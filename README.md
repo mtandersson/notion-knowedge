@@ -79,6 +79,43 @@ Production build:
 cargo build --workspace --release
 ```
 
+## Configuration
+
+The server reads environment variables once at startup and validates them
+before reporting readiness. `--check` performs the same validation and exits
+with status 0 on success or 2 on a configuration error. Normal startup also
+exits with status 2 for invalid configuration. Errors name the setting and
+constraint without printing the supplied value. Credentials are redacted in
+configuration debug output.
+
+The bootstrap needs no configuration or credentials by default. These settings
+establish the composition-root configuration for the upcoming HTTP transport
+and Notion adapter; the current bootstrap does not open a listener or make
+Notion requests.
+
+| Variable | Default | Accepted values |
+| --- | --- | --- |
+| `NK_HTTP_HOST` | `127.0.0.1` | An IPv4 or IPv6 address, without a port or IPv6 brackets; hostnames are not supported. |
+| `NK_HTTP_PORT` | `3000` | An integer from 1 to 65535. |
+| `NK_NOTION_AUTH` | `none` | `none` or `integration`. This selects upstream Notion credentials, not MCP client authentication. |
+| `NOTION_TOKEN` | Unset | Required when `NK_NOTION_AUTH=integration`; must be nonempty and contain no whitespace or control characters. Ignored when authentication is `none`. |
+
+An explicitly empty optional setting is invalid; defaults apply only when a
+variable is unset. OAuth configuration will be introduced with the OAuth
+implementation.
+
+See [`.env.example`](.env.example) for a sample. The server does not load `.env`
+files automatically: export variables in your shell or configure your service
+manager to supply them. For example, validate an HTTP bind override:
+
+```sh
+NK_HTTP_HOST=::1 NK_HTTP_PORT=3001 cargo run -p notion-knowledge-server -- --check
+```
+
+Supply a real Notion integration token through your local secret environment
+only after selecting `NK_NOTION_AUTH=integration`. Keep secret-bearing `.env`
+files out of Git and never put secrets in `.envrc`.
+
 ## Workspace
 
 ```text
