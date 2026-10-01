@@ -1,0 +1,36 @@
+name: One-off bootstrap verification
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Verify development shell
+        run: nix develop --command bash -lc 'cargo --version && rustc --version'
+
+      - name: Format
+        run: nix develop --command cargo fmt --all -- --check
+
+      - name: Test
+        run: nix develop --command cargo test --workspace
+
+      - name: Clippy
+        run: nix develop --command cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Production build
+        run: nix develop --command cargo build --workspace --release
+
+      - name: Bootstrap smoke check
+        run: nix develop --command cargo run -p notion-knowledge-server -- --check
