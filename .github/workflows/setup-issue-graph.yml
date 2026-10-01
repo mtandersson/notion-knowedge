@@ -233,3 +233,5 @@ jobs:
           print(f"Verified {sum(len(v) for v in children.values())} parent/sub-issue relations.")
           print(f"Verified {sum(len(v) for v in blocked_by.values())} blocked-by relations.")
           PY
+
+# trigger existing workflow on default branch
