@@ -44,17 +44,37 @@ ignored by Git.
 
 ## Commands
 
-Run the bootstrap server process:
+Run the MCP server over stdio:
 
 ```sh
 cargo run -p notion-knowledge-server
 ```
 
-The bootstrap intentionally does not expose an MCP transport yet. It stays
-running so the development command has the same process lifecycle as the
-future server. stdio and Streamable HTTP are implemented by #17 and #18.
+The server accepts newline-delimited MCP JSON-RPC on stdin and writes protocol
+responses to stdout. Startup diagnostics and errors go to stderr. It completes
+MCP initialization and supports tool discovery; the tool catalog is currently
+empty while semantic knowledge tools are implemented. The process exits when
+the connected client closes stdin after initialization. Streamable HTTP is
+implemented separately by #18.
 
-One-shot composition smoke check:
+For MCP Inspector-style clients, build the binary with
+`cargo build -p notion-knowledge-server` and configure the stdio command as the
+absolute path to `target/debug/notion-knowledge-server`, with no arguments.
+Supply configuration through the client's environment settings. A local MCP
+client configuration has this shape (replace the example path):
+
+```json
+{
+  "mcpServers": {
+    "notion-knowledge": {
+      "command": "/absolute/path/to/notion-knowedge/target/debug/notion-knowledge-server",
+      "args": []
+    }
+  }
+}
+```
+
+One-shot configuration and composition check (does not start a transport):
 
 ```sh
 cargo run -p notion-knowledge-server -- --check
@@ -64,6 +84,12 @@ Run tests:
 
 ```sh
 cargo test --workspace
+```
+
+The stdio process smoke test can also be run alone:
+
+```sh
+cargo test -p notion-knowledge-server --test stdio
 ```
 
 Format and lint:
@@ -90,7 +116,7 @@ configuration debug output.
 
 The bootstrap needs no configuration or credentials by default. These settings
 establish the composition-root configuration for the upcoming HTTP transport
-and Notion adapter; the current bootstrap does not open a listener or make
+and Notion adapter; the current stdio server does not open a listener or make
 Notion requests.
 
 | Variable | Default | Accepted values |

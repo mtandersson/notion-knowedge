@@ -12,3 +12,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 repository = "https://github.com/mtandersson/notion-knowedge"
+
+[workspace.dependencies]
+rmcp = { version = "3.5.0", default-features = false, features = ["server"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

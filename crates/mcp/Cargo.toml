@@ -6,3 +6,4 @@ repository.workspace = true
 
 [dependencies]
 notion-knowledge-core = { path = "../core" }
+rmcp.workspace = true
