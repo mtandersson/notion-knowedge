@@ -56,8 +56,25 @@ The server accepts newline-delimited MCP JSON-RPC on stdin and writes protocol
 responses to stdout. Startup diagnostics and errors go to stderr. It completes
 MCP initialization and supports tool discovery; the tool catalog is currently
 empty while semantic knowledge tools are implemented. The process exits when
-the connected client closes stdin after initialization. Streamable HTTP is
-implemented separately by #18.
+the connected client closes stdin after initialization. Use `--http` to serve
+the same MCP handler over Streamable HTTP at `/mcp`:
+
+```sh
+cargo run -p notion-knowledge-server -- --http
+```
+
+The default endpoint is `http://127.0.0.1:3000/mcp`. `NK_HTTP_HOST` and
+`NK_HTTP_PORT` set the listener address. HTTP supports initialization, tool
+discovery and calls, stateful sessions, SSE responses, and session deletion.
+Protocol failures return structured JSON-RPC errors. Ctrl-C stops the listener
+and cancels active sessions. Both transports currently share an empty tool
+catalog; calls to unknown tools return protocol errors.
+
+The HTTP listener validates Host against loopback names and the configured IP,
+and validates browser Origin against the configured HTTP authority or localhost
+at the configured port. Clients without Origin are accepted. For remote access,
+place this listener behind a trusted HTTPS proxy; public hostname routing and
+MCP authentication are separate deployment work.
 
 For MCP Inspector-style clients, build the binary with
 `cargo build -p notion-knowledge-server` and configure the stdio command as the
@@ -94,10 +111,11 @@ Run tests:
 cargo test --workspace --locked
 ```
 
-The stdio process smoke test can also be run alone:
+The transport process smoke tests can also be run alone:
 
 ```sh
 cargo test -p notion-knowledge-server --test stdio
+cargo test -p notion-knowledge-server --test http
 ```
 
 Format and lint:
@@ -143,9 +161,9 @@ constraint without printing the supplied value. Credentials are redacted in
 configuration debug output.
 
 The bootstrap needs no configuration or credentials by default. These settings
-establish the composition-root configuration for the upcoming HTTP transport
-and Notion adapter; the current stdio server does not open a listener or make
-Notion requests.
+establish the composition-root configuration for the HTTP transport
+and Notion adapter; the stdio server does not open a listener. Neither transport
+makes Notion requests yet.
 
 | Variable | Default | Accepted values |
 | --- | --- | --- |
