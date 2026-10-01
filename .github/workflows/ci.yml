@@ -66,6 +66,14 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-
 
+      - name: Restore Cargo build cache
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: target
+          key: target-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
+          restore-keys: |
+            target-${{ runner.os }}-${{ github.job }}-
+
       - name: Run Clippy
         run: nix develop --command cargo clippy --workspace --all-targets --locked -- -D warnings
 
@@ -95,6 +103,14 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-
+
+      - name: Restore Cargo build cache
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: target
+          key: target-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
+          restore-keys: |
+            target-${{ runner.os }}-${{ github.job }}-
 
       - name: Run cargo check
         run: nix develop --command cargo check --workspace --all-targets --locked
@@ -126,6 +142,14 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-
 
+      - name: Restore Cargo build cache
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: target
+          key: target-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
+          restore-keys: |
+            target-${{ runner.os }}-${{ github.job }}-
+
       - name: Run unit tests
         run: nix develop --command cargo test --workspace --locked
 
@@ -155,6 +179,14 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-
+
+      - name: Restore Cargo build cache
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: target
+          key: target-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
+          restore-keys: |
+            target-${{ runner.os }}-${{ github.job }}-
 
       - name: Build release workspace
         run: nix develop --command cargo build --workspace --release --locked
