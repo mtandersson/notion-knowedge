@@ -84,8 +84,11 @@ sub-issue and blocked-by relationships, and overlapping open PRs.
 Select an open leaf with no open children or unresolved blockers. Exclude work
 assigned to an external owner or covered by another active PR. This run's own
 worker ownership belongs to resumption, not exclusion. Follow established
-ordering; absent a policy, select the oldest eligible issue. Recheck eligibility
-before assigning work or mutating GitHub. Do not invent priority labels.
+ordering; absent a policy, select the newest eligible issue by `createdAt`
+(descending), breaking timestamp ties by issue number (descending). Apply
+eligibility filters before ordering; updates or comments do not make an issue
+newer. Recheck eligibility before assigning work or mutating GitHub. Do not
+invent priority labels.
 
 Run one ticket worker at a time. After a merge or verified split, refresh the
 backlog instead of using a stale selection queue. This lets newly unblocked
