@@ -15,7 +15,7 @@ fn components() -> [&'static str; 4] {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let _config = match Config::from_env() {
+    let config = match Config::from_env() {
         Ok(config) => config,
         Err(error) => {
             eprintln!("Configuration error: {error}");
@@ -31,6 +31,16 @@ async fn main() -> ExitCode {
 
     if check_only {
         return ExitCode::SUCCESS;
+    }
+
+    if env::args().skip(1).any(|arg| arg == "--http") {
+        return match notion_knowledge_server::http::serve(config.http_bind).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("MCP HTTP service failed: {error}");
+                ExitCode::FAILURE
+            }
+        };
     }
 
     eprintln!("Serving MCP over stdio.");
