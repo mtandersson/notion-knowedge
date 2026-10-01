@@ -1,23 +1,57 @@
 ---
 name: pick-tickets
-description: Pick one open, unblocked leaf GitHub ticket, investigate its size in a subagent, then deliver it through merge or split it into linked subtickets. Use for a next-ticket backlog cycle or a recurring one-ticket goal; use issue-to-merge directly for a named ticket or epic delivery.
+description: Create a resumable one-ticket /goal when invoked, pick an open, unblocked leaf GitHub ticket, investigate its size in a subagent, then deliver it through merge or split it into linked subtickets. Use for a next-ticket backlog cycle or a recurring one-ticket goal; use issue-to-merge directly for a named ticket or epic delivery.
 ---
 
 # Pick Tickets
 
-Drive one ticket cycle. The main driver selects and coordinates the work;
-a read-only subagent investigates scope before implementation. Finish this
-cycle after verified delivery or decomposition. A subsequent invocation
+Set up a reproducible `/goal` and drive one ticket cycle. The main driver
+selects and coordinates the work; a read-only subagent investigates scope
+before implementation. Finish this cycle after verified delivery or
+decomposition. A subsequent invocation
 resumes unfinished work or, after a verified terminal outcome, reads the
 current backlog and picks again.
 
-## Goal boundary
+## Create or resume the goal
 
-When the user explicitly requests a goal, use the goal tools if available.
-The objective is to inspect the eligible backlog and either deliver one leaf,
-decompose one oversized leaf, or establish that no eligible leaf is available.
-Use an existing compatible goal rather than creating a second unfinished one.
-An ordinary skill invocation does not implicitly create a goal.
+An explicit invocation of this skill is a request to create its one-ticket
+goal; the user does not need to separately type `/goal`. Merely discovering,
+reading, or editing the skill is not an invocation. If the skill is selected
+automatically for an ordinary task, obtain an explicit goal request before
+creating one, as required by the goal tools.
+
+Before ticket selection or implementation, identify the repository and the
+user's backlog scope, exclusions, ordering, and any explicit budget. When goal
+tools are available, call `get_goal` to inspect existing state. Reuse a
+compatible unfinished goal and resume its cycle; do not replace an unrelated
+unfinished goal. If one prevents
+creation, report it and ask the user which goal to continue. Respect paused
+state and the goal tools' lifecycle rules.
+
+When no unfinished goal exists, call `create_goal` with the following objective,
+substituting the actual repository and user constraints. Set `token_budget`
+only if the user explicitly supplied one. Do not merely describe a goal or
+print a command when the goal tools are available.
+
+```text
+In <owner/repository>, use pick-tickets to resume any unfinished ticket cycle;
+otherwise inspect the current backlog under <user scope, exclusions, and
+ordering> and select one open leaf with no open children, unresolved blockers,
+active overlapping PR, or conflicting owner. Investigate its scope in a
+read-only subagent. Deliver it through one focused PR, verify required checks,
+merge and issue closure; or decompose an oversized leaf into independently
+shippable children and verify native parent and blocked-by relationships; or
+verify that no eligible leaf exists and report why. Complete after exactly one
+verified merged, split, or idle outcome. Preserve the selected issue, branch/PR,
+partial split operations, evidence, and remaining work for resumption. Respect
+the user's constraints and any explicit budget, and follow the goal tools'
+pause and blocked rules. An open PR or exhausted budget is not completion.
+```
+
+Confirm that the goal is active before proceeding, and report its objective.
+If goal tools are unavailable, return a ready-to-run `/goal <objective>` command
+with the same substituted objective and explain that goal creation is
+unavailable here. Do not silently run a cycle without its persistent goal.
 
 Mark the goal complete only after its outcome is verified, report the outcome,
 and return. Do not select another ticket inside this one-ticket goal. A user
