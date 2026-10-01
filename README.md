@@ -133,6 +133,27 @@ GitHub Action dependencies are pinned to immutable commit SHAs. Cargo dependency
 downloads are cached using the lockfile-derived cache key; the Nix flake remains
 the source of truth for the toolchain.
 
+## Agent guidance and skills
+
+Shared agent configuration is intentionally agent-neutral:
+
+- `AGENTS.md` is the canonical repository guidance file.
+- `.agents/skills/` is the canonical location for shared repository skills and
+  their supporting resources.
+- `CLAUDE.md` is a compatibility symlink to `AGENTS.md`.
+- `.claude/skills` and `.codex/skills` are compatibility symlinks to
+  `.agents/skills`.
+
+Edit the canonical files, not the compatibility links. The layout check used by
+CI verifies the link targets, the five expected skills, and the
+`pick-tickets/agents/openai.yaml` metadata from a fresh checkout.
+
+Run the same check locally with:
+
+```sh
+./scripts/check-agent-layout.sh
+```
+
 ## Configuration
 
 The server reads environment variables once at startup and validates them
