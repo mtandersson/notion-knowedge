@@ -1,3 +1,3 @@
 interface:
   display_name: "Pick Tickets"
-  short_description: "Investigate and deliver one unblocked leaf ticket"
+  short_description: "Create a /goal to investigate and deliver one ticket"
