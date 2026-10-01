@@ -1,0 +1,298 @@
+{
+  "schema_version": 1,
+  "baseline_id": "hosted-notion-2026-10-01",
+  "dataset_id": "personal-knowledge-fixtures-v1",
+  "observed_at": "2026-10-01T21:40:13Z",
+  "surface": "Notion connected content search",
+  "tool_context": {
+    "exposed_tool": "mcp__codex_apps__notion_search",
+    "tool_version": null,
+    "version_note": "Connector metadata does not expose a deployed search version; no Notion API version is inferred.",
+    "access_discovery": "required_tool_not_exposed",
+    "plan": "unknown",
+    "ai_search_access": "unknown"
+  },
+  "evidence": {
+    "method": "Inspect callable tool inventory and search tool description before content search.",
+    "search_exposed": true,
+    "get_tool_access_exposed": false,
+    "ai_search_exposed": false,
+    "search_calls_made": 0,
+    "description_requires": "Call get_tool_access with {} before first content search; missing access information is not a denial.",
+    "corpus_verification": "not_performed",
+    "corpus_note": "Fictional fixtures have no verified hosted-page mapping. No corpus was created and no private workspace content was exported."
+  },
+  "comparison": {
+    "unit": "page",
+    "cutoff": 10,
+    "comparable_queries": 0,
+    "metrics": null,
+    "ci_requires_hosted_access": false
+  },
+  "queries": [
+    {
+      "query_id": "semantic-energy-en",
+      "query_text": "Which project helps me understand changes in my electricity consumption?",
+      "language": "en",
+      "category": "semantic",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "semantic-memory-en",
+      "query_text": "How can I remember more of what I read?",
+      "language": "en",
+      "category": "semantic",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "semantic-watering-en",
+      "query_text": "How do I keep my balcony plants watered while away for a weekend?",
+      "language": "en",
+      "category": "semantic",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "exact-project-en",
+      "query_text": "Find Project Lighthouse, the active energy project.",
+      "language": "en",
+      "category": "exact_name",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "exact-bike-en",
+      "query_text": "Find Cykelservice for 2026.",
+      "language": "en",
+      "category": "exact_name",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "exact-reading-en",
+      "query_text": "What books are in Reading queue?",
+      "language": "en",
+      "category": "exact_name",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "status-active-en",
+      "query_text": "Which projects are active as of 2026-03-02?",
+      "language": "en",
+      "category": "date_status",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "date-bike-en",
+      "query_text": "What maintenance was completed on 12 February 2026?",
+      "language": "en",
+      "category": "date_status",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "date-review-en",
+      "query_text": "What was the next action at the Lighthouse review on 2026-02-18?",
+      "language": "en",
+      "category": "date_status",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "link-energy-en",
+      "query_text": "Which decision linked from Project Lighthouse explains the initial data source?",
+      "language": "en",
+      "category": "cross_link",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "link-garden-en",
+      "query_text": "What follow-up is recorded in the review linked from Balkongodling?",
+      "language": "en",
+      "category": "cross_link",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "link-study-en",
+      "query_text": "Which books are on the reading list linked from Studierutin?",
+      "language": "en",
+      "category": "cross_link",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "semantic-energy-sv",
+      "query_text": "Vilket projekt hjälper mig förstå hur min elförbrukning förändras?",
+      "language": "sv",
+      "category": "semantic",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "semantic-memory-sv",
+      "query_text": "Hur kan jag komma ihåg mer av det jag läser?",
+      "language": "sv",
+      "category": "semantic",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "semantic-watering-sv",
+      "query_text": "Hur håller jag balkongväxterna vattnade när jag är borta en helg?",
+      "language": "sv",
+      "category": "semantic",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "exact-project-sv",
+      "query_text": "Hitta Project Lighthouse, det aktiva energiprojektet.",
+      "language": "sv",
+      "category": "exact_name",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "exact-bike-sv",
+      "query_text": "Hitta Cykelservice för 2026.",
+      "language": "sv",
+      "category": "exact_name",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "exact-reading-sv",
+      "query_text": "Vilka böcker finns i Reading queue?",
+      "language": "sv",
+      "category": "exact_name",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "status-active-sv",
+      "query_text": "Vilka projekt pågår den 2 mars 2026?",
+      "language": "sv",
+      "category": "date_status",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "date-bike-sv",
+      "query_text": "Vilken service blev klar den 12 februari 2026?",
+      "language": "sv",
+      "category": "date_status",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "date-review-sv",
+      "query_text": "Vad var nästa steg vid Lighthouse-avstämningen den 18 februari 2026?",
+      "language": "sv",
+      "category": "date_status",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "link-energy-sv",
+      "query_text": "Vilket beslut länkat från Project Lighthouse förklarar den första datakällan?",
+      "language": "sv",
+      "category": "cross_link",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "link-garden-sv",
+      "query_text": "Vilken uppföljning finns i avstämningen som länkas från Balkongodling?",
+      "language": "sv",
+      "category": "cross_link",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    },
+    {
+      "query_id": "link-study-sv",
+      "query_text": "Vilka böcker finns i läslistan som länkas från Studierutin?",
+      "language": "sv",
+      "category": "cross_link",
+      "status": "unavailable",
+      "reason": "access_discovery_tool_unavailable",
+      "executed": false,
+      "ranked_page_ids": null,
+      "metrics": null
+    }
+  ]
+}

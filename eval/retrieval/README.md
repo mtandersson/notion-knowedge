@@ -1,5 +1,9 @@
 # Personal-knowledge retrieval dataset
 
+The [hosted Notion baseline](HOSTED_NOTION.md) records search availability and
+the protocol for comparable hosted measurements; unavailable cases are not
+retrieval failures or zero scores.
+
 `personal-knowledge-v1.json` is a self-contained, version-controlled evaluation
 input: 12 fictional pages, 14 explicit chunks and 24 queries (12 intents paired
 in Swedish and English). It models everyday patterns: finding a project by
