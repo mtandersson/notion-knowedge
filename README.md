@@ -231,6 +231,12 @@ crates/
 Dependency direction is defined by ADR 0001. In particular, `core` must not
 depend on MCP, Notion, LanceDB, SQLite, or HTTP implementation types.
 
+## Retrieval evaluation
+
+A bilingual, privacy-conscious fixture corpus and graded query judgments live in
+[`eval/retrieval/`](eval/retrieval/README.md). Dataset integrity tests run with the
+normal workspace tests; retrieval benchmarking is a separate follow-up.
+
 ## Architecture decisions
 
 Architecture Decision Records live in [`docs/adr/`](docs/adr/README.md).

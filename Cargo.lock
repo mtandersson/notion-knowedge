@@ -638,6 +638,7 @@ name = "notion-knowledge-retrieval"
 version = "0.1.0"
 dependencies = [
  "notion-knowledge-core",
+ "serde_json",
 ]
 
 [[package]]
