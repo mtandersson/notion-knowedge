@@ -1,18 +1,20 @@
 ---
 name: issue-to-merge
-description: Deliver GitHub issues through focused PRs and merge, running independent sub-issues in parallel when asked to work an epic or ticket set. Use for backlog work or an issue through delivery.
+description: Deliver a named GitHub issue, epic, or ticket set through focused PRs and merge, running independent sub-issues in parallel when asked. Use pick-tickets for next-ticket backlog selection and recurring one-ticket goals.
 ---
 
 # Issues to Merge
 
-Run one issue when the user names one leaf or asks for the next ticket. When
+Run one issue when the user names one leaf or pick-tickets hands one off. When
 the user asks to work an epic or multiple tickets, schedule its unblocked
 leaves in parallel and continue with dependent leaves as their blockers merge.
 
 ## Select and scope
 
-If the user names an issue or epic, use it. Otherwise, delegate read-only
-selection of an open, unblocked leaf issue to a subagent. Check each ticket's
+If the user names an issue or epic, or pick-tickets supplies a selected issue,
+use it. For next-ticket backlog work without a named issue, use
+[pick-tickets](../pick-tickets/SKILL.md) for selection and investigation, then
+return here for delivery of that selected issue. Check each ticket's
 parent, sub-issues, dependencies, the current default branch, and overlapping
 open PRs.
 Read `README.md` when present and the relevant documentation and source.

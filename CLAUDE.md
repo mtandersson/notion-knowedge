@@ -43,6 +43,7 @@ has been decomposed. Follow the user's requested delivery scope for other work.
 The repository skills live in `.claude/skills` and are also available through
 `.agents/skills` and `.codex/skills`:
 
+- `pick-tickets` for one backlog cycle: pick, investigate, then merge or split
 - `issue-to-merge` for one ticket or parallel independent tickets through merge
 - `adversarial-review` for an independent read-only review
 - `writing-tests` when adding or changing behavior tests
