@@ -1,0 +1,14 @@
+# Allowlist only the committed Rust workspace inputs. Credentials, .env files,
+# model/index/state data, Git, target/, documentation and test tooling stay out.
+**
+!Cargo.toml
+!Cargo.lock
+!crates/
+!crates/**/
+!crates/**/Cargo.toml
+!crates/**/*.rs
+# Never allow common credential files, even inside an otherwise allowed tree.
+**/.env*
+**/*.pem
+**/*.key
+**/credentials*
