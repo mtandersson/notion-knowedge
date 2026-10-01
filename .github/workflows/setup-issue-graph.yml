@@ -1,4 +1,4 @@
-name: One-off setup native issue hierarchy and dependencies
+name: One-off setup native issue graph and labels
 
 on:
   pull_request:
@@ -17,7 +17,7 @@ jobs:
   setup:
     runs-on: ubuntu-latest
     steps:
-      - name: Configure native sub-issues and dependencies
+      - name: Configure native hierarchy, dependencies, labels and titles
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -35,7 +35,7 @@ jobs:
               "User-Agent": "notion-knowledge-issue-graph-setup",
           }
 
-          def api(method, path, data=None):
+          def api(method, path, data=None, tolerate=()):
               body = None if data is None else json.dumps(data).encode()
               req = urllib.request.Request(base + path, data=body, method=method, headers=headers)
               try:
@@ -44,15 +44,16 @@ jobs:
                       return json.loads(raw) if raw else None
               except urllib.error.HTTPError as e:
                   detail = e.read().decode(errors="replace")
+                  if e.code in tolerate:
+                      return {"_http_error": e.code, "_detail": detail}
                   raise RuntimeError(f"{method} {path} -> {e.code}: {detail}") from e
 
           issue_cache = {}
-          def issue(number):
-              if number not in issue_cache:
+          def issue(number, refresh=False):
+              if refresh or number not in issue_cache:
                   issue_cache[number] = api("GET", f"/issues/{number}")
               return issue_cache[number]
 
-          # Native hierarchy: End Goal -> epics -> implementation tickets.
           children = {
               1: list(range(2, 14)),
               2: list(range(14, 21)),
@@ -69,11 +70,11 @@ jobs:
               13: list(range(104, 116)),
           }
 
-          # Native blocked-by graph. Parent/epic issues are blocked by every direct sub-issue.
+          # Parent issues are blocked by every direct sub-issue. This makes GitHub's
+          # native completion/dependency UI reflect the hierarchy recursively.
           blocked_by = {parent: list(kids) for parent, kids in children.items()}
 
-          # Leaf prerequisites: only relationships where the target cannot be completed correctly
-          # before the blocker provides a required contract, implementation, or artifact.
+          # Leaf prerequisites: only true implementation prerequisites.
           leaf = {
               15: [14],
               16: [15],
@@ -187,27 +188,112 @@ jobs:
               115: [94, 114],
           }
           for n, deps in leaf.items():
-              blocked_by.setdefault(n, [])
-              blocked_by[n].extend(deps)
+              blocked_by.setdefault(n, []).extend(deps)
+          blocked_by = {n: list(dict.fromkeys(v)) for n, v in blocked_by.items()}
 
-          # Deduplicate while preserving order.
-          blocked_by = {n: list(dict.fromkeys(deps)) for n, deps in blocked_by.items()}
+          labels = {
+              "type:end-goal": ("5319e7", "Top-level project outcome"),
+              "type:epic": ("8250df", "Epic grouping native sub-issues"),
+              "type:task": ("d4c5f9", "Implementation task"),
+              "area:foundation": ("c2e0c6", "Project foundation and MCP shell"),
+              "area:notion": ("f9d0c4", "Notion API/backend integration"),
+              "area:indexing": ("bfdadc", "Canonical documents, chunking, local index and embeddings"),
+              "area:search": ("fbca04", "Retrieval, ranking and knowledge search"),
+              "area:sync": ("0e8a16", "Webhooks, reconciliation and freshness"),
+              "area:graph": ("1d76db", "Knowledge graph and relations"),
+              "area:files": ("0052cc", "ChatGPT file/image ingestion and Notion uploads"),
+              "area:writes": ("b60205", "Safe Notion mutation workflows"),
+              "area:security": ("d73a4a", "Security, privacy and access control"),
+              "area:evaluation": ("7057ff", "Search quality evaluation and regression"),
+              "area:operations": ("006b75", "Deployment, observability and operations"),
+              "integration:chatgpt": ("2188ff", "ChatGPT custom MCP integration"),
+              "status:duplicate": ("cfd3d7", "Duplicate issue retained for history"),
+              "phase:0": ("ededed", "Phase 0 - server skeleton"),
+              "phase:1": ("ededed", "Phase 1 - authoritative Notion read path"),
+              "phase:2": ("ededed", "Phase 2 - local retrieval MVP"),
+              "phase:3": ("ededed", "Phase 3 - freshness and sync"),
+              "phase:4": ("ededed", "Phase 4 - direct ChatGPT files/images"),
+              "phase:5": ("ededed", "Phase 5 - graph and safe writes"),
+              "phase:6": ("ededed", "Phase 6 - quality evaluation"),
+              "phase:7": ("ededed", "Phase 7 - production and cutover"),
+          }
+
+          parent_meta = {
+              2: ("area:foundation", "phase:0"),
+              3: ("area:notion", "phase:1"),
+              4: ("area:indexing", "phase:1"),
+              5: ("area:indexing", "phase:2"),
+              6: ("area:search", "phase:2"),
+              7: ("area:sync", "phase:3"),
+              8: ("area:graph", "phase:5"),
+              9: ("area:files", "phase:4"),
+              10: ("area:writes", "phase:5"),
+              11: ("area:security", "phase:5"),
+              12: ("area:evaluation", "phase:6"),
+              13: ("area:operations", "phase:7"),
+          }
+
+          issue_labels = {1: ["type:end-goal", "integration:chatgpt"]}
+          for parent, kids in children.items():
+              if parent == 1:
+                  continue
+              area, phase = parent_meta[parent]
+              issue_labels[parent] = ["type:epic", area, phase]
+              for child in kids:
+                  issue_labels[child] = ["type:task", area, phase]
+          issue_labels[34] = ["type:task", "area:indexing", "phase:1", "status:duplicate"]
+          for n in list(range(66, 76)) + [109, 114, 115]:
+              issue_labels.setdefault(n, []).append("integration:chatgpt")
+          for n in [67, 68, 75]:
+              issue_labels.setdefault(n, []).append("area:security")
+
+          print("Creating labels...")
+          current_labels = api("GET", "/labels?per_page=100") or []
+          existing_label_names = {x["name"] for x in current_labels}
+          for name, (color, description) in labels.items():
+              if name not in existing_label_names:
+                  api("POST", "/labels", {"name": name, "color": color, "description": description})
+                  existing_label_names.add(name)
+                  print(f"  created {name}")
+
+          print("Cleaning issue title prefixes and assigning labels...")
+          for n in range(1, 116):
+              it = issue(n)
+              title = it["title"]
+              clean = title
+              for prefix in ("[END GOAL] ", "[EPIC] ", "[TASK] "):
+                  if clean.startswith(prefix):
+                      clean = clean[len(prefix):]
+              if clean != title:
+                  api("PATCH", f"/issues/{n}", {"title": clean})
+                  issue_cache.pop(n, None)
+                  print(f"  #{n} title -> {clean}")
+              wanted = list(dict.fromkeys(issue_labels.get(n, [])))
+              if wanted:
+                  api("POST", f"/issues/{n}/labels", {"labels": wanted})
 
           print("Verifying/repairing native sub-issue hierarchy...")
           for parent, kids in children.items():
-              expected_parent = f"{base}/issues/{parent}"
+              existing = api("GET", f"/issues/{parent}/sub_issues?per_page=100") or []
+              existing_numbers = {x["number"] for x in existing}
               for child in kids:
-                  current_parent = issue(child).get("parent_issue_url")
-                  if current_parent == expected_parent:
+                  if child in existing_numbers:
                       continue
-                  if current_parent:
-                      raise RuntimeError(
-                          f"#{child} has unexpected parent {current_parent}; expected {expected_parent}"
-                      )
-                  api("POST", f"/issues/{parent}/sub_issues", {"sub_issue_id": issue(child)["id"]})
-                  issue_cache.pop(child, None)
+                  result = api(
+                      "POST",
+                      f"/issues/{parent}/sub_issues",
+                      {"sub_issue_id": issue(child, refresh=True)["id"]},
+                      tolerate=(422,),
+                  )
+                  if result and result.get("_http_error"):
+                      refreshed = api("GET", f"/issues/{parent}/sub_issues?per_page=100") or []
+                      if child not in {x["number"] for x in refreshed}:
+                          raise RuntimeError(
+                              f"Failed to attach #{child} to parent #{parent}: {result['_detail']}"
+                          )
                   print(f"  added sub-issue #{child} -> parent #{parent}")
-                  time.sleep(0.4)
+                  existing_numbers.add(child)
+                  time.sleep(0.25)
 
           print("Setting native blocked-by dependencies...")
           for target, blockers in blocked_by.items():
@@ -216,27 +302,30 @@ jobs:
               for blocker in blockers:
                   if blocker in existing_numbers:
                       continue
-                  try:
-                      api("POST", f"/issues/{target}/dependencies/blocked_by", {"issue_id": issue(blocker)["id"]})
-                  except RuntimeError as e:
-                      # Be race-tolerant: if another run added it, accept the final native state.
+                  result = api(
+                      "POST",
+                      f"/issues/{target}/dependencies/blocked_by",
+                      {"issue_id": issue(blocker, refresh=True)["id"]},
+                      tolerate=(422,),
+                  )
+                  if result and result.get("_http_error"):
                       refreshed = api("GET", f"/issues/{target}/dependencies/blocked_by?per_page=100") or []
                       if blocker not in {x["number"] for x in refreshed}:
-                          raise
+                          raise RuntimeError(
+                              f"Failed to add #{target} blocked by #{blocker}: {result['_detail']}"
+                          )
                   print(f"  #{target} blocked by #{blocker}")
                   existing_numbers.add(blocker)
-                  time.sleep(0.6)
+                  time.sleep(0.35)
 
-          print("Verifying hierarchy and dependency graph...")
+          print("Verifying final graph, titles and labels...")
           errors = []
           for parent, kids in children.items():
-              expected_parent = f"{base}/issues/{parent}"
-              for child in kids:
-                  current = api("GET", f"/issues/{child}")
-                  if current.get("parent_issue_url") != expected_parent:
-                      errors.append(
-                          f"#{child} parent={current.get('parent_issue_url')} expected={expected_parent}"
-                      )
+              actual = api("GET", f"/issues/{parent}/sub_issues?per_page=100") or []
+              actual_nums = {x["number"] for x in actual}
+              missing = set(kids) - actual_nums
+              if missing:
+                  errors.append(f"parent #{parent} missing sub-issues {sorted(missing)}")
 
           for target, blockers in blocked_by.items():
               actual = api("GET", f"/issues/{target}/dependencies/blocked_by?per_page=100") or []
@@ -245,9 +334,19 @@ jobs:
               if missing:
                   errors.append(f"#{target} missing blockers {sorted(missing)}")
 
+          for n, wanted in issue_labels.items():
+              it = api("GET", f"/issues/{n}")
+              actual_labels = {x["name"] for x in it.get("labels", [])}
+              missing = set(wanted) - actual_labels
+              if missing:
+                  errors.append(f"#{n} missing labels {sorted(missing)}")
+              if it["title"].startswith(("[END GOAL] ", "[EPIC] ", "[TASK] ")):
+                  errors.append(f"#{n} still has title prefix")
+
           if errors:
               raise SystemExit("\n".join(errors))
 
-          print(f"Verified {sum(len(v) for v in children.values())} parent/sub-issue relations.")
-          print(f"Verified {sum(len(v) for v in blocked_by.values())} blocked-by relations.")
+          print(f"Verified {sum(len(v) for v in children.values())} native parent/sub-issue relations.")
+          print(f"Verified {sum(len(v) for v in blocked_by.values())} native blocked-by relations.")
+          print("Verified title cleanup and labels.")
           PY
