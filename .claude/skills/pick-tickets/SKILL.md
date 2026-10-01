@@ -1,174 +1,163 @@
 ---
 name: pick-tickets
-description: Create a resumable one-ticket /goal when invoked, pick an open, unblocked leaf GitHub ticket, investigate its size in a subagent, then deliver it through merge or split it into linked subtickets. Use for a next-ticket backlog cycle or a recurring one-ticket goal; use issue-to-merge directly for a named ticket or epic delivery.
+description: Drain the eligible GitHub backlog under a persistent goal by delegating one ticket at a time through review and merge, refreshing dependencies after each outcome. Use for /goal pick-tickets; use issue-to-merge directly for a named ticket.
 ---
 
 # Pick Tickets
 
-Set up a reproducible `/goal` and drive one ticket cycle. The main driver
-selects and coordinates the work; a read-only subagent investigates scope
-before implementation. Finish this cycle after verified delivery or
-decomposition. A subsequent invocation
-resumes unfinished work or, after a verified terminal outcome, reads the
-current backlog and picks again.
+Coordinate a continuing backlog run. Pick one eligible ticket, hand it to a
+worker subagent for delivery, verify its outcome, then refresh the backlog and
+repeat. A verified merge or completed split ends that assignment. A worker exit
+triggers verification and, if needed, resumption. Neither completes the overall
+goal. Complete only when a fresh audit proves there are no eligible tickets
+and no unfinished assignments from this run.
 
-## Create or resume the goal
+## Invocation and goal lifecycle
 
-An explicit invocation of this skill is a request to create its one-ticket
-goal; the user does not need to separately type `/goal`. Merely discovering,
-reading, or editing the skill is not an invocation. If the skill is selected
-automatically for an ordinary task, obtain an explicit goal request before
-creating one, as required by the goal tools.
-
-Before ticket selection or implementation, identify the repository and the
-user's backlog scope, exclusions, ordering, and any explicit budget. When goal
-tools are available, call `get_goal` to inspect existing state. Reuse a
-compatible unfinished goal and resume its cycle; do not replace an unrelated
-unfinished goal. If one prevents
-creation, report it and ask the user which goal to continue. Respect paused
-state and the goal tools' lifecycle rules.
-
-When no unfinished goal exists, call `create_goal` with the following objective,
-substituting the actual repository and user constraints. Set `token_budget`
-only if the user explicitly supplied one. Do not merely describe a goal or
-print a command when the goal tools are available.
+The intended entry point is:
 
 ```text
-In <owner/repository>, use pick-tickets to resume any unfinished ticket cycle;
-otherwise inspect the current backlog under <user scope, exclusions, and
-ordering> and select one open leaf with no open children, unresolved blockers,
-active overlapping PR, or conflicting owner. Investigate its scope in a
-read-only subagent. Deliver it through one focused PR, verify required checks,
-merge and issue closure; or decompose an oversized leaf into independently
-shippable children and verify native parent and blocked-by relationships; or
-verify that no eligible leaf exists and report why. Complete after exactly one
-verified merged, split, or idle outcome. Preserve the selected issue, branch/PR,
-partial split operations, evidence, and remaining work for resumption. Respect
-the user's constraints and any explicit budget, and follow the goal tools'
-pause and blocked rules. An open PR or exhausted budget is not completion.
+/goal pick-tickets
 ```
 
-Confirm that the goal is active before proceeding, and report its objective.
-If goal tools are unavailable, return a ready-to-run `/goal <objective>` command
-with the same substituted objective and explain that goal creation is
-unavailable here. Do not silently run a cycle without its persistent goal.
+Also recognize `/goal $pick-tickets` and explicit `$pick-tickets` invocations.
+An explicit invocation authorizes this backlog workflow, including ticket
+workers, independent reviews, focused PRs, and merges after verification.
+Merely reading or editing this skill does not start a backlog run.
 
-Mark the goal complete only after its outcome is verified, report the outcome,
-and return. Do not select another ticket inside this one-ticket goal. A user
-or recurring runner invokes the next cycle; this skill does not install a
-schedule or start an unlimited loop. Respect explicit budgets and the goal
-tools' rules for unfinished, paused, or blocked work. Running out of budget,
-waiting for an answer, or opening a PR does not constitute completion.
+Identify the repository from the checkout and apply any user scope,
+exclusions, ordering, and budget. Default to the repository's entire open
+backlog. Inspect `get_goal` before selection. Reuse an active goal whose
+objective names this skill or describes this workflow; interpret the short
+skill name using these instructions without trying to replace the goal.
+Respect paused goals. Do not replace an unrelated unfinished goal.
+
+If explicitly invoked without an unfinished goal, use `create_goal` with the
+following objective, substituting the repository and user constraints. Set a
+token budget only when explicitly supplied:
+
+```text
+In <owner/repository>, use pick-tickets to drain the eligible backlog under
+<scope, exclusions, and ordering>. Resume unfinished assignments first.
+Select one open, unblocked leaf at a time and delegate its investigation,
+implementation, testing, independent review, PR, and merge to a worker using
+issue-to-merge. Verify merge and issue closure, or verify decomposition into
+native child/dependency relationships. After each verified outcome, refresh
+the backlog and select again, including newly unblocked or created children.
+Complete only after a fresh full-backlog audit proves no eligible tickets
+remain and this run has no unfinished work. Preserve evidence and handoffs
+across turns. Follow user budgets and the goal lifecycle rules.
+```
+
+Confirm the active goal and scope. If goal tools are unavailable, explain the
+limitation and provide `/goal pick-tickets` for a supporting environment.
+Do not start an untracked continuing run.
 
 ## Resume before selecting
 
-Before fresh selection, inspect the active goal, prior handoff, and associated
-issue, branch/PR, or partial decomposition for an unfinished cycle. Resume its
-selected ticket and remaining work. Fresh-selection exclusions for open
-children or an active PR do not disqualify this cycle's own ticket.
+Inspect the current goal context, prior handoff, worktrees, branches, PRs, and
+partial splits. Resume this run's unfinished ticket before assigning a new
+one. Its own PR or children do not disqualify it from resumption.
 
-For an open PR, continue review, CI, and merge verification. For a partial
-split, reuse the existing children, repair missing relationships, and verify
-the complete graph before selecting any child. If the previous operation may
-have succeeded before interruption, read back its state before retrying.
-Recheck current acceptance criteria, dependencies, and ownership; resumption
-does not authorize starting blocked work or taking over another owner's work.
+Check the worker's actual status. If it is still running, keep that assignment
+and observe it. If it exited, inspect authoritative GitHub and checkout state:
+verify its claimed outcome, or hand the remaining work to a replacement worker.
+An exited worker, observation timeout, or transient API error is not evidence
+of delivery. Never create a duplicate worker for a live assignment.
 
-Select a fresh ticket only after the prior cycle has a verified merged, split,
-or idle outcome, or the user explicitly changes scope. If the prior handoff
-cannot identify what to resume, ask the user instead of silently selecting
-new work. Keep the selected issue, branch/PR, completed split operations, and
-remaining work in the goal context and unfinished handoff so a later invocation
-can resume them.
+For an open PR, resume checks, review fixes, and merge. For a partial split,
+reuse existing children and repair missing relationships. Read back operations
+that may have succeeded before retrying. Recheck acceptance criteria,
+dependencies, and ownership. Recover ambiguous handoffs from current state;
+ask only if conflicting evidence prevents identifying the assignment.
 
-## Pick an eligible leaf
+Preserve a compact handoff in the thread before yielding: repository and scope,
+selected issue, worker identity/status, worktree/branch/PR, verified outcomes,
+partial graph operations, live process/check handles, and next action.
 
-Read root agent guidance and available project documentation. Identify the
-repository and default branch from the checkout. Apply the user's backlog
-scope, exclusions, and ordering, then inspect open issues and their native
-parent, sub-issue, and blocked-by relationships, along with overlapping PRs.
+## Select from the current backlog
 
-Select an open issue with no open children and no unresolved blockers. Exclude
-work already being delivered in an active PR or by another owner. Follow
-established priority conventions; absent a defined order, prefer the oldest
-eligible issue and explain the choice. Do not invent a priority policy.
-Recheck eligibility before editing or creating GitHub artifacts.
+Read repository guidance and available project documentation. Refresh the
+remote default branch, all in-scope open issues (paginate), native parent,
+sub-issue and blocked-by relationships, and overlapping open PRs.
 
-If none qualifies, report why (empty backlog, dependencies, or active work)
-and return an idle outcome. Do not start blocked work to keep the cycle busy.
+Select an open leaf with no open children or unresolved blockers. Exclude work
+assigned to an external owner or covered by another active PR. This run's own
+worker ownership belongs to resumption, not exclusion. Follow established
+ordering; absent a policy, select the oldest eligible issue. Recheck eligibility
+before assigning work or mutating GitHub. Do not invent priority labels.
 
-## Investigate in a subagent
+Run one ticket worker at a time. After a merge or verified split, refresh the
+backlog instead of using a stale selection queue. This lets newly unblocked
+tickets and newly created children enter the next selection.
 
-Give a separate subagent the selected issue, acceptance criteria, repository
-guidance, and relevant source/documentation. Ask it to investigate read-only:
+## Delegate delivery
 
-- Whether the reported problem and desired behavior match the code.
-- Affected boundaries, dependencies, and concrete implementation steps.
-- Meaningful tests and other verification required for acceptance.
-- Whether the work fits one focused, independently reviewable PR within any
-  explicit execution budget, or needs independently shippable subtickets.
-- Unanswered decisions, risks, and recommended next action, with evidence.
+Create an isolated worktree and branch from the current remote default branch,
+preserving unrelated user changes. Spawn a worker with the selected issue,
+acceptance criteria, verified dependencies, repository guidance, worktree,
+user constraints, and this assignment:
 
-The investigator must not edit, commit, create issues, or push. The main
-driver evaluates its findings and owns the decision. If subagents are
-unavailable, report that limitation and investigate directly.
+> Deliver this specific ticket using issue-to-merge. Investigate its scope,
+> implement it, run relevant checks, obtain independent adversarial review,
+> fix in-scope findings, open one focused PR, verify CI, merge, and verify issue
+> closure. If genuinely oversized, decompose it into independently shippable
+> children and verify native parent and blocked-by relationships. Report the
+> evidence and any unfinished state. Do not select another backlog ticket or
+> create, complete, or replace the parent goal.
 
-The main driver is allowed to ask the user questions when intent, acceptance
-criteria, tradeoffs, or scope remain unclear after investigation. Recommend
-an answer and explain the consequence briefly. Resolve repository facts from
-the code and issues first. Continue independent investigation while waiting;
-do not guess a consequential decision or treat silence as agreement.
+The worker owns the ticket through its terminal outcome. It uses
+[issue-to-merge](../issue-to-merge/SKILL.md), including a separate read-only
+[adversarial-review](../adversarial-review/SKILL.md) agent before the PR and
+[writing-tests](../writing-tests/SKILL.md) for behavior tests. Reserve capacity
+for that reviewer. The coordinator owns selection, resumption, and overall
+goal completion. If worker tools cannot perform an authorized operation, the
+coordinator may carry it out using the worker's concrete, verified evidence.
+If subagents are unavailable, report that limitation and continue useful local
+investigation. Preserve unfinished state when delegation or the required
+independent review cannot be performed; do not claim those gates passed.
 
-## Deliver a focused ticket
+Stay responsive while the worker runs. Surface consequential missing decisions
+with a recommendation; continue independent investigation where possible.
+Do not treat silence as approval. A technical error, unavailable credential,
+or unclear requirement alone does not justify splitting a ticket.
 
-If the scope is clear and fits one PR, use
-[issue-to-merge](../issue-to-merge/SKILL.md) with this specific issue. Follow
-its implementation, behavior testing, independent adversarial review,
-Conventional Commit, PR, CI, and merge workflow. Preserve the investigation
-findings so delivery does not repeat ticket selection.
+## Verify the assignment and repeat
 
-Verify that the PR merged into the intended default branch and the selected
-issue closed after its acceptance criteria were satisfied. If the work proves
-larger during implementation, reassess and decompose it rather than expanding
-the PR indefinitely. Preserve any partial work and report its disposition.
+Inspect authoritative state after every worker exit:
 
-## Split an oversized ticket
+- **Merged:** Verify the PR merged into the intended default branch, applicable
+  checks and independent review passed, acceptance criteria were satisfied,
+  and the selected issue closed. Record evidence and refresh the default branch.
+- **Split:** Verify the smallest useful child set covers the parent's acceptance
+  criteria, native parent links and blocked-by edges are correct and acyclic,
+  external blockers are carried to affected children, and the parent remains
+  open. Reuse equivalent existing issues. Body links alone are insufficient.
+- **Unfinished:** Preserve the worktree, PR, partial split, and evidence. Resume
+  the same assignment; never silently skip it because the worker exited.
 
-Split based on implementation boundaries and acceptance criteria, not a fixed
-line count or difficulty alone. Unclear requirements need clarification;
-an unavailable credential or failing check needs resolution. Neither is by
-itself evidence that subtickets are needed.
+After a verified merge or split, report brief progress and immediately select
+again in the same goal. A split is a way to make work shippable; its eligible
+children remain part of this run. Do not ask the user to invoke the skill again
+between assignments.
 
-Create the smallest useful set of independently shippable child issues. Give
-each a concrete outcome, acceptance criteria, scope, and verification plan.
-Together they must cover the selected issue's criteria without duplicating
-work. Search for existing children or equivalent issues before creating new
-ones; reuse them when appropriate, including on a retried cycle.
+## Completion and interruptions
 
-Attach children using native GitHub sub-issue relationships. Add native
-blocked-by edges from each dependent child to its prerequisites. Carry forward
-external blockers to the children they affect, preserve existing valid links,
-and avoid cycles. Allow independent children to remain unblocked. Body links
-can explain the plan but do not substitute for native relationships.
+When selection finds no candidate, audit the complete current in-scope backlog
+and this run's unfinished state. Account for every remaining issue as a parent
+with open children, blocked by named open prerequisites, externally owned, or
+covered by another active PR. Distinguish an empty backlog from a backlog with
+no currently eligible work. A failed API read or incomplete page is not an
+empty-backlog result.
 
-Read back the child and dependency relationships to verify the graph. Update
-the selected issue with the decomposition and leave it open as the parent
-until its work is delivered. End this cycle after verified decomposition;
-the next invocation can select an eligible child. If relationship APIs fail,
-report the partial state and recover it before declaring this cycle complete.
+Only call `update_goal` with `complete` when the audit proves no eligible issue
+remains and there is no unfinished assignment, live worker, open PR belonging
+to this run, or partially verified decomposition. Report merged PRs, splits,
+verification, and the reasons any issues remain. Do not wait indefinitely for
+external owners or future tickets once this audit passes.
 
-## Report and return
-
-Report the selected issue and one of these outcomes:
-
-- **Merged:** PR link, review outcome, relevant checks, verified merge and
-  issue closure.
-- **Split:** Parent and child links, dependency order, verified native graph,
-  and the acceptance criteria covered.
-- **Idle:** No eligible leaf and the observed reason.
-- **Unfinished:** Selected issue, branch/PR, existing children and graph
-  operations, remaining work, and any unanswered decision or impediment needed
-  to resume this cycle before fresh selection.
-
-Only verified merged, split, or idle outcomes satisfy this cycle's objective.
-For a budgeted goal, include final usage as required by the goal tools.
+If progress is prevented by a tooling, permission, credential, or unresolved
+user-decision blocker, preserve the goal and handoff. Follow the goal tools'
+blocked audit threshold; never label unavailable backlog evidence as successful
+completion. Pause only on explicit request. Budget exhaustion, yielding a
+turn, or one ticket's terminal outcome does not complete the backlog goal.
