@@ -1,0 +1,21 @@
+# Rust
+/target/
+
+# Nix / direnv
+/.direnv/
+result
+result-*
+
+# Local data and secrets
+.env
+.env.*
+!.env.example
+.envrc.local
+*.db
+*.db-shm
+*.db-wal
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

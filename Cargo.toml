@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/core",
+  "crates/notion",
+  "crates/retrieval",
+  "crates/mcp",
+  "crates/server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/mtandersson/notion-knowedge"

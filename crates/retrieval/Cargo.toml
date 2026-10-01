@@ -1,0 +1,8 @@
+[package]
+name = "notion-knowledge-retrieval"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+notion-knowledge-core = { path = "../core" }
