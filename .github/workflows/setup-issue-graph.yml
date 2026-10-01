@@ -9,6 +9,10 @@ permissions:
   contents: read
   issues: write
 
+concurrency:
+  group: one-off-native-issue-graph
+  cancel-in-progress: false
+
 jobs:
   setup:
     runs-on: ubuntu-latest
@@ -189,16 +193,21 @@ jobs:
           # Deduplicate while preserving order.
           blocked_by = {n: list(dict.fromkeys(deps)) for n, deps in blocked_by.items()}
 
-          print("Setting native sub-issue hierarchy...")
+          print("Verifying/repairing native sub-issue hierarchy...")
           for parent, kids in children.items():
-              existing = api("GET", f"/issues/{parent}/sub_issues?per_page=100") or []
-              existing_numbers = {x["number"] for x in existing}
+              expected_parent = f"{base}/issues/{parent}"
               for child in kids:
-                  if child in existing_numbers:
+                  current_parent = issue(child).get("parent_issue_url")
+                  if current_parent == expected_parent:
                       continue
+                  if current_parent:
+                      raise RuntimeError(
+                          f"#{child} has unexpected parent {current_parent}; expected {expected_parent}"
+                      )
                   api("POST", f"/issues/{parent}/sub_issues", {"sub_issue_id": issue(child)["id"]})
+                  issue_cache.pop(child, None)
                   print(f"  added sub-issue #{child} -> parent #{parent}")
-                  time.sleep(0.2)
+                  time.sleep(0.4)
 
           print("Setting native blocked-by dependencies...")
           for target, blockers in blocked_by.items():
@@ -207,18 +216,27 @@ jobs:
               for blocker in blockers:
                   if blocker in existing_numbers:
                       continue
-                  api("POST", f"/issues/{target}/dependencies/blocked_by", {"issue_id": issue(blocker)["id"]})
+                  try:
+                      api("POST", f"/issues/{target}/dependencies/blocked_by", {"issue_id": issue(blocker)["id"]})
+                  except RuntimeError as e:
+                      # Be race-tolerant: if another run added it, accept the final native state.
+                      refreshed = api("GET", f"/issues/{target}/dependencies/blocked_by?per_page=100") or []
+                      if blocker not in {x["number"] for x in refreshed}:
+                          raise
                   print(f"  #{target} blocked by #{blocker}")
-                  time.sleep(0.2)
+                  existing_numbers.add(blocker)
+                  time.sleep(0.6)
 
           print("Verifying hierarchy and dependency graph...")
           errors = []
           for parent, kids in children.items():
-              actual = api("GET", f"/issues/{parent}/sub_issues?per_page=100") or []
-              actual_nums = {x["number"] for x in actual}
-              missing = set(kids) - actual_nums
-              if missing:
-                  errors.append(f"parent #{parent} missing sub-issues {sorted(missing)}")
+              expected_parent = f"{base}/issues/{parent}"
+              for child in kids:
+                  current = api("GET", f"/issues/{child}")
+                  if current.get("parent_issue_url") != expected_parent:
+                      errors.append(
+                          f"#{child} parent={current.get('parent_issue_url')} expected={expected_parent}"
+                      )
 
           for target, blockers in blocked_by.items():
               actual = api("GET", f"/issues/{target}/dependencies/blocked_by?per_page=100") or []
