@@ -2,6 +2,7 @@ use std::env;
 use std::process::ExitCode;
 
 use notion_knowledge_server::config::Config;
+use rmcp::{ServiceExt, service::QuitReason, transport::stdio};
 
 fn components() -> [&'static str; 4] {
     [
@@ -12,7 +13,8 @@ fn components() -> [&'static str; 4] {
     ]
 }
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
     let _config = match Config::from_env() {
         Ok(config) => config,
         Err(error) => {
@@ -31,13 +33,20 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    eprintln!(
-        "No MCP transport is wired yet; stdio and Streamable HTTP are implemented by #17 and #18."
-    );
-    eprintln!("Bootstrap process is running; press Ctrl-C to stop.");
-
-    loop {
-        std::thread::park();
+    eprintln!("Serving MCP over stdio.");
+    let service = match notion_knowledge_mcp::KnowledgeServer.serve(stdio()).await {
+        Ok(service) => service,
+        Err(_) => {
+            eprintln!("MCP stdio initialization failed.");
+            return ExitCode::FAILURE;
+        }
+    };
+    match service.waiting().await {
+        Ok(QuitReason::Closed | QuitReason::Cancelled) => ExitCode::SUCCESS,
+        _ => {
+            eprintln!("MCP stdio service failed.");
+            ExitCode::FAILURE
+        }
     }
 }
 
