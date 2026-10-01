@@ -131,6 +131,13 @@ Production build:
 cargo build --workspace --release --locked
 ```
 
+## Container
+
+The current server is packaged in a pinned, non-root container with stdio and
+HTTP support. See [container build, run and verification instructions](docs/container.md).
+This bootstrap does not yet load models or process indexes; #104 remains open
+for the adapter integration in #145.
+
 ## Continuous integration
 
 The permanent GitHub Actions workflow at `.github/workflows/ci.yml` mirrors the
@@ -138,7 +145,8 @@ canonical checks above on every pull request targeting `main`, every push to
 `main`, and manual `workflow_dispatch` runs.
 
 CI exposes separate required-check-friendly jobs for formatting, Clippy, type
-checking, unit tests, and the release build. The release-build job also uploads
+checking, unit tests, the release build, and final-image container smoke tests.
+The release-build job also uploads
 a short-lived Linux server artifact for downstream validation and future
 release automation.
 
