@@ -1,29 +1,35 @@
 {
   description = "Local-first Notion knowledge MCP";
 
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
-    flake-utils.url = "github:numtide/flake-utils";
-  };
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
-  outputs = { nixpkgs, flake-utils, ... }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        pkgs = import nixpkgs { inherit system; };
-      in {
-        devShells.default = pkgs.mkShell {
-          packages = with pkgs; [
-            cargo
-            rustc
-            rustfmt
-            clippy
-            git
-            pkg-config
-            openssl
-            sqlite
-          ];
+  outputs = { nixpkgs, ... }:
+    let
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "x86_64-darwin"
+        "aarch64-darwin"
+      ];
+    in {
+      devShells = nixpkgs.lib.genAttrs systems (system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in {
+          default = pkgs.mkShell {
+            packages = with pkgs; [
+              cargo
+              rustc
+              rustfmt
+              clippy
+              git
+              pkg-config
+              openssl
+              sqlite
+            ];
 
-          RUST_BACKTRACE = "1";
-        };
-      });
+            RUST_BACKTRACE = "1";
+          };
+        });
+    };
 }
