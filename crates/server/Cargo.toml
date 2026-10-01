@@ -1,0 +1,12 @@
+[package]
+name = "notion-knowledge-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+notion-knowledge-core = { path = "../core" }
+notion-knowledge-mcp = { path = "../mcp" }
+notion-knowledge-notion = { path = "../notion" }
+notion-knowledge-retrieval = { path = "../retrieval" }
