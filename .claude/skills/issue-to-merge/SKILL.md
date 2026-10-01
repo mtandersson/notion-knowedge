@@ -1,6 +1,6 @@
 ---
 name: issue-to-merge
-description: Deliver a named GitHub issue, epic, or ticket set through focused PRs and merge, running independent sub-issues in parallel when asked. Use pick-tickets for next-ticket backlog selection and recurring one-ticket goals.
+description: Deliver a named GitHub issue, epic, or ticket set through focused PRs and merge, running independent sub-issues in parallel when asked. Use pick-tickets for continuing delegated backlog delivery.
 ---
 
 # Issues to Merge
@@ -13,10 +13,11 @@ leaves in parallel and continue with dependent leaves as their blockers merge.
 
 If the user names an issue or epic, or pick-tickets supplies a selected issue,
 use it. For next-ticket backlog work without a named issue, use
-[pick-tickets](../pick-tickets/SKILL.md) for selection and investigation, then
-return here for delivery of that selected issue. Check each ticket's
-parent, sub-issues, dependencies, the current default branch, and overlapping
-open PRs.
+[pick-tickets](../pick-tickets/SKILL.md) to coordinate the continuing backlog
+run. A worker handed one ticket uses this skill for that assignment only;
+after it reports delivery or decomposition, the coordinator selects again.
+Check each ticket's parent, sub-issues, dependencies, the current default
+branch, and overlapping open PRs.
 Read `README.md` when present and the relevant documentation and source.
 
 Keep the PR to one clear change. For a broad issue, create independently
