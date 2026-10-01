@@ -1,0 +1,704 @@
+{
+  "schema_version": 1,
+  "dataset_id": "personal-knowledge-fixtures-v1",
+  "as_of": "2026-03-02",
+  "provenance": "Hand-authored fictional fixtures modeled on everyday personal-knowledge query patterns; no private workspace content or live Notion identifiers.",
+  "pages": [
+    {
+      "id": "fixture:page:project-lighthouse",
+      "title": "Project Lighthouse",
+      "language": "en",
+      "status": "active",
+      "updated_at": "2026-02-18",
+      "links": [
+        "fixture:page:energy-decision",
+        "fixture:page:lighthouse-review"
+      ],
+      "chunks": [
+        {
+          "id": "fixture:chunk:project-lighthouse:overview",
+          "text": "A personal home energy dashboard. The next step is comparing household electricity use by week. This project is active; a prototype is ready."
+        },
+        {
+          "id": "fixture:chunk:project-lighthouse:decision",
+          "text": "Choose CSV exports for the first release because the meter API is unreliable. The decision is recorded in Energy data decision."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:project-lighthouse-old",
+      "title": "Project Lighthouse archive",
+      "language": "en",
+      "status": "archived",
+      "updated_at": "2025-11-15",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:project-lighthouse-old:overview",
+          "text": "The 2025 Lighthouse idea was a reading list app. It was archived on 2025-11-15 before any prototype."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:energy-decision",
+      "title": "Energy data decision",
+      "language": "en",
+      "status": "complete",
+      "updated_at": "2026-02-10",
+      "links": [
+        "fixture:page:project-lighthouse"
+      ],
+      "chunks": [
+        {
+          "id": "fixture:chunk:energy-decision:decision",
+          "text": "Use CSV electricity exports for the first version of Project Lighthouse. Revisit the meter API after the prototype is tested."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:lighthouse-review",
+      "title": "Lighthouse review 2026-02-18",
+      "language": "en",
+      "status": "complete",
+      "updated_at": "2026-02-18",
+      "links": [
+        "fixture:page:project-lighthouse",
+        "fixture:page:energy-decision"
+      ],
+      "chunks": [
+        {
+          "id": "fixture:chunk:lighthouse-review:notes",
+          "text": "The Project Lighthouse review found missing weekend readings. The next action is to request a fresh CSV export. The prototype remains active."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:odling",
+      "title": "Balkongodling",
+      "language": "sv",
+      "status": "active",
+      "updated_at": "2026-03-02",
+      "links": [
+        "fixture:page:odling-review"
+      ],
+      "chunks": [
+        {
+          "id": "fixture:chunk:odling:plan",
+          "text": "Plan för balkongodling: välj växter som klarar skugga och korta perioder utan vattning. Sallat och mynta passar. Projektet pågår."
+        },
+        {
+          "id": "fixture:chunk:odling:watering",
+          "text": "Under en helgresa håller en enkel självbevattnande kruka jorden fuktig. Testa krukan före resan."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:odling-review",
+      "title": "Odlingsavstämning 2026-03-02",
+      "language": "sv",
+      "status": "complete",
+      "updated_at": "2026-03-02",
+      "links": [
+        "fixture:page:odling"
+      ],
+      "chunks": [
+        {
+          "id": "fixture:chunk:odling-review:notes",
+          "text": "Balkongodling är fortfarande aktivt. Myntan fungerar i skugga. Nästa steg är att testa självbevattning innan helgresan."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:reading",
+      "title": "Reading queue",
+      "language": "en",
+      "status": "active",
+      "updated_at": "2026-01-20",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:reading:queue",
+          "text": "Books to read about remembering what you learn: Make It Stick and A Mind for Numbers. Add a short retrieval exercise after each chapter."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:study",
+      "title": "Studierutin",
+      "language": "sv",
+      "status": "active",
+      "updated_at": "2026-01-22",
+      "links": [
+        "fixture:page:reading"
+      ],
+      "chunks": [
+        {
+          "id": "fixture:chunk:study:routine",
+          "text": "För att minnas det du läser: stäng boken och försök återberätta innehållet ur minnet. Repetera efter några dagar istället för att bara läsa om texten."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:travel",
+      "title": "Weekend packing",
+      "language": "en",
+      "status": "complete",
+      "updated_at": "2026-02-01",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:travel:list",
+          "text": "For a short train trip: pack a charger, reusable water bottle and rain jacket. No gardening equipment is needed."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:bike",
+      "title": "Cykelservice",
+      "language": "sv",
+      "status": "complete",
+      "updated_at": "2026-02-12",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:bike:service",
+          "text": "Cykelservicen blev klar den 12 februari 2026. Bromsarna justerades och kedjan smordes. Inga fler åtgärder behövs."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:bike-old",
+      "title": "Cykelservice 2025",
+      "language": "sv",
+      "status": "archived",
+      "updated_at": "2025-02-12",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:bike-old:service",
+          "text": "Cykelservice i februari 2025: byt kedja vid nästa besök. Anteckningen är arkiverad."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:garden-old",
+      "title": "Balkongodling 2025",
+      "language": "sv",
+      "status": "archived",
+      "updated_at": "2025-08-30",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:garden-old:plan",
+          "text": "Förra årets balkongodling använde solälskande tomater. Planen är arkiverad och gäller inte årets skuggiga balkong."
+        }
+      ]
+    }
+  ],
+  "queries": [
+    {
+      "id": "semantic-energy-en",
+      "language": "en",
+      "category": "semantic",
+      "text": "Which project helps me understand changes in my electricity consumption?",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:project-lighthouse:overview",
+          "grade": 3,
+          "rationale": "Describes weekly electricity comparison."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:project-lighthouse-old:overview"
+      ],
+      "intent": "Recover a project by purpose rather than its title."
+    },
+    {
+      "id": "semantic-memory-en",
+      "language": "en",
+      "category": "semantic",
+      "text": "How can I remember more of what I read?",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:study:routine",
+          "grade": 3,
+          "rationale": "Gives retrieval practice and spaced review."
+        },
+        {
+          "source_id": "fixture:chunk:reading:queue",
+          "grade": 1,
+          "rationale": "Related books and a chapter retrieval exercise."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:travel:list"
+      ],
+      "intent": "Find learning advice across languages; related reading is useful but less direct."
+    },
+    {
+      "id": "semantic-watering-en",
+      "language": "en",
+      "category": "semantic",
+      "text": "How do I keep my balcony plants watered while away for a weekend?",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:odling:watering",
+          "grade": 3,
+          "rationale": "Explains self-watering pots and testing."
+        },
+        {
+          "source_id": "fixture:chunk:odling-review:notes",
+          "grade": 2,
+          "rationale": "Confirms the self-watering next action."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:travel:list",
+        "fixture:chunk:garden-old:plan"
+      ],
+      "intent": "Find practical advice without matching the page title."
+    },
+    {
+      "id": "exact-project-en",
+      "language": "en",
+      "category": "exact_name",
+      "text": "Find Project Lighthouse, the active energy project.",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:project-lighthouse:overview",
+          "grade": 3,
+          "rationale": "Current project with the exact title."
+        },
+        {
+          "source_id": "fixture:chunk:project-lighthouse:decision",
+          "grade": 3,
+          "rationale": "Another chunk on the requested exact-title active project; page metadata identifies it."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:project-lighthouse-old:overview"
+      ],
+      "intent": "Distinguish current and similarly named archived projects."
+    },
+    {
+      "id": "exact-bike-en",
+      "language": "en",
+      "category": "exact_name",
+      "text": "Find Cykelservice for 2026.",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:bike:service",
+          "grade": 3,
+          "rationale": "Exact title and current service year."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:bike-old:service"
+      ],
+      "intent": "Handle Swedish exact names and same-topic archive distractors."
+    },
+    {
+      "id": "exact-reading-en",
+      "language": "en",
+      "category": "exact_name",
+      "text": "What books are in Reading queue?",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:reading:queue",
+          "grade": 3,
+          "rationale": "Lists the requested books."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:study:routine"
+      ],
+      "intent": "Resolve an exact English title in both query languages."
+    },
+    {
+      "id": "status-active-en",
+      "language": "en",
+      "category": "date_status",
+      "text": "Which projects are active as of 2026-03-02?",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:project-lighthouse:overview",
+          "grade": 3,
+          "rationale": "Active energy project."
+        },
+        {
+          "source_id": "fixture:chunk:odling:plan",
+          "grade": 3,
+          "rationale": "Active balcony project."
+        },
+        {
+          "source_id": "fixture:chunk:project-lighthouse:decision",
+          "grade": 3,
+          "rationale": "A chunk on the active energy project; page metadata supplies status."
+        },
+        {
+          "source_id": "fixture:chunk:odling:watering",
+          "grade": 3,
+          "rationale": "A chunk on the active balcony project; page metadata supplies status."
+        },
+        {
+          "source_id": "fixture:chunk:lighthouse-review:notes",
+          "grade": 2,
+          "rationale": "Review explicitly confirms Lighthouse remains active."
+        },
+        {
+          "source_id": "fixture:chunk:odling-review:notes",
+          "grade": 2,
+          "rationale": "Review explicitly confirms Balkongodling remains active."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:garden-old:plan",
+        "fixture:chunk:bike:service"
+      ],
+      "intent": "Retrieve both current projects; routines and queues are not projects."
+    },
+    {
+      "id": "date-bike-en",
+      "language": "en",
+      "category": "date_status",
+      "text": "What maintenance was completed on 12 February 2026?",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:bike:service",
+          "grade": 3,
+          "rationale": "Completed brake and chain maintenance on that date."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:bike-old:service"
+      ],
+      "intent": "Require date and completion status, not only month/day."
+    },
+    {
+      "id": "date-review-en",
+      "language": "en",
+      "category": "date_status",
+      "text": "What was the next action at the Lighthouse review on 2026-02-18?",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:lighthouse-review:notes",
+          "grade": 3,
+          "rationale": "Dated review requests a fresh CSV export."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:energy-decision:decision"
+      ],
+      "intent": "Distinguish a dated next action from the earlier design decision."
+    },
+    {
+      "id": "link-energy-en",
+      "language": "en",
+      "category": "cross_link",
+      "text": "Which decision linked from Project Lighthouse explains the initial data source?",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:energy-decision:decision",
+          "grade": 3,
+          "rationale": "Linked decision explains CSV first."
+        },
+        {
+          "source_id": "fixture:chunk:project-lighthouse:decision",
+          "grade": 2,
+          "rationale": "Project summary points to the detailed decision."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:project-lighthouse-old:overview"
+      ],
+      "intent": "Retrieve the linked decision and useful referring context."
+    },
+    {
+      "id": "link-garden-en",
+      "language": "en",
+      "category": "cross_link",
+      "text": "What follow-up is recorded in the review linked from Balkongodling?",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:odling-review:notes",
+          "grade": 3,
+          "rationale": "Linked review specifies self-watering test."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:garden-old:plan"
+      ],
+      "intent": "Follow the current project to its review."
+    },
+    {
+      "id": "link-study-en",
+      "language": "en",
+      "category": "cross_link",
+      "text": "Which books are on the reading list linked from Studierutin?",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:reading:queue",
+          "grade": 3,
+          "rationale": "Linked reading list contains both book titles."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:study:routine"
+      ],
+      "intent": "Retrieve linked target rather than stop at the referring routine."
+    },
+    {
+      "id": "semantic-energy-sv",
+      "language": "sv",
+      "category": "semantic",
+      "text": "Vilket projekt hjälper mig förstå hur min elförbrukning förändras?",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:project-lighthouse:overview",
+          "grade": 3,
+          "rationale": "Describes weekly electricity comparison."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:project-lighthouse-old:overview"
+      ],
+      "intent": "Recover a project by purpose rather than its title."
+    },
+    {
+      "id": "semantic-memory-sv",
+      "language": "sv",
+      "category": "semantic",
+      "text": "Hur kan jag komma ihåg mer av det jag läser?",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:study:routine",
+          "grade": 3,
+          "rationale": "Gives retrieval practice and spaced review."
+        },
+        {
+          "source_id": "fixture:chunk:reading:queue",
+          "grade": 1,
+          "rationale": "Related books and a chapter retrieval exercise."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:travel:list"
+      ],
+      "intent": "Find learning advice across languages; related reading is useful but less direct."
+    },
+    {
+      "id": "semantic-watering-sv",
+      "language": "sv",
+      "category": "semantic",
+      "text": "Hur håller jag balkongväxterna vattnade när jag är borta en helg?",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:odling:watering",
+          "grade": 3,
+          "rationale": "Explains self-watering pots and testing."
+        },
+        {
+          "source_id": "fixture:chunk:odling-review:notes",
+          "grade": 2,
+          "rationale": "Confirms the self-watering next action."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:travel:list",
+        "fixture:chunk:garden-old:plan"
+      ],
+      "intent": "Find practical advice without matching the page title."
+    },
+    {
+      "id": "exact-project-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "text": "Hitta Project Lighthouse, det aktiva energiprojektet.",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:project-lighthouse:overview",
+          "grade": 3,
+          "rationale": "Current project with the exact title."
+        },
+        {
+          "source_id": "fixture:chunk:project-lighthouse:decision",
+          "grade": 3,
+          "rationale": "Another chunk on the requested exact-title active project; page metadata identifies it."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:project-lighthouse-old:overview"
+      ],
+      "intent": "Distinguish current and similarly named archived projects."
+    },
+    {
+      "id": "exact-bike-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "text": "Hitta Cykelservice för 2026.",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:bike:service",
+          "grade": 3,
+          "rationale": "Exact title and current service year."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:bike-old:service"
+      ],
+      "intent": "Handle Swedish exact names and same-topic archive distractors."
+    },
+    {
+      "id": "exact-reading-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "text": "Vilka böcker finns i Reading queue?",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:reading:queue",
+          "grade": 3,
+          "rationale": "Lists the requested books."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:study:routine"
+      ],
+      "intent": "Resolve an exact English title in both query languages."
+    },
+    {
+      "id": "status-active-sv",
+      "language": "sv",
+      "category": "date_status",
+      "text": "Vilka projekt pågår den 2 mars 2026?",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:project-lighthouse:overview",
+          "grade": 3,
+          "rationale": "Active energy project."
+        },
+        {
+          "source_id": "fixture:chunk:odling:plan",
+          "grade": 3,
+          "rationale": "Active balcony project."
+        },
+        {
+          "source_id": "fixture:chunk:project-lighthouse:decision",
+          "grade": 3,
+          "rationale": "A chunk on the active energy project; page metadata supplies status."
+        },
+        {
+          "source_id": "fixture:chunk:odling:watering",
+          "grade": 3,
+          "rationale": "A chunk on the active balcony project; page metadata supplies status."
+        },
+        {
+          "source_id": "fixture:chunk:lighthouse-review:notes",
+          "grade": 2,
+          "rationale": "Review explicitly confirms Lighthouse remains active."
+        },
+        {
+          "source_id": "fixture:chunk:odling-review:notes",
+          "grade": 2,
+          "rationale": "Review explicitly confirms Balkongodling remains active."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:garden-old:plan",
+        "fixture:chunk:bike:service"
+      ],
+      "intent": "Retrieve both current projects; routines and queues are not projects."
+    },
+    {
+      "id": "date-bike-sv",
+      "language": "sv",
+      "category": "date_status",
+      "text": "Vilken service blev klar den 12 februari 2026?",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:bike:service",
+          "grade": 3,
+          "rationale": "Completed brake and chain maintenance on that date."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:bike-old:service"
+      ],
+      "intent": "Require date and completion status, not only month/day."
+    },
+    {
+      "id": "date-review-sv",
+      "language": "sv",
+      "category": "date_status",
+      "text": "Vad var nästa steg vid Lighthouse-avstämningen den 18 februari 2026?",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:lighthouse-review:notes",
+          "grade": 3,
+          "rationale": "Dated review requests a fresh CSV export."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:energy-decision:decision"
+      ],
+      "intent": "Distinguish a dated next action from the earlier design decision."
+    },
+    {
+      "id": "link-energy-sv",
+      "language": "sv",
+      "category": "cross_link",
+      "text": "Vilket beslut länkat från Project Lighthouse förklarar den första datakällan?",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:energy-decision:decision",
+          "grade": 3,
+          "rationale": "Linked decision explains CSV first."
+        },
+        {
+          "source_id": "fixture:chunk:project-lighthouse:decision",
+          "grade": 2,
+          "rationale": "Project summary points to the detailed decision."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:project-lighthouse-old:overview"
+      ],
+      "intent": "Retrieve the linked decision and useful referring context."
+    },
+    {
+      "id": "link-garden-sv",
+      "language": "sv",
+      "category": "cross_link",
+      "text": "Vilken uppföljning finns i avstämningen som länkas från Balkongodling?",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:odling-review:notes",
+          "grade": 3,
+          "rationale": "Linked review specifies self-watering test."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:garden-old:plan"
+      ],
+      "intent": "Follow the current project to its review."
+    },
+    {
+      "id": "link-study-sv",
+      "language": "sv",
+      "category": "cross_link",
+      "text": "Vilka böcker finns i läslistan som länkas från Studierutin?",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:reading:queue",
+          "grade": 3,
+          "rationale": "Linked reading list contains both book titles."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:study:routine"
+      ],
+      "intent": "Retrieve linked target rather than stop at the referring routine."
+    }
+  ]
+}
