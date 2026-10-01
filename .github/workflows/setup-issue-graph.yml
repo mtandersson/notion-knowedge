@@ -1,9 +1,9 @@
 name: One-off setup native issue hierarchy and dependencies
 
 on:
-  push:
+  pull_request:
     paths:
-      - .github/workflows/setup-issue-graph.yml
+      - .github/issue-graph-trigger
 
 permissions:
   contents: read
@@ -233,5 +233,3 @@ jobs:
           print(f"Verified {sum(len(v) for v in children.values())} parent/sub-issue relations.")
           print(f"Verified {sum(len(v) for v in blocked_by.values())} blocked-by relations.")
           PY
-
-# trigger existing workflow on default branch
