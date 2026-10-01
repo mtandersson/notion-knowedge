@@ -1,4 +1,7 @@
 use std::env;
+use std::process::ExitCode;
+
+use notion_knowledge_server::config::Config;
 
 fn components() -> [&'static str; 4] {
     [
@@ -9,7 +12,14 @@ fn components() -> [&'static str; 4] {
     ]
 }
 
-fn main() {
+fn main() -> ExitCode {
+    let _config = match Config::from_env() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("Configuration error: {error}");
+            return ExitCode::from(2);
+        }
+    };
     let check_only = env::args().skip(1).any(|arg| arg == "--check");
 
     eprintln!(
@@ -18,7 +28,7 @@ fn main() {
     );
 
     if check_only {
-        return;
+        return ExitCode::SUCCESS;
     }
 
     eprintln!(
