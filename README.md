@@ -1,5 +1,7 @@
 # notion-knowedge
 
+[![CI](https://github.com/mtandersson/notion-knowedge/actions/workflows/ci.yml/badge.svg)](https://github.com/mtandersson/notion-knowedge/actions/workflows/ci.yml)
+
 Local-first Notion knowledge MCP for ChatGPT.
 
 Notion is the authoritative source of truth. Local retrieval state is derived,
@@ -80,10 +82,16 @@ One-shot configuration and composition check (does not start a transport):
 cargo run -p notion-knowledge-server -- --check
 ```
 
+Type-check the full workspace:
+
+```sh
+cargo check --workspace --all-targets --locked
+```
+
 Run tests:
 
 ```sh
-cargo test --workspace
+cargo test --workspace --locked
 ```
 
 The stdio process smoke test can also be run alone:
@@ -96,14 +104,34 @@ Format and lint:
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 Production build:
 
 ```sh
-cargo build --workspace --release
+cargo build --workspace --release --locked
 ```
+
+## Continuous integration
+
+The permanent GitHub Actions workflow at `.github/workflows/ci.yml` mirrors the
+canonical checks above on every pull request targeting `main`, every push to
+`main`, and manual `workflow_dispatch` runs.
+
+CI exposes separate required-check-friendly jobs for formatting, Clippy, type
+checking, unit tests, and the release build. The release-build job also uploads
+a short-lived Linux server artifact for downstream validation and future
+release automation.
+
+The normal CI path does **not** use Notion credentials or other repository
+secrets. Integration tests that eventually require real external credentials
+should remain separate controlled jobs rather than broadening the trust surface
+of ordinary pull-request CI.
+
+GitHub Action dependencies are pinned to immutable commit SHAs. Cargo dependency
+downloads are cached using the lockfile-derived cache key; the Nix flake remains
+the source of truth for the toolchain.
 
 ## Configuration
 
