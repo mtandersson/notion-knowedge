@@ -87,7 +87,7 @@ jobs:
             experimental-features = nix-command flakes
 
       - name: Check formatting
-        run: nix develop --command cargo fmt --all -- --check
+        run: nix develop .#format --command cargo fmt --all -- --check
 
   clippy:
     needs: changes
@@ -341,10 +341,10 @@ jobs:
             experimental-features = nix-command flakes
 
       - name: Verify security gate failure paths
-        run: nix develop --command python3 scripts/test-security-scanning.py
+        run: nix develop .#security --command python3 scripts/test-security-scanning.py
 
       - name: Audit locked dependencies against fresh RustSec advisories
-        run: nix develop --command ./scripts/check-dependencies.sh
+        run: nix develop .#security --command ./scripts/check-dependencies.sh
 
   secrets:
     name: Secret scanning
@@ -364,7 +364,7 @@ jobs:
             experimental-features = nix-command flakes
 
       - name: Scan reachable history with redacted findings
-        run: nix develop --command ./scripts/check-secrets.sh
+        run: nix develop .#security --command ./scripts/check-secrets.sh
 
   gate:
     name: CI gate
@@ -391,7 +391,13 @@ jobs:
       matrix:
         shell: [default, format, security]
         mode: [fresh, persistent]
-    name: Nix ${{ matrix.shell }} ${{ matrix.mode }}
+        variant: [baseline]
+        include:
+          - {shell: format, mode: fresh, variant: narrow}
+          - {shell: format, mode: persistent, variant: narrow}
+          - {shell: security, mode: fresh, variant: narrow}
+          - {shell: security, mode: persistent, variant: narrow}
+    name: Nix ${{ matrix.shell }} ${{ matrix.mode }} ${{ matrix.variant }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -401,6 +407,9 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+      - name: Restore measured baseline flake
+        if: matrix.variant == 'baseline'
+        run: git show 3da44f1fda030f1fa9a366d71399cf6c7e238a86:flake.nix > flake.nix
       - name: Restore persistent candidate
         if: matrix.mode == 'persistent'
         uses: nix-community/cache-nix-action@b16f249a0248efec86dd9d4224cb75f1ffa48bcc
@@ -414,6 +423,47 @@ jobs:
       - name: Record measurement
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: nix-${{ matrix.shell }}-${{ matrix.mode }}
+          name: nix-${{ matrix.shell }}-${{ matrix.mode }}-${{ matrix.variant }}
           path: nix-benchmark.json
           retention-days: 30
+
+  invalidation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        input: [flake.nix, flake.lock]
+    name: Nix invalidate ${{ matrix.input }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Restore measured baseline flake
+        run: git show 3da44f1fda030f1fa9a366d71399cf6c7e238a86:flake.nix > flake.nix
+      - name: Change one flake input
+        env:
+          PROBE_INPUT: ${{ matrix.input }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, pathlib
+          p = pathlib.Path(os.environ['PROBE_INPUT'])
+          if p.suffix == '.nix':
+              p.write_text(p.read_text() + '\n# Cache compatibility probe\n')
+          else:
+              p.write_text(json.dumps(json.loads(p.read_text()), indent=4) + '\n')
+          PYTHON
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Restore persistent candidate without saving
+        uses: nix-community/cache-nix-action@b16f249a0248efec86dd9d4224cb75f1ffa48bcc
+        with:
+          primary-key: nk-nix-bench-v1-${{ runner.os }}-${{ runner.arch }}-default-${{ hashFiles('flake.nix', 'flake.lock') }}
+          save: false
+      - name: Measure environment
+        env:
+          NIX_BENCH_SHELL: default
+        run: python3 scripts/benchmark-nix.py
