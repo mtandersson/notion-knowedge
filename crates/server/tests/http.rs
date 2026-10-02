@@ -53,6 +53,29 @@ async fn http_client_initializes_discovers_calls_and_receives_structured_errors(
             if line.contains("Serving MCP over Streamable HTTP") { break; }
         }
         let client = Client::builder().no_proxy().build().unwrap();
+        let live_url = format!("http://127.0.0.1:{port}/livez");
+        let live = client.get(&live_url).send().await.unwrap();
+        assert_eq!(live.status(), StatusCode::OK);
+        assert_eq!(live.headers()["cache-control"], "no-store");
+        assert_eq!(
+            live.json::<Value>().await.unwrap(),
+            json!({
+                "server": {"name":"notion-knowledge", "version":env!("CARGO_PKG_VERSION")},
+                "transport":"http", "status":"alive"
+            })
+        );
+        let ready_url = format!("http://127.0.0.1:{port}/readyz");
+        let ready = client.get(&ready_url).send().await.unwrap();
+        assert_eq!(ready.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(ready.headers()["cache-control"], "no-store");
+        assert_eq!(
+            ready.json::<Value>().await.unwrap(),
+            json!({
+                "server": {"name":"notion-knowledge", "version":env!("CARGO_PKG_VERSION")},
+                "transport":"http", "status":"not_ready",
+                "dependencies":{"index":"unavailable"}
+            })
+        );
         let health_url = format!("http://127.0.0.1:{port}/health");
         let health = client.get(&health_url).send().await.unwrap();
         assert_eq!(health.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -63,8 +86,10 @@ async fn http_client_initializes_discovers_calls_and_receives_structured_errors(
             "transport":"http", "status":"degraded",
             "dependencies":{"notion":"unconfigured", "index":"unavailable"}
         }));
-        for (header, value) in [("origin", "https://untrusted.example"), ("host", "untrusted.example")] {
-            assert_eq!(client.get(&health_url).header(header,value).send().await.unwrap().status(), StatusCode::FORBIDDEN);
+        for url in [&live_url, &ready_url, &health_url] {
+            for (header, value) in [("origin", "https://untrusted.example"), ("host", "untrusted.example")] {
+                assert_eq!(client.get(url).header(header,value).send().await.unwrap().status(), StatusCode::FORBIDDEN);
+            }
         }
         let url = format!("http://127.0.0.1:{port}/mcp");
         let before_initialize = client.post(&url)
