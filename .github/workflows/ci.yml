@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - main
+      - benchmark/153-foundation
   push:
     branches:
       - main
