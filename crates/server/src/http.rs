@@ -357,7 +357,11 @@ mod tests {
             );
             assert_eq!(
                 ready["dependencies"]["index"],
-                if index_healthy { "healthy" } else { "unavailable" }
+                if index_healthy {
+                    "healthy"
+                } else {
+                    "unavailable"
+                }
             );
 
             let health = client
