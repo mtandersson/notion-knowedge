@@ -6,7 +6,8 @@ scope only after the existing final-image checks pass. Fork PRs do not export;
 GitHub's merge-ref cache isolation prevents PR layers from being restored on
 main. See [container cache policy and commands](container.md#ci-layer-cache).
 Cargo build jobs use [source-refreshing compatible snapshots](cargo-cache.md).
-Nix caching remains separate work.
+Nix uses measured [fresh downloads and smaller pinned CI shells](nix-ci.md);
+large persistent stores did not beat the selected path in hosted probes.
 
 The CI workflow triggers on **every** pull request targeting `main`, every main
 push, and manual dispatch. There are no workflow-level path filters. The cheap

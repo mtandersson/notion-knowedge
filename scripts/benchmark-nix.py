@@ -11,9 +11,8 @@ profile = '/tmp/nk-nix-benchmark-profile'
 command = ['nix', 'develop', f'.#{shell}', '--profile', profile]
 start = time.monotonic()
 plan = subprocess.run(['nix', 'build', f'.#devShells.x86_64-linux.{shell}', '--dry-run'], text=True, capture_output=True)
-print(plan.stderr, flush=True)
-plan.check_returncode()
 print('DOWNLOAD_PLAN_BEGIN\n' + plan.stderr + '\nDOWNLOAD_PLAN_END', flush=True)
+plan.check_returncode()
 before = time.monotonic()
 activation = subprocess.run(command + ['--command', 'true'], text=True, capture_output=True)
 print(activation.stdout + activation.stderr, flush=True)

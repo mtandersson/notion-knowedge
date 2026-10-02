@@ -1,0 +1,2301 @@
+{
+  "measured_date": "2026-10-02",
+  "runner": "GitHub ubuntu-latest Linux/X64",
+  "selected": "Fresh downloads; mkShellNoCC format and security; unchanged default Rust shell",
+  "versions": {
+    "cargo": "1.98.0",
+    "rustfmt": "1.9.0",
+    "cargo-audit": "0.22.2",
+    "gitleaks": "8.30.1"
+  },
+  "candidate_action_sha": "b16f249a0248efec86dd9d4224cb75f1ffa48bcc",
+  "runs": [
+    {
+      "run": 37043263489,
+      "head_sha": "3da44f1fda030f1fa9a366d71399cf6c7e238a86",
+      "attempt": 1,
+      "conclusion": "success",
+      "workflow_elapsed_seconds": 312.0,
+      "summed_step_seconds": 1069.0,
+      "benchmarks": [
+        {
+          "job": "Nix default persistent",
+          "job_id": 110958569671,
+          "conclusion": "success",
+          "queue_seconds": 2.0,
+          "measurements": [
+            {
+              "shell": "default",
+              "setup_seconds": 20.422098852999994,
+              "plan_seconds": 16.395527798000003,
+              "closure_paths": 147,
+              "closure_nar_bytes": 2533937616
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:",
+            "these 132 paths will be fetched (722.8 MiB download, 2.4 GiB unpacked):",
+            "this path will be fetched (107.5 KiB download, 107.4 KiB unpacked):"
+          ],
+          "actual_copied_paths": 135,
+          "cache_and_versions": [
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-default-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89\".",
+            "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+            "rustfmt 1.9.0",
+            "cargo-audit 0.22.2",
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-default-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89\".",
+            "Found no cache with this key.",
+            "Current store size in bytes: 2868306456.",
+            "Maximum allowed store size in bytes: 3221225472 (3G).",
+            "Sent 67108864 of 852871220 (7.9%), 63.9 MBs/sec",
+            "Sent 718653492 of 852871220 (84.3%), 342.5 MBs/sec",
+            "Sent 852871220 of 852871220 (100.0%), 348.3 MBs/sec",
+            "Saved the new cache."
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 5.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 38.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Restore persistent candidate",
+              "seconds": 15.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix security fresh",
+          "job_id": 110958570065,
+          "conclusion": "success",
+          "queue_seconds": 3.0,
+          "measurements": [
+            {
+              "shell": "security",
+              "setup_seconds": 5.4738574400000175,
+              "plan_seconds": 10.165693965999992,
+              "closure_paths": 133,
+              "closure_nar_bytes": 800886496
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:",
+            "these 118 paths will be fetched (249.6 MiB download, 763.7 MiB unpacked):",
+            "this path will be fetched (107.5 KiB download, 107.4 KiB unpacked):"
+          ],
+          "actual_copied_paths": 121,
+          "cache_and_versions": [
+            "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+            "rustfmt 1.9.0-stable (48a229ceae 2026-09-01)",
+            "cargo-audit 0.22.2"
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 4.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 17.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix format fresh",
+          "job_id": 110958570072,
+          "conclusion": "success",
+          "queue_seconds": 4.0,
+          "measurements": [
+            {
+              "shell": "format",
+              "setup_seconds": 11.025681924999986,
+              "plan_seconds": 9.847097087000009,
+              "closure_paths": 79,
+              "closure_nar_bytes": 2137463432
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:",
+            "these 64 paths will be fetched (592.3 MiB download, 2.0 GiB unpacked):",
+            "these 4 paths will be fetched (2.5 MiB download, 11.3 MiB unpacked):"
+          ],
+          "actual_copied_paths": 70,
+          "cache_and_versions": [
+            "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+            "rustfmt 1.9.0"
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 4.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 22.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix default fresh",
+          "job_id": 110958570109,
+          "conclusion": "success",
+          "queue_seconds": 2.0,
+          "measurements": [
+            {
+              "shell": "default",
+              "setup_seconds": 19.275046642999996,
+              "plan_seconds": 13.40951790600002,
+              "closure_paths": 147,
+              "closure_nar_bytes": 2533937616
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:",
+            "these 132 paths will be fetched (722.8 MiB download, 2.4 GiB unpacked):",
+            "this path will be fetched (107.5 KiB download, 107.4 KiB unpacked):"
+          ],
+          "actual_copied_paths": 135,
+          "cache_and_versions": [
+            "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+            "rustfmt 1.9.0",
+            "cargo-audit 0.22.2"
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 3.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 34.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix format persistent",
+          "job_id": 110958570212,
+          "conclusion": "success",
+          "queue_seconds": 2.0,
+          "measurements": [
+            {
+              "shell": "format",
+              "setup_seconds": 10.267788938000002,
+              "plan_seconds": 11.357429033000003,
+              "closure_paths": 79,
+              "closure_nar_bytes": 2137463432
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:",
+            "these 64 paths will be fetched (592.3 MiB download, 2.0 GiB unpacked):",
+            "these 4 paths will be fetched (2.5 MiB download, 11.3 MiB unpacked):"
+          ],
+          "actual_copied_paths": 70,
+          "cache_and_versions": [
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-format-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89\".",
+            "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+            "rustfmt 1.9.0",
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-format-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89\".",
+            "Found no cache with this key.",
+            "Current store size in bytes: 2482944744.",
+            "Maximum allowed store size in bytes: 3221225472 (3G).",
+            "Sent 0 of 714342465 (0.0%), 0.0 MBs/sec",
+            "Sent 580124737 of 714342465 (81.2%), 275.5 MBs/sec",
+            "Sent 714342465 of 714342465 (100.0%), 253.6 MBs/sec",
+            "Saved the new cache."
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 5.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 23.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Restore persistent candidate",
+              "seconds": 17.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix security persistent",
+          "job_id": 110958570523,
+          "conclusion": "success",
+          "queue_seconds": 3.0,
+          "measurements": [
+            {
+              "shell": "security",
+              "setup_seconds": 4.528426878999994,
+              "plan_seconds": 6.870108852000044,
+              "closure_paths": 133,
+              "closure_nar_bytes": 800886496
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:",
+            "these 118 paths will be fetched (249.6 MiB download, 763.7 MiB unpacked):",
+            "this path will be fetched (107.5 KiB download, 107.4 KiB unpacked):"
+          ],
+          "actual_copied_paths": 121,
+          "cache_and_versions": [
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-security-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89\".",
+            "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+            "rustfmt 1.9.0-stable (48a229ceae 2026-09-01)",
+            "cargo-audit 0.22.2",
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-security-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89\".",
+            "Found no cache with this key.",
+            "Current store size in bytes: 1135246120.",
+            "Maximum allowed store size in bytes: 3221225472 (3G).",
+            "Sent 23202301 of 358746621 (6.5%), 22.1 MBs/sec",
+            "Sent 358746621 of 358746621 (100.0%), 197.8 MBs/sec",
+            "Saved the new cache."
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 5.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 15.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Restore persistent candidate",
+              "seconds": 11.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "run": 37043969673,
+      "head_sha": "f39947b9e3b940f07e71daf265ef7a78cab679fb",
+      "attempt": 1,
+      "conclusion": "cancelled",
+      "workflow_elapsed_seconds": 191.0,
+      "summed_step_seconds": 938.0,
+      "benchmarks": [
+        {
+          "job": "Nix invalidate flake.lock",
+          "job_id": 110960667802,
+          "conclusion": "failure",
+          "queue_seconds": 2.0,
+          "measurements": [],
+          "download_plan": [],
+          "actual_copied_paths": 0,
+          "cache_and_versions": [],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 3.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "failure"
+            },
+            {
+              "name": "Change one flake input",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Restore persistent candidate without saving",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix security persistent narrow",
+          "job_id": 110960667964,
+          "conclusion": "success",
+          "queue_seconds": 3.0,
+          "measurements": [
+            {
+              "shell": "security",
+              "setup_seconds": 3.7019078860000008,
+              "plan_seconds": 11.448808041999996,
+              "closure_paths": 120,
+              "closure_nar_bytes": 468932832
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:",
+            "these 105 paths will be fetched (150.1 MiB download, 447.1 MiB unpacked):",
+            "this path will be fetched (107.5 KiB download, 107.4 KiB unpacked):"
+          ],
+          "actual_copied_paths": 108,
+          "cache_and_versions": [
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-security-93c91ad1769400fd0fee481c027cc2bd54540c52393d1e1cb2d0a444112ace3a\".",
+            "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+            "rustfmt 1.9.0-stable (48a229ceae 2026-09-01)",
+            "cargo-audit 0.22.2",
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-security-93c91ad1769400fd0fee481c027cc2bd54540c52393d1e1cb2d0a444112ace3a\".",
+            "Found no cache with this key.",
+            "Current store size in bytes: 803292472.",
+            "Maximum allowed store size in bytes: 3221225472 (3G).",
+            "Sent 0 of 254019811 (0.0%), 0.0 MBs/sec",
+            "Sent 254019811 of 254019811 (100.0%), 120.8 MBs/sec",
+            "Saved the new cache."
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 4.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 17.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Restore persistent candidate",
+              "seconds": 10.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix security persistent baseline",
+          "job_id": 110960668103,
+          "conclusion": "failure",
+          "queue_seconds": 2.0,
+          "measurements": [],
+          "download_plan": [],
+          "actual_copied_paths": 0,
+          "cache_and_versions": [],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 3.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "failure"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix invalidate flake.nix",
+          "job_id": 110960668105,
+          "conclusion": "failure",
+          "queue_seconds": 2.0,
+          "measurements": [],
+          "download_plan": [],
+          "actual_copied_paths": 0,
+          "cache_and_versions": [],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "failure"
+            },
+            {
+              "name": "Change one flake input",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Restore persistent candidate without saving",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix format fresh narrow",
+          "job_id": 110960668141,
+          "conclusion": "success",
+          "queue_seconds": 2.0,
+          "measurements": [
+            {
+              "shell": "format",
+              "setup_seconds": 12.161025640000005,
+              "plan_seconds": 13.200498046999996,
+              "closure_paths": 66,
+              "closure_nar_bytes": 1805510048
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:",
+            "these 51 paths will be fetched (492.8 MiB download, 1.7 GiB unpacked):",
+            "these 4 paths will be fetched (2.5 MiB download, 11.3 MiB unpacked):"
+          ],
+          "actual_copied_paths": 57,
+          "cache_and_versions": [
+            "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+            "rustfmt 1.9.0"
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 4.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 27.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix default persistent baseline",
+          "job_id": 110960668156,
+          "conclusion": "failure",
+          "queue_seconds": 3.0,
+          "measurements": [],
+          "download_plan": [],
+          "actual_copied_paths": 0,
+          "cache_and_versions": [],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 5.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "failure"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix format persistent baseline",
+          "job_id": 110960668170,
+          "conclusion": "failure",
+          "queue_seconds": 2.0,
+          "measurements": [],
+          "download_plan": [],
+          "actual_copied_paths": 0,
+          "cache_and_versions": [],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 5.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 5.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "failure"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix default fresh baseline",
+          "job_id": 110960668179,
+          "conclusion": "failure",
+          "queue_seconds": 3.0,
+          "measurements": [],
+          "download_plan": [],
+          "actual_copied_paths": 0,
+          "cache_and_versions": [],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 5.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "failure"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix format persistent narrow",
+          "job_id": 110960668196,
+          "conclusion": "success",
+          "queue_seconds": 3.0,
+          "measurements": [
+            {
+              "shell": "format",
+              "setup_seconds": 15.188971873000014,
+              "plan_seconds": 10.991885050999997,
+              "closure_paths": 66,
+              "closure_nar_bytes": 1805510048
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:",
+            "these 51 paths will be fetched (492.8 MiB download, 1.7 GiB unpacked):",
+            "these 4 paths will be fetched (2.5 MiB download, 11.3 MiB unpacked):"
+          ],
+          "actual_copied_paths": 57,
+          "cache_and_versions": [
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-format-93c91ad1769400fd0fee481c027cc2bd54540c52393d1e1cb2d0a444112ace3a\".",
+            "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+            "rustfmt 1.9.0",
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-format-93c91ad1769400fd0fee481c027cc2bd54540c52393d1e1cb2d0a444112ace3a\".",
+            "Found no cache with this key.",
+            "Current store size in bytes: 2150991384.",
+            "Maximum allowed store size in bytes: 3221225472 (3G).",
+            "Sent 0 of 609942154 (0.0%), 0.0 MBs/sec",
+            "Sent 0 of 609942154 (0.0%), 0.0 MBs/sec",
+            "Sent 475724426 of 609942154 (78.0%), 151.1 MBs/sec",
+            "Sent 609942154 of 609942154 (100.0%), 154.1 MBs/sec",
+            "Saved the new cache."
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 4.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 28.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Restore persistent candidate",
+              "seconds": 19.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix security fresh baseline",
+          "job_id": 110960668201,
+          "conclusion": "failure",
+          "queue_seconds": 3.0,
+          "measurements": [],
+          "download_plan": [],
+          "actual_copied_paths": 0,
+          "cache_and_versions": [],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 3.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "failure"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix format fresh baseline",
+          "job_id": 110960668307,
+          "conclusion": "failure",
+          "queue_seconds": 3.0,
+          "measurements": [],
+          "download_plan": [],
+          "actual_copied_paths": 0,
+          "cache_and_versions": [],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 5.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "failure"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix security fresh narrow",
+          "job_id": 110960668338,
+          "conclusion": "success",
+          "queue_seconds": 2.0,
+          "measurements": [
+            {
+              "shell": "security",
+              "setup_seconds": 3.666341217000003,
+              "plan_seconds": 11.462555033999998,
+              "closure_paths": 120,
+              "closure_nar_bytes": 468932832
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:",
+            "these 105 paths will be fetched (150.1 MiB download, 447.1 MiB unpacked):",
+            "this path will be fetched (107.5 KiB download, 107.4 KiB unpacked):"
+          ],
+          "actual_copied_paths": 108,
+          "cache_and_versions": [
+            "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+            "rustfmt 1.9.0-stable (48a229ceae 2026-09-01)",
+            "cargo-audit 0.22.2"
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 4.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 18.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "run": 37044195586,
+      "head_sha": "773c789ecbb46cbd8952221af7e567b941b3d84e",
+      "attempt": 1,
+      "conclusion": "success",
+      "workflow_elapsed_seconds": 346.0,
+      "summed_step_seconds": 1079.0,
+      "benchmarks": [
+        {
+          "job": "Nix invalidate flake.nix",
+          "job_id": 110961840262,
+          "conclusion": "success",
+          "queue_seconds": 3.0,
+          "measurements": [
+            {
+              "shell": "default",
+              "setup_seconds": 24.478976404,
+              "plan_seconds": 11.911662110000002,
+              "closure_paths": 147,
+              "closure_nar_bytes": 2533937616,
+              "copied_paths": 133
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:",
+            "these 132 paths will be fetched (722.8 MiB download, 2.4 GiB unpacked):",
+            "this path will be fetched (107.5 KiB download, 107.4 KiB unpacked):"
+          ],
+          "actual_copied_paths": 135,
+          "cache_and_versions": [
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-default-0f078f24184395467e3bb7796795bcc8926cb7626aae4a47381338d8e580cb86\".",
+            "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+            "rustfmt 1.9.0",
+            "cargo-audit 0.22.2"
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 3.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Change one flake input",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 5.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore persistent candidate without saving",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 39.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Restore persistent candidate without saving",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix format persistent narrow",
+          "job_id": 110961840399,
+          "conclusion": "success",
+          "queue_seconds": 2.0,
+          "measurements": [
+            {
+              "shell": "format",
+              "setup_seconds": 0.5264465139999999,
+              "plan_seconds": 0.9729353450000033,
+              "closure_paths": 66,
+              "closure_nar_bytes": 1805510048,
+              "copied_paths": 0
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:"
+          ],
+          "actual_copied_paths": 0,
+          "cache_and_versions": [
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-format-93c91ad1769400fd0fee481c027cc2bd54540c52393d1e1cb2d0a444112ace3a\".",
+            "Cache hit for: nk-nix-bench-v1-Linux-X64-format-93c91ad1769400fd0fee481c027cc2bd54540c52393d1e1cb2d0a444112ace3a",
+            "Found a cache with the given \"primary-key\".",
+            "Cache hit for: nk-nix-bench-v1-Linux-X64-format-93c91ad1769400fd0fee481c027cc2bd54540c52393d1e1cb2d0a444112ace3a",
+            "Received 33554432 of 609942154 (5.5%), 32.0 MBs/sec",
+            "Received 134217728 of 609942154 (22.0%), 64.0 MBs/sec",
+            "Received 297795584 of 609942154 (48.8%), 94.6 MBs/sec",
+            "Received 448790528 of 609942154 (73.6%), 106.9 MBs/sec",
+            "Received 601553546 of 609942154 (98.6%), 114.6 MBs/sec",
+            "Received 609942154 of 609942154 (100.0%), 107.6 MBs/sec",
+            "Cache Size: ~582 MB (609942154 B)",
+            "Cache restored successfully",
+            "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+            "rustfmt 1.9.0",
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-format-93c91ad1769400fd0fee481c027cc2bd54540c52393d1e1cb2d0a444112ace3a\".",
+            "Cache hit for: nk-nix-bench-v1-Linux-X64-format-93c91ad1769400fd0fee481c027cc2bd54540c52393d1e1cb2d0a444112ace3a",
+            "Cache hit occurred on the \"primary-key\".",
+            "Not saving a new cache."
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 4.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 22.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Restore persistent candidate",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix invalidate flake.lock",
+          "job_id": 110961840425,
+          "conclusion": "success",
+          "queue_seconds": 3.0,
+          "measurements": [
+            {
+              "shell": "default",
+              "setup_seconds": 13.424110055999996,
+              "plan_seconds": 11.138072238999996,
+              "closure_paths": 147,
+              "closure_nar_bytes": 2533937616,
+              "copied_paths": 133
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:",
+            "these 132 paths will be fetched (722.8 MiB download, 2.4 GiB unpacked):",
+            "this path will be fetched (107.5 KiB download, 107.4 KiB unpacked):"
+          ],
+          "actual_copied_paths": 135,
+          "cache_and_versions": [
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-default-08eadba6b1841aeff96a83297263059ce39805e547f4fa9b9b77e321207c1160\".",
+            "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+            "rustfmt 1.9.0",
+            "cargo-audit 0.22.2"
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Change one flake input",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 5.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore persistent candidate without saving",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 28.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Restore persistent candidate without saving",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix default persistent baseline",
+          "job_id": 110961840427,
+          "conclusion": "success",
+          "queue_seconds": 2.0,
+          "measurements": [
+            {
+              "shell": "default",
+              "setup_seconds": 0.599242855,
+              "plan_seconds": 1.2117192210000098,
+              "closure_paths": 147,
+              "closure_nar_bytes": 2533937616,
+              "copied_paths": 0
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:"
+          ],
+          "actual_copied_paths": 0,
+          "cache_and_versions": [
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-default-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89\".",
+            "Cache hit for: nk-nix-bench-v1-Linux-X64-default-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89",
+            "Found a cache with the given \"primary-key\".",
+            "Cache hit for: nk-nix-bench-v1-Linux-X64-default-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89",
+            "Received 100663296 of 852871220 (11.8%), 95.5 MBs/sec",
+            "Received 297795584 of 852871220 (34.9%), 141.6 MBs/sec",
+            "Received 532676608 of 852871220 (62.5%), 169.1 MBs/sec",
+            "Received 738197504 of 852871220 (86.6%), 175.7 MBs/sec",
+            "Received 852871220 of 852871220 (100.0%), 176.5 MBs/sec",
+            "Cache Size: ~813 MB (852871220 B)",
+            "Cache restored successfully",
+            "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+            "rustfmt 1.9.0",
+            "cargo-audit 0.22.2",
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-default-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89\".",
+            "Cache hit for: nk-nix-bench-v1-Linux-X64-default-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89",
+            "Cache hit occurred on the \"primary-key\".",
+            "Not saving a new cache."
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 5.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 26.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 3.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Restore persistent candidate",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix format fresh narrow",
+          "job_id": 110961840445,
+          "conclusion": "success",
+          "queue_seconds": 3.0,
+          "measurements": [
+            {
+              "shell": "format",
+              "setup_seconds": 10.57965497,
+              "plan_seconds": 10.997278657999999,
+              "closure_paths": 66,
+              "closure_nar_bytes": 1805510048,
+              "copied_paths": 55
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:",
+            "these 51 paths will be fetched (492.8 MiB download, 1.7 GiB unpacked):",
+            "these 4 paths will be fetched (2.5 MiB download, 11.3 MiB unpacked):"
+          ],
+          "actual_copied_paths": 57,
+          "cache_and_versions": [
+            "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+            "rustfmt 1.9.0"
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 4.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 23.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix format persistent baseline",
+          "job_id": 110961840505,
+          "conclusion": "success",
+          "queue_seconds": 3.0,
+          "measurements": [
+            {
+              "shell": "format",
+              "setup_seconds": 0.6873423619999954,
+              "plan_seconds": 1.0809550690000123,
+              "closure_paths": 79,
+              "closure_nar_bytes": 2137463432,
+              "copied_paths": 0
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:"
+          ],
+          "actual_copied_paths": 0,
+          "cache_and_versions": [
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-format-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89\".",
+            "Cache hit for: nk-nix-bench-v1-Linux-X64-format-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89",
+            "Found a cache with the given \"primary-key\".",
+            "Cache hit for: nk-nix-bench-v1-Linux-X64-format-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89",
+            "Received 0 of 714342465 (0.0%), 0.0 MBs/sec",
+            "Received 96468992 of 714342465 (13.5%), 46.0 MBs/sec",
+            "Received 209715200 of 714342465 (29.4%), 66.6 MBs/sec",
+            "Received 297795584 of 714342465 (41.7%), 71.0 MBs/sec",
+            "Received 402653184 of 714342465 (56.4%), 76.8 MBs/sec",
+            "Received 515899392 of 714342465 (72.2%), 81.9 MBs/sec",
+            "Received 616562688 of 714342465 (86.3%), 84.0 MBs/sec",
+            "Received 710148161 of 714342465 (99.4%), 84.6 MBs/sec",
+            "Received 714342465 of 714342465 (100.0%), 84.7 MBs/sec",
+            "Cache Size: ~681 MB (714342465 B)",
+            "Cache restored successfully",
+            "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+            "rustfmt 1.9.0",
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-format-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89\".",
+            "Cache hit for: nk-nix-bench-v1-Linux-X64-format-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89",
+            "Cache hit occurred on the \"primary-key\".",
+            "Not saving a new cache."
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 4.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 28.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix format fresh baseline",
+          "job_id": 110961840573,
+          "conclusion": "success",
+          "queue_seconds": 3.0,
+          "measurements": [
+            {
+              "shell": "format",
+              "setup_seconds": 10.252344096000002,
+              "plan_seconds": 10.612332836,
+              "closure_paths": 79,
+              "closure_nar_bytes": 2137463432,
+              "copied_paths": 68
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:",
+            "these 64 paths will be fetched (592.3 MiB download, 2.0 GiB unpacked):",
+            "these 4 paths will be fetched (2.5 MiB download, 11.3 MiB unpacked):"
+          ],
+          "actual_copied_paths": 70,
+          "cache_and_versions": [
+            "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+            "rustfmt 1.9.0"
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 5.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 22.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix security fresh baseline",
+          "job_id": 110961840592,
+          "conclusion": "success",
+          "queue_seconds": 3.0,
+          "measurements": [
+            {
+              "shell": "security",
+              "setup_seconds": 5.299492854999997,
+              "plan_seconds": 12.507429013,
+              "closure_paths": 133,
+              "closure_nar_bytes": 800886496,
+              "copied_paths": 119
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:",
+            "these 118 paths will be fetched (249.6 MiB download, 763.7 MiB unpacked):",
+            "this path will be fetched (107.5 KiB download, 107.4 KiB unpacked):"
+          ],
+          "actual_copied_paths": 121,
+          "cache_and_versions": [
+            "cargo-audit 0.22.2"
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 5.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 3.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 18.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix security fresh narrow",
+          "job_id": 110961840603,
+          "conclusion": "success",
+          "queue_seconds": 4.0,
+          "measurements": [
+            {
+              "shell": "security",
+              "setup_seconds": 3.9599879910000055,
+              "plan_seconds": 11.359756514999994,
+              "closure_paths": 120,
+              "closure_nar_bytes": 468932832,
+              "copied_paths": 106
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:",
+            "these 105 paths will be fetched (150.1 MiB download, 447.1 MiB unpacked):",
+            "this path will be fetched (107.5 KiB download, 107.4 KiB unpacked):"
+          ],
+          "actual_copied_paths": 108,
+          "cache_and_versions": [
+            "cargo-audit 0.22.2"
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 5.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 16.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix security persistent narrow",
+          "job_id": 110961840699,
+          "conclusion": "success",
+          "queue_seconds": 2.0,
+          "measurements": [
+            {
+              "shell": "security",
+              "setup_seconds": 0.6331361209999997,
+              "plan_seconds": 1.2020028830000058,
+              "closure_paths": 120,
+              "closure_nar_bytes": 468932832,
+              "copied_paths": 0
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:"
+          ],
+          "actual_copied_paths": 0,
+          "cache_and_versions": [
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-security-93c91ad1769400fd0fee481c027cc2bd54540c52393d1e1cb2d0a444112ace3a\".",
+            "Cache hit for: nk-nix-bench-v1-Linux-X64-security-93c91ad1769400fd0fee481c027cc2bd54540c52393d1e1cb2d0a444112ace3a",
+            "Found a cache with the given \"primary-key\".",
+            "Cache hit for: nk-nix-bench-v1-Linux-X64-security-93c91ad1769400fd0fee481c027cc2bd54540c52393d1e1cb2d0a444112ace3a",
+            "Received 180355072 of 254019811 (71.0%), 167.5 MBs/sec",
+            "Received 254019811 of 254019811 (100.0%), 180.5 MBs/sec",
+            "Cache Size: ~242 MB (254019811 B)",
+            "Cache restored successfully",
+            "cargo-audit 0.22.2",
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-security-93c91ad1769400fd0fee481c027cc2bd54540c52393d1e1cb2d0a444112ace3a\".",
+            "Cache hit for: nk-nix-bench-v1-Linux-X64-security-93c91ad1769400fd0fee481c027cc2bd54540c52393d1e1cb2d0a444112ace3a",
+            "Cache hit occurred on the \"primary-key\".",
+            "Not saving a new cache."
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 4.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 13.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 3.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix security persistent baseline",
+          "job_id": 110961840821,
+          "conclusion": "success",
+          "queue_seconds": 2.0,
+          "measurements": [
+            {
+              "shell": "security",
+              "setup_seconds": 0.6624493549999997,
+              "plan_seconds": 1.1983661639999994,
+              "closure_paths": 133,
+              "closure_nar_bytes": 800886496,
+              "copied_paths": 0
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:"
+          ],
+          "actual_copied_paths": 0,
+          "cache_and_versions": [
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-security-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89\".",
+            "Cache hit for: nk-nix-bench-v1-Linux-X64-security-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89",
+            "Found a cache with the given \"primary-key\".",
+            "Cache hit for: nk-nix-bench-v1-Linux-X64-security-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89",
+            "Received 163577856 of 358746621 (45.6%), 153.5 MBs/sec",
+            "Received 358746621 of 358746621 (100.0%), 179.5 MBs/sec",
+            "Cache Size: ~342 MB (358746621 B)",
+            "Cache restored successfully",
+            "cargo-audit 0.22.2",
+            "Searching for a cache with the key \"nk-nix-bench-v1-Linux-X64-security-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89\".",
+            "Cache hit for: nk-nix-bench-v1-Linux-X64-security-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89",
+            "Cache hit occurred on the \"primary-key\".",
+            "Not saving a new cache."
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 2.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 4.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 16.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 3.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "job": "Nix default fresh baseline",
+          "job_id": 110961841132,
+          "conclusion": "success",
+          "queue_seconds": 2.0,
+          "measurements": [
+            {
+              "shell": "default",
+              "setup_seconds": 12.235775509000007,
+              "plan_seconds": 10.375491161999989,
+              "closure_paths": 147,
+              "closure_nar_bytes": 2533937616,
+              "copied_paths": 133
+            }
+          ],
+          "download_plan": [
+            "this derivation will be built:",
+            "these 132 paths will be fetched (722.8 MiB download, 2.4 GiB unpacked):",
+            "this path will be fetched (107.5 KiB download, 107.4 KiB unpacked):"
+          ],
+          "actual_copied_paths": 135,
+          "cache_and_versions": [
+            "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+            "rustfmt 1.9.0",
+            "cargo-audit 0.22.2"
+          ],
+          "steps": [
+            {
+              "name": "Set up job",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Install Nix",
+              "seconds": 5.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore measured baseline flake",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Restore persistent candidate",
+              "seconds": 0.0,
+              "conclusion": "skipped"
+            },
+            {
+              "name": "Measure environment",
+              "seconds": 24.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Record measurement",
+              "seconds": 1.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+              "seconds": 0.0,
+              "conclusion": "success"
+            },
+            {
+              "name": "Complete job",
+              "seconds": 0.0,
+              "conclusion": "success"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "candidate_cache_entries": [
+    {
+      "id": 8428729281,
+      "ref": "refs/pull/173/merge",
+      "key": "nk-nix-bench-v1-Linux-X64-format-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89",
+      "version": "61f580666a5d74c10e23b70373022cee6c075dda18cdbf0fb39a111db623243a",
+      "last_accessed_at": "2026-10-02T17:59:14.814704Z",
+      "created_at": "2026-10-02T17:50:30.563515Z",
+      "size_in_bytes": 714342465
+    },
+    {
+      "id": 8428737651,
+      "ref": "refs/pull/173/merge",
+      "key": "nk-nix-bench-v1-Linux-X64-default-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89",
+      "version": "61f580666a5d74c10e23b70373022cee6c075dda18cdbf0fb39a111db623243a",
+      "last_accessed_at": "2026-10-02T17:59:13.296204Z",
+      "created_at": "2026-10-02T17:50:44.000567Z",
+      "size_in_bytes": 852871220
+    },
+    {
+      "id": 8428952775,
+      "ref": "refs/pull/173/merge",
+      "key": "nk-nix-bench-v1-Linux-X64-format-93c91ad1769400fd0fee481c027cc2bd54540c52393d1e1cb2d0a444112ace3a",
+      "version": "61f580666a5d74c10e23b70373022cee6c075dda18cdbf0fb39a111db623243a",
+      "last_accessed_at": "2026-10-02T17:59:09.296832Z",
+      "created_at": "2026-10-02T17:56:20.926796Z",
+      "size_in_bytes": 609942154
+    },
+    {
+      "id": 8428720212,
+      "ref": "refs/pull/173/merge",
+      "key": "nk-nix-bench-v1-Linux-X64-security-171dd84591a31d3f4c3c2de8e66d61e344f98d3f48129c45e5d65c42ff60cf89",
+      "version": "61f580666a5d74c10e23b70373022cee6c075dda18cdbf0fb39a111db623243a",
+      "last_accessed_at": "2026-10-02T17:59:01.640577Z",
+      "created_at": "2026-10-02T17:50:15.949728Z",
+      "size_in_bytes": 358746621
+    },
+    {
+      "id": 8428939224,
+      "ref": "refs/pull/173/merge",
+      "key": "nk-nix-bench-v1-Linux-X64-security-93c91ad1769400fd0fee481c027cc2bd54540c52393d1e1cb2d0a444112ace3a",
+      "version": "61f580666a5d74c10e23b70373022cee6c075dda18cdbf0fb39a111db623243a",
+      "last_accessed_at": "2026-10-02T17:58:58.602492Z",
+      "created_at": "2026-10-02T17:56:01.118768Z",
+      "size_in_bytes": 254019811
+    }
+  ],
+  "excluded_failed_probes": [
+    {
+      "run": 37043117966,
+      "head_sha": "9495709167b7a38a48904a4f004b4077d88de814",
+      "reason": "Unsupported nix develop --dry-run; no measurements; superseded canonical jobs cancelled"
+    },
+    {
+      "run": 37043969673,
+      "scope": "baseline warm and invalidation jobs only",
+      "reason": "Shallow checkout omitted immutable baseline; narrow cold jobs succeeded, canonical jobs later cancelled"
+    }
+  ]
+}

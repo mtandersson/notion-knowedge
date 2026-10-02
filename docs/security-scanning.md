@@ -2,7 +2,10 @@
 
 The regular CI workflow runs two independent gates on pull requests targeting
 `main`, pushes to `main`, and manual runs. They use `cargo-audit` and Gitleaks
-from the same `flake.lock` pin as the development environment. No credentials,
+from the same `flake.lock` pin as the development environment, in the smaller
+`security` shell (`mkShellNoCC`). The [measured Nix policy](nix-ci.md) uses fresh
+store downloads; scanner artifacts are pinned, while live advisory data is
+always fetched separately. No credentials,
 paid scanner account, or repository secrets are needed, including for fork PRs.
 
 ## Dependency vulnerabilities
@@ -10,7 +13,7 @@ paid scanner account, or repository secrets are needed, including for fork PRs.
 From the repository root:
 
 ```sh
-nix develop --command ./scripts/check-dependencies.sh
+nix develop .#security --command ./scripts/check-dependencies.sh
 ```
 
 Cargo audit checks the existing `Cargo.lock` against a freshly fetched
@@ -37,7 +40,7 @@ There are currently no advisory exceptions.
 From the repository root, after committing changes:
 
 ```sh
-nix develop --command ./scripts/check-secrets.sh
+nix develop .#security --command ./scripts/check-secrets.sh
 ```
 
 Gitleaks uses its full built-in ruleset, extended by `.gitleaks.toml`, and scans
@@ -49,7 +52,7 @@ partial history. Unreachable objects, other unmerged branches, and uncommitted
 changes are outside this scan's scope. To check staged changes before a commit:
 
 ```sh
-nix develop --command gitleaks git --staged --config .gitleaks.toml \
+nix develop .#security --command gitleaks git --staged --config .gitleaks.toml \
   --gitleaks-ignore-path .gitleaksignore --redact=100 --no-banner \
   --ignore-gitleaks-allow .
 ```
@@ -72,7 +75,7 @@ configuration and exception lists as changes to the security policy.
 ## Verify the gates
 
 ```sh
-nix develop --command python3 scripts/test-security-scanning.py
+nix develop .#security --command python3 scripts/test-security-scanning.py
 ```
 
 The focused offline tests invoke the production scripts and real pinned

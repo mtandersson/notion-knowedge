@@ -5,6 +5,7 @@
 /.direnv/
 result
 result-*
+/nix-benchmark.json
 
 # Local data and secrets
 .env
