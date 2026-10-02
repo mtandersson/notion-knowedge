@@ -2,10 +2,10 @@ name: Restore compatible Cargo snapshots
 description: Key pinned toolchain/dependencies separately from source snapshots
 inputs:
   job:
-    required: 'true'
+    required: true
     description: Cargo job identity
   profile:
-    required: 'true'
+    required: true
     description: debug or release
 outputs:
   key:
