@@ -124,3 +124,14 @@ ran all nine original checks plus selection and gate. Docs-only thus avoided
 all unrelated Rust and container work while retaining advisory and secret
 coverage. Full production PR and post-merge main runs are also inspected during
 delivery; cache/performance comparisons belong to the later #151 children.
+
+## Matched whole-CI campaign
+
+[The #174 hosted campaign](ci-performance-evidence.md) compares the historical
+workflow design and current optimized CI on identical current production inputs,
+with observed cold/warm sequences and matched Rust/docs PRs. Its machine ledger
+and retained raw archives separate queue, setup/Nix, caches, Cargo and container
+work. Warm/docs samples improved; cold and Rust PR samples were slower, including
+an observed Docker compilation-cache miss after an unchanged-source PR follow-up.
+These results do not establish a general Rust PR speedup. Optional development
+build sharing and the full original acceptance audit remain #175/#176 under #155.
