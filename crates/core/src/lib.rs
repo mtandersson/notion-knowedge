@@ -12,3 +12,5 @@ pub const SERVER_NAME: &str = "notion-knowledge";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod health;
+
+// CI selection benchmark: Rust input

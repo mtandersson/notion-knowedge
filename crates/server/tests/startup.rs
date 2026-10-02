@@ -100,3 +100,5 @@ fn release_identity_is_available_without_runtime_configuration() {
     );
     assert!(output.stderr.is_empty());
 }
+
+// CI selection benchmark: test input
