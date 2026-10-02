@@ -87,7 +87,7 @@ jobs:
             experimental-features = nix-command flakes
 
       - name: Check formatting
-        run: nix develop --command cargo fmt --all -- --check
+        run: nix develop .#format --command cargo fmt --all -- --check
 
   clippy:
     needs: changes
@@ -341,10 +341,10 @@ jobs:
             experimental-features = nix-command flakes
 
       - name: Verify security gate failure paths
-        run: nix develop --command python3 scripts/test-security-scanning.py
+        run: nix develop .#security --command python3 scripts/test-security-scanning.py
 
       - name: Audit locked dependencies against fresh RustSec advisories
-        run: nix develop --command ./scripts/check-dependencies.sh
+        run: nix develop .#security --command ./scripts/check-dependencies.sh
 
   secrets:
     name: Secret scanning
@@ -364,7 +364,7 @@ jobs:
             experimental-features = nix-command flakes
 
       - name: Scan reachable history with redacted findings
-        run: nix develop --command ./scripts/check-secrets.sh
+        run: nix develop .#security --command ./scripts/check-secrets.sh
 
   gate:
     name: CI gate

@@ -16,6 +16,12 @@
         let
           pkgs = import nixpkgs { inherit system; };
         in {
+          format = pkgs.mkShellNoCC {
+            packages = with pkgs; [ cargo rustfmt ];
+          };
+          security = pkgs.mkShellNoCC {
+            packages = with pkgs; [ cargo-audit gitleaks git python3 ];
+          };
           default = pkgs.mkShell {
             packages = with pkgs; [
               cargo

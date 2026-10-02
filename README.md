@@ -175,6 +175,9 @@ downloads are cached using the lockfile-derived cache key. Compiled outputs use
 [compatible source snapshots](docs/cargo-cache.md), refreshed after successful
 source changes; the Nix flake remains the source of truth for the toolchain.
 
+CI uses [smaller pinned format/security shells and fresh Nix downloads](docs/nix-ci.md),
+selected from measured restore/save overhead.
+
 Security scans use pinned Nix tools, fresh RustSec advisories, and complete Git
 history with redacted findings. See [security scanning](docs/security-scanning.md)
 for local commands, gate verification, and narrowly reviewed exceptions.
