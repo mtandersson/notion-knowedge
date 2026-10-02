@@ -1,0 +1,3 @@
+# Exact commit:path:rule:line fingerprints only. Document each synthetic false
+# positive with rationale, tracking issue, owner and review date.
+# See docs/security-scanning.md. No current exceptions.

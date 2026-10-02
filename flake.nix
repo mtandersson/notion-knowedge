@@ -19,11 +19,14 @@
           default = pkgs.mkShell {
             packages = with pkgs; [
               cargo
+              cargo-audit
+              gitleaks
               rustc
               rustfmt
               clippy
               git
               pkg-config
+              python3
               openssl
               sqlite
             ];
