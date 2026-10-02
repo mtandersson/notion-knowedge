@@ -30,6 +30,12 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if env::args().skip(1).any(|arg| arg == "--healthcheck") {
+        return match notion_knowledge_server::http::container_healthcheck(&config) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) | Err(_) => ExitCode::FAILURE,
+        };
+    }
     if env::args().skip(1).any(|arg| arg == "--diagnostics") {
         println!(
             "{}",
