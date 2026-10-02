@@ -131,6 +131,13 @@ Production build:
 cargo build --workspace --release --locked
 ```
 
+## Diagnostics
+
+Use `--version` for the Cargo release identity, `--diagnostics` for a one-shot
+composition report, and HTTP `GET /health` for current serving-process dependency
+health. The bootstrap reports unavailable adapters honestly (HTTP 503). See
+[diagnostic semantics and orchestration access policy](docs/diagnostics.md).
+
 ## Container
 
 The current server is packaged in a pinned, non-root container with stdio and

@@ -15,6 +15,14 @@ fn components() -> [&'static str; 4] {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    if env::args().skip(1).any(|arg| arg == "--version") {
+        println!(
+            "{} {}",
+            notion_knowledge_core::SERVER_NAME,
+            notion_knowledge_core::VERSION
+        );
+        return ExitCode::SUCCESS;
+    }
     let config = match Config::from_env() {
         Ok(config) => config,
         Err(error) => {
@@ -22,11 +30,22 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if env::args().skip(1).any(|arg| arg == "--diagnostics") {
+        println!(
+            "{}",
+            notion_knowledge_server::diagnostics::report(
+                notion_knowledge_server::diagnostics::bootstrap(&config).health(),
+                "one-shot"
+            )
+        );
+        return ExitCode::SUCCESS;
+    }
     let check_only = env::args().skip(1).any(|arg| arg == "--check");
 
     eprintln!(
-        "notion-knowledge bootstrap ready ({})",
-        components().join(", ")
+        "notion-knowledge bootstrap ready ({}) version {}",
+        components().join(", "),
+        notion_knowledge_core::VERSION
     );
 
     if check_only {
@@ -34,7 +53,7 @@ async fn main() -> ExitCode {
     }
 
     if env::args().skip(1).any(|arg| arg == "--http") {
-        return match notion_knowledge_server::http::serve(config.http_bind).await {
+        return match notion_knowledge_server::http::serve(config).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("MCP HTTP service failed: {error}");

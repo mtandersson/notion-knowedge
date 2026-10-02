@@ -53,6 +53,19 @@ async fn http_client_initializes_discovers_calls_and_receives_structured_errors(
             if line.contains("Serving MCP over Streamable HTTP") { break; }
         }
         let client = Client::builder().no_proxy().build().unwrap();
+        let health_url = format!("http://127.0.0.1:{port}/health");
+        let health = client.get(&health_url).send().await.unwrap();
+        assert_eq!(health.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(health.headers()["cache-control"], "no-store");
+        let health: Value = health.json().await.unwrap();
+        assert_eq!(health, json!({
+            "server": {"name":"notion-knowledge", "version":env!("CARGO_PKG_VERSION")},
+            "transport":"http", "status":"degraded",
+            "dependencies":{"notion":"unconfigured", "index":"unavailable"}
+        }));
+        for (header, value) in [("origin", "https://untrusted.example"), ("host", "untrusted.example")] {
+            assert_eq!(client.get(&health_url).header(header,value).send().await.unwrap().status(), StatusCode::FORBIDDEN);
+        }
         let url = format!("http://127.0.0.1:{port}/mcp");
         let before_initialize = client.post(&url)
             .header("accept", "application/json, text/event-stream")
@@ -73,6 +86,7 @@ async fn http_client_initializes_discovers_calls_and_receives_structured_errors(
         assert_eq!(initialized["id"], 1);
         assert_eq!(initialized["result"]["protocolVersion"], "2025-03-26");
         assert_eq!(initialized["result"]["serverInfo"]["name"], "notion-knowledge");
+        assert_eq!(initialized["result"]["serverInfo"]["version"], health["server"]["version"]);
         assert!(initialized["result"]["capabilities"]["tools"].is_object());
         let post = || client.post(&url)
             .header("accept", "application/json, text/event-stream")
