@@ -5,7 +5,8 @@ loads the final runtime and pinned builder, and exports a bounded mutable
 scope only after the existing final-image checks pass. Fork PRs do not export;
 GitHub's merge-ref cache isolation prevents PR layers from being restored on
 main. See [container cache policy and commands](container.md#ci-layer-cache).
-Cargo and Nix caches are unchanged by this Docker-only improvement.
+Cargo build jobs use [source-refreshing compatible snapshots](cargo-cache.md).
+Nix caching remains separate work.
 
 The CI workflow triggers on **every** pull request targeting `main`, every main
 push, and manual dispatch. There are no workflow-level path filters. The cheap
