@@ -95,7 +95,8 @@ jobs:
     - name: Require canonical command success
       env:
         OUTCOME: ${{ needs.dev-shared.outputs.clippy }}
-      run: test "$OUTCOME" = success
+        SHARED_RESULT: ${{ needs.dev-shared.result }}
+      run: test "$OUTCOME" = success && test "$SHARED_RESULT" = success
   check:
     name: Type check
     needs:
@@ -108,7 +109,8 @@ jobs:
     - name: Require canonical command success
       env:
         OUTCOME: ${{ needs.dev-shared.outputs.check }}
-      run: test "$OUTCOME" = success
+        SHARED_RESULT: ${{ needs.dev-shared.result }}
+      run: test "$OUTCOME" = success && test "$SHARED_RESULT" = success
   test:
     name: Unit tests
     needs:
@@ -121,7 +123,8 @@ jobs:
     - name: Require canonical command success
       env:
         OUTCOME: ${{ needs.dev-shared.outputs.test }}
-      run: test "$OUTCOME" = success
+        SHARED_RESULT: ${{ needs.dev-shared.result }}
+      run: test "$OUTCOME" = success && test "$SHARED_RESULT" = success
   build:
     needs: changes
     if: needs.changes.outputs.build == 'true'
@@ -359,6 +362,8 @@ jobs:
         hit: ${{ steps.cargo-cache.outputs.hit }}
         downloads-key: ${{ steps.cargo-cache.outputs.downloads-key }}
         downloads-hit: ${{ steps.cargo-cache.outputs.downloads-hit }}
+    - name: Inject terminal shared-job failure after successful commands
+      run: exit 1
     outputs:
       check: ${{ steps.check.outcome }}
       clippy: ${{ steps.clippy.outcome }}
