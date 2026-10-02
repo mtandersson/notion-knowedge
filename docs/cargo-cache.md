@@ -67,7 +67,7 @@ nix develop --command python3 scripts/cargo-cache.py key --job check --profile d
 
 Production restore then runs `prepare`, the canonical Cargo command, and on
 success `snapshot` plus explicit cache save. Key output contains hashes rather
-than credential/flag values. Hosted evidence must show baseline creation, a
-genuine source edit with compatible fallback and refreshed save, later exact
-reuse, and dependency/flake invalidation before closing #168. Distinguish cache
-key selection from Cargo's actual freshness/fingerprint decisions.
+than credential/flag values. [Hosted evidence](cargo-cache-evidence.md) records
+baseline creation, a genuine source edit with compatible fallback and refreshed
+save, exact reuse, dependency/flake invalidation, and per-profile storage/timings.
+It distinguishes key selection from Cargo's actual fingerprint decisions.

@@ -12,16 +12,3 @@ pub const SERVER_NAME: &str = "notion-knowledge";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod health;
-
-/// Temporary hosted cache probe: exercise a newly compiled public function.
-pub fn cache_probe_component() -> &'static str {
-    COMPONENT
-}
-
-#[cfg(test)]
-mod cache_probe_tests {
-    #[test]
-    fn source_refresh_executes_new_code() {
-        assert_eq!(super::cache_probe_component(), "core");
-    }
-}

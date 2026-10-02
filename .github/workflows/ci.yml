@@ -19,8 +19,6 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_TARGET_DIR: target
-  # Temporary hosted fingerprint evidence; removed before merge.
-  CARGO_LOG: cargo::core::compiler::fingerprint=info
 
 jobs:
   changes:
@@ -384,50 +382,3 @@ jobs:
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
         run: python3 scripts/ci-jobs.py gate
-
-  # Temporary read-only invalidation probes; removed before merge.
-  cache-boundaries:
-    name: Cache boundary (${{ matrix.input }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        input: [manifest, cargo-lock, flake-nix, flake-lock]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-      - name: Change one compatibility boundary
-        env:
-          CACHE_PROBE_INPUT: ${{ matrix.input }}
-        run: |
-          python3 - <<'PYPROBE'
-          import json, os
-          from pathlib import Path
-          kind = os.environ['CACHE_PROBE_INPUT']
-          if kind == 'manifest':
-              with open('Cargo.toml', 'a') as file:
-                  file.write('\n[profile.dev]\ndebug = 1\n')
-          elif kind == 'cargo-lock':
-              with open('Cargo.lock', 'a') as file:
-                  file.write('\n# hosted lockfile boundary probe\n')
-          elif kind == 'flake-nix':
-              path = Path('flake.nix')
-              path.write_text(path.read_text().replace('RUST_BACKTRACE = "1";', 'RUST_BACKTRACE = "1";\n            RUSTFLAGS = "-C debuginfo=1";'))
-          else:
-              path = Path('flake.lock')
-              path.write_text(json.dumps(json.loads(path.read_text()), indent=4) + '\n')
-          print('Changed boundary:', kind)
-          PYPROBE
-      - name: Restore with the production policy
-        uses: ./.github/actions/cargo-cache-restore
-        with:
-          job: check
-          profile: debug
-      - name: Compile with changed input
-        run: nix develop --command cargo check --workspace --all-targets --locked
