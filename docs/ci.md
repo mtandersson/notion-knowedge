@@ -65,10 +65,53 @@ cancellations, unexpected skips, detection failures, and invalid outputs.
 
 ## Actual Actions evidence
 
-Evidence is added after representative runs finish. The production baseline is
+The production baseline is
 main `4167a4726688fd79d9e5e831ad8e9a7fc4c321a6`, with full-coverage run
 [36964071809](https://github.com/mtandersson/notion-knowedge/actions/runs/36964071809).
 The comparable foundation PR run is
 [36963826931](https://github.com/mtandersson/notion-knowedge/actions/runs/36963826931).
 Performance/cache measurements remain in parent #151 and its follow-up children;
 this child establishes selection correctness without attributing cache benefits.
+
+
+On 2026-10-02, ten task-owned draft PRs targeted a temporary benchmark foundation
+`fefd681fba090b54707ce4043d5887a08ada6f8e`. Its workflow differs from the
+production implementation `39023a2` only by adding `benchmark/153-foundation`
+to the PR base-branch trigger list. Selection logic, job conditions, check
+commands, permissions, and the aggregate gate are identical. This isolates
+representative changed inputs before the selector workflow merges to main;
+otherwise every pre-merge test PR would itself include the workflow change
+and conservatively select all jobs. The foundation is never merged to main.
+Benchmark PRs and remote branches are closed/deleted after evidence capture.
+Run links preserve immutable commit identities and actual job logs/results.
+
+Every listed run passed CI input selection and both fresh security scans.
+The table lists the seven optional jobs; “None” means none selected/skipped.
+The failure run deliberately deleted `CLAUDE.md`: the actual Agent layout
+command exited 1 and CI gate ran and rejected that failed selected result.
+No fake result data or configured skip caused this failure.
+
+| Changed inputs / event | Immutable run | Optional jobs selected | Optional jobs skipped | CI gate |
+| --- | --- | --- | --- | --- |
+| docs | [36965010145](https://github.com/mtandersson/notion-knowedge/actions/runs/36965010145) | None | Agent layout, Clippy, Container smoke, Format, Release build, Type check, Unit tests | success |
+| agent | [36965014465](https://github.com/mtandersson/notion-knowedge/actions/runs/36965014465) | Agent layout | Clippy, Container smoke, Format, Release build, Type check, Unit tests | success |
+| fixture | [36965020854](https://github.com/mtandersson/notion-knowedge/actions/runs/36965020854) | Unit tests | Agent layout, Clippy, Container smoke, Format, Release build, Type check | success |
+| foundation | [36965025024](https://github.com/mtandersson/notion-knowedge/actions/runs/36965025024) | Agent layout, Clippy, Container smoke, Format, Release build, Type check, Unit tests | None | success |
+| rust-tests | [36965025858](https://github.com/mtandersson/notion-knowedge/actions/runs/36965025858) | Clippy, Container smoke, Format, Release build, Type check, Unit tests | Agent layout | success |
+| manifest-lock | [36965031906](https://github.com/mtandersson/notion-knowedge/actions/runs/36965031906) | Clippy, Container smoke, Format, Release build, Type check, Unit tests | Agent layout | success |
+| docker | [36965036418](https://github.com/mtandersson/notion-knowedge/actions/runs/36965036418) | Container smoke | Agent layout, Clippy, Format, Release build, Type check, Unit tests | success |
+| toolchain-workflow | [36965042528](https://github.com/mtandersson/notion-knowedge/actions/runs/36965042528) | Agent layout, Clippy, Container smoke, Format, Release build, Type check, Unit tests | None | success |
+| rename-unknown | [36965048133](https://github.com/mtandersson/notion-knowedge/actions/runs/36965048133) | Agent layout, Clippy, Container smoke, Format, Release build, Type check, Unit tests | None | success |
+| mixed | [36965053320](https://github.com/mtandersson/notion-knowedge/actions/runs/36965053320) | Agent layout, Container smoke | Clippy, Format, Release build, Type check, Unit tests | success |
+| failure | [36965058690](https://github.com/mtandersson/notion-knowedge/actions/runs/36965058690) | Agent layout | Clippy, Container smoke, Format, Release build, Type check, Unit tests | failure |
+
+The docs run changed README and deleted a Markdown ADR template. Agent changed
+AGENTS. Fixture changed the evaluation JSON. Rust/tests changed production Rust
+and a Rust integration test; manifest/lock changed both Cargo inputs. Docker
+changed Dockerfile. Toolchain/workflow changed flake.nix and the workflow. Rename
+moved README to an unknown root path, which selected full checks. Mixed changed
+README, AGENTS, and Dockerfile together. Foundation was a manual dispatch and
+ran all nine original checks plus selection and gate. Docs-only thus avoided
+all unrelated Rust and container work while retaining advisory and secret
+coverage. Full production PR and post-merge main runs are also inspected during
+delivery; cache/performance comparisons belong to the later #151 children.
