@@ -83,9 +83,9 @@ its own scope. GitHub additionally restricts PR exports to that PR's merge ref;
 main cannot restore them. Fork PRs only import and never export. Manual branch
 runs use their branch scope. Export happens only after smoke succeeds, with
 `mode=max` retaining intermediate compilation layers and a ten-minute timeout.
-One mutable scope per active PR replaces its previous snapshot; GitHub's
-repository cache quota/LRU eviction and seven-day unused-cache eviction bound
-storage.
+One logical scope per active PR tracks its latest manifest; BuildKit retains
+versioned small indices and content-addressed blobs. GitHub's repository cache
+quota/LRU eviction and seven-day unused-cache eviction bound their storage.
 
 Docker's content-addressed build keys invalidate compilation for changed Rust,
 Cargo manifests/lockfile, VERSION, or the pinned builder/Dockerfile. REVISION is
@@ -96,7 +96,7 @@ layer. No ordinary Nix CI binary is copied into the container.
 
 Cache benefits require hosted cold/warm logs, not configuration alone. Record
 restore/export size and duration, compilation cache hits, and final-image smoke
-results in the delivery evidence before closing #167.
+results in the [hosted delivery evidence](docker-cache-evidence.md) before closing #167.
 
 ## Run
 
