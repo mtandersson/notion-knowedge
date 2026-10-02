@@ -147,11 +147,18 @@ for the adapter integration in #145.
 
 ## Continuous integration
 
-The permanent GitHub Actions workflow at `.github/workflows/ci.yml` mirrors the
-canonical checks above on every pull request targeting `main`, every push to
-`main`, and manual `workflow_dispatch` runs.
+The permanent GitHub Actions workflow at `.github/workflows/ci.yml` runs on every
+pull request targeting `main`, every push to `main`, and manual
+`workflow_dispatch` runs. PRs select relevant checks from changed inputs; main
+and manual runs execute the full canonical checks above.
 
-CI exposes separate required-check-friendly jobs for formatting, Clippy, type
+CI selects checks conservatively from changed PR inputs and retains fresh dependency
+and secret scans on every PR. Main pushes and manual runs execute all checks.
+The always-running **CI gate** is the stable check to require when branch protection
+is available. See [CI selection and verification](docs/ci.md) for the path map,
+check migration, and actual-run evidence.
+
+CI retains separate check names for formatting, Clippy, type
 checking, unit tests, the release build, final-image container smoke tests,
 dependency vulnerabilities, and committed secrets.
 The release-build job also uploads
