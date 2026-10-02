@@ -15,14 +15,21 @@ print(plan.stderr, flush=True)
 plan.check_returncode()
 print('DOWNLOAD_PLAN_BEGIN\n' + plan.stderr + '\nDOWNLOAD_PLAN_END', flush=True)
 before = time.monotonic()
-subprocess.run(command + ['--command', 'true'], check=True)
+activation = subprocess.run(command + ['--command', 'true'], text=True, capture_output=True)
+print(activation.stdout + activation.stderr, flush=True)
+activation.check_returncode()
 setup = time.monotonic() - before
 closure = json.loads(subprocess.check_output(['nix', 'path-info', '--json', '--recursive', profile], text=True))
 entries = closure.values() if isinstance(closure, dict) else closure
 entries = list(entries)
 report = {'shell': shell, 'setup_seconds': setup, 'plan_seconds': before-start,
-          'closure_paths': len(entries), 'closure_nar_bytes': sum(x['narSize'] for x in entries)}
+          'closure_paths': len(entries), 'closure_nar_bytes': sum(x['narSize'] for x in entries),
+          'copied_paths': activation.stderr.count("copying path '")}
 print('NIX_BENCHMARK ' + json.dumps(report), flush=True)
 pathlib.Path('nix-benchmark.json').write_text(json.dumps(report, indent=2) + '\n')
-subprocess.run(command + ['--command', 'bash', '-c',
-    'for tool in cargo rustfmt cargo-audit gitleaks; do command -v "$tool" >/dev/null && "$tool" --version || true; done'], check=True)
+tools = {'default': [('cargo', '--version'), ('rustfmt', '--version'),
+                     ('cargo-audit', '--version'), ('gitleaks', 'version')],
+         'format': [('cargo', '--version'), ('rustfmt', '--version')],
+         'security': [('cargo-audit', '--version'), ('gitleaks', 'version')]}
+for tool, option in tools[shell]:
+    subprocess.run(command + ['--command', tool, option], check=True)
