@@ -16,7 +16,7 @@ use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 
-/// Serve the shared MCP handler at `/mcp` until Ctrl-C.
+/// Serve the shared MCP handler and orchestration probes until Ctrl-C.
 pub async fn serve(settings: crate::config::Config) -> io::Result<()> {
     let bind = settings.http_bind;
     let diagnostics = crate::diagnostics::bootstrap(&settings);
@@ -46,6 +46,49 @@ pub async fn serve(settings: crate::config::Config) -> io::Result<()> {
             cancellation.cancel();
         })
         .await
+}
+
+/// Docker invokes this one-shot probe from inside the running container.
+/// HTTP deployments must answer their liveness endpoint. Stdio deployments
+/// have no listener, so Docker process liveness is sufficient there.
+pub fn container_healthcheck(settings: &crate::config::Config) -> io::Result<bool> {
+    let pid1 = std::fs::read("/proc/1/cmdline")?;
+    if !command_line_uses_http(&pid1) {
+        return Ok(true);
+    }
+    probe_liveness(settings.http_bind)
+}
+
+fn command_line_uses_http(command_line: &[u8]) -> bool {
+    command_line
+        .split(|byte| *byte == 0)
+        .any(|argument| argument == b"--http")
+}
+
+fn probe_liveness(bind: SocketAddr) -> io::Result<bool> {
+    use std::io::{Read, Write};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpStream};
+    use std::time::Duration;
+
+    let ip = match bind.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    let target = SocketAddr::new(ip, bind.port());
+    let timeout = Duration::from_secs(2);
+    let mut stream = TcpStream::connect_timeout(&target, timeout)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    write!(
+        stream,
+        "GET /livez HTTP/1.1\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n",
+        bind.port()
+    )?;
+    stream.flush()?;
+    let mut response = [0_u8; 64];
+    let read = stream.read(&mut response)?;
+    Ok(response[..read].starts_with(b"HTTP/1.1 200"))
 }
 
 // The SDK returns plain text when deserializing malformed request bodies.
@@ -132,9 +175,52 @@ fn diagnostics_router(
     diagnostics: crate::diagnostics::Diagnostics,
 ) -> axum::Router {
     axum::Router::new()
+        .route("/livez", get(liveness_response))
+        .route("/readyz", get(readiness_response))
         .route("/health", get(health_response))
         .with_state(diagnostics)
         .layer(middleware::from_fn_with_state(bind, guard_diagnostics))
+}
+
+async fn liveness_response() -> Response {
+    (
+        StatusCode::OK,
+        [("cache-control", "no-store")],
+        axum::Json(json!({
+            "server": {
+                "name": notion_knowledge_core::SERVER_NAME,
+                "version": notion_knowledge_core::VERSION
+            },
+            "transport": "http",
+            "status": "alive"
+        })),
+    )
+        .into_response()
+}
+
+async fn readiness_response(
+    State(diagnostics): State<crate::diagnostics::Diagnostics>,
+) -> Response {
+    let health = diagnostics.health();
+    let ready = health.index == notion_knowledge_core::health::DependencyState::Healthy;
+    (
+        if ready {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        [("cache-control", "no-store")],
+        axum::Json(json!({
+            "server": {
+                "name": notion_knowledge_core::SERVER_NAME,
+                "version": notion_knowledge_core::VERSION
+            },
+            "transport": "http",
+            "status": if ready { "ready" } else { "not_ready" },
+            "dependencies": {"index": health.index.as_str()}
+        })),
+    )
+        .into_response()
 }
 
 async fn health_response(State(diagnostics): State<crate::diagnostics::Diagnostics>) -> Response {
@@ -204,6 +290,91 @@ mod tests {
                 DependencyState::Unavailable
             }
         }
+    }
+
+    #[test]
+    fn container_healthcheck_identifies_http_pid1_arguments() {
+        assert!(command_line_uses_http(
+            b"/usr/local/bin/notion-knowledge-server\0--http\0"
+        ));
+        assert!(!command_line_uses_http(
+            b"/usr/local/bin/notion-knowledge-server\0"
+        ));
+    }
+
+    #[tokio::test]
+    async fn orchestration_probes_separate_liveness_local_readiness_and_upstream_health() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bind = listener.local_addr().unwrap();
+        let notion = Arc::new(Probe(AtomicBool::new(false)));
+        let index = Arc::new(Probe(AtomicBool::new(false)));
+        let router = diagnostics_router(
+            bind,
+            crate::diagnostics::Diagnostics::new(notion.clone(), index.clone()),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        for (notion_healthy, index_healthy) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            notion.0.store(notion_healthy, Ordering::Relaxed);
+            index.0.store(index_healthy, Ordering::Relaxed);
+
+            let live = client
+                .get(format!("http://{bind}/livez"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(live.status(), StatusCode::OK);
+            assert_eq!(live.headers()["cache-control"], "no-store");
+            let live: Value = live.json().await.unwrap();
+            assert_eq!(live["status"], "alive");
+
+            let ready = client
+                .get(format!("http://{bind}/readyz"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                ready.status(),
+                if index_healthy {
+                    StatusCode::OK
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+            );
+            assert_eq!(ready.headers()["cache-control"], "no-store");
+            let ready: Value = ready.json().await.unwrap();
+            assert_eq!(
+                ready["status"],
+                if index_healthy { "ready" } else { "not_ready" }
+            );
+            assert_eq!(
+                ready["dependencies"]["index"],
+                if index_healthy { "healthy" } else { "unavailable" }
+            );
+
+            let health = client
+                .get(format!("http://{bind}/health"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                health.status(),
+                if notion_healthy && index_healthy {
+                    StatusCode::OK
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+            );
+        }
+        server.abort();
     }
 
     #[tokio::test]
