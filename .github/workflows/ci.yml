@@ -19,6 +19,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_TARGET_DIR: target
+  # Temporary hosted fingerprint evidence; removed before merge.
+  CARGO_LOG: cargo::core::compiler::fingerprint=info
 
 jobs:
   changes:
