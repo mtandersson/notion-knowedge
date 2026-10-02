@@ -23,7 +23,7 @@ python3 scripts/smoke-container.py
 The smoke script builds `notion-knowledge:smoke` (override with `--image TAG`),
 checks OCI labels, actual executable linkage, and non-root writes to fresh
 external volumes, validates startup/configuration errors,
-and initializes/discovers tools over both stdio and HTTP in the final image.
+and initializes/discovers tools over both stdio and HTTP in the final image. It also verifies the image healthcheck command plus liveness, readiness, and dependency-diagnostic semantics.
 It requires access to the local Docker daemon and registry/Cargo downloads;
 it uses no upstream credentials. A small permission probe is compiled in the
 pinned builder and mounted read-only into a disposable test container; it never
@@ -130,6 +130,16 @@ docker run --rm --read-only --name notion-knowledge \
 
 Connect to `http://127.0.0.1:3000/mcp`. The Dockerfile declares SIGINT for
 `docker stop`, matching the server's graceful HTTP shutdown handler.
+
+The image also declares a Docker `HEALTHCHECK` that executes
+`notion-knowledge-server --healthcheck`. For an HTTP PID 1 it probes the
+process-only `/livez` endpoint over loopback, so an unavailable Notion API or
+local index does not mark the container dead. A stdio PID 1 has no HTTP listener;
+there the same command treats the running PID 1 as live and does not invent a
+readiness requirement. Use `/readyz` separately in an orchestrator to gate HTTP
+traffic on the required local index. `/health` remains the full dependency
+diagnostic and is intentionally not the restart probe.
+
 Configuration remains environment-based; see the README for variable validation
 and redaction. Runtime environment variables (or a local `--env-file`) stay
 outside image layers.
