@@ -25,7 +25,7 @@ The individual Docker and Cargo measurements prove correctness and persistence,
 not a controlled aggregate speedup. Their run links, commits, step timing tables,
 cache sizes and trust limits remain available to #155. The Nix decision must
 include its cache overhead rather than inferring benefit from an installed action.
-Final production and post-merge coverage links are recorded with #169 delivery.
+Final production and post-merge coverage links will be recorded with #169 delivery.
 
 The merged Docker/Cargo evidence and measured Nix decision cover every #154
 implementation requirement; no additional cache mechanism is left unproven.

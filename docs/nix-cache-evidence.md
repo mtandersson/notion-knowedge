@@ -127,6 +127,6 @@ application credentials and did not cache advisories or scanner results.
 The [complete #154 acceptance audit](cache-acceptance-audit.md) connects the
 merged Docker/Cargo leaves and this decision to the original requirements.
 Final production PR, post-merge main and manual full-coverage verification links
-are recorded in the #169 delivery comment. #154 and #151 remain open; #155 retains
+will be recorded in the #169 delivery comment. #154 and #151 remain open; #155 retains
 the comparable full campaign rather than treating these probe totals as its
 result.
