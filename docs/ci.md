@@ -135,3 +135,7 @@ work. Warm/docs samples improved; cold and Rust PR samples were slower, includin
 an observed Docker compilation-cache miss after an unchanged-source PR follow-up.
 These results do not establish a general Rust PR speedup. Optional development
 build sharing and the full original acceptance audit remain #175/#176 under #155.
+
+The [development sharing experiment](ci-dev-sharing-evidence.md) retains separate
+Type check, Clippy and Unit tests jobs: measured work/storage savings did not
+improve complete development PR feedback in either cold or warm samples.
