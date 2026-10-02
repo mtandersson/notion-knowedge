@@ -145,6 +145,11 @@ def stdio(image):
                 child.stdin.flush()
                 tools = exchange({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
                 require(tools == {"tools": []}, "Bootstrap tool catalog must be empty")
+                healthcheck = subprocess.run(
+                    ["docker", "exec", name, "/usr/local/bin/notion-knowledge-server", "--healthcheck"],
+                    capture_output=True, text=True, timeout=10)
+                require(healthcheck.returncode == 0,
+                        f"Stdio container process healthcheck failed: {healthcheck.stderr}")
                 child.stdin.close()
                 require(child.wait(timeout=20) == 0, "Stdio disconnect failed")
                 require(child.stdout.read() == "", "Unexpected trailing protocol output")
@@ -168,6 +173,12 @@ def http_smoke(image):
         while "Serving MCP over Streamable HTTP" not in docker("logs", name, capture_output=True).stderr:
             require(time.monotonic() < deadline, "HTTP listener did not start")
             time.sleep(0.1)
+
+        healthcheck = subprocess.run(
+            ["docker", "exec", name, "/usr/local/bin/notion-knowledge-server", "--healthcheck"],
+            capture_output=True, text=True, timeout=10)
+        require(healthcheck.returncode == 0,
+                f"HTTP container liveness healthcheck failed: {healthcheck.stderr}")
 
         def post(request, session=None, extra=None):
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
@@ -193,19 +204,31 @@ def http_smoke(image):
             finally:
                 connection.close()
 
-        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
-        try:
-            connection.request("GET", "/health")
-            reply = connection.getresponse()
-            require(reply.status == 503, "Absent adapters must degrade runtime health")
-            require(reply.getheader("cache-control") == "no-store", "Health must not be cached")
-            health = json.loads(reply.read())
-            require(health == {"server": {"name": "notion-knowledge", "version": workspace_version()},
-                               "transport": "http", "status": "degraded",
-                               "dependencies": {"notion": "unconfigured", "index": "unavailable"}},
-                    "Wrong serving-process health report")
-        finally:
-            connection.close()
+        for endpoint, expected_status, expected_body in [
+            ("/livez", 200, {
+                "server": {"name": "notion-knowledge", "version": workspace_version()},
+                "transport": "http", "status": "alive"}),
+            ("/readyz", 503, {
+                "server": {"name": "notion-knowledge", "version": workspace_version()},
+                "transport": "http", "status": "not_ready",
+                "dependencies": {"index": "unavailable"}}),
+            ("/health", 503, {
+                "server": {"name": "notion-knowledge", "version": workspace_version()},
+                "transport": "http", "status": "degraded",
+                "dependencies": {"notion": "unconfigured", "index": "unavailable"}}),
+        ]:
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            try:
+                connection.request("GET", endpoint)
+                reply = connection.getresponse()
+                require(reply.status == expected_status,
+                        f"Unexpected {endpoint} status: {reply.status}")
+                require(reply.getheader("cache-control") == "no-store",
+                        f"{endpoint} must not be cached")
+                require(json.loads(reply.read()) == expected_body,
+                        f"Wrong {endpoint} report")
+            finally:
+                connection.close()
 
         status, session, value = post(initialize())
         require(status == 200 and session, "HTTP initialization failed")
@@ -257,6 +280,9 @@ def main():
     metadata = json.loads(docker("image", "inspect", args.image, capture_output=True).stdout)[0]["Config"]
     require(metadata["User"] == "65532:65532", "Image must use numeric non-root UID/GID")
     require(metadata["Entrypoint"] == ["/usr/local/bin/notion-knowledge-server"], "Wrong entrypoint")
+    require(metadata.get("Healthcheck", {}).get("Test") ==
+            ["CMD", "/usr/local/bin/notion-knowledge-server", "--healthcheck"],
+            "Container healthcheck must use the server liveness probe")
     for key, expected in {"version": version, "revision": revision, "source": SOURCE}.items():
         require(metadata["Labels"].get(f"org.opencontainers.image.{key}") == expected, f"Wrong {key} label")
     identity = run_once(args.image, ["--version"])
@@ -286,7 +312,7 @@ def main():
     mounts_and_linkage(args.image, args.builder_image)
     stdio(args.image)
     http_smoke(args.image)
-    print("Final-image smoke passed: metadata/version guard, non-root startup, config errors, diagnostics/health, stdio and HTTP MCP.")
+    print("Final-image smoke passed: metadata/version guard, non-root startup, config errors, liveness/readiness/diagnostics, stdio and HTTP MCP.")
 
 
 if __name__ == "__main__":
