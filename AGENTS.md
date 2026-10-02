@@ -53,3 +53,5 @@ metadata or adapters clearly scoped as such:
 - `adversarial-review` for an independent read-only review
 - `writing-tests` when adding or changing behavior tests
 - `grill-me` for a detailed design interview
+
+<!-- CI selection benchmark: mixed -->

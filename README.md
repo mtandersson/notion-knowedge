@@ -261,3 +261,5 @@ boundary; the current bootstrap does not implement MCP authentication.
 Architecture Decision Records live in [`docs/adr/`](docs/adr/README.md).
 The ADR README documents when to write one, numbering, status transitions,
 review expectations, and how decisions are superseded.
+
+<!-- CI selection benchmark: mixed -->

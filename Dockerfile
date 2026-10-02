@@ -25,3 +25,5 @@ WORKDIR /var/lib/notion-knowledge
 EXPOSE 3000
 STOPSIGNAL SIGINT
 ENTRYPOINT ["/usr/local/bin/notion-knowledge-server"]
+
+# CI selection benchmark: mixed
