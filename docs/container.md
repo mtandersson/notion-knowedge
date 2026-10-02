@@ -62,7 +62,9 @@ than broadening it to local runtime data.
 ## CI layer cache
 
 CI uses pinned Buildx/build-push actions to import GitHub Actions layers and
-load both the final image and its pinned builder. The final-image smoke runs as:
+load both the final image and its pinned probe builder. The probe stage uses
+the same Rust base as compilation but excludes Cargo downloads/build outputs.
+The final-image smoke runs as:
 
 ```sh
 python3 scripts/test-container-smoke.py

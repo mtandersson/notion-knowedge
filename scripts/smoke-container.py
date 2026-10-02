@@ -84,7 +84,7 @@ fn main() {
             # Compile a disposable permission probe using the same pinned builder.
             # Inject it into a test container only; it never enters the runtime image.
             if build_builder:
-                docker("build", "--build-arg", f"VERSION={workspace_version()}", "--target", "builder", "--tag", builder_image, str(ROOT))
+                docker("build", "--target", "probe-builder", "--tag", builder_image, str(ROOT))
             docker("create", "-i", "--name", compiler, "--entrypoint", "rustc", builder_image,
                    "-", "-o", "/tmp/mount-probe", stdout=subprocess.DEVNULL)
             docker("start", "-ai", compiler, input=probe, capture_output=True)

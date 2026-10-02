@@ -314,7 +314,7 @@ jobs:
         with:
           context: .
           platforms: linux/amd64
-          target: builder
+          target: probe-builder
           load: true
           tags: notion-knowledge:smoke-builder
           build-args: VERSION=${{ steps.identity.outputs.version }}
