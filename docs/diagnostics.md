@@ -8,14 +8,56 @@ rejects a missing or mismatched version instead of labelling a different binary.
 
 ## Running-process health
 
-With `--http`, `GET /health` reports the serving process's current dependency
-snapshots, without MCP initialization or a session:
+With `--http`, the server exposes three unauthenticated orchestration/diagnostic
+endpoints on the same listener. They are deliberately separate so an upstream
+Notion outage cannot create a container restart loop.
 
-```sh
-curl -i http://127.0.0.1:3000/health
+### Liveness: `GET /livez`
+
+Liveness answers only whether the HTTP process can serve requests. It does not
+inspect Notion or the local index and therefore remains HTTP 200 when either is
+degraded:
+
+```json
+{
+  "server": {"name": "notion-knowledge", "version": "0.1.0"},
+  "transport": "http",
+  "status": "alive"
+}
 ```
 
-The response schema is:
+Use liveness for restart decisions and the image-level Docker `HEALTHCHECK`.
+Responses use `Cache-Control: no-store`.
+
+### Readiness: `GET /readyz`
+
+Readiness gates traffic on required **local** serving dependencies. Today that
+means the retrieval index snapshot. The remote Notion API is intentionally not
+a readiness dependency: temporary upstream failure must not remove an otherwise
+usable local knowledge service from rotation.
+
+A ready response is HTTP 200 with `status: "ready"`. An unavailable, unknown,
+or unconfigured local index returns HTTP 503 with `status: "not_ready"`:
+
+```json
+{
+  "server": {"name": "notion-knowledge", "version": "0.1.0"},
+  "transport": "http",
+  "status": "not_ready",
+  "dependencies": {"index": "unavailable"}
+}
+```
+
+The current bootstrap has no index adapter, so `/readyz` deliberately returns
+503 until #145 wires the production index. Future required local dependencies
+must be added to this gate explicitly rather than inheriting aggregate upstream
+health implicitly.
+
+### Dependency diagnostics: `GET /health`
+
+`/health` remains the full dependency snapshot for operators and diagnostics.
+Both Notion and the index must be healthy for HTTP 200; other combinations return
+HTTP 503 while preserving each dependency state:
 
 ```json
 {
@@ -26,35 +68,19 @@ The response schema is:
 }
 ```
 
-Dependency states are `healthy` (a current successful check), `unconfigured`,
-`unavailable` (including an absent adapter), and `unknown` (unchecked or stale).
-Both dependencies must be healthy for aggregate `healthy` and HTTP 200; all
-other combinations produce `degraded` and HTTP 503 with the same JSON schema.
-Responses use `Cache-Control: no-store`. They contain only fixed identity,
-transport and state labels: no configuration values, tokens, upstream error
-strings, document content or signed URLs.
+Dependency states are `healthy`, `unconfigured`, `unavailable`, and
+`unknown`. All three endpoints use bounded in-memory snapshots and perform no
+upstream I/O. Their JSON is allowlisted and cannot contain configuration values,
+tokens, upstream error strings, document content, or signed URLs.
 
-The bootstrap has no Notion or index adapter. Notion is `unconfigured` in auth
-mode `none` and `unavailable` in mode `integration`, even with a valid token.
-The index is always `unavailable`. Thus the current binary deliberately returns
-503; successful configuration validation or an MCP handshake does not establish
-dependency health. Concrete adapters should implement core `HealthProbe` with a
-bounded, current snapshot and be wired into server `Diagnostics`; the HTTP
-handler observes each probe on every request, without performing upstream I/O.
-Adapters must expire stale observations to `unknown`.
-
-An orchestrator can use this JSON and the HTTP status as an overall dependency
-health gate. For example, in an HTTP deployment bound to `0.0.0.0:3000`, a
-Kubernetes HTTP probe can request `/health` on port 3000 with an explicit
-`Host: 127.0.0.1:3000` header. Keep this gate disabled for the current bootstrap
-if the empty MCP catalog is intentionally being deployed. This endpoint is
-**not liveness**: an upstream outage must not cause restart loops. Separate
-liveness, local-dependency readiness policy and a container HEALTHCHECK remain
-#108; this ticket establishes the diagnostic contract they can reuse.
+For orchestration, use `/livez` for restart/liveness, `/readyz` for traffic
+readiness, and `/health` only when the complete dependency picture is useful.
+For example, Kubernetes can probe the HTTP listener with an explicit
+`Host: 127.0.0.1:3000` header when the service binds `0.0.0.0:3000`.
 
 ## Access policy
 
-`/health` uses the same listener as MCP. No credential or session is required.
+`/livez`, `/readyz`, and `/health` use the same listener as MCP. No credential or session is required.
 Host must name the configured IP or `localhost`, `127.0.0.1`, `::1`
 (IPv6 uses authority brackets). Host ports may differ from the listening port
 for container publication, as on the MCP route. If supplied, Origin
@@ -86,6 +112,6 @@ cargo test -p notion-knowledge-core --locked
 cargo test -p notion-knowledge-server --locked
 ```
 
-Tests cover the healthy/degraded state matrix, runtime probe changes, HTTP
-status/access policy, bootstrap unavailable states, release identity and
-secret/signed-URL omission in one-shot output.
+Tests cover process liveness, local readiness, the healthy/degraded dependency
+matrix, runtime probe changes, Host/Origin access policy, bootstrap unavailable
+states, release identity and secret/signed-URL omission in one-shot output.
