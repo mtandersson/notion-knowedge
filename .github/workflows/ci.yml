@@ -270,14 +270,70 @@ jobs:
     name: Container smoke
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      DOCKER_CACHE_SCOPE: nk-container-v1-Linux-X64-${{ github.event.pull_request.number || github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Build and verify final runtime image
-        run: python3 scripts/smoke-container.py
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Test cached image identity rejection
+        run: python3 scripts/test-container-smoke.py
+
+      - name: Read canonical image identity
+        id: identity
+        run: |
+          python3 - <<'PY'
+          import os, tomllib
+          with open('Cargo.toml', 'rb') as manifest:
+              version = tomllib.load(manifest)['workspace']['package']['version']
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              print(f'version={version}', file=output)
+          PY
+
+      - name: Build and load final runtime image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: notion-knowledge:smoke
+          build-args: |
+            VERSION=${{ steps.identity.outputs.version }}
+            REVISION=${{ github.sha }}
+          cache-from: |
+            type=gha,scope=nk-container-v1-${{ runner.os }}-${{ runner.arch }}-main
+            type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}
+
+      - name: Load pinned builder for permission probe
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          target: probe-builder
+          load: true
+          tags: notion-knowledge:smoke-builder
+          build-args: VERSION=${{ steps.identity.outputs.version }}
+
+      - name: Verify final runtime image
+        run: python3 scripts/smoke-container.py --prebuilt --builder-image notion-knowledge:smoke-builder
+
+      # Export only after all final-image interactions pass. PR caches are
+      # isolated by GitHub's merge-ref scope and cannot poison main restores.
+      - name: Export verified compilation layers
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: |
+            VERSION=${{ steps.identity.outputs.version }}
+            REVISION=${{ github.sha }}
+          cache-to: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }},mode=max,timeout=10m
 
   dependencies:
     name: Dependency vulnerabilities

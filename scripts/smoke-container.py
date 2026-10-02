@@ -44,10 +44,11 @@ def run_once(image, args, options=None):
         cleanup(name)
 
 
-def mounts_and_linkage(image):
+def mounts_and_linkage(image, builder_image=None):
     name = f"nk-smoke-files-{os.getpid()}"
     compiler = f"nk-smoke-compiler-{os.getpid()}"
-    builder_image = f"{image}-builder"
+    build_builder = builder_image is None
+    builder_image = builder_image or f"{image}-builder"
     volumes = [f"nk-smoke-{kind}-{os.getpid()}" for kind in ("index", "state", "models")]
     probe = r'''use std::fs;
 unsafe extern "C" { fn getuid() -> u32; fn getgid() -> u32; }
@@ -82,7 +83,8 @@ fn main() {
                     f"Final executable linkage failed: {linked.stdout} {linked.stderr}")
             # Compile a disposable permission probe using the same pinned builder.
             # Inject it into a test container only; it never enters the runtime image.
-            docker("build", "--build-arg", f"VERSION={workspace_version()}", "--target", "builder", "--tag", builder_image, str(ROOT))
+            if build_builder:
+                docker("build", "--target", "probe-builder", "--tag", builder_image, str(ROOT))
             docker("create", "-i", "--name", compiler, "--entrypoint", "rustc", builder_image,
                    "-", "-o", "/tmp/mount-probe", stdout=subprocess.DEVNULL)
             docker("start", "-ai", compiler, input=probe, capture_output=True)
@@ -236,11 +238,16 @@ def workspace_version():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", default="notion-knowledge:smoke")
+    parser.add_argument("--prebuilt", action="store_true",
+                        help="Verify an already loaded final image instead of building it")
+    parser.add_argument("--builder-image",
+                        help="Already loaded pinned builder used for the disposable mount probe")
     args = parser.parse_args()
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     version = workspace_version()
-    docker("build", "--build-arg", f"VERSION={version}", "--build-arg", f"REVISION={revision}",
-           "--tag", args.image, str(ROOT))
+    if not args.prebuilt:
+        docker("build", "--build-arg", f"VERSION={version}", "--build-arg", f"REVISION={revision}",
+               "--tag", args.image, str(ROOT))
     for invalid_version in [None, "not-the-Cargo-version"]:
         options = [] if invalid_version is None else ["--build-arg", f"VERSION={invalid_version}"]
         rejected = subprocess.run(["docker", "build", "--target", "builder", *options, str(ROOT)],
@@ -276,7 +283,7 @@ def main():
         require(result.returncode == 2 and setting in result.stderr and not result.stdout,
                 f"Invalid {setting} did not return configuration failure")
         require(value not in result.stderr if len(value) > 1 else True, "Configuration value leaked")
-    mounts_and_linkage(args.image)
+    mounts_and_linkage(args.image, args.builder_image)
     stdio(args.image)
     http_smoke(args.image)
     print("Final-image smoke passed: metadata/version guard, non-root startup, config errors, diagnostics/health, stdio and HTTP MCP.")
