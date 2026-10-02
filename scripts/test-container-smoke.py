@@ -18,6 +18,8 @@ class CachedImageIdentity(unittest.TestCase):
         version = smoke.workspace_version()
         metadata = {'User': '65532:65532',
                     'Entrypoint': ['/usr/local/bin/notion-knowledge-server'],
+                    'Healthcheck': {'Test': ['CMD', '/usr/local/bin/notion-knowledge-server',
+                                             '--healthcheck']},
                     'Labels': {f'org.opencontainers.image.{k}': v for k, v in
                                {'version': version, 'revision': revision, 'source': smoke.SOURCE}.items()}}
 
