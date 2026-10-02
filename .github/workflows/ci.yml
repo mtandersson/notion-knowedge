@@ -20,7 +20,41 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  changes:
+    name: CI input selection
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      agent-layout: ${{ steps.select.outputs.agent-layout }}
+      fmt: ${{ steps.select.outputs.fmt }}
+      clippy: ${{ steps.select.outputs.clippy }}
+      check: ${{ steps.select.outputs.check }}
+      test: ${{ steps.select.outputs.test }}
+      build: ${{ steps.select.outputs.build }}
+      container: ${{ steps.select.outputs.container }}
+      dependencies: ${{ steps.select.outputs.dependencies }}
+      secrets: ${{ steps.select.outputs.secrets }}
+    steps:
+      - name: Checkout complete history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Test input selection and final gate
+        run: python3 scripts/test-ci-jobs.py
+
+      - name: Select relevant jobs
+        id: select
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_BASE: ${{ github.event.pull_request.base.sha }}
+          CI_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/ci-jobs.py select --event "$CI_EVENT" --base "$CI_BASE" --head "$CI_HEAD"
+
   agent-layout:
+    needs: changes
+    if: needs.changes.outputs.agent-layout == 'true'
     name: Agent layout
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -34,6 +68,8 @@ jobs:
         run: ./scripts/check-agent-layout.sh
 
   fmt:
+    needs: changes
+    if: needs.changes.outputs.fmt == 'true'
     name: Format
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -53,6 +89,8 @@ jobs:
         run: nix develop --command cargo fmt --all -- --check
 
   clippy:
+    needs: changes
+    if: needs.changes.outputs.clippy == 'true'
     name: Clippy
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -91,6 +129,8 @@ jobs:
         run: nix develop --command cargo clippy --workspace --all-targets --locked -- -D warnings
 
   check:
+    needs: changes
+    if: needs.changes.outputs.check == 'true'
     name: Type check
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -129,6 +169,8 @@ jobs:
         run: nix develop --command cargo check --workspace --all-targets --locked
 
   test:
+    needs: changes
+    if: needs.changes.outputs.test == 'true'
     name: Unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -167,6 +209,8 @@ jobs:
         run: nix develop --command cargo test --workspace --locked
 
   build:
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
     name: Release build
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -221,6 +265,8 @@ jobs:
           retention-days: 7
 
   container:
+    needs: changes
+    if: needs.changes.outputs.container == 'true'
     name: Container smoke
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -274,3 +320,20 @@ jobs:
 
       - name: Scan reachable history with redacted findings
         run: nix develop --command ./scripts/check-secrets.sh
+
+  gate:
+    name: CI gate
+    if: always()
+    needs: [changes, agent-layout, fmt, clippy, check, test, build, container, dependencies, secrets]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Require every selected check to succeed
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci-jobs.py gate
