@@ -1,0 +1,4 @@
+# Exact advisory IDs only. Each entry must include a rationale, tracking issue,
+# owner and review date; see docs/security-scanning.md. No current exceptions.
+[advisories]
+ignore = []

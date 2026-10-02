@@ -1,0 +1,3 @@
+# Keep the pinned scanner's full built-in ruleset.
+[extend]
+useDefault = true

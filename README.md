@@ -145,7 +145,8 @@ canonical checks above on every pull request targeting `main`, every push to
 `main`, and manual `workflow_dispatch` runs.
 
 CI exposes separate required-check-friendly jobs for formatting, Clippy, type
-checking, unit tests, the release build, and final-image container smoke tests.
+checking, unit tests, the release build, final-image container smoke tests,
+dependency vulnerabilities, and committed secrets.
 The release-build job also uploads
 a short-lived Linux server artifact for downstream validation and future
 release automation.
@@ -158,6 +159,10 @@ of ordinary pull-request CI.
 GitHub Action dependencies are pinned to immutable commit SHAs. Cargo dependency
 downloads are cached using the lockfile-derived cache key; the Nix flake remains
 the source of truth for the toolchain.
+
+Security scans use pinned Nix tools, fresh RustSec advisories, and complete Git
+history with redacted findings. See [security scanning](docs/security-scanning.md)
+for local commands, gate verification, and narrowly reviewed exceptions.
 
 ## Agent guidance and skills
 
