@@ -1,5 +1,12 @@
 # CI selection and verification
 
+Container smoke imports Buildx layers from main and the current PR/branch,
+loads the final runtime and pinned builder, and exports a bounded mutable
+scope only after the existing final-image checks pass. Fork PRs do not export;
+GitHub's merge-ref cache isolation prevents PR layers from being restored on
+main. See [container cache policy and commands](container.md#ci-layer-cache).
+Cargo and Nix caches are unchanged by this Docker-only improvement.
+
 The CI workflow triggers on **every** pull request targeting `main`, every main
 push, and manual dispatch. There are no workflow-level path filters. The cheap
 **CI input selection** job runs the production selector and its contract tests.

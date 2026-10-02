@@ -59,6 +59,43 @@ files, keys, model weights, derived indexes, Git metadata and build outputs are
 excluded. When adding other required source assets, review the allowlist rather
 than broadening it to local runtime data.
 
+## CI layer cache
+
+CI uses pinned Buildx/build-push actions to import GitHub Actions layers and
+load both the final image and its pinned builder. The final-image smoke runs as:
+
+```sh
+python3 scripts/test-container-smoke.py
+python3 scripts/smoke-container.py --prebuilt --builder-image notion-knowledge:smoke-builder
+```
+
+`--prebuilt` skips only the successful final-image build; missing/mismatched
+VERSION builds still have to fail. All label, binary identity, linkage, volume,
+configuration, diagnostics, MCP/session/health and shutdown checks remain.
+`--builder-image` uses the loaded builder for the disposable permission probe.
+The default command still builds both images for local development.
+
+The `nk-container-v1-Linux-X64-main` scope is warmed by successful main runs.
+Each same-repository PR uses a single numbered scope and can restore main plus
+its own scope. GitHub additionally restricts PR exports to that PR's merge ref;
+main cannot restore them. Fork PRs only import and never export. Manual branch
+runs use their branch scope. Export happens only after smoke succeeds, with
+`mode=max` retaining intermediate compilation layers and a ten-minute timeout.
+One mutable scope per active PR replaces its previous snapshot; GitHub's
+repository cache quota/LRU eviction and seven-day unused-cache eviction bound
+storage.
+
+Docker's content-addressed build keys invalidate compilation for changed Rust,
+Cargo manifests/lockfile, VERSION, or the pinned builder/Dockerfile. REVISION is
+applied in the final stage, allowing unchanged compilation to survive a new
+commit while labels are checked against the checkout. The `.dockerignore`
+allowlist excludes credentials and runtime/model/index data from every exported
+layer. No ordinary Nix CI binary is copied into the container.
+
+Cache benefits require hosted cold/warm logs, not configuration alone. Record
+restore/export size and duration, compilation cache hits, and final-image smoke
+results in the delivery evidence before closing #167.
+
 ## Run
 
 Stdio is the default entrypoint. Preserve stdin with `-i` and omit `-t` so MCP
