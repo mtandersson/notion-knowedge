@@ -7,13 +7,13 @@ name: CI
   push:
     branches:
     - main
-  workflow_dispatch: ''
+  workflow_dispatch: null
 permissions:
   contents: read
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref
     }}
-  cancel-in-progress: 'true'
+  cancel-in-progress: true
 env:
   CARGO_TERM_COLOR: always
   BENCH_CACHE_NAMESPACE: nk174-b-20261002
@@ -21,23 +21,23 @@ jobs:
   agent-layout:
     name: Agent layout
     runs-on: ubuntu-latest
-    timeout-minutes: '5'
+    timeout-minutes: 5
     steps:
     - name: Checkout
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
-        persist-credentials: 'false'
+        persist-credentials: false
     - name: Verify shared agent guidance and skill discovery
       run: ./scripts/check-agent-layout.sh
   fmt:
     name: Format
     runs-on: ubuntu-latest
-    timeout-minutes: '15'
+    timeout-minutes: 15
     steps:
     - name: Checkout
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
-        persist-credentials: 'false'
+        persist-credentials: false
     - name: Install Nix
       uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
       with:
@@ -51,12 +51,12 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
-    timeout-minutes: '20'
+    timeout-minutes: 20
     steps:
     - name: Checkout
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
-        persist-credentials: 'false'
+        persist-credentials: false
     - name: Install Nix
       uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
       with:
@@ -90,12 +90,12 @@ jobs:
   check:
     name: Type check
     runs-on: ubuntu-latest
-    timeout-minutes: '20'
+    timeout-minutes: 20
     steps:
     - name: Checkout
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
-        persist-credentials: 'false'
+        persist-credentials: false
     - name: Install Nix
       uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
       with:
@@ -129,12 +129,12 @@ jobs:
   test:
     name: Unit tests
     runs-on: ubuntu-latest
-    timeout-minutes: '20'
+    timeout-minutes: 20
     steps:
     - name: Checkout
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
-        persist-credentials: 'false'
+        persist-credentials: false
     - name: Install Nix
       uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
       with:
@@ -168,12 +168,12 @@ jobs:
   build:
     name: Release build
     runs-on: ubuntu-latest
-    timeout-minutes: '25'
+    timeout-minutes: 25
     steps:
     - name: Checkout
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
-        persist-credentials: 'false'
+        persist-credentials: false
     - name: Install Nix
       uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
       with:
@@ -222,27 +222,27 @@ jobs:
         name: notion-knowledge-server-${{ runner.os }}-${{ runner.arch }}
         path: dist/*.tar.gz
         if-no-files-found: error
-        retention-days: '7'
+        retention-days: 7
   container:
     name: Container smoke
     runs-on: ubuntu-latest
-    timeout-minutes: '25'
+    timeout-minutes: 25
     steps:
     - name: Checkout
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
-        persist-credentials: 'false'
+        persist-credentials: false
     - name: Build and verify final runtime image
       run: python3 scripts/benchmark-container.py
   dependencies:
     name: Dependency vulnerabilities
     runs-on: ubuntu-latest
-    timeout-minutes: '15'
+    timeout-minutes: 15
     steps:
     - name: Checkout
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
-        persist-credentials: 'false'
+        persist-credentials: false
     - name: Install Nix
       uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
       with:
@@ -258,13 +258,13 @@ jobs:
   secrets:
     name: Secret scanning
     runs-on: ubuntu-latest
-    timeout-minutes: '15'
+    timeout-minutes: 15
     steps:
     - name: Checkout complete history
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
-        fetch-depth: '0'
-        persist-credentials: 'false'
+        fetch-depth: 0
+        persist-credentials: false
     - name: Install Nix
       uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
       with:
