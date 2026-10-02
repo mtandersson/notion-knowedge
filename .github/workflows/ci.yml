@@ -1,30 +1,28 @@
 name: CI
-
-on:
+'on':
   pull_request:
     branches:
-      - main
+    - main
+    - bench174-optimized
   push:
     branches:
-      - main
-  workflow_dispatch:
-
+    - main
+  workflow_dispatch: ''
 permissions:
   contents: read
-
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref
+    }}
+  cancel-in-progress: 'true'
 env:
   CARGO_TERM_COLOR: always
   CARGO_TARGET_DIR: target
-
+  BENCH_CACHE_NAMESPACE: nk174-o-20261002
 jobs:
   changes:
     name: CI input selection
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: '5'
     outputs:
       agent-layout: ${{ steps.select.outputs.agent-layout }}
       fmt: ${{ steps.select.outputs.fmt }}
@@ -36,349 +34,345 @@ jobs:
       dependencies: ${{ steps.select.outputs.dependencies }}
       secrets: ${{ steps.select.outputs.secrets }}
     steps:
-      - name: Checkout complete history
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Test input selection and final gate
-        run: python3 scripts/test-ci-jobs.py
-
-      - name: Select relevant jobs
-        id: select
-        env:
-          CI_EVENT: ${{ github.event_name }}
-          CI_BASE: ${{ github.event.pull_request.base.sha }}
-          CI_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: python3 scripts/ci-jobs.py select --event "$CI_EVENT" --base "$CI_BASE" --head "$CI_HEAD"
-
+    - name: Checkout complete history
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        fetch-depth: '0'
+        persist-credentials: 'false'
+    - name: Test input selection and final gate
+      run: python3 scripts/test-ci-jobs.py
+    - name: Select relevant jobs
+      id: select
+      env:
+        CI_EVENT: ${{ github.event_name }}
+        CI_BASE: ${{ github.event.pull_request.base.sha }}
+        CI_HEAD: ${{ github.event.pull_request.head.sha }}
+      run: python3 scripts/ci-jobs.py select --event "$CI_EVENT" --base "$CI_BASE"
+        --head "$CI_HEAD"
   agent-layout:
     needs: changes
     if: needs.changes.outputs.agent-layout == 'true'
     name: Agent layout
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: '5'
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Verify shared agent guidance and skill discovery
-        run: ./scripts/check-agent-layout.sh
-
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: 'false'
+    - name: Verify shared agent guidance and skill discovery
+      run: ./scripts/check-agent-layout.sh
   fmt:
     needs: changes
     if: needs.changes.outputs.fmt == 'true'
     name: Format
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: '15'
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: 'false'
+    - name: Install Nix
+      uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+      with:
+        extra_nix_config: 'experimental-features = nix-command flakes
 
-      - name: Install Nix
-        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-
-      - name: Check formatting
-        run: nix develop .#format --command cargo fmt --all -- --check
-
+          '
+    - name: Materialize pinned Nix shell
+      run: nix develop .#format --command true
+    - name: Check formatting
+      run: nix develop .#format --command cargo fmt --all -- --check
   clippy:
     needs: changes
     if: needs.changes.outputs.clippy == 'true'
     name: Clippy
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: '20'
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: 'false'
+    - name: Install Nix
+      uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+      with:
+        extra_nix_config: 'experimental-features = nix-command flakes
 
-      - name: Install Nix
-        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-
-      - name: Restore pinned Cargo caches
-        id: cargo-cache
-        uses: ./.github/actions/cargo-cache-restore
-        with:
-          job: ${{ github.job }}
-          profile: debug
-
-      - name: Run Clippy
-        run: nix develop --command cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: Save successful refreshed Cargo caches
-        if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: ./.github/actions/cargo-cache-save
-        with:
-          key: ${{ steps.cargo-cache.outputs.key }}
-          hit: ${{ steps.cargo-cache.outputs.hit }}
-          downloads-key: ${{ steps.cargo-cache.outputs.downloads-key }}
-          downloads-hit: ${{ steps.cargo-cache.outputs.downloads-hit }}
-
+          '
+    - name: Materialize pinned Nix shell
+      run: nix develop .#default --command true
+    - name: Restore pinned Cargo caches
+      id: cargo-cache
+      uses: ./.github/actions/cargo-cache-restore
+      with:
+        job: ${{ github.job }}
+        profile: debug
+    - name: Run Clippy
+      run: nix develop --command env CARGO_LOG=cargo::core::compiler::fingerprint=info
+        cargo clippy --workspace --all-targets --locked -- -D warnings
+    - name: Save successful refreshed Cargo caches
+      if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name
+        == github.repository)
+      uses: ./.github/actions/cargo-cache-save
+      with:
+        key: ${{ steps.cargo-cache.outputs.key }}
+        hit: ${{ steps.cargo-cache.outputs.hit }}
+        downloads-key: ${{ steps.cargo-cache.outputs.downloads-key }}
+        downloads-hit: ${{ steps.cargo-cache.outputs.downloads-hit }}
   check:
     needs: changes
     if: needs.changes.outputs.check == 'true'
     name: Type check
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: '20'
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: 'false'
+    - name: Install Nix
+      uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+      with:
+        extra_nix_config: 'experimental-features = nix-command flakes
 
-      - name: Install Nix
-        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-
-      - name: Restore pinned Cargo caches
-        id: cargo-cache
-        uses: ./.github/actions/cargo-cache-restore
-        with:
-          job: ${{ github.job }}
-          profile: debug
-
-      - name: Run cargo check
-        run: nix develop --command cargo check --workspace --all-targets --locked
-
-      - name: Save successful refreshed Cargo caches
-        if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: ./.github/actions/cargo-cache-save
-        with:
-          key: ${{ steps.cargo-cache.outputs.key }}
-          hit: ${{ steps.cargo-cache.outputs.hit }}
-          downloads-key: ${{ steps.cargo-cache.outputs.downloads-key }}
-          downloads-hit: ${{ steps.cargo-cache.outputs.downloads-hit }}
-
+          '
+    - name: Materialize pinned Nix shell
+      run: nix develop .#default --command true
+    - name: Restore pinned Cargo caches
+      id: cargo-cache
+      uses: ./.github/actions/cargo-cache-restore
+      with:
+        job: ${{ github.job }}
+        profile: debug
+    - name: Run cargo check
+      run: nix develop --command env CARGO_LOG=cargo::core::compiler::fingerprint=info
+        cargo check --workspace --all-targets --locked
+    - name: Save successful refreshed Cargo caches
+      if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name
+        == github.repository)
+      uses: ./.github/actions/cargo-cache-save
+      with:
+        key: ${{ steps.cargo-cache.outputs.key }}
+        hit: ${{ steps.cargo-cache.outputs.hit }}
+        downloads-key: ${{ steps.cargo-cache.outputs.downloads-key }}
+        downloads-hit: ${{ steps.cargo-cache.outputs.downloads-hit }}
   test:
     needs: changes
     if: needs.changes.outputs.test == 'true'
     name: Unit tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: '20'
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: 'false'
+    - name: Install Nix
+      uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+      with:
+        extra_nix_config: 'experimental-features = nix-command flakes
 
-      - name: Install Nix
-        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-
-      - name: Restore pinned Cargo caches
-        id: cargo-cache
-        uses: ./.github/actions/cargo-cache-restore
-        with:
-          job: ${{ github.job }}
-          profile: debug
-
-      - name: Run unit tests
-        run: nix develop --command cargo test --workspace --locked
-
-      - name: Save successful refreshed Cargo caches
-        if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: ./.github/actions/cargo-cache-save
-        with:
-          key: ${{ steps.cargo-cache.outputs.key }}
-          hit: ${{ steps.cargo-cache.outputs.hit }}
-          downloads-key: ${{ steps.cargo-cache.outputs.downloads-key }}
-          downloads-hit: ${{ steps.cargo-cache.outputs.downloads-hit }}
-
+          '
+    - name: Materialize pinned Nix shell
+      run: nix develop .#default --command true
+    - name: Restore pinned Cargo caches
+      id: cargo-cache
+      uses: ./.github/actions/cargo-cache-restore
+      with:
+        job: ${{ github.job }}
+        profile: debug
+    - name: Run unit tests
+      run: nix develop --command env CARGO_LOG=cargo::core::compiler::fingerprint=info
+        cargo test --workspace --locked
+    - name: Save successful refreshed Cargo caches
+      if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name
+        == github.repository)
+      uses: ./.github/actions/cargo-cache-save
+      with:
+        key: ${{ steps.cargo-cache.outputs.key }}
+        hit: ${{ steps.cargo-cache.outputs.hit }}
+        downloads-key: ${{ steps.cargo-cache.outputs.downloads-key }}
+        downloads-hit: ${{ steps.cargo-cache.outputs.downloads-hit }}
   build:
     needs: changes
     if: needs.changes.outputs.build == 'true'
     name: Release build
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: '25'
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: 'false'
+    - name: Install Nix
+      uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+      with:
+        extra_nix_config: 'experimental-features = nix-command flakes
 
-      - name: Install Nix
-        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
+          '
+    - name: Materialize pinned Nix shell
+      run: nix develop .#default --command true
+    - name: Restore pinned Cargo caches
+      id: cargo-cache
+      uses: ./.github/actions/cargo-cache-restore
+      with:
+        job: ${{ github.job }}
+        profile: release
+    - name: Build release workspace
+      run: nix develop --command env CARGO_LOG=cargo::core::compiler::fingerprint=info
+        cargo build --workspace --release --locked
+    - name: Package server artifact
+      shell: bash
+      run: 'set -euo pipefail
 
-      - name: Restore pinned Cargo caches
-        id: cargo-cache
-        uses: ./.github/actions/cargo-cache-restore
-        with:
-          job: ${{ github.job }}
-          profile: release
+        artifact="notion-knowledge-server-${{ runner.os }}-${{ runner.arch }}-${{
+        github.sha }}"
 
-      - name: Build release workspace
-        run: nix develop --command cargo build --workspace --release --locked
+        mkdir -p dist
 
-      - name: Package server artifact
-        shell: bash
-        run: |
-          set -euo pipefail
-          artifact="notion-knowledge-server-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}"
-          mkdir -p dist
-          tar -C target/release -czf "dist/${artifact}.tar.gz" notion-knowledge-server
+        tar -C target/release -czf "dist/${artifact}.tar.gz" notion-knowledge-server
 
-      - name: Upload server artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: notion-knowledge-server-${{ runner.os }}-${{ runner.arch }}
-          path: dist/*.tar.gz
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Save successful refreshed Cargo caches
-        if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: ./.github/actions/cargo-cache-save
-        with:
-          key: ${{ steps.cargo-cache.outputs.key }}
-          hit: ${{ steps.cargo-cache.outputs.hit }}
-          downloads-key: ${{ steps.cargo-cache.outputs.downloads-key }}
-          downloads-hit: ${{ steps.cargo-cache.outputs.downloads-hit }}
-
+        '
+    - name: Upload server artifact
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: notion-knowledge-server-${{ runner.os }}-${{ runner.arch }}
+        path: dist/*.tar.gz
+        if-no-files-found: error
+        retention-days: '7'
+    - name: Save successful refreshed Cargo caches
+      if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name
+        == github.repository)
+      uses: ./.github/actions/cargo-cache-save
+      with:
+        key: ${{ steps.cargo-cache.outputs.key }}
+        hit: ${{ steps.cargo-cache.outputs.hit }}
+        downloads-key: ${{ steps.cargo-cache.outputs.downloads-key }}
+        downloads-hit: ${{ steps.cargo-cache.outputs.downloads-hit }}
   container:
     needs: changes
     if: needs.changes.outputs.container == 'true'
     name: Container smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: '25'
     env:
-      DOCKER_CACHE_SCOPE: nk-container-v1-Linux-X64-${{ github.event.pull_request.number || github.ref_name }}
+      DOCKER_CACHE_SCOPE: nk174-o-20261002-docker
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: 'false'
+    - name: Set up Buildx
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+    - name: Test cached image identity rejection
+      run: python3 scripts/test-container-smoke.py
+    - name: Read canonical image identity
+      id: identity
+      run: "python3 - <<'PY'\nimport os, tomllib\nwith open('Cargo.toml', 'rb') as\
+        \ manifest:\n    version = tomllib.load(manifest)['workspace']['package']['version']\n\
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:\n    print(f'version={version}',\
+        \ file=output)\nPY\n"
+    - name: Build and load final runtime image
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+      with:
+        context: .
+        platforms: linux/amd64
+        load: 'true'
+        tags: notion-knowledge:smoke
+        build-args: 'VERSION=${{ steps.identity.outputs.version }}
 
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+          REVISION=${{ github.sha }}
 
-      - name: Test cached image identity rejection
-        run: python3 scripts/test-container-smoke.py
+          '
+        cache-from: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}
+    - name: Load pinned builder for permission probe
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+      with:
+        context: .
+        platforms: linux/amd64
+        target: probe-builder
+        load: 'true'
+        tags: notion-knowledge:smoke-builder
+        build-args: VERSION=${{ steps.identity.outputs.version }}
+    - name: Verify final runtime image
+      run: python3 scripts/benchmark-container.py --prebuilt --builder-image notion-knowledge:smoke-builder
+    - name: Export verified compilation layers
+      if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name
+        == github.repository
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+      with:
+        context: .
+        platforms: linux/amd64
+        build-args: 'VERSION=${{ steps.identity.outputs.version }}
 
-      - name: Read canonical image identity
-        id: identity
-        run: |
-          python3 - <<'PY'
-          import os, tomllib
-          with open('Cargo.toml', 'rb') as manifest:
-              version = tomllib.load(manifest)['workspace']['package']['version']
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              print(f'version={version}', file=output)
-          PY
+          REVISION=${{ github.sha }}
 
-      - name: Build and load final runtime image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          platforms: linux/amd64
-          load: true
-          tags: notion-knowledge:smoke
-          build-args: |
-            VERSION=${{ steps.identity.outputs.version }}
-            REVISION=${{ github.sha }}
-          cache-from: |
-            type=gha,scope=nk-container-v1-${{ runner.os }}-${{ runner.arch }}-main
-            type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}
-
-      - name: Load pinned builder for permission probe
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          platforms: linux/amd64
-          target: probe-builder
-          load: true
-          tags: notion-knowledge:smoke-builder
-          build-args: VERSION=${{ steps.identity.outputs.version }}
-
-      - name: Verify final runtime image
-        run: python3 scripts/smoke-container.py --prebuilt --builder-image notion-knowledge:smoke-builder
-
-      # Export only after all final-image interactions pass. PR caches are
-      # isolated by GitHub's merge-ref scope and cannot poison main restores.
-      - name: Export verified compilation layers
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          platforms: linux/amd64
-          build-args: |
-            VERSION=${{ steps.identity.outputs.version }}
-            REVISION=${{ github.sha }}
-          cache-to: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }},mode=max,timeout=10m
-
+          '
+        cache-to: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }},mode=max,timeout=10m
   dependencies:
     name: Dependency vulnerabilities
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: '15'
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: 'false'
+    - name: Install Nix
+      uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+      with:
+        extra_nix_config: 'experimental-features = nix-command flakes
 
-      - name: Install Nix
-        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-
-      - name: Verify security gate failure paths
-        run: nix develop .#security --command python3 scripts/test-security-scanning.py
-
-      - name: Audit locked dependencies against fresh RustSec advisories
-        run: nix develop .#security --command ./scripts/check-dependencies.sh
-
+          '
+    - name: Materialize pinned Nix shell
+      run: nix develop .#security --command true
+    - name: Verify security gate failure paths
+      run: nix develop .#security --command python3 scripts/test-security-scanning.py
+    - name: Audit locked dependencies against fresh RustSec advisories
+      run: nix develop .#security --command ./scripts/check-dependencies.sh
   secrets:
     name: Secret scanning
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: '15'
     steps:
-      - name: Checkout complete history
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
+    - name: Checkout complete history
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        fetch-depth: '0'
+        persist-credentials: 'false'
+    - name: Install Nix
+      uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+      with:
+        extra_nix_config: 'experimental-features = nix-command flakes
 
-      - name: Install Nix
-        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-
-      - name: Scan reachable history with redacted findings
-        run: nix develop .#security --command ./scripts/check-secrets.sh
-
+          '
+    - name: Materialize pinned Nix shell
+      run: nix develop .#security --command true
+    - name: Scan reachable history with redacted findings
+      run: nix develop .#security --command ./scripts/check-secrets.sh
   gate:
     name: CI gate
     if: always()
-    needs: [changes, agent-layout, fmt, clippy, check, test, build, container, dependencies, secrets]
+    needs:
+    - changes
+    - agent-layout
+    - fmt
+    - clippy
+    - check
+    - test
+    - build
+    - container
+    - dependencies
+    - secrets
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: '5'
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Require every selected check to succeed
-        env:
-          CI_NEEDS: ${{ toJSON(needs) }}
-        run: python3 scripts/ci-jobs.py gate
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: 'false'
+    - name: Require every selected check to succeed
+      env:
+        CI_NEEDS: ${{ toJSON(needs) }}
+      run: python3 scripts/ci-jobs.py gate
