@@ -27,6 +27,25 @@ establish cache reuse and overhead, not a controlled whole-workflow speedup.
 The comparable parent campaign remains #155. They exclude job queue time and
 do not add parallel job durations to produce workflow elapsed time.
 
+| Scheduling/setup span | Cold | Warm |
+| --- | ---: | ---: |
+| Workflow dispatch → Container job start (selection + queue) | 14s | 18s |
+| Selection finished → Container job start (dependent-job queue) | 2s | 3s |
+| Runner setup step | 3s | 2s |
+| Checkout | 1s | 2s |
+| Buildx setup | 14s | 7s |
+| Container job step execution summed | 249s | 62s |
+| Workflow elapsed (creation → final update) | 276s | 146s |
+| All eleven jobs' step execution summed | 634s | 639s |
+
+Cache manifest restoration and lazy layer downloads are included in the final
+build/load step (99s/5s); they are not separately timed Actions steps. Probe
+toolchain downloads/load are separately shown above. Export is a separate
+67s/3s step. Setup/queue values come from run and job/step timestamps, rounded
+to seconds. Parallel job execution sums are neither workflow elapsed nor a
+billing claim; unrelated Cargo/Nix variation explains why the full sum does
+not fall with the container improvement. #155 owns a comparable campaign.
+
 ## Trust and storage
 
 The production scope is `nk-container-v1-Linux-X64-main`; PRs use a numbered
