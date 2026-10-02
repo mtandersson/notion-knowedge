@@ -338,3 +338,5 @@ jobs:
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
         run: python3 scripts/ci-jobs.py gate
+
+# CI selection benchmark: workflow
