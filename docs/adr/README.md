@@ -52,7 +52,9 @@ fine. Material changes get a new ADR that supersedes the old one.
 2. Gather enough evidence to make the tradeoff explicit.
 3. Add an ADR using the next number and `0000-template.md`.
 4. Link the ADR to the issue and relevant implementation tickets.
-5. Review the ADR in the same PR that establishes the decision in code, or in a
+5. For trust-boundary changes, update the [threat model](../threat-model.md)
+   in the same PR and obtain its required independent security review.
+   Review the ADR in the same PR that establishes the decision in code, or in a
    focused documentation PR before implementation when sequencing requires it.
 6. Mark the ADR **Accepted** when the decision is approved for implementation.
 7. If the decision later changes, add a new ADR and mark the old one

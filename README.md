@@ -242,6 +242,13 @@ A bilingual, privacy-conscious fixture corpus and graded query judgments live in
 [`eval/retrieval/`](eval/retrieval/README.md). Dataset integrity tests run with the
 normal workspace tests; retrieval benchmarking is a separate follow-up.
 
+## Security boundaries
+
+The [threat model](docs/threat-model.md) records current protections, production
+release requirements, residual risks and review triggers for MCP, Notion, local
+state, webhooks and file ingestion. Review it when enabling or changing a trust
+boundary; the current bootstrap does not implement MCP authentication.
+
 ## Architecture decisions
 
 Architecture Decision Records live in [`docs/adr/`](docs/adr/README.md).
