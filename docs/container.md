@@ -13,7 +13,8 @@ Docker with BuildKit and Python 3.9+ are sufficient; the host needs no Rust
 installation. Build from the repository root:
 
 ```sh
-docker build --build-arg VERSION=0.1.0 \
+version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' Cargo.toml)
+docker build --build-arg VERSION="$version" \
   --build-arg REVISION="$(git rev-parse HEAD)" \
   -t notion-knowledge:local .
 python3 scripts/smoke-container.py
@@ -46,8 +47,11 @@ libraries, add them to the runtime deliberately and verify the final executable.
 The Nix flake remains the development/ordinary Rust CI toolchain; the pinned
 container builder defines the image toolchain independently.
 
-OCI source is fixed to the repository URL. VERSION defaults to `0.1.0`, REVISION
-to `unknown`; release builds must supply the package version and Git commit.
+OCI source is fixed to the repository URL. VERSION must mirror the root Cargo
+workspace package version; missing or mismatched values fail the build. REVISION
+defaults to `unknown`; release builds must supply the Git commit. The smoke
+script derives VERSION directly from Cargo.toml. See [health diagnostics](diagnostics.md)
+for the running HTTP dependency report; `--check` validates configuration only.
 The smoke script derives these values from Cargo.toml and HEAD. Do not pass
 credentials through build arguments. `.dockerignore` allows only Cargo manifests,
 Cargo.lock and Rust source files under crates into the context. Environment

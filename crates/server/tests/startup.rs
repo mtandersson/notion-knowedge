@@ -56,3 +56,47 @@ fn startup_and_smoke_check_fail_before_readiness_for_invalid_configuration() {
         }
     }
 }
+
+#[test]
+fn one_shot_diagnostics_expose_only_identity_and_honest_dependency_states() {
+    let sentinel = "https://private.example/file?X-Amz-Signature=secret-sentinel";
+    for (auth, expected) in [("none", "unconfigured"), ("integration", "unavailable")] {
+        let output = Command::new(env!("CARGO_BIN_EXE_notion-knowledge-server"))
+            .env_clear()
+            .env("NK_NOTION_AUTH", auth)
+            .env("NOTION_TOKEN", sentinel)
+            .arg("--diagnostics")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(!text.contains("private.example"));
+        assert!(!text.contains("secret-sentinel"));
+        assert!(output.stderr.is_empty());
+        let report: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            report,
+            serde_json::json!({
+                "server": {"name": "notion-knowledge", "version": env!("CARGO_PKG_VERSION")},
+                "transport": "one-shot", "status": "degraded",
+                "dependencies": {"notion": expected, "index": "unavailable"}
+            })
+        );
+    }
+}
+
+#[test]
+fn release_identity_is_available_without_runtime_configuration() {
+    let output = Command::new(env!("CARGO_BIN_EXE_notion-knowledge-server"))
+        .env_clear()
+        .env("NK_HTTP_PORT", "invalid")
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("notion-knowledge {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    assert!(output.stderr.is_empty());
+}

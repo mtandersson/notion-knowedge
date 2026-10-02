@@ -82,7 +82,7 @@ fn main() {
                     f"Final executable linkage failed: {linked.stdout} {linked.stderr}")
             # Compile a disposable permission probe using the same pinned builder.
             # Inject it into a test container only; it never enters the runtime image.
-            docker("build", "--target", "builder", "--tag", builder_image, str(ROOT))
+            docker("build", "--build-arg", f"VERSION={workspace_version()}", "--target", "builder", "--tag", builder_image, str(ROOT))
             docker("create", "-i", "--name", compiler, "--entrypoint", "rustc", builder_image,
                    "-", "-o", "/tmp/mount-probe", stdout=subprocess.DEVNULL)
             docker("start", "-ai", compiler, input=probe, capture_output=True)
@@ -191,6 +191,20 @@ def http_smoke(image):
             finally:
                 connection.close()
 
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        try:
+            connection.request("GET", "/health")
+            reply = connection.getresponse()
+            require(reply.status == 503, "Absent adapters must degrade runtime health")
+            require(reply.getheader("cache-control") == "no-store", "Health must not be cached")
+            health = json.loads(reply.read())
+            require(health == {"server": {"name": "notion-knowledge", "version": workspace_version()},
+                               "transport": "http", "status": "degraded",
+                               "dependencies": {"notion": "unconfigured", "index": "unavailable"}},
+                    "Wrong serving-process health report")
+        finally:
+            connection.close()
+
         status, session, value = post(initialize())
         require(status == 200 and session, "HTTP initialization failed")
         require(response(value, 1)["serverInfo"]["name"] == "notion-knowledge", "Wrong HTTP server")
@@ -208,21 +222,48 @@ def http_smoke(image):
         cleanup(name)
 
 
+def workspace_version():
+    # Read only the canonical workspace package version, without tomllib.
+    section = ""
+    for line in (ROOT / "Cargo.toml").read_text().splitlines():
+        if line.startswith("["):
+            section = line
+        if section == "[workspace.package]" and line.startswith("version ="):
+            return line.split('"')[1]
+    raise RuntimeError("Missing Cargo workspace package version")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", default="notion-knowledge:smoke")
     args = parser.parse_args()
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-    # Read the workspace version, without requiring Python 3.11's tomllib.
-    version = next(line.split('"')[1] for line in (ROOT / "Cargo.toml").read_text().splitlines()
-                   if line.startswith("version ="))
+    version = workspace_version()
     docker("build", "--build-arg", f"VERSION={version}", "--build-arg", f"REVISION={revision}",
            "--tag", args.image, str(ROOT))
+    for invalid_version in [None, "not-the-Cargo-version"]:
+        options = [] if invalid_version is None else ["--build-arg", f"VERSION={invalid_version}"]
+        rejected = subprocess.run(["docker", "build", "--target", "builder", *options, str(ROOT)],
+                                  capture_output=True, text=True)
+        require(rejected.returncode != 0 and 'test "$VERSION"' in rejected.stderr,
+                "Missing or mismatched OCI version must fail at version validation")
     metadata = json.loads(docker("image", "inspect", args.image, capture_output=True).stdout)[0]["Config"]
     require(metadata["User"] == "65532:65532", "Image must use numeric non-root UID/GID")
     require(metadata["Entrypoint"] == ["/usr/local/bin/notion-knowledge-server"], "Wrong entrypoint")
     for key, expected in {"version": version, "revision": revision, "source": SOURCE}.items():
         require(metadata["Labels"].get(f"org.opencontainers.image.{key}") == expected, f"Wrong {key} label")
+    identity = run_once(args.image, ["--version"])
+    require(identity.returncode == 0 and identity.stdout == f"notion-knowledge {version}\n",
+            "Container identity must match Cargo and OCI label")
+    sentinel = "https://private.example/file?X-Amz-Signature=secret-sentinel"
+    diagnostic = run_once(args.image, ["--diagnostics"],
+                          ["-e", "NK_NOTION_AUTH=integration", "-e", f"NOTION_TOKEN={sentinel}"])
+    require(diagnostic.returncode == 0 and sentinel not in diagnostic.stdout + diagnostic.stderr,
+            "Container diagnostics failed or leaked credentials")
+    require(json.loads(diagnostic.stdout) == {
+        "server": {"name": "notion-knowledge", "version": version}, "transport": "one-shot",
+        "status": "degraded", "dependencies": {"notion": "unavailable", "index": "unavailable"}},
+        "Configured credentials must not imply healthy adapters")
     valid = run_once(args.image, ["--check"])
     require(valid.returncode == 0 and valid.stdout == "" and "bootstrap ready" in valid.stderr,
             "Composition check failed")
@@ -238,7 +279,7 @@ def main():
     mounts_and_linkage(args.image)
     stdio(args.image)
     http_smoke(args.image)
-    print("Final-image smoke passed: metadata, non-root startup, config errors, stdio and HTTP MCP.")
+    print("Final-image smoke passed: metadata/version guard, non-root startup, config errors, diagnostics/health, stdio and HTTP MCP.")
 
 
 if __name__ == "__main__":

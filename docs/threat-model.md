@@ -36,6 +36,11 @@ Implemented protections and their limits:
   of identity. The JSON POST validation buffer is capped at 4 MiB for
   `application/json`; this is not complete request/result/session/rate limiting.
   [Transport tests](../crates/server/tests/http.rs) cover those current gates.
+- [Health diagnostics](diagnostics.md) expose fixed identity and dependency
+  states without tokens, signed URLs or upstream errors. `/health` has explicit
+  Host/Origin gates, requires no session or credential, and is intended for
+  private operator/probe access. Placeholder adapters report degraded health;
+  this is not a liveness endpoint or evidence of application authorization.
 - [Container packaging](container.md) runs UID/GID 65532, excludes runtime
   secrets/data from build context and documents loopback publication and a
   read-only filesystem. The reserved volume directories are not yet consumed.
