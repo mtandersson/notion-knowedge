@@ -12,3 +12,17 @@ pub const SERVER_NAME: &str = "notion-knowledge";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod health;
+
+/// Whether a byte slice is empty, used by the matched CI source-change probe.
+pub fn ci_probe_is_empty(input: &[u8]) -> bool {
+    input.is_empty()
+}
+
+#[cfg(test)]
+mod ci_probe_tests {
+    #[test]
+    fn distinguishes_empty_and_nonempty_input() {
+        assert!(super::ci_probe_is_empty(&[]));
+        assert!(!super::ci_probe_is_empty(b"notion"));
+    }
+}
