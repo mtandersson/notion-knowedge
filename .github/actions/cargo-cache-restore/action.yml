@@ -23,32 +23,42 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Test Cargo cache contracts
-      shell: bash
-      run: python3 scripts/test-cargo-cache.py
-    - name: Compute pinned Cargo compatibility and source keys
-      id: keys
-      shell: bash
-      run: nix develop --command python3 scripts/cargo-cache.py key --job '${{ inputs.job }}' --profile '${{ inputs.profile }}' --os '${{ runner.os }}' --arch '${{ runner.arch }}'
-    - name: Restore Cargo dependency downloads
-      id: downloads
-      uses: actions/cache/restore@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-      with:
-        path: |
-          ~/.cargo/registry/index
-          ~/.cargo/registry/cache
-          ~/.cargo/git/db
-        key: ${{ steps.keys.outputs.downloads-key }}
-        restore-keys: |
-          ${{ steps.keys.outputs.downloads-prefix }}
-          cargo-${{ runner.os }}-
-    - name: Restore compatible Cargo build snapshot
-      id: target
-      uses: actions/cache/restore@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-      with:
-        path: target
-        key: ${{ steps.keys.outputs.key }}
-        restore-keys: ${{ steps.keys.outputs.prefix }}
-    - name: Prepare verified source timestamps
-      shell: bash
-      run: python3 scripts/cargo-cache.py prepare
+  - name: Test Cargo cache contracts
+    shell: bash
+    run: python3 scripts/test-cargo-cache.py
+  - name: Compute pinned Cargo compatibility and source keys
+    id: keys
+    shell: bash
+    run: 'env GITHUB_OUTPUT=/tmp/nk-bench-keys nix develop --command python3 scripts/cargo-cache.py
+      key --job ''${{ inputs.job }}'' --profile ''${{ inputs.profile }}'' --os ''${{
+      runner.os }}'' --arch ''${{ runner.arch }}''
+
+      sed ''s/^\([^=]*=\)/\1${{ env.BENCH_CACHE_NAMESPACE }}-/'' /tmp/nk-bench-keys
+      >> "$GITHUB_OUTPUT"'
+  - name: Restore Cargo dependency downloads
+    id: downloads
+    uses: actions/cache/restore@2c8a9bd7457de244a408f35966fab2fb45fda9c8
+    with:
+      path: '~/.cargo/registry/index
+
+        ~/.cargo/registry/cache
+
+        ~/.cargo/git/db
+
+        '
+      key: ${{ steps.keys.outputs.downloads-key }}
+      restore-keys: '${{ steps.keys.outputs.downloads-prefix }}
+
+        ${{ env.BENCH_CACHE_NAMESPACE }}-cargo-${{ runner.os }}-
+
+        '
+  - name: Restore compatible Cargo build snapshot
+    id: target
+    uses: actions/cache/restore@2c8a9bd7457de244a408f35966fab2fb45fda9c8
+    with:
+      path: target
+      key: ${{ steps.keys.outputs.key }}
+      restore-keys: ${{ steps.keys.outputs.prefix }}
+  - name: Prepare verified source timestamps
+    shell: bash
+    run: python3 scripts/cargo-cache.py prepare
