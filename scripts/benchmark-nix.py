@@ -10,7 +10,9 @@ shell = os.environ['NIX_BENCH_SHELL']
 profile = '/tmp/nk-nix-benchmark-profile'
 command = ['nix', 'develop', f'.#{shell}', '--profile', profile]
 start = time.monotonic()
-plan = subprocess.run(command + ['--dry-run'], text=True, capture_output=True, check=True)
+plan = subprocess.run(['nix', 'build', f'.#devShells.x86_64-linux.{shell}', '--dry-run'], text=True, capture_output=True)
+print(plan.stderr, flush=True)
+plan.check_returncode()
 print('DOWNLOAD_PLAN_BEGIN\n' + plan.stderr + '\nDOWNLOAD_PLAN_END', flush=True)
 before = time.monotonic()
 subprocess.run(command + ['--command', 'true'], check=True)
