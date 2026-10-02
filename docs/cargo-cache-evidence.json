@@ -1,0 +1,693 @@
+{
+  "measurement": "2026-10-02; GitHub ubuntu-latest Linux X64; PR #172 merge-ref; pinned Nix toolchain",
+  "runs": [
+    {
+      "stage": "baseline",
+      "id": 37038156724,
+      "sha": "a09e9c83422b50b3cef975e2dc07f67ffb0c2413",
+      "created_at": "2026-10-02T17:03:47Z",
+      "updated_at": "2026-10-02T17:07:31Z",
+      "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37038156724",
+      "conclusion": "success",
+      "workflow_elapsed_s": 224.0,
+      "summed_step_execution_s": 759.0,
+      "checks": {
+        "Secret scanning": "success",
+        "CI input selection": "success",
+        "Dependency vulnerabilities": "success",
+        "Agent layout": "success",
+        "Clippy": "success",
+        "Type check": "success",
+        "Container smoke": "success",
+        "Unit tests": "success",
+        "Format": "success",
+        "Release build": "success",
+        "CI gate": "success"
+      },
+      "summaries": [
+        {
+          "job": "Clippy",
+          "id": 110941444143,
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37038156724/job/110941444143",
+          "queue_s": 2.0,
+          "setup_s": 8.0,
+          "restore_total_s": 41.0,
+          "key_and_nix_shell_s": 35.17,
+          "downloads_restore_s": 1.58,
+          "target_restore_s": 0.34,
+          "cargo_step_s": 42.0,
+          "save_total_s": 3.0,
+          "target_archive_bytes": 47056649,
+          "selected_keys": [
+            "2026-10-02T17:04:48.5901116Z {\"downloads-key\": \"nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69\", \"downloads-prefix\": \"nk-cargo-downloads-v1-Linux-X64-\", \"key\": \"nk-cargo-v1-Linux-X64-clippy-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-781824979b31c0cd821709f6d4f3b034be9487da5613502bdd83ffb8124ca9ef\", \"prefix\": \"nk-cargo-v1-Linux-X64-clippy-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-\"}"
+          ],
+          "restore_keys": [
+            "2026-10-02T17:04:50.0311702Z Cache restored from key: cargo-Linux-32dc15e69a842b0f4d0bd854117c56f2c7536fd3184908652fb2b730b87e5c39"
+          ],
+          "save_keys": [
+            "2026-10-02T17:05:34.7748105Z Cache saved with key: nk-cargo-v1-Linux-X64-clippy-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-781824979b31c0cd821709f6d4f3b034be9487da5613502bdd83ffb8124ca9ef",
+            "2026-10-02T17:05:35.7701952Z Cache saved with key: nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69"
+          ],
+          "misses": [
+            "2026-10-02T17:04:50.4551998Z Cache not found for input keys: nk-cargo-v1-Linux-X64-clippy-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-781824979b31c0cd821709f6d4f3b034be9487da5613502bdd83ffb8124ca9ef, nk-cargo-v1-Linux-X64-clippy-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-"
+          ],
+          "finished": [
+            "2026-10-02T17:05:32.5505361Z     Finished `dev` profile [unoptimized + debuginfo] target(s) in 40.20s"
+          ],
+          "workspace_compile_count": 5,
+          "external_compile_count": 115,
+          "dirty_count": 0,
+          "fingerprint_examples": []
+        },
+        {
+          "job": "Type check",
+          "id": 110941444197,
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37038156724/job/110941444197",
+          "queue_s": 2.0,
+          "setup_s": 10.0,
+          "restore_total_s": 42.0,
+          "key_and_nix_shell_s": 38.28,
+          "downloads_restore_s": 2.3,
+          "target_restore_s": 0.59,
+          "cargo_step_s": 55.0,
+          "save_total_s": 3.0,
+          "target_archive_bytes": 47060078,
+          "selected_keys": [
+            "2026-10-02T17:04:50.6959324Z {\"downloads-key\": \"nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69\", \"downloads-prefix\": \"nk-cargo-downloads-v1-Linux-X64-\", \"key\": \"nk-cargo-v1-Linux-X64-check-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-781824979b31c0cd821709f6d4f3b034be9487da5613502bdd83ffb8124ca9ef\", \"prefix\": \"nk-cargo-v1-Linux-X64-check-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-\"}"
+          ],
+          "restore_keys": [
+            "2026-10-02T17:04:52.8129632Z Cache restored from key: cargo-Linux-32dc15e69a842b0f4d0bd854117c56f2c7536fd3184908652fb2b730b87e5c39"
+          ],
+          "save_keys": [
+            "2026-10-02T17:05:51.2571373Z Cache saved with key: nk-cargo-v1-Linux-X64-check-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-781824979b31c0cd821709f6d4f3b034be9487da5613502bdd83ffb8124ca9ef"
+          ],
+          "misses": [
+            "2026-10-02T17:04:53.3163418Z Cache not found for input keys: nk-cargo-v1-Linux-X64-check-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-781824979b31c0cd821709f6d4f3b034be9487da5613502bdd83ffb8124ca9ef, nk-cargo-v1-Linux-X64-check-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-"
+          ],
+          "finished": [
+            "2026-10-02T17:05:48.1567129Z     Finished `dev` profile [unoptimized + debuginfo] target(s) in 52.86s"
+          ],
+          "workspace_compile_count": 5,
+          "external_compile_count": 115,
+          "dirty_count": 0,
+          "fingerprint_examples": []
+        },
+        {
+          "job": "Container smoke",
+          "id": 110941444251,
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37038156724/job/110941444251",
+          "queue_s": 2.0,
+          "setup_s": null,
+          "restore_total_s": null,
+          "key_and_nix_shell_s": null,
+          "downloads_restore_s": null,
+          "target_restore_s": null,
+          "cargo_step_s": null,
+          "save_total_s": null,
+          "target_archive_bytes": null,
+          "selected_keys": [],
+          "restore_keys": [],
+          "save_keys": [],
+          "misses": [],
+          "finished": [],
+          "workspace_compile_count": 0,
+          "external_compile_count": 0,
+          "dirty_count": 0,
+          "fingerprint_examples": []
+        },
+        {
+          "job": "Unit tests",
+          "id": 110941444272,
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37038156724/job/110941444272",
+          "queue_s": 3.0,
+          "setup_s": 8.0,
+          "restore_total_s": 40.0,
+          "key_and_nix_shell_s": 36.36,
+          "downloads_restore_s": 1.45,
+          "target_restore_s": 0.29,
+          "cargo_step_s": 94.0,
+          "save_total_s": 6.0,
+          "target_archive_bytes": 168331132,
+          "selected_keys": [
+            "2026-10-02T17:04:48.7511910Z {\"downloads-key\": \"nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69\", \"downloads-prefix\": \"nk-cargo-downloads-v1-Linux-X64-\", \"key\": \"nk-cargo-v1-Linux-X64-test-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-781824979b31c0cd821709f6d4f3b034be9487da5613502bdd83ffb8124ca9ef\", \"prefix\": \"nk-cargo-v1-Linux-X64-test-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-\"}"
+          ],
+          "restore_keys": [
+            "2026-10-02T17:04:49.9250773Z Cache restored from key: cargo-Linux-32dc15e69a842b0f4d0bd854117c56f2c7536fd3184908652fb2b730b87e5c39"
+          ],
+          "save_keys": [
+            "2026-10-02T17:06:30.3406793Z Cache saved with key: nk-cargo-v1-Linux-X64-test-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-781824979b31c0cd821709f6d4f3b034be9487da5613502bdd83ffb8124ca9ef"
+          ],
+          "misses": [
+            "2026-10-02T17:04:50.4845842Z Cache not found for input keys: nk-cargo-v1-Linux-X64-test-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-781824979b31c0cd821709f6d4f3b034be9487da5613502bdd83ffb8124ca9ef, nk-cargo-v1-Linux-X64-test-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-"
+          ],
+          "finished": [
+            "2026-10-02T17:06:24.3973764Z     Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 32s"
+          ],
+          "workspace_compile_count": 5,
+          "external_compile_count": 115,
+          "dirty_count": 0,
+          "fingerprint_examples": []
+        },
+        {
+          "job": "Release build",
+          "id": 110941444319,
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37038156724/job/110941444319",
+          "queue_s": 2.0,
+          "setup_s": 8.0,
+          "restore_total_s": 40.0,
+          "key_and_nix_shell_s": 37.51,
+          "downloads_restore_s": 1.97,
+          "target_restore_s": 0.32,
+          "cargo_step_s": 146.0,
+          "save_total_s": 4.0,
+          "target_archive_bytes": 76532493,
+          "selected_keys": [
+            "2026-10-02T17:04:47.4654921Z {\"downloads-key\": \"nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69\", \"downloads-prefix\": \"nk-cargo-downloads-v1-Linux-X64-\", \"key\": \"nk-cargo-v1-Linux-X64-build-release-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-781824979b31c0cd821709f6d4f3b034be9487da5613502bdd83ffb8124ca9ef\", \"prefix\": \"nk-cargo-v1-Linux-X64-build-release-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-\"}"
+          ],
+          "restore_keys": [
+            "2026-10-02T17:04:49.4361988Z Cache restored from key: cargo-Linux-32dc15e69a842b0f4d0bd854117c56f2c7536fd3184908652fb2b730b87e5c39"
+          ],
+          "save_keys": [
+            "2026-10-02T17:07:21.1079706Z Cache saved with key: nk-cargo-v1-Linux-X64-build-release-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-781824979b31c0cd821709f6d4f3b034be9487da5613502bdd83ffb8124ca9ef"
+          ],
+          "misses": [
+            "2026-10-02T17:04:49.7240938Z Cache not found for input keys: nk-cargo-v1-Linux-X64-build-release-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-781824979b31c0cd821709f6d4f3b034be9487da5613502bdd83ffb8124ca9ef, nk-cargo-v1-Linux-X64-build-release-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-"
+          ],
+          "finished": [
+            "2026-10-02T17:07:15.8475279Z     Finished `release` profile [optimized] target(s) in 2m 24s"
+          ],
+          "workspace_compile_count": 5,
+          "external_compile_count": 82,
+          "dirty_count": 0,
+          "fingerprint_examples": []
+        }
+      ],
+      "container_step_s": {
+        "Build and load final runtime image": 11.0,
+        "Load pinned builder for permission probe": 33.0,
+        "Verify final runtime image": 7.0,
+        "Export verified compilation layers": 2.0
+      }
+    },
+    {
+      "stage": "source refresh",
+      "id": 37038627298,
+      "sha": "f6f165d7b04750b400739d2d210a717d4761e26c",
+      "created_at": "2026-10-02T17:07:57Z",
+      "updated_at": "2026-10-02T17:11:55Z",
+      "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37038627298",
+      "conclusion": "success",
+      "workflow_elapsed_s": 238.0,
+      "summed_step_execution_s": 632.0,
+      "checks": {
+        "CI input selection": "success",
+        "Dependency vulnerabilities": "success",
+        "Secret scanning": "success",
+        "Unit tests": "success",
+        "Format": "success",
+        "Clippy": "success",
+        "Agent layout": "success",
+        "Release build": "success",
+        "Type check": "success",
+        "Container smoke": "success",
+        "CI gate": "success"
+      },
+      "summaries": [
+        {
+          "job": "Unit tests",
+          "id": 110943030875,
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37038627298/job/110943030875",
+          "queue_s": 3.0,
+          "setup_s": 9.0,
+          "restore_total_s": 52.0,
+          "key_and_nix_shell_s": 38.61,
+          "downloads_restore_s": 1.76,
+          "target_restore_s": 10.23,
+          "cargo_step_s": 34.0,
+          "save_total_s": 5.0,
+          "target_archive_bytes": 168332884,
+          "selected_keys": [
+            "2026-10-02T17:09:03.2617923Z {\"downloads-key\": \"nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69\", \"downloads-prefix\": \"nk-cargo-downloads-v1-Linux-X64-\", \"key\": \"nk-cargo-v1-Linux-X64-test-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c\", \"prefix\": \"nk-cargo-v1-Linux-X64-test-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-\"}"
+          ],
+          "restore_keys": [
+            "2026-10-02T17:09:05.2089112Z Cache restored from key: nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69",
+            "2026-10-02T17:09:15.2966408Z Cache restored from key: nk-cargo-v1-Linux-X64-test-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-781824979b31c0cd821709f6d4f3b034be9487da5613502bdd83ffb8124ca9ef"
+          ],
+          "save_keys": [
+            "2026-10-02T17:09:54.6441228Z Cache saved with key: nk-cargo-v1-Linux-X64-test-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c"
+          ],
+          "misses": [],
+          "finished": [
+            "2026-10-02T17:09:49.4478932Z     Finished `test` profile [unoptimized + debuginfo] target(s) in 31.71s"
+          ],
+          "workspace_compile_count": 5,
+          "external_compile_count": 0,
+          "dirty_count": 17,
+          "fingerprint_examples": [
+            "2026-10-02T17:09:21.4122834Z    3.675090950s  INFO prepare_target{force=false package_id=notion-knowledge-core v0.1.0 (/home/runner/work/notion-knowedge/notion-knowedge/crates/core) target=\"notion_knowledge_core\"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(ChangedFile { reference: \"/home/runner/work/notion-knowedge/notion-knowedge/target/debug/.fingerprint/notion-knowledge-core-ca4f4a5689121720/dep-test-lib-notion_knowledge_core\", reference_mtime: FileTime { seconds: 1790960782, nanos: 681001197 }, stale: \"/home/runner/work/notion-knowedge/notion-knowedge/crates/core/src/lib.rs\", stale_mtime: FileTime { seconds: 1790960955, nanos: 788289499 } }))",
+            "2026-10-02T17:09:21.4144953Z    3.675526044s  INFO prepare_target{force=false package_id=notion-knowledge-core v0.1.0 (/home/runner/work/notion-knowedge/notion-knowedge/crates/core) target=\"notion_knowledge_core\"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(ChangedFile { reference: \"/home/runner/work/notion-knowedge/notion-knowedge/target/debug/.fingerprint/notion-knowledge-core-d6e4a5764dab2ca1/dep-lib-notion_knowledge_core\", reference_mtime: FileTime { seconds: 1790960711, nanos: 618586538 }, stale: \"/home/runner/work/notion-knowedge/notion-knowedge/crates/core/src/lib.rs\", stale_mtime: FileTime { seconds: 1790960955, nanos: 788289499 } }))"
+          ]
+        },
+        {
+          "job": "Clippy",
+          "id": 110943030982,
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37038627298/job/110943030982",
+          "queue_s": 2.0,
+          "setup_s": 8.0,
+          "restore_total_s": 27.0,
+          "key_and_nix_shell_s": 22.47,
+          "downloads_restore_s": 2.1,
+          "target_restore_s": 1.04,
+          "cargo_step_s": 4.0,
+          "save_total_s": 2.0,
+          "target_archive_bytes": 47058224,
+          "selected_keys": [
+            "2026-10-02T17:08:44.4242588Z {\"downloads-key\": \"nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69\", \"downloads-prefix\": \"nk-cargo-downloads-v1-Linux-X64-\", \"key\": \"nk-cargo-v1-Linux-X64-clippy-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c\", \"prefix\": \"nk-cargo-v1-Linux-X64-clippy-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-\"}"
+          ],
+          "restore_keys": [
+            "2026-10-02T17:08:46.8733856Z Cache restored from key: nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69",
+            "2026-10-02T17:08:47.9917332Z Cache restored from key: nk-cargo-v1-Linux-X64-clippy-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-781824979b31c0cd821709f6d4f3b034be9487da5613502bdd83ffb8124ca9ef"
+          ],
+          "save_keys": [
+            "2026-10-02T17:08:54.9682649Z Cache saved with key: nk-cargo-v1-Linux-X64-clippy-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c"
+          ],
+          "misses": [],
+          "finished": [
+            "2026-10-02T17:08:52.8280578Z     Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.75s"
+          ],
+          "workspace_compile_count": 5,
+          "external_compile_count": 0,
+          "dirty_count": 17,
+          "fingerprint_examples": [
+            "2026-10-02T17:08:50.7203751Z    0.640762629s  INFO prepare_target{force=false package_id=notion-knowledge-core v0.1.0 (/home/runner/work/notion-knowedge/notion-knowedge/crates/core) target=\"notion_knowledge_core\"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(ChangedFile { reference: \"/home/runner/work/notion-knowedge/notion-knowedge/target/debug/.fingerprint/notion-knowledge-core-0ce08f1b206a9764/dep-lib-notion_knowledge_core\", reference_mtime: FileTime { seconds: 1790960709, nanos: 611407817 }, stale: \"/home/runner/work/notion-knowedge/notion-knowedge/crates/core/src/lib.rs\", stale_mtime: FileTime { seconds: 1790960928, nanos: 53586796 } }))",
+            "2026-10-02T17:08:50.7243170Z    0.641125184s  INFO prepare_target{force=false package_id=notion-knowledge-core v0.1.0 (/home/runner/work/notion-knowedge/notion-knowedge/crates/core) target=\"notion_knowledge_core\"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(ChangedFile { reference: \"/home/runner/work/notion-knowedge/notion-knowedge/target/debug/.fingerprint/notion-knowledge-core-fd57a7626244dd88/dep-test-lib-notion_knowledge_core\", reference_mtime: FileTime { seconds: 1790960730, nanos: 895734163 }, stale: \"/home/runner/work/notion-knowedge/notion-knowedge/crates/core/src/lib.rs\", stale_mtime: FileTime { seconds: 1790960928, nanos: 53586796 } }))"
+          ]
+        },
+        {
+          "job": "Release build",
+          "id": 110943031045,
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37038627298/job/110943031045",
+          "queue_s": 3.0,
+          "setup_s": 8.0,
+          "restore_total_s": 31.0,
+          "key_and_nix_shell_s": 23.8,
+          "downloads_restore_s": 2.44,
+          "target_restore_s": 3.11,
+          "cargo_step_s": 82.0,
+          "save_total_s": 4.0,
+          "target_archive_bytes": 76531709,
+          "selected_keys": [
+            "2026-10-02T17:08:47.5984601Z {\"downloads-key\": \"nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69\", \"downloads-prefix\": \"nk-cargo-downloads-v1-Linux-X64-\", \"key\": \"nk-cargo-v1-Linux-X64-build-release-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c\", \"prefix\": \"nk-cargo-v1-Linux-X64-build-release-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-\"}"
+          ],
+          "restore_keys": [
+            "2026-10-02T17:08:50.1331663Z Cache restored from key: nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69",
+            "2026-10-02T17:08:53.2504490Z Cache restored from key: nk-cargo-v1-Linux-X64-build-release-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-781824979b31c0cd821709f6d4f3b034be9487da5613502bdd83ffb8124ca9ef"
+          ],
+          "save_keys": [
+            "2026-10-02T17:10:22.4278139Z Cache saved with key: nk-cargo-v1-Linux-X64-build-release-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c"
+          ],
+          "misses": [],
+          "finished": [
+            "2026-10-02T17:10:15.7769882Z     Finished `release` profile [optimized] target(s) in 1m 20s"
+          ],
+          "workspace_compile_count": 5,
+          "external_compile_count": 0,
+          "dirty_count": 6,
+          "fingerprint_examples": [
+            "2026-10-02T17:08:55.9710305Z    0.671496390s  INFO prepare_target{force=false package_id=notion-knowledge-core v0.1.0 (/home/runner/work/notion-knowedge/notion-knowedge/crates/core) target=\"notion_knowledge_core\"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(ChangedFile { reference: \"/home/runner/work/notion-knowedge/notion-knowedge/target/release/.fingerprint/notion-knowledge-core-0731b5da69ca8e6d/dep-lib-notion_knowledge_core\", reference_mtime: FileTime { seconds: 1790960735, nanos: 132487894 }, stale: \"/home/runner/work/notion-knowedge/notion-knowedge/crates/core/src/lib.rs\", stale_mtime: FileTime { seconds: 1790960933, nanos: 316445030 } }))",
+            "2026-10-02T17:08:55.9732301Z    0.675522349s  INFO prepare_target{force=false package_id=notion-knowledge-mcp v0.1.0 (/home/runner/work/notion-knowedge/notion-knowedge/crates/mcp) target=\"notion_knowledge_mcp\"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleDepFingerprint { unit: UnitIndex(45) })"
+          ]
+        },
+        {
+          "job": "Type check",
+          "id": 110943031115,
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37038627298/job/110943031115",
+          "queue_s": 3.0,
+          "setup_s": 7.0,
+          "restore_total_s": 27.0,
+          "key_and_nix_shell_s": 23.64,
+          "downloads_restore_s": 0.8,
+          "target_restore_s": 1.12,
+          "cargo_step_s": 5.0,
+          "save_total_s": 2.0,
+          "target_archive_bytes": 47056022,
+          "selected_keys": [
+            "2026-10-02T17:08:46.0369178Z {\"downloads-key\": \"nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69\", \"downloads-prefix\": \"nk-cargo-downloads-v1-Linux-X64-\", \"key\": \"nk-cargo-v1-Linux-X64-check-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c\", \"prefix\": \"nk-cargo-v1-Linux-X64-check-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-\"}"
+          ],
+          "restore_keys": [
+            "2026-10-02T17:08:47.3261987Z Cache restored from key: nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69",
+            "2026-10-02T17:08:48.4483183Z Cache restored from key: nk-cargo-v1-Linux-X64-check-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-781824979b31c0cd821709f6d4f3b034be9487da5613502bdd83ffb8124ca9ef"
+          ],
+          "save_keys": [
+            "2026-10-02T17:08:55.4863697Z Cache saved with key: nk-cargo-v1-Linux-X64-check-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c"
+          ],
+          "misses": [],
+          "finished": [
+            "2026-10-02T17:08:53.4296275Z     Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.81s"
+          ],
+          "workspace_compile_count": 5,
+          "external_compile_count": 0,
+          "dirty_count": 17,
+          "fingerprint_examples": [
+            "2026-10-02T17:08:51.2580885Z    0.637810316s  INFO prepare_target{force=false package_id=notion-knowledge-core v0.1.0 (/home/runner/work/notion-knowedge/notion-knowedge/crates/core) target=\"notion_knowledge_core\"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(ChangedFile { reference: \"/home/runner/work/notion-knowedge/notion-knowedge/target/debug/.fingerprint/notion-knowledge-core-e8d4243bd18b1dc9/dep-lib-notion_knowledge_core\", reference_mtime: FileTime { seconds: 1790960717, nanos: 595800617 }, stale: \"/home/runner/work/notion-knowedge/notion-knowedge/crates/core/src/lib.rs\", stale_mtime: FileTime { seconds: 1790960928, nanos: 517866754 } }))",
+            "2026-10-02T17:08:51.2615439Z    0.638233879s  INFO prepare_target{force=false package_id=notion-knowledge-core v0.1.0 (/home/runner/work/notion-knowedge/notion-knowedge/crates/core) target=\"notion_knowledge_core\"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(ChangedFile { reference: \"/home/runner/work/notion-knowedge/notion-knowedge/target/debug/.fingerprint/notion-knowledge-core-f009a294d4dde5af/dep-test-lib-notion_knowledge_core\", reference_mtime: FileTime { seconds: 1790960746, nanos: 240390797 }, stale: \"/home/runner/work/notion-knowedge/notion-knowedge/crates/core/src/lib.rs\", stale_mtime: FileTime { seconds: 1790960928, nanos: 517866754 } }))"
+          ]
+        },
+        {
+          "job": "Container smoke",
+          "id": 110943031201,
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37038627298/job/110943031201",
+          "queue_s": 3.0,
+          "setup_s": null,
+          "restore_total_s": null,
+          "key_and_nix_shell_s": null,
+          "downloads_restore_s": null,
+          "target_restore_s": null,
+          "cargo_step_s": null,
+          "save_total_s": null,
+          "target_archive_bytes": null,
+          "selected_keys": [],
+          "restore_keys": [],
+          "save_keys": [],
+          "misses": [],
+          "finished": [
+            "2026-10-02T17:10:33.5231588Z #14 107.9     Finished `release` profile [optimized] target(s) in 1m 47s"
+          ],
+          "workspace_compile_count": 5,
+          "external_compile_count": 82,
+          "dirty_count": 0,
+          "fingerprint_examples": []
+        }
+      ],
+      "container_step_s": {
+        "Build and load final runtime image": 130.0,
+        "Load pinned builder for permission probe": 31.0,
+        "Verify final runtime image": 8.0,
+        "Export verified compilation layers": 23.0
+      }
+    },
+    {
+      "stage": "exact reuse and boundaries",
+      "id": 37039131335,
+      "sha": "b28a26a18232f331730e0cd39c935d98dfb2d70c",
+      "created_at": "2026-10-02T17:12:26Z",
+      "updated_at": "2026-10-02T17:14:24Z",
+      "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37039131335",
+      "conclusion": "success",
+      "workflow_elapsed_s": 118.0,
+      "summed_step_execution_s": 802.0,
+      "checks": {
+        "Secret scanning": "success",
+        "Cache boundary (manifest)": "success",
+        "CI input selection": "success",
+        "Cache boundary (flake-lock)": "success",
+        "Cache boundary (cargo-lock)": "success",
+        "Dependency vulnerabilities": "success",
+        "Cache boundary (flake-nix)": "success",
+        "Release build": "success",
+        "Clippy": "success",
+        "Agent layout": "success",
+        "Format": "success",
+        "Container smoke": "success",
+        "Unit tests": "success",
+        "Type check": "success",
+        "CI gate": "success"
+      },
+      "summaries": [
+        {
+          "job": "Cache boundary (manifest)",
+          "id": 110944621767,
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37039131335/job/110944621767",
+          "queue_s": 2.0,
+          "setup_s": null,
+          "restore_total_s": null,
+          "key_and_nix_shell_s": 19.01,
+          "downloads_restore_s": 3.16,
+          "target_restore_s": 0.5,
+          "cargo_step_s": 64.0,
+          "save_total_s": null,
+          "target_archive_bytes": null,
+          "selected_keys": [
+            "2026-10-02T17:12:57.2453321Z {\"downloads-key\": \"nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69\", \"downloads-prefix\": \"nk-cargo-downloads-v1-Linux-X64-\", \"key\": \"nk-cargo-v1-Linux-X64-check-debug-5a409bb7b22e92ecfd9b4290fe52db1b4cc69271ba05367aa474166149696cab-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c\", \"prefix\": \"nk-cargo-v1-Linux-X64-check-debug-5a409bb7b22e92ecfd9b4290fe52db1b4cc69271ba05367aa474166149696cab-\"}"
+          ],
+          "restore_keys": [
+            "2026-10-02T17:13:00.6886355Z Cache restored from key: nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69"
+          ],
+          "save_keys": [],
+          "misses": [
+            "2026-10-02T17:13:01.0953668Z Cache not found for input keys: nk-cargo-v1-Linux-X64-check-debug-5a409bb7b22e92ecfd9b4290fe52db1b4cc69271ba05367aa474166149696cab-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c, nk-cargo-v1-Linux-X64-check-debug-5a409bb7b22e92ecfd9b4290fe52db1b4cc69271ba05367aa474166149696cab-"
+          ],
+          "finished": [
+            "2026-10-02T17:14:05.3309534Z     Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 02s"
+          ],
+          "workspace_compile_count": 5,
+          "external_compile_count": 115,
+          "dirty_count": 0,
+          "fingerprint_examples": []
+        },
+        {
+          "job": "Cache boundary (flake-lock)",
+          "id": 110944621909,
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37039131335/job/110944621909",
+          "queue_s": 2.0,
+          "setup_s": null,
+          "restore_total_s": null,
+          "key_and_nix_shell_s": 34.7,
+          "downloads_restore_s": 2.0,
+          "target_restore_s": 0.56,
+          "cargo_step_s": 45.0,
+          "save_total_s": null,
+          "target_archive_bytes": null,
+          "selected_keys": [
+            "2026-10-02T17:13:17.1469307Z {\"downloads-key\": \"nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69\", \"downloads-prefix\": \"nk-cargo-downloads-v1-Linux-X64-\", \"key\": \"nk-cargo-v1-Linux-X64-check-debug-768a413b641062d4fc05544b63602e568d5613299e72e40e0bdc7fed8b5e5a70-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c\", \"prefix\": \"nk-cargo-v1-Linux-X64-check-debug-768a413b641062d4fc05544b63602e568d5613299e72e40e0bdc7fed8b5e5a70-\"}"
+          ],
+          "restore_keys": [
+            "2026-10-02T17:13:19.1530549Z Cache restored from key: nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69"
+          ],
+          "save_keys": [],
+          "misses": [
+            "2026-10-02T17:13:19.4908098Z Cache not found for input keys: nk-cargo-v1-Linux-X64-check-debug-768a413b641062d4fc05544b63602e568d5613299e72e40e0bdc7fed8b5e5a70-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c, nk-cargo-v1-Linux-X64-check-debug-768a413b641062d4fc05544b63602e568d5613299e72e40e0bdc7fed8b5e5a70-"
+          ],
+          "finished": [
+            "2026-10-02T17:14:05.1199020Z     Finished `dev` profile [unoptimized + debuginfo] target(s) in 43.62s"
+          ],
+          "workspace_compile_count": 5,
+          "external_compile_count": 115,
+          "dirty_count": 0,
+          "fingerprint_examples": []
+        },
+        {
+          "job": "Cache boundary (cargo-lock)",
+          "id": 110944621942,
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37039131335/job/110944621942",
+          "queue_s": 2.0,
+          "setup_s": null,
+          "restore_total_s": null,
+          "key_and_nix_shell_s": 19.88,
+          "downloads_restore_s": 2.2,
+          "target_restore_s": 0.36,
+          "cargo_step_s": 64.0,
+          "save_total_s": null,
+          "target_archive_bytes": null,
+          "selected_keys": [
+            "2026-10-02T17:12:58.7097778Z {\"downloads-key\": \"nk-cargo-downloads-v1-Linux-X64-2c4bdebcc1d61b665260dab60d5f8b335fea0cf8d008355b1c34ba195454796e\", \"downloads-prefix\": \"nk-cargo-downloads-v1-Linux-X64-\", \"key\": \"nk-cargo-v1-Linux-X64-check-debug-d83226b61a13fcba219d888f6a5f0f1e019d64badb6dc6312eed143490bd99f2-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c\", \"prefix\": \"nk-cargo-v1-Linux-X64-check-debug-d83226b61a13fcba219d888f6a5f0f1e019d64badb6dc6312eed143490bd99f2-\"}"
+          ],
+          "restore_keys": [
+            "2026-10-02T17:13:01.0149556Z Cache restored from key: nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69"
+          ],
+          "save_keys": [],
+          "misses": [
+            "2026-10-02T17:13:01.3755331Z Cache not found for input keys: nk-cargo-v1-Linux-X64-check-debug-d83226b61a13fcba219d888f6a5f0f1e019d64badb6dc6312eed143490bd99f2-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c, nk-cargo-v1-Linux-X64-check-debug-d83226b61a13fcba219d888f6a5f0f1e019d64badb6dc6312eed143490bd99f2-"
+          ],
+          "finished": [
+            "2026-10-02T17:14:05.1913597Z     Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 02s"
+          ],
+          "workspace_compile_count": 5,
+          "external_compile_count": 115,
+          "dirty_count": 0,
+          "fingerprint_examples": []
+        },
+        {
+          "job": "Cache boundary (flake-nix)",
+          "id": 110944621979,
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37039131335/job/110944621979",
+          "queue_s": 2.0,
+          "setup_s": null,
+          "restore_total_s": null,
+          "key_and_nix_shell_s": 38.86,
+          "downloads_restore_s": 2.24,
+          "target_restore_s": 0.32,
+          "cargo_step_s": 59.0,
+          "save_total_s": null,
+          "target_archive_bytes": null,
+          "selected_keys": [
+            "2026-10-02T17:13:17.9471516Z {\"downloads-key\": \"nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69\", \"downloads-prefix\": \"nk-cargo-downloads-v1-Linux-X64-\", \"key\": \"nk-cargo-v1-Linux-X64-check-debug-b238648c79e8c222cc70dd2bd2140ae6d72b30c7acf9d2eea99e30234da3e610-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c\", \"prefix\": \"nk-cargo-v1-Linux-X64-check-debug-b238648c79e8c222cc70dd2bd2140ae6d72b30c7acf9d2eea99e30234da3e610-\"}"
+          ],
+          "restore_keys": [
+            "2026-10-02T17:13:20.3665555Z Cache restored from key: nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69"
+          ],
+          "save_keys": [],
+          "misses": [
+            "2026-10-02T17:13:20.6933646Z Cache not found for input keys: nk-cargo-v1-Linux-X64-check-debug-b238648c79e8c222cc70dd2bd2140ae6d72b30c7acf9d2eea99e30234da3e610-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c, nk-cargo-v1-Linux-X64-check-debug-b238648c79e8c222cc70dd2bd2140ae6d72b30c7acf9d2eea99e30234da3e610-"
+          ],
+          "finished": [
+            "2026-10-02T17:14:19.5481590Z     Finished `dev` profile [unoptimized + debuginfo] target(s) in 56.62s"
+          ],
+          "workspace_compile_count": 5,
+          "external_compile_count": 115,
+          "dirty_count": 0,
+          "fingerprint_examples": []
+        },
+        {
+          "job": "Release build",
+          "id": 110944695541,
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37039131335/job/110944695541",
+          "queue_s": 2.0,
+          "setup_s": 12.0,
+          "restore_total_s": 44.0,
+          "key_and_nix_shell_s": 38.56,
+          "downloads_restore_s": 1.47,
+          "target_restore_s": 2.25,
+          "cargo_step_s": 6.0,
+          "save_total_s": 1.0,
+          "target_archive_bytes": 76531709,
+          "selected_keys": [
+            "2026-10-02T17:13:33.6154758Z {\"downloads-key\": \"nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69\", \"downloads-prefix\": \"nk-cargo-downloads-v1-Linux-X64-\", \"key\": \"nk-cargo-v1-Linux-X64-build-release-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c\", \"prefix\": \"nk-cargo-v1-Linux-X64-build-release-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-\"}"
+          ],
+          "restore_keys": [
+            "2026-10-02T17:13:35.0874333Z Cache restored from key: nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69",
+            "2026-10-02T17:13:37.1345994Z Cache restored from key: nk-cargo-v1-Linux-X64-build-release-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c"
+          ],
+          "save_keys": [],
+          "misses": [],
+          "finished": [
+            "2026-10-02T17:13:43.0667403Z     Finished `release` profile [optimized] target(s) in 4.01s"
+          ],
+          "workspace_compile_count": 0,
+          "external_compile_count": 0,
+          "dirty_count": 0,
+          "fingerprint_examples": []
+        },
+        {
+          "job": "Clippy",
+          "id": 110944695566,
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37039131335/job/110944695566",
+          "queue_s": 3.0,
+          "setup_s": 8.0,
+          "restore_total_s": 31.0,
+          "key_and_nix_shell_s": 24.42,
+          "downloads_restore_s": 2.29,
+          "target_restore_s": 2.78,
+          "cargo_step_s": 3.0,
+          "save_total_s": 0.0,
+          "target_archive_bytes": 47058224,
+          "selected_keys": [
+            "2026-10-02T17:13:15.8272303Z {\"downloads-key\": \"nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69\", \"downloads-prefix\": \"nk-cargo-downloads-v1-Linux-X64-\", \"key\": \"nk-cargo-v1-Linux-X64-clippy-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c\", \"prefix\": \"nk-cargo-v1-Linux-X64-clippy-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-\"}"
+          ],
+          "restore_keys": [
+            "2026-10-02T17:13:18.5326876Z Cache restored from key: nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69",
+            "2026-10-02T17:13:21.3132392Z Cache restored from key: nk-cargo-v1-Linux-X64-clippy-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c"
+          ],
+          "save_keys": [],
+          "misses": [],
+          "finished": [
+            "2026-10-02T17:13:24.3818061Z     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.67s"
+          ],
+          "workspace_compile_count": 0,
+          "external_compile_count": 0,
+          "dirty_count": 0,
+          "fingerprint_examples": []
+        },
+        {
+          "job": "Container smoke",
+          "id": 110944695682,
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37039131335/job/110944695682",
+          "queue_s": 2.0,
+          "setup_s": null,
+          "restore_total_s": null,
+          "key_and_nix_shell_s": null,
+          "downloads_restore_s": null,
+          "target_restore_s": null,
+          "cargo_step_s": null,
+          "save_total_s": null,
+          "target_archive_bytes": null,
+          "selected_keys": [],
+          "restore_keys": [],
+          "save_keys": [],
+          "misses": [],
+          "finished": [],
+          "workspace_compile_count": 0,
+          "external_compile_count": 0,
+          "dirty_count": 0,
+          "fingerprint_examples": []
+        },
+        {
+          "job": "Unit tests",
+          "id": 110944695705,
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37039131335/job/110944695705",
+          "queue_s": 2.0,
+          "setup_s": 8.0,
+          "restore_total_s": 34.0,
+          "key_and_nix_shell_s": 24.38,
+          "downloads_restore_s": 2.96,
+          "target_restore_s": 6.01,
+          "cargo_step_s": 4.0,
+          "save_total_s": 0.0,
+          "target_archive_bytes": 168332884,
+          "selected_keys": [
+            "2026-10-02T17:13:14.2112922Z {\"downloads-key\": \"nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69\", \"downloads-prefix\": \"nk-cargo-downloads-v1-Linux-X64-\", \"key\": \"nk-cargo-v1-Linux-X64-test-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c\", \"prefix\": \"nk-cargo-v1-Linux-X64-test-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-\"}"
+          ],
+          "restore_keys": [
+            "2026-10-02T17:13:17.6880218Z Cache restored from key: nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69",
+            "2026-10-02T17:13:23.6981978Z Cache restored from key: nk-cargo-v1-Linux-X64-test-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c"
+          ],
+          "save_keys": [],
+          "misses": [],
+          "finished": [
+            "2026-10-02T17:13:26.6432144Z     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.65s"
+          ],
+          "workspace_compile_count": 0,
+          "external_compile_count": 0,
+          "dirty_count": 0,
+          "fingerprint_examples": []
+        },
+        {
+          "job": "Type check",
+          "id": 110944695759,
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37039131335/job/110944695759",
+          "queue_s": 2.0,
+          "setup_s": 9.0,
+          "restore_total_s": 30.0,
+          "key_and_nix_shell_s": 23.04,
+          "downloads_restore_s": 3.13,
+          "target_restore_s": 2.67,
+          "cargo_step_s": 3.0,
+          "save_total_s": 0.0,
+          "target_archive_bytes": 47056022,
+          "selected_keys": [
+            "2026-10-02T17:13:14.4852284Z {\"downloads-key\": \"nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69\", \"downloads-prefix\": \"nk-cargo-downloads-v1-Linux-X64-\", \"key\": \"nk-cargo-v1-Linux-X64-check-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c\", \"prefix\": \"nk-cargo-v1-Linux-X64-check-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-\"}"
+          ],
+          "restore_keys": [
+            "2026-10-02T17:13:17.9405023Z Cache restored from key: nk-cargo-downloads-v1-Linux-X64-8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69",
+            "2026-10-02T17:13:20.6106738Z Cache restored from key: nk-cargo-v1-Linux-X64-check-debug-eaa03e04246433a7b0a137fb66bf7deab825952a4e5e6acdcd907f5b879b2fde-bb92896aef7c30ed822389cde23cfbbd3392afff00e297b556542a930e15f12c"
+          ],
+          "save_keys": [],
+          "misses": [],
+          "finished": [
+            "2026-10-02T17:13:23.4942708Z     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.66s"
+          ],
+          "workspace_compile_count": 0,
+          "external_compile_count": 0,
+          "dirty_count": 0,
+          "fingerprint_examples": []
+        }
+      ],
+      "container_step_s": {
+        "Build and load final runtime image": 5.0,
+        "Load pinned builder for permission probe": 46.0,
+        "Verify final runtime image": 16.0,
+        "Export verified compilation layers": 2.0
+      }
+    }
+  ]
+}

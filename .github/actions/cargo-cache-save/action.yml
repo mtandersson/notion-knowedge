@@ -1,0 +1,37 @@
+name: Save successful Cargo snapshots
+description: Persist current source outputs only after successful commands
+inputs:
+  key:
+    required: true
+    description: Current source snapshot key
+  hit:
+    required: false
+    description: Exact build cache hit
+  downloads-key:
+    required: true
+    description: Current dependency download key
+  downloads-hit:
+    required: false
+    description: Exact dependency download hit
+runs:
+  using: composite
+  steps:
+    - name: Record successful source fingerprints
+      if: inputs.hit != 'true'
+      shell: bash
+      run: python3 scripts/cargo-cache.py snapshot
+    - name: Save refreshed Cargo build snapshot
+      if: inputs.hit != 'true'
+      uses: actions/cache/save@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+      with:
+        path: target
+        key: ${{ inputs.key }}
+    - name: Save Cargo dependency downloads
+      if: inputs.downloads-hit != 'true'
+      uses: actions/cache/save@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: ${{ inputs.downloads-key }}

@@ -18,6 +18,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: target
 
 jobs:
   changes:
@@ -106,27 +107,24 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      - name: Restore Cargo dependency cache
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+      - name: Restore pinned Cargo caches
+        id: cargo-cache
+        uses: ./.github/actions/cargo-cache-restore
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-
-
-      - name: Restore Cargo build cache
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: target
-          key: target-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
-          restore-keys: |
-            target-${{ runner.os }}-${{ github.job }}-
+          job: ${{ github.job }}
+          profile: debug
 
       - name: Run Clippy
         run: nix develop --command cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Save successful refreshed Cargo caches
+        if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: ./.github/actions/cargo-cache-save
+        with:
+          key: ${{ steps.cargo-cache.outputs.key }}
+          hit: ${{ steps.cargo-cache.outputs.hit }}
+          downloads-key: ${{ steps.cargo-cache.outputs.downloads-key }}
+          downloads-hit: ${{ steps.cargo-cache.outputs.downloads-hit }}
 
   check:
     needs: changes
@@ -146,27 +144,24 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      - name: Restore Cargo dependency cache
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+      - name: Restore pinned Cargo caches
+        id: cargo-cache
+        uses: ./.github/actions/cargo-cache-restore
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-
-
-      - name: Restore Cargo build cache
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: target
-          key: target-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
-          restore-keys: |
-            target-${{ runner.os }}-${{ github.job }}-
+          job: ${{ github.job }}
+          profile: debug
 
       - name: Run cargo check
         run: nix develop --command cargo check --workspace --all-targets --locked
+
+      - name: Save successful refreshed Cargo caches
+        if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: ./.github/actions/cargo-cache-save
+        with:
+          key: ${{ steps.cargo-cache.outputs.key }}
+          hit: ${{ steps.cargo-cache.outputs.hit }}
+          downloads-key: ${{ steps.cargo-cache.outputs.downloads-key }}
+          downloads-hit: ${{ steps.cargo-cache.outputs.downloads-hit }}
 
   test:
     needs: changes
@@ -186,27 +181,24 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      - name: Restore Cargo dependency cache
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+      - name: Restore pinned Cargo caches
+        id: cargo-cache
+        uses: ./.github/actions/cargo-cache-restore
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-
-
-      - name: Restore Cargo build cache
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: target
-          key: target-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
-          restore-keys: |
-            target-${{ runner.os }}-${{ github.job }}-
+          job: ${{ github.job }}
+          profile: debug
 
       - name: Run unit tests
         run: nix develop --command cargo test --workspace --locked
+
+      - name: Save successful refreshed Cargo caches
+        if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: ./.github/actions/cargo-cache-save
+        with:
+          key: ${{ steps.cargo-cache.outputs.key }}
+          hit: ${{ steps.cargo-cache.outputs.hit }}
+          downloads-key: ${{ steps.cargo-cache.outputs.downloads-key }}
+          downloads-hit: ${{ steps.cargo-cache.outputs.downloads-hit }}
 
   build:
     needs: changes
@@ -226,24 +218,12 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      - name: Restore Cargo dependency cache
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+      - name: Restore pinned Cargo caches
+        id: cargo-cache
+        uses: ./.github/actions/cargo-cache-restore
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-
-
-      - name: Restore Cargo build cache
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: target
-          key: target-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
-          restore-keys: |
-            target-${{ runner.os }}-${{ github.job }}-
+          job: ${{ github.job }}
+          profile: release
 
       - name: Build release workspace
         run: nix develop --command cargo build --workspace --release --locked
@@ -263,6 +243,15 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
           retention-days: 7
+
+      - name: Save successful refreshed Cargo caches
+        if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: ./.github/actions/cargo-cache-save
+        with:
+          key: ${{ steps.cargo-cache.outputs.key }}
+          hit: ${{ steps.cargo-cache.outputs.hit }}
+          downloads-key: ${{ steps.cargo-cache.outputs.downloads-key }}
+          downloads-hit: ${{ steps.cargo-cache.outputs.downloads-hit }}
 
   container:
     needs: changes

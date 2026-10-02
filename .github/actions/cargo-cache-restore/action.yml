@@ -1,0 +1,54 @@
+name: Restore compatible Cargo snapshots
+description: Key pinned toolchain/dependencies separately from source snapshots
+inputs:
+  job:
+    required: true
+    description: Cargo job identity
+  profile:
+    required: true
+    description: debug or release
+outputs:
+  key:
+    value: ${{ steps.keys.outputs.key }}
+    description: Current source snapshot key
+  hit:
+    value: ${{ steps.target.outputs.cache-hit }}
+    description: Exact current source snapshot restored
+  downloads-key:
+    value: ${{ steps.keys.outputs.downloads-key }}
+    description: Dependency download key
+  downloads-hit:
+    value: ${{ steps.downloads.outputs.cache-hit }}
+    description: Exact download cache restored
+runs:
+  using: composite
+  steps:
+    - name: Test Cargo cache contracts
+      shell: bash
+      run: python3 scripts/test-cargo-cache.py
+    - name: Compute pinned Cargo compatibility and source keys
+      id: keys
+      shell: bash
+      run: nix develop --command python3 scripts/cargo-cache.py key --job '${{ inputs.job }}' --profile '${{ inputs.profile }}' --os '${{ runner.os }}' --arch '${{ runner.arch }}'
+    - name: Restore Cargo dependency downloads
+      id: downloads
+      uses: actions/cache/restore@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: ${{ steps.keys.outputs.downloads-key }}
+        restore-keys: |
+          ${{ steps.keys.outputs.downloads-prefix }}
+          cargo-${{ runner.os }}-
+    - name: Restore compatible Cargo build snapshot
+      id: target
+      uses: actions/cache/restore@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+      with:
+        path: target
+        key: ${{ steps.keys.outputs.key }}
+        restore-keys: ${{ steps.keys.outputs.prefix }}
+    - name: Prepare verified source timestamps
+      shell: bash
+      run: python3 scripts/cargo-cache.py prepare

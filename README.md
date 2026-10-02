@@ -171,8 +171,9 @@ should remain separate controlled jobs rather than broadening the trust surface
 of ordinary pull-request CI.
 
 GitHub Action dependencies are pinned to immutable commit SHAs. Cargo dependency
-downloads are cached using the lockfile-derived cache key; the Nix flake remains
-the source of truth for the toolchain.
+downloads are cached using the lockfile-derived cache key. Compiled outputs use
+[compatible source snapshots](docs/cargo-cache.md), refreshed after successful
+source changes; the Nix flake remains the source of truth for the toolchain.
 
 Security scans use pinned Nix tools, fresh RustSec advisories, and complete Git
 history with redacted findings. See [security scanning](docs/security-scanning.md)
