@@ -29,4 +29,6 @@ USER 65532:65532
 WORKDIR /var/lib/notion-knowledge
 EXPOSE 3000
 STOPSIGNAL SIGINT
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD ["/usr/local/bin/notion-knowledge-server", "--healthcheck"]
 ENTRYPOINT ["/usr/local/bin/notion-knowledge-server"]
