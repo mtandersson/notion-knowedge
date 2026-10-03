@@ -1,0 +1,10 @@
+name: Choose Docker cache roots
+description: Prefer this ref's available cache root and fall back to trusted main
+outputs:
+  final-cache-from:
+    description: One available final-image cache source, or empty
+  builder-cache-from:
+    description: One available builder-root cache source, or empty
+runs:
+  using: node24
+  main: source.cjs

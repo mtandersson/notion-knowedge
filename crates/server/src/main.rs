@@ -68,7 +68,7 @@ async fn main() -> ExitCode {
         };
     }
 
-    eprintln!("Serving MCP over stdio. [ci-cache-probe-185-v2]");
+    eprintln!("Serving MCP over stdio. [ci-cache-probe-185-v3]");
     let service = match notion_knowledge_mcp::KnowledgeServer.serve(stdio()).await {
         Ok(service) => service,
         Err(_) => {

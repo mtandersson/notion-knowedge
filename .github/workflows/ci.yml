@@ -276,6 +276,13 @@ jobs:
       - name: Record effective context and cache authorization
         uses: ./.github/actions/docker-cache-probe
 
+      - name: Choose available Docker cache roots
+        id: docker-cache-source
+        uses: ./.github/actions/docker-cache-source
+
+      - name: Test Docker cache root selection
+        run: node --test scripts/test-docker-cache-source.cjs
+
       - name: Test cached image identity rejection
         run: python3 scripts/test-container-smoke.py
 
@@ -300,11 +307,7 @@ jobs:
           build-args: |
             VERSION=${{ steps.identity.outputs.version }}
             REVISION=${{ github.sha }}
-          cache-from: |
-            type=gha,scope=nk-container-v1-${{ runner.os }}-${{ runner.arch }}-main-builder
-            type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}-builder
-            type=gha,scope=nk-container-v1-${{ runner.os }}-${{ runner.arch }}-main
-            type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}
+          cache-from: ${{ steps.docker-cache-source.outputs.final-cache-from }}
 
       - name: Load pinned builder for permission probe
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -332,7 +335,7 @@ jobs:
                   binary = pathlib.Path(temporary) / 'server'
                   subprocess.run(['docker', 'cp', container + ':/usr/local/bin/notion-knowledge-server', str(binary)], check=True)
                   data = binary.read_bytes()
-                  assert b'ci-cache-probe-185-v2' in data, 'Expected used source edit absent from final binary'
+                  assert b'ci-cache-probe-185-v3' in data, 'Expected used source edit absent from final binary'
                   print('VERIFIED_EXECUTABLE ' + json.dumps({'image': info['Id'], 'revision': info['Config']['Labels']['org.opencontainers.image.revision'], 'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}))
           finally:
               subprocess.run(['docker', 'rm', container], check=True, stdout=subprocess.DEVNULL)
@@ -349,11 +352,7 @@ jobs:
           target: builder
           build-args: VERSION=${{ steps.identity.outputs.version }}
           # Resolve the stable compiler root from the same trusted cache inputs.
-          cache-from: |
-            type=gha,scope=nk-container-v1-${{ runner.os }}-${{ runner.arch }}-main-builder
-            type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}-builder
-            type=gha,scope=nk-container-v1-${{ runner.os }}-${{ runner.arch }}-main
-            type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}
+          cache-from: ${{ steps.docker-cache-source.outputs.builder-cache-from }}
           cache-to: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}-builder,mode=max,timeout=10m
 
       - name: Export verified final image graph
@@ -365,11 +364,7 @@ jobs:
           build-args: |
             VERSION=${{ steps.identity.outputs.version }}
             REVISION=${{ github.sha }}
-          cache-from: |
-            type=gha,scope=nk-container-v1-${{ runner.os }}-${{ runner.arch }}-main-builder
-            type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}-builder
-            type=gha,scope=nk-container-v1-${{ runner.os }}-${{ runner.arch }}-main
-            type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}
+          cache-from: ${{ steps.docker-cache-source.outputs.final-cache-from }}
           cache-to: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }},mode=max,timeout=10m
 
   dependencies:
