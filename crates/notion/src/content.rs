@@ -12,6 +12,7 @@ fn error(kind: BackendErrorKind) -> BackendError {
         kind,
         operation: "notion.read_content",
         retry_after: None,
+        committed_page_id: None,
     }
 }
 #[derive(Deserialize)]

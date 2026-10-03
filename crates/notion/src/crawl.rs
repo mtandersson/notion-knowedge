@@ -20,6 +20,7 @@ fn error(kind: BackendErrorKind) -> BackendError {
         kind,
         operation: "notion.discover",
         retry_after: None,
+        committed_page_id: None,
     }
 }
 fn text(value: &Value) -> Result<&str, BackendError> {

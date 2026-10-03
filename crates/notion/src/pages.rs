@@ -14,6 +14,7 @@ fn error(kind: BackendErrorKind) -> BackendError {
         kind,
         operation: "notion.fetch_page",
         retry_after: None,
+        committed_page_id: None,
     }
 }
 pub(crate) fn uuid(input: &str) -> Option<String> {

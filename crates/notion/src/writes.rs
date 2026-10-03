@@ -20,6 +20,7 @@ fn failure(operation: &'static str, kind: BackendErrorKind) -> BackendError {
         operation,
         kind,
         retry_after: None,
+        committed_page_id: None,
     }
 }
 

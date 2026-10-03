@@ -20,6 +20,7 @@ fn error(kind: BackendErrorKind) -> BackendError {
         kind,
         operation: "notion.discover_documents",
         retry_after: None,
+        committed_page_id: None,
     }
 }
 
