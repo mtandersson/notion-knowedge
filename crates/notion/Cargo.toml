@@ -12,7 +12,7 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 
 pulldown-cmark = { version = "0.13", default-features = false }
-quick-xml = "0.39"
+quick-xml = "0.41"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["net", "io-util"] }

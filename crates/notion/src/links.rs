@@ -159,7 +159,7 @@ fn enhanced(markdown: &str) -> Vec<EnhancedTag> {
         for attribute in tag.attributes() {
             match attribute {
                 Ok(attribute) if attribute.key.as_ref() == b"url" => {
-                    match attribute.unescape_value() {
+                    match attribute.normalized_value(quick_xml::XmlVersion::Implicit1_0) {
                         Ok(value) => url = Some(value.into_owned()),
                         Err(_) => malformed = true,
                     }
