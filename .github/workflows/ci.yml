@@ -317,6 +317,9 @@ jobs:
       - name: Verify final runtime image
         run: python3 scripts/smoke-container.py --prebuilt --builder-image notion-knowledge:smoke-builder
 
+      - name: Verify source dependency and pinned-builder invalidation
+        run: python3 scripts/task-185-cache-probe.py
+
       # Export only after all final-image interactions pass. PR caches are
       # isolated by GitHub's merge-ref scope and cannot poison main restores.
       - name: Export verified compilation layers
