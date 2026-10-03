@@ -801,6 +801,7 @@ dependencies = [
 name = "notion-knowledge-notion"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "notion-knowledge-core",
  "reqwest",
  "serde",

@@ -12,3 +12,5 @@ pub use client::{IntegrationIdentity, NotionClient};
 
 pub mod writes;
 pub use writes::CreatedPage;
+
+pub mod pages;
