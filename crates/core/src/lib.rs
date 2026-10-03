@@ -15,3 +15,6 @@ pub mod health;
 
 /// Canonical, provider-independent indexed content contracts.
 pub mod indexed;
+
+/// Authoritative page read/write ports implemented by the Notion adapter.
+pub mod backend;
