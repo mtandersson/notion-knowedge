@@ -32,14 +32,11 @@ async fn main() -> ExitCode {
     };
     let args: Vec<_> = env::args().skip(1).collect();
     if let Some(position) = args.iter().position(|arg| arg == "--crawl-dry-run") {
-        let roots = match args[position + 1..]
-            .iter()
-            .map(|root| notion_knowledge_notion::pages::page_id(root))
-            .collect::<Result<Vec<_>, _>>()
+        let (roots, rules) = match notion_knowledge_server::crawl_args::parse(&args[position + 1..])
         {
-            Ok(roots) if !roots.is_empty() => roots,
-            _ => {
-                eprintln!("--crawl-dry-run requires one or more Notion root page IDs or links.");
+            Ok(scope) => scope,
+            Err(error) => {
+                eprintln!("Invalid discovery scope: {error}.");
                 return ExitCode::from(2);
             }
         };
@@ -56,7 +53,7 @@ async fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        return match client.crawl_roots(&roots).await {
+        return match client.crawl_with_exclusions(&roots, &rules).await {
             Ok(report) => {
                 // Output intentionally includes discovered titles/links; no
                 // content is printed before the complete read-only run succeeds.

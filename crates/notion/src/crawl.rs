@@ -3,7 +3,8 @@ use crate::{NotionClient, pages::page_id};
 use notion_knowledge_core::{
     backend::{BackendError, BackendErrorKind, BackendFuture, PageId},
     discovery::{
-        DiscoveredPage, DiscoveryReport, ScopedDiscovery, SkipReason, SkippedContent, inaccessible,
+        DiscoveredPage, DiscoveryReport, ExclusionRules, ScopedDiscovery, SkipReason,
+        SkippedContent, SourceType, inaccessible,
     },
 };
 use reqwest::{Method, header::AUTHORIZATION};
@@ -197,6 +198,28 @@ impl NotionClient {
     /// Complete, read-only physical descendant discovery. No index writes, search,
     /// link following, cached progress or persisted secrets. Safely restartable.
     pub async fn crawl_roots(&self, roots: &[PageId]) -> Result<DiscoveryReport, BackendError> {
+        self.crawl_with_exclusions(roots, &ExclusionRules::default())
+            .await
+    }
+    /// The only content handoff is the completed, exclusion-filtered report.
+    pub async fn crawl_with_exclusions(
+        &self,
+        roots: &[PageId],
+        rules: &ExclusionRules,
+    ) -> Result<DiscoveryReport, BackendError> {
+        let rules = ExclusionRules {
+            page_ids: rules
+                .page_ids
+                .iter()
+                .map(|v| page_id(v).map(|v| v.0))
+                .collect::<Result<_, _>>()?,
+            descendants_of: rules
+                .descendants_of
+                .iter()
+                .map(|v| page_id(v).map(|v| v.0))
+                .collect::<Result<_, _>>()?,
+            source_types: rules.source_types.clone(),
+        };
         if roots.is_empty() {
             return Err(error(BackendErrorKind::InvalidInput));
         }
@@ -212,6 +235,9 @@ impl NotionClient {
                 parent: None,
             })
             .collect();
+        // Initial queue contains every root before any descendants. Remove
+        // rejected roots before wiki ancestry can use them as authority.
+        let mut permitted_roots = roots.clone();
         let mut visited = BTreeSet::new();
         let mut pages = BTreeMap::new();
         let mut skipped = BTreeMap::new();
@@ -222,8 +248,28 @@ impl NotionClient {
             if visited.len() > MAX_NODES {
                 return Err(error(BackendErrorKind::Internal));
             }
+            // Resolve configured roots even when excluded: an unknown root is
+            // never a successful empty authorization scope.
+            if node.parent.is_some() {
+                let source = match node.kind {
+                    Kind::Page => Some(SourceType::Page),
+                    Kind::Database => Some(SourceType::Database),
+                    Kind::DataSource => Some(SourceType::DataSource),
+                    Kind::Block => None,
+                };
+                if let Some(reason) = source.and_then(|source| rules.exclusion(&node.id, source)) {
+                    skipped.insert(node.id.clone(), reason);
+                    continue;
+                }
+            }
             let result = self
-                .crawl_node(&node, &roots, &mut queue, &mut pages, &mut skipped)
+                .crawl_node(
+                    &node,
+                    (&permitted_roots, &rules),
+                    &mut queue,
+                    &mut pages,
+                    &mut skipped,
+                )
                 .await;
             if let Err(e) = result {
                 // A configured root must be readable. Only descendants' access
@@ -233,6 +279,9 @@ impl NotionClient {
                 } else {
                     return Err(e);
                 }
+            }
+            if node.parent.is_none() && !pages.contains_key(&node.id) {
+                permitted_roots.remove(&node.id);
             }
             if queue.len() > MAX_NODES {
                 return Err(error(BackendErrorKind::Internal));
@@ -251,6 +300,7 @@ impl NotionClient {
         &self,
         source: &str,
         roots: &BTreeSet<String>,
+        rules: &ExclusionRules,
     ) -> Result<Option<String>, BackendError> {
         let mut current = source.to_owned();
         let mut endpoint = "data_sources";
@@ -258,6 +308,19 @@ impl NotionClient {
         let mut seen = BTreeSet::new();
         let mut owner = None;
         loop {
+            let source_type = match endpoint {
+                "pages" => Some(SourceType::Page),
+                "databases" => Some(SourceType::Database),
+                "data_sources" => Some(SourceType::DataSource),
+                _ => None,
+            };
+            if source_type
+                .and_then(|kind| rules.exclusion(&current, kind))
+                .is_some()
+                || (endpoint == "pages" && rules.descendants_of.contains(&current))
+            {
+                return Ok(None);
+            }
             if endpoint == "pages" && roots.contains(&current) {
                 return Ok(owner);
             }
@@ -303,14 +366,67 @@ impl NotionClient {
             }
         }
     }
+    // Explicit additional roots cannot override exclusion rules on ancestors.
+    // Unreadable/malformed ancestry returns an error, never implicit permission.
+    async fn root_ancestor_exclusion(
+        &self,
+        value: &Value,
+        rules: &ExclusionRules,
+    ) -> Result<Option<SkipReason>, BackendError> {
+        if rules.page_ids.is_empty()
+            && rules.descendants_of.is_empty()
+            && rules.source_types.is_empty()
+        {
+            return Ok(None);
+        }
+        let mut value = value.clone();
+        let mut seen = BTreeSet::new();
+        loop {
+            let kind = text(&value["parent"]["type"])?;
+            let (endpoint, source) = match kind {
+                "workspace" => return Ok(None),
+                "page_id" => ("pages", Some(SourceType::Page)),
+                "block_id" => ("blocks", None),
+                "database_id" => ("databases", Some(SourceType::Database)),
+                "data_source_id" => ("data_sources", Some(SourceType::DataSource)),
+                _ => return Err(error(BackendErrorKind::Internal)),
+            };
+            let current = id(&value["parent"][kind])?;
+            if !seen.insert((endpoint, current.clone())) || seen.len() > MAX_NODES {
+                return Err(error(BackendErrorKind::Internal));
+            }
+            if let Some(reason) = source.and_then(|source| rules.exclusion(&current, source)) {
+                return Ok(Some(reason));
+            }
+            if source == Some(SourceType::Page) && rules.descendants_of.contains(&current) {
+                return Ok(Some(SkipReason::ExcludedDescendants));
+            }
+            value = self
+                .crawl_request(Method::GET, &format!("{endpoint}/{current}"), None)
+                .await?;
+            let object = match endpoint {
+                "pages" => "page",
+                "blocks" => "block",
+                "databases" => "database",
+                _ => "data_source",
+            };
+            if value["object"] != object || id(&value["id"])? != current {
+                return Err(error(BackendErrorKind::Internal));
+            }
+            if archived(&value)? {
+                return Err(error(BackendErrorKind::InvalidInput));
+            }
+        }
+    }
     async fn crawl_node(
         &self,
         node: &Node,
-        roots: &BTreeSet<String>,
+        scope: (&BTreeSet<String>, &ExclusionRules),
         queue: &mut VecDeque<Node>,
         pages: &mut BTreeMap<String, DiscoveredPage>,
         skipped: &mut BTreeMap<String, SkipReason>,
     ) -> Result<(), BackendError> {
+        let (roots, rules) = scope;
         {
             let endpoint = match node.kind {
                 Kind::Page => "pages",
@@ -347,6 +463,18 @@ impl NotionClient {
                 skipped.insert(node.id.clone(), SkipReason::Archived);
                 return Ok(());
             }
+            if node.parent.is_none()
+                && let Some(reason) = self.root_ancestor_exclusion(&value, rules).await?
+            {
+                skipped.insert(node.id.clone(), reason);
+                return Ok(());
+            }
+            if node.kind == Kind::Page
+                && let Some(reason) = rules.exclusion(&node.id, SourceType::Page)
+            {
+                skipped.insert(node.id.clone(), reason);
+                return Ok(());
+            }
             if node.kind == Kind::Block {
                 let kind = text(&value["type"])?;
                 if kind == "link_to_page" {
@@ -377,6 +505,10 @@ impl NotionClient {
             }
             if node.kind == Kind::Page {
                 pages.insert(node.id.clone(), page(&value, &node.id)?);
+                if rules.descendants_of.contains(&node.id) {
+                    skipped.insert(node.id.clone(), SkipReason::ExcludedDescendants);
+                    return Ok(());
+                }
             }
         }
         for value in self.crawl_list(node).await? {
@@ -385,7 +517,7 @@ impl NotionClient {
                 if value["object"] == "data_source" {
                     // Wiki queries expose child databases' data sources. Check
                     // their actual ancestry; a linked external source is not scope.
-                    let owner = match self.source_owner_in_scope(&child_id, roots).await {
+                    let owner = match self.source_owner_in_scope(&child_id, roots, rules).await {
                         Ok(owner) => owner,
                         Err(e) if inaccessible(e.kind) => {
                             skipped.insert(child_id, SkipReason::Inaccessible);
@@ -467,6 +599,13 @@ impl NotionClient {
 impl ScopedDiscovery for NotionClient {
     fn discover<'a>(&'a self, roots: &'a [PageId]) -> BackendFuture<'a, DiscoveryReport> {
         Box::pin(self.crawl_roots(roots))
+    }
+    fn discover_with_exclusions<'a>(
+        &'a self,
+        roots: &'a [PageId],
+        rules: &'a ExclusionRules,
+    ) -> BackendFuture<'a, DiscoveryReport> {
+        Box::pin(self.crawl_with_exclusions(roots, rules))
     }
 }
 
@@ -941,6 +1080,242 @@ mod tests {
                 client.crawl_roots(&roots).await.unwrap_err().kind,
                 BackendErrorKind::InvalidInput
             );
+        }
+    }
+    #[tokio::test]
+    async fn excluded_pages_and_container_types_never_fetch_content_or_enter_handoff() {
+        for source_type in [
+            None,
+            Some(SourceType::Database),
+            Some(SourceType::DataSource),
+            Some(SourceType::Page),
+        ] {
+            let mut rules = ExclusionRules::default();
+            rules.page_ids.insert(CHILD.into());
+            if let Some(kind) = source_type {
+                rules.source_types.insert(kind);
+            }
+            let mut steps = vec![get(
+                format!("pages/{ROOT}"),
+                page_value(ROOT, json!({"type":"workspace","workspace":true})),
+            )];
+            if source_type != Some(SourceType::Page) {
+                steps.push(children(
+                    ROOT,
+                    vec![
+                        block(CHILD, ROOT, "child_page", false),
+                        block(DB, ROOT, "child_database", false),
+                    ],
+                ));
+                if source_type != Some(SourceType::Database) {
+                    steps.push(get(
+                        format!("databases/{DB}"),
+                        database(DB, ROOT, vec![SOURCE]),
+                    ));
+                    if source_type != Some(SourceType::DataSource) {
+                        steps.push(get(format!("data_sources/{SOURCE}"), source(SOURCE, DB)));
+                        steps.push((
+                            format!("POST /v1/data_sources/{SOURCE}/query"),
+                            200,
+                            list(vec![], None),
+                        ));
+                    }
+                }
+            }
+            let (client, task) = mock(steps).await;
+            let report = client
+                .crawl_with_exclusions(&roots(), &rules)
+                .await
+                .unwrap();
+            assert_eq!(
+                report
+                    .pages
+                    .iter()
+                    .map(|p| p.id.as_str())
+                    .collect::<Vec<_>>(),
+                if source_type == Some(SourceType::Page) {
+                    vec![]
+                } else {
+                    vec![ROOT]
+                }
+            );
+            assert!(report.skipped.iter().any(|s| matches!(
+                s.reason,
+                SkipReason::ExcludedPage | SkipReason::ExcludedSourceType
+            )));
+            // Mock accepts ONLY permitted metadata/listing requests: a request for
+            // excluded content fails the actual HTTP boundary, not just output.
+            task.await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn descendant_rules_keep_named_page_but_prune_children_and_cannot_be_overridden_by_roots()
+    {
+        let mut rules = ExclusionRules::default();
+        rules.descendants_of.insert(ROOT.into());
+        let (client, task) = mock(vec![
+            get(
+                format!("pages/{ROOT}"),
+                page_value(ROOT, json!({"type":"workspace","workspace":true})),
+            ),
+            get(
+                format!("pages/{CHILD}"),
+                page_value(CHILD, parent_value("page_id", ROOT)),
+            ),
+        ])
+        .await;
+        let report = client
+            .crawl_with_exclusions(&[PageId(ROOT.into()), PageId(CHILD.into())], &rules)
+            .await
+            .unwrap();
+        assert_eq!(
+            report
+                .pages
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![ROOT]
+        );
+        assert!(
+            report
+                .skipped
+                .iter()
+                .all(|s| s.reason == SkipReason::ExcludedDescendants)
+        );
+        task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn excluded_or_ancestry_unresolved_roots_still_fail_closed() {
+        let mut rules = ExclusionRules::default();
+        rules.page_ids.insert(ROOT.into());
+        let (client, task) = mock(vec![(format!("GET /v1/pages/{ROOT}"), 404, json!({}))]).await;
+        assert!(
+            client
+                .crawl_with_exclusions(&roots(), &rules)
+                .await
+                .is_err()
+        );
+        task.await.unwrap();
+        rules.page_ids.clear();
+        rules.page_ids.insert(OUT.into());
+        let (client, task) = mock(vec![
+            get(
+                format!("pages/{ROOT}"),
+                page_value(ROOT, parent_value("page_id", CHILD)),
+            ),
+            (format!("GET /v1/pages/{CHILD}"), 403, json!({})),
+        ])
+        .await;
+        assert!(
+            client
+                .crawl_with_exclusions(&roots(), &rules)
+                .await
+                .is_err()
+        );
+        task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn wiki_sources_cannot_cross_an_excluded_ancestor_to_authorize_content() {
+        let nested = "00000000-0000-0000-0000-000000000009";
+        let mut rules = ExclusionRules::default();
+        rules.page_ids.insert(CHILD.into());
+        let (client, task) = mock(vec![
+            get(
+                format!("pages/{ROOT}"),
+                page_value(ROOT, json!({"type":"workspace","workspace":true})),
+            ),
+            children(ROOT, vec![block(DB, ROOT, "child_database", false)]),
+            get(format!("databases/{DB}"), database(DB, ROOT, vec![SOURCE])),
+            get(format!("data_sources/{SOURCE}"), source(SOURCE, DB)),
+            (
+                format!("POST /v1/data_sources/{SOURCE}/query"),
+                200,
+                list(vec![source(nested, OUT)], None),
+            ),
+            get(format!("data_sources/{nested}"), source(nested, OUT)),
+            get(
+                format!("databases/{OUT}"),
+                database(OUT, CHILD, vec![nested]),
+            ),
+        ])
+        .await;
+        let report = client
+            .crawl_with_exclusions(&roots(), &rules)
+            .await
+            .unwrap();
+        assert_eq!(
+            report
+                .pages
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![ROOT]
+        );
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|s| s.id == nested && s.reason == SkipReason::OutsideScope)
+        );
+        task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn wiki_sources_cannot_use_a_rejected_second_root_as_scope_authority() {
+        let nested = "00000000-0000-0000-0000-000000000009";
+        for descendants_only in [false, true] {
+            let mut rules = ExclusionRules::default();
+            if descendants_only {
+                rules.descendants_of.insert(OUT.into());
+            } else {
+                rules.page_ids.insert(OUT.into());
+            }
+            let (client, task) = mock(vec![
+                get(
+                    format!("pages/{ROOT}"),
+                    page_value(ROOT, json!({"type":"workspace","workspace":true})),
+                ),
+                children(ROOT, vec![block(DB, ROOT, "child_database", false)]),
+                get(
+                    format!("pages/{CHILD}"),
+                    page_value(CHILD, parent_value("page_id", OUT)),
+                ),
+                get(format!("databases/{DB}"), database(DB, ROOT, vec![SOURCE])),
+                get(format!("data_sources/{SOURCE}"), source(SOURCE, DB)),
+                (
+                    format!("POST /v1/data_sources/{SOURCE}/query"),
+                    200,
+                    list(vec![source(nested, ROW)], None),
+                ),
+                get(format!("data_sources/{nested}"), source(nested, ROW)),
+                get(
+                    format!("databases/{ROW}"),
+                    database(ROW, CHILD, vec![nested]),
+                ),
+                get(
+                    format!("pages/{CHILD}"),
+                    page_value(CHILD, parent_value("page_id", OUT)),
+                ),
+            ])
+            .await;
+            let report = client
+                .crawl_with_exclusions(&[PageId(ROOT.into()), PageId(CHILD.into())], &rules)
+                .await
+                .unwrap();
+            assert_eq!(
+                report
+                    .pages
+                    .iter()
+                    .map(|p| p.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec![ROOT]
+            );
+            assert!(
+                report
+                    .skipped
+                    .iter()
+                    .any(|s| s.id == nested && s.reason == SkipReason::OutsideScope)
+            );
+            task.await.unwrap();
         }
     }
 }
