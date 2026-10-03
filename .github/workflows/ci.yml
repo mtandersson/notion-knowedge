@@ -317,20 +317,6 @@ jobs:
       - name: Verify final runtime image
         run: python3 scripts/smoke-container.py --prebuilt --builder-image notion-knowledge:smoke-builder
 
-      # A cached final image may skip materializing its compiler dependencies.
-      # Make the verified compiler result a root before exporting the whole graph.
-      - name: Retain verified compilation cache result
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          platforms: linux/amd64
-          target: builder
-          build-args: VERSION=${{ steps.identity.outputs.version }}
-          cache-from: |
-            type=gha,scope=nk-container-v1-${{ runner.os }}-${{ runner.arch }}-main
-            type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}
-
       # Export only after all final-image interactions pass. PR caches are
       # isolated by GitHub's merge-ref scope and cannot poison main restores.
       - name: Export verified compilation layers
@@ -339,10 +325,9 @@ jobs:
         with:
           context: .
           platforms: linux/amd64
-          build-args: |
-            VERSION=${{ steps.identity.outputs.version }}
-            REVISION=${{ github.sha }}
-          # Preserve remote links as well as the explicitly retained local result.
+          target: builder
+          build-args: VERSION=${{ steps.identity.outputs.version }}
+          # Resolve the stable compiler root from the same trusted cache inputs.
           cache-from: |
             type=gha,scope=nk-container-v1-${{ runner.os }}-${{ runner.arch }}-main
             type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}
