@@ -15,8 +15,8 @@ this model; adding it requires a new review. Notion is authoritative. Derived
 local content is disposable but remains confidential, including embeddings,
 page titles, graph edges, checkpoints and backups.
 
-Today [the MCP handler](../crates/mcp/src/lib.rs) advertises an empty tool
-catalog. [The Notion](../crates/notion/src/lib.rs) and
+Today [the MCP handler](../crates/mcp/src/lib.rs) advertises the contract-only `knowledge_search` tool, which returns
+an explicit retrieval-unavailable error without results. [The Notion](../crates/notion/src/lib.rs) and
 [retrieval](../crates/retrieval/src/lib.rs) adapters are placeholders: there
 are no Notion requests, active local databases, webhook endpoint, file fetcher
 or embedding provider. The stdio and HTTP transports are implemented. None of
@@ -76,7 +76,7 @@ Server -- document chunks --> local model OR explicit remote embedding provider
 Server -- minimized tool results --> MCP client / ChatGPT (external recipient)
 ```
 
-Except stdio/HTTP with an empty catalog, these are intended flows. Each arrow
+Except stdio/HTTP with the contract-only search catalog, these are intended flows. Each arrow
 crosses a boundary even when the same process wires the components. Content
 crossing from Notion, files or retrieval into the agent is data, never an
 instruction or authorization grant. Sending a tool result to ChatGPT transfers
