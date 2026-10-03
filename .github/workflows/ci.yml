@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - main
+      - bench185-base
   push:
     branches:
       - main
