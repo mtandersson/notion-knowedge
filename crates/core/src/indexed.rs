@@ -31,10 +31,7 @@ pub enum PropertyValue {
     Number(f64),
     Boolean(bool),
     Strings(Vec<String>),
-    Date {
-        start: String,
-        end: Option<String>,
-    },
+    Date { start: String, end: Option<String> },
     PageIds(Vec<String>),
     PersonIds(Vec<String>),
 }
@@ -43,16 +40,9 @@ pub enum PropertyValue {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LinkTarget {
-    External {
-        url: String,
-    },
-    Page {
-        page_id: String,
-    },
-    Block {
-        page_id: String,
-        block_id: String,
-    },
+    External { url: String },
+    Page { page_id: String },
+    Block { page_id: String, block_id: String },
 }
 
 /// Metadata needed to cite and refresh either a page or a chunk independently.
