@@ -24,3 +24,6 @@ pub mod discovery;
 
 /// Semantic Markdown chunk drafts, before hashing and ID assignment.
 pub mod chunking;
+
+/// Versioned content fingerprints and cross-run chunk identities.
+pub mod fingerprint;

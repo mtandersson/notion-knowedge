@@ -261,7 +261,9 @@ depend on MCP, Notion, LanceDB, SQLite, or HTTP implementation types.
 The [canonical indexed content contract](docs/indexed-content.md) defines the
 versioned page/chunk records shared by discovery and retrieval. The
 [heading-aware Markdown chunker](docs/markdown-chunking.md) produces semantic
-chunk drafts with citation metadata and original source offsets.
+chunk drafts with citation metadata and original source offsets. The
+[versioned fingerprint stage](docs/content-fingerprints.md) assigns content hashes
+and reconciles stable chunk identities against a preceding snapshot.
 
 The [authoritative backend contract](docs/notion-backend.md) defines typed
 read/write capabilities and normalized failures independently of API transports.
