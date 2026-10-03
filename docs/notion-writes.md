@@ -11,7 +11,7 @@ The receipt contains the authoritative stable page ID and URL.
 `append_content(AppendPageContent)` accepts common Markdown directly, including
 headings, paragraphs, emphasis, links, lists, tasks and code fences. It sends
 only `insert_content` with explicit `position: {type: end}`. Existing content is
-preserved. No replacement, delete permission, selection, automatic retries,
+preserved. No replacement, delete permission, selection, ambiguous-failure retries,
 batching or asynchronous task execution is requested. Upstream conversion is
 Notion's enhanced Markdown parser, so callers do not construct block JSON.
 
@@ -23,7 +23,8 @@ additional parsing/block-count limits. Responses are capped at 2 MiB. A timeout,
 interrupted/malformed response or unexpected async receipt is a failure, not
 proof the mutation did not happen. Callers must reconcile rather than blindly
 retry a non-idempotent create or append. Raw bodies and credentials never
-appear in returned errors. Rate limiting and Retry-After policy belong to #23.
+appear in returned errors. [Shared admission and Retry-After policy](notion-rate-limits.md) applies to every
+request; only explicit 429/529 rejection can automatically replay a mutation.
 
 The Markdown operations use `Notion-Version: 2026-03-11`; identity probing
 retains its separate `2022-06-28` version. Official references checked

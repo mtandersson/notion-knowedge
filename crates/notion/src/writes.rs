@@ -57,7 +57,7 @@ impl NotionClient {
         })
     }
 
-    /// Append only: no selection, replacement, deletion, batching or automatic retries.
+    /// Append only: no selection, replacement, deletion, batching or ambiguous-failure retries.
     pub async fn append_content(&self, request: AppendPageContent) -> Result<(), BackendError> {
         let operation = "notion.append";
         if !valid_id(&request.page_id) || request.markdown.trim().is_empty() {
@@ -89,16 +89,14 @@ impl NotionClient {
         if body.len() > 500 * 1024 {
             return Err(failure(operation, BackendErrorKind::InvalidInput));
         }
-        let mut response = self
+        let request = self
             .http
             .request(method, format!("{}{path}", self.api_root))
             .header(AUTHORIZATION, self.authorization.clone())
             .header("Notion-Version", MARKDOWN_VERSION)
             .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await
-            .map_err(|_| failure(operation, BackendErrorKind::Unavailable))?;
+            .body(body);
+        let mut response = self.send(request, false, operation).await?;
         if response.status().as_u16() != 200 {
             let kind = match response.status().as_u16() {
                 400 => BackendErrorKind::InvalidInput,
@@ -139,7 +137,9 @@ mod tests {
         body: &str,
     ) -> (NotionClient, tokio::task::JoinHandle<(String, Value)>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut client = NotionClient::integration("test-credential").unwrap();
+        let mut client = NotionClient::integration("test-credential")
+            .unwrap()
+            .without_retries();
         client.api_root = format!("http://{}/v1", listener.local_addr().unwrap());
         let body = body.to_owned();
         let server = tokio::spawn(async move {
@@ -235,7 +235,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn writes_surface_sanitized_failures_without_retrying_or_replacing() {
+    async fn single_attempt_writes_surface_sanitized_failures_without_replacing() {
         for (status, kind) in [
             (400, BackendErrorKind::InvalidInput),
             (403, BackendErrorKind::PermissionDenied),
@@ -259,7 +259,9 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_inputs_are_rejected_before_network_mutation() {
-        let client = NotionClient::integration("test-credential").unwrap();
+        let client = NotionClient::integration("test-credential")
+            .unwrap()
+            .without_retries();
         for id in ["", "../users/me", "12345678-1234-1234-1234-123456789abz"] {
             assert_eq!(
                 client

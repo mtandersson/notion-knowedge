@@ -22,3 +22,6 @@ pub mod content;
 pub mod links;
 
 pub mod replacement;
+
+mod transport;
+pub use transport::RequestMetrics;

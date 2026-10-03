@@ -24,7 +24,6 @@ does not print private identity metadata.
 Failures use the core sanitized backend contract: 401 is `Unauthenticated`,
 403 `PermissionDenied`, 429 `RateLimited`, network failures and 5xx
 `Unavailable`, and malformed responses/unexpected statuses `Internal`.
-There are no automatic retries. Retry policy and read/write ports belong to
-subsequent tickets. No identity request uses live credentials in ordinary CI;
+Requests use the [shared limiter and bounded retry policy](notion-rate-limits.md). No identity request uses live credentials in ordinary CI;
 mock HTTP tests exercise request headers, success, authentication/transient
 failure distinctions and malformed identities.

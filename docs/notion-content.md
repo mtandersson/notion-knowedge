@@ -19,7 +19,8 @@ well as record-limit truncation. This read does not fetch those subtrees or
 return a misleading partial success. Empty Markdown is a valid empty page.
 Malformed/wrong-object/wrong-ID responses and responses over 8 MiB fail closed.
 Upstream failures use sanitized core error classes; private response bodies,
-content and credentials are never logged. There is no retry or cache here.
+content and credentials are never logged. There is no cache; requests use the
+[shared limiter and bounded retry policy](notion-rate-limits.md).
 
 This is an exact raw authoritative read, not an indexing authorization layer.
 Index consumers must first use the fresh `crawl_with_exclusions` report and

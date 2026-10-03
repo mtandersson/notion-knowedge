@@ -31,8 +31,8 @@ reveal whether a 404 is absence or lack of access), explicit 403 to
 Transport failures are `Unavailable`; malformed or inconsistent page responses
 are `Internal`. Errors contain neither credentials nor raw upstream bodies.
 The adapter disables redirects, uses its existing 15-second timeout and bounds
-metadata bodies at 2 MiB. It performs no automatic retry. Retry-After policy
-remains #23.
+metadata bodies at 2 MiB. Requests use the
+[shared limiter and bounded retry policy](notion-rate-limits.md).
 
 This operation uses `Notion-Version: 2026-03-11`. Official references checked
 2026-10-03:
