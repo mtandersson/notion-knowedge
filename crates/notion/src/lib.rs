@@ -6,3 +6,6 @@
 
 /// Stable component identifier used by the bootstrap composition smoke check.
 pub const COMPONENT: &str = "notion";
+
+pub mod client;
+pub use client::{IntegrationIdentity, NotionClient};

@@ -215,7 +215,11 @@ configuration debug output.
 The bootstrap needs no configuration or credentials by default. These settings
 establish the composition-root configuration for the HTTP transport
 and Notion adapter; the stdio server does not open a listener. Neither transport
-makes Notion requests yet.
+makes Notion requests during normal startup. Use the explicit on-demand probe
+`cargo run -p notion-knowledge-server -- --notion-identity` to verify the configured
+integration against Notion. It requires `NK_NOTION_AUTH=integration` and
+`NOTION_TOKEN` from the secret environment, prints only a success message or a
+sanitized failure class, and exits without starting an MCP transport.
 
 | Variable | Default | Accepted values |
 | --- | --- | --- |
@@ -278,3 +282,6 @@ boundary; the current bootstrap does not implement MCP authentication.
 Architecture Decision Records live in [`docs/adr/`](docs/adr/README.md).
 The ADR README documents when to write one, numbering, status transitions,
 review expectations, and how decisions are superseded.
+
+The [integration identity client](docs/notion-identity.md) documents the API
+version, failure classes and credential boundary.
