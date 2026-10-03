@@ -93,3 +93,9 @@ scans, passed for production and probe runs. Temporary probe scripts, extra
 Actions-read permission, and workflow steps are removed before merge; the
 run/commit links retain reproducible code and immutable logs. #168/#169/#155
 retain the separate Cargo/Nix and full comparative objectives.
+
+## Subsequent source-changing PR investigation
+
+The [#185 causal evidence](docker-cache-causal-evidence.md) preserves the later
+#174 miss and examines lazy compiler-result retention across warm reexports.
+The historical runs above remain unchanged observations within their stated scope.
