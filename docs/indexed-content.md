@@ -33,7 +33,7 @@ representable. Hash algorithm, canonical hash input, stable chunk-ID generation,
 normalization and link extraction remain the responsibility of #30–#33; this
 contract does not calculate them. The [heading-aware chunker](markdown-chunking.md)
 produces lossless drafts with source offsets and citation metadata; IDs and
-hashes remain a separate stage. Document hashes cover document content and
+hashes are assigned by the [versioned fingerprint stage](content-fingerprints.md). Document hashes cover document content and
 chunk hashes cover chunk content. Neither record contains vectors or storage
 provider types. Additive optional fields can be compatible; changes to meanings,
 required fields or tagged variants require an explicit schema migration/version.
