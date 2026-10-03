@@ -30,6 +30,48 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let args: Vec<_> = env::args().skip(1).collect();
+    if let Some(position) = args.iter().position(|arg| arg == "--crawl-dry-run") {
+        let roots = match args[position + 1..]
+            .iter()
+            .map(|root| notion_knowledge_notion::pages::page_id(root))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(roots) if !roots.is_empty() => roots,
+            _ => {
+                eprintln!("--crawl-dry-run requires one or more Notion root page IDs or links.");
+                return ExitCode::from(2);
+            }
+        };
+        let notion_knowledge_server::config::NotionAuth::Integration(token) = &config.notion_auth
+        else {
+            eprintln!("Discovery requires NK_NOTION_AUTH=integration.");
+            return ExitCode::from(2);
+        };
+        let client = match notion_knowledge_notion::NotionClient::integration(token.expose_secret())
+        {
+            Ok(client) => client,
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        return match client.crawl_roots(&roots).await {
+            Ok(report) => {
+                // Output intentionally includes discovered titles/links; no
+                // content is printed before the complete read-only run succeeds.
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).expect("serializable discovery")
+                );
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if env::args().skip(1).any(|arg| arg == "--notion-identity") {
         let notion_knowledge_server::config::NotionAuth::Integration(token) = &config.notion_auth
         else {

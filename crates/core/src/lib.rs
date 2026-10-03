@@ -18,3 +18,6 @@ pub mod indexed;
 
 /// Authoritative page read/write ports implemented by the Notion adapter.
 pub mod backend;
+
+/// Read-only discovery under explicit configured roots.
+pub mod discovery;

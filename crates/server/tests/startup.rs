@@ -114,3 +114,24 @@ fn identity_probe_requires_explicit_integration_configuration_without_serving() 
     assert!(stderr.contains("requires NK_NOTION_AUTH=integration"));
     assert!(!stderr.contains("bootstrap ready"));
 }
+
+#[test]
+fn discovery_dry_run_validates_explicit_roots_and_auth_before_starting_a_transport() {
+    for args in [
+        vec!["--crawl-dry-run"],
+        vec!["--crawl-dry-run", "private-invalid-root"],
+        vec!["--crawl-dry-run", "00000000-0000-0000-0000-000000000001"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_notion-knowledge-server"))
+            .env_clear()
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let diagnostic = String::from_utf8(output.stderr).unwrap();
+        assert!(!diagnostic.contains("private-invalid-root"));
+        assert!(!diagnostic.contains("Serving MCP"));
+        assert!(!diagnostic.contains("bootstrap ready"));
+    }
+}

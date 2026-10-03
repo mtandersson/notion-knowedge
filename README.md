@@ -288,5 +288,8 @@ version, failure classes and credential boundary.
 The [page write primitives](docs/notion-writes.md) document Markdown creation
 and append semantics.
 
+The [scoped root crawler](docs/notion-discovery.md) documents read-only discovery,
+physical ancestry boundaries and the `--crawl-dry-run` command.
+
 The [exact page metadata read](docs/notion-pages.md) documents IDs, links,
 normalized properties and response completeness.
