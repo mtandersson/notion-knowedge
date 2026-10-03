@@ -76,7 +76,7 @@ impl NotionClient {
         Ok(())
     }
 
-    async fn write(
+    pub(crate) async fn write(
         &self,
         method: Method,
         path: &str,
