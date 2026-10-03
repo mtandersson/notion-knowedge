@@ -301,6 +301,7 @@ jobs:
             VERSION=${{ steps.identity.outputs.version }}
             REVISION=${{ github.sha }}
           cache-from: |
+            type=gha,scope=nk-container-v1-${{ runner.os }}-${{ runner.arch }}-main
             type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}
 
       - name: Load pinned builder for permission probe
@@ -327,6 +328,7 @@ jobs:
           target: builder
           build-args: VERSION=${{ steps.identity.outputs.version }}
           cache-from: |
+            type=gha,scope=nk-container-v1-${{ runner.os }}-${{ runner.arch }}-main
             type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}
 
       # Export only after all final-image interactions pass. PR caches are
@@ -342,6 +344,7 @@ jobs:
             REVISION=${{ github.sha }}
           # Preserve remote links as well as the explicitly retained local result.
           cache-from: |
+            type=gha,scope=nk-container-v1-${{ runner.os }}-${{ runner.arch }}-main
             type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}
           cache-to: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }},mode=max,timeout=10m
 
