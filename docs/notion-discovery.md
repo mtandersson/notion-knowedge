@@ -75,3 +75,47 @@ contracts and workspace tests for CLI validation. Tests require no Notion
 credentials or external account and verify actual request methods, paths,
 versions, pagination bodies, scope boundaries, failure/restart semantics and
 cycle termination. No live integration crawl was performed for this change.
+
+## Exclusions and ignore rules
+
+Pass repeated `--exclude-page ID`, `--exclude-descendants ID`, and
+`--exclude-source-type page|database|data_source` options after
+`--crawl-dry-run`, together with explicit roots. IDs accept the same normalized
+Notion IDs/links as roots. For example:
+
+```sh
+cargo run -p notion-knowledge-server -- --crawl-dry-run ROOT_PAGE_ID \
+  --exclude-page PRIVATE_PAGE_ID --exclude-descendants METADATA_ONLY_PAGE_ID \
+  --exclude-source-type database
+```
+
+`ExclusionRules` is the provider-independent core policy, applied by
+`crawl_with_exclusions`. Page exclusions prune the page and its whole physical
+subtree. Descendant rules retain the named page's metadata but never enumerate
+its children. Source types describe physical Notion objects: `page` excludes
+all pages, `database` prunes databases and their rows, and `data_source` prunes
+source queries and their rows. They are not file extensions or block types.
+Rules combine by exclusion; no root or allow rule overrides them. Additional
+explicit roots under an excluded ancestor are excluded too. Roots must still
+resolve, including excluded roots. When rules require ancestor checks, denied,
+missing, cyclic, archived or malformed ancestry fails closed with no report.
+
+Dry-run reports use `excluded_page`, `excluded_descendants`, and
+`excluded_source_type` reasons. A pruned container accounts for its whole
+subtree; individual unknown descendants cannot be enumerated without reading
+excluded content. Existing `outside_scope` reasons also cover wiki sources
+whose ancestry crosses an exclusion boundary. Reasons include IDs only, never
+excluded titles/content. Known excluded descendant objects are pruned before
+fetching their content. Listing authorized parents can necessarily expose child
+IDs or metadata returned by Notion; these are never included as allowed pages.
+
+The completed report's `pages` is the only current indexing handoff: excluded
+pages cannot reach downstream extraction, chunking or embeddings through it.
+There is currently no embedding/index writer. Future writers must consume a
+fresh report from `crawl_with_exclusions`, accept only its page IDs before any
+content fetch or embedding call, and replace their previous scope snapshot
+(including deleting formerly allowed pages when rules change). Raw backend
+reads and `crawl_roots` (the explicitly empty-rule compatibility API) do not
+apply a separate configured policy automatically. A failed run provides no
+handoff; callers must not treat it as authorization to reuse old scope. The
+same concurrent-edit/snapshot limitations above apply to exclusion ancestry.

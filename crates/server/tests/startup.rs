@@ -135,3 +135,26 @@ fn discovery_dry_run_validates_explicit_roots_and_auth_before_starting_a_transpo
         assert!(!diagnostic.contains("bootstrap ready"));
     }
 }
+
+#[test]
+fn invalid_exclusion_options_fail_before_credentials_or_network_and_do_not_echo_values() {
+    for options in [
+        vec!["--exclude-page", "private-invalid-id"],
+        vec!["--exclude-descendants"],
+        vec!["--exclude-source-type", "private-unknown-type"],
+        vec!["--unknown-rule"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_notion-knowledge-server"))
+            .env_clear()
+            .args(["--crawl-dry-run", "00000000000000000000000000000001"])
+            .args(options)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("Invalid discovery scope"));
+        assert!(!stderr.contains("private"));
+        assert!(!stderr.contains("Discovery requires"));
+    }
+}

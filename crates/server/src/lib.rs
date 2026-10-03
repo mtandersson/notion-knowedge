@@ -3,3 +3,5 @@
 pub mod config;
 pub mod diagnostics;
 pub mod http;
+
+pub mod crawl_args;
