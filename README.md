@@ -254,6 +254,9 @@ crates/
 Dependency direction is defined by ADR 0001. In particular, `core` must not
 depend on MCP, Notion, LanceDB, SQLite, or HTTP implementation types.
 
+The [canonical indexed content contract](docs/indexed-content.md) defines the
+versioned page/chunk records shared by discovery and retrieval.
+
 ## Retrieval evaluation
 
 A bilingual, privacy-conscious fixture corpus and graded query judgments live in
