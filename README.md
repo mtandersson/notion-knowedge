@@ -293,3 +293,6 @@ physical ancestry boundaries and the `--crawl-dry-run` command.
 
 The [exact page metadata read](docs/notion-pages.md) documents IDs, links,
 normalized properties and response completeness.
+
+The [authoritative content read](docs/notion-content.md) preserves nested
+enhanced Markdown and surfaces unsupported or incomplete content explicitly.
