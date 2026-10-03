@@ -20,4 +20,8 @@ for(const {Scope} of scopes){
  console.log('CACHE_INDEX_LOOKUP '+JSON.stringify(result));
 }
 }
+if(process.env.RUN_CACHE_INVALIDATION_PROBES==='true'){
+ const probe=cp.spawnSync('python3',['scripts/task-185-cache-probe.py'],{stdio:'inherit',env:process.env});
+ if(probe.status!==0)throw new Error('Changed-input cache probes failed');
+}
 })().catch(error=>{console.error(error.message);process.exitCode=1;});

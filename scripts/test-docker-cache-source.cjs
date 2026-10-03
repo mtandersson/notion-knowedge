@@ -94,3 +94,23 @@ test('Read-only fork authorization uses main without cache writes or credential 
     fs.rmSync(directory, {recursive: true});
   }
 });
+
+test('A cache outage leaves both imports empty and keeps private errors out of logs', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nk-cache-source-'));
+  const output = path.join(directory, 'output');
+  const claims = {ac: JSON.stringify([{Scope: ref}, {Scope: 'refs/heads/main'}])};
+  const token = `test-only.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.test-only`;
+  const privateURL = new URL('https://cache.invalid/download');
+  privateURL.searchParams.set('sig', 'test-only-value');
+  const logs = [];
+  try {
+    await run({DOCKER_CACHE_SCOPE: scope, GITHUB_REF: ref, RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64',
+      ACTIONS_RESULTS_URL: args.serviceURL, ACTIONS_RUNTIME_TOKEN: token, GITHUB_OUTPUT: output},
+    async () => { throw new Error(privateURL.href + ' ' + token); }, line => logs.push(line));
+    assert.equal(fs.readFileSync(output, 'utf8'), 'final-cache-from=\nbuilder-cache-from=\n');
+    assert.equal(logs.join('\n').includes(privateURL.href), false);
+    assert.equal(logs.join('\n').includes(token), false);
+  } finally {
+    fs.rmSync(directory, {recursive: true});
+  }
+});

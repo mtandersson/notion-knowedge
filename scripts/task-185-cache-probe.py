@@ -1,6 +1,6 @@
 """Task-owned temporary probes; never part of production CI."""
 from pathlib import Path
-import os, shutil, subprocess, tempfile, time
+import hashlib, json, os, re, shutil, subprocess, tempfile, time
 root=Path.cwd()
 revision=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
 import tomllib
@@ -28,8 +28,28 @@ for variant in ['source','lockfile','builder-pin']:
         image=f'notion-knowledge:probe-{variant}'
         start=time.monotonic()
         print(f'PROBE {variant} START revision={revision} version={version}',flush=True)
-        subprocess.run(['docker','buildx','build','--progress=plain','--load','--build-arg',f'VERSION={version}',
-                        '--build-arg',f'REVISION={revision}','--tag',image,str(context)],check=True)
+        command=['docker','buildx','build','--progress=plain','--load','--build-arg',f'VERSION={version}',
+                 '--build-arg',f'REVISION={revision}','--tag',image]
+        cache_from=os.environ.get('PROBE_CACHE_FROM')
+        if cache_from:
+            command += ['--cache-from', cache_from]
+        command.append(str(context))
+        process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+        lines=[]
+        for line in process.stdout:
+            lines.append(line); print(line,end='',flush=True)
+        assert process.wait()==0, f'{variant} image build failed'
+        compiles=len(re.findall(r'\bCompiling \S+ v',''.join(lines)))
+        assert compiles>0, f'{variant} unexpectedly reused the unchanged compiler result'
+        container=subprocess.check_output(['docker','create',image],text=True).strip()
+        try:
+            binary=context/'.probe-binary'
+            subprocess.run(['docker','cp',container+':/usr/local/bin/notion-knowledge-server',str(binary)],check=True)
+            data=binary.read_bytes()
+            print('INVALIDATION_RESULT '+json.dumps({'variant':variant,'compiled_crates':compiles,
+                  'binary_sha256':hashlib.sha256(data).hexdigest(),'revision':revision,'cache_from':cache_from}),flush=True)
+        finally:
+            subprocess.run(['docker','rm',container],check=True,stdout=subprocess.DEVNULL)
         print(f'PROBE {variant} BUILD_SECONDS={time.monotonic()-start:.2f}',flush=True)
         builder='notion-knowledge:smoke-builder'
         if variant=='builder-pin':

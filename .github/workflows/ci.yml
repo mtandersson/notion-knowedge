@@ -371,6 +371,14 @@ jobs:
       - name: Record exported cache roots
         uses: ./.github/actions/docker-cache-probe
 
+
+      - name: Verify source lockfile and builder cache invalidation
+        uses: ./.github/actions/docker-cache-probe
+        env:
+          RUN_CACHE_INVALIDATION_PROBES: 'true'
+          PROBE_CACHE_FROM: ${{ steps.docker-cache-source.outputs.final-cache-from }}
+
+
   dependencies:
     name: Dependency vulnerabilities
     runs-on: ubuntu-latest
