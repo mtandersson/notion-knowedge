@@ -1,3 +1,4 @@
+mod common;
 use std::{process::Stdio, time::Duration};
 
 use reqwest::{Client, Response, StatusCode};
@@ -123,7 +124,18 @@ async fn http_client_initializes_discovers_calls_and_receives_structured_errors(
         let tools = frame(post().json(&json!({"jsonrpc":"2.0", "id":2, "method":"tools/list"}))
             .send().await.unwrap()).await;
         assert_eq!(tools["id"], 2);
-        assert_eq!(tools["result"]["tools"], json!([]));
+        common::assert_search_catalog(&tools["result"]["tools"]);
+        for mode in ["semantic", "lexical", "hybrid"] {
+            let result = frame(post().json(&json!({"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"knowledge_search","arguments":{"query":"notes","limit":1,"mode":mode}}})).send().await.unwrap()).await;
+            assert_eq!(result["result"]["isError"], true);
+            assert!(result["result"]["content"][0]["text"].as_str().unwrap().starts_with("retrieval_unavailable:"));
+            assert!(result["result"].get("structuredContent").is_none());
+        }
+        for arguments in [json!({"query":"secret-input","limit":1,"mode":"hybrid","filters":null}),json!({"query":"secret-input","limit":1,"mode":"hybrid","filters":{"page_ids":null}}),json!({"query":" ","limit":1,"mode":"hybrid"}),json!({"query":"secret-input","limit":0,"mode":"hybrid"}),json!({"query":"secret-input","limit":101,"mode":"hybrid"}),json!({"query":"secret-input","limit":1,"mode":"sql"}),json!({"query":"secret-input","limit":1,"mode":"hybrid","filters":{"page_ids":[]}}),json!({"query":"secret-input","limit":1,"mode":"hybrid","filters":{"sql":"DROP"}})] {
+            let result = frame(post().json(&json!({"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"knowledge_search","arguments":arguments}})).send().await.unwrap()).await;
+            assert_eq!(result["error"]["code"], -32602);
+            assert!(!result.to_string().contains("secret-input"));
+        }
         let called = frame(post().json(&json!({"jsonrpc":"2.0", "id":3, "method":"tools/call", "params":{"name":"unknown-tool", "arguments":{}}}))
             .send().await.unwrap()).await;
         assert_eq!(called["id"], 3);

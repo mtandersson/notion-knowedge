@@ -846,6 +846,8 @@ version = "0.1.0"
 dependencies = [
  "notion-knowledge-core",
  "rmcp",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

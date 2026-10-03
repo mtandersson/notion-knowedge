@@ -7,3 +7,6 @@ repository.workspace = true
 [dependencies]
 notion-knowledge-core = { path = "../core" }
 rmcp.workspace = true
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

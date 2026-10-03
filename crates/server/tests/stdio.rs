@@ -1,3 +1,4 @@
+mod common;
 use std::io;
 use std::process::Stdio;
 use std::time::Duration;
@@ -35,6 +36,7 @@ async fn stdio_client_initializes_discovers_tools_and_exits_on_disconnect() {
             }}),
             json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
             json!({"jsonrpc": "2.0", "id": 3, "method": "ping"}),
+            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"knowledge_search","arguments":{"query":"find notes","limit":5,"mode":"hybrid","filters":{"page_ids":["page-1"]}}}}),
         ] {
             stdin.write_all(request.to_string().as_bytes()).await?;
             stdin.write_all(b"\n").await?;
@@ -95,6 +97,14 @@ async fn stdio_client_initializes_discovers_tools_and_exits_on_disconnect() {
         initialized["serverInfo"]["version"],
         env!("CARGO_PKG_VERSION")
     );
-    assert_eq!(responses[1]["result"]["tools"], json!([]));
+    common::assert_search_catalog(&responses[1]["result"]["tools"]);
     assert_eq!(responses[2]["result"], json!({}));
+    assert_eq!(responses[3]["result"]["isError"], true);
+    assert!(
+        responses[3]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("retrieval_unavailable:")
+    );
+    assert!(responses[3]["result"].get("structuredContent").is_none());
 }

@@ -25,6 +25,13 @@ def require(condition, message):
         raise AssertionError(message)
 
 
+def search_catalog(value):
+    tools = value.get("tools", [])
+    require(len(tools) == 1 and tools[0]["name"] == "knowledge_search", "Search tool discovery failed")
+    require(tools[0]["inputSchema"]["properties"]["mode"]["enum"] == ["semantic", "lexical", "hybrid"], "Search modes missing")
+    require("score" in tools[0]["outputSchema"]["properties"]["results"]["items"]["properties"], "Search scores missing")
+
+
 def cleanup(name):
     # Some local ZFS Docker installations briefly hold a dataset after exit.
     for attempt in range(5):
@@ -144,7 +151,7 @@ def stdio(image):
                                               "notifications/initialized"}) + "\n")
                 child.stdin.flush()
                 tools = exchange({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-                require(tools == {"tools": []}, "Bootstrap tool catalog must be empty")
+                search_catalog(tools)
                 healthcheck = subprocess.run(
                     ["docker", "exec", name, "/usr/local/bin/notion-knowledge-server", "--healthcheck"],
                     capture_output=True, text=True, timeout=10)
@@ -236,7 +243,8 @@ def http_smoke(image):
         status, _, _ = post({"jsonrpc": "2.0", "method": "notifications/initialized"}, session)
         require(status == 202, "HTTP initialization notification failed")
         status, _, value = post({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, session)
-        require(status == 200 and response(value, 2) == {"tools": []}, "HTTP discovery failed")
+        require(status == 200, "HTTP discovery failed")
+        search_catalog(response(value, 2))
         for headers in [{"Host": "untrusted.example"}, {"Origin": "https://untrusted.example"}]:
             status, _, _ = post({"jsonrpc": "2.0", "id": 3, "method": "ping"}, session, headers)
             require(status == 403, "Untrusted Host/Origin was accepted")
