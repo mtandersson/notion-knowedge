@@ -257,6 +257,9 @@ depend on MCP, Notion, LanceDB, SQLite, or HTTP implementation types.
 The [canonical indexed content contract](docs/indexed-content.md) defines the
 versioned page/chunk records shared by discovery and retrieval.
 
+The [authoritative backend contract](docs/notion-backend.md) defines typed
+read/write capabilities and normalized failures independently of API transports.
+
 ## Retrieval evaluation
 
 A bilingual, privacy-conscious fixture corpus and graded query judgments live in
