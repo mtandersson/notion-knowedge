@@ -108,10 +108,7 @@ impl NotionClient {
         if let Some(body) = body {
             request = request.json(body);
         }
-        let mut response = request
-            .send()
-            .await
-            .map_err(|_| error(BackendErrorKind::Unavailable))?;
+        let mut response = self.send(request, true, "notion.crawl").await?;
         if response.status().as_u16() != 200 {
             return Err(error(match response.status().as_u16() {
                 400 => BackendErrorKind::InvalidInput,
@@ -651,7 +648,9 @@ mod tests {
         steps: Vec<(String, u16, Value)>,
     ) -> (NotionClient, tokio::task::JoinHandle<Vec<String>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut client = NotionClient::integration("test-credential").unwrap();
+        let mut client = NotionClient::integration("test-credential")
+            .unwrap()
+            .without_retries();
         client.api_root = format!("http://{}/v1", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
             let mut requests = Vec::new();
@@ -1074,7 +1073,9 @@ mod tests {
     }
     #[tokio::test]
     async fn empty_or_invalid_scope_is_rejected_without_upstream_requests() {
-        let client = NotionClient::integration("test-credential").unwrap();
+        let client = NotionClient::integration("test-credential")
+            .unwrap()
+            .without_retries();
         for roots in [vec![], vec![PageId("invalid".into())]] {
             assert_eq!(
                 client.crawl_roots(&roots).await.unwrap_err().kind,

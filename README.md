@@ -289,6 +289,8 @@ review expectations, and how decisions are superseded.
 
 The [integration identity client](docs/notion-identity.md) documents the API
 version, failure classes and credential boundary.
+The [shared rate limiter and retry policy](docs/notion-rate-limits.md) covers
+every Notion request and exposes payload-free retry counters.
 The [page write primitives](docs/notion-writes.md) document Markdown creation
 and append semantics.
 

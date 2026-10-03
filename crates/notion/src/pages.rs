@@ -239,17 +239,15 @@ fn metadata(value: &Value, expected: &PageId) -> Result<Page, BackendError> {
     })
 }
 impl NotionClient {
-    /// Fresh exact metadata. Does not read page content, cache, retry or follow links.
+    /// Fresh exact metadata. Does not read page content, cache or follow links.
     pub async fn fetch_page(&self, input: &str) -> Result<Page, BackendError> {
         let id = page_id(input)?;
-        let mut response = self
+        let request = self
             .http
             .get(format!("{}/pages/{}", self.api_root, id.0))
             .header(AUTHORIZATION, self.authorization.clone())
-            .header("Notion-Version", PAGE_VERSION)
-            .send()
-            .await
-            .map_err(|_| error(BackendErrorKind::Unavailable))?;
+            .header("Notion-Version", PAGE_VERSION);
+        let mut response = self.send(request, true, "notion.fetch_page").await?;
         if response.status().as_u16() != 200 {
             return Err(error(match response.status().as_u16() {
                 400 => BackendErrorKind::InvalidInput,
@@ -295,7 +293,9 @@ mod tests {
     }
     async fn fetch(input: &str, status: u16, body: String) -> (Result<Page, BackendError>, String) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut client = NotionClient::integration("test-credential").unwrap();
+        let mut client = NotionClient::integration("test-credential")
+            .unwrap()
+            .without_retries();
         client.api_root = format!("http://{}/v1", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -475,7 +475,9 @@ mod tests {
     }
     #[tokio::test]
     async fn untrusted_links_and_invalid_ids_fail_before_network_access() {
-        let client = NotionClient::integration("test-credential").unwrap();
+        let client = NotionClient::integration("test-credential")
+            .unwrap()
+            .without_retries();
         for input in [
             "garbage",
             "https://notion.so.evil.test/12345678123412341234123456789abc",

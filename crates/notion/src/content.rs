@@ -25,18 +25,16 @@ struct Markdown {
 impl NotionClient {
     /// Read exact metadata and complete enhanced Markdown without following links.
     /// Unsupported blocks remain visible as Notion's `<unknown .../>` markers.
-    /// Incomplete content fails; no partial success, cache or retry is returned.
+    /// Incomplete content fails; no partial success or cache is returned.
     pub async fn read_content(&self, input: &str) -> Result<PageContent, BackendError> {
         let id = page_id(input)?;
         let page = self.fetch_page(&id.0).await?;
-        let mut response = self
+        let request = self
             .http
             .get(format!("{}/pages/{}/markdown", self.api_root, id.0))
             .header(AUTHORIZATION, self.authorization.clone())
-            .header("Notion-Version", PAGE_VERSION)
-            .send()
-            .await
-            .map_err(|_| error(BackendErrorKind::Unavailable))?;
+            .header("Notion-Version", PAGE_VERSION);
+        let mut response = self.send(request, true, "notion.read_content").await?;
         if response.status().as_u16() != 200 {
             return Err(error(match response.status().as_u16() {
                 400 => BackendErrorKind::InvalidInput,
@@ -84,7 +82,9 @@ mod tests {
     const ID: &str = "12345678-1234-1234-1234-123456789abc";
     async fn read(status: u16, body: String) -> (Result<PageContent, BackendError>, Vec<String>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut client = NotionClient::integration("test-credential").unwrap();
+        let mut client = NotionClient::integration("test-credential")
+            .unwrap()
+            .without_retries();
         client.api_root = format!("http://{}/v1", listener.local_addr().unwrap());
         let metadata = json!({"object":"page","id":ID,"url":format!("https://www.notion.so/{ID}"),"archived":false,"last_edited_time":"2026-10-03T12:30:00Z","properties":{"Title":{"id":"title","type":"title","title":[{"plain_text":"Hello"}]}}}).to_string();
         let server = tokio::spawn(async move {
@@ -175,7 +175,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn upstream_failures_are_sanitized_and_not_retried() {
+    async fn single_attempt_upstream_failures_are_sanitized() {
         for (status, kind) in [
             (401, BackendErrorKind::Unauthenticated),
             (403, BackendErrorKind::PermissionDenied),

@@ -8,7 +8,9 @@ use serde::Deserialize;
 /// Explicit version for the stable get-self endpoint.
 pub const NOTION_VERSION: &str = "2022-06-28";
 
+#[derive(Clone)]
 pub struct NotionClient {
+    pub(crate) transport: std::sync::Arc<crate::transport::Transport>,
     pub(crate) http: reqwest::Client,
     pub(crate) authorization: HeaderValue,
     identity_url: String,
@@ -63,6 +65,7 @@ impl NotionClient {
             .build()
             .map_err(|_| failure(BackendErrorKind::Internal))?;
         Ok(Self {
+            transport: Default::default(),
             http,
             authorization,
             identity_url: identity_url.to_owned(),
@@ -73,14 +76,12 @@ impl NotionClient {
 
     /// Verify the integration with GET /v1/users/me. Raw upstream errors are discarded.
     pub async fn identity(&self) -> Result<IntegrationIdentity, BackendError> {
-        let mut response = self
+        let response = self
             .http
             .get(&self.identity_url)
             .header(AUTHORIZATION, self.authorization.clone())
-            .header("Notion-Version", NOTION_VERSION)
-            .send()
-            .await
-            .map_err(|_| failure(BackendErrorKind::Unavailable))?;
+            .header("Notion-Version", NOTION_VERSION);
+        let mut response = self.send(response, true, "notion.identity").await?;
         let status = response.status();
         if !status.is_success() {
             let kind = match status.as_u16() {
@@ -141,7 +142,9 @@ mod tests {
             stream.write_all(response.as_bytes()).await.unwrap();
             String::from_utf8(request).unwrap()
         });
-        let client = NotionClient::with_identity_url("test-credential", &url).unwrap();
+        let client = NotionClient::with_identity_url("test-credential", &url)
+            .unwrap()
+            .without_retries();
         assert!(!format!("{client:?}").contains("test-credential"));
         (client.identity().await, server.await.unwrap())
     }
@@ -191,7 +194,9 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let client = NotionClient::with_identity_url("test-credential", &url).unwrap();
+        let client = NotionClient::with_identity_url("test-credential", &url)
+            .unwrap()
+            .without_retries();
         assert_eq!(
             client.identity().await.unwrap_err().kind,
             BackendErrorKind::Unavailable
