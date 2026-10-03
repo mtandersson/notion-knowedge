@@ -9,3 +9,6 @@ pub const COMPONENT: &str = "notion";
 
 pub mod client;
 pub use client::{IntegrationIdentity, NotionClient};
+
+pub mod writes;
+pub use writes::CreatedPage;

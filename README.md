@@ -285,3 +285,5 @@ review expectations, and how decisions are superseded.
 
 The [integration identity client](docs/notion-identity.md) documents the API
 version, failure classes and credential boundary.
+The [page write primitives](docs/notion-writes.md) document Markdown creation
+and append semantics.
