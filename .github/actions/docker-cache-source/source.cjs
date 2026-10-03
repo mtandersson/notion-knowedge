@@ -61,7 +61,7 @@ async function run(env = process.env, fetcher = fetch, log = console.log) {
     finalSource = choose(ownFinal, mainFinal);
     builderSource = choose(ownBuilder, mainBuilder);
   } catch {
-    log('Docker cache preflight unavailable; using the local builder cache.');
+    log('Docker cache preflight unavailable; building without remote cache imports.');
   }
   fs.appendFileSync(env.GITHUB_OUTPUT,
     `final-cache-from=${finalSource}\nbuilder-cache-from=${builderSource}\n`);
