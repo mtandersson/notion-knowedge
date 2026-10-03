@@ -8,14 +8,16 @@ const records=[...new Set([...paths,...dirs])].sort().map(p=>{const st=fs.lstatS
 console.log('EFFECTIVE_CONTEXT '+JSON.stringify({checkout:cp.execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),scope:process.env.DOCKER_CACHE_SCOPE,records}));
 
 (async()=>{
+for(const cacheScope of [process.env.DOCKER_CACHE_SCOPE, "nk-container-v1-Linux-X64-main"]){
 for(const {Scope} of scopes){
- const key='index-'+process.env.DOCKER_CACHE_SCOPE+'-1-'+crypto.createHash('sha256').update(Scope).digest('hex').slice(0,8);
+ const key='index-'+cacheScope+'-1-'+crypto.createHash('sha256').update(Scope).digest('hex').slice(0,8);
  const version=crypto.createHash('sha256').update('|go-actionscache-1.0').digest('hex');
  const r=await fetch(process.env.ACTIONS_RESULTS_URL.replace(/\/$/,'')+'/twirp/github.actions.results.api.v1.CacheService/GetCacheEntryDownloadURL',{method:'POST',headers:{Authorization:'Bearer '+process.env.ACTIONS_RUNTIME_TOKEN,'Content-Type':'application/json'},body:JSON.stringify({key,restore_keys:[key],version})});
  if(!r.ok) throw new Error('Cache lookup status '+r.status);
  const data=await r.json();
- const result={scope:Scope,key,ok:data.ok,matched_key:data.matched_key};
+ const result={cacheScope,scope:Scope,key,ok:data.ok,matched_key:data.matched_key};
  if(data.ok){const response=await fetch(data.signed_download_url);if(!response.ok)throw new Error('Manifest download status '+response.status);const bytes=Buffer.from(await response.arrayBuffer());result.bytes=bytes.length;result.sha256=crypto.createHash('sha256').update(bytes).digest('hex');result.manifest=JSON.parse(bytes.toString());}
  console.log('CACHE_INDEX_LOOKUP '+JSON.stringify(result));
+}
 }
 })().catch(error=>{console.error(error.message);process.exitCode=1;});
