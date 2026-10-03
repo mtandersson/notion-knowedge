@@ -287,3 +287,6 @@ The [integration identity client](docs/notion-identity.md) documents the API
 version, failure classes and credential boundary.
 The [page write primitives](docs/notion-writes.md) document Markdown creation
 and append semantics.
+
+The [exact page metadata read](docs/notion-pages.md) documents IDs, links,
+normalized properties and response completeness.
