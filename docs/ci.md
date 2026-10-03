@@ -1,6 +1,7 @@
 # CI selection and verification
 
-Container smoke imports Buildx layers from main and the current PR/branch,
+Container smoke chooses one available Buildx index per final/builder root,
+preferring the current PR/branch and falling back to trusted main,
 loads the final runtime and pinned builder, and exports a bounded mutable
 scope only after the existing final-image checks pass. Fork PRs do not export;
 GitHub's merge-ref cache isolation prevents PR layers from being restored on
@@ -53,9 +54,11 @@ The gate uses `always()` and depends on all jobs, so a failed upstream job canno
 silently skip the final decision. Cancelling the entire workflow cannot produce
 a successful gate; any required CI gate still needs a successful run.
 
-On 2026-10-02, rechecking both the repository rulesets endpoint and main branch
-protection endpoint returned HTTP 403: “Upgrade to GitHub Pro or make this
-repository public to enable this feature.” No configured protection is claimed.
+On 2026-10-03, rechecking rulesets returned HTTP 403: “Upgrade to GitHub Pro or
+make this repository public to enable this feature.” Main branch protection
+returned HTTP 403: “Resource not accessible by integration.” That distinct
+response proves API unavailability, not a plan restriction or absence of settings.
+No configured protection is claimed.
 Merge delivery checks observed CI results explicitly. When the plan permits
 protection, require the stable CI gate before relying on enforced blocking.
 
@@ -133,8 +136,12 @@ with observed cold/warm sequences and matched Rust/docs PRs. Its machine ledger
 and retained raw archives separate queue, setup/Nix, caches, Cargo and container
 work. Warm/docs samples improved; cold and Rust PR samples were slower, including
 an observed Docker compilation-cache miss after an unchanged-source PR follow-up.
-These results do not establish a general Rust PR speedup. Optional development
-build sharing and the full original acceptance audit remain #175/#176 under #155.
+These results do not establish a general Rust PR speedup. The
+[causal Docker correction](docker-cache-causal-evidence.md) separately proves
+repeated-PR reuse and preserves the historical cause limitation. The
+[complete original acceptance audit](ci-final-audit.md) maps all #151/#155/#176
+requirements without claiming a universal speedup; parent closures require
+separate coordinator audits.
 
 The [development sharing experiment](ci-dev-sharing-evidence.md) retains separate
 Type check, Clippy and Unit tests jobs: measured work/storage savings did not
