@@ -135,3 +135,30 @@ fn setext_headings_inherited_path_empty_text_and_invalid_sizes() {
         assert!(chunk_document(&doc, config).is_err());
     }
 }
+
+#[test]
+fn prose_splits_cannot_manufacture_lists_headings_or_drop_hard_breaks() {
+    for text in [
+        "aaaa - item more prose",
+        "aaaa + item more prose",
+        "aaaa 1. item more prose",
+        "aaaa 2) item more prose",
+        "aaaa # heading more prose",
+        "aaaa  \ncontinued prose",
+        "aaaa  \r\ncontinued prose",
+        "aaaa     indented prose",
+        "aaaa \tindented prose",
+    ] {
+        let doc = document(text);
+        let chunks = chunk_document(
+            &doc,
+            ChunkConfig {
+                target_chars: 7,
+                overlap_chars: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(chunks.len(), 1, "{text:?}: {chunks:?}");
+        assert_eq!(chunks[0].text, text);
+    }
+}

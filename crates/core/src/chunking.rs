@@ -78,7 +78,19 @@ pub fn chunk_document(
                 {
                     let raw = &text[range.clone()];
                     // Only ordinary prose can be split without balancing markup.
-                    if !raw.contains(['*', '_', '`', '[', ']', '<', '>', '\\', '&', '!', '~']) {
+                    if !raw.contains([
+                        '*', '_', '`', '[', ']', '<', '>', '\\', '&', '!', '~', '-', '+', '#', '=',
+                        '|',
+                    ]) && !raw.contains("  ")
+                        && !raw.contains('\t')
+                        && !raw.split_whitespace().any(|word| {
+                            word.strip_suffix('.')
+                                .or_else(|| word.strip_suffix(')'))
+                                .is_some_and(|prefix| {
+                                    !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit())
+                                })
+                        })
+                    {
                         let mut count = 0;
                         for (offset, ch) in raw.char_indices() {
                             count += 1;

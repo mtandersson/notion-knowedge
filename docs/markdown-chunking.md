@@ -25,7 +25,8 @@ prose segments may repeat within the overlap budget. Overlap can be zero if no
 whole safe segment fits; it never crosses a section boundary and always advances.
 
 The size target is soft. Lists (including nested items), fenced/indented code,
-tables, blockquotes, paragraphs containing inline Markdown/HTML, and unbroken
+tables, blockquotes, paragraphs containing inline Markdown/HTML or potential block markers (including
+ordered-list tokens), repeated spaces/tabs or explicit hard breaks, and unbroken
 words are atomic when splitting would damage syntax. They can exceed the target.
 HTML/enhanced-Markdown containers are conservatively preserved through the last
 matching closing tag; incomplete containers retain the remaining tail intact.
