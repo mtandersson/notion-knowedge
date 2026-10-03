@@ -9,8 +9,7 @@ use std::time::Duration;
 use crate::indexed::PropertyValue;
 
 /// Owned, Send future supports both real asynchronous I/O and object-safe mocks.
-pub type BackendFuture<'a, T> =
-    Pin<Box<dyn Future<Output = Result<T, BackendError>> + Send + 'a>>;
+pub type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, BackendError>> + Send + 'a>>;
 
 /// Stable authoritative identity (not an indexed chunk ID).
 #[derive(Debug, Clone, PartialEq, Eq)]

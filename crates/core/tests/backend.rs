@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Wake, Waker};
+use std::sync::Mutex;
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use notion_knowledge_core::backend::*;
@@ -62,12 +62,7 @@ impl NotionWrite for MockBackend {
 // These mocks finish immediately. A pending future is a test failure, not a
 // homemade executor for network I/O.
 fn ready<T>(mut future: BackendFuture<'_, T>) -> Result<T, BackendError> {
-    struct Noop;
-    impl Wake for Noop {
-        fn wake(self: Arc<Self>) {}
-    }
-    let waker = Waker::from(Arc::new(Noop));
-    let mut context = Context::from_waker(&waker);
+    let mut context = Context::from_waker(Waker::noop());
     match future.as_mut().poll(&mut context) {
         Poll::Ready(result) => result,
         Poll::Pending => panic!("mock must be immediately ready"),
@@ -134,4 +129,3 @@ fn write_errors_preserve_retry_advice_without_upstream_transport_types() {
     assert_eq!(error.retry_after, Some(Duration::from_secs(3)));
     assert_eq!(error.to_string(), "create_page failed: RateLimited");
 }
-
