@@ -72,11 +72,41 @@ fn rich_text(value: &Value) -> Result<String, BackendError> {
         .map(|v| string(&v["plain_text"]))
         .collect()
 }
+fn sorted(mut values: Vec<String>) -> Vec<String> {
+    values.sort();
+    values
+}
 fn property(value: &Value) -> Result<PropertyValue, BackendError> {
     use PropertyValue::*;
     let kind = value["type"]
         .as_str()
         .ok_or_else(|| error(BackendErrorKind::Internal))?;
+    if !matches!(
+        kind,
+        "title"
+            | "rich_text"
+            | "number"
+            | "checkbox"
+            | "url"
+            | "email"
+            | "phone_number"
+            | "created_time"
+            | "last_edited_time"
+            | "select"
+            | "status"
+            | "multi_select"
+            | "date"
+            | "people"
+            | "relation"
+            | "created_by"
+            | "last_edited_by"
+            | "formula"
+            | "rollup"
+            | "string"
+            | "boolean"
+    ) {
+        return Err(error(BackendErrorKind::UnsupportedContent));
+    }
     let v = value
         .get(kind)
         .ok_or_else(|| error(BackendErrorKind::Internal))?;
@@ -113,13 +143,13 @@ fn property(value: &Value) -> Result<PropertyValue, BackendError> {
         ),
         "url" | "email" | "phone_number" | "created_time" | "last_edited_time" => Text(string(v)?),
         "select" | "status" => Text(string(&v["name"])?),
-        "multi_select" => Strings(
+        "multi_select" => Strings(sorted(
             v.as_array()
                 .ok_or_else(|| error(BackendErrorKind::Internal))?
                 .iter()
                 .map(|v| string(&v["name"]))
                 .collect::<Result<_, _>>()?,
-        ),
+        )),
         "date" => Date {
             start: string(&v["start"])?,
             end: if v["end"].is_null() {
@@ -141,19 +171,17 @@ fn property(value: &Value) -> Result<PropertyValue, BackendError> {
                 .as_array()
                 .ok_or_else(|| error(BackendErrorKind::Internal))?
                 .iter()
-                .map(|v| string(&v["id"]))
+                .map(|v| uuid(&string(&v["id"])?).ok_or_else(|| error(BackendErrorKind::Internal)))
                 .collect::<Result<Vec<_>, _>>()?;
             if kind == "people" {
-                PersonIds(ids)
+                PersonIds(sorted(ids))
             } else {
-                PageIds(
-                    ids.into_iter()
-                        .map(|id| uuid(&id).ok_or_else(|| error(BackendErrorKind::Internal)))
-                        .collect::<Result<_, _>>()?,
-                )
+                PageIds(sorted(ids))
             }
         }
-        "created_by" | "last_edited_by" => PersonIds(vec![string(&v["id"])?]),
+        "created_by" | "last_edited_by" => PersonIds(vec![
+            uuid(&string(&v["id"])?).ok_or_else(|| error(BackendErrorKind::Internal))?,
+        ]),
         "formula" | "rollup" => property(v)?,
         "string" => Text(string(v)?),
         "boolean" => Boolean(
@@ -359,6 +387,90 @@ mod tests {
         assert_eq!(
             fetch(ID, 200, value.to_string()).await.0.unwrap_err().kind,
             BackendErrorKind::UnsupportedContent
+        );
+    }
+    #[tokio::test]
+    async fn metadata_is_stable_across_display_names_and_collection_order() {
+        let other = "aaaaaaaa-1234-1234-1234-123456789abc";
+        let mut first = fixture();
+        first["properties"]["Tags"] =
+            json!({"id":"tags","type":"multi_select","multi_select":[{"name":"Z"},{"name":"A"}]});
+        first["properties"]["People"] = json!({"id":"people","type":"people","people":[{"id":other.to_uppercase().replace('-', "")},{"id":ID}]});
+        first["properties"]["Related"]["relation"] = json!([{"id":other},{"id":ID}]);
+        first["properties"]["State"] =
+            json!({"id":"state","type":"status","status":{"name":"In progress"}});
+        first["properties"]["Choice"] =
+            json!({"id":"choice","type":"select","select":{"name":"Blue"}});
+        first["properties"]["Due"]["date"]["end"] = json!("2026-10-04");
+        let mut second = first.clone();
+        let properties = second["properties"].as_object_mut().unwrap();
+        let renamed = properties.remove("Count").unwrap();
+        properties.insert("A renamed numeric field".to_owned(), renamed);
+        for (name, field) in [
+            ("Tags", "multi_select"),
+            ("People", "people"),
+            ("Related", "relation"),
+        ] {
+            properties.get_mut(name).unwrap()[field]
+                .as_array_mut()
+                .unwrap()
+                .reverse();
+        }
+        let page = fetch(ID, 200, first.to_string()).await.0.unwrap();
+        let reordered = fetch(ID, 200, second.to_string()).await.0.unwrap();
+        assert_eq!(page, reordered);
+        assert_eq!(
+            serde_json::to_string(&page.properties).unwrap(),
+            serde_json::to_string(&reordered.properties).unwrap()
+        );
+        assert_eq!(
+            page.properties["tags"],
+            PropertyValue::Strings(vec!["A".into(), "Z".into()])
+        );
+        assert_eq!(
+            page.properties["people"],
+            PropertyValue::PersonIds(vec![ID.into(), other.into()])
+        );
+        assert_eq!(
+            page.properties["r"],
+            PropertyValue::PageIds(vec![ID.into(), other.into()])
+        );
+        assert_eq!(
+            page.properties["state"],
+            PropertyValue::Text("In progress".into())
+        );
+        assert_eq!(
+            page.properties["choice"],
+            PropertyValue::Text("Blue".into())
+        );
+        assert_eq!(page.properties["c"], PropertyValue::Boolean(true));
+        assert_eq!(page.properties["n%3A"], PropertyValue::Number(42.0));
+        assert_eq!(
+            page.properties["d"],
+            PropertyValue::Date {
+                start: "2026-10-03".into(),
+                end: Some("2026-10-04".into())
+            }
+        );
+    }
+    #[tokio::test]
+    async fn unknown_property_types_fail_safely_without_exposing_values() {
+        for payload in [
+            json!({"id":"future","type":"future_type"}),
+            json!({"id":"future","type":"future_type","future_type":"private property content"}),
+        ] {
+            let mut value = fixture();
+            value["properties"]["Future"] = payload;
+            let failure = fetch(ID, 200, value.to_string()).await.0.unwrap_err();
+            assert_eq!(failure.kind, BackendErrorKind::UnsupportedContent);
+            assert!(!format!("{failure:?} {failure}").contains("private property content"));
+        }
+        let mut value = fixture();
+        value["properties"]["People"] =
+            json!({"id":"people","type":"people","people":[{"id":"not-a-person-id"}]});
+        assert_eq!(
+            fetch(ID, 200, value.to_string()).await.0.unwrap_err().kind,
+            BackendErrorKind::Internal
         );
     }
     #[tokio::test]

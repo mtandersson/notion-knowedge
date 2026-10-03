@@ -22,7 +22,8 @@ variants preserve null, text, number, checkbox, multi-value strings, date ranges
 page relations and people IDs. Formula/rollup values use their resolved value
 type. Normalization determines supported property mappings; raw API objects and
 credentials do not belong here. Link targets distinguish external URLs, pages
-and blocks. Producers retain source order for lists; `BTreeMap` provides stable
+and blocks. Producers retain source order for links and headings. Unordered property
+collections (multi-select, relations and people) use canonical sorted order; `BTreeMap` provides stable
 property-key serialization.
 
 These types describe data, not a validation or processing pipeline. Producers
