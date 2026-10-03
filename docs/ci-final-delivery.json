@@ -1,0 +1,3278 @@
+{
+  "issue": 186,
+  "pr": 190,
+  "pr_head": "780f06fd8458bdde29b12b693aadbbcd6bd8ec67",
+  "reviewed_tree": "882ee53cbbe1d719d4fe5e16f0b6bf6fde23b397",
+  "tested_merged_production": "23087aabcc920b1189038b3f8f844710804047f8",
+  "method": "Actual PR success, complete main success, then subsequent full manual success. All11jobs inspected. Exact tested tree equals independently reviewed tree. Zero compiler events and actual compiler RUN/executable COPY reuse all3solves. Evidence-only commit/ref is archival and is not itself claimed CI-tested or merged. Production does not change. No general speedup inference.",
+  "independent_review": "approve with follow-ups, all natural delivery follow-ups now verified",
+  "runs": [
+    {
+      "run": 37110206661,
+      "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110206661",
+      "attempt": 1,
+      "head": "780f06fd8458bdde29b12b693aadbbcd6bd8ec67",
+      "conclusion": "success",
+      "original_log_sha256": "a09ae9a56682c77fc2c460ff875cdb43b661ce672ca90539f13d006352bc4e9f",
+      "sanitized_log_sha256": "a09ae9a56682c77fc2c460ff875cdb43b661ce672ca90539f13d006352bc4e9f",
+      "workflow_wall_seconds": 96.0,
+      "summed_step_execution_seconds": 363.0,
+      "dispatch_to_first_job_seconds": 4.0,
+      "contexts": [],
+      "cache_index_lookups": [],
+      "cache_preflight": [
+        {
+          "scope": "nk-container-v1-Linux-X64-190",
+          "ref": "refs/pull/190/merge",
+          "available": false
+        },
+        {
+          "scope": "nk-container-v1-Linux-X64-main",
+          "ref": "refs/heads/main",
+          "available": true,
+          "key": "index-nk-container-v1-Linux-X64-main-1-f921bd05#11",
+          "bytes": 11201,
+          "sha256": "4a4cd920c2bf29109205c6226a9b930f026e13b792b68b494c4a23de163ff609"
+        },
+        {
+          "scope": "nk-container-v1-Linux-X64-190-builder",
+          "ref": "refs/pull/190/merge",
+          "available": false
+        },
+        {
+          "scope": "nk-container-v1-Linux-X64-main-builder",
+          "ref": "refs/heads/main",
+          "available": true,
+          "key": "index-nk-container-v1-Linux-X64-main-builder-1-f921bd05#2",
+          "bytes": 3885,
+          "sha256": "84141c2c4b8d44a1f6e8bb582c14fe238975c59c95fa382528157dc7876baf6b"
+        }
+      ],
+      "verified_executables": [],
+      "invalidation_controls": [],
+      "container_solves": {
+        "Set up job": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Checkout": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Set up Buildx": {
+          "compiled_crates": [],
+          "vertices": {
+            "#1": {
+              "stage": "internal",
+              "operation": "booting buildkit",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.4
+            }
+          }
+        },
+        "Choose available Docker cache roots": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Test Docker cache root selection": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Test cached image identity rejection": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Read canonical image identity": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Build and load final runtime image": {
+          "compiled_crates": [],
+          "vertices": {
+            "#1": {
+              "stage": "internal",
+              "operation": "load build definition from Dockerfile",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#2": {
+              "stage": "auth",
+              "operation": "library/rust:pull token for registry-1.docker.io",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#3": {
+              "stage": "internal",
+              "operation": "load metadata for gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.6
+            },
+            "#4": {
+              "stage": "internal",
+              "operation": "load metadata for docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.3
+            },
+            "#5": {
+              "stage": "internal",
+              "operation": "load .dockerignore",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#6": {
+              "stage": "toolchain 1/1",
+              "operation": "FROM docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#7": {
+              "stage": "stage-3 1/4",
+              "operation": "FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#8": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.1
+            },
+            "#9": {
+              "stage": "internal",
+              "operation": "load build context",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#10": {
+              "stage": "builder 4/4",
+              "operation": "RUN test \"$VERSION\" = \"$(sed -n '/^\\[workspace.package\\]/,/^\\[/s/^version = \"\\([^\"]*\\)\"/\\1/p' Cargo.toml)\"     && cargo build --release --locked -p notion-knowledge-server     && ldd target/release/notion-knowledge-server     && mkdir -p /runtime-data/index /runtime-data/state /runtime-data/models     && chown -R 65532:65532 /runtime-data",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#11": {
+              "stage": "stage-3 2/4",
+              "operation": "COPY --from=builder /build/target/release/notion-knowledge-server /usr/local/bin/notion-knowledge-server",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#12": {
+              "stage": "stage-3 3/4",
+              "operation": "COPY --from=builder --chown=65532:65532 /runtime-data /var/lib/notion-knowledge",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#13": {
+              "stage": "builder 1/4",
+              "operation": "WORKDIR /build",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#14": {
+              "stage": "builder 2/4",
+              "operation": "COPY Cargo.toml Cargo.lock ./",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#15": {
+              "stage": "builder 3/4",
+              "operation": "COPY crates ./crates",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#16": {
+              "stage": "stage-3 4/4",
+              "operation": "WORKDIR /var/lib/notion-knowledge",
+              "progress_statuses": [
+                "CACHED",
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.4
+            },
+            "#17": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.8
+            },
+            "#18": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.3
+            },
+            "#19": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            }
+          },
+          "cache-from": [
+            "type=gha,scope=nk-container-v1-Linux-X64-main"
+          ]
+        },
+        "Load pinned builder for permission probe": {
+          "compiled_crates": [],
+          "vertices": {
+            "#1": {
+              "stage": "internal",
+              "operation": "load build definition from Dockerfile",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#2": {
+              "stage": "internal",
+              "operation": "load metadata for docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#3": {
+              "stage": "internal",
+              "operation": "load .dockerignore",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#5": {
+              "stage": "toolchain 1/1",
+              "operation": "FROM docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 2.7
+            },
+            "#6": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 23.8
+            },
+            "#4": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 32.2
+            },
+            "#7": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            }
+          }
+        },
+        "Verify final runtime image": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Export verified builder root": {
+          "compiled_crates": [],
+          "vertices": {
+            "#1": {
+              "stage": "internal",
+              "operation": "load build definition from Dockerfile",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#2": {
+              "stage": "internal",
+              "operation": "load metadata for docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#3": {
+              "stage": "internal",
+              "operation": "load .dockerignore",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#4": {
+              "stage": "toolchain 1/1",
+              "operation": "FROM docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#5": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#6": {
+              "stage": "internal",
+              "operation": "load build context",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#7": {
+              "stage": "builder 3/4",
+              "operation": "COPY crates ./crates",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#8": {
+              "stage": "builder 1/4",
+              "operation": "WORKDIR /build",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#9": {
+              "stage": "builder 2/4",
+              "operation": "COPY Cargo.toml Cargo.lock ./",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#10": {
+              "stage": "builder 4/4",
+              "operation": "RUN test \"$VERSION\" = \"$(sed -n '/^\\[workspace.package\\]/,/^\\[/s/^version = \"\\([^\"]*\\)\"/\\1/p' Cargo.toml)\"     && cargo build --release --locked -p notion-knowledge-server     && ldd target/release/notion-knowledge-server     && mkdir -p /runtime-data/index /runtime-data/state /runtime-data/models     && chown -R 65532:65532 /runtime-data",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#11": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.4
+            },
+            "#12": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            }
+          },
+          "cache-from": [
+            "type=gha,scope=nk-container-v1-Linux-X64-main-builder"
+          ],
+          "cache-to": [
+            "type=gha,scope=nk-container-v1-Linux-X64-190-builder,mode=max,timeout=10m"
+          ]
+        },
+        "Export verified final image graph": {
+          "compiled_crates": [],
+          "vertices": {
+            "#1": {
+              "stage": "internal",
+              "operation": "load build definition from Dockerfile",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#2": {
+              "stage": "internal",
+              "operation": "load metadata for docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#3": {
+              "stage": "internal",
+              "operation": "load metadata for gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#4": {
+              "stage": "internal",
+              "operation": "load .dockerignore",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#5": {
+              "stage": "toolchain 1/1",
+              "operation": "FROM docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#6": {
+              "stage": "stage-3 1/4",
+              "operation": "FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#7": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#8": {
+              "stage": "internal",
+              "operation": "load build context",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#9": {
+              "stage": "builder 1/4",
+              "operation": "WORKDIR /build",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#10": {
+              "stage": "builder 4/4",
+              "operation": "RUN test \"$VERSION\" = \"$(sed -n '/^\\[workspace.package\\]/,/^\\[/s/^version = \"\\([^\"]*\\)\"/\\1/p' Cargo.toml)\"     && cargo build --release --locked -p notion-knowledge-server     && ldd target/release/notion-knowledge-server     && mkdir -p /runtime-data/index /runtime-data/state /runtime-data/models     && chown -R 65532:65532 /runtime-data",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#11": {
+              "stage": "builder 2/4",
+              "operation": "COPY Cargo.toml Cargo.lock ./",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#12": {
+              "stage": "builder 3/4",
+              "operation": "COPY crates ./crates",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#13": {
+              "stage": "stage-3 2/4",
+              "operation": "COPY --from=builder /build/target/release/notion-knowledge-server /usr/local/bin/notion-knowledge-server",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#14": {
+              "stage": "stage-3 3/4",
+              "operation": "COPY --from=builder --chown=65532:65532 /runtime-data /var/lib/notion-knowledge",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#15": {
+              "stage": "stage-3 4/4",
+              "operation": "WORKDIR /var/lib/notion-knowledge",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#16": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.9
+            },
+            "#17": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            }
+          },
+          "cache-from": [
+            "type=gha,scope=nk-container-v1-Linux-X64-main"
+          ],
+          "cache-to": [
+            "type=gha,scope=nk-container-v1-Linux-X64-190,mode=max,timeout=10m"
+          ]
+        },
+        "Post Export verified final image graph": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Post Export verified builder root": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Post Load pinned builder for permission probe": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Post Build and load final runtime image": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Post Set up Buildx": {
+          "compiled_crates": [],
+          "vertices": {}
+        }
+      },
+      "jobs": [
+        {
+          "name": "CI input selection",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 11.0,
+          "step_execution_seconds": 8.0,
+          "steps": []
+        },
+        {
+          "name": "Dependency vulnerabilities",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 29.0,
+          "step_execution_seconds": 27.0,
+          "steps": []
+        },
+        {
+          "name": "Secret scanning",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 30.0,
+          "step_execution_seconds": 27.0,
+          "steps": []
+        },
+        {
+          "name": "Agent layout",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 7.0,
+          "step_execution_seconds": 3.0,
+          "steps": []
+        },
+        {
+          "name": "Container smoke",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 70.0,
+          "step_execution_seconds": 68.0,
+          "steps": [
+            {
+              "name": "Set up job",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "name": "Checkout",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "name": "Set up Buildx",
+              "conclusion": "success",
+              "seconds": 10.0
+            },
+            {
+              "name": "Choose available Docker cache roots",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "name": "Test Docker cache root selection",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "name": "Test cached image identity rejection",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "name": "Read canonical image identity",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "name": "Build and load final runtime image",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "name": "Load pinned builder for permission probe",
+              "conclusion": "success",
+              "seconds": 33.0
+            },
+            {
+              "name": "Verify final runtime image",
+              "conclusion": "success",
+              "seconds": 7.0
+            },
+            {
+              "name": "Export verified builder root",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "name": "Export verified final image graph",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "name": "Post Export verified final image graph",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "name": "Post Export verified builder root",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "name": "Post Load pinned builder for permission probe",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "name": "Post Build and load final runtime image",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "name": "Post Set up Buildx",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "name": "Post Checkout",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "name": "Complete job",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ]
+        },
+        {
+          "name": "Release build",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 66.0,
+          "step_execution_seconds": 62.0,
+          "steps": []
+        },
+        {
+          "name": "Format",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 31.0,
+          "step_execution_seconds": 27.0,
+          "steps": []
+        },
+        {
+          "name": "Unit tests",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 62.0,
+          "step_execution_seconds": 59.0,
+          "steps": []
+        },
+        {
+          "name": "Type check",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 41.0,
+          "step_execution_seconds": 37.0,
+          "steps": []
+        },
+        {
+          "name": "Clippy",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 46.0,
+          "step_execution_seconds": 42.0,
+          "steps": []
+        },
+        {
+          "name": "CI gate",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 6.0,
+          "step_execution_seconds": 3.0,
+          "steps": []
+        }
+      ],
+      "event": "pull_request",
+      "created_at": "2026-10-03T08:35:14Z",
+      "completed_at": "2026-10-03T08:36:50Z",
+      "jobs_api_identities": [
+        {
+          "id": 111166461674,
+          "name": "CI input selection",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110206661/job/111166461674",
+          "conclusion": "success"
+        },
+        {
+          "id": 111166461797,
+          "name": "Dependency vulnerabilities",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110206661/job/111166461797",
+          "conclusion": "success"
+        },
+        {
+          "id": 111166461862,
+          "name": "Secret scanning",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110206661/job/111166461862",
+          "conclusion": "success"
+        },
+        {
+          "id": 111166497130,
+          "name": "Agent layout",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110206661/job/111166497130",
+          "conclusion": "success"
+        },
+        {
+          "id": 111166497133,
+          "name": "Container smoke",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110206661/job/111166497133",
+          "conclusion": "success"
+        },
+        {
+          "id": 111166497147,
+          "name": "Release build",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110206661/job/111166497147",
+          "conclusion": "success"
+        },
+        {
+          "id": 111166497155,
+          "name": "Format",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110206661/job/111166497155",
+          "conclusion": "success"
+        },
+        {
+          "id": 111166497191,
+          "name": "Unit tests",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110206661/job/111166497191",
+          "conclusion": "success"
+        },
+        {
+          "id": 111166497217,
+          "name": "Type check",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110206661/job/111166497217",
+          "conclusion": "success"
+        },
+        {
+          "id": 111166497227,
+          "name": "Clippy",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110206661/job/111166497227",
+          "conclusion": "success"
+        },
+        {
+          "id": 111166688692,
+          "name": "CI gate",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110206661/job/111166688692",
+          "conclusion": "success"
+        }
+      ],
+      "security_evidence": [
+        "Dependency vulnerabilities\tAudit locked dependencies against fresh RustSec advisories\t2026-10-03T08:35:40.0026847Z \u001b[0m\u001b[0m\u001b[1m\u001b[32m    Fetching\u001b[0m advisory database from `https://github.com/RustSec/advisory-db.git`",
+        "Secret scanning\tScan reachable history with redacted findings\t2026-10-03T08:35:47.0039971Z \u001b[90m8:35AM\u001b[0m \u001b[32mINF\u001b[0m \u001b[1m35 commits scanned.\u001b[0m",
+        "Secret scanning\tScan reachable history with redacted findings\t2026-10-03T08:35:47.0041476Z \u001b[90m8:35AM\u001b[0m \u001b[32mINF\u001b[0m \u001b[1mno leaks found\u001b[0m"
+      ],
+      "actual_smoke_evidence": [
+        "Container smoke\tVerify final runtime image\t2026-10-03T08:36:30.7596140Z Final-image smoke passed: metadata/version guard, non-root startup, config errors, liveness/readiness/diagnostics, stdio and HTTP MCP."
+      ],
+      "actual_checkout_identities": [
+        {
+          "commit": "70010f0095b8b8ac9a50590b5382b867c0ac8136",
+          "tree": "882ee53cbbe1d719d4fe5e16f0b6bf6fde23b397",
+          "production_inputs": {
+            "files": [
+              {
+                "path": ".cargo/audit.toml",
+                "sha256": "04f71aade6c2f66aff9c0a2d209d24c4eefcf60866da6311c9fd052d82377eab"
+              },
+              {
+                "path": ".dockerignore",
+                "sha256": "005d3506cd7df6223e86284286d8a4b1813ae69d3886bcb9b3850caa97f92e91"
+              },
+              {
+                "path": ".gitleaks.toml",
+                "sha256": "66ecac4d0a2093702fc1956a6163932dd587af1f336decb7c38fbacbdf5d72c3"
+              },
+              {
+                "path": ".gitleaksignore",
+                "sha256": "05d36b95c24a192accb73095bd55f588dcfa63a7e54f6857d66b984bac679d82"
+              },
+              {
+                "path": "Cargo.lock",
+                "sha256": "8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69"
+              },
+              {
+                "path": "Cargo.toml",
+                "sha256": "d02de347eafd9a1c153c30ba4e26a6070df129cd9365ed8872341fe09330493c"
+              },
+              {
+                "path": "Dockerfile",
+                "sha256": "a6bc53025ee93f3463e90b25d6b6344a7e2ac0ee88e054e4134b174a14dcef54"
+              },
+              {
+                "path": "crates/core/Cargo.toml",
+                "sha256": "5a296e2901c72ad1e99628c1ae4e1b7827e908ca5e3240c0162bcecfa49843a2"
+              },
+              {
+                "path": "crates/core/src/health.rs",
+                "sha256": "0b1a13b0f36f3f02793ffe5513cac153d5ceda45254403ccf82b36b46a3bda7e"
+              },
+              {
+                "path": "crates/core/src/lib.rs",
+                "sha256": "2926e9d1073a810eb34982e59f8a11c8453b7ab1370669beb2b8642cbaaa0f08"
+              },
+              {
+                "path": "crates/mcp/Cargo.toml",
+                "sha256": "4829a8a9bcc97831b37df2dae97b40a5c21be4a10fa3ba1c3ae086de23867fca"
+              },
+              {
+                "path": "crates/mcp/src/lib.rs",
+                "sha256": "b921eed4832ac34fa7694651ffbb9afcff85a4b524c3983a57fb97f49e0579aa"
+              },
+              {
+                "path": "crates/notion/Cargo.toml",
+                "sha256": "691f3237114cd49541dadad22d5be459d27ff256ea4be5c1638cbef1eef4a279"
+              },
+              {
+                "path": "crates/notion/src/lib.rs",
+                "sha256": "31d53a2dca2332af8f53d8c0334fa9f73ec39b5f903a5a71fffff71f297b3158"
+              },
+              {
+                "path": "crates/retrieval/Cargo.toml",
+                "sha256": "b9a8995f3db63ab915050d862e62ba4ac7e2638b3fe5f1d52754bf73b891717a"
+              },
+              {
+                "path": "crates/retrieval/src/lib.rs",
+                "sha256": "a367e1fd4d1b3c414973648bd4bbe5339bb8cda36f20af8806e5a3e0c839d77e"
+              },
+              {
+                "path": "crates/retrieval/tests/evaluation_dataset.rs",
+                "sha256": "dca981f28edf03a0001660592123e56f7ec18060ee56236458e1fb5d2a3a87af"
+              },
+              {
+                "path": "crates/retrieval/tests/hosted_baseline.rs",
+                "sha256": "354d5fad76b7a3ce677599115a4abe8017ca7d23ed0d55569037502f385a42ab"
+              },
+              {
+                "path": "crates/server/Cargo.toml",
+                "sha256": "fd35ab7ca92ddd9d491cef1c93b867ed87c098e512e9cdc6f8a8a9477ab2b7eb"
+              },
+              {
+                "path": "crates/server/src/config.rs",
+                "sha256": "97252c6491d687636c3df0baa64c871f94ab4f999b001bb323417149ab4280c6"
+              },
+              {
+                "path": "crates/server/src/diagnostics.rs",
+                "sha256": "5908bf0a6a25fc4d87e8d2e74048833bf0ecef1c3e28ee082941b433d0fe3e59"
+              },
+              {
+                "path": "crates/server/src/http.rs",
+                "sha256": "8bb47ebecd7ff8bad395634c8cd62938ec421da457ecb0418f652c6542bb362f"
+              },
+              {
+                "path": "crates/server/src/lib.rs",
+                "sha256": "47f3805000c741829a21700d8b6792cb3e2284434fb52644dcc7d9b1a6dcf3fa"
+              },
+              {
+                "path": "crates/server/src/main.rs",
+                "sha256": "6902207c6ca7b061638eba2eab81bddb23abd4a4bea4850ad2df225623986ff8"
+              },
+              {
+                "path": "crates/server/tests/http.rs",
+                "sha256": "65bbfd89cc14e3b7d621dd5a0cf801fe6b194f31bc6810a5c4fc0ffeed4184fb"
+              },
+              {
+                "path": "crates/server/tests/startup.rs",
+                "sha256": "9d8bfdd848a2ea171cfe53641e51bce5bba710c3e1be94964e3248f6e5ccf890"
+              },
+              {
+                "path": "crates/server/tests/stdio.rs",
+                "sha256": "17c232e55b9e7240574f81e32c3009f7424c2e1497bc3a2b70328db6be2f68cd"
+              },
+              {
+                "path": "eval/retrieval/HOSTED_NOTION.md",
+                "sha256": "7235fecb135361eed6d3048f042bb5cd54b37e4671cd8c7c82c949603b2f30b8"
+              },
+              {
+                "path": "eval/retrieval/README.md",
+                "sha256": "c09f9a2e417e6ec00deef788b7a2aebf158e509afa65cca05ae5c7f9709fcc37"
+              },
+              {
+                "path": "eval/retrieval/hosted-notion-2026-10-01.json",
+                "sha256": "5af4aac531cf38e2cde90712619b3b062eeeec21cff4dfa7129e307b2bb918fc"
+              },
+              {
+                "path": "eval/retrieval/personal-knowledge-v1.json",
+                "sha256": "b96d4eba5be7ea7b9d48be12ce088d455f38868fe09b658ce06319ced9888efe"
+              },
+              {
+                "path": "flake.lock",
+                "sha256": "7789d32c105783133de8fafba4ae706bae719fc50f0c252e075386e2d4c90922"
+              },
+              {
+                "path": "flake.nix",
+                "sha256": "3fdd059c2920a3c4401d1d3a58f039a10fa30c431ef375d754ee80612a3637ab"
+              },
+              {
+                "path": "scripts/check-agent-layout.sh",
+                "sha256": "364d9addec5cbfb33d8fda27fa3d559b85247ea80c42eb78ccc9ba69f721417a"
+              },
+              {
+                "path": "scripts/check-dependencies.sh",
+                "sha256": "c04bdd3272957f5fd452361726fbaf8cb060fe298a755f996ddc8a93e6a728eb"
+              },
+              {
+                "path": "scripts/check-secrets.sh",
+                "sha256": "f81adb2878e2aa260b1bfda25d85ae96d7d154415281e5cdc22a8394b143fcf2"
+              },
+              {
+                "path": "scripts/smoke-container.py",
+                "sha256": "b26dd694666efece682c7b176be09a40bb288b4edf5275abf3443dab5d4384b3"
+              },
+              {
+                "path": "scripts/test-security-scanning.py",
+                "sha256": "287f6e55c23449e9aefe6fb038efc7a06f1d9924f6bc53f9b0f5a35eeb3f2b56"
+              }
+            ],
+            "sha256": "2028f91cda49580ba44ff0ac2d35567b0534fff123e805a5691d879786154b61"
+          }
+        }
+      ]
+    },
+    {
+      "run": 37110338867,
+      "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110338867",
+      "attempt": 1,
+      "head": "23087aabcc920b1189038b3f8f844710804047f8",
+      "conclusion": "success",
+      "original_log_sha256": "0089ceab59cecd61ff9888647f64d9e804b83666b0dfde4e3244e13bf41e17d0",
+      "sanitized_log_sha256": "0089ceab59cecd61ff9888647f64d9e804b83666b0dfde4e3244e13bf41e17d0",
+      "workflow_wall_seconds": 101.0,
+      "summed_step_execution_seconds": 362.0,
+      "dispatch_to_first_job_seconds": 3.0,
+      "contexts": [],
+      "cache_index_lookups": [],
+      "cache_preflight": [
+        {
+          "scope": "nk-container-v1-Linux-X64-main",
+          "ref": "refs/heads/main",
+          "available": true,
+          "key": "index-nk-container-v1-Linux-X64-main-1-f921bd05#11",
+          "bytes": 11201,
+          "sha256": "4a4cd920c2bf29109205c6226a9b930f026e13b792b68b494c4a23de163ff609"
+        },
+        {
+          "scope": "nk-container-v1-Linux-X64-main",
+          "ref": "refs/heads/main",
+          "available": true,
+          "key": "index-nk-container-v1-Linux-X64-main-1-f921bd05#11",
+          "bytes": 11201,
+          "sha256": "4a4cd920c2bf29109205c6226a9b930f026e13b792b68b494c4a23de163ff609"
+        },
+        {
+          "scope": "nk-container-v1-Linux-X64-main-builder",
+          "ref": "refs/heads/main",
+          "available": true,
+          "key": "index-nk-container-v1-Linux-X64-main-builder-1-f921bd05#2",
+          "bytes": 3885,
+          "sha256": "84141c2c4b8d44a1f6e8bb582c14fe238975c59c95fa382528157dc7876baf6b"
+        },
+        {
+          "scope": "nk-container-v1-Linux-X64-main-builder",
+          "ref": "refs/heads/main",
+          "available": true,
+          "key": "index-nk-container-v1-Linux-X64-main-builder-1-f921bd05#2",
+          "bytes": 3885,
+          "sha256": "84141c2c4b8d44a1f6e8bb582c14fe238975c59c95fa382528157dc7876baf6b"
+        }
+      ],
+      "verified_executables": [],
+      "invalidation_controls": [],
+      "container_solves": {
+        "Set up job": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Checkout": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Set up Buildx": {
+          "compiled_crates": [],
+          "vertices": {
+            "#1": {
+              "stage": "internal",
+              "operation": "booting buildkit",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.7
+            }
+          }
+        },
+        "Choose available Docker cache roots": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Test Docker cache root selection": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Test cached image identity rejection": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Read canonical image identity": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Build and load final runtime image": {
+          "compiled_crates": [],
+          "vertices": {
+            "#1": {
+              "stage": "internal",
+              "operation": "load build definition from Dockerfile",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#2": {
+              "stage": "internal",
+              "operation": "load metadata for docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.9
+            },
+            "#3": {
+              "stage": "auth",
+              "operation": "library/rust:pull token for registry-1.docker.io",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#4": {
+              "stage": "internal",
+              "operation": "load metadata for gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.8
+            },
+            "#5": {
+              "stage": "internal",
+              "operation": "load .dockerignore",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#6": {
+              "stage": "internal",
+              "operation": "load build context",
+              "progress_statuses": [
+                "DONE",
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#7": {
+              "stage": "toolchain 1/1",
+              "operation": "FROM docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#8": {
+              "stage": "stage-3 1/4",
+              "operation": "FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#9": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.5
+            },
+            "#10": {
+              "stage": "builder 2/4",
+              "operation": "COPY Cargo.toml Cargo.lock ./",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#11": {
+              "stage": "builder 3/4",
+              "operation": "COPY crates ./crates",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#12": {
+              "stage": "builder 4/4",
+              "operation": "RUN test \"$VERSION\" = \"$(sed -n '/^\\[workspace.package\\]/,/^\\[/s/^version = \"\\([^\"]*\\)\"/\\1/p' Cargo.toml)\"     && cargo build --release --locked -p notion-knowledge-server     && ldd target/release/notion-knowledge-server     && mkdir -p /runtime-data/index /runtime-data/state /runtime-data/models     && chown -R 65532:65532 /runtime-data",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#13": {
+              "stage": "stage-3 2/4",
+              "operation": "COPY --from=builder /build/target/release/notion-knowledge-server /usr/local/bin/notion-knowledge-server",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#14": {
+              "stage": "stage-3 3/4",
+              "operation": "COPY --from=builder --chown=65532:65532 /runtime-data /var/lib/notion-knowledge",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#15": {
+              "stage": "builder 1/4",
+              "operation": "WORKDIR /build",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#16": {
+              "stage": "stage-3 4/4",
+              "operation": "WORKDIR /var/lib/notion-knowledge",
+              "progress_statuses": [
+                "CACHED",
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 2.9
+            },
+            "#17": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 3.1
+            },
+            "#18": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.3
+            },
+            "#19": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            }
+          },
+          "cache-from": [
+            "type=gha,scope=nk-container-v1-Linux-X64-main"
+          ]
+        },
+        "Load pinned builder for permission probe": {
+          "compiled_crates": [],
+          "vertices": {
+            "#1": {
+              "stage": "internal",
+              "operation": "load build definition from Dockerfile",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#2": {
+              "stage": "internal",
+              "operation": "load metadata for docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#3": {
+              "stage": "internal",
+              "operation": "load .dockerignore",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#5": {
+              "stage": "toolchain 1/1",
+              "operation": "FROM docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 3.0
+            },
+            "#6": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 23.3
+            },
+            "#4": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 31.9
+            },
+            "#7": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            }
+          }
+        },
+        "Verify final runtime image": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Export verified builder root": {
+          "compiled_crates": [],
+          "vertices": {
+            "#1": {
+              "stage": "internal",
+              "operation": "load build definition from Dockerfile",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#2": {
+              "stage": "internal",
+              "operation": "load metadata for docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#3": {
+              "stage": "internal",
+              "operation": "load .dockerignore",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#4": {
+              "stage": "internal",
+              "operation": "load build context",
+              "progress_statuses": [
+                "DONE",
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#5": {
+              "stage": "toolchain 1/1",
+              "operation": "FROM docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#6": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.1
+            },
+            "#7": {
+              "stage": "builder 1/4",
+              "operation": "WORKDIR /build",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#8": {
+              "stage": "builder 2/4",
+              "operation": "COPY Cargo.toml Cargo.lock ./",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#9": {
+              "stage": "builder 3/4",
+              "operation": "COPY crates ./crates",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#10": {
+              "stage": "builder 4/4",
+              "operation": "RUN test \"$VERSION\" = \"$(sed -n '/^\\[workspace.package\\]/,/^\\[/s/^version = \"\\([^\"]*\\)\"/\\1/p' Cargo.toml)\"     && cargo build --release --locked -p notion-knowledge-server     && ldd target/release/notion-knowledge-server     && mkdir -p /runtime-data/index /runtime-data/state /runtime-data/models     && chown -R 65532:65532 /runtime-data",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#11": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 1.1
+            },
+            "#12": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            }
+          },
+          "cache-from": [
+            "type=gha,scope=nk-container-v1-Linux-X64-main-builder"
+          ],
+          "cache-to": [
+            "type=gha,scope=nk-container-v1-Linux-X64-main-builder,mode=max,timeout=10m"
+          ]
+        },
+        "Export verified final image graph": {
+          "compiled_crates": [],
+          "vertices": {
+            "#1": {
+              "stage": "internal",
+              "operation": "load build definition from Dockerfile",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#2": {
+              "stage": "internal",
+              "operation": "load metadata for docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#3": {
+              "stage": "internal",
+              "operation": "load metadata for gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#4": {
+              "stage": "internal",
+              "operation": "load .dockerignore",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#5": {
+              "stage": "internal",
+              "operation": "load build context",
+              "progress_statuses": [
+                "DONE",
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#6": {
+              "stage": "toolchain 1/1",
+              "operation": "FROM docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#7": {
+              "stage": "stage-3 1/4",
+              "operation": "FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#8": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.2
+            },
+            "#9": {
+              "stage": "builder 2/4",
+              "operation": "COPY Cargo.toml Cargo.lock ./",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#10": {
+              "stage": "builder 4/4",
+              "operation": "RUN test \"$VERSION\" = \"$(sed -n '/^\\[workspace.package\\]/,/^\\[/s/^version = \"\\([^\"]*\\)\"/\\1/p' Cargo.toml)\"     && cargo build --release --locked -p notion-knowledge-server     && ldd target/release/notion-knowledge-server     && mkdir -p /runtime-data/index /runtime-data/state /runtime-data/models     && chown -R 65532:65532 /runtime-data",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#11": {
+              "stage": "stage-3 3/4",
+              "operation": "COPY --from=builder --chown=65532:65532 /runtime-data /var/lib/notion-knowledge",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#12": {
+              "stage": "builder 1/4",
+              "operation": "WORKDIR /build",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#13": {
+              "stage": "builder 3/4",
+              "operation": "COPY crates ./crates",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#14": {
+              "stage": "stage-3 2/4",
+              "operation": "COPY --from=builder /build/target/release/notion-knowledge-server /usr/local/bin/notion-knowledge-server",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#15": {
+              "stage": "stage-3 4/4",
+              "operation": "WORKDIR /var/lib/notion-knowledge",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#16": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 3.0
+            },
+            "#17": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            }
+          },
+          "cache-from": [
+            "type=gha,scope=nk-container-v1-Linux-X64-main"
+          ],
+          "cache-to": [
+            "type=gha,scope=nk-container-v1-Linux-X64-main,mode=max,timeout=10m"
+          ]
+        },
+        "Post Export verified final image graph": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Post Export verified builder root": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Post Load pinned builder for permission probe": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Post Build and load final runtime image": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Post Set up Buildx": {
+          "compiled_crates": [],
+          "vertices": {}
+        }
+      },
+      "jobs": [
+        {
+          "name": "CI input selection",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 9.0,
+          "step_execution_seconds": 6.0,
+          "steps": []
+        },
+        {
+          "name": "Dependency vulnerabilities",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 38.0,
+          "step_execution_seconds": 37.0,
+          "steps": []
+        },
+        {
+          "name": "Secret scanning",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 30.0,
+          "step_execution_seconds": 27.0,
+          "steps": []
+        },
+        {
+          "name": "Type check",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 40.0,
+          "step_execution_seconds": 38.0,
+          "steps": []
+        },
+        {
+          "name": "Container smoke",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 78.0,
+          "step_execution_seconds": 75.0,
+          "steps": [
+            {
+              "name": "Set up job",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "name": "Checkout",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "name": "Set up Buildx",
+              "conclusion": "success",
+              "seconds": 6.0
+            },
+            {
+              "name": "Choose available Docker cache roots",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "name": "Test Docker cache root selection",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "name": "Test cached image identity rejection",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "name": "Read canonical image identity",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "name": "Build and load final runtime image",
+              "conclusion": "success",
+              "seconds": 6.0
+            },
+            {
+              "name": "Load pinned builder for permission probe",
+              "conclusion": "success",
+              "seconds": 33.0
+            },
+            {
+              "name": "Verify final runtime image",
+              "conclusion": "success",
+              "seconds": 8.0
+            },
+            {
+              "name": "Export verified builder root",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "name": "Export verified final image graph",
+              "conclusion": "success",
+              "seconds": 5.0
+            },
+            {
+              "name": "Post Export verified final image graph",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "name": "Post Export verified builder root",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "name": "Post Load pinned builder for permission probe",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "name": "Post Build and load final runtime image",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "name": "Post Set up Buildx",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "name": "Post Checkout",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "name": "Complete job",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ]
+        },
+        {
+          "name": "Clippy",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 60.0,
+          "step_execution_seconds": 59.0,
+          "steps": []
+        },
+        {
+          "name": "Agent layout",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 7.0,
+          "step_execution_seconds": 4.0,
+          "steps": []
+        },
+        {
+          "name": "Format",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 29.0,
+          "step_execution_seconds": 27.0,
+          "steps": []
+        },
+        {
+          "name": "Release build",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 43.0,
+          "step_execution_seconds": 40.0,
+          "steps": []
+        },
+        {
+          "name": "Unit tests",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 50.0,
+          "step_execution_seconds": 46.0,
+          "steps": []
+        },
+        {
+          "name": "CI gate",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 6.0,
+          "step_execution_seconds": 3.0,
+          "steps": []
+        }
+      ],
+      "event": "push",
+      "created_at": "2026-10-03T08:37:39Z",
+      "completed_at": "2026-10-03T08:39:20Z",
+      "jobs_api_identities": [
+        {
+          "id": 111166840005,
+          "name": "CI input selection",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110338867/job/111166840005",
+          "conclusion": "success"
+        },
+        {
+          "id": 111166840187,
+          "name": "Dependency vulnerabilities",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110338867/job/111166840187",
+          "conclusion": "success"
+        },
+        {
+          "id": 111166840217,
+          "name": "Secret scanning",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110338867/job/111166840217",
+          "conclusion": "success"
+        },
+        {
+          "id": 111166868518,
+          "name": "Type check",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110338867/job/111166868518",
+          "conclusion": "success"
+        },
+        {
+          "id": 111166868547,
+          "name": "Container smoke",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110338867/job/111166868547",
+          "conclusion": "success"
+        },
+        {
+          "id": 111166868555,
+          "name": "Clippy",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110338867/job/111166868555",
+          "conclusion": "success"
+        },
+        {
+          "id": 111166868574,
+          "name": "Agent layout",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110338867/job/111166868574",
+          "conclusion": "success"
+        },
+        {
+          "id": 111166868577,
+          "name": "Format",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110338867/job/111166868577",
+          "conclusion": "success"
+        },
+        {
+          "id": 111166868612,
+          "name": "Release build",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110338867/job/111166868612",
+          "conclusion": "success"
+        },
+        {
+          "id": 111166868635,
+          "name": "Unit tests",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110338867/job/111166868635",
+          "conclusion": "success"
+        },
+        {
+          "id": 111167077882,
+          "name": "CI gate",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110338867/job/111167077882",
+          "conclusion": "success"
+        }
+      ],
+      "security_evidence": [
+        "Dependency vulnerabilities\tAudit locked dependencies against fresh RustSec advisories\t2026-10-03T08:38:15.6607864Z \u001b[0m\u001b[0m\u001b[1m\u001b[32m    Fetching\u001b[0m advisory database from `https://github.com/RustSec/advisory-db.git`",
+        "Secret scanning\tScan reachable history with redacted findings\t2026-10-03T08:38:10.2819378Z \u001b[90m8:38AM\u001b[0m \u001b[32mINF\u001b[0m \u001b[1m35 commits scanned.\u001b[0m",
+        "Secret scanning\tScan reachable history with redacted findings\t2026-10-03T08:38:10.2821350Z \u001b[90m8:38AM\u001b[0m \u001b[32mINF\u001b[0m \u001b[1mno leaks found\u001b[0m"
+      ],
+      "actual_smoke_evidence": [
+        "Container smoke\tVerify final runtime image\t2026-10-03T08:38:53.1577232Z Final-image smoke passed: metadata/version guard, non-root startup, config errors, liveness/readiness/diagnostics, stdio and HTTP MCP."
+      ],
+      "actual_checkout_identities": [
+        {
+          "commit": "23087aabcc920b1189038b3f8f844710804047f8",
+          "tree": "882ee53cbbe1d719d4fe5e16f0b6bf6fde23b397",
+          "production_inputs": {
+            "files": [
+              {
+                "path": ".cargo/audit.toml",
+                "sha256": "04f71aade6c2f66aff9c0a2d209d24c4eefcf60866da6311c9fd052d82377eab"
+              },
+              {
+                "path": ".dockerignore",
+                "sha256": "005d3506cd7df6223e86284286d8a4b1813ae69d3886bcb9b3850caa97f92e91"
+              },
+              {
+                "path": ".gitleaks.toml",
+                "sha256": "66ecac4d0a2093702fc1956a6163932dd587af1f336decb7c38fbacbdf5d72c3"
+              },
+              {
+                "path": ".gitleaksignore",
+                "sha256": "05d36b95c24a192accb73095bd55f588dcfa63a7e54f6857d66b984bac679d82"
+              },
+              {
+                "path": "Cargo.lock",
+                "sha256": "8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69"
+              },
+              {
+                "path": "Cargo.toml",
+                "sha256": "d02de347eafd9a1c153c30ba4e26a6070df129cd9365ed8872341fe09330493c"
+              },
+              {
+                "path": "Dockerfile",
+                "sha256": "a6bc53025ee93f3463e90b25d6b6344a7e2ac0ee88e054e4134b174a14dcef54"
+              },
+              {
+                "path": "crates/core/Cargo.toml",
+                "sha256": "5a296e2901c72ad1e99628c1ae4e1b7827e908ca5e3240c0162bcecfa49843a2"
+              },
+              {
+                "path": "crates/core/src/health.rs",
+                "sha256": "0b1a13b0f36f3f02793ffe5513cac153d5ceda45254403ccf82b36b46a3bda7e"
+              },
+              {
+                "path": "crates/core/src/lib.rs",
+                "sha256": "2926e9d1073a810eb34982e59f8a11c8453b7ab1370669beb2b8642cbaaa0f08"
+              },
+              {
+                "path": "crates/mcp/Cargo.toml",
+                "sha256": "4829a8a9bcc97831b37df2dae97b40a5c21be4a10fa3ba1c3ae086de23867fca"
+              },
+              {
+                "path": "crates/mcp/src/lib.rs",
+                "sha256": "b921eed4832ac34fa7694651ffbb9afcff85a4b524c3983a57fb97f49e0579aa"
+              },
+              {
+                "path": "crates/notion/Cargo.toml",
+                "sha256": "691f3237114cd49541dadad22d5be459d27ff256ea4be5c1638cbef1eef4a279"
+              },
+              {
+                "path": "crates/notion/src/lib.rs",
+                "sha256": "31d53a2dca2332af8f53d8c0334fa9f73ec39b5f903a5a71fffff71f297b3158"
+              },
+              {
+                "path": "crates/retrieval/Cargo.toml",
+                "sha256": "b9a8995f3db63ab915050d862e62ba4ac7e2638b3fe5f1d52754bf73b891717a"
+              },
+              {
+                "path": "crates/retrieval/src/lib.rs",
+                "sha256": "a367e1fd4d1b3c414973648bd4bbe5339bb8cda36f20af8806e5a3e0c839d77e"
+              },
+              {
+                "path": "crates/retrieval/tests/evaluation_dataset.rs",
+                "sha256": "dca981f28edf03a0001660592123e56f7ec18060ee56236458e1fb5d2a3a87af"
+              },
+              {
+                "path": "crates/retrieval/tests/hosted_baseline.rs",
+                "sha256": "354d5fad76b7a3ce677599115a4abe8017ca7d23ed0d55569037502f385a42ab"
+              },
+              {
+                "path": "crates/server/Cargo.toml",
+                "sha256": "fd35ab7ca92ddd9d491cef1c93b867ed87c098e512e9cdc6f8a8a9477ab2b7eb"
+              },
+              {
+                "path": "crates/server/src/config.rs",
+                "sha256": "97252c6491d687636c3df0baa64c871f94ab4f999b001bb323417149ab4280c6"
+              },
+              {
+                "path": "crates/server/src/diagnostics.rs",
+                "sha256": "5908bf0a6a25fc4d87e8d2e74048833bf0ecef1c3e28ee082941b433d0fe3e59"
+              },
+              {
+                "path": "crates/server/src/http.rs",
+                "sha256": "8bb47ebecd7ff8bad395634c8cd62938ec421da457ecb0418f652c6542bb362f"
+              },
+              {
+                "path": "crates/server/src/lib.rs",
+                "sha256": "47f3805000c741829a21700d8b6792cb3e2284434fb52644dcc7d9b1a6dcf3fa"
+              },
+              {
+                "path": "crates/server/src/main.rs",
+                "sha256": "6902207c6ca7b061638eba2eab81bddb23abd4a4bea4850ad2df225623986ff8"
+              },
+              {
+                "path": "crates/server/tests/http.rs",
+                "sha256": "65bbfd89cc14e3b7d621dd5a0cf801fe6b194f31bc6810a5c4fc0ffeed4184fb"
+              },
+              {
+                "path": "crates/server/tests/startup.rs",
+                "sha256": "9d8bfdd848a2ea171cfe53641e51bce5bba710c3e1be94964e3248f6e5ccf890"
+              },
+              {
+                "path": "crates/server/tests/stdio.rs",
+                "sha256": "17c232e55b9e7240574f81e32c3009f7424c2e1497bc3a2b70328db6be2f68cd"
+              },
+              {
+                "path": "eval/retrieval/HOSTED_NOTION.md",
+                "sha256": "7235fecb135361eed6d3048f042bb5cd54b37e4671cd8c7c82c949603b2f30b8"
+              },
+              {
+                "path": "eval/retrieval/README.md",
+                "sha256": "c09f9a2e417e6ec00deef788b7a2aebf158e509afa65cca05ae5c7f9709fcc37"
+              },
+              {
+                "path": "eval/retrieval/hosted-notion-2026-10-01.json",
+                "sha256": "5af4aac531cf38e2cde90712619b3b062eeeec21cff4dfa7129e307b2bb918fc"
+              },
+              {
+                "path": "eval/retrieval/personal-knowledge-v1.json",
+                "sha256": "b96d4eba5be7ea7b9d48be12ce088d455f38868fe09b658ce06319ced9888efe"
+              },
+              {
+                "path": "flake.lock",
+                "sha256": "7789d32c105783133de8fafba4ae706bae719fc50f0c252e075386e2d4c90922"
+              },
+              {
+                "path": "flake.nix",
+                "sha256": "3fdd059c2920a3c4401d1d3a58f039a10fa30c431ef375d754ee80612a3637ab"
+              },
+              {
+                "path": "scripts/check-agent-layout.sh",
+                "sha256": "364d9addec5cbfb33d8fda27fa3d559b85247ea80c42eb78ccc9ba69f721417a"
+              },
+              {
+                "path": "scripts/check-dependencies.sh",
+                "sha256": "c04bdd3272957f5fd452361726fbaf8cb060fe298a755f996ddc8a93e6a728eb"
+              },
+              {
+                "path": "scripts/check-secrets.sh",
+                "sha256": "f81adb2878e2aa260b1bfda25d85ae96d7d154415281e5cdc22a8394b143fcf2"
+              },
+              {
+                "path": "scripts/smoke-container.py",
+                "sha256": "b26dd694666efece682c7b176be09a40bb288b4edf5275abf3443dab5d4384b3"
+              },
+              {
+                "path": "scripts/test-security-scanning.py",
+                "sha256": "287f6e55c23449e9aefe6fb038efc7a06f1d9924f6bc53f9b0f5a35eeb3f2b56"
+              }
+            ],
+            "sha256": "2028f91cda49580ba44ff0ac2d35567b0534fff123e805a5691d879786154b61"
+          }
+        }
+      ]
+    },
+    {
+      "run": 37110479728,
+      "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110479728",
+      "attempt": 1,
+      "head": "23087aabcc920b1189038b3f8f844710804047f8",
+      "conclusion": "success",
+      "original_log_sha256": "34e13f5422fa1ed0b5abb27d7ff0538dd1e03a0492ae85a90e24678e9bdd6a4c",
+      "sanitized_log_sha256": "34e13f5422fa1ed0b5abb27d7ff0538dd1e03a0492ae85a90e24678e9bdd6a4c",
+      "workflow_wall_seconds": 93.0,
+      "summed_step_execution_seconds": 377.0,
+      "dispatch_to_first_job_seconds": 3.0,
+      "contexts": [],
+      "cache_index_lookups": [],
+      "cache_preflight": [
+        {
+          "scope": "nk-container-v1-Linux-X64-main",
+          "ref": "refs/heads/main",
+          "available": true,
+          "key": "index-nk-container-v1-Linux-X64-main-1-f921bd05#12",
+          "bytes": 11200,
+          "sha256": "523927c2b92d0547172b06abeb8dcdfecc0617cec99f5ae3545d0fd04c1c0d35"
+        },
+        {
+          "scope": "nk-container-v1-Linux-X64-main",
+          "ref": "refs/heads/main",
+          "available": true,
+          "key": "index-nk-container-v1-Linux-X64-main-1-f921bd05#12",
+          "bytes": 11200,
+          "sha256": "523927c2b92d0547172b06abeb8dcdfecc0617cec99f5ae3545d0fd04c1c0d35"
+        },
+        {
+          "scope": "nk-container-v1-Linux-X64-main-builder",
+          "ref": "refs/heads/main",
+          "available": true,
+          "key": "index-nk-container-v1-Linux-X64-main-builder-1-f921bd05#3",
+          "bytes": 3884,
+          "sha256": "a2b3120fbe73a0c4b03eca0786c7b3957924754bc5c519c48e535c2df1b2c6e2"
+        },
+        {
+          "scope": "nk-container-v1-Linux-X64-main-builder",
+          "ref": "refs/heads/main",
+          "available": true,
+          "key": "index-nk-container-v1-Linux-X64-main-builder-1-f921bd05#3",
+          "bytes": 3884,
+          "sha256": "a2b3120fbe73a0c4b03eca0786c7b3957924754bc5c519c48e535c2df1b2c6e2"
+        }
+      ],
+      "verified_executables": [],
+      "invalidation_controls": [],
+      "container_solves": {
+        "Set up job": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Checkout": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Set up Buildx": {
+          "compiled_crates": [],
+          "vertices": {
+            "#1": {
+              "stage": "internal",
+              "operation": "booting buildkit",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.5
+            }
+          }
+        },
+        "Choose available Docker cache roots": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Test Docker cache root selection": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Test cached image identity rejection": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Read canonical image identity": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Build and load final runtime image": {
+          "compiled_crates": [],
+          "vertices": {
+            "#1": {
+              "stage": "internal",
+              "operation": "load build definition from Dockerfile",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#2": {
+              "stage": "auth",
+              "operation": "library/rust:pull token for registry-1.docker.io",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#3": {
+              "stage": "internal",
+              "operation": "load metadata for gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.6
+            },
+            "#4": {
+              "stage": "internal",
+              "operation": "load metadata for docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.4
+            },
+            "#5": {
+              "stage": "internal",
+              "operation": "load .dockerignore",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#6": {
+              "stage": "internal",
+              "operation": "load build context",
+              "progress_statuses": [
+                "DONE",
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#7": {
+              "stage": "toolchain 1/1",
+              "operation": "FROM docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#8": {
+              "stage": "stage-3 1/4",
+              "operation": "FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#9": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.1
+            },
+            "#10": {
+              "stage": "builder 1/4",
+              "operation": "WORKDIR /build",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#11": {
+              "stage": "builder 2/4",
+              "operation": "COPY Cargo.toml Cargo.lock ./",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#12": {
+              "stage": "builder 3/4",
+              "operation": "COPY crates ./crates",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#13": {
+              "stage": "builder 4/4",
+              "operation": "RUN test \"$VERSION\" = \"$(sed -n '/^\\[workspace.package\\]/,/^\\[/s/^version = \"\\([^\"]*\\)\"/\\1/p' Cargo.toml)\"     && cargo build --release --locked -p notion-knowledge-server     && ldd target/release/notion-knowledge-server     && mkdir -p /runtime-data/index /runtime-data/state /runtime-data/models     && chown -R 65532:65532 /runtime-data",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#14": {
+              "stage": "stage-3 2/4",
+              "operation": "COPY --from=builder /build/target/release/notion-knowledge-server /usr/local/bin/notion-knowledge-server",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#15": {
+              "stage": "stage-3 3/4",
+              "operation": "COPY --from=builder --chown=65532:65532 /runtime-data /var/lib/notion-knowledge",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#16": {
+              "stage": "stage-3 4/4",
+              "operation": "WORKDIR /var/lib/notion-knowledge",
+              "progress_statuses": [
+                "CACHED",
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.5
+            },
+            "#17": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.9
+            },
+            "#18": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.4
+            },
+            "#19": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            }
+          },
+          "cache-from": [
+            "type=gha,scope=nk-container-v1-Linux-X64-main"
+          ]
+        },
+        "Load pinned builder for permission probe": {
+          "compiled_crates": [],
+          "vertices": {
+            "#1": {
+              "stage": "internal",
+              "operation": "load build definition from Dockerfile",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#2": {
+              "stage": "internal",
+              "operation": "load metadata for docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#3": {
+              "stage": "internal",
+              "operation": "load .dockerignore",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#5": {
+              "stage": "toolchain 1/1",
+              "operation": "FROM docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 2.9
+            },
+            "#6": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 23.3
+            },
+            "#4": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 31.6
+            },
+            "#7": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            }
+          }
+        },
+        "Verify final runtime image": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Export verified builder root": {
+          "compiled_crates": [],
+          "vertices": {
+            "#1": {
+              "stage": "internal",
+              "operation": "load build definition from Dockerfile",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#2": {
+              "stage": "internal",
+              "operation": "load metadata for docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#3": {
+              "stage": "internal",
+              "operation": "load .dockerignore",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#4": {
+              "stage": "toolchain 1/1",
+              "operation": "FROM docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#5": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.1
+            },
+            "#6": {
+              "stage": "internal",
+              "operation": "load build context",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#7": {
+              "stage": "builder 1/4",
+              "operation": "WORKDIR /build",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#8": {
+              "stage": "builder 3/4",
+              "operation": "COPY crates ./crates",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#9": {
+              "stage": "builder 2/4",
+              "operation": "COPY Cargo.toml Cargo.lock ./",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#10": {
+              "stage": "builder 4/4",
+              "operation": "RUN test \"$VERSION\" = \"$(sed -n '/^\\[workspace.package\\]/,/^\\[/s/^version = \"\\([^\"]*\\)\"/\\1/p' Cargo.toml)\"     && cargo build --release --locked -p notion-knowledge-server     && ldd target/release/notion-knowledge-server     && mkdir -p /runtime-data/index /runtime-data/state /runtime-data/models     && chown -R 65532:65532 /runtime-data",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#11": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.5
+            },
+            "#12": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            }
+          },
+          "cache-from": [
+            "type=gha,scope=nk-container-v1-Linux-X64-main-builder"
+          ],
+          "cache-to": [
+            "type=gha,scope=nk-container-v1-Linux-X64-main-builder,mode=max,timeout=10m"
+          ]
+        },
+        "Export verified final image graph": {
+          "compiled_crates": [],
+          "vertices": {
+            "#1": {
+              "stage": "internal",
+              "operation": "load build definition from Dockerfile",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#2": {
+              "stage": "internal",
+              "operation": "load metadata for gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#3": {
+              "stage": "internal",
+              "operation": "load metadata for docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#4": {
+              "stage": "internal",
+              "operation": "load .dockerignore",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#5": {
+              "stage": "stage-3 1/4",
+              "operation": "FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#6": {
+              "stage": "toolchain 1/1",
+              "operation": "FROM docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#7": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#8": {
+              "stage": "internal",
+              "operation": "load build context",
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            },
+            "#9": {
+              "stage": "builder 4/4",
+              "operation": "RUN test \"$VERSION\" = \"$(sed -n '/^\\[workspace.package\\]/,/^\\[/s/^version = \"\\([^\"]*\\)\"/\\1/p' Cargo.toml)\"     && cargo build --release --locked -p notion-knowledge-server     && ldd target/release/notion-knowledge-server     && mkdir -p /runtime-data/index /runtime-data/state /runtime-data/models     && chown -R 65532:65532 /runtime-data",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#10": {
+              "stage": "stage-3 2/4",
+              "operation": "COPY --from=builder /build/target/release/notion-knowledge-server /usr/local/bin/notion-knowledge-server",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#11": {
+              "stage": "stage-3 3/4",
+              "operation": "COPY --from=builder --chown=65532:65532 /runtime-data /var/lib/notion-knowledge",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#12": {
+              "stage": "builder 2/4",
+              "operation": "COPY Cargo.toml Cargo.lock ./",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#13": {
+              "stage": "builder 1/4",
+              "operation": "WORKDIR /build",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#14": {
+              "stage": "builder 3/4",
+              "operation": "COPY crates ./crates",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#15": {
+              "stage": "stage-3 4/4",
+              "operation": "WORKDIR /var/lib/notion-knowledge",
+              "progress_statuses": [
+                "CACHED"
+              ],
+              "status": "CACHED",
+              "reported_seconds": null
+            },
+            "#16": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 1.1
+            },
+            "#17": {
+              "progress_statuses": [
+                "DONE"
+              ],
+              "status": "DONE",
+              "reported_seconds": 0.0
+            }
+          },
+          "cache-from": [
+            "type=gha,scope=nk-container-v1-Linux-X64-main"
+          ],
+          "cache-to": [
+            "type=gha,scope=nk-container-v1-Linux-X64-main,mode=max,timeout=10m"
+          ]
+        },
+        "Post Export verified final image graph": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Post Export verified builder root": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Post Load pinned builder for permission probe": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Post Build and load final runtime image": {
+          "compiled_crates": [],
+          "vertices": {}
+        },
+        "Post Set up Buildx": {
+          "compiled_crates": [],
+          "vertices": {}
+        }
+      },
+      "jobs": [
+        {
+          "name": "CI input selection",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 10.0,
+          "step_execution_seconds": 6.0,
+          "steps": []
+        },
+        {
+          "name": "Secret scanning",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 30.0,
+          "step_execution_seconds": 27.0,
+          "steps": []
+        },
+        {
+          "name": "Dependency vulnerabilities",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 35.0,
+          "step_execution_seconds": 33.0,
+          "steps": []
+        },
+        {
+          "name": "Clippy",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 46.0,
+          "step_execution_seconds": 43.0,
+          "steps": []
+        },
+        {
+          "name": "Type check",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 54.0,
+          "step_execution_seconds": 51.0,
+          "steps": []
+        },
+        {
+          "name": "Unit tests",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 70.0,
+          "step_execution_seconds": 67.0,
+          "steps": []
+        },
+        {
+          "name": "Agent layout",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 5.0,
+          "step_execution_seconds": 3.0,
+          "steps": []
+        },
+        {
+          "name": "Release build",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 59.0,
+          "step_execution_seconds": 56.0,
+          "steps": []
+        },
+        {
+          "name": "Format",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 29.0,
+          "step_execution_seconds": 26.0,
+          "steps": []
+        },
+        {
+          "name": "Container smoke",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 65.0,
+          "step_execution_seconds": 63.0,
+          "steps": [
+            {
+              "name": "Set up job",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "name": "Checkout",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "name": "Set up Buildx",
+              "conclusion": "success",
+              "seconds": 6.0
+            },
+            {
+              "name": "Choose available Docker cache roots",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "name": "Test Docker cache root selection",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "name": "Test cached image identity rejection",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "name": "Read canonical image identity",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "name": "Build and load final runtime image",
+              "conclusion": "success",
+              "seconds": 3.0
+            },
+            {
+              "name": "Load pinned builder for permission probe",
+              "conclusion": "success",
+              "seconds": 32.0
+            },
+            {
+              "name": "Verify final runtime image",
+              "conclusion": "success",
+              "seconds": 8.0
+            },
+            {
+              "name": "Export verified builder root",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "name": "Export verified final image graph",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "name": "Post Export verified final image graph",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "name": "Post Export verified builder root",
+              "conclusion": "success",
+              "seconds": 2.0
+            },
+            {
+              "name": "Post Load pinned builder for permission probe",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "name": "Post Build and load final runtime image",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "name": "Post Set up Buildx",
+              "conclusion": "success",
+              "seconds": 1.0
+            },
+            {
+              "name": "Post Checkout",
+              "conclusion": "success",
+              "seconds": 0.0
+            },
+            {
+              "name": "Complete job",
+              "conclusion": "success",
+              "seconds": 0.0
+            }
+          ]
+        },
+        {
+          "name": "CI gate",
+          "conclusion": "success",
+          "runner_labels": [
+            "ubuntu-latest"
+          ],
+          "job_wall_seconds": 5.0,
+          "step_execution_seconds": 2.0,
+          "steps": []
+        }
+      ],
+      "event": "workflow_dispatch",
+      "created_at": "2026-10-03T08:40:13Z",
+      "completed_at": "2026-10-03T08:41:46Z",
+      "jobs_api_identities": [
+        {
+          "id": 111167244475,
+          "name": "CI input selection",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110479728/job/111167244475",
+          "conclusion": "success"
+        },
+        {
+          "id": 111167244584,
+          "name": "Secret scanning",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110479728/job/111167244584",
+          "conclusion": "success"
+        },
+        {
+          "id": 111167244598,
+          "name": "Dependency vulnerabilities",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110479728/job/111167244598",
+          "conclusion": "success"
+        },
+        {
+          "id": 111167278428,
+          "name": "Clippy",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110479728/job/111167278428",
+          "conclusion": "success"
+        },
+        {
+          "id": 111167278440,
+          "name": "Type check",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110479728/job/111167278440",
+          "conclusion": "success"
+        },
+        {
+          "id": 111167278472,
+          "name": "Unit tests",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110479728/job/111167278472",
+          "conclusion": "success"
+        },
+        {
+          "id": 111167278476,
+          "name": "Agent layout",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110479728/job/111167278476",
+          "conclusion": "success"
+        },
+        {
+          "id": 111167278485,
+          "name": "Release build",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110479728/job/111167278485",
+          "conclusion": "success"
+        },
+        {
+          "id": 111167278572,
+          "name": "Format",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110479728/job/111167278572",
+          "conclusion": "success"
+        },
+        {
+          "id": 111167278615,
+          "name": "Container smoke",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110479728/job/111167278615",
+          "conclusion": "success"
+        },
+        {
+          "id": 111167466176,
+          "name": "CI gate",
+          "url": "https://github.com/mtandersson/notion-knowedge/actions/runs/37110479728/job/111167466176",
+          "conclusion": "success"
+        }
+      ],
+      "security_evidence": [
+        "Secret scanning\tScan reachable history with redacted findings\t2026-10-03T08:40:45.4496636Z \u001b[90m8:40AM\u001b[0m \u001b[32mINF\u001b[0m \u001b[1m35 commits scanned.\u001b[0m",
+        "Secret scanning\tScan reachable history with redacted findings\t2026-10-03T08:40:45.4499102Z \u001b[90m8:40AM\u001b[0m \u001b[32mINF\u001b[0m \u001b[1mno leaks found\u001b[0m",
+        "Dependency vulnerabilities\tAudit locked dependencies against fresh RustSec advisories\t2026-10-03T08:40:45.7819352Z \u001b[0m\u001b[0m\u001b[1m\u001b[32m    Fetching\u001b[0m advisory database from `https://github.com/RustSec/advisory-db.git`"
+      ],
+      "actual_smoke_evidence": [
+        "Container smoke\tVerify final runtime image\t2026-10-03T08:41:23.5631225Z Final-image smoke passed: metadata/version guard, non-root startup, config errors, liveness/readiness/diagnostics, stdio and HTTP MCP."
+      ],
+      "actual_checkout_identities": [
+        {
+          "commit": "23087aabcc920b1189038b3f8f844710804047f8",
+          "tree": "882ee53cbbe1d719d4fe5e16f0b6bf6fde23b397",
+          "production_inputs": {
+            "files": [
+              {
+                "path": ".cargo/audit.toml",
+                "sha256": "04f71aade6c2f66aff9c0a2d209d24c4eefcf60866da6311c9fd052d82377eab"
+              },
+              {
+                "path": ".dockerignore",
+                "sha256": "005d3506cd7df6223e86284286d8a4b1813ae69d3886bcb9b3850caa97f92e91"
+              },
+              {
+                "path": ".gitleaks.toml",
+                "sha256": "66ecac4d0a2093702fc1956a6163932dd587af1f336decb7c38fbacbdf5d72c3"
+              },
+              {
+                "path": ".gitleaksignore",
+                "sha256": "05d36b95c24a192accb73095bd55f588dcfa63a7e54f6857d66b984bac679d82"
+              },
+              {
+                "path": "Cargo.lock",
+                "sha256": "8a4ecda38abdb8a5091c33f0424cc7d5ca440a749b49e31886f604079c282d69"
+              },
+              {
+                "path": "Cargo.toml",
+                "sha256": "d02de347eafd9a1c153c30ba4e26a6070df129cd9365ed8872341fe09330493c"
+              },
+              {
+                "path": "Dockerfile",
+                "sha256": "a6bc53025ee93f3463e90b25d6b6344a7e2ac0ee88e054e4134b174a14dcef54"
+              },
+              {
+                "path": "crates/core/Cargo.toml",
+                "sha256": "5a296e2901c72ad1e99628c1ae4e1b7827e908ca5e3240c0162bcecfa49843a2"
+              },
+              {
+                "path": "crates/core/src/health.rs",
+                "sha256": "0b1a13b0f36f3f02793ffe5513cac153d5ceda45254403ccf82b36b46a3bda7e"
+              },
+              {
+                "path": "crates/core/src/lib.rs",
+                "sha256": "2926e9d1073a810eb34982e59f8a11c8453b7ab1370669beb2b8642cbaaa0f08"
+              },
+              {
+                "path": "crates/mcp/Cargo.toml",
+                "sha256": "4829a8a9bcc97831b37df2dae97b40a5c21be4a10fa3ba1c3ae086de23867fca"
+              },
+              {
+                "path": "crates/mcp/src/lib.rs",
+                "sha256": "b921eed4832ac34fa7694651ffbb9afcff85a4b524c3983a57fb97f49e0579aa"
+              },
+              {
+                "path": "crates/notion/Cargo.toml",
+                "sha256": "691f3237114cd49541dadad22d5be459d27ff256ea4be5c1638cbef1eef4a279"
+              },
+              {
+                "path": "crates/notion/src/lib.rs",
+                "sha256": "31d53a2dca2332af8f53d8c0334fa9f73ec39b5f903a5a71fffff71f297b3158"
+              },
+              {
+                "path": "crates/retrieval/Cargo.toml",
+                "sha256": "b9a8995f3db63ab915050d862e62ba4ac7e2638b3fe5f1d52754bf73b891717a"
+              },
+              {
+                "path": "crates/retrieval/src/lib.rs",
+                "sha256": "a367e1fd4d1b3c414973648bd4bbe5339bb8cda36f20af8806e5a3e0c839d77e"
+              },
+              {
+                "path": "crates/retrieval/tests/evaluation_dataset.rs",
+                "sha256": "dca981f28edf03a0001660592123e56f7ec18060ee56236458e1fb5d2a3a87af"
+              },
+              {
+                "path": "crates/retrieval/tests/hosted_baseline.rs",
+                "sha256": "354d5fad76b7a3ce677599115a4abe8017ca7d23ed0d55569037502f385a42ab"
+              },
+              {
+                "path": "crates/server/Cargo.toml",
+                "sha256": "fd35ab7ca92ddd9d491cef1c93b867ed87c098e512e9cdc6f8a8a9477ab2b7eb"
+              },
+              {
+                "path": "crates/server/src/config.rs",
+                "sha256": "97252c6491d687636c3df0baa64c871f94ab4f999b001bb323417149ab4280c6"
+              },
+              {
+                "path": "crates/server/src/diagnostics.rs",
+                "sha256": "5908bf0a6a25fc4d87e8d2e74048833bf0ecef1c3e28ee082941b433d0fe3e59"
+              },
+              {
+                "path": "crates/server/src/http.rs",
+                "sha256": "8bb47ebecd7ff8bad395634c8cd62938ec421da457ecb0418f652c6542bb362f"
+              },
+              {
+                "path": "crates/server/src/lib.rs",
+                "sha256": "47f3805000c741829a21700d8b6792cb3e2284434fb52644dcc7d9b1a6dcf3fa"
+              },
+              {
+                "path": "crates/server/src/main.rs",
+                "sha256": "6902207c6ca7b061638eba2eab81bddb23abd4a4bea4850ad2df225623986ff8"
+              },
+              {
+                "path": "crates/server/tests/http.rs",
+                "sha256": "65bbfd89cc14e3b7d621dd5a0cf801fe6b194f31bc6810a5c4fc0ffeed4184fb"
+              },
+              {
+                "path": "crates/server/tests/startup.rs",
+                "sha256": "9d8bfdd848a2ea171cfe53641e51bce5bba710c3e1be94964e3248f6e5ccf890"
+              },
+              {
+                "path": "crates/server/tests/stdio.rs",
+                "sha256": "17c232e55b9e7240574f81e32c3009f7424c2e1497bc3a2b70328db6be2f68cd"
+              },
+              {
+                "path": "eval/retrieval/HOSTED_NOTION.md",
+                "sha256": "7235fecb135361eed6d3048f042bb5cd54b37e4671cd8c7c82c949603b2f30b8"
+              },
+              {
+                "path": "eval/retrieval/README.md",
+                "sha256": "c09f9a2e417e6ec00deef788b7a2aebf158e509afa65cca05ae5c7f9709fcc37"
+              },
+              {
+                "path": "eval/retrieval/hosted-notion-2026-10-01.json",
+                "sha256": "5af4aac531cf38e2cde90712619b3b062eeeec21cff4dfa7129e307b2bb918fc"
+              },
+              {
+                "path": "eval/retrieval/personal-knowledge-v1.json",
+                "sha256": "b96d4eba5be7ea7b9d48be12ce088d455f38868fe09b658ce06319ced9888efe"
+              },
+              {
+                "path": "flake.lock",
+                "sha256": "7789d32c105783133de8fafba4ae706bae719fc50f0c252e075386e2d4c90922"
+              },
+              {
+                "path": "flake.nix",
+                "sha256": "3fdd059c2920a3c4401d1d3a58f039a10fa30c431ef375d754ee80612a3637ab"
+              },
+              {
+                "path": "scripts/check-agent-layout.sh",
+                "sha256": "364d9addec5cbfb33d8fda27fa3d559b85247ea80c42eb78ccc9ba69f721417a"
+              },
+              {
+                "path": "scripts/check-dependencies.sh",
+                "sha256": "c04bdd3272957f5fd452361726fbaf8cb060fe298a755f996ddc8a93e6a728eb"
+              },
+              {
+                "path": "scripts/check-secrets.sh",
+                "sha256": "f81adb2878e2aa260b1bfda25d85ae96d7d154415281e5cdc22a8394b143fcf2"
+              },
+              {
+                "path": "scripts/smoke-container.py",
+                "sha256": "b26dd694666efece682c7b176be09a40bb288b4edf5275abf3443dab5d4384b3"
+              },
+              {
+                "path": "scripts/test-security-scanning.py",
+                "sha256": "287f6e55c23449e9aefe6fb038efc7a06f1d9924f6bc53f9b0f5a35eeb3f2b56"
+              }
+            ],
+            "sha256": "2028f91cda49580ba44ff0ac2d35567b0534fff123e805a5691d879786154b61"
+          }
+        }
+      ]
+    }
+  ],
+  "raw_archives": [
+    {
+      "path": "37110206661-jobs.json.gz",
+      "archive_sha256": "f241cebd28ef42d539a7faaacbd7d49f54d5f8ca42f887baaae5af039ba773d2",
+      "uncompressed_sha256": "103514169b56cf0154517c8d097c7430447a8a2040ed1cef4270e543a5cae320",
+      "compressed_bytes": 2076
+    },
+    {
+      "path": "37110206661-run.json.gz",
+      "archive_sha256": "f605d12a2df445124eeb7b3ec105313d025c5828f9152340e7fa38ee8832266b",
+      "uncompressed_sha256": "d56b6054abb45f9ce686d975b62f7da5580916aef8bb283af721569137a70e3e",
+      "compressed_bytes": 1708
+    },
+    {
+      "path": "37110206661.log.gz",
+      "archive_sha256": "a0914c7277ed9d08c9bc04cc3fb6fa787996d656cfacafd7ceb3b5b38bdde905",
+      "uncompressed_sha256": "a09ae9a56682c77fc2c460ff875cdb43b661ce672ca90539f13d006352bc4e9f",
+      "compressed_bytes": 199765
+    },
+    {
+      "path": "37110338867-jobs.json.gz",
+      "archive_sha256": "be61854b936b6a97680dcb71aa87b42da3683e8e0a650cdea9f9779f908e2308",
+      "uncompressed_sha256": "283de90626944f69c2d5479ddd864ea8132ec9f5d9e67cf098c685785c9e785b",
+      "compressed_bytes": 2051
+    },
+    {
+      "path": "37110338867-run.json.gz",
+      "archive_sha256": "e9eea0ff5a5429433e2fbdb842332028d6bc7962305b3dfdd28a57da43d877f2",
+      "uncompressed_sha256": "27cb7155ed5bc2a7f3f90e09252413bd2ccfbd4faebdfca6b338c13a4497c205",
+      "compressed_bytes": 1533
+    },
+    {
+      "path": "37110338867.log.gz",
+      "archive_sha256": "bb768680b279096685707065597d4103ede32868d433647e605d71a073eddd3a",
+      "uncompressed_sha256": "0089ceab59cecd61ff9888647f64d9e804b83666b0dfde4e3244e13bf41e17d0",
+      "compressed_bytes": 181973
+    },
+    {
+      "path": "37110479728-jobs.json.gz",
+      "archive_sha256": "31fe280c7229de59d1c3b19033c40ee5366946a8901c42462ce1288a8dc76656",
+      "uncompressed_sha256": "8ca5ba905a157798983eab1990ac7faed3a8811f3c3a1473dad591603bd46cac",
+      "compressed_bytes": 2039
+    },
+    {
+      "path": "37110479728-run.json.gz",
+      "archive_sha256": "0f1dae6db4fd6b9e9889326feb522feb38a9de9505b26f1fd225172eb1e0c545",
+      "uncompressed_sha256": "a27beff8624a64dda36441ed73e7ab5a572c748c856462af152acc1ed45b1e22",
+      "compressed_bytes": 1537
+    },
+    {
+      "path": "37110479728.log.gz",
+      "archive_sha256": "dad3a7d61efb93fa4b4773923e2494f98deef5698fe842108d35f8f8e5307484",
+      "uncompressed_sha256": "34e13f5422fa1ed0b5abb27d7ff0538dd1e03a0492ae85a90e24678e9bdd6a4c",
+      "compressed_bytes": 176740
+    },
+    {
+      "path": "cache-snapshot.json.gz",
+      "archive_sha256": "1c9cfa48a7817922da8207f44cbc21203b98589609acbd0286b152171df328d6",
+      "uncompressed_sha256": "2b93f64a1dd42ca2b6f08eb821f81a67ecf57143ba35d0f642817c7b7a73ca06",
+      "compressed_bytes": 286
+    }
+  ]
+}
