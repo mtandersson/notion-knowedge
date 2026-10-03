@@ -317,6 +317,24 @@ jobs:
       - name: Verify final runtime image
         run: python3 scripts/smoke-container.py --prebuilt --builder-image notion-knowledge:smoke-builder
 
+      - name: Record verified executable identity
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, pathlib, subprocess, tempfile
+          image = 'notion-knowledge:smoke'
+          info = json.loads(subprocess.check_output(['docker', 'image', 'inspect', image]))[0]
+          container = subprocess.check_output(['docker', 'create', image], text=True).strip()
+          try:
+              with tempfile.TemporaryDirectory() as temporary:
+                  binary = pathlib.Path(temporary) / 'server'
+                  subprocess.run(['docker', 'cp', container + ':/usr/local/bin/notion-knowledge-server', str(binary)], check=True)
+                  data = binary.read_bytes()
+                  print('VERIFIED_EXECUTABLE ' + json.dumps({'image': info['Id'], 'revision': info['Config']['Labels']['org.opencontainers.image.revision'], 'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}))
+          finally:
+              subprocess.run(['docker', 'rm', container], check=True, stdout=subprocess.DEVNULL)
+          PY
+
       # Export only after all final-image interactions pass. PR caches are
       # isolated by GitHub's merge-ref scope and cannot poison main restores.
       - name: Export verified compilation layers
