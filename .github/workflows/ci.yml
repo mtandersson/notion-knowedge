@@ -330,6 +330,7 @@ jobs:
                   binary = pathlib.Path(temporary) / 'server'
                   subprocess.run(['docker', 'cp', container + ':/usr/local/bin/notion-knowledge-server', str(binary)], check=True)
                   data = binary.read_bytes()
+                  assert b'ci-cache-probe-185' in data, 'Expected used source edit absent from final binary'
                   print('VERIFIED_EXECUTABLE ' + json.dumps({'image': info['Id'], 'revision': info['Config']['Labels']['org.opencontainers.image.revision'], 'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}))
           finally:
               subprocess.run(['docker', 'rm', container], check=True, stdout=subprocess.DEVNULL)
