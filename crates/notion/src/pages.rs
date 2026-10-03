@@ -16,7 +16,7 @@ fn error(kind: BackendErrorKind) -> BackendError {
         retry_after: None,
     }
 }
-fn uuid(input: &str) -> Option<String> {
+pub(crate) fn uuid(input: &str) -> Option<String> {
     if input.len() != 32
         && !(input.len() == 36 && [8, 13, 18, 23].iter().all(|i| input.as_bytes()[*i] == b'-'))
     {

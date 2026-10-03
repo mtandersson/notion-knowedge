@@ -18,3 +18,5 @@ pub mod pages;
 pub mod crawl;
 
 pub mod content;
+
+pub mod links;

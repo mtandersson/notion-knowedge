@@ -41,3 +41,7 @@ Protocol references:
 
 - [Retrieve page Markdown](https://developers.notion.com/reference/retrieve-page-markdown)
 - [Enhanced Markdown](https://developers.notion.com/guides/data-apis/enhanced-markdown)
+
+The separate [relationship normalization step](notion-links.md) extracts page
+links, mentions and relation-property edges from this lossless content without
+fetching targets or expanding discovery scope.
