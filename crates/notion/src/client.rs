@@ -13,6 +13,7 @@ pub struct NotionClient {
     pub(crate) authorization: HeaderValue,
     identity_url: String,
     pub(crate) api_root: String,
+    pub(crate) replacement_enabled: bool,
 }
 
 impl std::fmt::Debug for NotionClient {
@@ -66,6 +67,7 @@ impl NotionClient {
             authorization,
             identity_url: identity_url.to_owned(),
             api_root: "https://api.notion.com/v1".to_owned(),
+            replacement_enabled: false,
         })
     }
 

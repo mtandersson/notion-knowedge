@@ -40,3 +40,42 @@ the recommended replacement commands would violate this operation's contract.
 
 Run credential-free mocked HTTP tests with
 `cargo test -p notion-knowledge-notion --locked`.
+
+## Explicit replacement
+
+`NotionClient::replace_content(ReplacePageContent)` replaces one explicit UUID
+page target using the recommended `replace_content` command and `new_str`.
+Replacement is disabled on every new client. The trusted composition caller
+must grant it with `with_replacement_access(true)`; passing `false` disables
+it again. This is a local operation capability, separate from Notion integration
+permissions and future MCP caller authorization. Create and append remain
+separate existing primitives. No MCP tool or environment setting enables this
+operation automatically.
+
+Before writing, the adapter reads complete authoritative metadata and Markdown.
+Both existing and requested content must fit a conservative parser allowlist:
+paragraphs, headings, ordinary quotes, fenced code, lists/tasks,
+emphasis, strong, strikethrough, links and rules. HTML/enhanced Notion XML,
+unknown blocks, images, tables, footnotes, math and other extensions fail closed.
+Indented code is rejected because Notion tabs encode children; heading
+attributes and wiki-link extensions are also rejected. Literal HTML inside
+fenced code is safe. Archived or incomplete pages also fail.
+This prevents whole-page replacement from silently removing content whose
+preservation has not been implemented. Empty Markdown explicitly clears an
+ordinary page. Notion's child-page/database deletion guard is explicitly kept
+with `allow_deleting_content: false`; asynchronous writes are disabled.
+
+A successful mutation receipt must identify the target and complete content.
+A separate authoritative read verifies that the result matches the requested
+Markdown exactly. Notion formatting normalization can therefore return a
+`Conflict` at `notion.replace.verify` after a successful mutation: reconcile by
+reading the page, never blindly retry. Read-after-write is verification, not a
+transaction or conditional update: concurrent writers can still race between
+preflight and mutation. This operation does not claim optimistic concurrency.
+Errors expose only the sanitized operation/stage and normalized failure class;
+raw upstream validation messages, content and credentials are discarded.
+
+The primitive returns `PageContent` with verified metadata; it does not yet
+implement the full `NotionWrite` trait (whose other methods require complete
+metadata receipts). Requests remain subject to the shared serialized 500 KiB
+limit; replacements additionally reject input above 490 KiB before preflight.
