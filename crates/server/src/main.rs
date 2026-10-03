@@ -30,6 +30,31 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if env::args().skip(1).any(|arg| arg == "--notion-identity") {
+        let notion_knowledge_server::config::NotionAuth::Integration(token) = &config.notion_auth
+        else {
+            eprintln!("Notion identity requires NK_NOTION_AUTH=integration.");
+            return ExitCode::from(2);
+        };
+        let client = match notion_knowledge_notion::NotionClient::integration(token.expose_secret())
+        {
+            Ok(client) => client,
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        return match client.identity().await {
+            Ok(_) => {
+                println!("Notion integration identity verified.");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if env::args().skip(1).any(|arg| arg == "--healthcheck") {
         return match notion_knowledge_server::http::container_healthcheck(&config) {
             Ok(true) => ExitCode::SUCCESS,

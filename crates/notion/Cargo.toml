@@ -6,3 +6,9 @@ repository.workspace = true
 
 [dependencies]
 notion-knowledge-core = { path = "../core" }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["net", "io-util"] }

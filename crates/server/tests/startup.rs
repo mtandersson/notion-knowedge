@@ -100,3 +100,17 @@ fn release_identity_is_available_without_runtime_configuration() {
     );
     assert!(output.stderr.is_empty());
 }
+
+#[test]
+fn identity_probe_requires_explicit_integration_configuration_without_serving() {
+    let output = Command::new(env!("CARGO_BIN_EXE_notion-knowledge-server"))
+        .env_clear()
+        .arg("--notion-identity")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("requires NK_NOTION_AUTH=integration"));
+    assert!(!stderr.contains("bootstrap ready"));
+}
