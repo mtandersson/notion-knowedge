@@ -76,6 +76,10 @@ pub struct BackendError {
     pub kind: BackendErrorKind,
     pub operation: &'static str,
     pub retry_after: Option<Duration>,
+    /// Target from a validated successful mutation receipt when later metadata
+    /// verification fails. Reconcile this page; never replay the mutation.
+    /// None does not prove that a failed/ambiguous mutation made no change.
+    pub committed_page_id: Option<PageId>,
 }
 
 impl std::fmt::Display for BackendError {

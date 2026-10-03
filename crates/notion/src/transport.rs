@@ -57,6 +57,7 @@ fn error(
         operation,
         kind,
         retry_after,
+        committed_page_id: None,
     }
 }
 impl Transport {

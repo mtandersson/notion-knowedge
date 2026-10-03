@@ -18,6 +18,7 @@ impl NotionRead for MockBackend {
                     kind: BackendErrorKind::NotFound,
                     operation: "fetch_page",
                     retry_after: None,
+                    committed_page_id: None,
                 });
             }
             Ok(content.page.clone())
@@ -54,6 +55,7 @@ impl NotionWrite for MockBackend {
                 kind: BackendErrorKind::RateLimited,
                 operation: "create_page",
                 retry_after: Some(Duration::from_secs(3)),
+                committed_page_id: None,
             })
         })
     }

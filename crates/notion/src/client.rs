@@ -42,6 +42,7 @@ fn failure(kind: BackendErrorKind) -> BackendError {
         kind,
         operation: "notion.identity",
         retry_after: None,
+        committed_page_id: None,
     }
 }
 
