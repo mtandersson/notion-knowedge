@@ -16,3 +16,5 @@ pub use writes::CreatedPage;
 pub mod pages;
 
 pub mod crawl;
+
+pub mod content;
