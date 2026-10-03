@@ -301,6 +301,8 @@ jobs:
             VERSION=${{ steps.identity.outputs.version }}
             REVISION=${{ github.sha }}
           cache-from: |
+            type=gha,scope=nk-container-v1-${{ runner.os }}-${{ runner.arch }}-main-builder
+            type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}-builder
             type=gha,scope=nk-container-v1-${{ runner.os }}-${{ runner.arch }}-main
             type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}
 
@@ -330,7 +332,7 @@ jobs:
                   binary = pathlib.Path(temporary) / 'server'
                   subprocess.run(['docker', 'cp', container + ':/usr/local/bin/notion-knowledge-server', str(binary)], check=True)
                   data = binary.read_bytes()
-                  assert b'ci-cache-probe-185' in data, 'Expected used source edit absent from final binary'
+                  assert b'ci-cache-probe-185-v2' in data, 'Expected used source edit absent from final binary'
                   print('VERIFIED_EXECUTABLE ' + json.dumps({'image': info['Id'], 'revision': info['Config']['Labels']['org.opencontainers.image.revision'], 'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}))
           finally:
               subprocess.run(['docker', 'rm', container], check=True, stdout=subprocess.DEVNULL)
@@ -338,7 +340,7 @@ jobs:
 
       # Export only after all final-image interactions pass. PR caches are
       # isolated by GitHub's merge-ref scope and cannot poison main restores.
-      - name: Export verified compilation layers
+      - name: Export verified builder root
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -348,6 +350,24 @@ jobs:
           build-args: VERSION=${{ steps.identity.outputs.version }}
           # Resolve the stable compiler root from the same trusted cache inputs.
           cache-from: |
+            type=gha,scope=nk-container-v1-${{ runner.os }}-${{ runner.arch }}-main-builder
+            type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}-builder
+            type=gha,scope=nk-container-v1-${{ runner.os }}-${{ runner.arch }}-main
+            type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}
+          cache-to: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}-builder,mode=max,timeout=10m
+
+      - name: Export verified final image graph
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: |
+            VERSION=${{ steps.identity.outputs.version }}
+            REVISION=${{ github.sha }}
+          cache-from: |
+            type=gha,scope=nk-container-v1-${{ runner.os }}-${{ runner.arch }}-main-builder
+            type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}-builder
             type=gha,scope=nk-container-v1-${{ runner.os }}-${{ runner.arch }}-main
             type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}
           cache-to: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }},mode=max,timeout=10m

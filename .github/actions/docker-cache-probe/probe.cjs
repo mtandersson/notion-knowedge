@@ -8,7 +8,7 @@ const records=[...new Set([...paths,...dirs])].sort().map(p=>{const st=fs.lstatS
 console.log('EFFECTIVE_CONTEXT '+JSON.stringify({checkout:cp.execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),scope:process.env.DOCKER_CACHE_SCOPE,records}));
 
 (async()=>{
-for(const cacheScope of [process.env.DOCKER_CACHE_SCOPE, "nk-container-v1-Linux-X64-main"]){
+for(const cacheScope of [process.env.DOCKER_CACHE_SCOPE, process.env.DOCKER_CACHE_SCOPE+"-builder", "nk-container-v1-Linux-X64-main", "nk-container-v1-Linux-X64-main-builder"]){
 for(const {Scope} of scopes){
  const key='index-'+cacheScope+'-1-'+crypto.createHash('sha256').update(Scope).digest('hex').slice(0,8);
  const version=crypto.createHash('sha256').update('|go-actionscache-1.0').digest('hex');
