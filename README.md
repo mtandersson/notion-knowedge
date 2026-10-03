@@ -259,7 +259,9 @@ Dependency direction is defined by ADR 0001. In particular, `core` must not
 depend on MCP, Notion, LanceDB, SQLite, or HTTP implementation types.
 
 The [canonical indexed content contract](docs/indexed-content.md) defines the
-versioned page/chunk records shared by discovery and retrieval.
+versioned page/chunk records shared by discovery and retrieval. The
+[heading-aware Markdown chunker](docs/markdown-chunking.md) produces semantic
+chunk drafts with citation metadata and original source offsets.
 
 The [authoritative backend contract](docs/notion-backend.md) defines typed
 read/write capabilities and normalized failures independently of API transports.
