@@ -13,6 +13,11 @@ The result preserves the RFC 3339 edit timestamp and archived flag, extracts
 the title and normalizes properties under their stable property IDs (not display
 names). Supported values include text, numbers, checkboxes, select/status,
 multi-select, dates, people, relations and scalar formula/rollup results.
+Property maps are sorted by stable ID; display names and object order do not
+affect local metadata. Multi-select names and relation/person IDs are sorted
+lexicographically, retaining duplicates. Person and relation UUIDs use lowercase
+hyphenated form. Rich-text segment order remains meaningful and is preserved.
+Dates preserve their start/end strings without conversion.
 Unsupported property types and potentially truncated lists return
 `UnsupportedContent`, rather than presenting incomplete metadata as complete.
 A separate property-item pagination operation is not implemented here. File
