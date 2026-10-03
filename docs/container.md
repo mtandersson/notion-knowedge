@@ -77,15 +77,23 @@ configuration, diagnostics, MCP/session/health and shutdown checks remain.
 `--builder-image` uses the loaded builder for the disposable permission probe.
 The default command still builds both images for local development.
 
-The `nk-container-v1-Linux-X64-main` scope is warmed by successful main runs.
-Each same-repository PR uses a single numbered scope and can restore main plus
-its own scope. GitHub additionally restricts PR exports to that PR's merge ref;
-main cannot restore them. Fork PRs only import and never export. Manual branch
-runs use their branch scope. Export happens only after smoke succeeds, with
-`mode=max` retaining intermediate compilation layers and a ten-minute timeout.
-One logical scope per active PR tracks its latest manifest; BuildKit retains
-versioned small indices and content-addressed blobs. GitHub's repository cache
-quota/LRU eviction and seven-day unused-cache eviction bound their storage.
+Successful main runs warm `nk-container-v1-Linux-X64-main` and its `-builder`
+companion. Each same-repository PR has the equivalent numbered pair. For each
+root, the read-only local action selects the exact available own-ref index,
+otherwise the trusted main index, otherwise no remote import. It never configures
+overlapping logical cache sources in one solve. Lookup errors and eviction can cause a
+local rebuild; they never skip production checks. Forks can restore authorized
+main caches but never export. GitHub isolates PR writes to their merge ref.
+
+After all final-image smoke succeeds, CI exports the builder target to its own
+`-builder` scope and the final target to its own ordinary scope, both `mode=max`
+with ten-minute timeouts. Two roots preserve expensive compilation and runtime
+COPY results through lazy warm solves. BuildKit's exact engine digest is pinned;
+the index lookup protocol is coupled to that version and must be reviewed when
+upgrading. Index presence is an availability snapshot, not proof that every blob
+remains available or that a changed input is compatible. Versioned indices and
+shared content-addressed blobs remain subject to repository quota/LRU eviction
+and seven-day unused-cache eviction; there are two logical roots per active PR.
 
 Docker's content-addressed build keys invalidate compilation for changed Rust,
 Cargo manifests/lockfile, VERSION, or the pinned builder/Dockerfile. REVISION is
