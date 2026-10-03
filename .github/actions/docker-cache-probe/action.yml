@@ -1,0 +1,5 @@
+name: Docker cache causal probe
+description: Record non-secret effective inputs and authorized cache refs
+runs:
+  using: node24
+  main: probe.cjs
