@@ -40,7 +40,7 @@ function choose(own, main) {
   return selected ? `type=gha,scope=${selected.scope}` : '';
 }
 
-async function run(env = process.env) {
+async function run(env = process.env, fetcher = fetch, log = console.log) {
   let finalSource = '', builderSource = '';
   try {
     const claims = JSON.parse(Buffer.from(env.ACTIONS_RUNTIME_TOKEN.split('.')[1], 'base64url'));
@@ -48,7 +48,7 @@ async function run(env = process.env) {
     const own = env.DOCKER_CACHE_SCOPE;
     const main = `nk-container-v1-${env.RUNNER_OS}-${env.RUNNER_ARCH}-main`;
     if (!own || !env.GITHUB_REF || !env.ACTIONS_RESULTS_URL) throw new Error();
-    const args = {allowedRefs, serviceURL: env.ACTIONS_RESULTS_URL, token: env.ACTIONS_RUNTIME_TOKEN};
+    const args = {allowedRefs, serviceURL: env.ACTIONS_RESULTS_URL, token: env.ACTIONS_RUNTIME_TOKEN, fetcher};
     const [ownFinal, mainFinal, ownBuilder, mainBuilder] = await Promise.all([
       lookup({...args, scope: own, ref: env.GITHUB_REF}),
       lookup({...args, scope: main, ref: 'refs/heads/main'}),
@@ -56,16 +56,16 @@ async function run(env = process.env) {
       lookup({...args, scope: `${main}-builder`, ref: 'refs/heads/main'}),
     ]);
     for (const result of [ownFinal, mainFinal, ownBuilder, mainBuilder]) {
-      console.log(`DOCKER_CACHE_ROOT ${JSON.stringify(result)}`);
+      log(`DOCKER_CACHE_ROOT ${JSON.stringify(result)}`);
     }
     finalSource = choose(ownFinal, mainFinal);
     builderSource = choose(ownBuilder, mainBuilder);
   } catch {
-    console.log('Docker cache preflight unavailable; using the local builder cache.');
+    log('Docker cache preflight unavailable; using the local builder cache.');
   }
   fs.appendFileSync(env.GITHUB_OUTPUT,
     `final-cache-from=${finalSource}\nbuilder-cache-from=${builderSource}\n`);
 }
 
-module.exports = {indexKey, lookup, choose};
+module.exports = {indexKey, lookup, choose, run};
 if (require.main === module) run();

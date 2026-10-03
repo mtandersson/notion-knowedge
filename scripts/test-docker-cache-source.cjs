@@ -1,6 +1,9 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const {indexKey, lookup, choose} = require('../.github/actions/docker-cache-source/source.cjs');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const {indexKey, lookup, choose, run} = require('../.github/actions/docker-cache-source/source.cjs');
 
 const scope = 'nk-container-v1-Linux-X64-187';
 const ref = 'refs/pull/187/merge';
@@ -56,5 +59,38 @@ test('Lookup absence, service failures, unavailable blobs and malformed graphs f
     async () => { throw new Error('Download error must remain private'); },
   ]) {
     assert.equal((await lookup({...args, fetcher})).available, false);
+  }
+});
+
+test('Read-only fork authorization uses main without cache writes or credential logging', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nk-cache-source-'));
+  const output = path.join(directory, 'output');
+  const main = 'nk-container-v1-Linux-X64-main';
+  const claims = {ac: JSON.stringify([{Scope: 'refs/heads/main', Permission: 1}])};
+  const token = `test-only.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.test-only`;
+  const logs = [], requests = [];
+  try {
+    await run({DOCKER_CACHE_SCOPE: scope, GITHUB_REF: ref, RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64',
+      ACTIONS_RESULTS_URL: args.serviceURL, ACTIONS_RUNTIME_TOKEN: token, GITHUB_OUTPUT: output},
+    async (url, options) => {
+      requests.push(url);
+      if (url === 'https://cache.invalid/download') {
+        assert.equal(options.headers, undefined);
+        return {ok: true, arrayBuffer: async () => graph};
+      }
+      assert.ok(url.endsWith('/GetCacheEntryDownloadURL'), 'Only read-only cache requests permitted');
+      assert.equal(options.method, 'POST');
+      const key = JSON.parse(options.body).key;
+      if (key === indexKey(main, 'refs/heads/main')) return entry(key + '#1');
+      assert.equal(key, indexKey(main + '-builder', 'refs/heads/main'));
+      return {ok: true, json: async () => ({ok: false})};
+    }, line => logs.push(line));
+    assert.equal(fs.readFileSync(output, 'utf8'),
+      `final-cache-from=type=gha,scope=${main}\nbuilder-cache-from=\n`);
+    assert.equal(requests.length, 3, 'Unauthorized own refs must not be queried');
+    assert.equal(logs.join('\n').includes(token), false);
+    assert.equal(logs.join('\n').includes('https://cache.invalid/download'), false);
+  } finally {
+    fs.rmSync(directory, {recursive: true});
   }
 });
