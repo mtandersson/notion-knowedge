@@ -708,6 +708,147 @@ mod tests {
         vec![PageId(ROOT.into())]
     }
     #[tokio::test]
+    async fn scoped_snapshot_returns_no_partial_records_when_exact_content_is_incomplete() {
+        use notion_knowledge_core::chunking::ChunkConfig;
+        let mut metadata = page_value(ROOT, json!({"type":"workspace","workspace":true}));
+        metadata["last_edited_time"] = json!("2026-10-03T12:30:00.000Z");
+        let (client, task) = mock(vec![
+            get(format!("pages/{ROOT}"), metadata.clone()),
+            children(ROOT, vec![]),
+            get(format!("pages/{ROOT}"), metadata),
+            get(format!("pages/{ROOT}/markdown"), json!({"object":"page_markdown","id":ROOT,"markdown":"partial private content","truncated":true,"unknown_block_ids":[]})),
+        ]).await;
+        let result = client
+            .discover_documents(
+                ROOT,
+                "fixture-workspace",
+                &ExclusionRules::default(),
+                ChunkConfig::default(),
+            )
+            .await;
+        assert_eq!(
+            result.unwrap_err().kind,
+            BackendErrorKind::UnsupportedContent
+        );
+        assert_eq!(task.await.unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn scoped_snapshot_preserves_canonical_content_and_never_reads_excluded_pages() {
+        use notion_knowledge_core::{
+            chunking::ChunkConfig,
+            indexed::{IndexedChunk, IndexedDocument, LinkTarget, PropertyValue},
+        };
+        let markdown = format!(
+            "# Svenska\n\nNested [external](https://example.test/guide).\n\n## References\n\n<mention-page url=\"https://www.notion.so/{OUT}\"/>\n"
+        );
+        let mut snapshots = Vec::new();
+        for timestamp in ["2026-10-03T12:30:00.000Z", "2026-10-03T12:31:00.000Z"] {
+            let mut metadata = page_value(ROOT, json!({"type":"workspace","workspace":true}));
+            metadata["last_edited_time"] = json!(timestamp);
+            metadata["properties"]["Related"] =
+                json!({"id":"r","type":"relation","relation":[{"id":OUT}],"has_more":false});
+            metadata["properties"]["Done"] = json!({"id":"c","type":"checkbox","checkbox":true});
+            let mut hidden = block(CHILD, ROOT, "child_page", false);
+            hidden["child_page"] = json!({"title":"Private"});
+            let steps = vec![
+                get(format!("pages/{ROOT}"), metadata.clone()),
+                children(ROOT, vec![hidden]),
+                get(format!("pages/{ROOT}"), metadata.clone()),
+                get(
+                    format!("pages/{ROOT}/markdown"),
+                    json!({"object":"page_markdown","id":ROOT,"markdown":markdown,"truncated":false,"unknown_block_ids":[]}),
+                ),
+            ];
+            let (client, task) = mock(steps).await;
+            let rules = ExclusionRules {
+                page_ids: [CHILD.to_owned()].into(),
+                ..Default::default()
+            };
+            let snapshot = client
+                .discover_documents(ROOT, "fixture-workspace", &rules, ChunkConfig::default())
+                .await
+                .unwrap();
+            let requests = task.await.unwrap();
+            assert_eq!(requests.len(), 4); // The strict mock rejects a read of CHILD or OUT.
+            assert_eq!(snapshot.discovery.pages.len(), 1);
+            assert!(
+                snapshot
+                    .discovery
+                    .skipped
+                    .iter()
+                    .any(|s| s.id == CHILD && s.reason == SkipReason::ExcludedPage)
+            );
+            assert_eq!(snapshot.documents.len(), 1);
+            let document = &snapshot.documents[0];
+            assert_eq!(document.text, markdown);
+            assert_eq!(document.metadata.page_id, ROOT);
+            assert_eq!(document.metadata.last_edited_time, timestamp);
+            assert_eq!(document.metadata.source.root_page_id, ROOT);
+            assert_eq!(document.metadata.source.workspace_id, "fixture-workspace");
+            assert_eq!(
+                document.metadata.properties["c"],
+                PropertyValue::Boolean(true)
+            );
+            assert_eq!(
+                document.metadata.properties["r"],
+                PropertyValue::PageIds(vec![OUT.into()])
+            );
+            assert!(document.links.contains(&LinkTarget::Page {
+                page_id: OUT.into()
+            }));
+            assert!(document.links.contains(&LinkTarget::External {
+                url: "https://example.test/guide".into()
+            }));
+            assert_eq!(
+                serde_json::from_value::<IndexedDocument>(serde_json::to_value(document).unwrap())
+                    .unwrap(),
+                *document
+            );
+            assert!(snapshot.chunks.len() >= 2);
+            for chunk in &snapshot.chunks {
+                assert_eq!(chunk.metadata.last_edited_time, timestamp);
+                assert_eq!(chunk.metadata.source, document.metadata.source);
+                assert!(!chunk.metadata.heading_path.is_empty());
+                assert!(!chunk.chunk_id.is_empty());
+                assert_eq!(
+                    serde_json::from_value::<IndexedChunk>(serde_json::to_value(chunk).unwrap())
+                        .unwrap(),
+                    *chunk
+                );
+            }
+            let reference_chunk = snapshot
+                .chunks
+                .iter()
+                .find(|c| c.metadata.heading_path == ["Svenska", "References"])
+                .unwrap();
+            assert!(
+                !reference_chunk
+                    .links
+                    .iter()
+                    .any(|link| matches!(link, LinkTarget::External { .. }))
+            );
+            snapshots.push(snapshot);
+        }
+        assert_eq!(
+            snapshots[0].documents[0].content_hash,
+            snapshots[1].documents[0].content_hash
+        );
+        assert_eq!(
+            snapshots[0]
+                .chunks
+                .iter()
+                .map(|c| (&c.chunk_id, &c.content_hash))
+                .collect::<Vec<_>>(),
+            snapshots[1]
+                .chunks
+                .iter()
+                .map(|c| (&c.chunk_id, &c.content_hash))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
     async fn physical_descendants_include_nested_pages_and_all_database_rows_without_following_references()
      {
         let mut link = block(OUT, ROOT, "link_to_page", true);

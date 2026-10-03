@@ -302,3 +302,7 @@ normalized properties and response completeness.
 
 The [authoritative content read](docs/notion-content.md) preserves nested
 enhanced Markdown and surfaces unsupported or incomplete content explicitly.
+
+The [scoped canonical document smoke](docs/discovered-documents.md) assembles
+exclusion-aware discovery, exact content, relationships, chunking and stable
+fingerprints into a read-only canonical snapshot.

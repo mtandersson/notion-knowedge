@@ -25,3 +25,5 @@ pub mod replacement;
 
 mod transport;
 pub use transport::RequestMetrics;
+
+pub mod documents;
