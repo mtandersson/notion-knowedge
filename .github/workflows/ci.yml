@@ -260,7 +260,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
-      DOCKER_CACHE_SCOPE: nk-container-v1-Linux-X64-${{ github.event.pull_request.number || github.ref_name }}
+      DOCKER_CACHE_SCOPE: nk185-isolated-20261003
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -269,6 +269,12 @@ jobs:
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+        with:
+          buildkitd-flags: --debug
+
+      - name: Record effective context and cache authorization
+        uses: ./.github/actions/docker-cache-probe
 
       - name: Test cached image identity rejection
         run: python3 scripts/test-container-smoke.py
@@ -295,7 +301,6 @@ jobs:
             VERSION=${{ steps.identity.outputs.version }}
             REVISION=${{ github.sha }}
           cache-from: |
-            type=gha,scope=nk-container-v1-${{ runner.os }}-${{ runner.arch }}-main
             type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}
 
       - name: Load pinned builder for permission probe
