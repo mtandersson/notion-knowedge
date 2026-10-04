@@ -42,7 +42,7 @@ execution is not cancellable once started. Production needs bounded worker
 execution and cancellation semantics. Owned safetensor bytes avoid unsafe mmap
 lifetime assumptions but increase transient memory.
 
-LanceDB 0.26.2 / Arrow 57.3.1 schema: UTF8 `chunk_id`, UTF8 `text`, UTF8 `chunk_record` (serialized canonical schema-v1 IndexedChunk),
+LanceDB 0.39.0 / Arrow 58.4.0 schema: UTF8 `chunk_id`, UTF8 `text`, UTF8 `chunk_record` (serialized canonical schema-v1 IndexedChunk),
 FixedSizeList<Float32,1024> `vector`. Schema metadata contains the complete core
 embedding identity; a schema-v1 `embedding.json` sidecar duplicates it for cheap
 preflight before loading the model. Both identities and the actual vector
@@ -58,10 +58,29 @@ pkg-config and OpenSSL to the pinned Rust tooling, plus curl and GNU time.
 CPU kernels use Rust/Candle; ONNX is configured for dynamic loading solely to
 avoid fastembed's unused default ONNX download/link path. The Qwen code path
 never initializes ONNX and requires no ONNX shared library. No GPU or remote
-inference is involved. The first attempted LanceDB 0.39.0/Lance 12.0 stack failed
-code generation in the pinned Rust 1.98.1 / LLVM 21.1.8 compiler. The tested
-compatibility path is an earlier published embedded release, not a production
-version choice. See the report for the compiler reproducer and audit warnings.
+inference is involved. The spike shell pins upstream Rust 1.98.1 with its bundled
+LLVM 22.1.8 through the locked rust-overlay input, including matching Clippy and
+rustfmt. The distro Rust 1.98.1 / LLVM 21.1.8 pairing fails AVX512 code generation
+required by Lance 12.0.0. The `remote` compile-time feature works around LanceDB
+0.39.0's unconditional `Error::Http` references; the executable still connects
+only to the supplied local directory. See the report for the compiler finding
+and remaining unsuppressed dependency warning.
+
+Check both compiler optimization paths and the model-free specifications:
+
+```sh
+rustc --edition=2024 crates/retrieval/spikes/qwen-lance/compiler-reproducer.rs -o /tmp/nk-avx512
+rustc --edition=2024 -C opt-level=3 crates/retrieval/spikes/qwen-lance/compiler-reproducer.rs -o /tmp/nk-avx512-opt
+cargo test --locked --manifest-path crates/retrieval/spikes/qwen-lance/Cargo.toml -j 2
+cargo clippy --locked --all-targets --manifest-path crates/retrieval/spikes/qwen-lance/Cargo.toml -j 2 -- -D warnings
+cargo fmt --manifest-path crates/retrieval/spikes/qwen-lance/Cargo.toml -- --check
+python3 crates/retrieval/spikes/qwen-lance/check-failures.py "$exe"
+```
+
+Run these in `nix develop .#spike`; the reproducer compiles but never executes
+AVX512 instructions. The failure checks require a built binary and use
+disposable invalid fixtures; they do not require model assets.
+
 Compile resources and model runtime resources must be reported separately. Models/indexes are disposable local state.
 
 ## Evidence checkpoint
