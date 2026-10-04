@@ -77,3 +77,12 @@ All seven implementation tickets are required, together with the integrated smok
 
 This is the phase-1 canonical-source boundary in parent #1. Local index creation,
 embedding, sync and semantic MCP retrieval remain their own implementation epics.
+
+## Explicit selected-page consumer
+
+`discover_selected_document` completes the same fresh exclusion-aware crawl,
+rejects a selected page absent from its allowed report, and extracts/chunks only
+that page. It retains the full discovery report for audit while the canonical
+records contain exactly the selected page. Other discovered pages and links do
+not enter extraction. This is used by the experimental one-page vector spike;
+it does not write an index inside the authoritative adapter.

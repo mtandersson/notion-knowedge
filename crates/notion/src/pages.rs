@@ -46,7 +46,8 @@ pub fn page_id(input: &str) -> Result<PageId, BackendError> {
                 || !url.username().is_empty()
                 || url.password().is_some()
                 || url.port().is_some()
-                || !(host == "notion.so"
+                || !(host == "app.notion.com"
+                    || host == "notion.so"
                     || host.ends_with(".notion.so")
                     || host == "notion.site"
                     || host.ends_with(".notion.site"))
@@ -58,6 +59,19 @@ pub fn page_id(input: &str) -> Result<PageId, BackendError> {
         })
         .ok_or_else(|| error(BackendErrorKind::InvalidInput))?;
     Ok(PageId(id))
+}
+/// Current responses use in_trash; page archival is a separate state.
+/// Legacy archived remains accepted for recorded older-version fixtures.
+pub(crate) fn inactive(value: &Value) -> Option<bool> {
+    let mut found = false;
+    let mut inactive = false;
+    for field in ["in_trash", "is_archived", "archived"] {
+        if let Some(value) = value.get(field) {
+            inactive |= value.as_bool()?;
+            found = true;
+        }
+    }
+    found.then_some(inactive)
 }
 fn string(value: &Value) -> Result<String, BackendError> {
     value
@@ -203,9 +217,7 @@ fn metadata(value: &Value, expected: &PageId) -> Result<Page, BackendError> {
     {
         return Err(error(BackendErrorKind::Internal));
     }
-    let archived = value["archived"]
-        .as_bool()
-        .ok_or_else(|| error(BackendErrorKind::Internal))?;
+    let archived = inactive(value).ok_or_else(|| error(BackendErrorKind::Internal))?;
     let mut properties = BTreeMap::new();
     let mut title = None;
     for value in value["properties"]
@@ -315,6 +327,30 @@ mod tests {
         });
         (client.fetch_page(input).await, server.await.unwrap())
     }
+    #[test]
+    fn current_and_legacy_inactive_states_reject_malformed_flags() {
+        for value in [
+            json!({"in_trash":false,"is_archived":false}),
+            json!({"archived":false}),
+        ] {
+            assert_eq!(inactive(&value), Some(false));
+        }
+        for value in [
+            json!({"in_trash":true}),
+            json!({"in_trash":false,"is_archived":true}),
+            json!({"archived":true,"in_trash":false}),
+        ] {
+            assert_eq!(inactive(&value), Some(true));
+        }
+        for value in [
+            json!({}),
+            json!({"in_trash":"false"}),
+            json!({"in_trash":false,"is_archived":null}),
+        ] {
+            assert_eq!(inactive(&value), None);
+        }
+    }
+
     #[tokio::test]
     async fn ids_and_normal_notion_links_fetch_identical_authoritative_metadata() {
         for input in [
@@ -325,6 +361,7 @@ mod tests {
                 ID.replace('-', "")
             ),
             format!("https://workspace.notion.site/{ID}"),
+            format!("https://app.notion.com/p/Selected-{}", ID.replace('-', "")),
         ] {
             let (result, request) = fetch(&input, 200, fixture().to_string()).await;
             let page = result.unwrap();
@@ -482,6 +519,7 @@ mod tests {
         for input in [
             "garbage",
             "https://notion.so.evil.test/12345678123412341234123456789abc",
+            "https://app.notion.com.evil.test/12345678123412341234123456789abc",
             "http://notion.so/12345678123412341234123456789abc",
             "https://user@notion.so/12345678123412341234123456789abc",
             "https://notion.so/",

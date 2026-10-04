@@ -41,11 +41,7 @@ fn parent(value: &Value, expected: &str, kinds: &[&str]) -> Result<bool, Backend
     Ok(id(&value["parent"][kind])? == expected)
 }
 fn archived(value: &Value) -> Result<bool, BackendError> {
-    let archived = value["archived"]
-        .as_bool()
-        .ok_or_else(|| error(BackendErrorKind::Internal))?;
-    // Older objects may omit in_trash; archived remains authoritative.
-    Ok(archived || value["in_trash"] == true)
+    crate::pages::inactive(value).ok_or_else(|| error(BackendErrorKind::Internal))
 }
 fn page(value: &Value, expected: &str) -> Result<DiscoveredPage, BackendError> {
     if value["object"] != "page" || id(&value["id"])? != expected {
@@ -709,6 +705,115 @@ mod tests {
         vec![PageId(ROOT.into())]
     }
     #[tokio::test]
+    async fn selected_snapshot_preserves_provenance_without_following_links() {
+        use notion_knowledge_core::chunking::ChunkConfig;
+        let mut metadata = page_value(ROOT, json!({"type":"workspace","workspace":true}));
+        metadata["url"] = json!(format!(
+            "https://app.notion.com/p/Selected-{}",
+            ROOT.replace('-', "")
+        ));
+        metadata.as_object_mut().unwrap().remove("archived");
+        metadata["is_archived"] = json!(false);
+        metadata["in_trash"] = json!(false);
+        metadata["last_edited_time"] = json!("2026-10-03T12:30:00.000Z");
+        let markdown = format!(
+            "# Selected heading\n\nApproved passage. <mention-page url=\"https://www.notion.so/{OUT}\"/>"
+        );
+        let (client, task) = mock(vec![
+            get(format!("pages/{ROOT}"), metadata.clone()), children(ROOT, vec![]),
+            get(format!("pages/{ROOT}"), metadata),
+            get(format!("pages/{ROOT}/markdown"), json!({"object":"page_markdown","id":ROOT,"markdown":markdown,"truncated":false,"unknown_block_ids":[]})),
+        ]).await;
+        let snapshot = client
+            .discover_selected_document(
+                ROOT,
+                ROOT,
+                "fixture-workspace",
+                &ExclusionRules::default(),
+                ChunkConfig::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(snapshot.documents.len(), 1);
+        assert!(!snapshot.chunks.is_empty());
+        for chunk in &snapshot.chunks {
+            assert_eq!(chunk.metadata.page_id, ROOT);
+            assert_eq!(chunk.metadata.source.root_page_id, ROOT);
+            assert_eq!(chunk.metadata.last_edited_time, "2026-10-03T12:30:00.000Z");
+            assert!(!chunk.chunk_id.is_empty());
+            assert!(!chunk.content_hash.is_empty());
+        }
+        assert_eq!(task.await.unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn selected_snapshot_leaves_other_discovered_pages_unextracted() {
+        use notion_knowledge_core::chunking::ChunkConfig;
+        let mut metadata = page_value(ROOT, json!({"type":"workspace","workspace":true}));
+        metadata["last_edited_time"] = json!("2026-10-03T12:30:00.000Z");
+        let mut child = block(CHILD, ROOT, "child_page", false);
+        child["child_page"] = json!({"title":"Other allowed page"});
+        let (client, task) = mock(vec![
+            get(format!("pages/{ROOT}"), metadata.clone()), children(ROOT, vec![child]),
+            get(format!("pages/{CHILD}"), page_value(CHILD, json!({"type":"page_id","page_id":ROOT}))),
+            children(CHILD, vec![]),
+            get(format!("pages/{ROOT}"), metadata),
+            get(format!("pages/{ROOT}/markdown"), json!({"object":"page_markdown","id":ROOT,"markdown":"# Selected\n\nOnly this passage is extracted.","truncated":false,"unknown_block_ids":[]})),
+        ]).await;
+        let snapshot = client
+            .discover_selected_document(
+                ROOT,
+                ROOT,
+                "fixture-workspace",
+                &ExclusionRules::default(),
+                ChunkConfig::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(snapshot.discovery.pages.len(), 2);
+        assert_eq!(snapshot.documents.len(), 1);
+        assert!(
+            snapshot
+                .chunks
+                .iter()
+                .all(|chunk| chunk.metadata.page_id == ROOT)
+        );
+        assert_eq!(task.await.unwrap().len(), 6); // No child Markdown request is permitted.
+    }
+
+    #[tokio::test]
+    async fn selected_snapshot_rejects_outside_and_excluded_pages_before_content_reads() {
+        use notion_knowledge_core::chunking::ChunkConfig;
+        for selected in [OUT, CHILD] {
+            let mut child = block(CHILD, ROOT, "child_page", false);
+            child["child_page"] = json!({"title":"Excluded"});
+            let (client, task) = mock(vec![
+                get(
+                    format!("pages/{ROOT}"),
+                    page_value(ROOT, json!({"type":"workspace","workspace":true})),
+                ),
+                children(ROOT, vec![child]),
+            ])
+            .await;
+            let rules = ExclusionRules {
+                page_ids: [CHILD.to_owned()].into(),
+                ..Default::default()
+            };
+            let result = client
+                .discover_selected_document(
+                    ROOT,
+                    selected,
+                    "fixture-workspace",
+                    &rules,
+                    ChunkConfig::default(),
+                )
+                .await;
+            assert_eq!(result.unwrap_err().kind, BackendErrorKind::PermissionDenied);
+            assert_eq!(task.await.unwrap().len(), 2);
+        }
+    }
+
+    #[tokio::test]
     async fn scoped_snapshot_returns_no_partial_records_when_exact_content_is_incomplete() {
         use notion_knowledge_core::chunking::ChunkConfig;
         let mut metadata = page_value(ROOT, json!({"type":"workspace","workspace":true}));
@@ -721,6 +826,33 @@ mod tests {
         ]).await;
         let result = client
             .discover_documents(
+                ROOT,
+                "fixture-workspace",
+                &ExclusionRules::default(),
+                ChunkConfig::default(),
+            )
+            .await;
+        assert_eq!(
+            result.unwrap_err().kind,
+            BackendErrorKind::UnsupportedContent
+        );
+        assert_eq!(task.await.unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn selected_snapshot_fails_on_unsupported_authoritative_content() {
+        use notion_knowledge_core::chunking::ChunkConfig;
+        let mut metadata = page_value(ROOT, json!({"type":"workspace","workspace":true}));
+        metadata["last_edited_time"] = json!("2026-10-03T12:30:00.000Z");
+        let (client, task) = mock(vec![
+            get(format!("pages/{ROOT}"), metadata.clone()),
+            children(ROOT, vec![]),
+            get(format!("pages/{ROOT}"), metadata),
+            get(format!("pages/{ROOT}/markdown"), json!({"object":"page_markdown","id":ROOT,"markdown":"partial private content","truncated":true,"unknown_block_ids":[]})),
+        ]).await;
+        let result = client
+            .discover_selected_document(
+                ROOT,
                 ROOT,
                 "fixture-workspace",
                 &ExclusionRules::default(),

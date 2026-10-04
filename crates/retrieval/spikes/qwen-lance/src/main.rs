@@ -147,13 +147,18 @@ impl EmbeddingProvider for Provider {
 async fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
     ensure!(
-        args.len() == 4 && matches!(args[1].as_str(), "create" | "query"),
-        "usage: qwen-lance-spike <create|query> <verified-assets-dir> <index-dir>"
+        (args.len() == 4 && matches!(args[1].as_str(), "create" | "query"))
+            || (args.len() == 5 && args[1] == "query-page")
+            || (args.len() >= 7 && args[1] == "create-notion"),
+        "usage: qwen-lance-spike <create|query> ASSETS INDEX; query-page ASSETS INDEX QUESTION; create-notion ASSETS INDEX ROOT PAGE WORKSPACE [EXCLUDED_PAGE ...]"
     );
+    if args[1] == "query-page" {
+        ensure!(!args[4].trim().is_empty(), "question must not be empty");
+    }
     // `remote` is a compile workaround; always pass LanceDB a local absolute path.
     let index = std::path::absolute(&args[3]).context("resolve local index directory")?;
     let expected = metadata()?;
-    if args[1] == "query" {
+    if matches!(args[1].as_str(), "query" | "query-page") {
         let persisted: EmbeddingMetadata = serde_json::from_slice(
             &std::fs::read(index.join("embedding.json"))
                 .context("missing persisted embedding metadata")?,
@@ -167,15 +172,56 @@ async fn main() -> Result<()> {
             "index already exists; use a new path for an explicit rebuild"
         );
     }
+    let source_chunks = if args[1] == "create-notion" {
+        ensure!(
+            std::env::var("NK_NOTION_AUTH").as_deref() == Ok("integration"),
+            "NK_NOTION_AUTH=integration is required"
+        );
+        let token = std::env::var("NOTION_TOKEN")
+            .map_err(|_| anyhow::anyhow!("NOTION_TOKEN is required"))?;
+        let client = notion_knowledge_notion::NotionClient::integration(&token)?;
+        let mut rules = notion_knowledge_core::discovery::ExclusionRules::default();
+        for excluded in &args[7..] {
+            rules
+                .page_ids
+                .insert(notion_knowledge_notion::pages::page_id(excluded)?.0);
+        }
+        let snapshot = client
+            .discover_selected_document(
+                &args[4],
+                &args[5],
+                &args[6],
+                &rules,
+                notion_knowledge_core::chunking::ChunkConfig::default(),
+            )
+            .await?;
+        ensure!(
+            snapshot.documents.len() == 1 && !snapshot.chunks.is_empty(),
+            "selected page has no indexable content"
+        );
+        ensure!(
+            snapshot.chunks.len() <= 32,
+            "spike page exceeds 32 chunk bound"
+        );
+        println!(
+            "selected_documents=1 allowed_discovered={} skipped={} selected_chunks={}",
+            snapshot.discovery.pages.len(),
+            snapshot.discovery.skipped.len(),
+            snapshot.chunks.len()
+        );
+        Some(snapshot.chunks)
+    } else {
+        None
+    };
     let start = Instant::now();
     let provider = Provider::load(Path::new(&args[2]))?;
     println!("model_load_ms={}", start.elapsed().as_millis());
     let db = lancedb::connect(index.to_str().context("index path must be UTF-8")?)
         .execute()
         .await?;
-    if args[1] == "create" {
+    if !matches!(args[1].as_str(), "query" | "query-page") {
         let start = Instant::now();
-        let chunks = chunks();
+        let chunks = source_chunks.unwrap_or_else(chunks);
         let vectors = embedding::embed_batch(
             &provider,
             &chunks.iter().map(|c| c.text.clone()).collect::<Vec<_>>(),
@@ -203,11 +249,15 @@ async fn main() -> Result<()> {
         let batch = RecordBatch::try_new(
             schema,
             vec![
-                Arc::new(StringArray::from(vec![
-                    "fixture-backups",
-                    "fixture-tomatoes",
-                ])),
-                Arc::new(StringArray::from(TEXTS.to_vec())),
+                Arc::new(StringArray::from(
+                    chunks
+                        .iter()
+                        .map(|c| c.chunk_id.as_str())
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+                )),
                 Arc::new(StringArray::from(
                     chunks
                         .iter()
@@ -222,10 +272,21 @@ async fn main() -> Result<()> {
             index.join("embedding.json"),
             serde_json::to_vec_pretty(provider.metadata())?,
         )?;
-        println!("persisted_rows=2 metadata_schema=1 dimension={DIM} model_revision={REVISION}");
+        println!(
+            "persisted_rows={} metadata_schema=1 dimension={DIM} model_revision={REVISION}",
+            chunks.len()
+        );
     } else {
         let start = Instant::now();
-        let query = embedding::embed_batch(&provider, &[QUERY.to_string()])
+        let question = if args[1] == "query-page" {
+            format!(
+                "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: {}",
+                args[4]
+            )
+        } else {
+            QUERY.to_string()
+        };
+        let query = embedding::embed_batch(&provider, &[question])
             .await?
             .remove(0);
         println!("query_embed_ms={}", start.elapsed().as_millis());
@@ -272,11 +333,33 @@ async fn main() -> Result<()> {
             .downcast_ref::<Float32Array>()
             .context("invalid distance schema")?;
         ensure!(
-            ids.len() == 2 && ids.value(0) == "fixture-backups",
+            !ids.is_empty()
+                && (args[1] == "query-page"
+                    || (ids.len() == 2 && ids.value(0) == "fixture-backups")),
             "unexpected fixture ranking"
         );
+        let records = batch
+            .column_by_name("chunk_record")
+            .context("missing canonical record")?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .context("invalid canonical record schema")?;
         for row in 0..ids.len() {
             ensure!(distances.value(row).is_finite(), "nonfinite score");
+            if args[1] == "query-page" {
+                let chunk: IndexedChunk = serde_json::from_str(records.value(row))?;
+                // Explicit local output contains selected source provenance; do not commit live output.
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "chunk_id": chunk.chunk_id, "page_id": chunk.metadata.page_id,
+                        "title": chunk.metadata.title, "url": chunk.metadata.url,
+                        "heading_path": chunk.metadata.heading_path, "last_edited_time": chunk.metadata.last_edited_time,
+                        "content_hash": chunk.content_hash, "text": chunk.text,
+                        "cosine_similarity": 1.0 - distances.value(row)
+                    }))?
+                );
+            }
             println!(
                 "chunk_id={} cosine_similarity={}",
                 ids.value(row),
