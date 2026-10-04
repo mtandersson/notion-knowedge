@@ -156,5 +156,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+    def test_nested_workspace_advisory_fails_even_when_root_workspace_is_clean(self):
+        db = self.root / 'advisory-db'
+        initialize(db)
+        advisories = db / 'crates' / 'security-fixture'
+        advisories.mkdir(parents=True)
+        (advisories / 'RUSTSEC-2025-0001.md').write_text('```toml\n[advisory]\nid = "RUSTSEC-2025-0001"\npackage = "security-fixture"\ndate = "2025-01-01"\nurl = "https://example.invalid/synthetic-advisory"\n[versions]\npatched = [">= 1.0.1"]\n```\n# Synthetic advisory\nA disposable nested workspace fixture.\n')
+        commit(db)
+        clean = 'version = 4\n[[package]]\nname = "security-fixture"\nversion = "1.0.1"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n'
+        (self.root / 'Cargo.lock').write_text(clean)
+        nested = self.root / 'crates' / 'experiment'
+        nested.mkdir(parents=True)
+        (nested / 'Cargo.lock').write_text(clean.replace('1.0.1', '1.0.0'))
+        result = run('bash', 'scripts/check-dependencies.sh', '--db', str(db), '--no-fetch', '--stale', cwd=self.root)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('RUSTSEC-2025-0001', result.stdout + result.stderr)
+
+
 if __name__ == '__main__':
     unittest.main()

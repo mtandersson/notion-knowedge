@@ -1,0 +1,27 @@
+[package]
+name = "qwen-lance-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+notion-knowledge-core = { path = "../../../core" }
+anyhow = "1"
+arrow-array = "57.2"
+arrow-schema = "57.2"
+candle-core = "=0.11.0"
+candle-nn = "=0.11.0"
+fastembed = { version = "=7.1.0", default-features = false, features = ["qwen3", "ort-load-dynamic"] }
+futures = "0.3"
+lancedb = "=0.26.2"
+serde_json = "1"
+sha2 = "0.10"
+tokenizers = { version = "=0.23.2", default-features = false, features = ["onig"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[profile.dev]
+debug = 0
+[profile.release]
+debug = 0
