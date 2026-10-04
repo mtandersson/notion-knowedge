@@ -310,3 +310,7 @@ fingerprints into a read-only canonical snapshot.
 The [embedding provider contract](docs/embeddings.md) defines asynchronous batch
 execution and persisted provider/model/vector-space identity independently of
 local model runtimes.
+
+The [one-page Notion/vector experiment](docs/notion-vector-spike.md) connects an
+explicitly selected page to the local Qwen/LanceDB spike without broadening
+discovery authority. It remains separate from the production MCP runtime.

@@ -45,6 +45,50 @@ impl NotionClient {
         let discovery = self
             .crawl_with_exclusions(std::slice::from_ref(&root), rules)
             .await?;
+        self.assemble_documents(root.0, workspace_id, discovery, config)
+            .await
+    }
+
+    /// Fresh discovery authorizes exactly one selected page. Other discovered
+    /// pages and referenced targets never reach content extraction.
+    pub async fn discover_selected_document(
+        &self,
+        root: &str,
+        selected: &str,
+        workspace_id: &str,
+        rules: &ExclusionRules,
+        config: ChunkConfig,
+    ) -> Result<DocumentSnapshot, BackendError> {
+        let root = page_id(root)?;
+        let selected = page_id(selected)?;
+        if workspace_id.is_empty()
+            || config.target_chars == 0
+            || config.overlap_chars >= config.target_chars
+        {
+            return Err(error(BackendErrorKind::InvalidInput));
+        }
+        let discovery = self
+            .crawl_with_exclusions(std::slice::from_ref(&root), rules)
+            .await?;
+        if !discovery.pages.iter().any(|page| page.id == selected.0) {
+            return Err(error(BackendErrorKind::PermissionDenied));
+        }
+        let mut selected_report = discovery.clone();
+        selected_report.pages.retain(|page| page.id == selected.0);
+        let mut snapshot = self
+            .assemble_documents(root.0, workspace_id, selected_report, config)
+            .await?;
+        snapshot.discovery = discovery;
+        Ok(snapshot)
+    }
+
+    async fn assemble_documents(
+        &self,
+        root: String,
+        workspace_id: &str,
+        discovery: DiscoveryReport,
+        config: ChunkConfig,
+    ) -> Result<DocumentSnapshot, BackendError> {
         let mut documents = Vec::new();
         let mut chunks = Vec::new();
         for discovered in &discovery.pages {
@@ -63,7 +107,7 @@ impl NotionClient {
                     last_edited_time: content.page.last_edited_time.clone(),
                     source: SourceMetadata {
                         workspace_id: workspace_id.into(),
-                        root_page_id: root.0.clone(),
+                        root_page_id: root.clone(),
                         database_id: None,
                         data_source_id: None,
                     },
