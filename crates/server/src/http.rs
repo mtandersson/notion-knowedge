@@ -18,6 +18,14 @@ use rmcp::transport::streamable_http_server::{
 
 /// Serve the shared MCP handler and orchestration probes until Ctrl-C.
 pub async fn serve(settings: crate::config::Config) -> io::Result<()> {
+    serve_with_handler(settings, notion_knowledge_mcp::KnowledgeServer::default()).await
+}
+
+/// Both normal and explicit experimental composition use the same transport.
+pub async fn serve_with_handler(
+    settings: crate::config::Config,
+    handler: notion_knowledge_mcp::KnowledgeServer,
+) -> io::Result<()> {
     let bind = settings.http_bind;
     let diagnostics = crate::diagnostics::bootstrap(&settings);
     let listener = tokio::net::TcpListener::bind(bind).await?;
@@ -30,7 +38,7 @@ pub async fn serve(settings: crate::config::Config) -> io::Result<()> {
     ];
     let cancellation = config.cancellation_token.clone();
     let service = StreamableHttpService::new(
-        || Ok(notion_knowledge_mcp::KnowledgeServer),
+        move || Ok(handler.clone()),
         Arc::new(LocalSessionManager::default()),
         config,
     );

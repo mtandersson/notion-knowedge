@@ -23,6 +23,8 @@ use notion_knowledge_core::indexed::{
     IndexedChunk, IndexedMetadata, SchemaVersion, SourceMetadata,
 };
 
+mod serve;
+
 const REVISION: &str = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3";
 const DIM: usize = 1024;
 const QUERY: &str = "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: Var förvaras säkerhetskopiorna?";
@@ -146,6 +148,16 @@ impl EmbeddingProvider for Provider {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
+    if args
+        .get(1)
+        .is_some_and(|mode| matches!(mode.as_str(), "serve-stdio" | "serve-http"))
+    {
+        ensure!(
+            args.len() == 4,
+            "usage: qwen-lance-spike <serve-stdio|serve-http> ASSETS INDEX"
+        );
+        return serve::run(&args[1], Path::new(&args[2]), Path::new(&args[3])).await;
+    }
     ensure!(
         (args.len() == 4 && matches!(args[1].as_str(), "create" | "query"))
             || (args.len() == 5 && args[1] == "query-page")

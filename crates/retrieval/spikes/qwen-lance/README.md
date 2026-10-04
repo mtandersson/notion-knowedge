@@ -88,3 +88,13 @@ Compile resources and model runtime resources must be reported separately. Model
 Investigation and observed execution results are recorded in
 [the spike report](../../../../docs/local-vector-spike.md). The experiment
 alone does not close production #37/#39 or the end-to-end parent #211.
+
+## Explicit semantic MCP configuration (#214)
+
+`serve-stdio ASSETS INDEX` and `serve-http ASSETS INDEX` inject the experimental
+semantic adapter into the existing shared MCP handler. HTTP reuses the server
+library's transport wiring; both transports return the same contract and errors.
+The default production server still has no retrieval adapter. See
+[semantic MCP reproduction and actual-response evidence](../../../../docs/semantic-mcp-spike.md).
+Neither serving mode reads Notion or requires a token. The already-derived index
+and raw returned source excerpts remain local outside Git.

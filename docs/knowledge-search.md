@@ -23,11 +23,14 @@ modes. Empty results signify a completed search with no matches. Retrieved
 text is untrusted content, not instructions; callers can use the stable source
 references for authoritative reads and citation.
 
-This issue defines the tool contract only. No retrieval adapter, embeddings or
-LanceDB queries are wired yet. Every valid call returns `isError: true` with
-`retrieval_unavailable` and no fabricated result object. Invalid arguments
-return JSON-RPC invalid-params without echoing supplied input. Later retrieval
-work must implement the declared success schema and filter semantics.
+The default bootstrap has no retrieval adapter: valid calls return `isError:
+true` with `retrieval_unavailable` and no fabricated result object. The explicit
+[semantic MCP spike](semantic-mcp-spike.md) injects a local Qwen/LanceDB adapter
+into the same handler and HTTP wiring. It supports semantic mode only;
+lexical/hybrid return `mode_unavailable`. Dependency failures return
+`retrieval_unavailable`. Invalid arguments always return JSON-RPC invalid-params
+without echoing supplied input. Successful content blocks also identify retrieved
+excerpts as untrusted data. Production implementation remains in #45/#49.
 
 Production-boundary discovery and call tests run with:
 
