@@ -1,8 +1,7 @@
 //! Explicit CPU feasibility experiment, not the production adapter.
 use anyhow::{Context, Result, ensure};
 use arrow_array::{
-    Array, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator, StringArray,
-    types::Float32Type,
+    Array, FixedSizeListArray, Float32Array, RecordBatch, StringArray, types::Float32Type,
 };
 use arrow_schema::{DataType, Field, Schema};
 use candle_core::{DType, Device};
@@ -151,7 +150,8 @@ async fn main() -> Result<()> {
         args.len() == 4 && matches!(args[1].as_str(), "create" | "query"),
         "usage: qwen-lance-spike <create|query> <verified-assets-dir> <index-dir>"
     );
-    let index = Path::new(&args[3]);
+    // `remote` is a compile workaround; always pass LanceDB a local absolute path.
+    let index = std::path::absolute(&args[3]).context("resolve local index directory")?;
     let expected = metadata()?;
     if args[1] == "query" {
         let persisted: EmbeddingMetadata = serde_json::from_slice(
@@ -201,7 +201,7 @@ async fn main() -> Result<()> {
             )])),
         );
         let batch = RecordBatch::try_new(
-            schema.clone(),
+            schema,
             vec![
                 Arc::new(StringArray::from(vec![
                     "fixture-backups",
@@ -217,9 +217,7 @@ async fn main() -> Result<()> {
                 Arc::new(vector),
             ],
         )?;
-        db.create_table("chunks", RecordBatchIterator::new(vec![Ok(batch)], schema))
-            .execute()
-            .await?;
+        db.create_table("chunks", batch).execute().await?;
         std::fs::write(
             index.join("embedding.json"),
             serde_json::to_vec_pretty(provider.metadata())?,
