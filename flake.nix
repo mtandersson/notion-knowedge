@@ -22,6 +22,10 @@
           security = pkgs.mkShellNoCC {
             packages = with pkgs; [ cargo-audit gitleaks git python3 ];
           };
+          spike = pkgs.mkShell {
+            packages = with pkgs; [ cargo rustc rustfmt clippy pkg-config openssl protobuf python3 curl time ];
+            RUST_BACKTRACE = "1";
+          };
           default = pkgs.mkShell {
             packages = with pkgs; [
               cargo
