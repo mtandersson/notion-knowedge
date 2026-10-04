@@ -67,7 +67,7 @@ The default endpoint is `http://127.0.0.1:3000/mcp`. `NK_HTTP_HOST` and
 discovery and calls, stateful sessions, SSE responses, and session deletion.
 Protocol failures return structured JSON-RPC errors. Ctrl-C stops the listener
 and cancels active sessions. Both transports share the [semantic search contract](docs/knowledge-search.md);
-valid search calls currently return an explicit retrieval-unavailable tool error.
+valid search calls in the default bootstrap return an explicit retrieval-unavailable tool error. The isolated [semantic MCP spike](docs/semantic-mcp-spike.md) explicitly configures real local semantic retrieval through this same handler and transport wiring.
 Calls to unknown tools return protocol errors.
 
 The HTTP listener validates Host against loopback names and the configured IP,

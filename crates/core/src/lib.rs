@@ -30,3 +30,6 @@ pub mod fingerprint;
 
 /// Embedding execution port and persisted vector-space identity.
 pub mod embedding;
+
+/// Semantic retrieval execution independent of MCP and storage types.
+pub mod search;

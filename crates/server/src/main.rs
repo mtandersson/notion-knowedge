@@ -133,7 +133,10 @@ async fn main() -> ExitCode {
     }
 
     eprintln!("Serving MCP over stdio.");
-    let service = match notion_knowledge_mcp::KnowledgeServer.serve(stdio()).await {
+    let service = match notion_knowledge_mcp::KnowledgeServer::default()
+        .serve(stdio())
+        .await
+    {
         Ok(service) => service,
         Err(_) => {
             eprintln!("MCP stdio initialization failed.");
