@@ -27,3 +27,6 @@ pub mod chunking;
 
 /// Versioned content fingerprints and cross-run chunk identities.
 pub mod fingerprint;
+
+/// Embedding execution port and persisted vector-space identity.
+pub mod embedding;

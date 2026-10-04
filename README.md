@@ -306,3 +306,7 @@ enhanced Markdown and surfaces unsupported or incomplete content explicitly.
 The [scoped canonical document smoke](docs/discovered-documents.md) assembles
 exclusion-aware discovery, exact content, relationships, chunking and stable
 fingerprints into a read-only canonical snapshot.
+
+The [embedding provider contract](docs/embeddings.md) defines asynchronous batch
+execution and persisted provider/model/vector-space identity independently of
+local model runtimes.
