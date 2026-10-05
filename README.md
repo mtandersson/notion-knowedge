@@ -318,3 +318,8 @@ discovery authority. It remains separate from the production MCP runtime.
 The [bounded ChatGPT experiment](docs/chatgpt-spike.md) records the private
 connection, actual source-linked answers, manual-refresh demonstration, unsupported
 question behavior and production follow-up decisions.
+
+The [local Qwen embedding provider](docs/local-qwen.md) implements the production
+embedding port with pinned offline assets and bounded CPU batches. Enable the
+optional `local-qwen` retrieval feature and use the matched `.#spike` toolchain;
+the bootstrap server is not yet wired to load the model.
