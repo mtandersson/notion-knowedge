@@ -2,9 +2,10 @@ use std::fmt;
 use std::path::Path;
 
 use notion_knowledge_core::sync_state::{PageSyncState, SyncStateStore};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
-const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("sync_state/migrations/0001_sync_state.sql"))];
+const MIGRATIONS: &[(i64, &str)] =
+    &[(1, include_str!("sync_state/migrations/0001_sync_state.sql"))];
 
 pub struct SqliteSyncStateStore {
     connection: Connection,
