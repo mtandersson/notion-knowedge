@@ -147,7 +147,31 @@ impl EmbeddingProvider for Provider {
 }
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args: Vec<_> = std::env::args().collect();
+    let mut args: Vec<_> = std::env::args().collect();
+    if args.get(1).is_some_and(|mode| mode == "inspect-index") {
+        ensure!(args.len() == 3, "usage: inspect-index INDEX");
+        validate_existing_index(Path::new(&args[2]), None).await?;
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|mode| mode == "verify-text") {
+        ensure!(
+            args.len() == 5 && !args[3].is_empty() && !args[4].is_empty(),
+            "usage: verify-text INDEX ABSENT_TEXT PRESENT_TEXT"
+        );
+        validate_existing_index(Path::new(&args[2]), Some((&args[3], &args[4]))).await?;
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|mode| mode == "refresh-notion") {
+        ensure!(
+            args.len() >= 8,
+            "usage: refresh-notion ASSETS OLD_INDEX NEW_INDEX ROOT PAGE WORKSPACE [EXCLUDED_PAGE ...]"
+        );
+        // A full refresh creates a separate generation. Keep the serving index
+        // unchanged on read/model/write failure; explicitly switch after success.
+        validate_existing_index(Path::new(&args[3]), None).await?;
+        args.remove(3);
+        args[1] = "create-notion".into();
+    }
     if args
         .get(1)
         .is_some_and(|mode| matches!(mode.as_str(), "serve-stdio" | "serve-http"))
@@ -284,6 +308,7 @@ async fn main() -> Result<()> {
             index.join("embedding.json"),
             serde_json::to_vec_pretty(provider.metadata())?,
         )?;
+        validate_existing_index(&index, None).await?;
         println!(
             "persisted_rows={} metadata_schema=1 dimension={DIM} model_revision={REVISION}",
             chunks.len()
@@ -382,6 +407,97 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Validate both persisted identities before a refresh, without loading a model.
+async fn validate_existing_index(
+    index: &Path,
+    text_expectation: Option<(&str, &str)>,
+) -> Result<()> {
+    let expected = metadata()?;
+    let persisted: EmbeddingMetadata = serde_json::from_slice(
+        &std::fs::read(index.join("embedding.json"))
+            .context("refresh requires an existing index identity")?,
+    )?;
+    persisted
+        .ensure_compatible(&expected)
+        .context("incompatible vector metadata; explicitly rebuild to a new index")?;
+    let index = std::path::absolute(index)?;
+    let db = lancedb::connect(index.to_str().context("index path must be UTF-8")?)
+        .execute()
+        .await?;
+    let table = db.open_table("chunks").execute().await?;
+    let schema = table.schema().await?;
+    let actual: EmbeddingMetadata = serde_json::from_str(
+        schema
+            .metadata()
+            .get("embedding")
+            .context("table missing embedding identity")?,
+    )?;
+    actual
+        .ensure_compatible(&expected)
+        .context("incompatible table vector metadata; explicitly rebuild to a new index")?;
+    ensure!(
+        matches!(schema.field_with_name("vector")?.data_type(), DataType::FixedSizeList(item, dimension) if *dimension == DIM as i32 && item.data_type() == &DataType::Float32),
+        "incompatible vector schema; explicitly rebuild to a new index"
+    );
+    let count = table.count_rows(None).await?;
+    ensure!(count > 0 && count <= 32, "spike requires 1..=32 rows");
+    let batches: Vec<RecordBatch> = table
+        .query()
+        .limit(33)
+        .execute()
+        .await?
+        .try_collect()
+        .await?;
+    let mut records = Vec::new();
+    for batch in batches {
+        let column = batch
+            .column_by_name("chunk_record")
+            .context("missing canonical records")?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .context("invalid canonical records")?;
+        for row in 0..column.len() {
+            ensure!(!column.is_null(row), "missing canonical record");
+            records.push(serde_json::from_str::<IndexedChunk>(column.value(row))?);
+        }
+    }
+    ensure!(records.len() == count, "incomplete generation");
+    if let Some((absent, present)) = text_expectation {
+        verify_record_text(&records, absent, present)?;
+        println!("all_records_old_text_absent=true new_text_present=true");
+    }
+    let digest = generation_digest(&mut records)?;
+    println!("verified_rows={count} unique_chunks={count} corpus_sha256={digest}");
+    Ok(())
+}
+
+fn verify_record_text(records: &[IndexedChunk], absent: &str, present: &str) -> Result<()> {
+    ensure!(
+        records.iter().all(|record| !record.text.contains(absent)),
+        "old distinctive text remains in generation"
+    );
+    ensure!(
+        records.iter().any(|record| record.text.contains(present)),
+        "new distinctive text missing from generation"
+    );
+    Ok(())
+}
+
+/// Fingerprint canonical records independent of storage order, rejecting duplicates.
+fn generation_digest(records: &mut [IndexedChunk]) -> Result<String> {
+    records.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
+    ensure!(
+        records
+            .windows(2)
+            .all(|pair| pair[0].chunk_id != pair[1].chunk_id),
+        "duplicate chunk identities"
+    );
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(records)?)
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,6 +527,56 @@ mod tests {
             Err(EmbeddingError::IncompatibleIndex)
         );
     }
+    #[test]
+    fn generation_identity_is_order_independent_and_rejects_duplicate_chunks() {
+        let mut original = chunks();
+        let expected = generation_digest(&mut original).unwrap();
+        original.reverse();
+        assert_eq!(generation_digest(&mut original).unwrap(), expected);
+        original.push(original[0].clone());
+        assert!(
+            generation_digest(&mut original)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate chunk identities")
+        );
+    }
+
+    #[test]
+    fn generation_text_checks_all_chunks_and_requires_the_new_passage() {
+        let records = chunks();
+        assert!(verify_record_text(&records, "old missing text", "tomater").is_ok());
+        assert!(verify_record_text(&records, "tomater", "biblioteket").is_err());
+        assert!(verify_record_text(&records, "old missing text", "new missing text").is_err());
+    }
+
+    #[tokio::test]
+    async fn refresh_rejects_an_incompatible_generation_before_source_reads() {
+        let index =
+            std::env::temp_dir().join(format!("nk-refresh-identity-{}", std::process::id()));
+        std::fs::create_dir(&index).unwrap();
+        let incompatible = EmbeddingMetadata::new(
+            "other-provider".into(),
+            "other-model".into(),
+            "other-revision".into(),
+            DIM,
+        )
+        .unwrap();
+        std::fs::write(
+            index.join("embedding.json"),
+            serde_json::to_vec(&incompatible).unwrap(),
+        )
+        .unwrap();
+        let error = validate_existing_index(&index, None).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("explicitly rebuild to a new index")
+        );
+        assert!(!index.join("chunks.lance").exists());
+        std::fs::remove_dir_all(index).unwrap();
+    }
+
     #[test]
     fn synthetic_chunks_preserve_canonical_identity_and_provenance() {
         for chunk in chunks() {

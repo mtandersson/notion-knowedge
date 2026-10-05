@@ -136,5 +136,6 @@ metadata/filter/authorization requirements. #49 can reuse stable canonical
 citation mapping and the bounded success schema, but still owns query-aware
 snippets, deduplication, ranking and its complete evidence requirements. This
 single-page experiment is neither a production ranking baseline nor their
-completion. Manual refresh/restart/rebuild belongs to #215; an actual ChatGPT
+completion. Manual refresh/restart/rebuild is documented in the
+[Step 4 experiment](manual-refresh-spike.md); an actual ChatGPT
 answer and source link belongs to #216.
