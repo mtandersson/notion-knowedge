@@ -6,3 +6,6 @@
 
 /// Stable component identifier used by the bootstrap composition smoke check.
 pub const COMPONENT: &str = "retrieval";
+
+#[cfg(feature = "local-qwen")]
+pub mod qwen;

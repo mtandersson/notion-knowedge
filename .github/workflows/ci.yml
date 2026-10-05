@@ -94,7 +94,7 @@ jobs:
     if: needs.changes.outputs.clippy == 'true'
     name: Clippy
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -116,6 +116,9 @@ jobs:
 
       - name: Run Clippy
         run: nix develop --command cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Lint optional local Qwen provider
+        run: nix develop .#spike --command cargo clippy -p notion-knowledge-retrieval --all-targets --features local-qwen --locked -- -D warnings
 
       - name: Save successful refreshed Cargo caches
         if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
@@ -168,7 +171,7 @@ jobs:
     if: needs.changes.outputs.test == 'true'
     name: Unit tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -190,6 +193,9 @@ jobs:
 
       - name: Run unit tests
         run: nix develop --command cargo test --workspace --locked
+
+      - name: Test optional local Qwen provider without model assets
+        run: nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-qwen --locked
 
       - name: Save successful refreshed Cargo caches
         if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)

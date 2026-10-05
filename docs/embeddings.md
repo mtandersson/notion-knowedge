@@ -3,8 +3,8 @@
 `core::embedding::EmbeddingProvider` is an object-safe asynchronous batch port.
 Concrete local runtime implementations belong in `retrieval`; no runtime or
 model dependency is introduced by this contract. The deterministic fake lives
-only in core integration tests. A real model adapter and index persistence are
-separate follow-up work (#39 and #37/#36).
+only in core integration tests. The [local Qwen provider](local-qwen.md) implements this port behind an
+explicit retrieval feature. Index persistence remains separate work (#37/#36).
 
 Each instance exposes immutable `EmbeddingMetadata`: provider ID, model ID,
 model version and positive vector dimension. Version means the identity of the
