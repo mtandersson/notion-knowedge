@@ -1,120 +1,182 @@
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
-use notion_knowledge_core::sync_state::{PageSyncState, SyncStateStore};
-use notion_knowledge_retrieval::sync_state::SqliteSyncStateStore;
+use notion_knowledge_core::sync_state::{
+    CrawlCheckpoint, IndexVersion, PageSyncState, PageSyncStatus, SyncStateError, SyncStateStore,
+};
+use notion_knowledge_retrieval::sync_state::{LATEST_SCHEMA_VERSION, SqliteSyncStateStore};
+use rusqlite::Connection;
 
-fn state(
-    page_id: &str,
-    hash: Option<&str>,
-    tombstone: Option<i64>,
-    synced_at_ms: i64,
-) -> PageSyncState {
-    PageSyncState {
-        page_id: page_id.to_owned(),
-        content_hash: hash.map(str::to_owned),
-        notion_last_edited_ms: Some(synced_at_ms - 1),
-        synced_at_ms,
-        tombstoned_at_ms: tombstone,
+static NEXT_DB: AtomicU64 = AtomicU64::new(1);
+
+struct TestDb {
+    path: PathBuf,
+}
+
+impl TestDb {
+    fn new(name: &str) -> Self {
+        let id = NEXT_DB.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "notion-knowledge-sync-state-{}-{name}-{id}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        Self {
+            path: directory.join("state.sqlite3"),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn reset_directory(&self) {
+        if let Some(directory) = self.path.parent() {
+            fs::remove_dir_all(directory).unwrap();
+        }
     }
 }
 
-fn temp_db() -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "notion-knowledge-sync-state-{}-{nonce}.sqlite",
-        std::process::id()
-    ))
-}
-
-fn remove_db(path: &Path) {
-    let _ = fs::remove_file(path);
-    let _ = fs::remove_file(format!("{}-wal", path.display()));
-    let _ = fs::remove_file(format!("{}-shm", path.display()));
+impl Drop for TestDb {
+    fn drop(&mut self) {
+        if let Some(directory) = self.path.parent() {
+            let _ = fs::remove_dir_all(directory);
+        }
+    }
 }
 
 #[test]
-fn migrations_are_versioned_idempotent_and_rebuild_from_an_empty_file() {
-    let path = temp_db();
+fn state_survives_reopen_with_versioned_schema() {
+    let db = TestDb::new("durable");
+    let store = SqliteSyncStateStore::open(db.path()).unwrap();
+    assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
 
-    {
-        let store = SqliteSyncStateStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 1);
-    }
-    {
-        let store = SqliteSyncStateStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 1);
-    }
+    let page = PageSyncState::present(
+        "page-1".into(),
+        "sha256:abc".into(),
+        Some("2026-10-05T18:00:00Z".into()),
+    )
+    .unwrap();
+    let checkpoint =
+        CrawlCheckpoint::new("workspace-root".into(), Some("cursor-42".into())).unwrap();
+    let index_version = IndexVersion::new("chunks".into(), "schema-1".into()).unwrap();
 
-    remove_db(&path);
+    store.put_page_state(&page).unwrap();
+    store.put_checkpoint(&checkpoint).unwrap();
+    store.put_index_version(&index_version).unwrap();
+    assert!(store.register_webhook_event("event-1").unwrap());
+    drop(store);
 
-    let rebuilt = SqliteSyncStateStore::open(&path).unwrap();
-    assert_eq!(rebuilt.schema_version().unwrap(), 1);
-    assert_eq!(rebuilt.page("missing").unwrap(), None);
-
-    drop(rebuilt);
-    remove_db(&path);
+    let reopened = SqliteSyncStateStore::open(db.path()).unwrap();
+    assert_eq!(reopened.page_state("page-1").unwrap(), Some(page));
+    assert_eq!(
+        reopened.checkpoint("workspace-root").unwrap(),
+        Some(checkpoint)
+    );
+    assert_eq!(
+        reopened.index_version("chunks").unwrap(),
+        Some(index_version)
+    );
+    assert!(!reopened.register_webhook_event("event-1").unwrap());
 }
 
 #[test]
-fn page_upsert_atomically_replaces_complete_state_and_represents_tombstones() {
-    let mut store = SqliteSyncStateStore::open_in_memory().unwrap();
+fn page_upsert_replaces_hash_and_tombstone_atomically() {
+    let store = SqliteSyncStateStore::open_in_memory().unwrap();
 
     store
-        .upsert_page(&state("page-1", Some("hash-a"), None, 100))
+        .put_page_state(&PageSyncState::present("page-1".into(), "hash-1".into(), None).unwrap())
         .unwrap();
-    let tombstone = PageSyncState {
-        page_id: "page-1".into(),
-        content_hash: None,
-        notion_last_edited_ms: None,
-        synced_at_ms: 200,
-        tombstoned_at_ms: Some(199),
-    };
-    store.upsert_page(&tombstone).unwrap();
+    store
+        .put_page_state(&PageSyncState::present("page-1".into(), "hash-2".into(), None).unwrap())
+        .unwrap();
 
-    assert_eq!(store.page("page-1").unwrap(), Some(tombstone));
+    let updated = store.page_state("page-1").unwrap().unwrap();
+    assert_eq!(updated.content_hash(), Some("hash-2"));
+    assert!(matches!(
+        updated.status(),
+        PageSyncStatus::Present { content_hash } if content_hash == "hash-2"
+    ));
+
+    store
+        .put_page_state(&PageSyncState::tombstone("page-1".into(), None).unwrap())
+        .unwrap();
+
+    let tombstone = store.page_state("page-1").unwrap().unwrap();
+    assert!(tombstone.is_tombstone());
+    assert_eq!(tombstone.content_hash(), None);
 }
 
 #[test]
-fn webhook_event_ids_are_deduplicated_durably() {
-    let path = temp_db();
+fn webhook_ids_are_deduplicated_without_storing_payloads() {
+    let store = SqliteSyncStateStore::open_in_memory().unwrap();
 
-    {
-        let mut store = SqliteSyncStateStore::open(&path).unwrap();
-        assert!(store.record_webhook_event("evt-1", 10).unwrap());
-        assert!(!store.record_webhook_event("evt-1", 11).unwrap());
-    }
-
-    {
-        let mut reopened = SqliteSyncStateStore::open(&path).unwrap();
-        assert!(!reopened.record_webhook_event("evt-1", 12).unwrap());
-        assert!(reopened.record_webhook_event("evt-2", 13).unwrap());
-    }
-
-    remove_db(&path);
+    assert!(store.register_webhook_event("event-42").unwrap());
+    assert!(!store.register_webhook_event("event-42").unwrap());
+    assert!(store.register_webhook_event("event-43").unwrap());
 }
 
 #[test]
-fn checkpoints_and_index_versions_can_be_replaced_without_notion() {
-    let mut store = SqliteSyncStateStore::open_in_memory().unwrap();
+fn deleting_the_database_rebuilds_an_empty_store_without_notion() {
+    let db = TestDb::new("rebuild");
+    let store = SqliteSyncStateStore::open(db.path()).unwrap();
+    store
+        .put_page_state(&PageSyncState::present("page-1".into(), "hash-1".into(), None).unwrap())
+        .unwrap();
+    drop(store);
 
-    assert_eq!(store.checkpoint("crawl").unwrap(), None);
-    store.put_checkpoint("crawl", "cursor-a", 1).unwrap();
-    store.put_checkpoint("crawl", "cursor-b", 2).unwrap();
-    assert_eq!(
-        store.checkpoint("crawl").unwrap().as_deref(),
-        Some("cursor-b")
-    );
+    db.reset_directory();
 
-    assert_eq!(store.index_version("chunks").unwrap(), None);
-    store.set_index_version("chunks", "v1", 3).unwrap();
-    store.set_index_version("chunks", "v2", 4).unwrap();
-    assert_eq!(
-        store.index_version("chunks").unwrap().as_deref(),
-        Some("v2")
-    );
+    let rebuilt = SqliteSyncStateStore::open(db.path()).unwrap();
+    assert_eq!(rebuilt.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    assert_eq!(rebuilt.page_state("page-1").unwrap(), None);
+}
+
+#[test]
+fn altered_migration_history_is_rejected_as_corrupt_state() {
+    let db = TestDb::new("altered-history");
+    let connection = Connection::open(db.path()).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                applied_at_unix INTEGER NOT NULL
+            );
+            INSERT INTO schema_migrations (version, name, applied_at_unix)
+            VALUES (1, 'different_migration', 0);",
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        SqliteSyncStateStore::open(db.path()),
+        Err(SyncStateError::CorruptState)
+    ));
+}
+
+#[test]
+fn newer_unknown_schema_is_rejected_instead_of_reinterpreted() {
+    let db = TestDb::new("future-schema");
+    let connection = Connection::open(db.path()).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                applied_at_unix INTEGER NOT NULL
+            );
+            INSERT INTO schema_migrations (version, name, applied_at_unix)
+            VALUES (99, 'future', 0);",
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        SqliteSyncStateStore::open(db.path()),
+        Err(SyncStateError::UnsupportedSchema)
+    ));
 }
