@@ -314,3 +314,7 @@ local model runtimes.
 The [one-page Notion/vector experiment](docs/notion-vector-spike.md) connects an
 explicitly selected page to the local Qwen/LanceDB spike without broadening
 discovery authority. It remains separate from the production MCP runtime.
+
+The [bounded ChatGPT experiment](docs/chatgpt-spike.md) records the private
+connection, actual source-linked answers, manual-refresh demonstration, unsupported
+question behavior and production follow-up decisions.
