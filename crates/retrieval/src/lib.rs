@@ -9,3 +9,6 @@ pub const COMPONENT: &str = "retrieval";
 
 #[cfg(feature = "local-qwen")]
 pub mod qwen;
+
+/// SQLite-backed durable operational state used by crawlers and index orchestration.
+pub mod sync_state;
