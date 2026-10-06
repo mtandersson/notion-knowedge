@@ -62,8 +62,7 @@ impl ChunkTableError {
     pub fn is_incompatible_index(&self) -> bool {
         matches!(
             self,
-            Self::InvalidSchema(_)
-                | Self::Embedding(EmbeddingError::IncompatibleIndex)
+            Self::InvalidSchema(_) | Self::Embedding(EmbeddingError::IncompatibleIndex)
         )
     }
 }
@@ -188,13 +187,9 @@ impl LanceChunkTable {
         let table = database.open_table(table_name).execute().await?;
 
         match validate_table_schema(&table, &embedding).await {
-            Ok(()) => Ok((
-                Self { table, embedding },
-                IndexStartupAction::Opened,
-            )),
+            Ok(()) => Ok((Self { table, embedding }, IndexStartupAction::Opened)),
             Err(error)
-                if policy == IndexCompatibilityPolicy::Rebuild
-                    && error.is_incompatible_index() =>
+                if policy == IndexCompatibilityPolicy::Rebuild && error.is_incompatible_index() =>
             {
                 drop(table);
                 database.drop_table(table_name, &[]).await?;
@@ -203,10 +198,7 @@ impl LanceChunkTable {
                     .execute()
                     .await?;
                 validate_table_schema(&table, &embedding).await?;
-                Ok((
-                    Self { table, embedding },
-                    IndexStartupAction::Rebuilt,
-                ))
+                Ok((Self { table, embedding }, IndexStartupAction::Rebuilt))
             }
             Err(error) => Err(error),
         }
@@ -617,14 +609,13 @@ async fn validate_table_schema(
             "missing or unsupported persisted schema version".into(),
         ));
     }
-    let persisted_embedding: EmbeddingMetadata = serde_json::from_str(
-        actual.metadata().get(EMBEDDING_KEY).ok_or_else(|| {
+    let persisted_embedding: EmbeddingMetadata =
+        serde_json::from_str(actual.metadata().get(EMBEDDING_KEY).ok_or_else(|| {
             ChunkTableError::InvalidSchema("missing persisted embedding identity".into())
-        })?,
-    )
-    .map_err(|_| {
-        ChunkTableError::InvalidSchema("invalid persisted embedding identity".into())
-    })?;
+        })?)
+        .map_err(|_| {
+            ChunkTableError::InvalidSchema("invalid persisted embedding identity".into())
+        })?;
     persisted_embedding.ensure_compatible(expected_embedding)?;
     Ok(())
 }
@@ -922,7 +913,10 @@ mod tests {
         let preserved = LanceChunkTable::open(&path, "chunks", original.clone())
             .await
             .expect("failed startup must preserve original generation");
-        assert_eq!(preserved.count_rows().await.expect("count preserved rows"), 1);
+        assert_eq!(
+            preserved.count_rows().await.expect("count preserved rows"),
+            1
+        );
         drop(preserved);
 
         let (rebuilt, action) = LanceChunkTable::open_with_policy(
@@ -994,7 +988,10 @@ mod tests {
         let preserved = LanceChunkTable::open(&path, "chunks", original)
             .await
             .expect("invalid target must not drop existing table");
-        assert_eq!(preserved.count_rows().await.expect("count preserved rows"), 1);
+        assert_eq!(
+            preserved.count_rows().await.expect("count preserved rows"),
+            1
+        );
         drop(preserved);
 
         std::fs::remove_dir_all(path).expect("remove temporary database");
@@ -1005,14 +1002,16 @@ mod tests {
         let path = temp_database("schema-version-policy");
         let metadata = embedding("revision-1", 3);
         let uri = local_database_uri(&path).expect("local database uri");
-        let database = lancedb::connect(&uri).execute().await.expect("connect database");
+        let database = lancedb::connect(&uri)
+            .execute()
+            .await
+            .expect("connect database");
 
         let expected = chunk_schema(&metadata).expect("expected schema");
         let mut persisted = expected.metadata().clone();
         persisted.insert(TABLE_SCHEMA_KEY.into(), "unsupported-version".into());
-        let incompatible = Arc::new(
-            Schema::new(expected.fields().clone()).with_metadata(persisted),
-        );
+        let incompatible =
+            Arc::new(Schema::new(expected.fields().clone()).with_metadata(persisted));
         database
             .create_empty_table("chunks", incompatible)
             .execute()
