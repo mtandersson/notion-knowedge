@@ -33,9 +33,7 @@ impl Default for KnowledgeServer {
 }
 
 impl KnowledgeServer {
-    pub fn with_search(
-        search: Arc<dyn notion_knowledge_core::search::SemanticSearch>,
-    ) -> Self {
+    pub fn with_search(search: Arc<dyn notion_knowledge_core::search::SemanticSearch>) -> Self {
         Self {
             search: Some(search),
             ..Self::default()
@@ -106,10 +104,7 @@ impl ServerHandler for KnowledgeServer {
             "knowledge_search" => {
                 let input: search::SearchRequest =
                     serde_json::from_value(serde_json::Value::Object(arguments)).map_err(|_| {
-                        rmcp::ErrorData::invalid_params(
-                            "invalid knowledge_search arguments",
-                            None,
-                        )
+                        rmcp::ErrorData::invalid_params("invalid knowledge_search arguments", None)
                     })?;
                 input
                     .validate()
@@ -199,11 +194,11 @@ impl ServerHandler for KnowledgeServer {
                     ) => Ok(error(
                         "source_not_accessible: one or more refs are missing or outside configured root scope; no content was returned",
                     )),
-                    Err(notion_knowledge_core::source::SourceExpansionError::Unavailable) => Ok(
-                        error(
+                    Err(notion_knowledge_core::source::SourceExpansionError::Unavailable) => {
+                        Ok(error(
                             "retrieval_unavailable: source expansion dependency failed; no content was returned",
-                        ),
-                    ),
+                        ))
+                    }
                     Ok(_) => Ok(error(
                         "retrieval_unavailable: source expansion dependency returned invalid output; no content was returned",
                     )),
