@@ -38,10 +38,38 @@ impl SemanticSearch for Fixture {
         })
     }
 }
-async fn exchange(adapter: Arc<Fixture>, arguments: Value) -> Value {
+
+struct LexicalFixture {
+    calls: Mutex<Vec<LexicalQuery>>,
+    fail: bool,
+}
+
+impl LexicalSearch for LexicalFixture {
+    fn search(&self, query: LexicalQuery) -> SearchFuture<'_> {
+        self.calls.lock().unwrap().push(query);
+        Box::pin(async move {
+            if self.fail {
+                return Err(SearchUnavailable);
+            }
+            Ok(vec![SearchHit {
+                text: "Exact lexical source".into(),
+                score: 2.5,
+                source: SearchSource {
+                    page_id: "lexical-page".into(),
+                    chunk_id: "lexical-chunk".into(),
+                    url: "https://example.invalid/lexical".into(),
+                    title: "Lexical fixture".into(),
+                    heading_path: vec!["Exact".into()],
+                    block_id: Some("block-lexical".into()),
+                },
+            }])
+        })
+    }
+}
+async fn exchange_server(server_handler: KnowledgeServer, arguments: Value) -> Value {
     let (client, server) = tokio::io::duplex(65536);
     let task = tokio::spawn(async move {
-        KnowledgeServer::with_search(adapter)
+        server_handler
             .serve(server)
             .await
             .unwrap()
@@ -74,6 +102,14 @@ async fn exchange(adapter: Arc<Fixture>, arguments: Value) -> Value {
     }
     unreachable!()
 }
+
+async fn exchange(adapter: Arc<Fixture>, arguments: Value) -> Value {
+    exchange_server(KnowledgeServer::with_search(adapter), arguments).await
+}
+
+async fn exchange_lexical(adapter: Arc<LexicalFixture>, arguments: Value) -> Value {
+    exchange_server(KnowledgeServer::with_lexical_search(adapter), arguments).await
+}
 #[tokio::test]
 async fn semantic_calls_preserve_citations_and_pass_filters_to_domain_port() {
     let adapter = Arc::new(Fixture {
@@ -97,6 +133,41 @@ async fn semantic_calls_preserve_citations_and_pass_filters_to_domain_port() {
     assert_eq!(calls[0].page_ids.as_ref().unwrap().len(), 2);
     assert_eq!(calls[0].root_page_ids.as_ref().unwrap(), &["root-1"]);
 }
+#[tokio::test]
+async fn lexical_mode_calls_lexical_port_and_preserves_filters_and_citations() {
+    let adapter = Arc::new(LexicalFixture {
+        calls: Mutex::new(vec![]),
+        fail: false,
+    });
+    let response = exchange_lexical(
+        adapter.clone(),
+        json!({
+            "query":"exact-term",
+            "limit":3,
+            "mode":"lexical",
+            "filters":{"page_ids":["page-1"],"root_page_ids":["root-1","root-2"]}
+        }),
+    )
+    .await;
+
+    assert!(response.get("error").is_none());
+    let result = &response["result"]["structuredContent"]["results"][0];
+    assert_eq!(result["source"]["page_id"], "lexical-page");
+    assert_eq!(result["source"]["chunk_id"], "lexical-chunk");
+    assert_eq!(result["source"]["block_id"], "block-lexical");
+    assert_eq!(result["score"], 2.5);
+
+    let calls = adapter.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].query, "exact-term");
+    assert_eq!(calls[0].limit, 3);
+    assert_eq!(calls[0].page_ids.as_ref().unwrap(), &["page-1"]);
+    assert_eq!(
+        calls[0].root_page_ids.as_ref().unwrap(),
+        &["root-1", "root-2"]
+    );
+}
+
 #[tokio::test]
 async fn unsupported_modes_and_invalid_arguments_never_execute_search() {
     for mode in ["lexical", "hybrid"] {
