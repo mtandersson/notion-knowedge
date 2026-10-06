@@ -9,6 +9,14 @@ pub struct SemanticQuery {
     pub page_ids: Option<Vec<String>>,
     pub root_page_ids: Option<Vec<String>>,
 }
+
+#[derive(Debug, Clone)]
+pub struct LexicalQuery {
+    pub query: String,
+    pub limit: usize,
+    pub page_ids: Option<Vec<String>>,
+    pub root_page_ids: Option<Vec<String>>,
+}
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchSource {
     pub page_id: String,
@@ -31,4 +39,8 @@ pub type SearchFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Vec<SearchHit>, SearchUnavailable>> + Send + 'a>>;
 pub trait SemanticSearch: Send + Sync {
     fn search(&self, query: SemanticQuery) -> SearchFuture<'_>;
+}
+
+pub trait LexicalSearch: Send + Sync {
+    fn search(&self, query: LexicalQuery) -> SearchFuture<'_>;
 }
