@@ -83,6 +83,7 @@ pub(crate) fn valid_output(
                 .block_id
                 .as_ref()
                 .is_some_and(|block_id| block_id.is_empty())
+            || source.provenance.chunk_ids.is_empty()
             || source
                 .provenance
                 .chunk_ids
