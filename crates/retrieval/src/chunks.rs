@@ -34,8 +34,12 @@ const CANONICAL_CHUNK_SCHEMA_VERSION: &str = "1";
 const TABLE_SCHEMA_KEY: &str = "notion_knowledge.chunk_table.schema_version";
 const CANONICAL_SCHEMA_KEY: &str = "notion_knowledge.chunk_table.canonical_schema_version";
 const EMBEDDING_KEY: &str = "notion_knowledge.chunk_table.embedding";
-pub const CHUNK_FTS_INDEX_NAME: &str = "chunks_fts_v1";
-const CHUNK_FTS_COLUMNS: [&str; 4] = ["title", "text", "page_id", "chunk_id"];
+const CHUNK_FTS_INDEXES: [(&str, &str); 4] = [
+    ("chunks_fts_text_v1", "text"),
+    ("chunks_fts_title_v1", "title"),
+    ("chunks_fts_page_id_v1", "page_id"),
+    ("chunks_fts_chunk_id_v1", "chunk_id"),
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChunkTableError {
@@ -267,34 +271,40 @@ impl LanceChunkTable {
     }
 
 
-    /// Ensure the production BM25/FTS index exists without rebuilding it on
-    /// every startup. The stable versioned name owns the tokenizer contract.
+    /// Ensure the production BM25/FTS indices exist without rebuilding them on
+    /// every startup. Native Lance FTS is one-column-per-index, so title, text
+    /// and stable identifiers each get a versioned index.
     pub async fn ensure_fts_index(
         &self,
         config: &FtsIndexConfig,
     ) -> Result<(), ChunkTableError> {
-        if self
-            .table
-            .list_indices()
-            .await?
-            .iter()
-            .any(|index| index.name == CHUNK_FTS_INDEX_NAME)
-        {
-            return Ok(());
+        let existing = self.table.list_indices().await?;
+        for (index_name, column) in CHUNK_FTS_INDEXES {
+            if existing.iter().any(|index| index.name == index_name) {
+                continue;
+            }
+            self.create_fts_index(index_name, column, config, false)
+                .await?;
         }
-        self.create_fts_index(config, false).await
+        Ok(())
     }
 
-    /// Explicitly replace the FTS index when tokenizer configuration changes.
+    /// Explicitly replace all FTS indices when tokenizer configuration changes.
     pub async fn rebuild_fts_index(
         &self,
         config: &FtsIndexConfig,
     ) -> Result<(), ChunkTableError> {
-        self.create_fts_index(config, true).await
+        for (index_name, column) in CHUNK_FTS_INDEXES {
+            self.create_fts_index(index_name, column, config, true)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn create_fts_index(
         &self,
+        index_name: &str,
+        column: &str,
         config: &FtsIndexConfig,
         replace: bool,
     ) -> Result<(), ChunkTableError> {
@@ -307,41 +317,55 @@ impl LanceChunkTable {
             .block_size(config.block_size)
             .map_err(|_| ChunkTableError::InvalidSchema("invalid FTS block size".into()))?;
         self.table
-            .create_index(&CHUNK_FTS_COLUMNS, Index::FTS(params))
-            .name(CHUNK_FTS_INDEX_NAME.to_string())
+            .create_index(&[column], Index::FTS(params))
+            .name(index_name.to_string())
             .replace(replace)
             .execute()
             .await?;
         Ok(())
     }
 
-    /// Fold delta fragments created by incremental updates into the named FTS
-    /// index. Callers choose when to pay this maintenance cost.
+    /// Fold delta fragments created by incremental updates into all FTS indices.
+    /// Callers choose when to pay this maintenance cost.
     pub async fn optimize_fts_index(&self) -> Result<(), ChunkTableError> {
         self.table
             .optimize(OptimizeAction::Index(
-                OptimizeOptions::new().index_names(vec![CHUNK_FTS_INDEX_NAME.to_string()]),
+                OptimizeOptions::new().index_names(
+                    CHUNK_FTS_INDEXES
+                        .iter()
+                        .map(|(name, _)| (*name).to_string())
+                        .collect(),
+                ),
             ))
             .await?;
         Ok(())
     }
 
-    /// Low-level FTS probe used by the retrieval adapter and its tests. The
-    /// user-facing lexical search contract, filters and escaping belong to #46.
+    /// Low-level one-column FTS probe used by the retrieval adapter and tests.
+    /// The user-facing lexical search contract, filters and fusion belong to #46.
     pub async fn fts_query(
         &self,
+        column: &str,
         query: &str,
         limit: usize,
     ) -> Result<Vec<FtsIndexHit>, ChunkTableError> {
-        if query.trim().is_empty() || limit == 0 {
+        if query.trim().is_empty()
+            || limit == 0
+            || !CHUNK_FTS_INDEXES
+                .iter()
+                .any(|(_, indexed_column)| *indexed_column == column)
+        {
             return Err(ChunkTableError::InvalidRows(
-                "FTS query and limit must be nonempty".into(),
+                "FTS query requires a supported column, nonempty text and positive limit".into(),
             ));
         }
+        let fts_query = FullTextSearchQuery::new(query.to_owned())
+            .with_column(column.to_owned())
+            .map_err(|_| ChunkTableError::InvalidRows("invalid FTS query column".into()))?;
         let batches: Vec<RecordBatch> = self
             .table
             .query()
-            .full_text_search(FullTextSearchQuery::new(query.to_owned()))
+            .full_text_search(fts_query)
             .select(Select::Columns(vec![
                 "chunk_id".into(),
                 "page_id".into(),
