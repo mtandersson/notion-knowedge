@@ -263,8 +263,9 @@ impl LanceChunkTable {
         if rows.is_empty() {
             return Err(SourceExpansionError::Missing);
         }
-        rows.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
-
+        // LanceDB preserves the persisted scan sequence here; keep it rather than
+        // sorting stable IDs (which are content hashes and do not encode source
+        // order). Provenance carries the exact contributing chunk sequence.
         let first = &rows[0];
         if !roots.iter().any(|root| root == &first.root_page_id)
             || rows.iter().any(|row| {
