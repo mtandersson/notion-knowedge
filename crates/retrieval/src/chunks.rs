@@ -411,7 +411,7 @@ impl LanceChunkTable {
             ]))
             .limit(limit);
         if let Some(predicate) = predicate {
-            search = search.only_if(predicate.to_owned());
+            search = search.only_if(predicate);
         }
         let batches: Vec<RecordBatch> = search.execute().await?.try_collect().await?;
         decode_fts_hits(&batches)
