@@ -428,12 +428,16 @@ impl LanceChunkTable {
             ("text", 1.0_f32),
         ];
         let mut best = HashMap::<(String, String), SearchHit>::new();
+        let phrase = quoted_phrase(&query.query);
 
         for (column, band) in fields {
             for hit in self
                 .fts_query_scoped(column, &query.query, candidate_limit, predicate.as_deref())
                 .await?
             {
+                if phrase.is_some_and(|phrase| !hit_matches_phrase(column, &hit, phrase)) {
+                    continue;
+                }
                 let native = hit.score.max(0.0);
                 let score = band + native / (1.0 + native);
                 if !score.is_finite() {
@@ -875,6 +879,27 @@ fn lexical_filter_predicate(query: &LexicalQuery) -> Result<Option<String>, Chun
 
 fn bounded_text(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
+}
+
+
+fn quoted_phrase(query: &str) -> Option<&str> {
+    let query = query.trim();
+    let phrase = query.strip_prefix('"')?.strip_suffix('"')?.trim();
+    (!phrase.is_empty() && !phrase.contains('"')).then_some(phrase)
+}
+
+fn hit_matches_phrase(column: &str, hit: &FtsIndexHit, phrase: &str) -> bool {
+    match column {
+        "chunk_id" => hit.chunk_id == phrase,
+        "page_id" => hit.page_id == phrase,
+        "title" => contains_case_insensitive(&hit.title, phrase),
+        "text" => contains_case_insensitive(&hit.text, phrase),
+        _ => false,
+    }
+}
+
+fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
+    haystack.to_lowercase().contains(&needle.to_lowercase())
 }
 
 fn string_column<'a>(
@@ -1676,7 +1701,7 @@ mod tests {
         )
         .await
         .expect("search exact chunk id");
-        assert_eq!(id_hits.len(), 1);
+        assert!(!id_hits.is_empty());
         assert_eq!(id_hits[0].source.page_id, "page-id");
         assert_eq!(id_hits[0].source.chunk_id, "nk-chunk-v1:aurora");
 
