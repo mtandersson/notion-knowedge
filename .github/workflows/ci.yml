@@ -119,6 +119,9 @@ jobs:
 
       - name: Lint optional local Qwen provider
         run: nix develop .#spike --command cargo clippy -p notion-knowledge-retrieval --all-targets --features local-qwen --locked -- -D warnings
+      - name: Lint optional local LanceDB adapter
+        run: nix develop .#spike --command cargo clippy -p notion-knowledge-retrieval --all-targets --features local-lancedb --locked -- -D warnings
+
 
       - name: Save successful refreshed Cargo caches
         if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
@@ -196,6 +199,9 @@ jobs:
 
       - name: Test optional local Qwen provider without model assets
         run: nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-qwen --locked
+      - name: Test optional local LanceDB adapter
+        run: nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --locked
+
 
       - name: Save successful refreshed Cargo caches
         if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)

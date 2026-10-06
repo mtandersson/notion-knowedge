@@ -7,9 +7,16 @@ repository.workspace = true
 [features]
 default = []
 local-qwen = ["dep:candle-core", "dep:candle-nn", "dep:fastembed", "dep:tokenizers", "dep:sha2", "dep:tokio", "dep:serde_json"]
+local-lancedb = ["dep:arrow-array", "dep:arrow-schema", "dep:lancedb", "dep:serde_json"]
 
 [dependencies]
 notion-knowledge-core = { path = "../core" }
+
+arrow-array = { version = "=58.4.0", optional = true }
+arrow-schema = { version = "=58.4.0", optional = true }
+# LanceDB 0.39.0 references its HTTP error variant even in embedded-only code.
+# Runtime paths in this adapter are still local filesystem paths only.
+lancedb = { version = "=0.39.0", features = ["remote"], optional = true }
 
 candle-core = { version = "=0.11.0", optional = true }
 candle-nn = { version = "=0.11.0", optional = true }
@@ -21,6 +28,7 @@ serde_json = { version = "1", optional = true }
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 
 [dev-dependencies]
+futures = "0.3"
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 

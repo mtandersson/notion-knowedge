@@ -311,6 +311,9 @@ The [embedding provider contract](docs/embeddings.md) defines asynchronous batch
 execution and persisted provider/model/vector-space identity independently of
 local model runtimes.
 
+The [production LanceDB chunk table](docs/lancedb-chunks.md) persists canonical
+chunks with explicit vector identity, queryable source filters and stable-ID upserts.
+
 The [one-page Notion/vector experiment](docs/notion-vector-spike.md) connects an
 explicitly selected page to the local Qwen/LanceDB spike without broadening
 discovery authority. It remains separate from the production MCP runtime.
