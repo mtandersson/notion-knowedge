@@ -52,13 +52,8 @@ pub enum SourceExpansionError {
     Unavailable,
 }
 
-pub type SourceExpansionFuture<'a> = Pin<
-    Box<
-        dyn Future<Output = Result<Vec<ExpandedSource>, SourceExpansionError>>
-            + Send
-            + 'a,
-    >,
->;
+pub type SourceExpansionFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<ExpandedSource>, SourceExpansionError>> + Send + 'a>>;
 
 /// Adapter boundary for expanding stable page/chunk references without rerunning
 /// broad retrieval. Implementations must honor `root_page_ids` before returning
