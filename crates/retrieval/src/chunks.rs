@@ -179,6 +179,10 @@ impl LanceChunkTable {
         policy: IndexCompatibilityPolicy,
     ) -> Result<(Self, IndexStartupAction), ChunkTableError> {
         validate_table_name(table_name)?;
+        // Validate the requested target contract before any destructive recovery.
+        // Otherwise an invalid runtime dimension could be mistaken for a persisted
+        // incompatibility and cause the existing derived table to be dropped.
+        let target_schema = chunk_schema(&embedding)?;
         let uri = local_database_uri(database_path.as_ref())?;
         let database = lancedb::connect(&uri).execute().await?;
         let table = database.open_table(table_name).execute().await?;
@@ -194,9 +198,8 @@ impl LanceChunkTable {
             {
                 drop(table);
                 database.drop_table(table_name, &[]).await?;
-                let schema = chunk_schema(&embedding)?;
                 let table = database
-                    .create_empty_table(table_name, schema)
+                    .create_empty_table(table_name, target_schema)
                     .execute()
                     .await?;
                 validate_table_schema(&table, &embedding).await?;
@@ -951,6 +954,48 @@ mod tests {
             LanceChunkTable::open(&path, "chunks", original).await,
             Err(error) if error.is_incompatible_index()
         ));
+
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn rebuild_policy_validates_target_schema_before_dropping_existing_table() {
+        let path = temp_database("invalid-target-schema");
+        let original = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", original.clone())
+            .await
+            .expect("create table");
+        table
+            .upsert(
+                table.embedding_metadata(),
+                &[EmbeddedChunk::new(
+                    chunk("root", "Original", "must survive invalid target"),
+                    vec![1.0, 0.0, 0.0],
+                )],
+            )
+            .await
+            .expect("seed original generation");
+        drop(table);
+
+        let invalid_target = embedding("revision-2", i32::MAX as usize + 1);
+        let error = match LanceChunkTable::open_with_policy(
+            &path,
+            "chunks",
+            invalid_target,
+            IndexCompatibilityPolicy::Rebuild,
+        )
+        .await
+        {
+            Ok(_) => panic!("invalid target schema must fail before rebuild"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, ChunkTableError::InvalidSchema(_)));
+
+        let preserved = LanceChunkTable::open(&path, "chunks", original)
+            .await
+            .expect("invalid target must not drop existing table");
+        assert_eq!(preserved.count_rows().await.expect("count preserved rows"), 1);
+        drop(preserved);
 
         std::fs::remove_dir_all(path).expect("remove temporary database");
     }
