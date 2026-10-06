@@ -308,18 +308,31 @@ impl LanceChunkTable {
         config: &FtsIndexConfig,
         replace: bool,
     ) -> Result<(), ChunkTableError> {
-        let params = FtsIndexBuilder::default()
-            .language(&config.language)
-            .map_err(|_| ChunkTableError::InvalidSchema("unsupported FTS language".into()))?
-            .stem(config.stem)
-            .remove_stop_words(config.remove_stop_words)
-            .ascii_folding(config.ascii_folding)
-            .block_size(config.block_size)
-            .map_err(|_| ChunkTableError::InvalidSchema("invalid FTS block size".into()))?;
+        let params = if matches!(column, "page_id" | "chunk_id") {
+            FtsIndexBuilder::default()
+                .base_tokenizer("raw".to_string())
+                .lower_case(false)
+                .stem(false)
+                .remove_stop_words(false)
+                .ascii_folding(false)
+                .block_size(config.block_size)
+                .map_err(|_| ChunkTableError::InvalidSchema("invalid FTS block size".into()))?
+        } else {
+            FtsIndexBuilder::default()
+                .language(&config.language)
+                .map_err(|_| ChunkTableError::InvalidSchema("unsupported FTS language".into()))?
+                .stem(config.stem)
+                .remove_stop_words(config.remove_stop_words)
+                .ascii_folding(config.ascii_folding)
+                .block_size(config.block_size)
+                .map_err(|_| ChunkTableError::InvalidSchema("invalid FTS block size".into()))?
+        };
+        let train = self.table.count_rows(None).await? != 0;
         self.table
             .create_index(&[column], Index::FTS(params))
             .name(index_name.to_string())
             .replace(replace)
+            .train(train)
             .execute()
             .await?;
         Ok(())
@@ -371,7 +384,6 @@ impl LanceChunkTable {
                 "page_id".into(),
                 "title".into(),
                 "text".into(),
-                "_score".into(),
             ]))
             .limit(limit)
             .execute()
@@ -1360,8 +1372,8 @@ mod tests {
         let rows = vec![
             EmbeddedChunk::new(
                 fts_chunk(
-                    "PAGE98765",
-                    "NK4821",
+                    "page-98765",
+                    "nk-chunk-v1:4821abcdef",
                     "Projekt Aurora",
                     "Bilen har snabb laddning i Lund och fungerar bra på vintern.",
                 ),
@@ -1369,8 +1381,8 @@ mod tests {
             ),
             EmbeddedChunk::new(
                 fts_chunk(
-                    "PAGE12345",
-                    "NK7777",
+                    "page-12345",
+                    "nk-chunk-v1:7777abcd",
                     "Telemetry notes",
                     "The charging telemetry pipeline records vehicle sessions.",
                 ),
@@ -1391,7 +1403,7 @@ mod tests {
             .await
             .expect("Swedish text query");
         assert_eq!(swedish.len(), 1);
-        assert_eq!(swedish[0].chunk_id, "NK4821");
+        assert_eq!(swedish[0].chunk_id, "nk-chunk-v1:4821abcdef");
         assert!(swedish[0].score.is_finite());
 
         let english = table
@@ -1399,28 +1411,28 @@ mod tests {
             .await
             .expect("English text query");
         assert_eq!(english.len(), 1);
-        assert_eq!(english[0].chunk_id, "NK7777");
+        assert_eq!(english[0].chunk_id, "nk-chunk-v1:7777abcd");
 
         let title = table
             .fts_query("title", "Aurora", 10)
             .await
             .expect("title query");
         assert_eq!(title.len(), 1);
-        assert_eq!(title[0].page_id, "PAGE98765");
+        assert_eq!(title[0].page_id, "page-98765");
 
         let page_id = table
-            .fts_query("page_id", "PAGE98765", 10)
+            .fts_query("page_id", "page-98765", 10)
             .await
             .expect("page identifier query");
         assert_eq!(page_id.len(), 1);
-        assert_eq!(page_id[0].chunk_id, "NK4821");
+        assert_eq!(page_id[0].chunk_id, "nk-chunk-v1:4821abcdef");
 
         let chunk_id = table
-            .fts_query("chunk_id", "NK4821", 10)
+            .fts_query("chunk_id", "nk-chunk-v1:4821abcdef", 10)
             .await
             .expect("chunk identifier query");
         assert_eq!(chunk_id.len(), 1);
-        assert_eq!(chunk_id[0].page_id, "PAGE98765");
+        assert_eq!(chunk_id[0].page_id, "page-98765");
 
         drop(table);
         std::fs::remove_dir_all(path).expect("remove temporary database");
