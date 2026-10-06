@@ -1,47 +1,68 @@
 # Local sync-state database
 
-Issue #36 introduces the durable operational store selected by ADR 0001.
-Notion remains authoritative; this SQLite file contains only rebuildable local
-coordination state and is intentionally separate from LanceDB retrieval data.
+Issue #36 adds the operational state store selected by
+[ADR 0001](adr/0001-runtime-and-component-boundaries.md). Notion remains the
+authoritative source; this database contains only local coordination and
+derived-state metadata.
 
-## Boundary
+## Ownership
 
-core::sync_state::SyncStateStore owns the provider-independent contract.
-retrieval::sync_state::SqliteSyncStateStore is the SQLite adapter. Server
-composition and crawl scheduling are separate tickets.
+`notion-knowledge-core::sync_state` owns provider-independent state types and
+the `SyncStateStore` port. `notion-knowledge-retrieval::sync_state` implements
+that port with embedded SQLite through `rusqlite`.
 
-The first schema migration persists:
+The adapter does not call Notion and does not depend on LanceDB. Deleting the
+SQLite file therefore cannot delete authoritative content, and opening a new
+file recreates an empty operational store from migrations alone.
 
-- complete page sync rows, including content hashes and optional tombstones
-- named crawl checkpoints
-- webhook event IDs used for durable deduplication
-- named index/schema version strings
+## Schema and migrations
 
-Each page upsert is one SQLite statement, so readers never observe a
-partially-replaced row. Webhook deduplication uses the event ID primary key and
-INSERT OR IGNORE, so the return value is true only for the first durable insert.
+Migrations are ordered, embedded SQL files under
+`crates/retrieval/migrations/`. The adapter records each applied migration in
+`schema_migrations` inside the same immediate SQLite transaction as the schema
+change. On open it verifies that every recorded migration version and name exactly
+matches the embedded migration prefix. Altered or gapped history is treated as
+corrupt state, while a genuinely newer schema is rejected as unsupported.
 
-## Migrations and rebuild
+Schema version 1 contains:
 
-Migrations are checked-in SQL under
-crates/retrieval/src/sync_state/migrations/. Applied versions are recorded in
-schema_migrations inside the same database. Opening a database runs pending
-migrations under an IMMEDIATE transaction and rejects a file whose schema is
-newer than this binary understands.
+| Table | Purpose |
+| --- | --- |
+| `page_sync_state` | Per-page content hash, last-edit marker, and explicit tombstone state |
+| `crawl_checkpoints` | Opaque cursor/checkpoint per named crawl scope |
+| `webhook_events` | Event IDs only, used as a durable deduplication set |
+| `index_versions` | Opaque version marker per derived index/generation |
+| `schema_migrations` | Applied operational-store schema migrations |
 
-Creating the store at an empty path requires no Notion client, token, or
-network access. Deleting the file therefore drops only derived operational
-state; opening the path again rebuilds the schema from migrations. Repopulating
-page/checkpoint contents from Notion is orchestration work, not a database
-migration requirement.
+No Notion page body, webhook payload, access token, or credential is stored.
 
-## Verification
+## Atomicity and deduplication
 
-Focused tests cover migration idempotency and empty-file rebuild, complete
-page replacement with tombstones, webhook deduplication across reopen, and
-checkpoint/index-version replacement.
+Each page-state change is one SQLite UPSERT, so a reader observes either the old
+row or the complete new row; a tombstone cannot retain a content hash because
+the schema enforces that invariant. Checkpoint and index-version writes use the
+same atomic UPSERT pattern.
 
-Run:
+Webhook deduplication uses the event ID as the primary key and
+`INSERT OR IGNORE`. The call returns `true` only when that ID was inserted for
+the first time, including across process restarts.
 
-    cargo test -p notion-knowledge-retrieval --test sync_state --locked
-    cargo clippy -p notion-knowledge-retrieval --all-targets --locked -- -D warnings
+A five-second SQLite busy timeout bounds lock contention. The adapter uses one
+mutex-guarded connection per store instance; SQLite remains the durable
+transaction boundary.
+
+## Rebuild behavior
+
+The operational store is intentionally disposable:
+
+1. stop users of the store;
+2. delete the SQLite database and its sidecar files;
+3. open the configured path again.
+
+Migrations recreate an empty store without contacting Notion. A later sync can
+repopulate page/checkpoint/index state from authoritative or derived sources as
+the owning workflow requires.
+
+Index-version semantics and compatibility policy remain the responsibility of
+the later index-versioning work (#43); this ticket only provides the durable
+opaque storage slot.
