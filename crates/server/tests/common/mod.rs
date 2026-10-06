@@ -2,9 +2,20 @@ use serde_json::{Value, json};
 
 pub fn assert_search_catalog(tools: &Value) {
     let tools = tools.as_array().expect("tools catalog");
-    assert_eq!(tools.len(), 1);
-    let tool = &tools[0];
-    assert_eq!(tool["name"], "knowledge_search");
+    assert_eq!(tools.len(), 2);
+    let tool = tools
+        .iter()
+        .find(|tool| tool["name"] == "knowledge_search")
+        .expect("knowledge_search tool");
+    let get = tools
+        .iter()
+        .find(|tool| tool["name"] == "knowledge_get")
+        .expect("knowledge_get tool");
+    assert_eq!(
+        get["inputSchema"]["required"],
+        json!(["refs", "max_chars"])
+    );
+    assert_eq!(get["annotations"]["readOnlyHint"], true);
     assert!(tool["description"].as_str().unwrap().contains("semantic"));
     assert_eq!(tool["annotations"]["readOnlyHint"], true);
     let input = &tool["inputSchema"];
