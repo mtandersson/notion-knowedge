@@ -948,6 +948,7 @@ mod tests {
     use std::{
         collections::BTreeMap,
         path::PathBuf,
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -955,7 +956,10 @@ mod tests {
     use arrow_schema::DataType;
     use futures::TryStreamExt;
     use lancedb::query::{ExecutableQuery, QueryBase};
-    use notion_knowledge_core::indexed::{IndexedMetadata, SourceMetadata};
+    use notion_knowledge_core::{
+        embedding::{EmbeddingFuture, EmbeddingProvider},
+        indexed::{IndexedMetadata, SourceMetadata},
+    };
 
     use super::*;
 
@@ -1003,6 +1007,58 @@ mod tests {
             "notion-knowledge-{name}-{}-{nonce}",
             std::process::id()
         ))
+    }
+
+
+    struct CountingProvider {
+        metadata: EmbeddingMetadata,
+        embedded_inputs: AtomicUsize,
+        fail: AtomicBool,
+    }
+
+    impl CountingProvider {
+        fn new(metadata: EmbeddingMetadata) -> Self {
+            Self {
+                metadata,
+                embedded_inputs: AtomicUsize::new(0),
+                fail: AtomicBool::new(false),
+            }
+        }
+
+        fn embedded_inputs(&self) -> usize {
+            self.embedded_inputs.load(Ordering::SeqCst)
+        }
+
+        fn set_fail(&self, fail: bool) {
+            self.fail.store(fail, Ordering::SeqCst);
+        }
+    }
+
+    impl EmbeddingProvider for CountingProvider {
+        fn metadata(&self) -> &EmbeddingMetadata {
+            &self.metadata
+        }
+
+        fn embed_batch<'a>(&'a self, inputs: &'a [String]) -> EmbeddingFuture<'a> {
+            self.embedded_inputs
+                .fetch_add(inputs.len(), Ordering::SeqCst);
+            let fail = self.fail.load(Ordering::SeqCst);
+            Box::pin(async move {
+                if fail {
+                    return Err(EmbeddingError::Unavailable);
+                }
+                Ok(inputs
+                    .iter()
+                    .map(|text| vec![text.len() as f32, 1.0, 0.0])
+                    .collect())
+            })
+        }
+    }
+
+    fn page_chunk(chunk_id: &str, text: &str) -> IndexedChunk {
+        let mut value = chunk("root", "Page title", text);
+        value.chunk_id = chunk_id.into();
+        value
     }
 
     #[tokio::test]
@@ -1352,6 +1408,226 @@ mod tests {
                 .await,
             Err(ChunkTableError::InvalidRows(message)) if message.contains("incompatible vector")
         ));
+        assert_eq!(table.count_rows().await.expect("count rows"), 0);
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn page_diff_embeds_only_changed_and_new_chunks_and_is_idempotent() {
+        let path = temp_database("page-diff");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+        let provider = CountingProvider::new(metadata);
+
+        let first = vec![
+            page_chunk("chunk-a", "alpha"),
+            page_chunk("chunk-b", "bravo"),
+            page_chunk("chunk-c", "charlie"),
+        ];
+        assert_eq!(
+            table
+                .apply_page_diff(&provider, "page-1", &first)
+                .await
+                .expect("initial page snapshot"),
+            ChunkDiffMetrics {
+                added: 3,
+                changed: 0,
+                skipped: 0,
+                removed: 0,
+            }
+        );
+        assert_eq!(provider.embedded_inputs(), 3);
+
+        let initial_rows = table
+            .rows_matching("page_id = 'page-1'".into())
+            .await
+            .expect("read initial rows");
+        let original_a_vector = initial_rows
+            .iter()
+            .find(|row| row.chunk_id == "chunk-a")
+            .expect("chunk a")
+            .vector
+            .clone();
+
+        let mut unchanged_with_new_metadata = page_chunk("chunk-a", "alpha");
+        unchanged_with_new_metadata.metadata.title = "Updated page title".into();
+        unchanged_with_new_metadata.metadata.last_edited_time =
+            "2026-10-06T18:00:00Z".into();
+        let changed = page_chunk("chunk-b", "bravo changed");
+        let added = page_chunk("chunk-d", "delta");
+        let second = vec![unchanged_with_new_metadata, changed, added];
+
+        assert_eq!(
+            table
+                .apply_page_diff(&provider, "page-1", &second)
+                .await
+                .expect("incremental page snapshot"),
+            ChunkDiffMetrics {
+                added: 1,
+                changed: 1,
+                skipped: 1,
+                removed: 1,
+            }
+        );
+        assert_eq!(provider.embedded_inputs(), 5);
+
+        let rows = table
+            .rows_matching("page_id = 'page-1'".into())
+            .await
+            .expect("read reconciled rows");
+        assert_eq!(rows.len(), 3);
+        let by_id: HashMap<_, _> = rows
+            .iter()
+            .map(|row| (row.chunk_id.as_str(), row))
+            .collect();
+        assert!(!by_id.contains_key("chunk-c"));
+        assert_eq!(by_id["chunk-a"].title, "Updated page title");
+        assert_eq!(by_id["chunk-a"].vector, original_a_vector);
+        assert_eq!(by_id["chunk-b"].text, "bravo changed");
+        assert_eq!(by_id["chunk-d"].text, "delta");
+
+        assert_eq!(
+            table
+                .apply_page_diff(&provider, "page-1", &second)
+                .await
+                .expect("idempotent retry"),
+            ChunkDiffMetrics {
+                added: 0,
+                changed: 0,
+                skipped: 3,
+                removed: 0,
+            }
+        );
+        assert_eq!(provider.embedded_inputs(), 5);
+        assert_eq!(table.count_rows().await.expect("count rows"), 3);
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn empty_page_snapshot_removes_only_that_page_without_embedding() {
+        let path = temp_database("page-delete");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+        let provider = CountingProvider::new(metadata);
+
+        table
+            .apply_page_diff(&provider, "page-1", &[page_chunk("page-1-a", "one")])
+            .await
+            .expect("seed page one");
+
+        let mut other = page_chunk("page-2-a", "two");
+        other.metadata.page_id = "page-2".into();
+        other.metadata.url = "https://example.invalid/page-2".into();
+        table
+            .apply_page_diff(&provider, "page-2", &[other])
+            .await
+            .expect("seed page two");
+        assert_eq!(provider.embedded_inputs(), 2);
+
+        assert_eq!(
+            table
+                .apply_page_diff(&provider, "page-1", &[])
+                .await
+                .expect("delete page snapshot"),
+            ChunkDiffMetrics {
+                added: 0,
+                changed: 0,
+                skipped: 0,
+                removed: 1,
+            }
+        );
+        assert_eq!(provider.embedded_inputs(), 2);
+        assert_eq!(table.count_rows().await.expect("count rows"), 1);
+        assert!(
+            table
+                .rows_matching("page_id = 'page-1'".into())
+                .await
+                .expect("query page one")
+                .is_empty()
+        );
+        assert_eq!(
+            table
+                .rows_matching("page_id = 'page-2'".into())
+                .await
+                .expect("query page two")
+                .len(),
+            1
+        );
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn embedding_failure_leaves_the_existing_page_generation_unchanged() {
+        let path = temp_database("page-diff-failure");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+        let provider = CountingProvider::new(metadata);
+
+        table
+            .apply_page_diff(&provider, "page-1", &[page_chunk("chunk-a", "old text")])
+            .await
+            .expect("seed page");
+        provider.set_fail(true);
+
+        let error = table
+            .apply_page_diff(&provider, "page-1", &[page_chunk("chunk-a", "new text")])
+            .await
+            .expect_err("embedding failure");
+        assert_eq!(
+            error,
+            ChunkTableError::Embedding(EmbeddingError::Unavailable)
+        );
+
+        let rows = table
+            .rows_matching("page_id = 'page-1'".into())
+            .await
+            .expect("read preserved page");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "old text");
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn invalid_page_snapshot_is_rejected_before_embedding_or_mutation() {
+        let path = temp_database("page-diff-validation");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+        let provider = CountingProvider::new(metadata);
+
+        let duplicate = vec![
+            page_chunk("same-id", "one"),
+            page_chunk("same-id", "two"),
+        ];
+        assert!(matches!(
+            table.apply_page_diff(&provider, "page-1", &duplicate).await,
+            Err(ChunkTableError::InvalidRows(_))
+        ));
+
+        let mut wrong_page = page_chunk("other", "other page");
+        wrong_page.metadata.page_id = "page-2".into();
+        assert!(matches!(
+            table
+                .apply_page_diff(&provider, "page-1", &[wrong_page])
+                .await,
+            Err(ChunkTableError::InvalidRows(_))
+        ));
+        assert_eq!(provider.embedded_inputs(), 0);
         assert_eq!(table.count_rows().await.expect("count rows"), 0);
 
         drop(table);
