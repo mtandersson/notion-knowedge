@@ -13,7 +13,12 @@ use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use futures::TryStreamExt;
 use lancedb::{
     Table,
-    query::{ExecutableQuery, QueryBase},
+    index::{
+        Index, IndexType,
+        scalar::{FtsIndexBuilder, FullTextSearchQuery},
+    },
+    query::{ExecutableQuery, QueryBase, Select},
+    table::{OptimizeOptions, optimize::OptimizeAction},
 };
 use notion_knowledge_core::{
     embedding::{self, EmbeddingError, EmbeddingMetadata, EmbeddingProvider},
@@ -29,6 +34,12 @@ const CANONICAL_CHUNK_SCHEMA_VERSION: &str = "1";
 const TABLE_SCHEMA_KEY: &str = "notion_knowledge.chunk_table.schema_version";
 const CANONICAL_SCHEMA_KEY: &str = "notion_knowledge.chunk_table.canonical_schema_version";
 const EMBEDDING_KEY: &str = "notion_knowledge.chunk_table.embedding";
+const CHUNK_FTS_INDEXES: [(&str, &str); 4] = [
+    ("chunks_fts_text_v1", "text"),
+    ("chunks_fts_title_v1", "title"),
+    ("chunks_fts_page_id_v1", "page_id"),
+    ("chunks_fts_chunk_id_v1", "chunk_id"),
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChunkTableError {
@@ -130,6 +141,36 @@ pub struct ChunkDiffMetrics {
     pub removed: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FtsIndexConfig {
+    pub language: String,
+    pub stem: bool,
+    pub remove_stop_words: bool,
+    pub ascii_folding: bool,
+    pub block_size: usize,
+}
+
+impl Default for FtsIndexConfig {
+    fn default() -> Self {
+        Self {
+            language: "Swedish".into(),
+            stem: true,
+            remove_stop_words: true,
+            ascii_folding: false,
+            block_size: 128,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FtsIndexHit {
+    pub chunk_id: String,
+    pub page_id: String,
+    pub title: String,
+    pub text: String,
+    pub score: f32,
+}
+
 /// Production chunk storage. LanceDB remains an adapter detail: callers pass
 /// canonical chunks and vectors, and receive storage-neutral errors.
 pub struct LanceChunkTable {
@@ -154,7 +195,13 @@ impl LanceChunkTable {
             .execute()
             .await?;
         validate_table_schema(&table, &embedding).await?;
-        Ok(Self { table, embedding })
+        let result = Self { table, embedding };
+        if let Err(error) = result.ensure_fts_index(&FtsIndexConfig::default()).await {
+            drop(result);
+            database.drop_table(table_name, &[]).await?;
+            return Err(error);
+        }
+        Ok(result)
     }
 
     /// Open an existing table only when both its storage schema and vector-space
@@ -196,7 +243,11 @@ impl LanceChunkTable {
         let table = database.open_table(table_name).execute().await?;
 
         match validate_table_schema(&table, &embedding).await {
-            Ok(()) => Ok((Self { table, embedding }, IndexStartupAction::Opened)),
+            Ok(()) => {
+                let result = Self { table, embedding };
+                result.ensure_fts_index(&FtsIndexConfig::default()).await?;
+                Ok((result, IndexStartupAction::Opened))
+            }
             Err(error)
                 if policy == IndexCompatibilityPolicy::Rebuild && error.is_incompatible_index() =>
             {
@@ -207,7 +258,9 @@ impl LanceChunkTable {
                     .execute()
                     .await?;
                 validate_table_schema(&table, &embedding).await?;
-                Ok((Self { table, embedding }, IndexStartupAction::Rebuilt))
+                let result = Self { table, embedding };
+                result.ensure_fts_index(&FtsIndexConfig::default()).await?;
+                Ok((result, IndexStartupAction::Rebuilt))
             }
             Err(error) => Err(error),
         }
@@ -219,6 +272,127 @@ impl LanceChunkTable {
 
     pub async fn count_rows(&self) -> Result<usize, ChunkTableError> {
         Ok(self.table.count_rows(None).await?)
+    }
+
+    /// Ensure the production BM25/FTS indices exist without rebuilding them on
+    /// every startup. Native Lance FTS is one-column-per-index, so title, text
+    /// and stable identifiers each get a versioned index.
+    pub async fn ensure_fts_index(&self, config: &FtsIndexConfig) -> Result<(), ChunkTableError> {
+        let existing = self.table.list_indices().await?;
+        for (index_name, column) in CHUNK_FTS_INDEXES {
+            if let Some(index) = existing.iter().find(|index| index.name == index_name) {
+                if index.index_type != IndexType::FTS || index.columns != vec![column.to_string()] {
+                    return Err(ChunkTableError::InvalidSchema(format!(
+                        "FTS index {index_name} does not match column {column}"
+                    )));
+                }
+                continue;
+            }
+            self.create_fts_index(index_name, column, config, false)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Explicitly replace all FTS indices when tokenizer configuration changes.
+    pub async fn rebuild_fts_index(&self, config: &FtsIndexConfig) -> Result<(), ChunkTableError> {
+        for (index_name, column) in CHUNK_FTS_INDEXES {
+            self.create_fts_index(index_name, column, config, true)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn create_fts_index(
+        &self,
+        index_name: &str,
+        column: &str,
+        config: &FtsIndexConfig,
+        replace: bool,
+    ) -> Result<(), ChunkTableError> {
+        let params = if matches!(column, "page_id" | "chunk_id") {
+            FtsIndexBuilder::default()
+                .base_tokenizer("raw".to_string())
+                .lower_case(false)
+                .stem(false)
+                .remove_stop_words(false)
+                .ascii_folding(false)
+                .block_size(config.block_size)
+                .map_err(|_| ChunkTableError::InvalidSchema("invalid FTS block size".into()))?
+        } else {
+            FtsIndexBuilder::default()
+                .language(&config.language)
+                .map_err(|_| ChunkTableError::InvalidSchema("unsupported FTS language".into()))?
+                .stem(config.stem)
+                .remove_stop_words(config.remove_stop_words)
+                .ascii_folding(config.ascii_folding)
+                .block_size(config.block_size)
+                .map_err(|_| ChunkTableError::InvalidSchema("invalid FTS block size".into()))?
+        };
+        let train = self.table.count_rows(None).await? != 0;
+        self.table
+            .create_index(&[column], Index::FTS(params))
+            .name(index_name.to_string())
+            .replace(replace)
+            .train(train)
+            .execute()
+            .await?;
+        Ok(())
+    }
+
+    /// Fold delta fragments created by incremental updates into all FTS indices.
+    /// Callers choose when to pay this maintenance cost.
+    pub async fn optimize_fts_index(&self) -> Result<(), ChunkTableError> {
+        self.table
+            .optimize(OptimizeAction::Index(
+                OptimizeOptions::new().index_names(
+                    CHUNK_FTS_INDEXES
+                        .iter()
+                        .map(|(name, _)| (*name).to_string())
+                        .collect(),
+                ),
+            ))
+            .await?;
+        Ok(())
+    }
+
+    /// Low-level one-column FTS probe used by the retrieval adapter and tests.
+    /// The user-facing lexical search contract, filters and fusion belong to #46.
+    pub async fn fts_query(
+        &self,
+        column: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<FtsIndexHit>, ChunkTableError> {
+        if query.trim().is_empty()
+            || limit == 0
+            || !CHUNK_FTS_INDEXES
+                .iter()
+                .any(|(_, indexed_column)| *indexed_column == column)
+        {
+            return Err(ChunkTableError::InvalidRows(
+                "FTS query requires a supported column, nonempty text and positive limit".into(),
+            ));
+        }
+        let fts_query = FullTextSearchQuery::new(query.to_owned())
+            .with_column(column.to_owned())
+            .map_err(|_| ChunkTableError::InvalidRows("invalid FTS query column".into()))?;
+        let batches: Vec<RecordBatch> = self
+            .table
+            .query()
+            .full_text_search(fts_query)
+            .select(Select::Columns(vec![
+                "chunk_id".into(),
+                "page_id".into(),
+                "title".into(),
+                "text".into(),
+            ]))
+            .limit(limit)
+            .execute()
+            .await?
+            .try_collect()
+            .await?;
+        decode_fts_hits(&batches)
     }
 
     /// Insert new stable chunk IDs and replace existing rows with the same ID.
@@ -566,6 +740,42 @@ fn string_column<'a>(
         .column_by_name(name)
         .and_then(|column| column.as_any().downcast_ref::<StringArray>())
         .ok_or_else(|| ChunkTableError::InvalidSchema(format!("missing UTF-8 column {name}")))
+}
+
+fn float32_column<'a>(
+    batch: &'a RecordBatch,
+    name: &str,
+) -> Result<&'a Float32Array, ChunkTableError> {
+    batch
+        .column_by_name(name)
+        .and_then(|column| column.as_any().downcast_ref::<Float32Array>())
+        .ok_or_else(|| ChunkTableError::InvalidSchema(format!("missing float32 column {name}")))
+}
+
+fn decode_fts_hits(batches: &[RecordBatch]) -> Result<Vec<FtsIndexHit>, ChunkTableError> {
+    let mut hits = Vec::new();
+    for batch in batches {
+        let chunk_ids = string_column(batch, "chunk_id")?;
+        let page_ids = string_column(batch, "page_id")?;
+        let titles = string_column(batch, "title")?;
+        let texts = string_column(batch, "text")?;
+        let scores = float32_column(batch, "_score")?;
+        for row in 0..batch.num_rows() {
+            if scores.is_null(row) || !scores.value(row).is_finite() {
+                return Err(ChunkTableError::InvalidRows(
+                    "FTS result score must be finite".into(),
+                ));
+            }
+            hits.push(FtsIndexHit {
+                chunk_id: chunk_ids.value(row).to_owned(),
+                page_id: page_ids.value(row).to_owned(),
+                title: titles.value(row).to_owned(),
+                text: texts.value(row).to_owned(),
+                score: scores.value(row),
+            });
+        }
+    }
+    Ok(hits)
 }
 
 fn vector_column<'a>(
@@ -1057,6 +1267,14 @@ mod tests {
         value
     }
 
+    fn fts_chunk(page_id: &str, chunk_id: &str, title: &str, text: &str) -> IndexedChunk {
+        let mut value = chunk("root", title, text);
+        value.chunk_id = chunk_id.into();
+        value.metadata.page_id = page_id.into();
+        value.metadata.url = format!("https://example.invalid/{page_id}");
+        value
+    }
+
     #[tokio::test]
     async fn create_and_open_from_scratch_preserves_explicit_schema() {
         let path = temp_database("schema");
@@ -1112,6 +1330,241 @@ mod tests {
             ))
         ));
 
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn create_installs_versioned_fts_indices_for_text_title_and_identifiers() {
+        let path = temp_database("fts-indexes");
+        let table = LanceChunkTable::create(&path, "chunks", embedding("revision-1", 3))
+            .await
+            .expect("create table with FTS indices");
+
+        let indices = table.table.list_indices().await.expect("list indices");
+        for (expected_name, expected_column) in CHUNK_FTS_INDEXES {
+            let index = indices
+                .iter()
+                .find(|index| index.name == expected_name)
+                .unwrap_or_else(|| panic!("missing FTS index {expected_name}"));
+            assert_eq!(index.columns, vec![expected_column.to_string()]);
+        }
+
+        table
+            .ensure_fts_index(&FtsIndexConfig::default())
+            .await
+            .expect("ensure existing indices is idempotent");
+        assert_eq!(
+            table
+                .table
+                .list_indices()
+                .await
+                .expect("list indices")
+                .len(),
+            CHUNK_FTS_INDEXES.len()
+        );
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn fts_index_retrieves_swedish_english_titles_and_exact_identifiers() {
+        let path = temp_database("fts-search");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+
+        let rows = vec![
+            EmbeddedChunk::new(
+                fts_chunk(
+                    "page-98765",
+                    "nk-chunk-v1:4821abcdef",
+                    "Projekt Aurora",
+                    "Bilen har snabb laddning i Lund och fungerar bra på vintern.",
+                ),
+                vec![1.0, 0.0, 0.0],
+            ),
+            EmbeddedChunk::new(
+                fts_chunk(
+                    "page-12345",
+                    "nk-chunk-v1:7777abcd",
+                    "Telemetry notes",
+                    "The charging telemetry pipeline records vehicle sessions.",
+                ),
+                vec![0.0, 1.0, 0.0],
+            ),
+        ];
+        table
+            .upsert(&metadata, &rows)
+            .await
+            .expect("insert FTS fixtures");
+        table
+            .optimize_fts_index()
+            .await
+            .expect("index inserted rows");
+
+        let swedish = table
+            .fts_query("text", "bilar", 10)
+            .await
+            .expect("Swedish stemming query");
+        assert_eq!(swedish.len(), 1);
+        assert_eq!(swedish[0].chunk_id, "nk-chunk-v1:4821abcdef");
+        assert!(swedish[0].score.is_finite());
+
+        let english = table
+            .fts_query("text", "telemetry", 10)
+            .await
+            .expect("English text query");
+        assert_eq!(english.len(), 1);
+        assert_eq!(english[0].chunk_id, "nk-chunk-v1:7777abcd");
+
+        let title = table
+            .fts_query("title", "Aurora", 10)
+            .await
+            .expect("title query");
+        assert_eq!(title.len(), 1);
+        assert_eq!(title[0].page_id, "page-98765");
+
+        let page_id = table
+            .fts_query("page_id", "page-98765", 10)
+            .await
+            .expect("page identifier query");
+        assert_eq!(page_id.len(), 1);
+        assert_eq!(page_id[0].chunk_id, "nk-chunk-v1:4821abcdef");
+
+        let chunk_id = table
+            .fts_query("chunk_id", "nk-chunk-v1:4821abcdef", 10)
+            .await
+            .expect("chunk identifier query");
+        assert_eq!(chunk_id.len(), 1);
+        assert_eq!(chunk_id[0].page_id, "page-98765");
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn optimizing_fts_after_page_diff_makes_updated_terms_searchable() {
+        let path = temp_database("fts-update");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+        let provider = CountingProvider::new(metadata);
+
+        table
+            .apply_page_diff(
+                &provider,
+                "page-1",
+                &[fts_chunk(
+                    "page-1",
+                    "chunk-a",
+                    "Refresh test",
+                    "legacyterm remains in the old chunk",
+                )],
+            )
+            .await
+            .expect("initial page snapshot");
+        table
+            .optimize_fts_index()
+            .await
+            .expect("index initial page");
+
+        assert_eq!(
+            table
+                .fts_query("text", "legacyterm", 10)
+                .await
+                .expect("query initial term")
+                .len(),
+            1
+        );
+
+        table
+            .apply_page_diff(
+                &provider,
+                "page-1",
+                &[fts_chunk(
+                    "page-1",
+                    "chunk-a",
+                    "Refresh test",
+                    "freshterm replaces the previous searchable marker",
+                )],
+            )
+            .await
+            .expect("updated page snapshot");
+        table
+            .optimize_fts_index()
+            .await
+            .expect("optimize updated FTS indices");
+
+        assert_eq!(
+            table
+                .fts_query("text", "freshterm", 10)
+                .await
+                .expect("query updated term")
+                .len(),
+            1
+        );
+        assert!(
+            table
+                .fts_query("text", "legacyterm", 10)
+                .await
+                .expect("query removed term")
+                .is_empty()
+        );
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn fts_configuration_and_query_validation_fail_without_mutating_index() {
+        let path = temp_database("fts-validation");
+        let table = LanceChunkTable::create(&path, "chunks", embedding("revision-1", 3))
+            .await
+            .expect("create table");
+
+        assert!(matches!(
+            table.fts_query("workspace_id", "value", 10).await,
+            Err(ChunkTableError::InvalidRows(_))
+        ));
+        assert!(matches!(
+            table.fts_query("text", "", 10).await,
+            Err(ChunkTableError::InvalidRows(_))
+        ));
+        assert!(matches!(
+            table.fts_query("text", "value", 0).await,
+            Err(ChunkTableError::InvalidRows(_))
+        ));
+
+        let before: HashSet<_> = table
+            .table
+            .list_indices()
+            .await
+            .expect("list initial indices")
+            .into_iter()
+            .map(|index| index.name)
+            .collect();
+        let invalid = FtsIndexConfig {
+            language: "not-a-language".into(),
+            ..FtsIndexConfig::default()
+        };
+        assert!(matches!(
+            table.rebuild_fts_index(&invalid).await,
+            Err(ChunkTableError::InvalidSchema(_))
+        ));
+        let after: HashSet<_> = table
+            .table
+            .list_indices()
+            .await
+            .expect("list preserved indices")
+            .into_iter()
+            .map(|index| index.name)
+            .collect();
+        assert_eq!(before, after);
+
+        drop(table);
         std::fs::remove_dir_all(path).expect("remove temporary database");
     }
 
