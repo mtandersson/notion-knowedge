@@ -173,7 +173,6 @@ impl LanceChunkTable {
         Ok(())
     }
 
-
     async fn rows_matching(&self, predicate: String) -> Result<Vec<StoredChunk>, ChunkTableError> {
         let batches: Vec<RecordBatch> = self
             .table
@@ -427,7 +426,10 @@ fn bounded_join(rows: &[StoredChunk], max_chars: usize) -> (String, bool) {
             break;
         }
         if remaining == 0 {
-            if index + 1 < rows.len() || output.chars().count() < rows.iter().map(|r| r.text.chars().count()).sum::<usize>() {
+            if index + 1 < rows.len()
+                || output.chars().count()
+                    < rows.iter().map(|r| r.text.chars().count()).sum::<usize>()
+            {
                 truncated = true;
             }
             break;
@@ -436,7 +438,6 @@ fn bounded_join(rows: &[StoredChunk], max_chars: usize) -> (String, bool) {
 
     (output, truncated)
 }
-
 
 fn validate_table_name(table_name: &str) -> Result<(), ChunkTableError> {
     if table_name.trim().is_empty() || table_name.chars().any(char::is_control) {
@@ -900,7 +901,6 @@ mod tests {
         drop(table);
         std::fs::remove_dir_all(path).expect("remove temporary database");
     }
-
 
     #[tokio::test]
     async fn source_expansion_returns_scoped_section_and_page_content_with_provenance() {
