@@ -11,10 +11,7 @@ pub fn assert_search_catalog(tools: &Value) {
         .iter()
         .find(|tool| tool["name"] == "knowledge_get")
         .expect("knowledge_get tool");
-    assert_eq!(
-        get["inputSchema"]["required"],
-        json!(["refs", "max_chars"])
-    );
+    assert_eq!(get["inputSchema"]["required"], json!(["refs", "max_chars"]));
     assert_eq!(get["annotations"]["readOnlyHint"], true);
     assert!(tool["description"].as_str().unwrap().contains("semantic"));
     assert_eq!(tool["annotations"]["readOnlyHint"], true);
