@@ -23,6 +23,7 @@ use lancedb::{
 use notion_knowledge_core::{
     embedding::{self, EmbeddingError, EmbeddingMetadata, EmbeddingProvider},
     indexed::{IndexedChunk, SchemaVersion},
+    search::{LexicalQuery, LexicalSearch, SearchFuture, SearchHit, SearchSource, SearchUnavailable},
     source::{
         ExpandedSource, SourceExpandQuery, SourceExpansion, SourceExpansionError,
         SourceExpansionFuture, SourceProvenance, StableSourceRef,
@@ -166,7 +167,11 @@ impl Default for FtsIndexConfig {
 pub struct FtsIndexHit {
     pub chunk_id: String,
     pub page_id: String,
+    pub root_page_id: String,
+    pub block_id: Option<String>,
+    pub url: String,
     pub title: String,
+    pub heading_path: Vec<String>,
     pub text: String,
     pub score: f32,
 }
@@ -357,12 +362,23 @@ impl LanceChunkTable {
     }
 
     /// Low-level one-column FTS probe used by the retrieval adapter and tests.
-    /// The user-facing lexical search contract, filters and fusion belong to #46.
+    /// The user-facing lexical search contract is implemented below without
+    /// concatenating user text into SQL predicates.
     pub async fn fts_query(
         &self,
         column: &str,
         query: &str,
         limit: usize,
+    ) -> Result<Vec<FtsIndexHit>, ChunkTableError> {
+        self.fts_query_scoped(column, query, limit, None).await
+    }
+
+    async fn fts_query_scoped(
+        &self,
+        column: &str,
+        query: &str,
+        limit: usize,
+        predicate: Option<&str>,
     ) -> Result<Vec<FtsIndexHit>, ChunkTableError> {
         if query.trim().is_empty()
             || limit == 0
@@ -377,22 +393,92 @@ impl LanceChunkTable {
         let fts_query = FullTextSearchQuery::new(query.to_owned())
             .with_column(column.to_owned())
             .map_err(|_| ChunkTableError::InvalidRows("invalid FTS query column".into()))?;
-        let batches: Vec<RecordBatch> = self
+        let mut search = self
             .table
             .query()
             .full_text_search(fts_query)
             .select(Select::Columns(vec![
                 "chunk_id".into(),
                 "page_id".into(),
+                "root_page_id".into(),
+                "block_id".into(),
+                "url".into(),
                 "title".into(),
+                "heading_path_json".into(),
                 "text".into(),
             ]))
-            .limit(limit)
-            .execute()
-            .await?
-            .try_collect()
-            .await?;
+            .limit(limit);
+        if let Some(predicate) = predicate {
+            search = search.only_if(predicate.to_owned());
+        }
+        let batches: Vec<RecordBatch> = search.execute().await?.try_collect().await?;
         decode_fts_hits(&batches)
+    }
+
+    async fn lexical_search(
+        &self,
+        query: LexicalQuery,
+    ) -> Result<Vec<SearchHit>, ChunkTableError> {
+        validate_lexical_query(&query)?;
+        let predicate = lexical_filter_predicate(&query)?;
+        let candidate_limit = query.limit.saturating_mul(4).min(400);
+        let fields = [
+            ("chunk_id", 4.0_f32),
+            ("page_id", 4.0_f32),
+            ("title", 2.0_f32),
+            ("text", 1.0_f32),
+        ];
+        let mut best = HashMap::<(String, String), SearchHit>::new();
+
+        for (column, band) in fields {
+            for hit in self
+                .fts_query_scoped(
+                    column,
+                    &query.query,
+                    candidate_limit,
+                    predicate.as_deref(),
+                )
+                .await?
+            {
+                let native = hit.score.max(0.0);
+                let score = band + native / (1.0 + native);
+                if !score.is_finite() {
+                    return Err(ChunkTableError::InvalidRows(
+                        "lexical ranking score must be finite".into(),
+                    ));
+                }
+                let key = (hit.page_id.clone(), hit.chunk_id.clone());
+                let candidate = SearchHit {
+                    text: bounded_text(&hit.text, 2000),
+                    score,
+                    source: SearchSource {
+                        page_id: hit.page_id,
+                        chunk_id: hit.chunk_id,
+                        url: hit.url,
+                        title: hit.title,
+                        heading_path: hit.heading_path,
+                        block_id: hit.block_id,
+                    },
+                };
+                match best.get(&key) {
+                    Some(existing) if existing.score >= candidate.score => {}
+                    _ => {
+                        best.insert(key, candidate);
+                    }
+                }
+            }
+        }
+
+        let mut hits = best.into_values().collect::<Vec<_>>();
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.source.page_id.cmp(&right.source.page_id))
+                .then_with(|| left.source.chunk_id.cmp(&right.source.chunk_id))
+        });
+        hits.truncate(query.limit);
+        Ok(hits)
     }
 
     /// Insert new stable chunk IDs and replace existing rows with the same ID.
@@ -679,6 +765,16 @@ impl LanceChunkTable {
     }
 }
 
+impl LexicalSearch for LanceChunkTable {
+    fn search(&self, query: LexicalQuery) -> SearchFuture<'_> {
+        Box::pin(async move {
+            self.lexical_search(query)
+                .await
+                .map_err(|_| SearchUnavailable)
+        })
+    }
+}
+
 impl SourceExpansion for LanceChunkTable {
     fn expand(&self, query: SourceExpandQuery) -> SourceExpansionFuture<'_> {
         Box::pin(async move {
@@ -732,6 +828,64 @@ fn root_predicate(roots: &[String]) -> String {
         .join(" OR ")
 }
 
+
+fn id_list_predicate(column: &str, ids: &[String]) -> String {
+    ids.iter()
+        .map(|id| format!("{column} = {}", sql_string(id)))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+fn validate_filter_ids(ids: &[String]) -> bool {
+    !ids.is_empty()
+        && ids.len() <= 100
+        && ids.iter().all(|id| {
+            !id.trim().is_empty()
+                && id.chars().count() <= 128
+                && !id.chars().any(char::is_control)
+        })
+}
+
+fn validate_lexical_query(query: &LexicalQuery) -> Result<(), ChunkTableError> {
+    if query.query.trim().is_empty()
+        || query.query.chars().count() > 4096
+        || query.limit == 0
+        || query.limit > 100
+        || query
+            .page_ids
+            .as_ref()
+            .is_some_and(|ids| !validate_filter_ids(ids))
+        || query
+            .root_page_ids
+            .as_ref()
+            .is_some_and(|ids| !validate_filter_ids(ids))
+    {
+        return Err(ChunkTableError::InvalidRows(
+            "invalid lexical query or metadata filters".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn lexical_filter_predicate(query: &LexicalQuery) -> Result<Option<String>, ChunkTableError> {
+    validate_lexical_query(query)?;
+    let mut predicates = Vec::new();
+    if let Some(page_ids) = &query.page_ids {
+        predicates.push(format!("({})", id_list_predicate("page_id", page_ids)));
+    }
+    if let Some(root_page_ids) = &query.root_page_ids {
+        predicates.push(format!(
+            "({})",
+            id_list_predicate("root_page_id", root_page_ids)
+        ));
+    }
+    Ok((!predicates.is_empty()).then(|| predicates.join(" AND ")))
+}
+
+fn bounded_text(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
 fn string_column<'a>(
     batch: &'a RecordBatch,
     name: &str,
@@ -757,7 +911,11 @@ fn decode_fts_hits(batches: &[RecordBatch]) -> Result<Vec<FtsIndexHit>, ChunkTab
     for batch in batches {
         let chunk_ids = string_column(batch, "chunk_id")?;
         let page_ids = string_column(batch, "page_id")?;
+        let roots = string_column(batch, "root_page_id")?;
+        let block_ids = string_column(batch, "block_id")?;
+        let urls = string_column(batch, "url")?;
         let titles = string_column(batch, "title")?;
+        let headings = string_column(batch, "heading_path_json")?;
         let texts = string_column(batch, "text")?;
         let scores = float32_column(batch, "_score")?;
         for row in 0..batch.num_rows() {
@@ -769,7 +927,11 @@ fn decode_fts_hits(batches: &[RecordBatch]) -> Result<Vec<FtsIndexHit>, ChunkTab
             hits.push(FtsIndexHit {
                 chunk_id: chunk_ids.value(row).to_owned(),
                 page_id: page_ids.value(row).to_owned(),
+                root_page_id: roots.value(row).to_owned(),
+                block_id: (!block_ids.is_null(row)).then(|| block_ids.value(row).to_owned()),
+                url: urls.value(row).to_owned(),
                 title: titles.value(row).to_owned(),
+                heading_path: serde_json::from_str(headings.value(row))?,
                 text: texts.value(row).to_owned(),
                 score: scores.value(row),
             });
