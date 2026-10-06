@@ -312,7 +312,7 @@ impl LanceChunkTable {
 
         if chunks.is_empty() {
             if metrics.removed != 0 {
-                self.table.delete((&page_predicate).into()).await?;
+                self.table.delete(page_predicate.as_str()).await?;
             }
             return Ok(metrics);
         }
