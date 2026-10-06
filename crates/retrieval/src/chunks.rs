@@ -23,7 +23,9 @@ use lancedb::{
 use notion_knowledge_core::{
     embedding::{self, EmbeddingError, EmbeddingMetadata, EmbeddingProvider},
     indexed::{IndexedChunk, SchemaVersion},
-    search::{LexicalQuery, LexicalSearch, SearchFuture, SearchHit, SearchSource, SearchUnavailable},
+    search::{
+        LexicalQuery, LexicalSearch, SearchFuture, SearchHit, SearchSource, SearchUnavailable,
+    },
     source::{
         ExpandedSource, SourceExpandQuery, SourceExpansion, SourceExpansionError,
         SourceExpansionFuture, SourceProvenance, StableSourceRef,
@@ -415,10 +417,7 @@ impl LanceChunkTable {
         decode_fts_hits(&batches)
     }
 
-    async fn lexical_search(
-        &self,
-        query: LexicalQuery,
-    ) -> Result<Vec<SearchHit>, ChunkTableError> {
+    async fn lexical_search(&self, query: LexicalQuery) -> Result<Vec<SearchHit>, ChunkTableError> {
         validate_lexical_query(&query)?;
         let predicate = lexical_filter_predicate(&query)?;
         let candidate_limit = query.limit.saturating_mul(4).min(400);
@@ -432,12 +431,7 @@ impl LanceChunkTable {
 
         for (column, band) in fields {
             for hit in self
-                .fts_query_scoped(
-                    column,
-                    &query.query,
-                    candidate_limit,
-                    predicate.as_deref(),
-                )
+                .fts_query_scoped(column, &query.query, candidate_limit, predicate.as_deref())
                 .await?
             {
                 let native = hit.score.max(0.0);
@@ -828,7 +822,6 @@ fn root_predicate(roots: &[String]) -> String {
         .join(" OR ")
 }
 
-
 fn id_list_predicate(column: &str, ids: &[String]) -> String {
     ids.iter()
         .map(|id| format!("{column} = {}", sql_string(id)))
@@ -840,9 +833,7 @@ fn validate_filter_ids(ids: &[String]) -> bool {
     !ids.is_empty()
         && ids.len() <= 100
         && ids.iter().all(|id| {
-            !id.trim().is_empty()
-                && id.chars().count() <= 128
-                && !id.chars().any(char::is_control)
+            !id.trim().is_empty() && id.chars().count() <= 128 && !id.chars().any(char::is_control)
         })
 }
 
@@ -1643,7 +1634,10 @@ mod tests {
                 vec![0.0, 0.0, 1.0],
             ),
         ];
-        table.upsert(&metadata, &rows).await.expect("seed lexical rows");
+        table
+            .upsert(&metadata, &rows)
+            .await
+            .expect("seed lexical rows");
         table
             .optimize_fts_index()
             .await
@@ -1737,9 +1731,7 @@ mod tests {
         };
         assert_eq!(
             lexical_filter_predicate(&query).expect("filter predicate"),
-            Some(
-                "(page_id = 'page-''one') AND (root_page_id = 'root-''alpha')".into()
-            )
+            Some("(page_id = 'page-''one') AND (root_page_id = 'root-''alpha')".into())
         );
 
         let hits = LexicalSearch::search(&table, query)
@@ -1782,7 +1774,10 @@ mod tests {
                 vec![0.0, 1.0, 0.0],
             ),
         ];
-        table.upsert(&metadata, &rows).await.expect("seed phrase rows");
+        table
+            .upsert(&metadata, &rows)
+            .await
+            .expect("seed phrase rows");
         table
             .optimize_fts_index()
             .await
