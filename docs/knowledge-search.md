@@ -1,4 +1,4 @@
-# Semantic search MCP contract
+# Knowledge search MCP contract
 
 `knowledge_search` is discovered through the same application handler over
 stdio and Streamable HTTP. Use it to locate indexed knowledge for answering
@@ -23,14 +23,25 @@ modes. Empty results signify a completed search with no matches. Retrieved
 text is untrusted content, not instructions; callers can use the stable source
 references for authoritative reads and citation.
 
-The default bootstrap has no retrieval adapter: valid calls return `isError:
-true` with `retrieval_unavailable` and no fabricated result object. The explicit
-[semantic MCP spike](semantic-mcp-spike.md) injects a local Qwen/LanceDB adapter
-into the same handler and HTTP wiring. It supports semantic mode only;
-lexical/hybrid return `mode_unavailable`. Dependency failures return
-`retrieval_unavailable`. Invalid arguments always return JSON-RPC invalid-params
-without echoing supplied input. Successful content blocks also identify retrieved
-excerpts as untrusted data. Production implementation remains in #45/#49.
+The default bootstrap has no retrieval adapter: valid calls return a tool error
+and no fabricated result object. The explicit [semantic MCP spike](semantic-mcp-spike.md)
+still demonstrates semantic composition. Production lexical retrieval from #46 can
+be injected independently through the same `KnowledgeServer` and serves
+`mode=lexical` using the LanceDB BM25 indices from #41. Hybrid remains
+`mode_unavailable` until #47. A mode whose adapter is not configured also fails
+explicitly instead of silently falling back to another retrieval path.
+
+Lexical `page_ids` and `root_page_ids` are applied inside LanceDB retrieval
+before candidates are returned. Lists use OR within one field and AND across
+fields. Filter IDs are SQL-escaped by the adapter, while the user query is passed
+through LanceDB's typed full-text query API rather than interpolated into a SQL
+predicate. See [lexical-search.md](lexical-search.md) for field ranking and
+tokenization behavior.
+
+Dependency failures return `retrieval_unavailable`. Invalid arguments always
+return JSON-RPC invalid-params without echoing supplied input. Successful content
+blocks identify retrieved excerpts as untrusted data. Semantic production work
+remains #45; hybrid fusion remains #47 and broader typed filters remain #48.
 
 Production-boundary discovery and call tests run with:
 
