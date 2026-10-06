@@ -128,6 +128,11 @@ impl ServerHandler for KnowledgeServer {
                 input
                     .validate()
                     .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
+                if self.search.is_none() && self.lexical_search.is_none() {
+                    return Ok(error(
+                        "retrieval_unavailable: no retrieval index adapter is configured; no search was performed",
+                    ));
+                }
                 let filters = input.filters;
                 let page_ids = filters.as_ref().and_then(|f| f.page_ids.clone());
                 let root_page_ids = filters.and_then(|f| f.root_page_ids);
