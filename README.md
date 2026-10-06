@@ -54,7 +54,9 @@ cargo run -p notion-knowledge-server
 
 The server accepts newline-delimited MCP JSON-RPC on stdin and writes protocol
 responses to stdout. Startup diagnostics and errors go to stderr. It completes
-MCP initialization and supports tool discovery; discovers the `knowledge_search` contract while retrieval adapters are implemented. The process exits when
+MCP initialization and supports tool discovery for both `knowledge_search` and
+`knowledge_get`; calls return explicit unavailable errors until the corresponding
+retrieval adapters are configured. The process exits when
 the connected client closes stdin after initialization. Use `--http` to serve
 the same MCP handler over Streamable HTTP at `/mcp`:
 
