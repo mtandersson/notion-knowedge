@@ -371,6 +371,7 @@ impl LanceChunkTable {
                 "page_id".into(),
                 "title".into(),
                 "text".into(),
+                "_score".into(),
             ]))
             .limit(limit)
             .execute()
@@ -1252,6 +1253,15 @@ mod tests {
         value
     }
 
+
+    fn fts_chunk(page_id: &str, chunk_id: &str, title: &str, text: &str) -> IndexedChunk {
+        let mut value = chunk("root", title, text);
+        value.chunk_id = chunk_id.into();
+        value.metadata.page_id = page_id.into();
+        value.metadata.url = format!("https://example.invalid/{page_id}");
+        value
+    }
+
     #[tokio::test]
     async fn create_and_open_from_scratch_preserves_explicit_schema() {
         let path = temp_database("schema");
@@ -1307,6 +1317,236 @@ mod tests {
             ))
         ));
 
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn create_installs_versioned_fts_indices_for_text_title_and_identifiers() {
+        let path = temp_database("fts-indexes");
+        let table = LanceChunkTable::create(&path, "chunks", embedding("revision-1", 3))
+            .await
+            .expect("create table with FTS indices");
+
+        let indices = table.table.list_indices().await.expect("list indices");
+        for (expected_name, expected_column) in CHUNK_FTS_INDEXES {
+            let index = indices
+                .iter()
+                .find(|index| index.name == expected_name)
+                .unwrap_or_else(|| panic!("missing FTS index {expected_name}"));
+            assert_eq!(index.columns, vec![expected_column.to_string()]);
+        }
+
+        table
+            .ensure_fts_index(&FtsIndexConfig::default())
+            .await
+            .expect("ensure existing indices is idempotent");
+        assert_eq!(
+            table.table.list_indices().await.expect("list indices").len(),
+            CHUNK_FTS_INDEXES.len()
+        );
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn fts_index_retrieves_swedish_english_titles_and_exact_identifiers() {
+        let path = temp_database("fts-search");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+
+        let rows = vec![
+            EmbeddedChunk::new(
+                fts_chunk(
+                    "PAGE98765",
+                    "NK4821",
+                    "Projekt Aurora",
+                    "Bilen har snabb laddning i Lund och fungerar bra på vintern.",
+                ),
+                vec![1.0, 0.0, 0.0],
+            ),
+            EmbeddedChunk::new(
+                fts_chunk(
+                    "PAGE12345",
+                    "NK7777",
+                    "Telemetry notes",
+                    "The charging telemetry pipeline records vehicle sessions.",
+                ),
+                vec![0.0, 1.0, 0.0],
+            ),
+        ];
+        table
+            .upsert(&metadata, &rows)
+            .await
+            .expect("insert FTS fixtures");
+        table
+            .optimize_fts_index()
+            .await
+            .expect("index inserted rows");
+
+        let swedish = table
+            .fts_query("text", "laddning", 10)
+            .await
+            .expect("Swedish text query");
+        assert_eq!(swedish.len(), 1);
+        assert_eq!(swedish[0].chunk_id, "NK4821");
+        assert!(swedish[0].score.is_finite());
+
+        let english = table
+            .fts_query("text", "telemetry", 10)
+            .await
+            .expect("English text query");
+        assert_eq!(english.len(), 1);
+        assert_eq!(english[0].chunk_id, "NK7777");
+
+        let title = table
+            .fts_query("title", "Aurora", 10)
+            .await
+            .expect("title query");
+        assert_eq!(title.len(), 1);
+        assert_eq!(title[0].page_id, "PAGE98765");
+
+        let page_id = table
+            .fts_query("page_id", "PAGE98765", 10)
+            .await
+            .expect("page identifier query");
+        assert_eq!(page_id.len(), 1);
+        assert_eq!(page_id[0].chunk_id, "NK4821");
+
+        let chunk_id = table
+            .fts_query("chunk_id", "NK4821", 10)
+            .await
+            .expect("chunk identifier query");
+        assert_eq!(chunk_id.len(), 1);
+        assert_eq!(chunk_id[0].page_id, "PAGE98765");
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn optimizing_fts_after_page_diff_makes_updated_terms_searchable() {
+        let path = temp_database("fts-update");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+        let provider = CountingProvider::new(metadata);
+
+        table
+            .apply_page_diff(
+                &provider,
+                "page-1",
+                &[fts_chunk(
+                    "page-1",
+                    "chunk-a",
+                    "Refresh test",
+                    "legacyterm remains in the old chunk",
+                )],
+            )
+            .await
+            .expect("initial page snapshot");
+        table
+            .optimize_fts_index()
+            .await
+            .expect("index initial page");
+
+        assert_eq!(
+            table
+                .fts_query("text", "legacyterm", 10)
+                .await
+                .expect("query initial term")
+                .len(),
+            1
+        );
+
+        table
+            .apply_page_diff(
+                &provider,
+                "page-1",
+                &[fts_chunk(
+                    "page-1",
+                    "chunk-a",
+                    "Refresh test",
+                    "freshterm replaces the previous searchable marker",
+                )],
+            )
+            .await
+            .expect("updated page snapshot");
+        table
+            .optimize_fts_index()
+            .await
+            .expect("optimize updated FTS indices");
+
+        assert_eq!(
+            table
+                .fts_query("text", "freshterm", 10)
+                .await
+                .expect("query updated term")
+                .len(),
+            1
+        );
+        assert!(
+            table
+                .fts_query("text", "legacyterm", 10)
+                .await
+                .expect("query removed term")
+                .is_empty()
+        );
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn fts_configuration_and_query_validation_fail_without_mutating_index() {
+        let path = temp_database("fts-validation");
+        let table = LanceChunkTable::create(&path, "chunks", embedding("revision-1", 3))
+            .await
+            .expect("create table");
+
+        assert!(matches!(
+            table.fts_query("workspace_id", "value", 10).await,
+            Err(ChunkTableError::InvalidRows(_))
+        ));
+        assert!(matches!(
+            table.fts_query("text", "", 10).await,
+            Err(ChunkTableError::InvalidRows(_))
+        ));
+        assert!(matches!(
+            table.fts_query("text", "value", 0).await,
+            Err(ChunkTableError::InvalidRows(_))
+        ));
+
+        let before: HashSet<_> = table
+            .table
+            .list_indices()
+            .await
+            .expect("list initial indices")
+            .into_iter()
+            .map(|index| index.name)
+            .collect();
+        let invalid = FtsIndexConfig {
+            language: "not-a-language".into(),
+            ..FtsIndexConfig::default()
+        };
+        assert!(matches!(
+            table.rebuild_fts_index(&invalid).await,
+            Err(ChunkTableError::InvalidSchema(_))
+        ));
+        let after: HashSet<_> = table
+            .table
+            .list_indices()
+            .await
+            .expect("list preserved indices")
+            .into_iter()
+            .map(|index| index.name)
+            .collect();
+        assert_eq!(before, after);
+
+        drop(table);
         std::fs::remove_dir_all(path).expect("remove temporary database");
     }
 
