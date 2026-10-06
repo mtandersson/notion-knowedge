@@ -277,16 +277,11 @@ impl LanceChunkTable {
     /// Ensure the production BM25/FTS indices exist without rebuilding them on
     /// every startup. Native Lance FTS is one-column-per-index, so title, text
     /// and stable identifiers each get a versioned index.
-    pub async fn ensure_fts_index(
-        &self,
-        config: &FtsIndexConfig,
-    ) -> Result<(), ChunkTableError> {
+    pub async fn ensure_fts_index(&self, config: &FtsIndexConfig) -> Result<(), ChunkTableError> {
         let existing = self.table.list_indices().await?;
         for (index_name, column) in CHUNK_FTS_INDEXES {
             if let Some(index) = existing.iter().find(|index| index.name == index_name) {
-                if index.index_type != IndexType::FTS
-                    || index.columns != vec![column.to_string()]
-                {
+                if index.index_type != IndexType::FTS || index.columns != vec![column.to_string()] {
                     return Err(ChunkTableError::InvalidSchema(format!(
                         "FTS index {index_name} does not match column {column}"
                     )));
@@ -300,10 +295,7 @@ impl LanceChunkTable {
     }
 
     /// Explicitly replace all FTS indices when tokenizer configuration changes.
-    pub async fn rebuild_fts_index(
-        &self,
-        config: &FtsIndexConfig,
-    ) -> Result<(), ChunkTableError> {
+    pub async fn rebuild_fts_index(&self, config: &FtsIndexConfig) -> Result<(), ChunkTableError> {
         for (index_name, column) in CHUNK_FTS_INDEXES {
             self.create_fts_index(index_name, column, config, true)
                 .await?;
@@ -1362,7 +1354,12 @@ mod tests {
             .await
             .expect("ensure existing indices is idempotent");
         assert_eq!(
-            table.table.list_indices().await.expect("list indices").len(),
+            table
+                .table
+                .list_indices()
+                .await
+                .expect("list indices")
+                .len(),
             CHUNK_FTS_INDEXES.len()
         );
 
