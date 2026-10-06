@@ -6,13 +6,21 @@ use std::{
 };
 
 use arrow_array::{
-    FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray, types::Float32Type,
+    Array, FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray, types::Float32Type,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use lancedb::Table;
+use futures::TryStreamExt;
+use lancedb::{
+    Table,
+    query::{ExecutableQuery, QueryBase},
+};
 use notion_knowledge_core::{
     embedding::{EmbeddingError, EmbeddingMetadata},
     indexed::{IndexedChunk, SchemaVersion},
+    source::{
+        ExpandedSource, SourceExpandQuery, SourceExpansion, SourceExpansionError,
+        SourceExpansionFuture, SourceProvenance, StableSourceRef,
+    },
 };
 
 pub const CHUNK_TABLE_SCHEMA_VERSION: &str = "1";
@@ -164,7 +172,270 @@ impl LanceChunkTable {
             .await?;
         Ok(())
     }
+
+
+    async fn rows_matching(&self, predicate: String) -> Result<Vec<StoredChunk>, ChunkTableError> {
+        let batches: Vec<RecordBatch> = self
+            .table
+            .query()
+            .only_if(predicate)
+            .execute()
+            .await?
+            .try_collect()
+            .await?;
+        decode_stored_chunks(&batches)
+    }
+
+    async fn scoped_rows_for_ref(
+        &self,
+        source_ref: &StableSourceRef,
+        roots: &[String],
+    ) -> Result<Vec<StoredChunk>, SourceExpansionError> {
+        if roots.is_empty() {
+            return Err(SourceExpansionError::OutOfScope);
+        }
+        let identity = reference_predicate(source_ref);
+        let scoped = format!("({identity}) AND ({})", root_predicate(roots));
+        let rows = self
+            .rows_matching(scoped)
+            .await
+            .map_err(|_| SourceExpansionError::Unavailable)?;
+        if !rows.is_empty() {
+            return Ok(rows);
+        }
+
+        // Distinguish an unknown ref from one outside the configured roots for
+        // adapter tests and diagnostics. The MCP boundary deliberately maps both
+        // cases to the same public error, so this metadata-only lookup cannot
+        // become an existence oracle for callers.
+        let exists = self
+            .table
+            .count_rows(Some(identity))
+            .await
+            .map_err(|_| SourceExpansionError::Unavailable)?;
+        if exists == 0 {
+            Err(SourceExpansionError::Missing)
+        } else {
+            Err(SourceExpansionError::OutOfScope)
+        }
+    }
+
+    async fn expand_one(
+        &self,
+        source_ref: StableSourceRef,
+        roots: &[String],
+        max_chars: usize,
+    ) -> Result<ExpandedSource, SourceExpansionError> {
+        let matched = self.scoped_rows_for_ref(&source_ref, roots).await?;
+        let mut rows = match &source_ref {
+            StableSourceRef::Page(page_id) => {
+                let predicate = format!(
+                    "page_id = {} AND ({})",
+                    sql_string(page_id),
+                    root_predicate(roots)
+                );
+                self.rows_matching(predicate)
+                    .await
+                    .map_err(|_| SourceExpansionError::Unavailable)?
+            }
+            StableSourceRef::Chunk(chunk_id) => {
+                if matched.len() != 1 {
+                    return Err(SourceExpansionError::Unavailable);
+                }
+                let anchor = &matched[0];
+                if anchor.chunk_id != *chunk_id {
+                    return Err(SourceExpansionError::Unavailable);
+                }
+                let headings = serde_json::to_string(&anchor.heading_path)
+                    .map_err(|_| SourceExpansionError::Unavailable)?;
+                let predicate = format!(
+                    "page_id = {} AND heading_path_json = {} AND root_page_id = {}",
+                    sql_string(&anchor.page_id),
+                    sql_string(&headings),
+                    sql_string(&anchor.root_page_id)
+                );
+                self.rows_matching(predicate)
+                    .await
+                    .map_err(|_| SourceExpansionError::Unavailable)?
+            }
+        };
+
+        if rows.is_empty() {
+            return Err(SourceExpansionError::Missing);
+        }
+        rows.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
+
+        let first = &rows[0];
+        if !roots.iter().any(|root| root == &first.root_page_id)
+            || rows.iter().any(|row| {
+                row.page_id != first.page_id
+                    || row.root_page_id != first.root_page_id
+                    || row.url != first.url
+                    || row.title != first.title
+            })
+        {
+            return Err(SourceExpansionError::OutOfScope);
+        }
+        if let StableSourceRef::Page(page_id) = &source_ref
+            && &first.page_id != page_id
+        {
+            return Err(SourceExpansionError::Unavailable);
+        }
+        if let StableSourceRef::Chunk(chunk_id) = &source_ref
+            && !rows.iter().any(|row| &row.chunk_id == chunk_id)
+        {
+            return Err(SourceExpansionError::Unavailable);
+        }
+
+        let heading_path = match source_ref {
+            StableSourceRef::Page(_) => Vec::new(),
+            StableSourceRef::Chunk(_) => first.heading_path.clone(),
+        };
+        let block_id = match source_ref {
+            StableSourceRef::Page(_) => None,
+            StableSourceRef::Chunk(_) => first.block_id.clone(),
+        };
+        let chunk_ids = rows.iter().map(|row| row.chunk_id.clone()).collect();
+        let (text, truncated) = bounded_join(&rows, max_chars);
+
+        Ok(ExpandedSource {
+            reference: source_ref,
+            text,
+            truncated,
+            provenance: SourceProvenance {
+                page_id: first.page_id.clone(),
+                root_page_id: first.root_page_id.clone(),
+                url: first.url.clone(),
+                title: first.title.clone(),
+                heading_path,
+                block_id,
+                chunk_ids,
+            },
+        })
+    }
 }
+
+impl SourceExpansion for LanceChunkTable {
+    fn expand(&self, query: SourceExpandQuery) -> SourceExpansionFuture<'_> {
+        Box::pin(async move {
+            if query.refs.is_empty() || query.root_page_ids.is_empty() || query.max_chars == 0 {
+                return Err(SourceExpansionError::Unavailable);
+            }
+            let mut remaining = query.max_chars;
+            let mut sources = Vec::with_capacity(query.refs.len());
+            for source_ref in query.refs {
+                let source = self
+                    .expand_one(source_ref, &query.root_page_ids, remaining)
+                    .await?;
+                remaining = remaining.saturating_sub(source.text.chars().count());
+                sources.push(source);
+            }
+            Ok(sources)
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StoredChunk {
+    chunk_id: String,
+    page_id: String,
+    block_id: Option<String>,
+    url: String,
+    title: String,
+    heading_path: Vec<String>,
+    root_page_id: String,
+    text: String,
+}
+
+fn sql_string(value: &str) -> String {
+    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
+}
+
+fn reference_predicate(source_ref: &StableSourceRef) -> String {
+    match source_ref {
+        StableSourceRef::Page(page_id) => format!("page_id = {}", sql_string(page_id)),
+        StableSourceRef::Chunk(chunk_id) => format!("chunk_id = {}", sql_string(chunk_id)),
+    }
+}
+
+fn root_predicate(roots: &[String]) -> String {
+    roots
+        .iter()
+        .map(|root| format!("root_page_id = {}", sql_string(root)))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+fn string_column<'a>(
+    batch: &'a RecordBatch,
+    name: &str,
+) -> Result<&'a StringArray, ChunkTableError> {
+    batch
+        .column_by_name(name)
+        .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+        .ok_or_else(|| ChunkTableError::InvalidSchema(format!("missing UTF-8 column {name}")))
+}
+
+fn decode_stored_chunks(batches: &[RecordBatch]) -> Result<Vec<StoredChunk>, ChunkTableError> {
+    let mut rows = Vec::new();
+    for batch in batches {
+        let chunk_ids = string_column(batch, "chunk_id")?;
+        let page_ids = string_column(batch, "page_id")?;
+        let block_ids = string_column(batch, "block_id")?;
+        let urls = string_column(batch, "url")?;
+        let titles = string_column(batch, "title")?;
+        let headings = string_column(batch, "heading_path_json")?;
+        let roots = string_column(batch, "root_page_id")?;
+        let texts = string_column(batch, "text")?;
+        for row in 0..batch.num_rows() {
+            rows.push(StoredChunk {
+                chunk_id: chunk_ids.value(row).to_owned(),
+                page_id: page_ids.value(row).to_owned(),
+                block_id: (!block_ids.is_null(row)).then(|| block_ids.value(row).to_owned()),
+                url: urls.value(row).to_owned(),
+                title: titles.value(row).to_owned(),
+                heading_path: serde_json::from_str(headings.value(row))?,
+                root_page_id: roots.value(row).to_owned(),
+                text: texts.value(row).to_owned(),
+            });
+        }
+    }
+    Ok(rows)
+}
+
+fn bounded_join(rows: &[StoredChunk], max_chars: usize) -> (String, bool) {
+    let mut output = String::new();
+    let mut remaining = max_chars;
+    let mut truncated = false;
+
+    for (index, row) in rows.iter().enumerate() {
+        let separator = if index == 0 { "" } else { "\n\n" };
+        for part in [separator, row.text.as_str()] {
+            if part.is_empty() {
+                continue;
+            }
+            let count = part.chars().count();
+            if count <= remaining {
+                output.push_str(part);
+                remaining -= count;
+                continue;
+            }
+            output.extend(part.chars().take(remaining));
+            remaining = 0;
+            truncated = true;
+            break;
+        }
+        if remaining == 0 {
+            if index + 1 < rows.len() || output.chars().count() < rows.iter().map(|r| r.text.chars().count()).sum::<usize>() {
+                truncated = true;
+            }
+            break;
+        }
+    }
+
+    (output, truncated)
+}
+
 
 fn validate_table_name(table_name: &str) -> Result<(), ChunkTableError> {
     if table_name.trim().is_empty() || table_name.chars().any(char::is_control) {
