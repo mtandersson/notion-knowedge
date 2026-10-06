@@ -27,9 +27,14 @@ def require(condition, message):
 
 def search_catalog(value):
     tools = value.get("tools", [])
-    require(len(tools) == 1 and tools[0]["name"] == "knowledge_search", "Search tool discovery failed")
-    require(tools[0]["inputSchema"]["properties"]["mode"]["enum"] == ["semantic", "lexical", "hybrid"], "Search modes missing")
-    require("score" in tools[0]["outputSchema"]["properties"]["results"]["items"]["properties"], "Search scores missing")
+    require(len(tools) == 2, "Tool discovery failed")
+    search = next((tool for tool in tools if tool.get("name") == "knowledge_search"), None)
+    get = next((tool for tool in tools if tool.get("name") == "knowledge_get"), None)
+    require(search is not None and get is not None, "Expected knowledge tools missing")
+    require(search["inputSchema"]["properties"]["mode"]["enum"] == ["semantic", "lexical", "hybrid"], "Search modes missing")
+    require("score" in search["outputSchema"]["properties"]["results"]["items"]["properties"], "Search scores missing")
+    require(get["inputSchema"]["required"] == ["refs", "max_chars"], "knowledge_get inputs missing")
+    require(get["annotations"]["readOnlyHint"] is True, "knowledge_get must be read-only")
 
 
 def cleanup(name):

@@ -34,5 +34,8 @@ pub mod embedding;
 /// Semantic retrieval execution independent of MCP and storage types.
 pub mod search;
 
+/// Stable source expansion independent of MCP and storage types.
+pub mod source;
+
 /// Durable operational sync-state contracts. Concrete databases belong in adapters.
 pub mod sync_state;
