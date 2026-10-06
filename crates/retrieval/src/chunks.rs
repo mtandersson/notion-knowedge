@@ -881,7 +881,6 @@ fn bounded_text(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
-
 fn quoted_phrase(query: &str) -> Option<&str> {
     let query = query.trim();
     let phrase = query.strip_prefix('"')?.strip_suffix('"')?.trim();
