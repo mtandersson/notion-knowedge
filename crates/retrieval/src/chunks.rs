@@ -226,7 +226,7 @@ impl LanceChunkTable {
         max_chars: usize,
     ) -> Result<ExpandedSource, SourceExpansionError> {
         let matched = self.scoped_rows_for_ref(&source_ref, roots).await?;
-        let mut rows = match &source_ref {
+        let rows = match &source_ref {
             StableSourceRef::Page(page_id) => {
                 let predicate = format!(
                     "page_id = {} AND ({})",
