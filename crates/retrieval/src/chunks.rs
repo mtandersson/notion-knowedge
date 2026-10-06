@@ -6,7 +6,8 @@ use std::{
 };
 
 use arrow_array::{
-    Array, FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray, types::Float32Type,
+    Array, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator, StringArray,
+    types::Float32Type,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use futures::TryStreamExt;
@@ -15,7 +16,7 @@ use lancedb::{
     query::{ExecutableQuery, QueryBase},
 };
 use notion_knowledge_core::{
-    embedding::{EmbeddingError, EmbeddingMetadata},
+    embedding::{self, EmbeddingError, EmbeddingMetadata, EmbeddingProvider},
     indexed::{IndexedChunk, SchemaVersion},
     source::{
         ExpandedSource, SourceExpandQuery, SourceExpansion, SourceExpansionError,
@@ -119,6 +120,14 @@ impl EmbeddedChunk {
     pub fn new(chunk: IndexedChunk, vector: Vec<f32>) -> Self {
         Self { chunk, vector }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChunkDiffMetrics {
+    pub added: usize,
+    pub changed: usize,
+    pub skipped: usize,
+    pub removed: usize,
 }
 
 /// Production chunk storage. LanceDB remains an adapter detail: callers pass
@@ -239,6 +248,119 @@ impl LanceChunkTable {
             )))
             .await?;
         Ok(())
+    }
+
+    /// Reconcile one complete page snapshot against persisted chunks.
+    ///
+    /// Unchanged content hashes reuse their existing vectors while still
+    /// refreshing citation metadata. Changed/new chunks are embedded once in a
+    /// single provider batch. The final merge deletes target-page rows absent
+    /// from the incoming snapshot, so retries converge to the same state.
+    pub async fn apply_page_diff(
+        &self,
+        provider: &dyn EmbeddingProvider,
+        page_id: &str,
+        chunks: &[IndexedChunk],
+    ) -> Result<ChunkDiffMetrics, ChunkTableError> {
+        self.embedding.ensure_compatible(provider.metadata())?;
+        validate_page_snapshot(page_id, chunks)?;
+
+        let page_predicate = format!("page_id = {}", sql_string(page_id));
+        let existing = self.rows_matching(page_predicate.clone()).await?;
+        let mut existing_by_id = HashMap::with_capacity(existing.len());
+        for row in existing {
+            let chunk_id = row.chunk_id.clone();
+            if existing_by_id.insert(chunk_id.clone(), row).is_some() {
+                return Err(ChunkTableError::InvalidRows(format!(
+                    "persisted page contains duplicate chunk_id: {chunk_id}"
+                )));
+            }
+        }
+
+        let incoming_ids: HashSet<&str> =
+            chunks.iter().map(|chunk| chunk.chunk_id.as_str()).collect();
+        let mut metrics = ChunkDiffMetrics {
+            removed: existing_by_id
+                .keys()
+                .filter(|chunk_id| !incoming_ids.contains(chunk_id.as_str()))
+                .count(),
+            ..ChunkDiffMetrics::default()
+        };
+        let mut embed_positions = Vec::new();
+        let mut embed_inputs = Vec::new();
+
+        for (position, chunk) in chunks.iter().enumerate() {
+            match existing_by_id.get(&chunk.chunk_id) {
+                Some(stored) if stored.content_hash == chunk.content_hash => {
+                    metrics.skipped += 1;
+                }
+                Some(_) => {
+                    metrics.changed += 1;
+                    embed_positions.push(position);
+                    embed_inputs.push(chunk.text.clone());
+                }
+                None => {
+                    metrics.added += 1;
+                    embed_positions.push(position);
+                    embed_inputs.push(chunk.text.clone());
+                }
+            }
+        }
+
+        // Finish all fallible embedding work before mutating the table.
+        let fresh_vectors = embedding::embed_batch(provider, &embed_inputs).await?;
+
+        if chunks.is_empty() {
+            if metrics.removed != 0 {
+                self.table.delete((&page_predicate).into()).await?;
+            }
+            return Ok(metrics);
+        }
+
+        let mut fresh_by_position = embed_positions
+            .into_iter()
+            .zip(fresh_vectors)
+            .collect::<HashMap<_, _>>();
+        let mut rows = Vec::with_capacity(chunks.len());
+        for (position, chunk) in chunks.iter().enumerate() {
+            let vector = if let Some(vector) = fresh_by_position.remove(&position) {
+                vector
+            } else {
+                existing_by_id
+                    .get(&chunk.chunk_id)
+                    .filter(|stored| stored.content_hash == chunk.content_hash)
+                    .map(|stored| stored.vector.clone())
+                    .ok_or_else(|| {
+                        ChunkTableError::InvalidRows(format!(
+                            "missing reusable vector for unchanged chunk {}",
+                            chunk.chunk_id
+                        ))
+                    })?
+            };
+            rows.push(EmbeddedChunk::new(chunk.clone(), vector));
+        }
+        if !fresh_by_position.is_empty() {
+            return Err(ChunkTableError::InvalidRows(
+                "embedding result could not be reconciled with page snapshot".into(),
+            ));
+        }
+
+        validate_rows(&rows, self.embedding.dimension())?;
+        let batch = rows_to_batch(&rows, &self.embedding)?;
+        let schema = batch.schema();
+        let mut merge = self.table.merge_insert(&["chunk_id"]);
+        merge
+            .when_matched_update_all(None)
+            .when_not_matched_insert_all()
+            .when_not_matched_by_source_delete(Some(page_predicate));
+        merge
+            .execute(Box::new(RecordBatchIterator::new(
+                vec![Ok(batch)].into_iter(),
+                schema,
+            )))
+            .await?;
+
+        Ok(metrics)
     }
 
     async fn rows_matching(&self, predicate: String) -> Result<Vec<StoredChunk>, ChunkTableError> {
@@ -413,6 +535,8 @@ struct StoredChunk {
     heading_path: Vec<String>,
     root_page_id: String,
     text: String,
+    content_hash: String,
+    vector: Vec<f32>,
 }
 
 fn sql_string(value: &str) -> String {
@@ -444,6 +568,35 @@ fn string_column<'a>(
         .ok_or_else(|| ChunkTableError::InvalidSchema(format!("missing UTF-8 column {name}")))
 }
 
+fn vector_column<'a>(
+    batch: &'a RecordBatch,
+    name: &str,
+) -> Result<&'a FixedSizeListArray, ChunkTableError> {
+    batch
+        .column_by_name(name)
+        .and_then(|column| column.as_any().downcast_ref::<FixedSizeListArray>())
+        .ok_or_else(|| ChunkTableError::InvalidSchema(format!("missing vector column {name}")))
+}
+
+fn decode_vector(column: &FixedSizeListArray, row: usize) -> Result<Vec<f32>, ChunkTableError> {
+    if column.is_null(row) {
+        return Err(ChunkTableError::InvalidRows(
+            "persisted vector must not be null".into(),
+        ));
+    }
+    let values = column.value(row);
+    let values = values
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .ok_or_else(|| ChunkTableError::InvalidSchema("vector values must be float32".into()))?;
+    if values.null_count() != 0 || values.iter().flatten().any(|value| !value.is_finite()) {
+        return Err(ChunkTableError::InvalidRows(
+            "persisted vector contains null or non-finite values".into(),
+        ));
+    }
+    Ok(values.values().to_vec())
+}
+
 fn decode_stored_chunks(batches: &[RecordBatch]) -> Result<Vec<StoredChunk>, ChunkTableError> {
     let mut rows = Vec::new();
     for batch in batches {
@@ -455,6 +608,8 @@ fn decode_stored_chunks(batches: &[RecordBatch]) -> Result<Vec<StoredChunk>, Chu
         let headings = string_column(batch, "heading_path_json")?;
         let roots = string_column(batch, "root_page_id")?;
         let texts = string_column(batch, "text")?;
+        let hashes = string_column(batch, "content_hash")?;
+        let vectors = vector_column(batch, "vector")?;
         for row in 0..batch.num_rows() {
             rows.push(StoredChunk {
                 chunk_id: chunk_ids.value(row).to_owned(),
@@ -465,6 +620,8 @@ fn decode_stored_chunks(batches: &[RecordBatch]) -> Result<Vec<StoredChunk>, Chu
                 heading_path: serde_json::from_str(headings.value(row))?,
                 root_page_id: roots.value(row).to_owned(),
                 text: texts.value(row).to_owned(),
+                content_hash: hashes.value(row).to_owned(),
+                vector: decode_vector(vectors, row)?,
             });
         }
     }
@@ -617,6 +774,35 @@ async fn validate_table_schema(
             ChunkTableError::InvalidSchema("invalid persisted embedding identity".into())
         })?;
     persisted_embedding.ensure_compatible(expected_embedding)?;
+    Ok(())
+}
+
+fn validate_page_snapshot(
+    page_id: &str,
+    chunks: &[IndexedChunk],
+) -> Result<(), ChunkTableError> {
+    if page_id.trim().is_empty() || page_id.chars().any(char::is_control) {
+        return Err(ChunkTableError::InvalidRows(
+            "page_id must be nonempty and contain no control characters".into(),
+        ));
+    }
+    let mut ids = HashSet::with_capacity(chunks.len());
+    for chunk in chunks {
+        if chunk.metadata.page_id != page_id {
+            return Err(ChunkTableError::InvalidRows(format!(
+                "chunk {} belongs to a different page",
+                chunk.chunk_id
+            )));
+        }
+        if chunk.chunk_id.trim().is_empty()
+            || chunk.content_hash.trim().is_empty()
+            || !ids.insert(chunk.chunk_id.as_str())
+        {
+            return Err(ChunkTableError::InvalidRows(
+                "page snapshot requires unique nonempty chunk IDs and content hashes".into(),
+            ));
+        }
+    }
     Ok(())
 }
 
