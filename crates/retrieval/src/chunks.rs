@@ -11,10 +11,12 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use futures::TryStreamExt;
-use lance_index::scalar::FullTextSearchQuery;
 use lancedb::{
     Table,
-    index::{Index, scalar::FtsIndexBuilder},
+    index::{
+        Index,
+        scalar::{FtsIndexBuilder, FullTextSearchQuery},
+    },
     query::{ExecutableQuery, QueryBase, Select},
     table::{OptimizeOptions, optimize::OptimizeAction},
 };
