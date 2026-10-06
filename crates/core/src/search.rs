@@ -1,4 +1,4 @@
-//! Provider-independent semantic retrieval port. Indexed scope is adapter-owned.
+//! Provider-independent search ports. Indexed scope is adapter-owned.
 use serde::Serialize;
 use std::{future::Future, pin::Pin};
 
