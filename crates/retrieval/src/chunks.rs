@@ -287,11 +287,11 @@ impl LanceChunkTable {
             return Err(SourceExpansionError::Unavailable);
         }
 
-        let heading_path = match source_ref {
+        let heading_path = match &source_ref {
             StableSourceRef::Page(_) => Vec::new(),
             StableSourceRef::Chunk(_) => first.heading_path.clone(),
         };
-        let block_id = match source_ref {
+        let block_id = match &source_ref {
             StableSourceRef::Page(_) => None,
             StableSourceRef::Chunk(_) => first.block_id.clone(),
         };
@@ -348,7 +348,7 @@ struct StoredChunk {
 }
 
 fn sql_string(value: &str) -> String {
-    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn reference_predicate(source_ref: &StableSourceRef) -> String {
@@ -898,5 +898,128 @@ mod tests {
 
         drop(table);
         std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+
+    #[tokio::test]
+    async fn source_expansion_returns_scoped_section_and_page_content_with_provenance() {
+        let path = temp_database("source-expansion");
+        let table = LanceChunkTable::create(&path, "chunks", embedding("revision-1", 3))
+            .await
+            .expect("create table");
+
+        let mut first = chunk("root-a", "Page", "first section part");
+        first.chunk_id = "chunk-a".into();
+        let mut second = chunk("root-a", "Page", "second section part");
+        second.chunk_id = "chunk-b".into();
+        let mut other_section = chunk("root-a", "Page", "other section");
+        other_section.chunk_id = "chunk-c".into();
+        other_section.metadata.heading_path = vec!["Other".into()];
+        let mut other_root = chunk("root-b", "Other root", "secret other root");
+        other_root.chunk_id = "chunk-d".into();
+        other_root.metadata.page_id = "page-2".into();
+        other_root.metadata.url = "https://example.invalid/page-2".into();
+
+        table
+            .upsert(
+                table.embedding_metadata(),
+                &[
+                    EmbeddedChunk::new(first, vec![1.0, 0.0, 0.0]),
+                    EmbeddedChunk::new(second, vec![0.0, 1.0, 0.0]),
+                    EmbeddedChunk::new(other_section, vec![0.0, 0.0, 1.0]),
+                    EmbeddedChunk::new(other_root, vec![0.5, 0.5, 0.0]),
+                ],
+            )
+            .await
+            .expect("insert source fixtures");
+
+        let section = table
+            .expand(SourceExpandQuery {
+                refs: vec![StableSourceRef::Chunk("chunk-a".into())],
+                max_chars: 256,
+                root_page_ids: vec!["root-a".into()],
+            })
+            .await
+            .expect("expand section");
+        assert_eq!(section.len(), 1);
+        assert_eq!(section[0].provenance.page_id, "page-1");
+        assert_eq!(section[0].provenance.root_page_id, "root-a");
+        assert_eq!(section[0].provenance.heading_path, vec!["Section"]);
+        assert_eq!(
+            section[0].provenance.chunk_ids,
+            vec!["chunk-a".to_owned(), "chunk-b".to_owned()]
+        );
+        assert!(section[0].text.contains("first section part"));
+        assert!(section[0].text.contains("second section part"));
+        assert!(!section[0].text.contains("other section"));
+        assert!(!section[0].text.contains("secret other root"));
+        assert!(!section[0].truncated);
+
+        let page = table
+            .expand(SourceExpandQuery {
+                refs: vec![StableSourceRef::Page("page-1".into())],
+                max_chars: 32,
+                root_page_ids: vec!["root-a".into()],
+            })
+            .await
+            .expect("expand page");
+        assert_eq!(page[0].provenance.page_id, "page-1");
+        assert_eq!(page[0].provenance.heading_path, Vec::<String>::new());
+        assert!(page[0].text.chars().count() <= 32);
+        assert!(page[0].truncated);
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn source_expansion_distinguishes_missing_from_out_of_scope_without_returning_content() {
+        let path = temp_database("source-scope");
+        let table = LanceChunkTable::create(&path, "chunks", embedding("revision-1", 3))
+            .await
+            .expect("create table");
+        let mut outside = chunk("root-b", "Outside", "outside");
+        outside.chunk_id = "outside-chunk".into();
+        outside.metadata.page_id = "outside-page".into();
+        table
+            .upsert(
+                table.embedding_metadata(),
+                &[EmbeddedChunk::new(outside, vec![1.0, 0.0, 0.0])],
+            )
+            .await
+            .expect("insert outside fixture");
+
+        assert_eq!(
+            table
+                .expand(SourceExpandQuery {
+                    refs: vec![StableSourceRef::Chunk("missing".into())],
+                    max_chars: 128,
+                    root_page_ids: vec!["root-a".into()],
+                })
+                .await,
+            Err(SourceExpansionError::Missing)
+        );
+        assert_eq!(
+            table
+                .expand(SourceExpandQuery {
+                    refs: vec![StableSourceRef::Chunk("outside-chunk".into())],
+                    max_chars: 128,
+                    root_page_ids: vec!["root-a".into()],
+                })
+                .await,
+            Err(SourceExpansionError::OutOfScope)
+        );
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[test]
+    fn source_predicates_quote_untrusted_ids() {
+        assert_eq!(sql_string("a'b"), "'a''b'");
+        assert_eq!(
+            reference_predicate(&StableSourceRef::Page("a' OR 1=1 --".into())),
+            "page_id = 'a'' OR 1=1 --'"
+        );
     }
 }
