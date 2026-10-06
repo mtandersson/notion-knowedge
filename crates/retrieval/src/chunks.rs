@@ -1607,6 +1607,244 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lexical_search_ranks_exact_names_and_preserves_provenance() {
+        let path = temp_database("lexical-ranking");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+
+        let rows = vec![
+            EmbeddedChunk::new(
+                fts_chunk(
+                    "page-title",
+                    "chunk-title",
+                    "Projekt Aurora",
+                    "Ordinary body text.",
+                ),
+                vec![1.0, 0.0, 0.0],
+            ),
+            EmbeddedChunk::new(
+                fts_chunk(
+                    "page-body",
+                    "chunk-body",
+                    "Other page",
+                    "Aurora appears only in this body.",
+                ),
+                vec![0.0, 1.0, 0.0],
+            ),
+            EmbeddedChunk::new(
+                fts_chunk(
+                    "page-id",
+                    "nk-chunk-v1:aurora",
+                    "Identifier page",
+                    "No lexical name in the body.",
+                ),
+                vec![0.0, 0.0, 1.0],
+            ),
+        ];
+        table.upsert(&metadata, &rows).await.expect("seed lexical rows");
+        table
+            .optimize_fts_index()
+            .await
+            .expect("optimize lexical indices");
+
+        let name_hits = LexicalSearch::search(
+            &table,
+            LexicalQuery {
+                query: "Aurora".into(),
+                limit: 10,
+                page_ids: None,
+                root_page_ids: None,
+            },
+        )
+        .await
+        .expect("search name");
+        assert_eq!(name_hits.len(), 2);
+        assert_eq!(name_hits[0].source.chunk_id, "chunk-title");
+        assert_eq!(name_hits[0].source.title, "Projekt Aurora");
+        assert_eq!(
+            name_hits[0].source.url,
+            "https://example.invalid/page-title"
+        );
+        assert_eq!(name_hits[0].source.heading_path, vec!["Section"]);
+        assert_eq!(name_hits[0].source.block_id.as_deref(), Some("block-1"));
+        assert!(name_hits[0].score > name_hits[1].score);
+
+        let id_hits = LexicalSearch::search(
+            &table,
+            LexicalQuery {
+                query: "nk-chunk-v1:aurora".into(),
+                limit: 10,
+                page_ids: None,
+                root_page_ids: None,
+            },
+        )
+        .await
+        .expect("search exact chunk id");
+        assert_eq!(id_hits.len(), 1);
+        assert_eq!(id_hits[0].source.page_id, "page-id");
+        assert_eq!(id_hits[0].source.chunk_id, "nk-chunk-v1:aurora");
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn lexical_search_applies_combined_metadata_filters_with_escaped_ids() {
+        let path = temp_database("lexical-filters");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+
+        let mut quoted = fts_chunk(
+            "page-'one",
+            "chunk-one",
+            "Quoted identifiers",
+            "needle appears here",
+        );
+        quoted.metadata.source.root_page_id = "root-'alpha".into();
+
+        let mut other = fts_chunk(
+            "page-two",
+            "chunk-two",
+            "Other root",
+            "needle appears here too",
+        );
+        other.metadata.source.root_page_id = "root-beta".into();
+
+        table
+            .upsert(
+                &metadata,
+                &[
+                    EmbeddedChunk::new(quoted, vec![1.0, 0.0, 0.0]),
+                    EmbeddedChunk::new(other, vec![0.0, 1.0, 0.0]),
+                ],
+            )
+            .await
+            .expect("seed filtered rows");
+        table
+            .optimize_fts_index()
+            .await
+            .expect("optimize lexical indices");
+
+        let query = LexicalQuery {
+            query: "needle".into(),
+            limit: 10,
+            page_ids: Some(vec!["page-'one".into()]),
+            root_page_ids: Some(vec!["root-'alpha".into()]),
+        };
+        assert_eq!(
+            lexical_filter_predicate(&query).expect("filter predicate"),
+            Some(
+                "(page_id = 'page-''one') AND (root_page_id = 'root-''alpha')".into()
+            )
+        );
+
+        let hits = LexicalSearch::search(&table, query)
+            .await
+            .expect("filtered lexical search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source.page_id, "page-'one");
+        assert_eq!(hits[0].source.chunk_id, "chunk-one");
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn lexical_search_supports_phrases_and_bounds_returned_text() {
+        let path = temp_database("lexical-phrases");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+
+        let long_tail = "x".repeat(2200);
+        let rows = vec![
+            EmbeddedChunk::new(
+                fts_chunk(
+                    "phrase-page",
+                    "phrase-chunk",
+                    "Phrase fixture",
+                    &format!("charging telemetry {long_tail}"),
+                ),
+                vec![1.0, 0.0, 0.0],
+            ),
+            EmbeddedChunk::new(
+                fts_chunk(
+                    "reversed-page",
+                    "reversed-chunk",
+                    "Reversed fixture",
+                    "telemetry noise charging",
+                ),
+                vec![0.0, 1.0, 0.0],
+            ),
+        ];
+        table.upsert(&metadata, &rows).await.expect("seed phrase rows");
+        table
+            .optimize_fts_index()
+            .await
+            .expect("optimize phrase indices");
+
+        let hits = LexicalSearch::search(
+            &table,
+            LexicalQuery {
+                query: "\"charging telemetry\"".into(),
+                limit: 10,
+                page_ids: None,
+                root_page_ids: None,
+            },
+        )
+        .await
+        .expect("phrase search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source.chunk_id, "phrase-chunk");
+        assert_eq!(hits[0].text.chars().count(), 2000);
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn lexical_search_rejects_invalid_direct_port_arguments() {
+        let path = temp_database("lexical-validation");
+        let table = LanceChunkTable::create(&path, "chunks", embedding("revision-1", 3))
+            .await
+            .expect("create table");
+
+        for query in [
+            LexicalQuery {
+                query: " ".into(),
+                limit: 1,
+                page_ids: None,
+                root_page_ids: None,
+            },
+            LexicalQuery {
+                query: "valid".into(),
+                limit: 0,
+                page_ids: None,
+                root_page_ids: None,
+            },
+            LexicalQuery {
+                query: "valid".into(),
+                limit: 1,
+                page_ids: Some(vec![]),
+                root_page_ids: None,
+            },
+        ] {
+            assert!(
+                LexicalSearch::search(&table, query).await.is_err(),
+                "invalid direct port input must fail closed"
+            );
+        }
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
     async fn optimizing_fts_after_page_diff_makes_updated_terms_searchable() {
         let path = temp_database("fts-update");
         let metadata = embedding("revision-1", 3);
