@@ -903,14 +903,17 @@ mod tests {
         drop(table);
 
         let replacement = embedding("revision-2", 3);
-        let error = LanceChunkTable::open_with_policy(
+        let error = match LanceChunkTable::open_with_policy(
             &path,
             "chunks",
             replacement.clone(),
             IndexCompatibilityPolicy::Fail,
         )
         .await
-        .expect_err("default policy must reject incompatible vector identity");
+        {
+            Ok(_) => panic!("default policy must reject incompatible vector identity"),
+            Err(error) => error,
+        };
         assert!(error.is_incompatible_index());
 
         let preserved = LanceChunkTable::open(&path, "chunks", original.clone())
@@ -971,14 +974,17 @@ mod tests {
             .await
             .expect("create incompatible table");
 
-        let error = LanceChunkTable::open_with_policy(
+        let error = match LanceChunkTable::open_with_policy(
             &path,
             "chunks",
             metadata.clone(),
             IndexCompatibilityPolicy::Fail,
         )
         .await
-        .expect_err("unsupported schema version must fail closed");
+        {
+            Ok(_) => panic!("unsupported schema version must fail closed"),
+            Err(error) => error,
+        };
         assert!(matches!(error, ChunkTableError::InvalidSchema(_)));
 
         let (rebuilt, action) = LanceChunkTable::open_with_policy(
@@ -993,14 +999,17 @@ mod tests {
         assert_eq!(rebuilt.count_rows().await.expect("empty rebuilt table"), 0);
         drop(rebuilt);
 
-        let missing = LanceChunkTable::open_with_policy(
+        let missing = match LanceChunkTable::open_with_policy(
             path.join("missing-database"),
             "missing-table",
             embedding("revision-1", 3),
             IndexCompatibilityPolicy::Rebuild,
         )
         .await
-        .expect_err("storage/missing-table errors must not be converted into rebuilds");
+        {
+            Ok(_) => panic!("storage errors must not be converted into rebuilds"),
+            Err(error) => error,
+        };
         assert!(!missing.is_incompatible_index());
 
         std::fs::remove_dir_all(path).expect("remove temporary database");
