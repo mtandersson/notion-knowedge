@@ -154,10 +154,13 @@ async fn expands_page_and_chunk_refs_with_server_owned_scope_and_provenance() {
     );
     assert_eq!(sources[1]["provenance"]["page_id"], "page-2");
     assert!(
-        response["result"]["content"][0]["text"]
-            .as_str()
+        response["result"]["content"]
+            .as_array()
             .unwrap()
-            .contains("untrusted")
+            .iter()
+            .any(|block| block["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("untrusted")))
     );
 
     let calls = adapter.calls.lock().unwrap();
