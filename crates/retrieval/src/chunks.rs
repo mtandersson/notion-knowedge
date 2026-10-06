@@ -196,7 +196,11 @@ impl LanceChunkTable {
             .await?;
         validate_table_schema(&table, &embedding).await?;
         let result = Self { table, embedding };
-        result.ensure_fts_index(&FtsIndexConfig::default()).await?;
+        if let Err(error) = result.ensure_fts_index(&FtsIndexConfig::default()).await {
+            drop(result);
+            database.drop_table(table_name, &[]).await?;
+            return Err(error);
+        }
         Ok(result)
     }
 
@@ -243,7 +247,7 @@ impl LanceChunkTable {
                 let result = Self { table, embedding };
                 result.ensure_fts_index(&FtsIndexConfig::default()).await?;
                 Ok((result, IndexStartupAction::Opened))
-            },
+            }
             Err(error)
                 if policy == IndexCompatibilityPolicy::Rebuild && error.is_incompatible_index() =>
             {
@@ -269,7 +273,6 @@ impl LanceChunkTable {
     pub async fn count_rows(&self) -> Result<usize, ChunkTableError> {
         Ok(self.table.count_rows(None).await?)
     }
-
 
     /// Ensure the production BM25/FTS indices exist without rebuilding them on
     /// every startup. Native Lance FTS is one-column-per-index, so title, text
@@ -1272,7 +1275,6 @@ mod tests {
         value
     }
 
-
     fn fts_chunk(page_id: &str, chunk_id: &str, title: &str, text: &str) -> IndexedChunk {
         let mut value = chunk("root", title, text);
         value.chunk_id = chunk_id.into();
@@ -1406,9 +1408,9 @@ mod tests {
             .expect("index inserted rows");
 
         let swedish = table
-            .fts_query("text", "laddning", 10)
+            .fts_query("text", "bilar", 10)
             .await
-            .expect("Swedish text query");
+            .expect("Swedish stemming query");
         assert_eq!(swedish.len(), 1);
         assert_eq!(swedish[0].chunk_id, "nk-chunk-v1:4821abcdef");
         assert!(swedish[0].score.is_finite());
