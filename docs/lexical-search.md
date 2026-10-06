@@ -48,7 +48,7 @@ Queries are deterministic for equal scores using page ID and chunk ID as tie-bre
 
 ## Phrase and multilingual behavior
 
-Quoted phrases are passed through to LanceDB's full-text query parser. Tests cover a quoted English phrase, Swedish stemming, exact identifiers, title/name lookup and English keyword matching.
+Quoted whole-query phrases are passed through to LanceDB for candidate generation and then post-filtered to a contiguous case-insensitive match in the field that produced the candidate. This compensates for backend query parsing that may otherwise return documents containing the same terms non-contiguously. Stable-ID phrase candidates require exact equality. Tests cover a quoted English phrase, Swedish stemming, exact identifiers, title/name lookup and English keyword matching.
 
 The current text tokenizer is Swedish-first. English terms still tokenize, but English-specific stemming/stop-word rules are not enabled simultaneously. That trade-off is documented in [fts-index.md](fts-index.md).
 
