@@ -969,6 +969,27 @@ mod tests {
         assert!(page[0].text.chars().count() <= 32);
         assert!(page[0].truncated);
 
+        let bounded_many = table
+            .expand(SourceExpandQuery {
+                refs: vec![
+                    StableSourceRef::Chunk("chunk-a".into()),
+                    StableSourceRef::Page("page-1".into()),
+                ],
+                max_chars: 20,
+                root_page_ids: vec!["root-a".into()],
+            })
+            .await
+            .expect("expand multiple refs under one budget");
+        assert_eq!(bounded_many.len(), 2);
+        assert!(
+            bounded_many
+                .iter()
+                .map(|source| source.text.chars().count())
+                .sum::<usize>()
+                <= 20
+        );
+        assert!(bounded_many.iter().any(|source| source.truncated));
+
         drop(table);
         std::fs::remove_dir_all(path).expect("remove temporary database");
     }
