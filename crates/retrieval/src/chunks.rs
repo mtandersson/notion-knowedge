@@ -14,7 +14,7 @@ use futures::TryStreamExt;
 use lancedb::{
     Table,
     index::{
-        Index,
+        Index, IndexType,
         scalar::{FtsIndexBuilder, FullTextSearchQuery},
     },
     query::{ExecutableQuery, QueryBase, Select},
@@ -280,7 +280,14 @@ impl LanceChunkTable {
     ) -> Result<(), ChunkTableError> {
         let existing = self.table.list_indices().await?;
         for (index_name, column) in CHUNK_FTS_INDEXES {
-            if existing.iter().any(|index| index.name == index_name) {
+            if let Some(index) = existing.iter().find(|index| index.name == index_name) {
+                if index.index_type != IndexType::FTS
+                    || index.columns != vec![column.to_string()]
+                {
+                    return Err(ChunkTableError::InvalidSchema(format!(
+                        "FTS index {index_name} does not match column {column}"
+                    )));
+                }
                 continue;
             }
             self.create_fts_index(index_name, column, config, false)
