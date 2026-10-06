@@ -31,11 +31,7 @@ impl SourceExpansion for Fixture {
                 _ => {}
             }
 
-            let root_page_id = query
-                .root_page_ids
-                .first()
-                .cloned()
-                .unwrap_or_default();
+            let root_page_id = query.root_page_ids.first().cloned().unwrap_or_default();
             let mut sources: Vec<_> = query
                 .refs
                 .iter()
@@ -249,8 +245,5 @@ fn source_expansion_requires_explicit_nonempty_root_scope() {
         behavior: Behavior::Valid,
     });
     assert!(KnowledgeServer::with_source_expansion(adapter.clone(), vec![]).is_err());
-    assert!(
-        KnowledgeServer::with_source_expansion(adapter, vec![" ".into()])
-            .is_err()
-    );
+    assert!(KnowledgeServer::with_source_expansion(adapter, vec![" ".into()]).is_err());
 }
