@@ -348,7 +348,7 @@ impl LanceChunkTable {
         validate_rows(&rows, self.embedding.dimension())?;
         let batch = rows_to_batch(&rows, &self.embedding)?;
         let schema = batch.schema();
-        let mut merge = self.table.merge_insert(&["chunk_id"]);
+        let mut merge = self.table.merge_insert(&["page_id", "chunk_id"]);
         merge
             .when_matched_update_all(None)
             .when_not_matched_insert_all()
@@ -777,10 +777,7 @@ async fn validate_table_schema(
     Ok(())
 }
 
-fn validate_page_snapshot(
-    page_id: &str,
-    chunks: &[IndexedChunk],
-) -> Result<(), ChunkTableError> {
+fn validate_page_snapshot(page_id: &str, chunks: &[IndexedChunk]) -> Result<(), ChunkTableError> {
     if page_id.trim().is_empty() || page_id.chars().any(char::is_control) {
         return Err(ChunkTableError::InvalidRows(
             "page_id must be nonempty and contain no control characters".into(),
@@ -1008,7 +1005,6 @@ mod tests {
             std::process::id()
         ))
     }
-
 
     struct CountingProvider {
         metadata: EmbeddingMetadata,
@@ -1455,8 +1451,7 @@ mod tests {
 
         let mut unchanged_with_new_metadata = page_chunk("chunk-a", "alpha");
         unchanged_with_new_metadata.metadata.title = "Updated page title".into();
-        unchanged_with_new_metadata.metadata.last_edited_time =
-            "2026-10-06T18:00:00Z".into();
+        unchanged_with_new_metadata.metadata.last_edited_time = "2026-10-06T18:00:00Z".into();
         let changed = page_chunk("chunk-b", "bravo changed");
         let added = page_chunk("chunk-d", "delta");
         let second = vec![unchanged_with_new_metadata, changed, added];
@@ -1567,6 +1562,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn page_diff_cannot_update_or_delete_same_chunk_id_on_another_page() {
+        let path = temp_database("page-isolation");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+        let provider = CountingProvider::new(metadata);
+
+        let page_one = page_chunk("shared-id", "page one");
+        table
+            .apply_page_diff(&provider, "page-1", &[page_one])
+            .await
+            .expect("seed page one");
+
+        let mut page_two = page_chunk("shared-id", "page two");
+        page_two.metadata.page_id = "page-2".into();
+        page_two.metadata.url = "https://example.invalid/page-2".into();
+        table
+            .apply_page_diff(&provider, "page-2", &[page_two])
+            .await
+            .expect("seed page two");
+
+        let mut page_one_changed = page_chunk("shared-id", "page one changed");
+        page_one_changed.metadata.title = "Changed page one".into();
+        assert_eq!(
+            table
+                .apply_page_diff(&provider, "page-1", &[page_one_changed])
+                .await
+                .expect("update page one"),
+            ChunkDiffMetrics {
+                added: 0,
+                changed: 1,
+                skipped: 0,
+                removed: 0,
+            }
+        );
+
+        let page_one_rows = table
+            .rows_matching("page_id = 'page-1'".into())
+            .await
+            .expect("read page one");
+        let page_two_rows = table
+            .rows_matching("page_id = 'page-2'".into())
+            .await
+            .expect("read page two");
+        assert_eq!(page_one_rows.len(), 1);
+        assert_eq!(page_two_rows.len(), 1);
+        assert_eq!(page_one_rows[0].text, "page one changed");
+        assert_eq!(page_two_rows[0].text, "page two");
+
+        table
+            .apply_page_diff(&provider, "page-1", &[])
+            .await
+            .expect("remove page one");
+        assert!(
+            table
+                .rows_matching("page_id = 'page-1'".into())
+                .await
+                .expect("query deleted page")
+                .is_empty()
+        );
+        assert_eq!(
+            table
+                .rows_matching("page_id = 'page-2'".into())
+                .await
+                .expect("query preserved page")
+                .len(),
+            1
+        );
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
     async fn embedding_failure_leaves_the_existing_page_generation_unchanged() {
         let path = temp_database("page-diff-failure");
         let metadata = embedding("revision-1", 3);
@@ -1610,10 +1680,7 @@ mod tests {
             .expect("create table");
         let provider = CountingProvider::new(metadata);
 
-        let duplicate = vec![
-            page_chunk("same-id", "one"),
-            page_chunk("same-id", "two"),
-        ];
+        let duplicate = vec![page_chunk("same-id", "one"), page_chunk("same-id", "two")];
         assert!(matches!(
             table.apply_page_diff(&provider, "page-1", &duplicate).await,
             Err(ChunkTableError::InvalidRows(_))
