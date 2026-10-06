@@ -166,7 +166,7 @@ async fn expands_page_and_chunk_refs_with_server_owned_scope_and_provenance() {
 
     let calls = adapter.calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].root_page_ids, vec!["root-1"]);
+    assert_eq!(calls[0].root_page_ids, vec!["root-1".to_owned()]);
     assert_eq!(calls[0].max_chars, 256);
     assert_eq!(calls[0].refs.len(), 2);
 }
