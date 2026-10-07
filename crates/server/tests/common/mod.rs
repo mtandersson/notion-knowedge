@@ -13,6 +13,34 @@ pub fn assert_search_catalog(tools: &Value) {
         .expect("knowledge_get tool");
     assert_eq!(get["inputSchema"]["required"], json!(["refs", "max_chars"]));
     assert_eq!(get["annotations"]["readOnlyHint"], true);
+    assert_eq!(get["annotations"]["openWorldHint"], true);
+    assert_eq!(
+        get["inputSchema"]["properties"]["freshness"]["enum"],
+        json!(["indexed", "fresh"])
+    );
+    assert_eq!(
+        get["inputSchema"]["properties"]["freshness"]["default"],
+        "indexed"
+    );
+    let source = &get["outputSchema"]["properties"]["sources"]["items"];
+    assert_eq!(
+        source["properties"]["content_scope"]["enum"],
+        json!(["indexed", "page"])
+    );
+    assert!(
+        source["properties"]["provenance"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("indexed_last_edited_time"))
+    );
+    assert_eq!(
+        source["properties"]["provenance"]["properties"]["refreshed_last_edited_time"]["type"],
+        "string"
+    );
+    assert_eq!(
+        source["properties"]["provenance"]["properties"]["index_stale"]["type"],
+        "boolean"
+    );
     assert!(tool["description"].as_str().unwrap().contains("semantic"));
     assert_eq!(tool["annotations"]["readOnlyHint"], true);
     let input = &tool["inputSchema"];

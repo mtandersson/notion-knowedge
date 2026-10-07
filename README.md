@@ -72,6 +72,11 @@ and cancels active sessions. Both transports share the [semantic search contract
 valid search calls in the default bootstrap return an explicit retrieval-unavailable tool error. The isolated [semantic MCP spike](docs/semantic-mcp-spike.md) explicitly configures real local semantic retrieval through this same handler and transport wiring.
 Calls to unknown tools return protocol errors.
 
+`knowledge_get` optionally verifies authoritative content with `freshness: "fresh"`,
+using a configured read-only Notion backend after authorizing indexed references.
+It distinguishes indexed and refreshed edit timestamps without updating the index.
+See [fresh-source verification](docs/fresh-source.md).
+
 The HTTP listener validates Host against loopback names and the configured IP,
 and validates browser Origin against the configured HTTP authority or localhost
 at the configured port. Clients without Origin are accepted. For remote access,
