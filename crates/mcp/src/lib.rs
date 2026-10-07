@@ -298,10 +298,25 @@ impl ServerHandler for KnowledgeServer {
                                     "notion_unavailable: no authoritative Notion backend is configured; no content was returned",
                                 ));
                             };
-                            if let Err(failure) =
-                                get::refresh(&mut sources, backend.as_ref(), max_chars).await
+                            if let Err(failure) = notion_knowledge_core::source::refresh_sources(
+                                &mut sources,
+                                backend.as_ref(),
+                                max_chars,
+                            )
+                            .await
                             {
-                                return Ok(error(failure));
+                                use notion_knowledge_core::source::FreshSourceError;
+                                return Ok(error(match failure {
+                                    FreshSourceError::Inaccessible => {
+                                        "source_not_accessible: authoritative source is inaccessible; no content was returned"
+                                    }
+                                    FreshSourceError::Unavailable => {
+                                        "notion_unavailable: authoritative Notion read failed; no content was returned"
+                                    }
+                                    FreshSourceError::Conflict => {
+                                        "notion_conflict: authoritative source changed during verification; no content was returned"
+                                    }
+                                }));
                             }
                         }
                         let output = serde_json::json!({"sources": sources});
