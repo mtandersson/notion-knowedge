@@ -61,32 +61,29 @@ pub trait HybridSearch: Send + Sync {
 
 /// Redact URL-bearing tokens before taking a Unicode prefix. Link targets are
 /// unnecessary in snippets: the stable page citation is provided separately.
-/// Ordinary public links remain; recognizable credential-bearing targets are
-/// removed in full, including their path, before truncation.
+/// All URL targets are omitted, including public links: signatures can live in
+/// paths as well as query parameters, so a provider denylist cannot guarantee
+/// safety. Markdown labels and stable source citations remain available.
 pub fn snippet(text: &str, limit: usize) -> String {
     let mut output = String::new();
     for token in text.split_inclusive(char::is_whitespace) {
         let mut remaining = token;
-        while let Some(start) = remaining.to_ascii_lowercase().find("http") {
+        while let Some(start) = ["http://", "https://", "//"]
+            .iter()
+            .filter_map(|prefix| remaining.to_ascii_lowercase().find(prefix))
+            .min()
+        {
             output.push_str(&remaining[..start]);
             let end = remaining[start..]
                 .find(|c: char| c.is_whitespace() || matches!(c, ')' | ']' | '>' | '\'' | '"'))
                 .map_or(remaining.len(), |offset| start + offset);
-            let raw = &remaining[start..end];
-            let decoded = decode_percent(raw)
-                .to_ascii_lowercase()
-                .replace("&amp;", "&");
-            output.push_str(if signed_target(&decoded) {
-                "[link omitted]"
-            } else {
-                raw
-            });
+            output.push_str("[link omitted]");
             remaining = &remaining[end..];
         }
         let decoded = decode_percent(remaining)
             .to_ascii_lowercase()
             .replace("&amp;", "&");
-        if signed_target(&decoded) {
+        if decoded.contains("http:") || decoded.contains("https:") || decoded.contains("//") {
             output.push_str("[link omitted]");
             if remaining.ends_with(char::is_whitespace) {
                 output.push(' ');
@@ -120,36 +117,6 @@ fn decode_percent(value: &str) -> String {
     }
     String::from_utf8_lossy(&bytes).into_owned()
 }
-fn signed_target(token: &str) -> bool {
-    let suspicious = |key: &str| {
-        key.starts_with("x-amz-")
-            || key.starts_with("x-goog-")
-            || matches!(
-                key,
-                "signature"
-                    | "sig"
-                    | "awsaccesskeyid"
-                    | "googleaccessid"
-                    | "token"
-                    | "access_token"
-            )
-    };
-    if let Some(start) = token.find("http") {
-        let raw = token[start..].trim_end_matches([')', ']', '>', '\'', '"']);
-        if let Ok(url) = url::Url::parse(raw)
-            && url
-                .query_pairs()
-                .any(|(key, _)| suspicious(&key.to_ascii_lowercase()))
-        {
-            return true;
-        }
-    }
-    // Malformed or encoded suspicious URLs must not escape redaction.
-    token
-        .split(['?', '&', ';'])
-        .any(|part| suspicious(part.split('=').next().unwrap_or("")))
-}
-
 #[cfg(test)]
 mod snippet_tests {
     use super::snippet;
@@ -158,6 +125,8 @@ mod snippet_tests {
         for url in [
             "https://files.example/a?X-Amz-Signature=secret",
             "HTTPS://example/a?sig=secret",
+            "//files.example/a?sig=secret",
+            "https://res.cloudinary.com/demo/image/authenticated/s--secret--/sample",
             "https%3A%2F%2Fexample/a?signature=secret",
             "%48%54%54%50%53%3A%2F%2Fexample/a?%58%2D%41%4D%5A%2D%53%49%47%4E%41%54%55%52%45=secret",
         ] {
@@ -174,7 +143,7 @@ mod snippet_tests {
                 "[public](https://example/public)[file](https://files/a?sig=secret)",
                 2000
             ),
-            "[public](https://example/public)[file]([link omitted])"
+            "[public]([link omitted])[file]([link omitted])"
         );
         assert_eq!(
             snippet(
@@ -192,7 +161,7 @@ mod snippet_tests {
         assert_eq!(snippet("https://example/secret?sig=secret", 4), "[lin");
         assert_eq!(
             snippet("See https://example/public now", 2000),
-            "See https://example/public now"
+            "See [link omitted] now"
         );
     }
 }
