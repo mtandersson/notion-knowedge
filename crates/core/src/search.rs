@@ -168,6 +168,12 @@ mod snippet_tests {
             )
             .contains("secret")
         );
+        for links in [
+            "[a](https://files/a?sig=secret)[b](https%3A%2F%2Ffiles/b?sig=secret)",
+            "[a](https%3A%2F%2Ffiles/a?sig=secret)[b](https://files/b?sig=secret)[c](https%3A%2F%2Ffiles/c?sig=secret)",
+        ] {
+            assert!(!snippet(links, 2000).contains("secret"));
+        }
         let long = format!(
             "Before [file](https://example/{}?sig=secret) after",
             "x".repeat(3000)
