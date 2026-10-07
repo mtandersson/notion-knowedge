@@ -129,7 +129,8 @@ fn fuse(
                 std::collections::btree_map::Entry::Occupied(mut entry) => {
                     let (existing, score) = entry.get_mut();
                     // Conflicting snapshots cannot be presented as one trustworthy chunk.
-                    if existing.text != hit.text
+                    if existing.source.last_edited_time != hit.source.last_edited_time
+                        || existing.text != hit.text
                         || existing.source.url != hit.source.url
                         || existing.source.title != hit.source.title
                         || existing.source.heading_path != hit.source.heading_path
@@ -165,6 +166,7 @@ mod tests {
             score: 999.0,
             matched_paths: vec![],
             source: SearchSource {
+                last_edited_time: "2026-10-07T12:00:00Z".into(),
                 page_id: "page".into(),
                 chunk_id: id.into(),
                 url: "https://example.invalid/page".into(),
@@ -235,6 +237,17 @@ mod tests {
             fuse(
                 vec![hit("a")],
                 vec![conflicting],
+                ReciprocalRankFusion::default(),
+                1
+            )
+            .is_err()
+        );
+        let mut different_edit = hit("a");
+        different_edit.source.last_edited_time = "2026-10-07T13:00:00Z".into();
+        assert!(
+            fuse(
+                vec![hit("a")],
+                vec![different_edit],
                 ReciprocalRankFusion::default(),
                 1
             )

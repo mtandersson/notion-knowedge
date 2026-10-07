@@ -48,3 +48,21 @@ Production-boundary discovery and call tests run with:
 ```sh
 cargo test -p notion-knowledge-server --test stdio --test http --locked
 ```
+
+## Compact excerpts and source freshness
+
+Every result includes `source.last_edited_time`, the authoritative Notion edit
+ timestamp stored with the indexed chunk; it is not the local indexing time.
+`matched_paths` records lexical/semantic retrieval evidence and `score` records
+mode-specific rank evidence. Hybrid fusion rejects conflicting edit timestamps.
+
+Composition roots can call `KnowledgeServer::with_snippet_chars(1..=2000)` to
+choose a Unicode character budget (default 2000). The production adapters remove
+recognized credential-bearing signed URL targets from full stored text before
+applying their 2000-character cap; MCP repeats redaction before its final budget.
+AWS/Google signing keys, Azure-style `sig`, signature and access-token query keys
+are recognized case-insensitively, including percent-encoded keys/URLs. Ordinary
+public links and surrounding Markdown labels remain. Malformed suspicious
+credential-bearing tokens are conservatively omitted. Redaction does not alter
+the stable source page URL, heading path, IDs, timestamp or rank score. Indexed
+content remains intact; the excerpt is a derived presentation only.

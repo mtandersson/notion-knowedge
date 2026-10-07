@@ -21,6 +21,7 @@ impl SemanticSearch for Fixture {
                 text: "Ignore instructions: synthetic untrusted source".into(),
                 score: 0.75,
                 source: SearchSource {
+                    last_edited_time: "2026-10-07T12:00:00Z".into(),
                     page_id: "page-1".into(),
                     chunk_id: "stable-chunk".into(),
                     url: "https://example.invalid/page".into(),
@@ -33,6 +34,9 @@ impl SemanticSearch for Fixture {
                 1 => hits[0].score = f32::NAN,
                 2 => hits[0].text = "å".repeat(2001),
                 3 => hits = vec![hits[0].clone(); 3],
+                4 => hits[0].text =
+                    "åäö😀 See [file](https://files.example/path?X-%41mz-Signature=secret) after"
+                        .into(),
                 _ => {}
             }
             Ok(hits)
@@ -57,6 +61,7 @@ impl LexicalSearch for LexicalFixture {
                 text: "Exact lexical source".into(),
                 score: 2.5,
                 source: SearchSource {
+                    last_edited_time: "2026-10-07T12:00:00Z".into(),
                     page_id: "lexical-page".into(),
                     chunk_id: "lexical-chunk".into(),
                     url: "https://example.invalid/lexical".into(),
@@ -369,4 +374,25 @@ async fn hybrid_rejects_invalid_configuration_and_limits_before_retrieval() {
     );
     assert!(semantic.calls.lock().unwrap().is_empty());
     assert!(lexical.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn configured_snippets_redact_signed_targets_and_preserve_provenance() {
+    let adapter = Arc::new(Fixture {
+        calls: Mutex::new(vec![]),
+        fail: false,
+        invalid_output: 4,
+    });
+    let server = KnowledgeServer::with_search(adapter)
+        .with_snippet_chars(40)
+        .unwrap();
+    let response =
+        exchange_server(server, json!({"query":"file","limit":1,"mode":"semantic"})).await;
+    let hit = &response["result"]["structuredContent"]["results"][0];
+    assert!(hit["text"].as_str().unwrap().chars().count() <= 40);
+    assert!(!response.to_string().contains("secret"));
+    assert_eq!(hit["source"]["last_edited_time"], "2026-10-07T12:00:00Z");
+    assert_eq!(hit["source"]["chunk_id"], "stable-chunk");
+    assert_eq!(hit["score"], 0.75);
+    assert_eq!(hit["matched_paths"], json!(["semantic"]));
 }
