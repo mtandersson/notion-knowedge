@@ -432,6 +432,7 @@ impl LanceChunkTable {
         config: &VectorIndexConfig,
     ) -> Result<(), ChunkTableError> {
         Self::validate_vector_index_config(config)?;
+        self.validate_vector_index_layout().await?;
         if self.count_rows().await? == 0 {
             return Err(ChunkTableError::InvalidRows(
                 "cannot rebuild vector index on an empty chunk table".into(),
@@ -2018,6 +2019,58 @@ mod tests {
             .await
             .expect("query optimized index");
         assert_eq!(hits[0].chunk_id, "chunk-c");
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn reserved_vector_index_name_with_wrong_layout_fails_closed() {
+        let path = temp_database("vector-name-collision");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+        table
+            .upsert(
+                &metadata,
+                &[EmbeddedChunk::new(
+                    page_chunk("chunk-a", "one"),
+                    vec![1.0, 0.0, 0.0],
+                )],
+            )
+            .await
+            .expect("seed row");
+
+        let params = FtsIndexBuilder::default();
+        table
+            .table
+            .create_index(&["text"], Index::FTS(params))
+            .name(CHUNK_VECTOR_INDEX_NAME.to_string())
+            .execute()
+            .await
+            .expect("create conflicting reserved index");
+
+        let config = vector_config(VectorDistance::L2);
+        assert!(matches!(
+            table.ensure_vector_index(&config).await,
+            Err(ChunkTableError::InvalidSchema(_))
+        ));
+        assert!(matches!(
+            table.rebuild_vector_index(&config).await,
+            Err(ChunkTableError::InvalidSchema(_))
+        ));
+
+        let index = table
+            .table
+            .list_indices()
+            .await
+            .expect("list indices")
+            .into_iter()
+            .find(|index| index.name == CHUNK_VECTOR_INDEX_NAME)
+            .expect("conflicting index remains");
+        assert_eq!(index.index_type, IndexType::FTS);
+        assert_eq!(index.columns, vec!["text".to_string()]);
 
         drop(table);
         std::fs::remove_dir_all(path).expect("remove temporary database");
