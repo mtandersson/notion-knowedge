@@ -154,6 +154,7 @@ fn selected(query: &SemanticQuery, chunk: &IndexedChunk) -> bool {
 }
 fn hit(chunk: IndexedChunk, score: f32) -> SearchHit {
     SearchHit {
+        matched_paths: Vec::new(),
         text: chunk.text.chars().take(2000).collect(),
         score,
         source: SearchSource {

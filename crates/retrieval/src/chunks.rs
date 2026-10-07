@@ -295,6 +295,7 @@ impl LanceSemanticSearch {
             .await?
             .into_iter()
             .map(|hit| SearchHit {
+                matched_paths: Vec::new(),
                 text: bounded_text(&hit.text, 2000),
                 // Native distance is lower-is-better for every supported metric.
                 // Negation preserves ranking without claiming cross-metric calibration.
@@ -798,6 +799,7 @@ impl LanceChunkTable {
                 }
                 let key = (hit.page_id.clone(), hit.chunk_id.clone());
                 let candidate = SearchHit {
+                    matched_paths: Vec::new(),
                     text: bounded_text(&hit.text, 2000),
                     score,
                     source: SearchSource {
