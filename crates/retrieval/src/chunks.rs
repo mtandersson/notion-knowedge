@@ -288,11 +288,12 @@ impl LanceSemanticSearch {
             limit: query.limit,
             page_ids: query.page_ids,
             root_page_ids: query.root_page_ids,
+            metadata: query.metadata,
         };
-        let predicate = lexical_filter_predicate(&scope)?;
+        let snapshot = self.table.read_snapshot().await?;
+        let predicate = snapshot.metadata_predicate(&scope).await?;
         let vectors = embedding::embed_batch(self.provider.as_ref(), &[query.query]).await?;
-        let mut hits = self
-            .table
+        let mut hits = snapshot
             .vector_query_scoped(&vectors[0], query.limit, self.nprobes, predicate.as_deref())
             .await?
             .into_iter()
@@ -774,9 +775,67 @@ impl LanceChunkTable {
         decode_fts_hits(&batches)
     }
 
+    /// Independent immutable handle: scan and ranking observe the same index revision.
+    async fn read_snapshot(&self) -> Result<Self, ChunkTableError> {
+        Ok(Self {
+            table: self.table.checkout_current().await?,
+            embedding: self.embedding.clone(),
+        })
+    }
+
+    /// Scan only metadata within the scalar scope, then constrain retrieval before top-k.
+    /// No vectors or source text are materialized. Malformed cache metadata fails closed.
+    async fn metadata_predicate(
+        &self,
+        query: &LexicalQuery,
+    ) -> Result<Option<String>, ChunkTableError> {
+        let scalar = lexical_filter_predicate(query)?;
+        if query.metadata.edited.is_none() && query.metadata.properties.is_none() {
+            return Ok(scalar);
+        }
+        let mut scan = self.table.query().select(Select::Columns(vec![
+            "chunk_id".into(),
+            "last_edited_time".into(),
+            "properties_json".into(),
+        ]));
+        if let Some(predicate) = &scalar {
+            scan = scan.only_if(predicate);
+        }
+        let mut batches = scan.execute().await?;
+        let mut ids = Vec::new();
+        while let Some(batch) = batches.try_next().await? {
+            let chunk_ids = string_column(&batch, "chunk_id")?;
+            let edited = string_column(&batch, "last_edited_time")?;
+            let properties = string_column(&batch, "properties_json")?;
+            for row in 0..batch.num_rows() {
+                let values = serde_json::from_str(properties.value(row))
+                    .map_err(|_| ChunkTableError::Serialization)?;
+                if query
+                    .metadata
+                    .matches_values(edited.value(row), &values)
+                    .map_err(|_| {
+                        ChunkTableError::InvalidRows("invalid persisted filter metadata".into())
+                    })?
+                {
+                    ids.push(chunk_ids.value(row).to_owned());
+                }
+            }
+        }
+        let matches = if ids.is_empty() {
+            "FALSE".to_owned()
+        } else {
+            format!("({})", id_list_predicate("chunk_id", &ids))
+        };
+        Ok(Some(match scalar {
+            Some(scope) => format!("({scope}) AND {matches}"),
+            None => matches,
+        }))
+    }
+
     async fn lexical_search(&self, query: LexicalQuery) -> Result<Vec<SearchHit>, ChunkTableError> {
         validate_lexical_query(&query)?;
-        let predicate = lexical_filter_predicate(&query)?;
+        let snapshot = self.read_snapshot().await?;
+        let predicate = snapshot.metadata_predicate(&query).await?;
         let candidate_limit = query.limit.saturating_mul(4).min(400);
         let fields = [
             ("chunk_id", 4.0_f32),
@@ -788,7 +847,7 @@ impl LanceChunkTable {
         let phrase = quoted_phrase(&query.query);
 
         for (column, band) in fields {
-            for hit in self
+            for hit in snapshot
                 .fts_query_scoped(column, &query.query, candidate_limit, predicate.as_deref())
                 .await?
             {
@@ -1207,7 +1266,8 @@ fn validate_filter_ids(ids: &[String]) -> bool {
 }
 
 fn validate_lexical_query(query: &LexicalQuery) -> Result<(), ChunkTableError> {
-    if query.query.trim().is_empty()
+    if query.metadata.validate().is_err()
+        || query.query.trim().is_empty()
         || query.query.chars().count() > 4096
         || query.limit == 0
         || query.limit > 100
@@ -1238,6 +1298,28 @@ fn lexical_filter_predicate(query: &LexicalQuery) -> Result<Option<String>, Chun
             "({})",
             id_list_predicate("root_page_id", root_page_ids)
         ));
+    }
+    for (column, ids) in [
+        ("workspace_id", &query.metadata.workspace_ids),
+        ("database_id", &query.metadata.database_ids),
+        ("data_source_id", &query.metadata.data_source_ids),
+    ] {
+        if let Some(ids) = ids {
+            predicates.push(format!("({})", id_list_predicate(column, ids)));
+        }
+    }
+    if let Some(kind) = query.metadata.page_kind {
+        predicates.push(
+            match kind {
+                notion_knowledge_core::search_filters::PageKind::Standalone => {
+                    "(database_id IS NULL AND data_source_id IS NULL)"
+                }
+                notion_knowledge_core::search_filters::PageKind::Database => {
+                    "(database_id IS NOT NULL OR data_source_id IS NOT NULL)"
+                }
+            }
+            .into(),
+        );
     }
     Ok((!predicates.is_empty()).then(|| predicates.join(" AND ")))
 }
@@ -1959,6 +2041,7 @@ mod tests {
                 limit: 1,
                 page_ids: Some(vec!["allowed'page".into()]),
                 root_page_ids: Some(vec!["scope".into()]),
+                metadata: Default::default(),
             })
             .await
             .unwrap();
@@ -1981,6 +2064,7 @@ mod tests {
                 limit: 2,
                 page_ids: None,
                 root_page_ids: None,
+                metadata: Default::default(),
             })
             .await
             .unwrap();
@@ -1993,7 +2077,8 @@ mod tests {
                     query: "".into(),
                     limit: 1,
                     page_ids: None,
-                    root_page_ids: None
+                    root_page_ids: None,
+                    metadata: Default::default(),
                 })
                 .await
                 .is_err()
@@ -2010,6 +2095,7 @@ mod tests {
                 limit: 2,
                 page_ids: None,
                 root_page_ids: None,
+                metadata: Default::default(),
             })
             .await
             .unwrap();
@@ -2022,6 +2108,7 @@ mod tests {
                 limit: 2,
                 page_ids: Some(vec!["missing".into(), "allowed'page".into()]),
                 root_page_ids: Some(vec!["wrong".into(), "scope".into()]),
+                metadata: Default::default(),
             })
             .await
             .unwrap();
@@ -2033,6 +2120,7 @@ mod tests {
                 limit: 2,
                 page_ids: Some(vec!["allowed'page".into()]),
                 root_page_ids: Some(vec!["wrong".into()]),
+                metadata: Default::default(),
             })
             .await
             .unwrap();
@@ -2044,7 +2132,8 @@ mod tests {
                     query: "x".into(),
                     limit: 1,
                     page_ids: None,
-                    root_page_ids: None
+                    root_page_ids: None,
+                    metadata: Default::default(),
                 })
                 .await
                 .is_err()
@@ -2550,6 +2639,7 @@ mod tests {
                 limit: 10,
                 page_ids: None,
                 root_page_ids: None,
+                metadata: Default::default(),
             },
         )
         .await
@@ -2572,6 +2662,7 @@ mod tests {
                 limit: 10,
                 page_ids: None,
                 root_page_ids: None,
+                metadata: Default::default(),
             },
         )
         .await
@@ -2628,6 +2719,7 @@ mod tests {
             limit: 10,
             page_ids: Some(vec!["page-'one".into()]),
             root_page_ids: Some(vec!["root-'alpha".into()]),
+            metadata: Default::default(),
         };
         assert_eq!(
             lexical_filter_predicate(&query).expect("filter predicate"),
@@ -2643,6 +2735,203 @@ mod tests {
 
         drop(table);
         std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn typed_metadata_filters_select_lower_ranked_candidates_before_both_limits() {
+        use notion_knowledge_core::indexed::PropertyValue;
+        use notion_knowledge_core::search_filters::{
+            DateRange, MetadataFilters, PageKind, PropertyFilter,
+        };
+        let path = temp_database("typed-filters");
+        let embedding = embedding("revision-1", 3);
+        let table = Arc::new(
+            LanceChunkTable::create(&path, "chunks", embedding.clone())
+                .await
+                .unwrap(),
+        );
+        let mut allowed = fts_chunk(
+            "page-'allowed",
+            "chunk-'allowed",
+            "Lower title",
+            "needle in body",
+        );
+        allowed.metadata.source.root_page_id = "root-'allowed".into();
+        allowed.metadata.source.workspace_id = "workspace-'one".into();
+        allowed.metadata.last_edited_time = "2026-10-07T12:00:00.250+02:00".into();
+        allowed.metadata.properties.insert(
+            "tags-'id".into(),
+            PropertyValue::Strings(vec!["rust-'tag".into()]),
+        );
+        allowed
+            .metadata
+            .properties
+            .insert("number".into(), PropertyValue::Number(7.0));
+        let mut rows = Vec::new();
+        for i in 0..20 {
+            let mut excluded = allowed.clone();
+            excluded.chunk_id = format!("excluded-{i}");
+            excluded.metadata.page_id = format!("excluded-{i}");
+            excluded.metadata.title = "needle".into();
+            excluded
+                .metadata
+                .properties
+                .insert("number".into(), PropertyValue::Number(8.0));
+            rows.push(EmbeddedChunk::new(excluded, vec![6.0, 1.0, 0.0]));
+        }
+        let mut outside = allowed.clone();
+        outside.chunk_id = "outside".into();
+        outside.metadata.source.root_page_id = "outside".into();
+        rows.push(EmbeddedChunk::new(outside, vec![6.0, 1.0, 0.0]));
+        let mut standalone = allowed.clone();
+        standalone.chunk_id = "standalone".into();
+        standalone.metadata.source.database_id = None;
+        standalone.metadata.source.data_source_id = None;
+        rows.push(EmbeddedChunk::new(standalone, vec![6.0, 1.0, 0.0]));
+        rows.push(EmbeddedChunk::new(allowed, vec![9.0, 1.0, 0.0]));
+        table.upsert(&embedding, &rows).await.unwrap();
+        table
+            .ensure_vector_index(&vector_config(VectorDistance::L2))
+            .await
+            .unwrap();
+        table.optimize_fts_index().await.unwrap();
+        let semantic =
+            LanceSemanticSearch::new(table.clone(), Arc::new(CountingProvider::new(embedding)), 1)
+                .unwrap();
+        let metadata = MetadataFilters {
+            workspace_ids: Some(vec!["missing".into(), "workspace-'one".into()]),
+            database_ids: Some(vec!["database-1".into()]),
+            data_source_ids: Some(vec!["source-1".into()]),
+            page_kind: Some(PageKind::Database),
+            edited: Some(DateRange {
+                from: Some("2026-10-07T10:00:00Z".into()),
+                until: Some("2026-10-07T10:00:01Z".into()),
+            }),
+            properties: Some(vec![
+                PropertyFilter::Contains {
+                    property_id: "tags-'id".into(),
+                    value: "rust-'tag".into(),
+                },
+                PropertyFilter::Equals {
+                    property_id: "number".into(),
+                    value: PropertyValue::Number(7.0),
+                },
+            ]),
+        };
+        for mode in [0, 1] {
+            let search = |metadata, roots| LexicalQuery {
+                query: "needle".into(),
+                limit: 1,
+                page_ids: None,
+                root_page_ids: Some(roots),
+                metadata,
+            };
+            let baseline = search(MetadataFilters::default(), vec!["root-'allowed".into()]);
+            let baseline = if mode == 0 {
+                LexicalSearch::search(table.as_ref(), baseline)
+                    .await
+                    .unwrap()
+            } else {
+                semantic
+                    .search(SemanticQuery {
+                        query: baseline.query,
+                        limit: baseline.limit,
+                        page_ids: baseline.page_ids,
+                        root_page_ids: baseline.root_page_ids,
+                        metadata: baseline.metadata,
+                    })
+                    .await
+                    .unwrap()
+            };
+            assert!(baseline[0].source.chunk_id.starts_with("excluded-"));
+            let query = search(metadata.clone(), vec!["root-'allowed".into()]);
+            let hits = if mode == 0 {
+                LexicalSearch::search(table.as_ref(), query).await.unwrap()
+            } else {
+                semantic
+                    .search(SemanticQuery {
+                        query: query.query,
+                        limit: query.limit,
+                        page_ids: query.page_ids,
+                        root_page_ids: query.root_page_ids,
+                        metadata: query.metadata,
+                    })
+                    .await
+                    .unwrap()
+            };
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].source.chunk_id, "chunk-'allowed");
+            let mut narrowed = metadata.clone();
+            narrowed.workspace_ids = Some(vec!["workspace-'one' OR TRUE --".into()]);
+            let queries = [
+                search(narrowed, vec!["root-'allowed".into()]),
+                search(metadata.clone(), vec!["outside-' OR TRUE --".into()]),
+            ];
+            for query in queries {
+                let hits = if mode == 0 {
+                    LexicalSearch::search(table.as_ref(), query).await.unwrap()
+                } else {
+                    semantic
+                        .search(SemanticQuery {
+                            query: query.query,
+                            limit: query.limit,
+                            page_ids: query.page_ids,
+                            root_page_ids: query.root_page_ids,
+                            metadata: query.metadata,
+                        })
+                        .await
+                        .unwrap()
+                };
+                assert!(hits.is_empty());
+            }
+        }
+        let standalone_query = LexicalQuery {
+            query: "needle".into(),
+            limit: 1,
+            page_ids: None,
+            root_page_ids: Some(vec!["root-'allowed".into()]),
+            metadata: MetadataFilters {
+                page_kind: Some(PageKind::Standalone),
+                ..Default::default()
+            },
+        };
+        let hits = LexicalSearch::search(table.as_ref(), standalone_query)
+            .await
+            .unwrap();
+        assert_eq!(hits[0].source.chunk_id, "standalone");
+        // An upsert after scan planning cannot change a search's pinned revision.
+        let pinned = table.read_snapshot().await.unwrap();
+        let mut replaced = rows.last().unwrap().chunk.clone();
+        replaced
+            .metadata
+            .properties
+            .insert("number".into(), PropertyValue::Number(8.0));
+        table
+            .upsert(
+                table.embedding_metadata(),
+                &[EmbeddedChunk::new(replaced, vec![9.0, 1.0, 0.0])],
+            )
+            .await
+            .unwrap();
+        table.optimize_fts_index().await.unwrap();
+        let old_query = LexicalQuery {
+            query: "needle".into(),
+            limit: 1,
+            page_ids: None,
+            root_page_ids: Some(vec!["root-'allowed".into()]),
+            metadata,
+        };
+        assert_eq!(
+            pinned.lexical_search(old_query.clone()).await.unwrap()[0]
+                .source
+                .chunk_id,
+            "chunk-'allowed"
+        );
+        assert!(table.lexical_search(old_query).await.unwrap().is_empty());
+        drop(pinned);
+        drop(semantic);
+        drop(table);
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[tokio::test]
@@ -2690,6 +2979,7 @@ mod tests {
                 limit: 10,
                 page_ids: None,
                 root_page_ids: None,
+                metadata: Default::default(),
             },
         )
         .await
@@ -2716,18 +3006,21 @@ mod tests {
                 limit: 1,
                 page_ids: None,
                 root_page_ids: None,
+                metadata: Default::default(),
             },
             LexicalQuery {
                 query: "valid".into(),
                 limit: 0,
                 page_ids: None,
                 root_page_ids: None,
+                metadata: Default::default(),
             },
             LexicalQuery {
                 query: "valid".into(),
                 limit: 1,
                 page_ids: Some(vec![]),
                 root_page_ids: None,
+                metadata: Default::default(),
             },
         ] {
             assert!(

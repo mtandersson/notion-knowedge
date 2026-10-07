@@ -42,3 +42,5 @@ pub mod sync_state;
 
 /// Configurable reciprocal-rank fusion of independent retrieval paths.
 pub mod hybrid;
+
+pub mod search_filters;

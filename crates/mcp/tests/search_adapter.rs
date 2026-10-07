@@ -124,7 +124,7 @@ async fn semantic_calls_preserve_citations_and_pass_filters_to_domain_port() {
         fail: false,
         invalid_output: 0,
     });
-    let response = exchange(adapter.clone(), json!({"query":"question","limit":2,"mode":"semantic","filters":{"page_ids":["page-1","page-2"],"root_page_ids":["root-1"]}})).await;
+    let response = exchange(adapter.clone(), json!({"query":"question","limit":2,"mode":"semantic","filters":{"page_ids":["page-1","page-2"],"root_page_ids":["root-1"],"metadata":{"workspace_ids":["workspace"],"page_kind":"database","edited":{"from":"2026-10-07T00:00:00Z"},"properties":[{"operator":"contains","property_id":"tags","value":"rust"}]}}})).await;
     assert!(response.get("error").is_none());
     let result = &response["result"]["structuredContent"]["results"][0];
     assert_eq!(result["source"]["chunk_id"], "stable-chunk");
@@ -262,11 +262,23 @@ async fn configured_hybrid_fuses_both_ports_and_serializes_path_provenance() {
         ..Default::default()
     };
     let hybrid = Arc::new(HybridFusion::new(semantic.clone(), lexical.clone(), config).unwrap());
-    let response = exchange_server(KnowledgeServer::default().and_hybrid_search(hybrid), json!({"query":"question","limit":2,"mode":"hybrid","filters":{"page_ids":["page-1"],"root_page_ids":["root-1"]}})).await;
+    let response = exchange_server(KnowledgeServer::default().and_hybrid_search(hybrid), json!({"query":"question","limit":2,"mode":"hybrid","filters":{"page_ids":["page-1"],"root_page_ids":["root-1"],"metadata":{"workspace_ids":["workspace"],"page_kind":"database","edited":{"from":"2026-10-07T00:00:00Z"},"properties":[{"operator":"contains","property_id":"tags","value":"rust"}]}}})).await;
     let results = response["result"]["structuredContent"]["results"]
         .as_array()
         .unwrap();
     assert_eq!(results.len(), 2);
+    assert_eq!(
+        semantic.calls.lock().unwrap()[0].metadata,
+        lexical.calls.lock().unwrap()[0].metadata
+    );
+    assert_eq!(
+        semantic.calls.lock().unwrap()[0]
+            .metadata
+            .workspace_ids
+            .as_ref()
+            .unwrap(),
+        &["workspace"]
+    );
     assert_eq!(results[0]["matched_paths"], json!(["lexical"]));
     assert_eq!(results[1]["matched_paths"], json!(["semantic"]));
     for calls in [
@@ -367,7 +379,8 @@ async fn hybrid_rejects_invalid_configuration_and_limits_before_retrieval() {
                 query: "question".into(),
                 limit: 2,
                 page_ids: None,
-                root_page_ids: None
+                root_page_ids: None,
+                metadata: Default::default(),
             })
             .await
             .is_err()
@@ -395,4 +408,117 @@ async fn configured_snippets_redact_signed_targets_and_preserve_provenance() {
     assert_eq!(hit["source"]["chunk_id"], "stable-chunk");
     assert_eq!(hit["score"], 0.75);
     assert_eq!(hit["matched_paths"], json!(["semantic"]));
+}
+
+#[tokio::test]
+async fn configured_roots_always_narrow_all_search_modes() {
+    use notion_knowledge_core::hybrid::{HybridFusion, ReciprocalRankFusion};
+    for mode in ["semantic", "lexical", "hybrid"] {
+        for requested in [
+            None,
+            Some(json!(["outside", "allowed"])),
+            Some(json!(["outside"])),
+        ] {
+            let semantic = Arc::new(Fixture {
+                calls: Mutex::new(vec![]),
+                fail: false,
+                invalid_output: 0,
+            });
+            let lexical = Arc::new(LexicalFixture {
+                calls: Mutex::new(vec![]),
+                fail: false,
+            });
+            let hybrid = Arc::new(
+                HybridFusion::new(
+                    semantic.clone(),
+                    lexical.clone(),
+                    ReciprocalRankFusion::default(),
+                )
+                .unwrap(),
+            );
+            let server = KnowledgeServer::with_search(semantic.clone())
+                .and_lexical_search(lexical.clone())
+                .and_hybrid_search(hybrid)
+                .with_root_page_ids(vec!["allowed".into()])
+                .unwrap();
+            let mut filters = json!({"metadata":{"workspace_ids":["workspace"],"properties":[{"operator":"equals","property_id":"x","value":{"type":"boolean","value":true}}]}});
+            if let Some(roots) = &requested {
+                filters["root_page_ids"] = roots.clone();
+            }
+            let response = exchange_server(
+                server,
+                json!({"query":"question","limit":2,"mode":mode,"filters":filters}),
+            )
+            .await;
+            assert!(response.get("error").is_none());
+            if requested == Some(json!(["outside"])) {
+                assert_eq!(
+                    response["result"]["structuredContent"]["results"],
+                    json!([])
+                );
+                assert!(semantic.calls.lock().unwrap().is_empty());
+                assert!(lexical.calls.lock().unwrap().is_empty());
+            } else {
+                for roots in semantic
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|q| &q.root_page_ids)
+                {
+                    assert_eq!(roots.as_ref().unwrap(), &["allowed"]);
+                }
+                for roots in lexical
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|q| &q.root_page_ids)
+                {
+                    assert_eq!(roots.as_ref().unwrap(), &["allowed"]);
+                }
+                assert_eq!(
+                    semantic.calls.lock().unwrap().len(),
+                    usize::from(mode != "lexical")
+                );
+                assert_eq!(
+                    lexical.calls.lock().unwrap().len(),
+                    usize::from(mode != "semantic")
+                );
+            }
+        }
+    }
+}
+#[tokio::test]
+async fn unsupported_metadata_filters_fail_before_any_adapter_call() {
+    for metadata in [
+        json!({"page_kind":"wiki"}),
+        json!({"created_time":{"from":"2026-01-01T00:00:00Z"}}),
+        json!({"edited":{}}),
+        json!({"workspace_ids":[]}),
+        json!({"edited":{"from":"2026-01-01"}}),
+        json!({"properties":[{"operator":"regex","property_id":"tags","value":"secret"}]}),
+        json!({"properties":[{"operator":"equals","property_id":"tags","value":{"type":"boolean","value":true,"unsupported":1}}]}),
+    ] {
+        let adapter = Arc::new(Fixture {
+            calls: Mutex::new(vec![]),
+            fail: false,
+            invalid_output: 0,
+        });
+        let response = exchange(
+            adapter.clone(),
+            json!({"query":"question","limit":1,"mode":"semantic","filters":{"metadata":metadata}}),
+        )
+        .await;
+        assert_eq!(response["error"]["code"], -32602);
+        assert!(!response.to_string().contains("secret"));
+        assert!(adapter.calls.lock().unwrap().is_empty());
+    }
+    let tool = notion_knowledge_mcp::search::tool();
+    let schema = serde_json::to_value(tool.input_schema).unwrap();
+    assert_eq!(
+        schema["properties"]["filters"]["properties"]["metadata"]["additionalProperties"],
+        false
+    );
+    assert_eq!(schema["properties"]["filters"]["properties"]["metadata"]["properties"]["properties"]["items"]["oneOf"].as_array().unwrap().len(), 3);
 }

@@ -24,6 +24,8 @@ pub struct SearchFilters {
     pub page_ids: Option<Vec<String>>,
     #[serde(default, deserialize_with = "present")]
     pub root_page_ids: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "present")]
+    pub metadata: Option<notion_knowledge_core::search_filters::MetadataFilters>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,6 +48,9 @@ impl SearchRequest {
             return Err("limit must be between 1 and 100");
         }
         if let Some(filters) = &self.filters {
+            if let Some(metadata) = &filters.metadata {
+                metadata.validate()?;
+            }
             for ids in [&filters.page_ids, &filters.root_page_ids]
                 .into_iter()
                 .flatten()
@@ -68,11 +73,44 @@ impl SearchRequest {
 
 pub fn tool() -> Tool {
     let ids = json!({"type":"array","minItems":1,"maxItems":100,"items":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"}});
+    let range = json!({"type":"object","additionalProperties":false,"minProperties":1,"properties":{
+        "from":{"type":"string","maxLength":128,"format":"date-time"},"until":{"type":"string","maxLength":128,"format":"date-time"}
+    }});
+    let property_id = json!({"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"});
+    let list = json!({"type":"array","maxItems":100,"items":{"type":"string","minLength":1,"maxLength":4096,"pattern":"\\S"}});
+    let mut values = vec![
+        json!({"type":"object","additionalProperties":false,"required":["type"],"properties":{"type":{"const":"null"},"value":{"type":"null"}}}),
+    ];
+    for (kind, value) in [
+        ("text", json!({"type":"string","maxLength":4096})),
+        ("number", json!({"type":"number"})),
+        ("boolean", json!({"type":"boolean"})),
+        ("strings", list.clone()),
+        ("page_ids", list.clone()),
+        ("person_ids", list),
+        (
+            "date",
+            json!({"type":"object","additionalProperties":false,"required":["start"],"properties":{
+                "start":{"type":"string","minLength":1,"maxLength":128},"end":{"type":["string","null"],"minLength":1,"maxLength":128}
+            }}),
+        ),
+    ] {
+        values.push(json!({"type":"object","additionalProperties":false,"required":["type","value"],"properties":{"type":{"const":kind},"value":value}}));
+    }
+    let properties = json!({"type":"array","minItems":1,"maxItems":20,"items":{"oneOf":[
+        {"type":"object","additionalProperties":false,"required":["operator","property_id","value"],"properties":{"operator":{"const":"equals"},"property_id":property_id,"value":{"oneOf":values}}},
+        {"type":"object","additionalProperties":false,"required":["operator","property_id","value"],"properties":{"operator":{"const":"contains"},"property_id":property_id,"value":{"type":"string","minLength":1,"maxLength":4096,"pattern":"\\S"}}},
+        {"type":"object","additionalProperties":false,"required":["operator","property_id","range"],"properties":{"operator":{"const":"date"},"property_id":property_id,"range":range}}
+    ]}});
+    let metadata = json!({"type":"object","additionalProperties":false,"properties":{
+        "workspace_ids":ids,"database_ids":ids,"data_source_ids":ids,
+        "page_kind":{"type":"string","enum":["standalone","database"]},"edited":range,"properties":properties
+    }});
     let input = json!({"type":"object","additionalProperties":false,"required":["query","limit","mode"],"properties":{
         "query":{"type":"string","minLength":1,"maxLength":4096,"pattern":"\\S","description":"Natural-language question or exact terms."},
         "limit":{"type":"integer","minimum":1,"maximum":100},
         "mode":{"type":"string","enum":["semantic","lexical","hybrid"]},
-        "filters":{"type":"object","additionalProperties":false,"properties":{"page_ids":ids,"root_page_ids":ids}}
+        "filters":{"type":"object","additionalProperties":false,"properties":{"page_ids":ids,"root_page_ids":ids,"metadata":metadata}}
     }});
     let output = json!({"type":"object","additionalProperties":false,"required":["results"],"properties":{
         "results":{"type":"array","maxItems":100,"items":{"type":"object","additionalProperties":false,"required":["source","text","score","matched_paths"],"properties":{

@@ -57,7 +57,8 @@ impl HybridFusion {
 impl HybridSearch for HybridFusion {
     fn search(&self, query: SemanticQuery) -> SearchFuture<'_> {
         Box::pin(async move {
-            if query.query.trim().is_empty()
+            if query.metadata.validate().is_err()
+                || query.query.trim().is_empty()
                 || query.query.chars().count() > 4096
                 || !(1..=self.config.candidate_limit).contains(&query.limit)
                 || [&query.page_ids, &query.root_page_ids]
@@ -78,6 +79,7 @@ impl HybridSearch for HybridFusion {
                 limit: self.config.candidate_limit,
                 page_ids: query.page_ids.clone(),
                 root_page_ids: query.root_page_ids.clone(),
+                metadata: query.metadata.clone(),
             };
             let limit = query.limit;
             let semantic = self

@@ -5,6 +5,7 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 sha2 = "0.10"
 url = "2"
 pulldown-cmark = { version = "0.13", default-features = false }
