@@ -382,7 +382,9 @@ impl LanceChunkTable {
         Self::validate_vector_index_config(config)?;
         self.validate_vector_index_layout().await?;
         let Some(stats) = self.table.index_stats(CHUNK_VECTOR_INDEX_NAME).await? else {
-            return Ok(());
+            return Err(ChunkTableError::InvalidSchema(
+                "vector index exists but statistics are unavailable".into(),
+            ));
         };
         let Some(distance) = stats.distance_type.as_ref() else {
             return Err(ChunkTableError::InvalidSchema(
@@ -509,6 +511,13 @@ impl LanceChunkTable {
         let distance = stats.distance_type.ok_or_else(|| {
             ChunkTableError::InvalidSchema("vector index is missing distance metadata".into())
         })?;
+        if matches!(distance, DistanceType::Cosine)
+            && query_vector.iter().all(|value| *value == 0.0)
+        {
+            return Err(ChunkTableError::InvalidRows(
+                "cosine vector queries require a non-zero query vector".into(),
+            ));
+        }
 
         let batches: Vec<RecordBatch> = self
             .table
@@ -1950,6 +1959,10 @@ mod tests {
             .await
             .expect("query rebuilt index");
         assert_eq!(hits[0].chunk_id, "chunk-a");
+        assert!(matches!(
+            table.vector_query(&[0.0, 0.0, 0.0], 1, 1).await,
+            Err(ChunkTableError::InvalidRows(_))
+        ));
 
         drop(table);
         std::fs::remove_dir_all(path).expect("remove temporary database");
