@@ -28,7 +28,26 @@ pub fn assert_search_catalog(tools: &Value) {
     assert_eq!(result["properties"]["score"]["type"], "number");
     assert_eq!(
         result["properties"]["source"]["required"],
-        json!(["page_id", "chunk_id", "url", "title", "heading_path"])
+        json!([
+            "page_id",
+            "chunk_id",
+            "url",
+            "title",
+            "heading_path",
+            "last_edited_time"
+        ])
     );
     assert!(result["properties"]["source"]["properties"]["block_id"].is_object());
+    assert_eq!(
+        result["required"],
+        json!(["source", "text", "score", "matched_paths"])
+    );
+    assert_eq!(
+        result["properties"]["source"]["properties"]["last_edited_time"]["type"],
+        "string"
+    );
+    assert_eq!(
+        result["properties"]["matched_paths"]["items"]["enum"],
+        json!(["semantic", "lexical"])
+    );
 }
