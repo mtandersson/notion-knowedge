@@ -1797,6 +1797,261 @@ mod tests {
         std::fs::remove_dir_all(path).expect("remove temporary database");
     }
 
+    fn vector_config(distance: VectorDistance) -> VectorIndexConfig {
+        VectorIndexConfig {
+            distance,
+            num_partitions: Some(1),
+            sample_rate: 8,
+            max_iterations: 20,
+        }
+    }
+
+    #[tokio::test]
+    async fn vector_index_builds_from_initial_crawl_and_returns_stable_nearest_neighbors() {
+        let path = temp_database("vector-index");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+
+        let rows = vec![
+            EmbeddedChunk::new(
+                fts_chunk("page-a", "chunk-a", "A", "nearest a"),
+                vec![1.0, 0.0, 0.0],
+            ),
+            EmbeddedChunk::new(
+                fts_chunk("page-b", "chunk-b", "B", "nearest b"),
+                vec![0.8, 0.2, 0.0],
+            ),
+            EmbeddedChunk::new(
+                fts_chunk("page-c", "chunk-c", "C", "nearest c"),
+                vec![0.0, 1.0, 0.0],
+            ),
+            EmbeddedChunk::new(
+                fts_chunk("page-d", "chunk-d", "D", "nearest d"),
+                vec![0.0, 0.0, 1.0],
+            ),
+        ];
+        table.upsert(&metadata, &rows).await.expect("seed crawl rows");
+
+        let config = vector_config(VectorDistance::L2);
+        assert_eq!(
+            table
+                .ensure_vector_index(&config)
+                .await
+                .expect("build vector index"),
+            VectorIndexAction::Created
+        );
+
+        let index = table
+            .table
+            .list_indices()
+            .await
+            .expect("list indices")
+            .into_iter()
+            .find(|index| index.name == CHUNK_VECTOR_INDEX_NAME)
+            .expect("vector index");
+        assert_eq!(index.index_type, IndexType::IvfFlat);
+        assert_eq!(index.columns, vec!["vector".to_string()]);
+
+        let stats = table
+            .table
+            .index_stats(CHUNK_VECTOR_INDEX_NAME)
+            .await
+            .expect("vector stats")
+            .expect("vector stats exist");
+        assert_eq!(stats.num_indexed_rows, 4);
+        assert_eq!(stats.num_unindexed_rows, 0);
+        assert!(matches!(stats.distance_type, Some(DistanceType::L2)));
+
+        let hits = table
+            .vector_query(&[1.0, 0.0, 0.0], 3, 1)
+            .await
+            .expect("nearest-neighbor query");
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].chunk_id, "chunk-a");
+        assert_eq!(hits[1].chunk_id, "chunk-b");
+        assert_eq!(hits[0].page_id, "page-a");
+        assert_eq!(hits[0].url, "https://example.invalid/page-a");
+        assert_eq!(hits[0].heading_path, vec!["Section"]);
+        assert_eq!(hits[0].block_id.as_deref(), Some("block-1"));
+        assert!(hits[0].distance <= hits[1].distance);
+        assert!(hits[1].distance <= hits[2].distance);
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn vector_index_ensure_is_idempotent_and_rebuild_validates_before_replace() {
+        let path = temp_database("vector-rebuild");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+        table
+            .upsert(
+                &metadata,
+                &[
+                    EmbeddedChunk::new(page_chunk("chunk-a", "one"), vec![1.0, 0.0, 0.0]),
+                    EmbeddedChunk::new(page_chunk("chunk-b", "two"), vec![0.0, 1.0, 0.0]),
+                ],
+            )
+            .await
+            .expect("seed rows");
+
+        let l2 = vector_config(VectorDistance::L2);
+        assert_eq!(
+            table.ensure_vector_index(&l2).await.expect("first ensure"),
+            VectorIndexAction::Created
+        );
+        assert_eq!(
+            table.ensure_vector_index(&l2).await.expect("second ensure"),
+            VectorIndexAction::Existing
+        );
+
+        let cosine = vector_config(VectorDistance::Cosine);
+        assert!(matches!(
+            table.ensure_vector_index(&cosine).await,
+            Err(ChunkTableError::InvalidSchema(_))
+        ));
+
+        let invalid = VectorIndexConfig {
+            num_partitions: Some(0),
+            ..l2.clone()
+        };
+        assert!(matches!(
+            table.rebuild_vector_index(&invalid).await,
+            Err(ChunkTableError::InvalidSchema(_))
+        ));
+        let stats = table
+            .table
+            .index_stats(CHUNK_VECTOR_INDEX_NAME)
+            .await
+            .expect("stats after rejected rebuild")
+            .expect("existing vector index");
+        assert!(matches!(stats.distance_type, Some(DistanceType::L2)));
+
+        table
+            .rebuild_vector_index(&cosine)
+            .await
+            .expect("explicit cosine rebuild");
+        let stats = table
+            .table
+            .index_stats(CHUNK_VECTOR_INDEX_NAME)
+            .await
+            .expect("stats after rebuild")
+            .expect("rebuilt vector index");
+        assert!(matches!(stats.distance_type, Some(DistanceType::Cosine)));
+
+        let hits = table
+            .vector_query(&[1.0, 0.0, 0.0], 1, 1)
+            .await
+            .expect("query rebuilt index");
+        assert_eq!(hits[0].chunk_id, "chunk-a");
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn optimize_vector_index_folds_incremental_rows_into_existing_index() {
+        let path = temp_database("vector-optimize");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+        table
+            .upsert(
+                &metadata,
+                &[
+                    EmbeddedChunk::new(page_chunk("chunk-a", "one"), vec![1.0, 0.0, 0.0]),
+                    EmbeddedChunk::new(page_chunk("chunk-b", "two"), vec![0.0, 1.0, 0.0]),
+                ],
+            )
+            .await
+            .expect("seed initial rows");
+
+        let config = vector_config(VectorDistance::L2);
+        table
+            .ensure_vector_index(&config)
+            .await
+            .expect("build initial index");
+
+        let mut added = page_chunk("chunk-c", "three");
+        added.metadata.page_id = "page-3".into();
+        added.metadata.url = "https://example.invalid/page-3".into();
+        table
+            .upsert(
+                &metadata,
+                &[EmbeddedChunk::new(added, vec![0.0, 0.0, 1.0])],
+            )
+            .await
+            .expect("append incremental row");
+
+        let before = table
+            .table
+            .index_stats(CHUNK_VECTOR_INDEX_NAME)
+            .await
+            .expect("stats before optimize")
+            .expect("vector index");
+        assert!(before.num_unindexed_rows >= 1);
+
+        assert_eq!(
+            table
+                .optimize_vector_index(&config)
+                .await
+                .expect("optimize vector index"),
+            VectorIndexAction::Existing
+        );
+        let after = table
+            .table
+            .index_stats(CHUNK_VECTOR_INDEX_NAME)
+            .await
+            .expect("stats after optimize")
+            .expect("vector index");
+        assert_eq!(after.num_unindexed_rows, 0);
+        assert_eq!(after.num_indexed_rows, 3);
+
+        let hits = table
+            .vector_query(&[0.0, 0.0, 1.0], 1, 1)
+            .await
+            .expect("query optimized index");
+        assert_eq!(hits[0].chunk_id, "chunk-c");
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn vector_index_and_query_validation_fail_closed() {
+        let path = temp_database("vector-validation");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata)
+            .await
+            .expect("create table");
+
+        assert!(matches!(
+            table.ensure_vector_index(&VectorIndexConfig::default()).await,
+            Err(ChunkTableError::InvalidRows(_))
+        ));
+        assert!(matches!(
+            table.vector_query(&[1.0, 0.0, 0.0], 1, 1).await,
+            Err(ChunkTableError::InvalidSchema(_))
+        ));
+        assert!(matches!(
+            table.vector_query(&[1.0, 0.0], 1, 1).await,
+            Err(ChunkTableError::InvalidRows(_))
+        ));
+        assert!(matches!(
+            table.vector_query(&[f32::NAN, 0.0, 0.0], 1, 1).await,
+            Err(ChunkTableError::InvalidRows(_))
+        ));
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
     #[tokio::test]
     async fn create_installs_versioned_fts_indices_for_text_title_and_identifiers() {
         let path = temp_database("fts-indexes");
