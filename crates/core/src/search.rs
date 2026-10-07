@@ -32,6 +32,8 @@ pub struct SearchHit {
     pub text: String,
     pub score: f32,
     pub source: SearchSource,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub matched_paths: Vec<RetrievalPath>,
 }
 #[derive(Debug, Clone, Copy)]
 pub struct SearchUnavailable;
@@ -43,4 +45,15 @@ pub trait SemanticSearch: Send + Sync {
 
 pub trait LexicalSearch: Send + Sync {
     fn search(&self, query: LexicalQuery) -> SearchFuture<'_>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetrievalPath {
+    Semantic,
+    Lexical,
+}
+
+pub trait HybridSearch: Send + Sync {
+    fn search(&self, query: SemanticQuery) -> SearchFuture<'_>;
 }

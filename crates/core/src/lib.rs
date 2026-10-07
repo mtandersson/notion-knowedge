@@ -39,3 +39,6 @@ pub mod source;
 
 /// Durable operational sync-state contracts. Concrete databases belong in adapters.
 pub mod sync_state;
+
+/// Configurable reciprocal-rank fusion of independent retrieval paths.
+pub mod hybrid;

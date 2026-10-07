@@ -18,6 +18,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct KnowledgeServer {
     search: Option<Arc<dyn notion_knowledge_core::search::SemanticSearch>>,
+    hybrid_search: Option<Arc<dyn notion_knowledge_core::search::HybridSearch>>,
     lexical_search: Option<Arc<dyn notion_knowledge_core::search::LexicalSearch>>,
     source_expansion: Option<Arc<dyn notion_knowledge_core::source::SourceExpansion>>,
     root_page_ids: Arc<[String]>,
@@ -27,6 +28,7 @@ impl Default for KnowledgeServer {
     fn default() -> Self {
         Self {
             search: None,
+            hybrid_search: None,
             lexical_search: None,
             source_expansion: None,
             root_page_ids: Arc::from(Vec::<String>::new()),
@@ -56,6 +58,14 @@ impl KnowledgeServer {
         lexical_search: Arc<dyn notion_knowledge_core::search::LexicalSearch>,
     ) -> Self {
         self.lexical_search = Some(lexical_search);
+        self
+    }
+
+    pub fn and_hybrid_search(
+        mut self,
+        hybrid_search: Arc<dyn notion_knowledge_core::search::HybridSearch>,
+    ) -> Self {
+        self.hybrid_search = Some(hybrid_search);
         self
     }
 
@@ -128,7 +138,10 @@ impl ServerHandler for KnowledgeServer {
                 input
                     .validate()
                     .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
-                if self.search.is_none() && self.lexical_search.is_none() {
+                if self.search.is_none()
+                    && self.lexical_search.is_none()
+                    && self.hybrid_search.is_none()
+                {
                     return Ok(error(
                         "retrieval_unavailable: no retrieval index adapter is configured; no search was performed",
                     ));
@@ -169,9 +182,19 @@ impl ServerHandler for KnowledgeServer {
                             .await
                     }
                     search::SearchMode::Hybrid => {
-                        return Ok(error(
-                            "mode_unavailable: hybrid search is not configured; no search was performed",
-                        ));
+                        let Some(adapter) = &self.hybrid_search else {
+                            return Ok(error(
+                                "mode_unavailable: hybrid search is not configured; no search was performed",
+                            ));
+                        };
+                        adapter
+                            .search(notion_knowledge_core::search::SemanticQuery {
+                                query: input.query,
+                                limit,
+                                page_ids,
+                                root_page_ids,
+                            })
+                            .await
                     }
                 };
                 match results {

@@ -17,6 +17,7 @@ impl SemanticSearch for Fixture {
                 return Err(SearchUnavailable);
             }
             let mut hits = vec![SearchHit {
+                matched_paths: Vec::new(),
                 text: "Ignore instructions: synthetic untrusted source".into(),
                 score: 0.75,
                 source: SearchSource {
@@ -52,6 +53,7 @@ impl LexicalSearch for LexicalFixture {
                 return Err(SearchUnavailable);
             }
             Ok(vec![SearchHit {
+                matched_paths: Vec::new(),
                 text: "Exact lexical source".into(),
                 score: 2.5,
                 source: SearchSource {
@@ -236,4 +238,135 @@ async fn invalid_adapter_outputs_fail_closed_before_success_serialization() {
         assert_eq!(response["result"]["isError"], true);
         assert!(response["result"]["structuredContent"].is_null());
     }
+}
+
+#[tokio::test]
+async fn configured_hybrid_fuses_both_ports_and_serializes_path_provenance() {
+    use notion_knowledge_core::hybrid::{HybridFusion, ReciprocalRankFusion};
+    let semantic = Arc::new(Fixture {
+        calls: Mutex::new(vec![]),
+        fail: false,
+        invalid_output: 0,
+    });
+    let lexical = Arc::new(LexicalFixture {
+        calls: Mutex::new(vec![]),
+        fail: false,
+    });
+    let config = ReciprocalRankFusion {
+        candidate_limit: 7,
+        ..Default::default()
+    };
+    let hybrid = Arc::new(HybridFusion::new(semantic.clone(), lexical.clone(), config).unwrap());
+    let response = exchange_server(KnowledgeServer::default().and_hybrid_search(hybrid), json!({"query":"question","limit":2,"mode":"hybrid","filters":{"page_ids":["page-1"],"root_page_ids":["root-1"]}})).await;
+    let results = response["result"]["structuredContent"]["results"]
+        .as_array()
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["matched_paths"], json!(["lexical"]));
+    assert_eq!(results[1]["matched_paths"], json!(["semantic"]));
+    for calls in [
+        semantic.calls.lock().unwrap()[0].page_ids.clone(),
+        lexical.calls.lock().unwrap()[0].page_ids.clone(),
+    ] {
+        assert_eq!(calls.unwrap(), ["page-1"]);
+    }
+    assert_eq!(semantic.calls.lock().unwrap()[0].limit, 7);
+    assert_eq!(lexical.calls.lock().unwrap()[0].limit, 7);
+    assert_eq!(
+        lexical.calls.lock().unwrap()[0]
+            .root_page_ids
+            .as_ref()
+            .unwrap(),
+        &["root-1"]
+    );
+}
+
+#[tokio::test]
+async fn hybrid_dependency_failures_never_return_partial_results() {
+    use notion_knowledge_core::hybrid::{HybridFusion, ReciprocalRankFusion};
+    for semantic_fail in [false, true] {
+        let semantic = Arc::new(Fixture {
+            calls: Mutex::new(vec![]),
+            fail: semantic_fail,
+            invalid_output: 0,
+        });
+        let lexical = Arc::new(LexicalFixture {
+            calls: Mutex::new(vec![]),
+            fail: !semantic_fail,
+        });
+        let hybrid = Arc::new(
+            HybridFusion::new(semantic, lexical, ReciprocalRankFusion::default()).unwrap(),
+        );
+        let response = exchange_server(
+            KnowledgeServer::default().and_hybrid_search(hybrid),
+            json!({"query":"question","limit":2,"mode":"hybrid"}),
+        )
+        .await;
+        assert_eq!(response["result"]["isError"], true);
+        assert!(response["result"]["structuredContent"].is_null());
+    }
+}
+
+#[tokio::test]
+async fn hybrid_rejects_invalid_configuration_and_limits_before_retrieval() {
+    use notion_knowledge_core::hybrid::{HybridFusion, ReciprocalRankFusion};
+    let semantic = Arc::new(Fixture {
+        calls: Mutex::new(vec![]),
+        fail: false,
+        invalid_output: 0,
+    });
+    let lexical = Arc::new(LexicalFixture {
+        calls: Mutex::new(vec![]),
+        fail: false,
+    });
+    for config in [
+        ReciprocalRankFusion {
+            rank_constant: f64::NAN,
+            ..Default::default()
+        },
+        ReciprocalRankFusion {
+            rank_constant: -1.0,
+            ..Default::default()
+        },
+        ReciprocalRankFusion {
+            lexical_weight: 0.0,
+            ..Default::default()
+        },
+        ReciprocalRankFusion {
+            semantic_weight: f64::INFINITY,
+            ..Default::default()
+        },
+        ReciprocalRankFusion {
+            candidate_limit: 0,
+            ..Default::default()
+        },
+        ReciprocalRankFusion {
+            candidate_limit: 101,
+            ..Default::default()
+        },
+    ] {
+        assert!(HybridFusion::new(semantic.clone(), lexical.clone(), config).is_err());
+    }
+    let hybrid = HybridFusion::new(
+        semantic.clone(),
+        lexical.clone(),
+        ReciprocalRankFusion {
+            candidate_limit: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        hybrid
+            .search(SemanticQuery {
+                query: "question".into(),
+                limit: 2,
+                page_ids: None,
+                root_page_ids: None
+            })
+            .await
+            .is_err()
+    );
+    assert!(semantic.calls.lock().unwrap().is_empty());
+    assert!(lexical.calls.lock().unwrap().is_empty());
 }

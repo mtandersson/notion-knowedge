@@ -331,3 +331,6 @@ the bootstrap server is not yet wired to load the model.
 
 The [production semantic vector adapter](docs/semantic-search.md) binds a configured
 embedding provider to the indexed LanceDB table and filters before top-k selection.
+
+The [hybrid search service](docs/hybrid-search.md) combines lexical and semantic
+candidates with configurable reciprocal-rank fusion and per-result path provenance.
