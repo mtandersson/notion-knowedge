@@ -328,3 +328,6 @@ The [local Qwen embedding provider](docs/local-qwen.md) implements the productio
 embedding port with pinned offline assets and bounded CPU batches. Enable the
 optional `local-qwen` retrieval feature and use the matched `.#spike` toolchain;
 the bootstrap server is not yet wired to load the model.
+
+The [production semantic vector adapter](docs/semantic-search.md) binds a configured
+embedding provider to the indexed LanceDB table and filters before top-k selection.

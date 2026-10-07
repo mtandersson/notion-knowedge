@@ -40,8 +40,8 @@ tokenization behavior.
 
 Dependency failures return `retrieval_unavailable`. Invalid arguments always
 return JSON-RPC invalid-params without echoing supplied input. Successful content
-blocks identify retrieved excerpts as untrusted data. Semantic production work
-remains #45; hybrid fusion remains #47 and broader typed filters remain #48.
+blocks identify retrieved excerpts as untrusted data. Production [semantic retrieval](semantic-search.md) can be injected through the
+same handler; hybrid fusion remains #47 and broader typed filters remain #48.
 
 Production-boundary discovery and call tests run with:
 

@@ -26,6 +26,7 @@ use notion_knowledge_core::{
     indexed::{IndexedChunk, SchemaVersion},
     search::{
         LexicalQuery, LexicalSearch, SearchFuture, SearchHit, SearchSource, SearchUnavailable,
+        SemanticQuery, SemanticSearch,
     },
     source::{
         ExpandedSource, SourceExpandQuery, SourceExpansion, SourceExpansionError,
@@ -245,6 +246,87 @@ pub struct VectorIndexHit {
 pub struct LanceChunkTable {
     table: Table,
     embedding: EmbeddingMetadata,
+}
+
+/// Semantic composition over an already configured local table and embedding
+/// provider. Construction rejects mixed vector spaces before a request runs.
+pub struct LanceSemanticSearch {
+    table: Arc<LanceChunkTable>,
+    provider: Arc<dyn EmbeddingProvider>,
+    nprobes: usize,
+}
+
+impl LanceSemanticSearch {
+    pub fn new(
+        table: Arc<LanceChunkTable>,
+        provider: Arc<dyn EmbeddingProvider>,
+        nprobes: usize,
+    ) -> Result<Self, ChunkTableError> {
+        table
+            .embedding_metadata()
+            .ensure_compatible(provider.metadata())?;
+        if nprobes == 0 {
+            return Err(ChunkTableError::InvalidRows(
+                "nprobes must be positive".into(),
+            ));
+        }
+        Ok(Self {
+            table,
+            provider,
+            nprobes,
+        })
+    }
+
+    async fn semantic_search(
+        &self,
+        query: SemanticQuery,
+    ) -> Result<Vec<SearchHit>, ChunkTableError> {
+        let scope = LexicalQuery {
+            query: query.query.clone(),
+            limit: query.limit,
+            page_ids: query.page_ids,
+            root_page_ids: query.root_page_ids,
+        };
+        let predicate = lexical_filter_predicate(&scope)?;
+        let vectors = embedding::embed_batch(self.provider.as_ref(), &[query.query]).await?;
+        let mut hits = self
+            .table
+            .vector_query_scoped(&vectors[0], query.limit, self.nprobes, predicate.as_deref())
+            .await?
+            .into_iter()
+            .map(|hit| SearchHit {
+                text: bounded_text(&hit.text, 2000),
+                // Native distance is lower-is-better for every supported metric.
+                // Negation preserves ranking without claiming cross-metric calibration.
+                score: -hit.distance,
+                source: SearchSource {
+                    page_id: hit.page_id,
+                    chunk_id: hit.chunk_id,
+                    url: hit.url,
+                    title: hit.title,
+                    heading_path: hit.heading_path,
+                    block_id: hit.block_id,
+                },
+            })
+            .collect::<Vec<_>>();
+        hits.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.source.page_id.cmp(&b.source.page_id))
+                .then_with(|| a.source.chunk_id.cmp(&b.source.chunk_id))
+        });
+        Ok(hits)
+    }
+}
+
+impl SemanticSearch for LanceSemanticSearch {
+    fn search(&self, query: SemanticQuery) -> SearchFuture<'_> {
+        Box::pin(async move {
+            self.semantic_search(query)
+                .await
+                .map_err(|_| SearchUnavailable)
+        })
+    }
 }
 
 impl LanceChunkTable {
@@ -487,6 +569,17 @@ impl LanceChunkTable {
         limit: usize,
         nprobes: usize,
     ) -> Result<Vec<VectorIndexHit>, ChunkTableError> {
+        self.vector_query_scoped(query_vector, limit, nprobes, None)
+            .await
+    }
+
+    async fn vector_query_scoped(
+        &self,
+        query_vector: &[f32],
+        limit: usize,
+        nprobes: usize,
+        predicate: Option<&str>,
+    ) -> Result<Vec<VectorIndexHit>, ChunkTableError> {
         if query_vector.len() != self.embedding.dimension()
             || query_vector.iter().any(|value| !value.is_finite())
             || limit == 0
@@ -514,7 +607,7 @@ impl LanceChunkTable {
             ));
         }
 
-        let batches: Vec<RecordBatch> = self
+        let mut search = self
             .table
             .query()
             .nearest_to(query_vector)?
@@ -531,11 +624,11 @@ impl LanceChunkTable {
                 "heading_path_json".into(),
                 "text".into(),
             ]))
-            .limit(limit)
-            .execute()
-            .await?
-            .try_collect()
-            .await?;
+            .limit(limit);
+        if let Some(predicate) = predicate {
+            search = search.only_if(predicate);
+        }
+        let batches: Vec<RecordBatch> = search.execute().await?.try_collect().await?;
         decode_vector_hits(&batches)
     }
 
@@ -1688,6 +1781,7 @@ mod tests {
     struct CountingProvider {
         metadata: EmbeddingMetadata,
         embedded_inputs: AtomicUsize,
+        calls: AtomicUsize,
         fail: AtomicBool,
     }
 
@@ -1696,6 +1790,7 @@ mod tests {
             Self {
                 metadata,
                 embedded_inputs: AtomicUsize::new(0),
+                calls: AtomicUsize::new(0),
                 fail: AtomicBool::new(false),
             }
         }
@@ -1715,6 +1810,7 @@ mod tests {
         }
 
         fn embed_batch<'a>(&'a self, inputs: &'a [String]) -> EmbeddingFuture<'a> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             self.embedded_inputs
                 .fetch_add(inputs.len(), Ordering::SeqCst);
             let fail = self.fail.load(Ordering::SeqCst);
@@ -1800,6 +1896,158 @@ mod tests {
         ));
 
         std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn semantic_search_embeds_once_and_filters_before_top_k_without_vectors() {
+        let path = temp_database("semantic-fixture");
+        let metadata = embedding("revision-1", 3);
+        let table = Arc::new(
+            LanceChunkTable::create(&path, "chunks", metadata.clone())
+                .await
+                .unwrap(),
+        );
+        let mut allowed = fts_chunk(
+            "allowed'page",
+            "allowed",
+            "Swedish",
+            "Säkerhetskopior körs varje natt.",
+        );
+        allowed.metadata.source.root_page_id = "scope".into();
+        let rows = vec![
+            EmbeddedChunk::new(
+                fts_chunk("excluded", "nearest", "English", "Backups run nightly."),
+                vec![1.0, 1.0, 0.0],
+            ),
+            EmbeddedChunk::new(allowed, vec![2.0, 1.0, 0.0]),
+            EmbeddedChunk::new(
+                fts_chunk("other", "far", "Other", "Bread baking."),
+                vec![8.0, 1.0, 0.0],
+            ),
+        ];
+        table.upsert(&metadata, &rows).await.unwrap();
+        table
+            .ensure_vector_index(&vector_config(VectorDistance::L2))
+            .await
+            .unwrap();
+        let provider = Arc::new(CountingProvider::new(metadata));
+        let search = LanceSemanticSearch::new(table, provider.clone(), 1).unwrap();
+        let hits = search
+            .search(SemanticQuery {
+                query: "x".into(),
+                limit: 1,
+                page_ids: Some(vec!["allowed'page".into()]),
+                root_page_ids: Some(vec!["scope".into()]),
+            })
+            .await
+            .unwrap();
+        assert_eq!(provider.embedded_inputs(), 1);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source.chunk_id, "allowed");
+        assert_eq!(hits[0].source.page_id, "allowed'page");
+        assert!(hits[0].score.is_finite());
+        assert_eq!(hits[0].score, -1.0);
+        let json = serde_json::to_value(&hits).unwrap();
+        assert_eq!(json[0].as_object().unwrap().len(), 3);
+        assert!(json[0].get("vector").is_none());
+        assert!(json[0].get("distance").is_none());
+        let hits = search
+            .search(SemanticQuery {
+                query: "x".into(),
+                limit: 2,
+                page_ids: None,
+                root_page_ids: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(provider.embedded_inputs(), 2);
+        assert_eq!(hits[0].source.chunk_id, "nearest");
+        assert!(hits[0].score > hits[1].score);
+        assert!(
+            search
+                .search(SemanticQuery {
+                    query: "".into(),
+                    limit: 1,
+                    page_ids: None,
+                    root_page_ids: None
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(provider.embedded_inputs(), 2);
+        search
+            .table
+            .rebuild_vector_index(&vector_config(VectorDistance::Cosine))
+            .await
+            .unwrap();
+        let cosine = search
+            .search(SemanticQuery {
+                query: "x".into(),
+                limit: 2,
+                page_ids: None,
+                root_page_ids: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(cosine[0].source.chunk_id, "nearest");
+        assert!(cosine[0].score > cosine[1].score);
+        assert!(cosine.iter().all(|hit| hit.score.is_finite()));
+        let scoped = search
+            .search(SemanticQuery {
+                query: "x".into(),
+                limit: 2,
+                page_ids: Some(vec!["missing".into(), "allowed'page".into()]),
+                root_page_ids: Some(vec!["wrong".into(), "scope".into()]),
+            })
+            .await
+            .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].source.chunk_id, "allowed");
+        let empty = search
+            .search(SemanticQuery {
+                query: "x".into(),
+                limit: 2,
+                page_ids: Some(vec!["allowed'page".into()]),
+                root_page_ids: Some(vec!["wrong".into()]),
+            })
+            .await
+            .unwrap();
+        assert!(empty.is_empty());
+        provider.set_fail(true);
+        assert!(
+            search
+                .search(SemanticQuery {
+                    query: "x".into(),
+                    limit: 1,
+                    page_ids: None,
+                    root_page_ids: None
+                })
+                .await
+                .is_err()
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn semantic_composition_rejects_same_dimension_different_model_identity() {
+        let path = temp_database("semantic-identity");
+        let table = Arc::new(
+            LanceChunkTable::create(&path, "chunks", embedding("revision-1", 3))
+                .await
+                .unwrap(),
+        );
+        let provider = Arc::new(CountingProvider::new(embedding("revision-2", 3)));
+        assert!(LanceSemanticSearch::new(table.clone(), provider, 1).is_err());
+        assert!(
+            LanceSemanticSearch::new(
+                table,
+                Arc::new(CountingProvider::new(embedding("revision-1", 3))),
+                0
+            )
+            .is_err()
+        );
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     fn vector_config(distance: VectorDistance) -> VectorIndexConfig {
