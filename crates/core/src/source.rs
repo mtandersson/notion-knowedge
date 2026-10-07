@@ -22,6 +22,13 @@ pub struct SourceProvenance {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub block_id: Option<String>,
     pub chunk_ids: Vec<String>,
+    /// Notion edit timestamp persisted with the resolved indexed source.
+    pub indexed_last_edited_time: String,
+    /// Present only after a successful authoritative read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refreshed_last_edited_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_stale: Option<bool>,
 }
 
 /// Expanded source content returned in the same order as requested references.
@@ -31,6 +38,16 @@ pub struct ExpandedSource {
     pub text: String,
     pub truncated: bool,
     pub provenance: SourceProvenance,
+    /// Fresh reads always return whole-page content; indexed reads expand the requested scope.
+    pub content_scope: SourceContentScope,
+}
+
+/// Scope of returned text, independently of the indexed anchor reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceContentScope {
+    Indexed,
+    Page,
 }
 
 /// Expansion request. Root scope is supplied by the trusted server composition,

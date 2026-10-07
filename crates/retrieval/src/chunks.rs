@@ -29,8 +29,8 @@ use notion_knowledge_core::{
         SemanticQuery, SemanticSearch,
     },
     source::{
-        ExpandedSource, SourceExpandQuery, SourceExpansion, SourceExpansionError,
-        SourceExpansionFuture, SourceProvenance, StableSourceRef,
+        ExpandedSource, SourceContentScope, SourceExpandQuery, SourceExpansion,
+        SourceExpansionError, SourceExpansionFuture, SourceProvenance, StableSourceRef,
     },
 };
 
@@ -1079,6 +1079,7 @@ impl LanceChunkTable {
                     || row.root_page_id != first.root_page_id
                     || row.url != first.url
                     || row.title != first.title
+                    || row.last_edited_time != first.last_edited_time
             })
         {
             return Err(SourceExpansionError::OutOfScope);
@@ -1109,7 +1110,11 @@ impl LanceChunkTable {
             reference: source_ref,
             text,
             truncated,
+            content_scope: SourceContentScope::Indexed,
             provenance: SourceProvenance {
+                indexed_last_edited_time: first.last_edited_time.clone(),
+                refreshed_last_edited_time: None,
+                index_stale: None,
                 page_id: first.page_id.clone(),
                 root_page_id: first.root_page_id.clone(),
                 url: first.url.clone(),
@@ -1154,6 +1159,7 @@ impl SourceExpansion for LanceChunkTable {
 
 #[derive(Debug, Clone)]
 struct StoredChunk {
+    last_edited_time: String,
     chunk_id: String,
     page_id: String,
     block_id: Option<String>,
@@ -1389,9 +1395,11 @@ fn decode_stored_chunks(batches: &[RecordBatch]) -> Result<Vec<StoredChunk>, Chu
         let roots = string_column(batch, "root_page_id")?;
         let texts = string_column(batch, "text")?;
         let hashes = string_column(batch, "content_hash")?;
+        let edited = string_column(batch, "last_edited_time")?;
         let vectors = vector_column(batch, "vector")?;
         for row in 0..batch.num_rows() {
             rows.push(StoredChunk {
+                last_edited_time: edited.value(row).to_owned(),
                 chunk_id: chunk_ids.value(row).to_owned(),
                 page_id: page_ids.value(row).to_owned(),
                 block_id: (!block_ids.is_null(row)).then(|| block_ids.value(row).to_owned()),
@@ -3484,6 +3492,13 @@ mod tests {
             .expect("expand section");
         assert_eq!(section.len(), 1);
         assert_eq!(section[0].provenance.page_id, "page-1");
+        assert_eq!(
+            section[0].provenance.indexed_last_edited_time,
+            "2026-10-05T12:00:00Z"
+        );
+        assert_eq!(section[0].content_scope, SourceContentScope::Indexed);
+        assert!(section[0].provenance.refreshed_last_edited_time.is_none());
+        assert!(section[0].provenance.index_stale.is_none());
         assert_eq!(section[0].provenance.root_page_id, "root-a");
         assert_eq!(section[0].provenance.heading_path, vec!["Section"]);
         assert_eq!(
@@ -3530,6 +3545,42 @@ mod tests {
         );
         assert!(bounded_many.iter().any(|source| source.truncated));
 
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn source_expansion_rejects_a_page_with_inconsistent_indexed_timestamps() {
+        let path = temp_database("source-timestamps");
+        let table = LanceChunkTable::create(&path, "chunks", embedding("revision-1", 3))
+            .await
+            .expect("create table");
+        let mut first = chunk("root-a", "Page", "first section");
+        first.chunk_id = "chunk-a".into();
+        let mut second = chunk("root-a", "Page", "second section");
+        second.chunk_id = "chunk-b".into();
+        second.metadata.last_edited_time = "2026-10-07T11:30:00Z".into();
+        table
+            .upsert(
+                table.embedding_metadata(),
+                &[
+                    EmbeddedChunk::new(first, vec![1.0, 0.0, 0.0]),
+                    EmbeddedChunk::new(second, vec![0.0, 1.0, 0.0]),
+                ],
+            )
+            .await
+            .expect("insert fixtures");
+        assert!(
+            table
+                .expand(SourceExpandQuery {
+                    refs: vec![StableSourceRef::Page("page-1".into())],
+                    max_chars: 256,
+                    root_page_ids: vec!["root-a".into()]
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(table.count_rows().await.expect("unchanged row count"), 2);
         drop(table);
         std::fs::remove_dir_all(path).expect("remove temporary database");
     }

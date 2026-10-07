@@ -23,12 +23,14 @@ pub struct KnowledgeServer {
     source_expansion: Option<Arc<dyn notion_knowledge_core::source::SourceExpansion>>,
     root_page_ids: Arc<[String]>,
     snippet_chars: usize,
+    fresh_source: Option<Arc<dyn notion_knowledge_core::backend::NotionRead>>,
 }
 
 impl Default for KnowledgeServer {
     fn default() -> Self {
         Self {
             snippet_chars: 2000,
+            fresh_source: None,
             search: None,
             hybrid_search: None,
             lexical_search: None,
@@ -39,6 +41,15 @@ impl Default for KnowledgeServer {
 }
 
 impl KnowledgeServer {
+    /// Configure read-only authoritative Notion access for explicit fresh get calls.
+    pub fn and_fresh_source(
+        mut self,
+        backend: Arc<dyn notion_knowledge_core::backend::NotionRead>,
+    ) -> Self {
+        self.fresh_source = Some(backend);
+        self
+    }
+
     /// Configure the Unicode character budget for each returned excerpt.
     pub fn with_snippet_chars(mut self, limit: usize) -> Result<Self, &'static str> {
         if !(1..=2000).contains(&limit) {
@@ -273,7 +284,7 @@ impl ServerHandler for KnowledgeServer {
                     root_page_ids: self.root_page_ids.iter().cloned().collect(),
                 };
                 match adapter.expand(query).await {
-                    Ok(sources)
+                    Ok(mut sources)
                         if get::valid_output(
                             &sources,
                             &refs,
@@ -281,6 +292,18 @@ impl ServerHandler for KnowledgeServer {
                             self.root_page_ids.as_ref(),
                         ) =>
                     {
+                        if input.freshness == get::Freshness::Fresh {
+                            let Some(backend) = &self.fresh_source else {
+                                return Ok(error(
+                                    "notion_unavailable: no authoritative Notion backend is configured; no content was returned",
+                                ));
+                            };
+                            if let Err(failure) =
+                                get::refresh(&mut sources, backend.as_ref(), max_chars).await
+                            {
+                                return Ok(error(failure));
+                            }
+                        }
                         let output = serde_json::json!({"sources": sources});
                         let mut result = rmcp::model::CallToolResult::structured(output);
                         result.content.push(rmcp::model::ContentBlock::text(
