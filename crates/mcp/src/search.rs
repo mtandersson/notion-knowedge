@@ -75,8 +75,9 @@ pub fn tool() -> Tool {
         "filters":{"type":"object","additionalProperties":false,"properties":{"page_ids":ids,"root_page_ids":ids}}
     }});
     let output = json!({"type":"object","additionalProperties":false,"required":["results"],"properties":{
-        "results":{"type":"array","maxItems":100,"items":{"type":"object","additionalProperties":false,"required":["source","text","score"],"properties":{
-            "source":{"type":"object","additionalProperties":false,"required":["page_id","chunk_id","url","title","heading_path"],"properties":{
+        "results":{"type":"array","maxItems":100,"items":{"type":"object","additionalProperties":false,"required":["source","text","score","matched_paths"],"properties":{
+            "source":{"type":"object","additionalProperties":false,"required":["page_id","chunk_id","url","title","heading_path","last_edited_time"],"properties":{
+                "last_edited_time":{"type":"string","minLength":1,"description":"Authoritative Notion edit timestamp from the indexed snapshot."},
                 "page_id":{"type":"string","minLength":1},"chunk_id":{"type":"string","minLength":1},"block_id":{"type":"string","minLength":1},
                 "url":{"type":"string","minLength":1},"title":{"type":"string"},"heading_path":{"type":"array","items":{"type":"string"}}
             }},

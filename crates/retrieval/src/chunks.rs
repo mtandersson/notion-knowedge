@@ -170,6 +170,7 @@ impl Default for FtsIndexConfig {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FtsIndexHit {
+    pub last_edited_time: String,
     pub chunk_id: String,
     pub page_id: String,
     pub root_page_id: String,
@@ -230,6 +231,7 @@ pub enum VectorIndexAction {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct VectorIndexHit {
+    pub last_edited_time: String,
     pub chunk_id: String,
     pub page_id: String,
     pub root_page_id: String,
@@ -296,11 +298,12 @@ impl LanceSemanticSearch {
             .into_iter()
             .map(|hit| SearchHit {
                 matched_paths: Vec::new(),
-                text: bounded_text(&hit.text, 2000),
+                text: notion_knowledge_core::search::snippet(&hit.text, 2000),
                 // Native distance is lower-is-better for every supported metric.
                 // Negation preserves ranking without claiming cross-metric calibration.
                 score: -hit.distance,
                 source: SearchSource {
+                    last_edited_time: hit.last_edited_time,
                     page_id: hit.page_id,
                     chunk_id: hit.chunk_id,
                     url: hit.url,
@@ -623,6 +626,7 @@ impl LanceChunkTable {
                 "url".into(),
                 "title".into(),
                 "heading_path_json".into(),
+                "last_edited_time".into(),
                 "text".into(),
             ]))
             .limit(limit);
@@ -759,6 +763,7 @@ impl LanceChunkTable {
                 "url".into(),
                 "title".into(),
                 "heading_path_json".into(),
+                "last_edited_time".into(),
                 "text".into(),
             ]))
             .limit(limit);
@@ -800,9 +805,10 @@ impl LanceChunkTable {
                 let key = (hit.page_id.clone(), hit.chunk_id.clone());
                 let candidate = SearchHit {
                     matched_paths: Vec::new(),
-                    text: bounded_text(&hit.text, 2000),
+                    text: notion_knowledge_core::search::snippet(&hit.text, 2000),
                     score,
                     source: SearchSource {
+                        last_edited_time: hit.last_edited_time,
                         page_id: hit.page_id,
                         chunk_id: hit.chunk_id,
                         url: hit.url,
@@ -1230,10 +1236,6 @@ fn lexical_filter_predicate(query: &LexicalQuery) -> Result<Option<String>, Chun
     Ok((!predicates.is_empty()).then(|| predicates.join(" AND ")))
 }
 
-fn bounded_text(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
-}
-
 fn quoted_phrase(query: &str) -> Option<&str> {
     let query = query.trim();
     let phrase = query.strip_prefix('"')?.strip_suffix('"')?.trim();
@@ -1284,6 +1286,7 @@ fn decode_vector_hits(batches: &[RecordBatch]) -> Result<Vec<VectorIndexHit>, Ch
         let urls = string_column(batch, "url")?;
         let titles = string_column(batch, "title")?;
         let headings = string_column(batch, "heading_path_json")?;
+        let edited = string_column(batch, "last_edited_time")?;
         let texts = string_column(batch, "text")?;
         let distances = float32_column(batch, "_distance")?;
         for row in 0..batch.num_rows() {
@@ -1293,6 +1296,7 @@ fn decode_vector_hits(batches: &[RecordBatch]) -> Result<Vec<VectorIndexHit>, Ch
                 ));
             }
             hits.push(VectorIndexHit {
+                last_edited_time: edited.value(row).to_owned(),
                 chunk_id: chunk_ids.value(row).to_owned(),
                 page_id: page_ids.value(row).to_owned(),
                 root_page_id: roots.value(row).to_owned(),
@@ -1318,6 +1322,7 @@ fn decode_fts_hits(batches: &[RecordBatch]) -> Result<Vec<FtsIndexHit>, ChunkTab
         let urls = string_column(batch, "url")?;
         let titles = string_column(batch, "title")?;
         let headings = string_column(batch, "heading_path_json")?;
+        let edited = string_column(batch, "last_edited_time")?;
         let texts = string_column(batch, "text")?;
         let scores = float32_column(batch, "_score")?;
         for row in 0..batch.num_rows() {
@@ -1327,6 +1332,7 @@ fn decode_fts_hits(batches: &[RecordBatch]) -> Result<Vec<FtsIndexHit>, ChunkTab
                 ));
             }
             hits.push(FtsIndexHit {
+                last_edited_time: edited.value(row).to_owned(),
                 chunk_id: chunk_ids.value(row).to_owned(),
                 page_id: page_ids.value(row).to_owned(),
                 root_page_id: roots.value(row).to_owned(),
@@ -1916,6 +1922,11 @@ mod tests {
             "Säkerhetskopior körs varje natt.",
         );
         allowed.metadata.source.root_page_id = "scope".into();
+        allowed.text = format!(
+            "Säkerhetskopior [file](https://files.example/{}?sig=secret) after",
+            "x".repeat(2500)
+        );
+        allowed.metadata.last_edited_time = "2026-10-07T11:12:13Z".into();
         let rows = vec![
             EmbeddedChunk::new(
                 fts_chunk("excluded", "nearest", "English", "Backups run nightly."),
@@ -1947,6 +1958,8 @@ mod tests {
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].source.chunk_id, "allowed");
+        assert_eq!(hits[0].source.last_edited_time, "2026-10-07T11:12:13Z");
+        assert_eq!(hits[0].text, "Säkerhetskopior [file]([link omitted]) after");
         assert_eq!(hits[0].source.page_id, "allowed'page");
         assert!(hits[0].score.is_finite());
         assert_eq!(hits[0].score, -1.0);
@@ -2675,6 +2688,7 @@ mod tests {
         .expect("phrase search");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].source.chunk_id, "phrase-chunk");
+        assert_eq!(hits[0].source.last_edited_time, "2026-10-05T12:00:00Z");
         assert_eq!(hits[0].text.chars().count(), 2000);
 
         drop(table);

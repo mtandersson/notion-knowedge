@@ -155,9 +155,10 @@ fn selected(query: &SemanticQuery, chunk: &IndexedChunk) -> bool {
 fn hit(chunk: IndexedChunk, score: f32) -> SearchHit {
     SearchHit {
         matched_paths: Vec::new(),
-        text: chunk.text.chars().take(2000).collect(),
+        text: notion_knowledge_core::search::snippet(&chunk.text, 2000),
         score,
         source: SearchSource {
+            last_edited_time: chunk.metadata.last_edited_time,
             page_id: chunk.metadata.page_id,
             chunk_id: chunk.chunk_id,
             url: chunk.metadata.url,
