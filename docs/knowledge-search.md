@@ -27,8 +27,9 @@ The default bootstrap has no retrieval adapter: valid calls return a tool error
 and no fabricated result object. The explicit [semantic MCP spike](semantic-mcp-spike.md)
 still demonstrates semantic composition. Production lexical retrieval from #46 can
 be injected independently through the same `KnowledgeServer` and serves
-`mode=lexical` using the LanceDB BM25 indices from #41. Hybrid remains
-`mode_unavailable` until #47. A mode whose adapter is not configured also fails
+`mode=lexical` using the LanceDB BM25 indices from #41.
+[Hybrid fusion](hybrid-search.md) combines configured semantic and lexical ports
+through `KnowledgeServer::and_hybrid_search`. A mode whose adapter is not configured also fails
 explicitly instead of silently falling back to another retrieval path.
 
 Lexical `page_ids` and `root_page_ids` are applied inside LanceDB retrieval
@@ -41,7 +42,7 @@ tokenization behavior.
 Dependency failures return `retrieval_unavailable`. Invalid arguments always
 return JSON-RPC invalid-params without echoing supplied input. Successful content
 blocks identify retrieved excerpts as untrusted data. Production [semantic retrieval](semantic-search.md) can be injected through the
-same handler; hybrid fusion remains #47 and broader typed filters remain #48.
+same handler, with hybrid fusion and typed metadata filters implemented below.
 
 Production-boundary discovery and call tests run with:
 
@@ -148,3 +149,7 @@ predicate grows with the number of matching chunks; hybrid currently repeats
 the scan per path. Large datasets may require indexed property/date projections
 or shared candidate planning in a later optimization. SQL-size/storage failures
 remain explicit retrieval-unavailable errors, never silent partial filtering.
+
+The [integrated retrieval smoke](retrieval-smoke.md) maps the search, source
+expansion and fresh-read acceptance criteria to reproducible credential-free
+checks, including the remaining bootstrap composition boundary.

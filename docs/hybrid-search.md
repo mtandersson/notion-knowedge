@@ -22,8 +22,8 @@ candidate depth rather than the final output limit. Duplicate entries within
 one ranker contribute only once, at their first occurrence. Shared chunks
 receive both contributions and serialize `matched_paths: ["semantic",
 "lexical"]`; single-path chunks retain their own path and can survive the
-final top-k. Search hits from existing nonhybrid adapters omit this additive
-field. The MCP output schema advertises it.
+final top-k. Every search hit includes `matched_paths`; nonhybrid results identify their
+single retrieval path. The MCP output schema requires it.
 
 Matching page/chunk IDs across rankers with conflicting excerpts or citation metadata fail
 closed as unavailable rather than silently mixing snapshots. Failure of either
