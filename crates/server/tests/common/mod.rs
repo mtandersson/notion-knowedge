@@ -52,6 +52,23 @@ pub fn assert_search_catalog(tools: &Value) {
     assert_eq!(input["properties"]["limit"]["maximum"], 100);
     assert!(input["properties"]["filters"]["properties"]["page_ids"].is_object());
     assert!(input["properties"]["filters"]["properties"]["root_page_ids"].is_object());
+    let metadata = &input["properties"]["filters"]["properties"]["metadata"];
+    assert_eq!(metadata["additionalProperties"], false);
+    assert_eq!(
+        metadata["properties"]["page_kind"]["enum"],
+        json!(["standalone", "database"])
+    );
+    assert_eq!(
+        metadata["properties"]["edited"]["properties"]["from"]["format"],
+        "date-time"
+    );
+    assert_eq!(
+        metadata["properties"]["properties"]["items"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
     let result = &tool["outputSchema"]["properties"]["results"]["items"];
     assert_eq!(result["properties"]["score"]["type"], "number");
     assert_eq!(

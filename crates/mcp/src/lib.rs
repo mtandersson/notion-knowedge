@@ -102,15 +102,22 @@ impl KnowledgeServer {
         source_expansion: Arc<dyn notion_knowledge_core::source::SourceExpansion>,
         root_page_ids: Vec<String>,
     ) -> Result<Self, &'static str> {
+        self = self.with_root_page_ids(root_page_ids)?;
+        self.source_expansion = Some(source_expansion);
+        Ok(self)
+    }
+
+    /// Configure the shared search/get authority. Caller filters only narrow these roots.
+    /// If unset, the search adapter owns the index's authorized scope.
+    pub fn with_root_page_ids(mut self, root_page_ids: Vec<String>) -> Result<Self, &'static str> {
         if root_page_ids.is_empty()
             || root_page_ids.len() > 100
-            || root_page_ids
-                .iter()
-                .any(|id| id.trim().is_empty() || id.chars().count() > 128)
+            || root_page_ids.iter().any(|id| {
+                id.trim().is_empty() || id.chars().count() > 128 || id.chars().any(char::is_control)
+            })
         {
-            return Err("source expansion requires 1 to 100 nonempty root page IDs");
+            return Err("scope requires 1 to 100 nonempty root page IDs");
         }
-        self.source_expansion = Some(source_expansion);
         self.root_page_ids = Arc::from(root_page_ids);
         Ok(self)
     }
@@ -169,7 +176,27 @@ impl ServerHandler for KnowledgeServer {
                 }
                 let filters = input.filters;
                 let page_ids = filters.as_ref().and_then(|f| f.page_ids.clone());
-                let root_page_ids = filters.and_then(|f| f.root_page_ids);
+                let metadata = filters
+                    .as_ref()
+                    .and_then(|f| f.metadata.clone())
+                    .unwrap_or_default();
+                let mut root_page_ids = filters.and_then(|f| f.root_page_ids);
+                if !self.root_page_ids.is_empty() {
+                    let roots = root_page_ids
+                        .take()
+                        .unwrap_or_else(|| self.root_page_ids.iter().cloned().collect());
+                    let roots = roots
+                        .into_iter()
+                        .filter(|id| self.root_page_ids.contains(id))
+                        .collect::<Vec<_>>();
+                    if roots.is_empty() {
+                        return Ok(rmcp::model::CallToolResult::structured(
+                            serde_json::json!({"results":[]}),
+                        )
+                        .into());
+                    }
+                    root_page_ids = Some(roots);
+                }
                 let limit = usize::from(input.limit);
                 let single_path = match input.mode {
                     search::SearchMode::Semantic => {
@@ -193,6 +220,7 @@ impl ServerHandler for KnowledgeServer {
                                 limit,
                                 page_ids,
                                 root_page_ids,
+                                metadata,
                             })
                             .await
                     }
@@ -208,6 +236,7 @@ impl ServerHandler for KnowledgeServer {
                                 limit,
                                 page_ids,
                                 root_page_ids,
+                                metadata,
                             })
                             .await
                     }
@@ -223,6 +252,7 @@ impl ServerHandler for KnowledgeServer {
                                 limit,
                                 page_ids,
                                 root_page_ids,
+                                metadata,
                             })
                             .await
                     }

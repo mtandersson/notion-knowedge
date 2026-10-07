@@ -8,6 +8,7 @@ pub struct SemanticQuery {
     pub limit: usize,
     pub page_ids: Option<Vec<String>>,
     pub root_page_ids: Option<Vec<String>>,
+    pub metadata: crate::search_filters::MetadataFilters,
 }
 
 #[derive(Debug, Clone)]
@@ -16,6 +17,7 @@ pub struct LexicalQuery {
     pub limit: usize,
     pub page_ids: Option<Vec<String>>,
     pub root_page_ids: Option<Vec<String>>,
+    pub metadata: crate::search_filters::MetadataFilters,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchSource {
@@ -40,10 +42,12 @@ pub struct SearchHit {
 pub struct SearchUnavailable;
 pub type SearchFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Vec<SearchHit>, SearchUnavailable>> + Send + 'a>>;
+/// Implementations must narrow by every supplied filter before limiting, or fail.
 pub trait SemanticSearch: Send + Sync {
     fn search(&self, query: SemanticQuery) -> SearchFuture<'_>;
 }
 
+/// Implementations must narrow by every supplied filter before limiting, or fail.
 pub trait LexicalSearch: Send + Sync {
     fn search(&self, query: LexicalQuery) -> SearchFuture<'_>;
 }

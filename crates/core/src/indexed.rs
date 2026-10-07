@@ -24,7 +24,12 @@ pub struct SourceMetadata {
 /// Typed normalized values keyed by stable Notion property ID, not display name.
 /// Formula and rollup outputs use the corresponding resolved value variant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+#[serde(
+    tag = "type",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum PropertyValue {
     Null,
     Text(String),

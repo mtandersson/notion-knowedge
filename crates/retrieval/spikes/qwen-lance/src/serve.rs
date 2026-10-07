@@ -42,6 +42,7 @@ impl Adapter {
         })
     }
     async fn execute(&self, query: SemanticQuery) -> Result<Vec<SearchHit>> {
+        query.metadata.validate().map_err(anyhow::Error::msg)?;
         let (provider, table) = self
             .state
             .as_ref()
@@ -127,7 +128,7 @@ impl Adapter {
                 );
                 let score = 1.0 - distances.value(row);
                 ensure!(score.is_finite(), "invalid score");
-                if !selected(&query, &chunk) {
+                if !selected(&query, &chunk) || !query.metadata.matches_metadata(&chunk.metadata).map_err(anyhow::Error::msg)? {
                     continue;
                 }
                 results.push(hit(chunk, score));
@@ -203,6 +204,7 @@ mod tests {
             limit: 1,
             page_ids: None,
             root_page_ids: None,
+            metadata: Default::default(),
         };
         assert!(selected(&query, &chunk));
         query.page_ids = Some(vec!["other".into(), chunk.metadata.page_id.clone()]);

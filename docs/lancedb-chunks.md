@@ -23,9 +23,9 @@ Every canonical chunk field has a persisted representation:
 - heading paths, normalized properties and links are deterministic JSON columns;
 - `vector` stores the embedding and is never nullable.
 
-The current MCP filter contract needs `page_id` and `root_page_id`; keeping
-the remaining source provenance scalar avoids JSON parsing for future source
-filters. The canonical contract is not duplicated as an opaque JSON record.
+MCP search filters use page/root and source-provenance columns directly.
+Typed property/date filtering scans only scoped metadata, then constrains vector
+and FTS retrieval before limits; see [the filter contract](knowledge-search.md). The canonical contract is not duplicated as an opaque JSON record.
 
 Schema metadata contains the chunk-table schema version, canonical chunk schema
 version and complete `EmbeddingMetadata`. Schema changes that alter field
