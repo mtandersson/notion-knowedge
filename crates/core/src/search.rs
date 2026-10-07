@@ -73,7 +73,16 @@ pub fn snippet(text: &str, limit: usize) -> String {
             .filter_map(|prefix| remaining.to_ascii_lowercase().find(prefix))
             .min()
         {
-            output.push_str(&remaining[..start]);
+            let prefix = &remaining[..start];
+            let decoded_prefix = decode_percent(prefix).to_ascii_lowercase();
+            if decoded_prefix.contains("http:")
+                || decoded_prefix.contains("https:")
+                || decoded_prefix.contains("//")
+            {
+                output.push_str("[link omitted]");
+            } else {
+                output.push_str(prefix);
+            }
             let end = remaining[start..]
                 .find(|c: char| c.is_whitespace() || matches!(c, ')' | ']' | '>' | '\'' | '"'))
                 .map_or(remaining.len(), |offset| start + offset);
@@ -151,6 +160,13 @@ mod snippet_tests {
                 2000
             ),
             "[a]([link omitted])[b]([link omitted])"
+        );
+        assert!(
+            !snippet(
+                "[a](https%3A%2F%2Ffiles.example/a?sig=secret)[b](https://example/public)",
+                2000
+            )
+            .contains("secret")
         );
         let long = format!(
             "Before [file](https://example/{}?sig=secret) after",
