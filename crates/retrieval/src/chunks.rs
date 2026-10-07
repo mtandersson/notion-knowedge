@@ -345,7 +345,6 @@ impl LanceChunkTable {
         Ok(self.table.count_rows(None).await?)
     }
 
-
     async fn validate_vector_index_layout(&self) -> Result<(), ChunkTableError> {
         if let Some(index) = self
             .table
@@ -364,9 +363,7 @@ impl LanceChunkTable {
     }
 
     fn validate_vector_index_config(config: &VectorIndexConfig) -> Result<(), ChunkTableError> {
-        if config.num_partitions == Some(0)
-            || config.sample_rate == 0
-            || config.max_iterations == 0
+        if config.num_partitions == Some(0) || config.sample_rate == 0 || config.max_iterations == 0
         {
             return Err(ChunkTableError::InvalidSchema(
                 "vector index parameters must be positive".into(),
@@ -505,9 +502,7 @@ impl LanceChunkTable {
             .table
             .index_stats(CHUNK_VECTOR_INDEX_NAME)
             .await?
-            .ok_or_else(|| {
-                ChunkTableError::InvalidSchema("vector index is not built".into())
-            })?;
+            .ok_or_else(|| ChunkTableError::InvalidSchema("vector index is not built".into()))?;
         let distance = stats.distance_type.ok_or_else(|| {
             ChunkTableError::InvalidSchema("vector index is missing distance metadata".into())
         })?;
@@ -1842,7 +1837,10 @@ mod tests {
                 vec![0.0, 0.0, 1.0],
             ),
         ];
-        table.upsert(&metadata, &rows).await.expect("seed crawl rows");
+        table
+            .upsert(&metadata, &rows)
+            .await
+            .expect("seed crawl rows");
 
         let config = vector_config(VectorDistance::L2);
         assert_eq!(
@@ -1996,10 +1994,7 @@ mod tests {
         added.metadata.page_id = "page-3".into();
         added.metadata.url = "https://example.invalid/page-3".into();
         table
-            .upsert(
-                &metadata,
-                &[EmbeddedChunk::new(added, vec![0.0, 0.0, 1.0])],
-            )
+            .upsert(&metadata, &[EmbeddedChunk::new(added, vec![0.0, 0.0, 1.0])])
             .await
             .expect("append incremental row");
 
@@ -2098,7 +2093,9 @@ mod tests {
             .expect("create table");
 
         assert!(matches!(
-            table.ensure_vector_index(&VectorIndexConfig::default()).await,
+            table
+                .ensure_vector_index(&VectorIndexConfig::default())
+                .await,
             Err(ChunkTableError::InvalidRows(_))
         ));
         assert!(matches!(
