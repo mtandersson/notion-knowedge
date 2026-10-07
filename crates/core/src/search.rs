@@ -1,9 +1,17 @@
-//! Provider-independent semantic retrieval port. Indexed scope is adapter-owned.
+//! Provider-independent search ports. Indexed scope is adapter-owned.
 use serde::Serialize;
 use std::{future::Future, pin::Pin};
 
 #[derive(Debug, Clone)]
 pub struct SemanticQuery {
+    pub query: String,
+    pub limit: usize,
+    pub page_ids: Option<Vec<String>>,
+    pub root_page_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LexicalQuery {
     pub query: String,
     pub limit: usize,
     pub page_ids: Option<Vec<String>>,
@@ -31,4 +39,8 @@ pub type SearchFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Vec<SearchHit>, SearchUnavailable>> + Send + 'a>>;
 pub trait SemanticSearch: Send + Sync {
     fn search(&self, query: SemanticQuery) -> SearchFuture<'_>;
+}
+
+pub trait LexicalSearch: Send + Sync {
+    fn search(&self, query: LexicalQuery) -> SearchFuture<'_>;
 }

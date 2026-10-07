@@ -23,6 +23,9 @@ use lancedb::{
 use notion_knowledge_core::{
     embedding::{self, EmbeddingError, EmbeddingMetadata, EmbeddingProvider},
     indexed::{IndexedChunk, SchemaVersion},
+    search::{
+        LexicalQuery, LexicalSearch, SearchFuture, SearchHit, SearchSource, SearchUnavailable,
+    },
     source::{
         ExpandedSource, SourceExpandQuery, SourceExpansion, SourceExpansionError,
         SourceExpansionFuture, SourceProvenance, StableSourceRef,
@@ -166,7 +169,11 @@ impl Default for FtsIndexConfig {
 pub struct FtsIndexHit {
     pub chunk_id: String,
     pub page_id: String,
+    pub root_page_id: String,
+    pub block_id: Option<String>,
+    pub url: String,
     pub title: String,
+    pub heading_path: Vec<String>,
     pub text: String,
     pub score: f32,
 }
@@ -357,12 +364,23 @@ impl LanceChunkTable {
     }
 
     /// Low-level one-column FTS probe used by the retrieval adapter and tests.
-    /// The user-facing lexical search contract, filters and fusion belong to #46.
+    /// The user-facing lexical search contract is implemented below without
+    /// concatenating user text into SQL predicates.
     pub async fn fts_query(
         &self,
         column: &str,
         query: &str,
         limit: usize,
+    ) -> Result<Vec<FtsIndexHit>, ChunkTableError> {
+        self.fts_query_scoped(column, query, limit, None).await
+    }
+
+    async fn fts_query_scoped(
+        &self,
+        column: &str,
+        query: &str,
+        limit: usize,
+        predicate: Option<&str>,
     ) -> Result<Vec<FtsIndexHit>, ChunkTableError> {
         if query.trim().is_empty()
             || limit == 0
@@ -377,22 +395,88 @@ impl LanceChunkTable {
         let fts_query = FullTextSearchQuery::new(query.to_owned())
             .with_column(column.to_owned())
             .map_err(|_| ChunkTableError::InvalidRows("invalid FTS query column".into()))?;
-        let batches: Vec<RecordBatch> = self
+        let mut search = self
             .table
             .query()
             .full_text_search(fts_query)
             .select(Select::Columns(vec![
                 "chunk_id".into(),
                 "page_id".into(),
+                "root_page_id".into(),
+                "block_id".into(),
+                "url".into(),
                 "title".into(),
+                "heading_path_json".into(),
                 "text".into(),
             ]))
-            .limit(limit)
-            .execute()
-            .await?
-            .try_collect()
-            .await?;
+            .limit(limit);
+        if let Some(predicate) = predicate {
+            search = search.only_if(predicate);
+        }
+        let batches: Vec<RecordBatch> = search.execute().await?.try_collect().await?;
         decode_fts_hits(&batches)
+    }
+
+    async fn lexical_search(&self, query: LexicalQuery) -> Result<Vec<SearchHit>, ChunkTableError> {
+        validate_lexical_query(&query)?;
+        let predicate = lexical_filter_predicate(&query)?;
+        let candidate_limit = query.limit.saturating_mul(4).min(400);
+        let fields = [
+            ("chunk_id", 4.0_f32),
+            ("page_id", 4.0_f32),
+            ("title", 2.0_f32),
+            ("text", 1.0_f32),
+        ];
+        let mut best = HashMap::<(String, String), SearchHit>::new();
+        let phrase = quoted_phrase(&query.query);
+
+        for (column, band) in fields {
+            for hit in self
+                .fts_query_scoped(column, &query.query, candidate_limit, predicate.as_deref())
+                .await?
+            {
+                if phrase.is_some_and(|phrase| !hit_matches_phrase(column, &hit, phrase)) {
+                    continue;
+                }
+                let native = hit.score.max(0.0);
+                let score = band + native / (1.0 + native);
+                if !score.is_finite() {
+                    return Err(ChunkTableError::InvalidRows(
+                        "lexical ranking score must be finite".into(),
+                    ));
+                }
+                let key = (hit.page_id.clone(), hit.chunk_id.clone());
+                let candidate = SearchHit {
+                    text: bounded_text(&hit.text, 2000),
+                    score,
+                    source: SearchSource {
+                        page_id: hit.page_id,
+                        chunk_id: hit.chunk_id,
+                        url: hit.url,
+                        title: hit.title,
+                        heading_path: hit.heading_path,
+                        block_id: hit.block_id,
+                    },
+                };
+                match best.get(&key) {
+                    Some(existing) if existing.score >= candidate.score => {}
+                    _ => {
+                        best.insert(key, candidate);
+                    }
+                }
+            }
+        }
+
+        let mut hits = best.into_values().collect::<Vec<_>>();
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.source.page_id.cmp(&right.source.page_id))
+                .then_with(|| left.source.chunk_id.cmp(&right.source.chunk_id))
+        });
+        hits.truncate(query.limit);
+        Ok(hits)
     }
 
     /// Insert new stable chunk IDs and replace existing rows with the same ID.
@@ -679,6 +763,16 @@ impl LanceChunkTable {
     }
 }
 
+impl LexicalSearch for LanceChunkTable {
+    fn search(&self, query: LexicalQuery) -> SearchFuture<'_> {
+        Box::pin(async move {
+            self.lexical_search(query)
+                .await
+                .map_err(|_| SearchUnavailable)
+        })
+    }
+}
+
 impl SourceExpansion for LanceChunkTable {
     fn expand(&self, query: SourceExpandQuery) -> SourceExpansionFuture<'_> {
         Box::pin(async move {
@@ -732,6 +826,81 @@ fn root_predicate(roots: &[String]) -> String {
         .join(" OR ")
 }
 
+fn id_list_predicate(column: &str, ids: &[String]) -> String {
+    ids.iter()
+        .map(|id| format!("{column} = {}", sql_string(id)))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+fn validate_filter_ids(ids: &[String]) -> bool {
+    !ids.is_empty()
+        && ids.len() <= 100
+        && ids.iter().all(|id| {
+            !id.trim().is_empty() && id.chars().count() <= 128 && !id.chars().any(char::is_control)
+        })
+}
+
+fn validate_lexical_query(query: &LexicalQuery) -> Result<(), ChunkTableError> {
+    if query.query.trim().is_empty()
+        || query.query.chars().count() > 4096
+        || query.limit == 0
+        || query.limit > 100
+        || query
+            .page_ids
+            .as_ref()
+            .is_some_and(|ids| !validate_filter_ids(ids))
+        || query
+            .root_page_ids
+            .as_ref()
+            .is_some_and(|ids| !validate_filter_ids(ids))
+    {
+        return Err(ChunkTableError::InvalidRows(
+            "invalid lexical query or metadata filters".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn lexical_filter_predicate(query: &LexicalQuery) -> Result<Option<String>, ChunkTableError> {
+    validate_lexical_query(query)?;
+    let mut predicates = Vec::new();
+    if let Some(page_ids) = &query.page_ids {
+        predicates.push(format!("({})", id_list_predicate("page_id", page_ids)));
+    }
+    if let Some(root_page_ids) = &query.root_page_ids {
+        predicates.push(format!(
+            "({})",
+            id_list_predicate("root_page_id", root_page_ids)
+        ));
+    }
+    Ok((!predicates.is_empty()).then(|| predicates.join(" AND ")))
+}
+
+fn bounded_text(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
+fn quoted_phrase(query: &str) -> Option<&str> {
+    let query = query.trim();
+    let phrase = query.strip_prefix('"')?.strip_suffix('"')?.trim();
+    (!phrase.is_empty() && !phrase.contains('"')).then_some(phrase)
+}
+
+fn hit_matches_phrase(column: &str, hit: &FtsIndexHit, phrase: &str) -> bool {
+    match column {
+        "chunk_id" => hit.chunk_id == phrase,
+        "page_id" => hit.page_id == phrase,
+        "title" => contains_case_insensitive(&hit.title, phrase),
+        "text" => contains_case_insensitive(&hit.text, phrase),
+        _ => false,
+    }
+}
+
+fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
+    haystack.to_lowercase().contains(&needle.to_lowercase())
+}
+
 fn string_column<'a>(
     batch: &'a RecordBatch,
     name: &str,
@@ -757,7 +926,11 @@ fn decode_fts_hits(batches: &[RecordBatch]) -> Result<Vec<FtsIndexHit>, ChunkTab
     for batch in batches {
         let chunk_ids = string_column(batch, "chunk_id")?;
         let page_ids = string_column(batch, "page_id")?;
+        let roots = string_column(batch, "root_page_id")?;
+        let block_ids = string_column(batch, "block_id")?;
+        let urls = string_column(batch, "url")?;
         let titles = string_column(batch, "title")?;
+        let headings = string_column(batch, "heading_path_json")?;
         let texts = string_column(batch, "text")?;
         let scores = float32_column(batch, "_score")?;
         for row in 0..batch.num_rows() {
@@ -769,7 +942,11 @@ fn decode_fts_hits(batches: &[RecordBatch]) -> Result<Vec<FtsIndexHit>, ChunkTab
             hits.push(FtsIndexHit {
                 chunk_id: chunk_ids.value(row).to_owned(),
                 page_id: page_ids.value(row).to_owned(),
+                root_page_id: roots.value(row).to_owned(),
+                block_id: (!block_ids.is_null(row)).then(|| block_ids.value(row).to_owned()),
+                url: urls.value(row).to_owned(),
                 title: titles.value(row).to_owned(),
+                heading_path: serde_json::from_str(headings.value(row))?,
                 text: texts.value(row).to_owned(),
                 score: scores.value(row),
             });
@@ -1439,6 +1616,248 @@ mod tests {
             .expect("chunk identifier query");
         assert_eq!(chunk_id.len(), 1);
         assert_eq!(chunk_id[0].page_id, "page-98765");
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn lexical_search_ranks_exact_names_and_preserves_provenance() {
+        let path = temp_database("lexical-ranking");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+
+        let rows = vec![
+            EmbeddedChunk::new(
+                fts_chunk(
+                    "page-title",
+                    "chunk-title",
+                    "Projekt Aurora",
+                    "Ordinary body text.",
+                ),
+                vec![1.0, 0.0, 0.0],
+            ),
+            EmbeddedChunk::new(
+                fts_chunk(
+                    "page-body",
+                    "chunk-body",
+                    "Other page",
+                    "Aurora appears only in this body.",
+                ),
+                vec![0.0, 1.0, 0.0],
+            ),
+            EmbeddedChunk::new(
+                fts_chunk(
+                    "page-id",
+                    "nk-chunk-v1:aurora",
+                    "Identifier page",
+                    "No lexical name in the body.",
+                ),
+                vec![0.0, 0.0, 1.0],
+            ),
+        ];
+        table
+            .upsert(&metadata, &rows)
+            .await
+            .expect("seed lexical rows");
+        table
+            .optimize_fts_index()
+            .await
+            .expect("optimize lexical indices");
+
+        let name_hits = LexicalSearch::search(
+            &table,
+            LexicalQuery {
+                query: "Aurora".into(),
+                limit: 10,
+                page_ids: None,
+                root_page_ids: None,
+            },
+        )
+        .await
+        .expect("search name");
+        assert_eq!(name_hits.len(), 2);
+        assert_eq!(name_hits[0].source.chunk_id, "chunk-title");
+        assert_eq!(name_hits[0].source.title, "Projekt Aurora");
+        assert_eq!(
+            name_hits[0].source.url,
+            "https://example.invalid/page-title"
+        );
+        assert_eq!(name_hits[0].source.heading_path, vec!["Section"]);
+        assert_eq!(name_hits[0].source.block_id.as_deref(), Some("block-1"));
+        assert!(name_hits[0].score > name_hits[1].score);
+
+        let id_hits = LexicalSearch::search(
+            &table,
+            LexicalQuery {
+                query: "nk-chunk-v1:aurora".into(),
+                limit: 10,
+                page_ids: None,
+                root_page_ids: None,
+            },
+        )
+        .await
+        .expect("search exact chunk id");
+        assert!(!id_hits.is_empty());
+        assert_eq!(id_hits[0].source.page_id, "page-id");
+        assert_eq!(id_hits[0].source.chunk_id, "nk-chunk-v1:aurora");
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn lexical_search_applies_combined_metadata_filters_with_escaped_ids() {
+        let path = temp_database("lexical-filters");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+
+        let mut quoted = fts_chunk(
+            "page-'one",
+            "chunk-one",
+            "Quoted identifiers",
+            "needle appears here",
+        );
+        quoted.metadata.source.root_page_id = "root-'alpha".into();
+
+        let mut other = fts_chunk(
+            "page-two",
+            "chunk-two",
+            "Other root",
+            "needle appears here too",
+        );
+        other.metadata.source.root_page_id = "root-beta".into();
+
+        table
+            .upsert(
+                &metadata,
+                &[
+                    EmbeddedChunk::new(quoted, vec![1.0, 0.0, 0.0]),
+                    EmbeddedChunk::new(other, vec![0.0, 1.0, 0.0]),
+                ],
+            )
+            .await
+            .expect("seed filtered rows");
+        table
+            .optimize_fts_index()
+            .await
+            .expect("optimize lexical indices");
+
+        let query = LexicalQuery {
+            query: "needle".into(),
+            limit: 10,
+            page_ids: Some(vec!["page-'one".into()]),
+            root_page_ids: Some(vec!["root-'alpha".into()]),
+        };
+        assert_eq!(
+            lexical_filter_predicate(&query).expect("filter predicate"),
+            Some("(page_id = 'page-''one') AND (root_page_id = 'root-''alpha')".into())
+        );
+
+        let hits = LexicalSearch::search(&table, query)
+            .await
+            .expect("filtered lexical search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source.page_id, "page-'one");
+        assert_eq!(hits[0].source.chunk_id, "chunk-one");
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn lexical_search_supports_phrases_and_bounds_returned_text() {
+        let path = temp_database("lexical-phrases");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+
+        let long_tail = "x".repeat(2200);
+        let rows = vec![
+            EmbeddedChunk::new(
+                fts_chunk(
+                    "phrase-page",
+                    "phrase-chunk",
+                    "Phrase fixture",
+                    &format!("charging telemetry {long_tail}"),
+                ),
+                vec![1.0, 0.0, 0.0],
+            ),
+            EmbeddedChunk::new(
+                fts_chunk(
+                    "reversed-page",
+                    "reversed-chunk",
+                    "Reversed fixture",
+                    "telemetry noise charging",
+                ),
+                vec![0.0, 1.0, 0.0],
+            ),
+        ];
+        table
+            .upsert(&metadata, &rows)
+            .await
+            .expect("seed phrase rows");
+        table
+            .optimize_fts_index()
+            .await
+            .expect("optimize phrase indices");
+
+        let hits = LexicalSearch::search(
+            &table,
+            LexicalQuery {
+                query: "\"charging telemetry\"".into(),
+                limit: 10,
+                page_ids: None,
+                root_page_ids: None,
+            },
+        )
+        .await
+        .expect("phrase search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source.chunk_id, "phrase-chunk");
+        assert_eq!(hits[0].text.chars().count(), 2000);
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn lexical_search_rejects_invalid_direct_port_arguments() {
+        let path = temp_database("lexical-validation");
+        let table = LanceChunkTable::create(&path, "chunks", embedding("revision-1", 3))
+            .await
+            .expect("create table");
+
+        for query in [
+            LexicalQuery {
+                query: " ".into(),
+                limit: 1,
+                page_ids: None,
+                root_page_ids: None,
+            },
+            LexicalQuery {
+                query: "valid".into(),
+                limit: 0,
+                page_ids: None,
+                root_page_ids: None,
+            },
+            LexicalQuery {
+                query: "valid".into(),
+                limit: 1,
+                page_ids: Some(vec![]),
+                root_page_ids: None,
+            },
+        ] {
+            assert!(
+                LexicalSearch::search(&table, query).await.is_err(),
+                "invalid direct port input must fail closed"
+            );
+        }
 
         drop(table);
         std::fs::remove_dir_all(path).expect("remove temporary database");

@@ -18,6 +18,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct KnowledgeServer {
     search: Option<Arc<dyn notion_knowledge_core::search::SemanticSearch>>,
+    lexical_search: Option<Arc<dyn notion_knowledge_core::search::LexicalSearch>>,
     source_expansion: Option<Arc<dyn notion_knowledge_core::source::SourceExpansion>>,
     root_page_ids: Arc<[String]>,
 }
@@ -26,6 +27,7 @@ impl Default for KnowledgeServer {
     fn default() -> Self {
         Self {
             search: None,
+            lexical_search: None,
             source_expansion: None,
             root_page_ids: Arc::from(Vec::<String>::new()),
         }
@@ -38,6 +40,23 @@ impl KnowledgeServer {
             search: Some(search),
             ..Self::default()
         }
+    }
+
+    pub fn with_lexical_search(
+        lexical_search: Arc<dyn notion_knowledge_core::search::LexicalSearch>,
+    ) -> Self {
+        Self {
+            lexical_search: Some(lexical_search),
+            ..Self::default()
+        }
+    }
+
+    pub fn and_lexical_search(
+        mut self,
+        lexical_search: Arc<dyn notion_knowledge_core::search::LexicalSearch>,
+    ) -> Self {
+        self.lexical_search = Some(lexical_search);
+        self
     }
 
     pub fn with_source_expansion(
@@ -109,26 +128,55 @@ impl ServerHandler for KnowledgeServer {
                 input
                     .validate()
                     .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
-                let Some(adapter) = &self.search else {
+                if self.search.is_none() && self.lexical_search.is_none() {
                     return Ok(error(
                         "retrieval_unavailable: no retrieval index adapter is configured; no search was performed",
                     ));
-                };
-                if !matches!(input.mode, search::SearchMode::Semantic) {
-                    return Ok(error(
-                        "mode_unavailable: this adapter supports semantic mode only; no search was performed",
-                    ));
                 }
                 let filters = input.filters;
-                let query = notion_knowledge_core::search::SemanticQuery {
-                    query: input.query,
-                    limit: usize::from(input.limit),
-                    page_ids: filters.as_ref().and_then(|f| f.page_ids.clone()),
-                    root_page_ids: filters.and_then(|f| f.root_page_ids),
+                let page_ids = filters.as_ref().and_then(|f| f.page_ids.clone());
+                let root_page_ids = filters.and_then(|f| f.root_page_ids);
+                let limit = usize::from(input.limit);
+                let results = match input.mode {
+                    search::SearchMode::Semantic => {
+                        let Some(adapter) = &self.search else {
+                            return Ok(error(
+                                "mode_unavailable: semantic search adapter is not configured; no search was performed",
+                            ));
+                        };
+                        adapter
+                            .search(notion_knowledge_core::search::SemanticQuery {
+                                query: input.query,
+                                limit,
+                                page_ids,
+                                root_page_ids,
+                            })
+                            .await
+                    }
+                    search::SearchMode::Lexical => {
+                        let Some(adapter) = &self.lexical_search else {
+                            return Ok(error(
+                                "mode_unavailable: lexical search adapter is not configured; no search was performed",
+                            ));
+                        };
+                        adapter
+                            .search(notion_knowledge_core::search::LexicalQuery {
+                                query: input.query,
+                                limit,
+                                page_ids,
+                                root_page_ids,
+                            })
+                            .await
+                    }
+                    search::SearchMode::Hybrid => {
+                        return Ok(error(
+                            "mode_unavailable: hybrid search is not configured; no search was performed",
+                        ));
+                    }
                 };
-                match adapter.search(query).await {
+                match results {
                     Ok(results)
-                        if results.len() <= usize::from(input.limit)
+                        if results.len() <= limit
                             && results.iter().all(|hit| {
                                 hit.score.is_finite()
                                     && hit.text.chars().count() <= 2000
@@ -143,7 +191,7 @@ impl ServerHandler for KnowledgeServer {
                         Ok(result.into())
                     }
                     _ => Ok(error(
-                        "retrieval_unavailable: semantic dependency failed; no results returned",
+                        "retrieval_unavailable: selected retrieval dependency failed; no results returned",
                     )),
                 }
             }
