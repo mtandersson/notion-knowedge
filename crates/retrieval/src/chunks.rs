@@ -12,10 +12,11 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use futures::TryStreamExt;
 use lancedb::{
-    Table,
+    DistanceType, Table,
     index::{
         Index, IndexType,
         scalar::{FtsIndexBuilder, FullTextSearchQuery},
+        vector::IvfFlatIndexBuilder,
     },
     query::{ExecutableQuery, QueryBase, Select},
     table::{OptimizeOptions, optimize::OptimizeAction},
@@ -37,6 +38,7 @@ const CANONICAL_CHUNK_SCHEMA_VERSION: &str = "1";
 const TABLE_SCHEMA_KEY: &str = "notion_knowledge.chunk_table.schema_version";
 const CANONICAL_SCHEMA_KEY: &str = "notion_knowledge.chunk_table.canonical_schema_version";
 const EMBEDDING_KEY: &str = "notion_knowledge.chunk_table.embedding";
+pub const CHUNK_VECTOR_INDEX_NAME: &str = "chunks_vector_ivf_flat_v1";
 const CHUNK_FTS_INDEXES: [(&str, &str); 4] = [
     ("chunks_fts_text_v1", "text"),
     ("chunks_fts_title_v1", "title"),
@@ -178,6 +180,66 @@ pub struct FtsIndexHit {
     pub score: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorDistance {
+    L2,
+    Cosine,
+}
+
+impl VectorDistance {
+    fn lance(self) -> DistanceType {
+        match self {
+            Self::L2 => DistanceType::L2,
+            Self::Cosine => DistanceType::Cosine,
+        }
+    }
+
+    fn matches(self, actual: &DistanceType) -> bool {
+        matches!(
+            (self, actual),
+            (Self::L2, DistanceType::L2) | (Self::Cosine, DistanceType::Cosine)
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VectorIndexConfig {
+    pub distance: VectorDistance,
+    pub num_partitions: Option<u32>,
+    pub sample_rate: u32,
+    pub max_iterations: u32,
+}
+
+impl Default for VectorIndexConfig {
+    fn default() -> Self {
+        Self {
+            distance: VectorDistance::L2,
+            num_partitions: None,
+            sample_rate: 256,
+            max_iterations: 50,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorIndexAction {
+    Created,
+    Existing,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VectorIndexHit {
+    pub chunk_id: String,
+    pub page_id: String,
+    pub root_page_id: String,
+    pub block_id: Option<String>,
+    pub url: String,
+    pub title: String,
+    pub heading_path: Vec<String>,
+    pub text: String,
+    pub distance: f32,
+}
+
 /// Production chunk storage. LanceDB remains an adapter detail: callers pass
 /// canonical chunks and vectors, and receive storage-neutral errors.
 pub struct LanceChunkTable {
@@ -208,6 +270,7 @@ impl LanceChunkTable {
             database.drop_table(table_name, &[]).await?;
             return Err(error);
         }
+        result.validate_vector_index_layout().await?;
         Ok(result)
     }
 
@@ -253,6 +316,7 @@ impl LanceChunkTable {
             Ok(()) => {
                 let result = Self { table, embedding };
                 result.ensure_fts_index(&FtsIndexConfig::default()).await?;
+                result.validate_vector_index_layout().await?;
                 Ok((result, IndexStartupAction::Opened))
             }
             Err(error)
@@ -279,6 +343,200 @@ impl LanceChunkTable {
 
     pub async fn count_rows(&self) -> Result<usize, ChunkTableError> {
         Ok(self.table.count_rows(None).await?)
+    }
+
+    async fn validate_vector_index_layout(&self) -> Result<(), ChunkTableError> {
+        if let Some(index) = self
+            .table
+            .list_indices()
+            .await?
+            .into_iter()
+            .find(|index| index.name == CHUNK_VECTOR_INDEX_NAME)
+            && (index.index_type != IndexType::IvfFlat
+                || index.columns != vec!["vector".to_string()])
+        {
+            return Err(ChunkTableError::InvalidSchema(format!(
+                "vector index {CHUNK_VECTOR_INDEX_NAME} must be IVF_FLAT on vector"
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_vector_index_config(config: &VectorIndexConfig) -> Result<(), ChunkTableError> {
+        if config.num_partitions == Some(0) || config.sample_rate == 0 || config.max_iterations == 0
+        {
+            return Err(ChunkTableError::InvalidSchema(
+                "vector index parameters must be positive".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn validate_vector_index_config_matches(
+        &self,
+        config: &VectorIndexConfig,
+    ) -> Result<(), ChunkTableError> {
+        Self::validate_vector_index_config(config)?;
+        self.validate_vector_index_layout().await?;
+        let Some(stats) = self.table.index_stats(CHUNK_VECTOR_INDEX_NAME).await? else {
+            return Err(ChunkTableError::InvalidSchema(
+                "vector index exists but statistics are unavailable".into(),
+            ));
+        };
+        let Some(distance) = stats.distance_type.as_ref() else {
+            return Err(ChunkTableError::InvalidSchema(
+                "vector index is missing persisted distance metadata".into(),
+            ));
+        };
+        if !config.distance.matches(distance) {
+            return Err(ChunkTableError::InvalidSchema(
+                "vector index distance does not match requested configuration".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Build the production IVF_FLAT ANN index once the initial crawl has
+    /// populated the vector column. Existing compatible indices are preserved.
+    pub async fn ensure_vector_index(
+        &self,
+        config: &VectorIndexConfig,
+    ) -> Result<VectorIndexAction, ChunkTableError> {
+        Self::validate_vector_index_config(config)?;
+        self.validate_vector_index_layout().await?;
+        if self
+            .table
+            .list_indices()
+            .await?
+            .iter()
+            .any(|index| index.name == CHUNK_VECTOR_INDEX_NAME)
+        {
+            self.validate_vector_index_config_matches(config).await?;
+            return Ok(VectorIndexAction::Existing);
+        }
+        if self.count_rows().await? == 0 {
+            return Err(ChunkTableError::InvalidRows(
+                "cannot train vector index on an empty chunk table".into(),
+            ));
+        }
+        self.create_vector_index(config, false).await?;
+        self.validate_vector_index_config_matches(config).await?;
+        Ok(VectorIndexAction::Created)
+    }
+
+    /// Explicitly retrain/replace the derived vector index. The chunk table and
+    /// authoritative source data are never replaced by this operation.
+    pub async fn rebuild_vector_index(
+        &self,
+        config: &VectorIndexConfig,
+    ) -> Result<(), ChunkTableError> {
+        Self::validate_vector_index_config(config)?;
+        self.validate_vector_index_layout().await?;
+        if self.count_rows().await? == 0 {
+            return Err(ChunkTableError::InvalidRows(
+                "cannot rebuild vector index on an empty chunk table".into(),
+            ));
+        }
+        self.create_vector_index(config, true).await?;
+        self.validate_vector_index_config_matches(config).await
+    }
+
+    async fn create_vector_index(
+        &self,
+        config: &VectorIndexConfig,
+        replace: bool,
+    ) -> Result<(), ChunkTableError> {
+        let mut builder = IvfFlatIndexBuilder::default()
+            .distance_type(config.distance.lance())
+            .sample_rate(config.sample_rate)
+            .max_iterations(config.max_iterations);
+        if let Some(num_partitions) = config.num_partitions {
+            builder = builder.num_partitions(num_partitions);
+        }
+        self.table
+            .create_index(&["vector"], Index::IvfFlat(builder))
+            .name(CHUNK_VECTOR_INDEX_NAME.to_string())
+            .replace(replace)
+            .execute()
+            .await?;
+        Ok(())
+    }
+
+    /// Fold rows written after the last index build into the named vector
+    /// index. This creates the index first if the initial crawl has completed.
+    pub async fn optimize_vector_index(
+        &self,
+        config: &VectorIndexConfig,
+    ) -> Result<VectorIndexAction, ChunkTableError> {
+        let action = self.ensure_vector_index(config).await?;
+        self.table
+            .optimize(OptimizeAction::Index(
+                OptimizeOptions::new().index_names(vec![CHUNK_VECTOR_INDEX_NAME.to_string()]),
+            ))
+            .await?;
+        self.validate_vector_index_config_matches(config).await?;
+        Ok(action)
+    }
+
+    /// Low-level indexed nearest-neighbor probe for #40. Distances are native
+    /// backend distances where lower values rank nearer. #45 owns conversion to
+    /// the semantic search application's higher-is-better score contract.
+    pub async fn vector_query(
+        &self,
+        query_vector: &[f32],
+        limit: usize,
+        nprobes: usize,
+    ) -> Result<Vec<VectorIndexHit>, ChunkTableError> {
+        if query_vector.len() != self.embedding.dimension()
+            || query_vector.iter().any(|value| !value.is_finite())
+            || limit == 0
+            || limit > 100
+            || nprobes == 0
+        {
+            return Err(ChunkTableError::InvalidRows(
+                "vector query requires matching finite dimensions and positive bounds".into(),
+            ));
+        }
+        self.validate_vector_index_layout().await?;
+        let stats = self
+            .table
+            .index_stats(CHUNK_VECTOR_INDEX_NAME)
+            .await?
+            .ok_or_else(|| ChunkTableError::InvalidSchema("vector index is not built".into()))?;
+        let distance = stats.distance_type.ok_or_else(|| {
+            ChunkTableError::InvalidSchema("vector index is missing distance metadata".into())
+        })?;
+        if matches!(distance, DistanceType::Cosine)
+            && query_vector.iter().all(|value| *value == 0.0)
+        {
+            return Err(ChunkTableError::InvalidRows(
+                "cosine vector queries require a non-zero query vector".into(),
+            ));
+        }
+
+        let batches: Vec<RecordBatch> = self
+            .table
+            .query()
+            .nearest_to(query_vector)?
+            .column("vector")
+            .distance_type(distance)
+            .nprobes(nprobes)
+            .select(Select::Columns(vec![
+                "chunk_id".into(),
+                "page_id".into(),
+                "root_page_id".into(),
+                "block_id".into(),
+                "url".into(),
+                "title".into(),
+                "heading_path_json".into(),
+                "text".into(),
+            ]))
+            .limit(limit)
+            .execute()
+            .await?
+            .try_collect()
+            .await?;
+        decode_vector_hits(&batches)
     }
 
     /// Ensure the production BM25/FTS indices exist without rebuilding them on
@@ -921,6 +1179,40 @@ fn float32_column<'a>(
         .ok_or_else(|| ChunkTableError::InvalidSchema(format!("missing float32 column {name}")))
 }
 
+fn decode_vector_hits(batches: &[RecordBatch]) -> Result<Vec<VectorIndexHit>, ChunkTableError> {
+    let mut hits = Vec::new();
+    for batch in batches {
+        let chunk_ids = string_column(batch, "chunk_id")?;
+        let page_ids = string_column(batch, "page_id")?;
+        let roots = string_column(batch, "root_page_id")?;
+        let block_ids = string_column(batch, "block_id")?;
+        let urls = string_column(batch, "url")?;
+        let titles = string_column(batch, "title")?;
+        let headings = string_column(batch, "heading_path_json")?;
+        let texts = string_column(batch, "text")?;
+        let distances = float32_column(batch, "_distance")?;
+        for row in 0..batch.num_rows() {
+            if distances.is_null(row) || !distances.value(row).is_finite() {
+                return Err(ChunkTableError::InvalidRows(
+                    "vector result distance must be finite".into(),
+                ));
+            }
+            hits.push(VectorIndexHit {
+                chunk_id: chunk_ids.value(row).to_owned(),
+                page_id: page_ids.value(row).to_owned(),
+                root_page_id: roots.value(row).to_owned(),
+                block_id: (!block_ids.is_null(row)).then(|| block_ids.value(row).to_owned()),
+                url: urls.value(row).to_owned(),
+                title: titles.value(row).to_owned(),
+                heading_path: serde_json::from_str(headings.value(row))?,
+                text: texts.value(row).to_owned(),
+                distance: distances.value(row),
+            });
+        }
+    }
+    Ok(hits)
+}
+
 fn decode_fts_hits(batches: &[RecordBatch]) -> Result<Vec<FtsIndexHit>, ChunkTableError> {
     let mut hits = Vec::new();
     for batch in batches {
@@ -1507,6 +1799,319 @@ mod tests {
             ))
         ));
 
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    fn vector_config(distance: VectorDistance) -> VectorIndexConfig {
+        VectorIndexConfig {
+            distance,
+            num_partitions: Some(1),
+            sample_rate: 8,
+            max_iterations: 20,
+        }
+    }
+
+    #[tokio::test]
+    async fn vector_index_builds_from_initial_crawl_and_returns_stable_nearest_neighbors() {
+        let path = temp_database("vector-index");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+
+        let rows = vec![
+            EmbeddedChunk::new(
+                fts_chunk("page-a", "chunk-a", "A", "nearest a"),
+                vec![1.0, 0.0, 0.0],
+            ),
+            EmbeddedChunk::new(
+                fts_chunk("page-b", "chunk-b", "B", "nearest b"),
+                vec![0.8, 0.2, 0.0],
+            ),
+            EmbeddedChunk::new(
+                fts_chunk("page-c", "chunk-c", "C", "nearest c"),
+                vec![0.0, 1.0, 0.0],
+            ),
+            EmbeddedChunk::new(
+                fts_chunk("page-d", "chunk-d", "D", "nearest d"),
+                vec![0.0, 0.0, 1.0],
+            ),
+        ];
+        table
+            .upsert(&metadata, &rows)
+            .await
+            .expect("seed crawl rows");
+
+        let config = vector_config(VectorDistance::L2);
+        assert_eq!(
+            table
+                .ensure_vector_index(&config)
+                .await
+                .expect("build vector index"),
+            VectorIndexAction::Created
+        );
+
+        let index = table
+            .table
+            .list_indices()
+            .await
+            .expect("list indices")
+            .into_iter()
+            .find(|index| index.name == CHUNK_VECTOR_INDEX_NAME)
+            .expect("vector index");
+        assert_eq!(index.index_type, IndexType::IvfFlat);
+        assert_eq!(index.columns, vec!["vector".to_string()]);
+
+        let stats = table
+            .table
+            .index_stats(CHUNK_VECTOR_INDEX_NAME)
+            .await
+            .expect("vector stats")
+            .expect("vector stats exist");
+        assert_eq!(stats.num_indexed_rows, 4);
+        assert_eq!(stats.num_unindexed_rows, 0);
+        assert!(matches!(stats.distance_type, Some(DistanceType::L2)));
+
+        let hits = table
+            .vector_query(&[1.0, 0.0, 0.0], 3, 1)
+            .await
+            .expect("nearest-neighbor query");
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].chunk_id, "chunk-a");
+        assert_eq!(hits[1].chunk_id, "chunk-b");
+        assert_eq!(hits[0].page_id, "page-a");
+        assert_eq!(hits[0].url, "https://example.invalid/page-a");
+        assert_eq!(hits[0].heading_path, vec!["Section"]);
+        assert_eq!(hits[0].block_id.as_deref(), Some("block-1"));
+        assert!(hits[0].distance <= hits[1].distance);
+        assert!(hits[1].distance <= hits[2].distance);
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn vector_index_ensure_is_idempotent_and_rebuild_validates_before_replace() {
+        let path = temp_database("vector-rebuild");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+        table
+            .upsert(
+                &metadata,
+                &[
+                    EmbeddedChunk::new(page_chunk("chunk-a", "one"), vec![1.0, 0.0, 0.0]),
+                    EmbeddedChunk::new(page_chunk("chunk-b", "two"), vec![0.0, 1.0, 0.0]),
+                ],
+            )
+            .await
+            .expect("seed rows");
+
+        let l2 = vector_config(VectorDistance::L2);
+        assert_eq!(
+            table.ensure_vector_index(&l2).await.expect("first ensure"),
+            VectorIndexAction::Created
+        );
+        assert_eq!(
+            table.ensure_vector_index(&l2).await.expect("second ensure"),
+            VectorIndexAction::Existing
+        );
+
+        let cosine = vector_config(VectorDistance::Cosine);
+        assert!(matches!(
+            table.ensure_vector_index(&cosine).await,
+            Err(ChunkTableError::InvalidSchema(_))
+        ));
+
+        let invalid = VectorIndexConfig {
+            num_partitions: Some(0),
+            ..l2.clone()
+        };
+        assert!(matches!(
+            table.rebuild_vector_index(&invalid).await,
+            Err(ChunkTableError::InvalidSchema(_))
+        ));
+        let stats = table
+            .table
+            .index_stats(CHUNK_VECTOR_INDEX_NAME)
+            .await
+            .expect("stats after rejected rebuild")
+            .expect("existing vector index");
+        assert!(matches!(stats.distance_type, Some(DistanceType::L2)));
+
+        table
+            .rebuild_vector_index(&cosine)
+            .await
+            .expect("explicit cosine rebuild");
+        let stats = table
+            .table
+            .index_stats(CHUNK_VECTOR_INDEX_NAME)
+            .await
+            .expect("stats after rebuild")
+            .expect("rebuilt vector index");
+        assert!(matches!(stats.distance_type, Some(DistanceType::Cosine)));
+
+        let hits = table
+            .vector_query(&[1.0, 0.0, 0.0], 1, 1)
+            .await
+            .expect("query rebuilt index");
+        assert_eq!(hits[0].chunk_id, "chunk-a");
+        assert!(matches!(
+            table.vector_query(&[0.0, 0.0, 0.0], 1, 1).await,
+            Err(ChunkTableError::InvalidRows(_))
+        ));
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn optimize_vector_index_folds_incremental_rows_into_existing_index() {
+        let path = temp_database("vector-optimize");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+        table
+            .upsert(
+                &metadata,
+                &[
+                    EmbeddedChunk::new(page_chunk("chunk-a", "one"), vec![1.0, 0.0, 0.0]),
+                    EmbeddedChunk::new(page_chunk("chunk-b", "two"), vec![0.0, 1.0, 0.0]),
+                ],
+            )
+            .await
+            .expect("seed initial rows");
+
+        let config = vector_config(VectorDistance::L2);
+        table
+            .ensure_vector_index(&config)
+            .await
+            .expect("build initial index");
+
+        let mut added = page_chunk("chunk-c", "three");
+        added.metadata.page_id = "page-3".into();
+        added.metadata.url = "https://example.invalid/page-3".into();
+        table
+            .upsert(&metadata, &[EmbeddedChunk::new(added, vec![0.0, 0.0, 1.0])])
+            .await
+            .expect("append incremental row");
+
+        let before = table
+            .table
+            .index_stats(CHUNK_VECTOR_INDEX_NAME)
+            .await
+            .expect("stats before optimize")
+            .expect("vector index");
+        assert!(before.num_unindexed_rows >= 1);
+
+        assert_eq!(
+            table
+                .optimize_vector_index(&config)
+                .await
+                .expect("optimize vector index"),
+            VectorIndexAction::Existing
+        );
+        let after = table
+            .table
+            .index_stats(CHUNK_VECTOR_INDEX_NAME)
+            .await
+            .expect("stats after optimize")
+            .expect("vector index");
+        assert_eq!(after.num_unindexed_rows, 0);
+        assert_eq!(after.num_indexed_rows, 3);
+
+        let hits = table
+            .vector_query(&[0.0, 0.0, 1.0], 1, 1)
+            .await
+            .expect("query optimized index");
+        assert_eq!(hits[0].chunk_id, "chunk-c");
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn reserved_vector_index_name_with_wrong_layout_fails_closed() {
+        let path = temp_database("vector-name-collision");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+        table
+            .upsert(
+                &metadata,
+                &[EmbeddedChunk::new(
+                    page_chunk("chunk-a", "one"),
+                    vec![1.0, 0.0, 0.0],
+                )],
+            )
+            .await
+            .expect("seed row");
+
+        let params = FtsIndexBuilder::default();
+        table
+            .table
+            .create_index(&["text"], Index::FTS(params))
+            .name(CHUNK_VECTOR_INDEX_NAME.to_string())
+            .execute()
+            .await
+            .expect("create conflicting reserved index");
+
+        let config = vector_config(VectorDistance::L2);
+        assert!(matches!(
+            table.ensure_vector_index(&config).await,
+            Err(ChunkTableError::InvalidSchema(_))
+        ));
+        assert!(matches!(
+            table.rebuild_vector_index(&config).await,
+            Err(ChunkTableError::InvalidSchema(_))
+        ));
+
+        let index = table
+            .table
+            .list_indices()
+            .await
+            .expect("list indices")
+            .into_iter()
+            .find(|index| index.name == CHUNK_VECTOR_INDEX_NAME)
+            .expect("conflicting index remains");
+        assert_eq!(index.index_type, IndexType::FTS);
+        assert_eq!(index.columns, vec!["text".to_string()]);
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn vector_index_and_query_validation_fail_closed() {
+        let path = temp_database("vector-validation");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata)
+            .await
+            .expect("create table");
+
+        assert!(matches!(
+            table
+                .ensure_vector_index(&VectorIndexConfig::default())
+                .await,
+            Err(ChunkTableError::InvalidRows(_))
+        ));
+        assert!(matches!(
+            table.vector_query(&[1.0, 0.0, 0.0], 1, 1).await,
+            Err(ChunkTableError::InvalidSchema(_))
+        ));
+        assert!(matches!(
+            table.vector_query(&[1.0, 0.0], 1, 1).await,
+            Err(ChunkTableError::InvalidRows(_))
+        ));
+        assert!(matches!(
+            table.vector_query(&[f32::NAN, 0.0, 0.0], 1, 1).await,
+            Err(ChunkTableError::InvalidRows(_))
+        ));
+
+        drop(table);
         std::fs::remove_dir_all(path).expect("remove temporary database");
     }
 
