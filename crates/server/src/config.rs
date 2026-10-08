@@ -6,6 +6,7 @@ use std::{env, ffi::OsString, fmt, net::SocketAddr};
 pub struct Config {
     pub http_bind: SocketAddr,
     pub notion_auth: NotionAuth,
+    pub webhook: crate::webhook::WebhookConfig,
 }
 
 #[derive(Debug)]
@@ -49,7 +50,9 @@ impl Config {
         Self::from_lookup(|key| env::var_os(key))
     }
 
-    fn from_lookup(mut lookup: impl FnMut(&str) -> Option<OsString>) -> Result<Self, ConfigError> {
+    pub(crate) fn from_lookup(
+        mut lookup: impl FnMut(&str) -> Option<OsString>,
+    ) -> Result<Self, ConfigError> {
         let host = optional(&mut lookup, "NK_HTTP_HOST", "127.0.0.1")?
             .parse()
             .map_err(|_| invalid("NK_HTTP_HOST", "must be an IPv4 or IPv6 address"))?;
@@ -75,9 +78,67 @@ impl Config {
             }
             _ => return Err(invalid("NK_NOTION_AUTH", "must be none or integration")),
         };
+        let mode = optional(&mut lookup, "NK_WEBHOOK_MODE", "disabled")?;
+        let webhook = match mode.as_str() {
+            "disabled" => crate::webhook::WebhookConfig::Disabled,
+            "setup" => {
+                let path = text(
+                    lookup("NK_WEBHOOK_CANDIDATE_FILE").ok_or_else(|| {
+                        invalid("NK_WEBHOOK_CANDIDATE_FILE", "required in setup mode")
+                    })?,
+                    "NK_WEBHOOK_CANDIDATE_FILE",
+                )?;
+                if path.is_empty() || !std::path::Path::new(&path).is_absolute() {
+                    return Err(invalid(
+                        "NK_WEBHOOK_CANDIDATE_FILE",
+                        "must be an absolute nonempty path",
+                    ));
+                }
+                crate::webhook::WebhookConfig::Setup {
+                    candidate_file: path.into(),
+                }
+            }
+            "verified" => {
+                let token = text(
+                    lookup("NK_WEBHOOK_VERIFICATION_TOKEN").ok_or_else(|| {
+                        invalid("NK_WEBHOOK_VERIFICATION_TOKEN", "required in verified mode")
+                    })?,
+                    "NK_WEBHOOK_VERIFICATION_TOKEN",
+                )?;
+                if !crate::webhook::valid_token(&token) {
+                    return Err(invalid(
+                        "NK_WEBHOOK_VERIFICATION_TOKEN",
+                        "must be nonempty, at most 512 bytes and contain no whitespace or controls",
+                    ));
+                }
+                let mut id = |key| -> Result<String, ConfigError> {
+                    let value = text(
+                        lookup(key).ok_or_else(|| invalid(key, "required in verified mode"))?,
+                        key,
+                    )?;
+                    if !crate::webhook::valid_id(&value) {
+                        return Err(invalid(key, "must be a hyphenated UUID"));
+                    }
+                    Ok(value)
+                };
+                crate::webhook::WebhookConfig::Verified {
+                    token: SecretToken(token),
+                    workspace_id: id("NK_WEBHOOK_WORKSPACE_ID")?,
+                    integration_id: id("NK_WEBHOOK_INTEGRATION_ID")?,
+                    subscription_id: id("NK_WEBHOOK_SUBSCRIPTION_ID")?,
+                }
+            }
+            _ => {
+                return Err(invalid(
+                    "NK_WEBHOOK_MODE",
+                    "must be disabled, setup or verified",
+                ));
+            }
+        };
         Ok(Self {
             http_bind: SocketAddr::new(host, port),
             notion_auth,
+            webhook,
         })
     }
 }
@@ -193,6 +254,51 @@ mod tests {
         }
     }
 
+    #[test]
+    fn webhook_configuration_requires_explicit_trust_and_redacts_token() {
+        assert!(matches!(
+            parse(&[]).unwrap().webhook,
+            crate::webhook::WebhookConfig::Disabled
+        ));
+        assert_eq!(
+            parse(&[("NK_WEBHOOK_MODE", "setup")]).unwrap_err().setting,
+            "NK_WEBHOOK_CANDIDATE_FILE"
+        );
+        assert_eq!(
+            parse(&[
+                ("NK_WEBHOOK_MODE", "setup"),
+                ("NK_WEBHOOK_CANDIDATE_FILE", "relative")
+            ])
+            .unwrap_err()
+            .setting,
+            "NK_WEBHOOK_CANDIDATE_FILE"
+        );
+        assert_eq!(
+            parse(&[("NK_WEBHOOK_MODE", "verified")])
+                .unwrap_err()
+                .setting,
+            "NK_WEBHOOK_VERIFICATION_TOKEN"
+        );
+        let id = "13950b26-c203-4f3b-b97d-93ec06319565";
+        let values = [
+            ("NK_WEBHOOK_MODE", "verified"),
+            ("NK_WEBHOOK_VERIFICATION_TOKEN", "fixture-private-key"),
+            ("NK_WEBHOOK_WORKSPACE_ID", id),
+            ("NK_WEBHOOK_INTEGRATION_ID", id),
+            ("NK_WEBHOOK_SUBSCRIPTION_ID", id),
+        ];
+        let config = parse(&values).unwrap();
+        assert!(!format!("{config:?}").contains("fixture-private-key"));
+        for index in 2..5 {
+            let mut invalid = values;
+            invalid[index].1 = "not-a-uuid";
+            assert_eq!(parse(&invalid).unwrap_err().setting, values[index].0);
+        }
+        let mut invalid = values;
+        invalid[1].1 = "secret invalid";
+        let error = parse(&invalid).unwrap_err();
+        assert!(!format!("{error:?}").contains("secret invalid"));
+    }
     #[cfg(unix)]
     #[test]
     fn non_unicode_settings_report_only_the_key() {

@@ -18,7 +18,7 @@ page titles, graph edges, checkpoints and backups.
 Today [the MCP handler](../crates/mcp/src/lib.rs) advertises the contract-only `knowledge_search` tool, which returns
 an explicit retrieval-unavailable error without results. [The Notion](../crates/notion/src/lib.rs) and
 [retrieval](../crates/retrieval/src/lib.rs) adapters are placeholders: there
-are no Notion requests, active local databases, webhook endpoint, file fetcher
+are no Notion requests, active local databases, file fetcher
 or embedding provider. The stdio and HTTP transports are implemented. None of
 the application authorization, OAuth, scope, write-control or file/webhook
 protections below are implemented merely because this document requires them.
@@ -155,3 +155,8 @@ A reviewer should block capability enablement when a required mitigation is
 missing, even if ordinary CI is green. Security controls should gain behavioral
 negative-path tests in their implementation tickets; this documentation change
 adds no tests that merely assert prose.
+
+The opt-in [webhook boundary](notion-webhooks.md) implements bounded raw-byte
+HMAC verification and separate candidate setup capture. Unsigned setup does not
+establish trust. Bootstrap admission remains unavailable and returns 503; durable
+admission/deduplication and authoritative scoped refresh remain release gates.

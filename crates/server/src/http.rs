@@ -43,10 +43,12 @@ pub async fn serve_with_handler(
         config,
     );
     let diagnostics = diagnostics_router(bind, diagnostics);
+    let webhooks = crate::webhook::router(settings.webhook, None);
     let router = axum::Router::new()
         .merge(diagnostics)
         .nest_service("/mcp", service)
-        .layer(middleware::from_fn(validate_json));
+        .layer(middleware::from_fn(validate_json))
+        .merge(webhooks);
     eprintln!("Serving MCP over Streamable HTTP at http://{bind}/mcp.");
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {
