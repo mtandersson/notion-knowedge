@@ -64,5 +64,5 @@ repopulate page/checkpoint/index state from authoritative or derived sources as
 the owning workflow requires.
 
 Index-version semantics and compatibility policy remain the responsibility of
-the later index-versioning work (#43); this ticket only provides the durable
+[index-versioning policy](index-compatibility.md); this ticket only provides the durable
 opaque storage slot.

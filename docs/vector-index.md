@@ -10,7 +10,7 @@ The first production vector index is a named `IVF_FLAT` index over the canonical
 
 IVF partitions the corpus into clusters and searches the nearest partitions instead of scanning every vector. IVF_FLAT keeps the original float vectors inside the index rather than quantizing them. This makes it a useful quality baseline before evaluating PQ/SQ/HNSW trade-offs.
 
-The default distance is L2. This matches the repository's existing vector-search/spike behavior and avoids silently changing semantic ranking while #45 is still open. Cosine can be selected explicitly and requires an explicit rebuild of an existing L2 index.
+The default distance is L2. This matches the repository's existing vector-search/spike behavior and matches the production semantic adapter’s distance-to-score conversion. Cosine can be selected explicitly and requires an explicit rebuild of an existing L2 index.
 
 ## Build configuration
 
@@ -35,7 +35,7 @@ All numeric values must be positive.
 - reads the index's persisted distance metric and uses that same metric for the query;
 - returns stable page/chunk provenance plus the native `_distance`.
 
-Distances are lower-is-better backend distances, not the higher-is-better application score used by `knowledge_search`. Production semantic score conversion, query embedding and metadata filtering remain #45.
+Distances are lower-is-better backend distances, not the higher-is-better application score used by `knowledge_search`. The [production semantic adapter](semantic-search.md) embeds the query, filters before top-k selection and converts distance into an application score.
 
 `nprobes` controls how many IVF partitions are searched. Higher values improve recall at increased query cost. The application should tune it against retrieval-quality benchmarks rather than treating the default as universal.
 
