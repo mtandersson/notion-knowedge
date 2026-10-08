@@ -7,6 +7,7 @@ pub struct Config {
     pub http_bind: SocketAddr,
     pub notion_auth: NotionAuth,
     pub webhook: crate::webhook::WebhookConfig,
+    pub webhook_state_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug)]
@@ -135,7 +136,29 @@ impl Config {
                 ));
             }
         };
+        let webhook_state_file =
+            if matches!(webhook, crate::webhook::WebhookConfig::Verified { .. }) {
+                let path = text(
+                    lookup("NK_WEBHOOK_STATE_FILE").ok_or_else(|| {
+                        invalid("NK_WEBHOOK_STATE_FILE", "required in verified mode")
+                    })?,
+                    "NK_WEBHOOK_STATE_FILE",
+                )?;
+                if path.is_empty()
+                    || !std::path::Path::new(&path).is_absolute()
+                    || path.chars().any(char::is_control)
+                {
+                    return Err(invalid(
+                        "NK_WEBHOOK_STATE_FILE",
+                        "must be an absolute nonempty path without controls",
+                    ));
+                }
+                Some(path.into())
+            } else {
+                None
+            };
         Ok(Self {
+            webhook_state_file,
             http_bind: SocketAddr::new(host, port),
             notion_auth,
             webhook,
@@ -286,7 +309,20 @@ mod tests {
             ("NK_WEBHOOK_WORKSPACE_ID", id),
             ("NK_WEBHOOK_INTEGRATION_ID", id),
             ("NK_WEBHOOK_SUBSCRIPTION_ID", id),
+            ("NK_WEBHOOK_STATE_FILE", "/tmp/webhook-test-state.sqlite"),
         ];
+        assert_eq!(
+            parse(&values[..5]).unwrap_err().setting,
+            "NK_WEBHOOK_STATE_FILE"
+        );
+        for path in ["", "relative", "/tmp/bad\npath"] {
+            let mut invalid = values;
+            invalid[5].1 = path;
+            assert_eq!(
+                parse(&invalid).unwrap_err().setting,
+                "NK_WEBHOOK_STATE_FILE"
+            );
+        }
         let config = parse(&values).unwrap();
         assert!(!format!("{config:?}").contains("fixture-private-key"));
         for index in 2..5 {

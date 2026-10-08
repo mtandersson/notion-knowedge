@@ -21,7 +21,8 @@ also the key for subsequent HMAC-SHA256 delivery signatures.
    Notion UI, then configure the confirmed token through your secret environment
    as `NK_WEBHOOK_VERIFICATION_TOKEN`. Set `NK_WEBHOOK_MODE=verified` and the
    subscription's `NK_WEBHOOK_WORKSPACE_ID`, `NK_WEBHOOK_INTEGRATION_ID`, and
-   `NK_WEBHOOK_SUBSCRIPTION_ID` (hyphenated UUIDs). Restart.
+   `NK_WEBHOOK_SUBSCRIPTION_ID` (hyphenated UUIDs). Set `NK_WEBHOOK_STATE_FILE`
+   to an absolute SQLite path in private, persistent local storage. Restart.
 4. Remove the candidate file securely when no longer needed. Keep all token files
    outside Git and avoid terminal/session logging of their contents.
 
@@ -48,17 +49,44 @@ core admission port. Full payloads, authors, data, signatures and tokens are not
 logged or retained in that port. An event is a hint for later authoritative,
 scoped Notion reads, never an instruction to index arbitrary supplied content.
 
-**The bootstrap has no durable admission adapter yet (#53). Valid events return
-503 rather than being acknowledged and discarded.** A composed admission adapter
-must report success only after durable acceptance (including duplicates), and be
-safe if its future is cancelled or retried. Admission has a ten-second deadline;
-failure/timeout returns 503. Auth failures return 401, scope failures 403, malformed
-envelopes 400, oversized bodies 413 and unsupported encoding 415.
+Verified HTTP composition now opens the SQLite inbox before serving. The state
+file is required; invalid configuration or an unavailable database stops startup.
+The inbox uses the operational-state database with schema migration v3, preserving
+page state, crawl checkpoints, index versions and the reconciliation journal.
+It acknowledges only a committed receipt. SQLite work runs on blocking threads;
+a cancelled request may still commit, and a retry safely finds the same event.
+Failure/timeout returns 503. Auth failures return 401, scope failures 403,
+malformed envelopes 400, oversized bodies 413 and unsupported encoding 415.
+
+Deduplication uses canonical lowercase `(workspace_id, subscription_id, event_id)`.
+The first envelope's identity, timestamp, event type, entity and attempt are retained;
+redeliveries may vary their positive attempt number but cannot overwrite the hint
+or reset pending/running/succeeded/failed state. A conflicting immutable hint
+returns 503, retaining the original. No raw payload, author data, signature,
+verification token or free-text failure is stored. The inbox has no automatic
+retention policy yet; monitor disk capacity and keep the database backed up.
+
+`WebhookInbox` supports scoped claims of pending work and recovery of expired
+running work. Claims have a durable increasing generation and bounded lease;
+completion from an expired or replaced owner fails. Successful and failed events
+remain durable and inert on redelivery. Failures store only a typed class.
+Claims are scoped to workspace/subscription; consumers must still validate their
+integration and current allowed roots through authoritative Notion reads. Inbox
+claims do not grant an indexing lock: workers must separately acquire the shared
+index-writer fence before effects. Effects and SQLite completion are not atomic;
+recovered work may execute again, so downstream writes must be idempotent.
+Automatic refresh, debounce and bounded retries remain #54–#57.
+
+Legacy identity-only `webhook_events` rows are preserved, but cannot reconstruct
+pending hints or prove matching payloads. Their IDs conservatively reject new
+receipts, even in another subscription. Do not delete them to enable blind
+replay: first reconcile affected sources authoritatively and decide an explicit
+operator migration/retention policy. This upgrade does not claim recovery of
+payloads the old ID-only API never persisted.
 
 [Official delivery semantics](https://developers.notion.com/reference/webhooks-events-delivery)
 allow delayed, unordered and repeated deliveries, with retries over approximately
-24 hours. This boundary does not reject old event timestamps or suppress replay;
-durable event-ID deduplication is #53. Debounce, retries and refresh are #54–#57.
+24 hours. No event-timestamp freshness restriction is applied to receipt.
 
 Fixture tests run with `cargo test -p notion-knowledge-server --locked`; normal CI
 needs no Notion credentials or live subscription.

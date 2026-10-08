@@ -29,6 +29,33 @@ pub enum WebhookConfig {
     },
 }
 
+/// Isolate synchronous SQLite commits from the async HTTP executor. A cancelled
+/// wait cannot roll back a completed receipt; redelivery observes the same row.
+pub struct DurableAdmission(pub Arc<notion_knowledge_retrieval::sync_state::SqliteSyncStateStore>);
+impl WebhookAdmission for DurableAdmission {
+    fn admit(
+        &self,
+        event: WebhookEvent,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<(), notion_knowledge_core::webhook::AdmissionError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        use notion_knowledge_core::webhook::{AdmissionError, WebhookInbox};
+        let store = self.0.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || store.receive(&event))
+                .await
+                .map_err(|_| AdmissionError::Unavailable)?
+                .map_err(|_| AdmissionError::Unavailable)?;
+            Ok(())
+        })
+    }
+}
+
 #[derive(Clone)]
 struct Endpoint {
     config: Arc<WebhookConfig>,
@@ -251,6 +278,7 @@ mod tests {
         crate::config::Config::from_lookup(|key| match key {
             "NK_WEBHOOK_MODE" => Some(OsString::from("verified")),
             "NK_WEBHOOK_VERIFICATION_TOKEN" => Some(TOKEN.into()),
+            "NK_WEBHOOK_STATE_FILE" => Some("/tmp/webhook-unit-unused.sqlite".into()),
             "NK_WEBHOOK_WORKSPACE_ID"
             | "NK_WEBHOOK_INTEGRATION_ID"
             | "NK_WEBHOOK_SUBSCRIPTION_ID" => Some(ID.into()),

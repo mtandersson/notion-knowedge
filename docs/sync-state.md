@@ -34,7 +34,10 @@ Schema version 1 contains:
 | `index_versions` | Opaque version marker per derived index/generation |
 | `schema_migrations` | Applied operational-store schema migrations |
 
-No Notion page body, webhook payload, access token, or credential is stored.
+Schema v2 adds the [reconciliation journal](reconciliation-journal.md).
+Schema v3 adds `webhook_inbox`: minimized authenticated hints plus durable
+processing state and claim generations. See [webhook semantics](notion-webhooks.md).
+No Notion page body, raw webhook payload, access token, or credential is stored.
 
 ## Atomicity and deduplication
 
@@ -43,7 +46,7 @@ row or the complete new row; a tombstone cannot retain a content hash because
 the schema enforces that invariant. Checkpoint and index-version writes use the
 same atomic UPSERT pattern.
 
-Webhook deduplication uses the event ID as the primary key and
+The legacy identity-only API uses the event ID as the primary key and
 `INSERT OR IGNORE`. The call returns `true` only when that ID was inserted for
 the first time, including across process restarts.
 
@@ -53,7 +56,10 @@ transaction boundary.
 
 ## Rebuild behavior
 
-The operational store is intentionally disposable:
+Deleting operational state also deletes pending webhook work and deduplication
+history. Authoritative page content survives, but queued notifications cannot be
+recreated from this database. Drain or preserve pending work and arrange a full
+authoritative reconciliation before an intentional rebuild:
 
 1. stop users of the store;
 2. delete the SQLite database and its sidecar files;

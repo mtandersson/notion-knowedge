@@ -251,6 +251,9 @@ Supply a real Notion integration token through your local secret environment
 only after selecting `NK_NOTION_AUTH=integration`. Keep secret-bearing `.env`
 files out of Git and never put secrets in `.envrc`.
 
+Verified Notion webhooks use a durable SQLite inbox configured with
+`NK_WEBHOOK_STATE_FILE`; see [setup and delivery semantics](docs/notion-webhooks.md).
+
 ## Workspace
 
 ```text
