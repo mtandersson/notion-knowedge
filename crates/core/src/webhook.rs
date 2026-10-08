@@ -68,6 +68,11 @@ pub struct InboxEvent {
     pub generation: i64,
     pub lease_until: Option<i64>,
     pub failure: Option<EventFailure>,
+    pub cycle_attempts: i64,
+    pub lifetime_attempts: i64,
+    pub retry_at: Option<i64>,
+    pub last_failure: Option<EventFailure>,
+    pub policy: RetryPolicy,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InboxScope {
@@ -110,5 +115,71 @@ pub trait WebhookInbox: Send + Sync {
         claim: &EventClaim,
         now: i64,
         failure: Option<EventFailure>,
+    ) -> Result<(), InboxError>;
+}
+
+/// Policy is persisted per event; requeue explicitly starts a new bounded cycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetryPolicy {
+    pub max_attempts: i64,
+    pub base_seconds: i64,
+    pub max_seconds: i64,
+}
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 5,
+            base_seconds: 5,
+            max_seconds: 300,
+        }
+    }
+}
+impl RetryPolicy {
+    pub fn validate(self) -> Result<Self, InboxError> {
+        if !(1..=100).contains(&self.max_attempts)
+            || !(1..=86400).contains(&self.base_seconds)
+            || !(self.base_seconds..=86400).contains(&self.max_seconds)
+        {
+            return Err(InboxError::InvalidInput);
+        }
+        Ok(self)
+    }
+    pub fn deadline(self, now: i64, attempts: i64) -> Result<i64, InboxError> {
+        self.validate()?;
+        if now < 0 || attempts < 1 {
+            return Err(InboxError::InvalidInput);
+        }
+        let factor = 1_i64
+            .checked_shl((attempts - 1).min(62) as u32)
+            .unwrap_or(i64::MAX);
+        now.checked_add(
+            self.base_seconds
+                .saturating_mul(factor)
+                .min(self.max_seconds),
+        )
+        .ok_or(InboxError::InvalidInput)
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessingOutcome {
+    Succeeded,
+    Retryable(EventFailure),
+    Permanent(EventFailure),
+}
+/// Retry paths share the same persisted claim budget as the original inbox API.
+pub trait WebhookRecovery: WebhookInbox {
+    fn complete(
+        &self,
+        claim: &EventClaim,
+        now: i64,
+        outcome: ProcessingOutcome,
+    ) -> Result<(), InboxError>;
+    fn failed(&self, scope: &InboxScope, limit: i64) -> Result<Vec<InboxEvent>, InboxError>;
+    fn requeue(
+        &self,
+        key: &EventKey,
+        generation: i64,
+        now: i64,
+        policy: RetryPolicy,
     ) -> Result<(), InboxError>;
 }
