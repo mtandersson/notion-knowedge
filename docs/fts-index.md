@@ -1,6 +1,6 @@
 # LanceDB BM25 / FTS index
 
-Issue #41 maintains native LanceDB full-text indices over the canonical chunk table. This layer owns storage/index lifecycle only; the user-facing lexical search contract, filters and hybrid fusion remain #46/#47.
+Issue #41 maintains native LanceDB full-text indices over the canonical chunk table. This layer owns storage/index lifecycle only; the [search contract](knowledge-search.md) and [hybrid service](hybrid-search.md) compose lexical retrieval, filters and reciprocal-rank fusion.
 
 ## Indexed fields
 

@@ -318,6 +318,8 @@ The [embedding provider contract](docs/embeddings.md) defines asynchronous batch
 execution and persisted provider/model/vector-space identity independently of
 local model runtimes.
 
+The [storage pipeline acceptance smoke](docs/storage-pipeline-smoke.md) maps the integrated local persistence, embedding, incremental indexing and recovery contracts to reproducible checks.
+
 The [production LanceDB chunk table](docs/lancedb-chunks.md) persists canonical
 chunks with explicit vector identity, queryable source filters and stable-ID upserts.
 

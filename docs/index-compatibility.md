@@ -55,4 +55,4 @@ Never coerce metadata, resize vectors, or mix rows from different vector spaces.
 
 Spike #215 demonstrated the same fail/rebuild rule on the disposable end-to-end corpus: incompatible persisted vector identity fails before source reads/model reuse, and deleting/rebuilding derived index state from unchanged Notion pages reproduces the expected retrieval result. Production #43 moves that policy into the reusable LanceDB adapter rather than keeping it in spike-only code.
 
-Incremental diffing remains #42. This compatibility gate deliberately does not decide which chunks need re-embedding; it only decides whether the existing index generation is safe to use at all.
+The [incremental reconciliation operation](incremental-indexing.md) implements page diffing. This compatibility gate deliberately does not decide which chunks need re-embedding; it only decides whether the existing index generation is safe to use at all.

@@ -18,7 +18,7 @@ Every canonical chunk field has a persisted representation:
   `chunk_id`, `page_id`, optional `block_id`, `url`, `title`,
   `last_edited_time`, `workspace_id`, `root_page_id`, optional
   `database_id` and optional `data_source_id`;
-- `text` is a first-class column for vector and later FTS retrieval;
+- `text` is a first-class column for vector and FTS retrieval;
 - `schema_version` and `content_hash` are first-class integrity fields;
 - heading paths, normalized properties and links are deterministic JSON columns;
 - `vector` stores the embedding and is never nullable.
@@ -34,7 +34,13 @@ migration instead of silent coercion.
 
 ## Writes
 
-`LanceChunkTable::upsert` first requires the batch embedding identity to match\nthe identity persisted with the table, then uses `chunk_id` as the merge key.\nThis prevents same-dimensional vectors from another model/revision from being\nmixed into an index. Existing stable IDs are replaced and new IDs are inserted.\nDuplicate IDs in one source batch are rejected before LanceDB because multiple\nsource matches do not have a well-defined winner. Vectors must exactly match\nthe persisted dimension and contain only finite values.
+`LanceChunkTable::upsert` first requires the batch embedding identity to match
+the identity persisted with the table, then uses `chunk_id` as the merge key.
+This prevents same-dimensional vectors from another model/revision from being
+mixed into an index. Existing stable IDs are replaced and new IDs are inserted.
+Duplicate IDs in one source batch are rejected before LanceDB because multiple
+source matches do not have a well-defined winner. Vectors must exactly match
+the persisted dimension and contain only finite values.
 
 The adapter accepts only local filesystem database paths. LanceDB's `remote`
 Cargo feature is compiled solely because 0.39.0 references its HTTP error
