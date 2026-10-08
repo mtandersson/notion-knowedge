@@ -185,3 +185,262 @@ fn invalid_inputs_cannot_create_work_or_overflow_claims() {
         );
     }
 }
+#[test]
+fn delayed_retries_preserve_reason_and_do_not_block_healthy_work() {
+    let db = Database::new();
+    let store = db.open();
+    store.receive(&event()).unwrap();
+    let (first, _) = store.claim(&scope(), 10, 5).unwrap().unwrap();
+    store
+        .complete(
+            &first,
+            11,
+            ProcessingOutcome::Retryable(EventFailure::Source),
+        )
+        .unwrap();
+    drop(store);
+    let store = db.open();
+    let delayed = store.event(&event().key()).unwrap().unwrap();
+    assert_eq!(delayed.retry_at, Some(16));
+    assert_eq!(delayed.last_failure, Some(EventFailure::Source));
+    assert_eq!(delayed.cycle_attempts, 1);
+    assert!(store.claim(&scope(), 15, 5).unwrap().is_none());
+    let mut healthy = event();
+    healthy.id = OTHER.into();
+    healthy.entity_id = OTHER.into();
+    store.receive(&healthy).unwrap();
+    let (good, work) = store.claim(&scope(), 15, 5).unwrap().unwrap();
+    assert_eq!(work.event.id, OTHER);
+    store.finish(&good, 15, None).unwrap();
+    let (second, work) = store.claim(&scope(), 16, 5).unwrap().unwrap();
+    assert_eq!(work.cycle_attempts, 2);
+    assert_eq!(work.lifetime_attempts, 2);
+    assert_eq!(
+        store.complete(&first, 17, ProcessingOutcome::Succeeded),
+        Err(InboxError::ClaimLost)
+    );
+    store
+        .complete(
+            &second,
+            17,
+            ProcessingOutcome::Permanent(EventFailure::Conflict),
+        )
+        .unwrap();
+    let failed = store.event(&event().key()).unwrap().unwrap();
+    assert_eq!(failed.failure, Some(EventFailure::Conflict));
+    assert!(store.claim(&scope(), 1000, 5).unwrap().is_none());
+    store
+        .requeue(
+            &event().key(),
+            failed.generation,
+            1000,
+            RetryPolicy {
+                max_attempts: 2,
+                base_seconds: 1,
+                max_seconds: 2,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store.requeue(
+            &event().key(),
+            failed.generation,
+            1000,
+            RetryPolicy::default()
+        ),
+        Err(InboxError::Conflict)
+    );
+    let (third, work) = store.claim(&scope(), 1000, 5).unwrap().unwrap();
+    assert_eq!(work.cycle_attempts, 1);
+    assert_eq!(work.lifetime_attempts, 3);
+    assert_eq!(
+        store.finish(&second, 1001, None),
+        Err(InboxError::ClaimLost)
+    );
+    store
+        .complete(
+            &third,
+            1001,
+            ProcessingOutcome::Retryable(EventFailure::Index),
+        )
+        .unwrap();
+    let (fourth, _) = store.claim(&scope(), 1002, 5).unwrap().unwrap();
+    store
+        .complete(
+            &fourth,
+            1003,
+            ProcessingOutcome::Retryable(EventFailure::Index),
+        )
+        .unwrap();
+    assert_eq!(
+        store.event(&event().key()).unwrap().unwrap().state,
+        EventState::Failed
+    );
+    assert_eq!(store.receive(&event()), Ok(Receipt::Duplicate));
+    assert_eq!(
+        store
+            .event(&event().key())
+            .unwrap()
+            .unwrap()
+            .lifetime_attempts,
+        4
+    );
+}
+#[test]
+fn repeated_crashes_are_bounded_and_retry_time_overflow_keeps_the_claim() {
+    let db = Database::new();
+    db.open().receive(&event()).unwrap();
+    for attempt in 1..=5 {
+        let store = db.open();
+        let (_, work) = store.claim(&scope(), attempt * 5, 5).unwrap().unwrap();
+        assert_eq!(work.cycle_attempts, attempt);
+    }
+    let store = db.open();
+    assert!(store.claim(&scope(), 30, 5).unwrap().is_none());
+    assert_eq!(store.failed(&scope(), 10).unwrap()[0].lifetime_attempts, 5);
+    let failed = store.event(&event().key()).unwrap().unwrap();
+    store
+        .requeue(
+            &event().key(),
+            failed.generation,
+            i64::MAX - 3,
+            RetryPolicy::default(),
+        )
+        .unwrap();
+    let (claim, _) = store.claim(&scope(), i64::MAX - 3, 2).unwrap().unwrap();
+    assert_eq!(
+        store.complete(
+            &claim,
+            i64::MAX - 2,
+            ProcessingOutcome::Retryable(EventFailure::Source)
+        ),
+        Err(InboxError::InvalidInput)
+    );
+    assert_eq!(
+        store.event(&event().key()).unwrap().unwrap().state,
+        EventState::Running
+    );
+    for policy in [
+        RetryPolicy {
+            max_attempts: 0,
+            ..Default::default()
+        },
+        RetryPolicy {
+            base_seconds: 0,
+            ..Default::default()
+        },
+        RetryPolicy {
+            max_seconds: 1,
+            ..Default::default()
+        },
+    ] {
+        assert_eq!(policy.validate(), Err(InboxError::InvalidInput));
+    }
+}
+#[test]
+fn concurrent_operator_requeue_has_one_winner_and_retains_failed_duplicate_state() {
+    let db = Database::new();
+    let one = db.open();
+    let two = db.open();
+    one.receive(&event()).unwrap();
+    let (claim, _) = one.claim(&scope(), 1, 10).unwrap().unwrap();
+    one.finish(&claim, 2, Some(EventFailure::Source)).unwrap();
+    assert_eq!(one.receive(&event()), Ok(Receipt::Duplicate));
+    assert_eq!(
+        one.event(&event().key()).unwrap().unwrap().state,
+        EventState::Failed
+    );
+    let (a, b) = std::thread::scope(|s| {
+        let a =
+            s.spawn(|| one.requeue(&event().key(), claim.generation, 3, RetryPolicy::default()));
+        let b =
+            s.spawn(|| two.requeue(&event().key(), claim.generation, 3, RetryPolicy::default()));
+        (a.join().unwrap(), b.join().unwrap())
+    });
+    assert!(matches!(
+        (a, b),
+        (Ok(()), Err(InboxError::Conflict)) | (Err(InboxError::Conflict), Ok(()))
+    ));
+    let (new, _) = two.claim(&scope(), 3, 10).unwrap().unwrap();
+    assert_eq!(one.finish(&claim, 4, None), Err(InboxError::ClaimLost));
+    two.finish(&new, 4, None).unwrap();
+    let policy = RetryPolicy {
+        max_attempts: 10,
+        base_seconds: 5,
+        max_seconds: 12,
+    };
+    assert_eq!(policy.deadline(100, 1), Ok(105));
+    assert_eq!(policy.deadline(100, 2), Ok(110));
+    assert_eq!(policy.deadline(100, 3), Ok(112));
+    assert_eq!(policy.deadline(100, 100), Ok(112));
+}
+#[test]
+fn v3_upgrade_preserves_running_failed_receipts_and_other_tables() {
+    let db = Database::new();
+    {
+        let raw = rusqlite::Connection::open(&db.0).unwrap();
+        raw.execute_batch(include_str!("../migrations/0001_initial.sql"))
+            .unwrap();
+        raw.execute_batch(include_str!("../migrations/0002_reconciliation.sql"))
+            .unwrap();
+        raw.execute_batch(include_str!("../migrations/0003_webhook_inbox.sql"))
+            .unwrap();
+        raw.execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at_unix INTEGER NOT NULL); INSERT INTO schema_migrations VALUES(1,'initial_sync_state',0),(2,'reconciliation_journal',0),(3,'webhook_inbox',0); INSERT INTO webhook_events(event_id) VALUES ('legacy'); INSERT INTO page_sync_state(page_id,content_hash,tombstoned) VALUES ('retained-page','retained-hash',0); INSERT INTO crawl_checkpoints(checkpoint_key,cursor) VALUES ('crawl','next'); INSERT INTO index_versions(index_name,version) VALUES ('chunks','v1'); INSERT INTO reconciliation_runs(run_id,scope,fence,phase,checkpoint,next_deadline) VALUES ('retained-run','scope',1,0,'checkpoint',123);").unwrap();
+        for (id, state, generation, lease, failure) in
+            [(ID, 1, 4, Some(100), None), (OTHER, 3, 2, None, Some(0))]
+        {
+            raw.execute("INSERT INTO webhook_inbox(workspace_id,subscription_id,event_id,integration_id,event_timestamp,event_type,entity_id,entity_type,attempt_number,state,generation,lease_until,failure) VALUES (?1,?1,?2,?1,'2026-10-08T00:00:00Z','page.content_updated',?1,'page',9,?3,?4,?5,?6)",rusqlite::params![ID,id,state,generation,lease,failure]).unwrap();
+        }
+    }
+    let store = db.open();
+    let running = store.event(&event().key()).unwrap().unwrap();
+    assert_eq!(running.lifetime_attempts, 4);
+    assert_eq!(running.cycle_attempts, 1);
+    assert_eq!(running.generation, 4);
+    assert_eq!(running.lease_until, Some(100));
+    assert!(store.claim(&scope(), 99, 5).unwrap().is_none());
+    let (_, recovered) = store.claim(&scope(), 100, 5).unwrap().unwrap();
+    assert_eq!(recovered.lifetime_attempts, 5);
+    let failed = store.failed(&scope(), 10).unwrap();
+    assert_eq!(failed[0].failure, Some(EventFailure::Source));
+    assert_eq!(failed[0].last_failure, Some(EventFailure::Source));
+    assert_eq!(failed[0].lifetime_attempts, 2);
+    assert!(!store.register_webhook_event("legacy").unwrap());
+    let raw = rusqlite::Connection::open(&db.0).unwrap();
+    assert_eq!(
+        raw.query_row(
+            "SELECT content_hash FROM page_sync_state WHERE page_id='retained-page'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "retained-hash"
+    );
+    assert_eq!(
+        raw.query_row(
+            "SELECT checkpoint FROM reconciliation_runs WHERE run_id='retained-run'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "checkpoint"
+    );
+    assert_eq!(
+        raw.query_row(
+            "SELECT cursor FROM crawl_checkpoints WHERE checkpoint_key='crawl'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "next"
+    );
+    assert_eq!(
+        raw.query_row(
+            "SELECT version FROM index_versions WHERE index_name='chunks'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "v1"
+    );
+}

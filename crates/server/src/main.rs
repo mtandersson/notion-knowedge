@@ -23,6 +23,19 @@ async fn main() -> ExitCode {
         );
         return ExitCode::SUCCESS;
     }
+    let operator_args: Vec<String> = env::args().skip(1).collect();
+    if operator_args.iter().any(|s| s.starts_with("--webhook-")) {
+        return match notion_knowledge_server::webhook_recovery::run(&operator_args) {
+            Ok(report) => {
+                println!("{report}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("Webhook operator error: {error}");
+                ExitCode::from(2)
+            }
+        };
+    }
     let config = match Config::from_env() {
         Ok(config) => config,
         Err(error) => {

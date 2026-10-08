@@ -57,10 +57,10 @@ fn normalized(event: &WebhookEvent) -> Result<WebhookEvent, InboxError> {
     Ok(event)
 }
 fn snapshot(db: &Connection, k: &EventKey) -> Result<Option<InboxEvent>, InboxError> {
-    db.query_row("SELECT integration_id,event_timestamp,event_type,entity_id,entity_type,attempt_number,state,generation,lease_until,failure FROM webhook_inbox WHERE workspace_id=?1 AND subscription_id=?2 AND event_id=?3",params![k.workspace_id,k.subscription_id,k.event_id],|r| {
+    db.query_row("SELECT integration_id,event_timestamp,event_type,entity_id,entity_type,attempt_number,state,generation,lease_until,failure,cycle_attempts,lifetime_attempts,retry_at,max_attempts,base_seconds,max_seconds,last_failure FROM webhook_inbox WHERE workspace_id=?1 AND subscription_id=?2 AND event_id=?3",params![k.workspace_id,k.subscription_id,k.event_id],|r| {
         let state=match r.get::<_,i64>(6)? {0=>EventState::Pending,1=>EventState::Running,2=>EventState::Succeeded,3=>EventState::Failed,_=>return Err(rusqlite::Error::InvalidQuery)};
         let failure=match r.get::<_,Option<i64>>(9)? {None=>None,Some(0)=>Some(EventFailure::Source),Some(1)=>Some(EventFailure::Index),Some(2)=>Some(EventFailure::Conflict),Some(3)=>Some(EventFailure::Unavailable),_=>return Err(rusqlite::Error::InvalidQuery)};
-        Ok(InboxEvent {event:WebhookEvent{id:k.event_id.clone(),workspace_id:k.workspace_id.clone(),subscription_id:k.subscription_id.clone(),integration_id:r.get(0)?,timestamp:r.get(1)?,event_type:r.get(2)?,entity_id:r.get(3)?,entity_type:r.get(4)?,attempt_number:r.get(5)?},state,generation:r.get(7)?,lease_until:r.get(8)?,failure})
+        Ok(InboxEvent {event:WebhookEvent{id:k.event_id.clone(),workspace_id:k.workspace_id.clone(),subscription_id:k.subscription_id.clone(),integration_id:r.get(0)?,timestamp:r.get(1)?,event_type:r.get(2)?,entity_id:r.get(3)?,entity_type:r.get(4)?,attempt_number:r.get(5)?},state,generation:r.get(7)?,lease_until:r.get(8)?,failure,cycle_attempts:r.get(10)?,lifetime_attempts:r.get(11)?,retry_at:r.get(12)?,last_failure: match r.get::<_,Option<i64>>(16)? {None=>None,Some(0)=>Some(EventFailure::Source),Some(1)=>Some(EventFailure::Index),Some(2)=>Some(EventFailure::Conflict),Some(3)=>Some(EventFailure::Unavailable),_=>return Err(rusqlite::Error::InvalidQuery)},policy:RetryPolicy{max_attempts:r.get(13)?,base_seconds:r.get(14)?,max_seconds:r.get(15)?}})
     }).optional().map_err(sql)
 }
 impl WebhookInbox for SqliteSyncStateStore {
@@ -128,7 +128,9 @@ impl WebhookInbox for SqliteSyncStateStore {
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql)?;
-        let k=tx.query_row("SELECT workspace_id,subscription_id,event_id FROM webhook_inbox WHERE workspace_id=?2 AND subscription_id=?3 AND (state=0 OR (state=1 AND lease_until<=?1)) ORDER BY received_at_unix,workspace_id,subscription_id,event_id LIMIT 1",params![now,scope.workspace_id.to_ascii_lowercase(),scope.subscription_id.to_ascii_lowercase()],|r|Ok(EventKey{workspace_id:r.get(0)?,subscription_id:r.get(1)?,event_id:r.get(2)?})).optional().map_err(sql)?;
+        // Expired last attempts are dead-lettered before selection, without blocking other events.
+        tx.execute("UPDATE webhook_inbox SET state=3,failure=3,last_failure=3,lease_until=NULL,retry_at=NULL WHERE workspace_id=?1 AND subscription_id=?2 AND state=1 AND lease_until<=?3 AND cycle_attempts>=max_attempts", params![scope.workspace_id.to_ascii_lowercase(),scope.subscription_id.to_ascii_lowercase(),now]).map_err(sql)?;
+        let k=tx.query_row("SELECT workspace_id,subscription_id,event_id FROM webhook_inbox WHERE workspace_id=?2 AND subscription_id=?3 AND ((state=0 AND (retry_at IS NULL OR retry_at<=?1)) OR (state=1 AND lease_until<=?1)) AND cycle_attempts<max_attempts AND lifetime_attempts<9223372036854775807 AND generation<9223372036854775807 ORDER BY received_at_unix,workspace_id,subscription_id,event_id LIMIT 1",params![now,scope.workspace_id.to_ascii_lowercase(),scope.subscription_id.to_ascii_lowercase()],|r|Ok(EventKey{workspace_id:r.get(0)?,subscription_id:r.get(1)?,event_id:r.get(2)?})).optional().map_err(sql)?;
         let Some(k) = k else {
             tx.commit().map_err(sql)?;
             return Ok(None);
@@ -138,7 +140,7 @@ impl WebhookInbox for SqliteSyncStateStore {
             .generation
             .checked_add(1)
             .ok_or(InboxError::Unavailable)?;
-        tx.execute("UPDATE webhook_inbox SET state=1,generation=?1,lease_until=?2 WHERE workspace_id=?3 AND subscription_id=?4 AND event_id=?5",params![generation,until,k.workspace_id,k.subscription_id,k.event_id]).map_err(sql)?;
+        tx.execute("UPDATE webhook_inbox SET state=1,generation=?1,lease_until=?2,cycle_attempts=cycle_attempts+1,lifetime_attempts=lifetime_attempts+1,retry_at=NULL WHERE workspace_id=?3 AND subscription_id=?4 AND event_id=?5",params![generation,until,k.workspace_id,k.subscription_id,k.event_id]).map_err(sql)?;
         let event = snapshot(&tx, &k)?.ok_or(InboxError::Unavailable)?;
         tx.commit().map_err(sql)?;
         Ok(Some((EventClaim { key: k, generation }, event)))
@@ -149,24 +151,123 @@ impl WebhookInbox for SqliteSyncStateStore {
         now: i64,
         failure: Option<EventFailure>,
     ) -> Result<(), InboxError> {
+        self.complete(
+            claim,
+            now,
+            failure.map_or(ProcessingOutcome::Succeeded, ProcessingOutcome::Permanent),
+        )
+    }
+}
+impl WebhookRecovery for SqliteSyncStateStore {
+    fn complete(
+        &self,
+        claim: &EventClaim,
+        now: i64,
+        outcome: ProcessingOutcome,
+    ) -> Result<(), InboxError> {
         let k = key(&claim.key)?;
         if now < 0 || claim.generation <= 0 {
             return Err(InboxError::InvalidInput);
         }
+        let mut db = self
+            .lock_connection()
+            .map_err(|_| InboxError::Unavailable)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql)?;
+        let prior = snapshot(&tx, &k)?.ok_or(InboxError::ClaimLost)?;
+        if prior.state != EventState::Running
+            || prior.generation != claim.generation
+            || prior.lease_until.is_none_or(|t| t <= now)
+        {
+            return Err(InboxError::ClaimLost);
+        }
+        let last_failure = match outcome {
+            ProcessingOutcome::Succeeded => None,
+            ProcessingOutcome::Retryable(f) | ProcessingOutcome::Permanent(f) => Some(match f {
+                EventFailure::Source => 0,
+                EventFailure::Index => 1,
+                EventFailure::Conflict => 2,
+                EventFailure::Unavailable => 3,
+            }),
+        };
+        let (state, failure, due) = match outcome {
+            ProcessingOutcome::Succeeded => (2, None, None),
+            ProcessingOutcome::Retryable(_) if prior.cycle_attempts < prior.policy.max_attempts => {
+                (
+                    0,
+                    None,
+                    Some(prior.policy.deadline(now, prior.cycle_attempts)?),
+                )
+            }
+            ProcessingOutcome::Retryable(f) | ProcessingOutcome::Permanent(f) => (3, Some(f), None),
+        };
         let failure = failure.map(|f| match f {
             EventFailure::Source => 0,
             EventFailure::Index => 1,
             EventFailure::Conflict => 2,
             EventFailure::Unavailable => 3,
         });
+        tx.execute("UPDATE webhook_inbox SET state=?1,failure=?2,retry_at=?3,lease_until=NULL,last_failure=?7 WHERE workspace_id=?4 AND subscription_id=?5 AND event_id=?6",params![state,failure,due,k.workspace_id,k.subscription_id,k.event_id,last_failure]).map_err(sql)?;
+        tx.commit().map_err(sql)
+    }
+    fn failed(&self, scope: &InboxScope, limit: i64) -> Result<Vec<InboxEvent>, InboxError> {
+        if !valid_id(&scope.workspace_id)
+            || !valid_id(&scope.subscription_id)
+            || !(1..=1000).contains(&limit)
+        {
+            return Err(InboxError::InvalidInput);
+        }
         let db = self
             .lock_connection()
             .map_err(|_| InboxError::Unavailable)?;
-        let n=db.execute("UPDATE webhook_inbox SET state=?1,failure=?2,lease_until=NULL WHERE workspace_id=?3 AND subscription_id=?4 AND event_id=?5 AND state=1 AND generation=?6 AND lease_until>?7",params![if failure.is_some(){3}else{2},failure,k.workspace_id,k.subscription_id,k.event_id,claim.generation,now]).map_err(sql)?;
+        let mut stmt=db.prepare("SELECT event_id FROM webhook_inbox WHERE workspace_id=?1 AND subscription_id=?2 AND state=3 ORDER BY received_at_unix,event_id LIMIT ?3").map_err(sql)?;
+        let ids = stmt
+            .query_map(
+                params![
+                    scope.workspace_id.to_ascii_lowercase(),
+                    scope.subscription_id.to_ascii_lowercase(),
+                    limit
+                ],
+                |r| r.get::<_, String>(0),
+            )
+            .map_err(sql)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql)?;
+        ids.into_iter()
+            .map(|id| {
+                snapshot(
+                    &db,
+                    &EventKey {
+                        workspace_id: scope.workspace_id.to_ascii_lowercase(),
+                        subscription_id: scope.subscription_id.to_ascii_lowercase(),
+                        event_id: id,
+                    },
+                )?
+                .ok_or(InboxError::Unavailable)
+            })
+            .collect()
+    }
+    fn requeue(
+        &self,
+        k: &EventKey,
+        generation: i64,
+        now: i64,
+        policy: RetryPolicy,
+    ) -> Result<(), InboxError> {
+        let k = key(k)?;
+        let policy = policy.validate()?;
+        if now < 0 || generation < 0 || generation == i64::MAX {
+            return Err(InboxError::InvalidInput);
+        }
+        let db = self
+            .lock_connection()
+            .map_err(|_| InboxError::Unavailable)?;
+        let n=db.execute("UPDATE webhook_inbox SET state=0,failure=NULL,retry_at=?1,cycle_attempts=0,generation=generation+1,max_attempts=?2,base_seconds=?3,max_seconds=?4 WHERE workspace_id=?5 AND subscription_id=?6 AND event_id=?7 AND state=3 AND generation=?8 AND lifetime_attempts<9223372036854775807",params![now,policy.max_attempts,policy.base_seconds,policy.max_seconds,k.workspace_id,k.subscription_id,k.event_id,generation]).map_err(sql)?;
         if n == 1 {
             Ok(())
         } else {
-            Err(InboxError::ClaimLost)
+            Err(InboxError::Conflict)
         }
     }
 }

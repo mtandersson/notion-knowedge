@@ -90,3 +90,45 @@ allow delayed, unordered and repeated deliveries, with retries over approximatel
 
 Fixture tests run with `cargo test -p notion-knowledge-server --locked`; normal CI
 needs no Notion credentials or live subscription.
+
+## Bounded inbox recovery and operator commands
+
+Schema v4 persists a processing-cycle counter separately from lifetime processing
+attempts, Notion's original `attempt_number`, and ownership generation. Each claim,
+including takeover after a crash, consumes one attempt. Defaults allow five attempts;
+retryable outcomes delay eligibility by 5, 10, 20, then 40 seconds (capped at 300).
+Permanent outcomes and exhausted work stay failed. Expired final claims become
+failed when the next scoped claim sweeps them; delayed/failed work does not block
+other eligible events. Clock values are Unix seconds; invalid or overflowing times
+fail without completing the claim. Policies allow 1–100 attempts and 1–86400-second
+base/cap, with cap at least base. Policy is persisted per event, so changing an
+operator policy does not silently change another event's budget.
+
+The production binary provides local-only commands, requiring an **existing absolute
+SQLite file**. Scope UUIDs and event UUIDs are case insensitive. Arguments are exact
+positional forms; output contains identifiers, sanitized enum classes and counters,
+never raw bodies or free-text source failures:
+
+```sh
+notion-knowledge-server --webhook-failed /absolute/state.sqlite WORKSPACE_UUID SUBSCRIPTION_UUID 100
+notion-knowledge-server --webhook-inspect /absolute/state.sqlite WORKSPACE_UUID SUBSCRIPTION_UUID EVENT_UUID
+notion-knowledge-server --webhook-retry /absolute/state.sqlite WORKSPACE_UUID SUBSCRIPTION_UUID EVENT_UUID GENERATION 5 5 300
+```
+
+List returns the oldest failed events, bounded to 1–1000; inspect addresses any
+selected event directly, including pending/running events. Retry requires the
+observed generation from inspect and a failed event. It atomically increments the
+generation, starts a new bounded cycle with the supplied attempts/base/cap, and
+retains lifetime counts, original hints and last failure classification. Concurrent
+or repeated requeues and stale worker completion fail. Delivery duplicates never
+reset counters or state. The existing `finish(..., Some(failure))` API deliberately
+means permanent failure; automatic delayed retries use `complete(Retryable(...))`.
+
+Upgrade preserves v3 hints, receipts, page and reconciliation state. Existing rows
+retain lifetime generation as the best available prior-claim count; rows previously
+claimed begin with one consumed cycle attempt. Existing failed rows stay inert until
+an explicit operator retry, and existing running leases remain valid with their
+original generation. These commands do not dispatch source/index processing; #248
+adds that composition after its dependencies. Inbox ownership does not fence an
+in-flight index write: processors still require shared index serialization and
+idempotent apply-before-ack.

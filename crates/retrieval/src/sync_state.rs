@@ -13,7 +13,7 @@ use notion_knowledge_core::sync_state::{
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
-pub const LATEST_SCHEMA_VERSION: i64 = 3;
+pub const LATEST_SCHEMA_VERSION: i64 = 4;
 
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
@@ -30,6 +30,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         3,
         "webhook_inbox",
         include_str!("../migrations/0003_webhook_inbox.sql"),
+    ),
+    (
+        4,
+        "webhook_recovery",
+        include_str!("../migrations/0004_webhook_recovery.sql"),
     ),
 ];
 
