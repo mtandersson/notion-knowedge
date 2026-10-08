@@ -343,3 +343,6 @@ embedding provider to the indexed LanceDB table and filters before top-k selecti
 
 The [hybrid search service](docs/hybrid-search.md) combines lexical and semantic
 candidates with configurable reciprocal-rank fusion and per-result path provenance.
+
+The [Notion webhook boundary](docs/notion-webhooks.md) documents opt-in setup,
+raw-body signature verification and the durable admission follow-up.

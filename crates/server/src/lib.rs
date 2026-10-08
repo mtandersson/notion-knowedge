@@ -5,3 +5,5 @@ pub mod diagnostics;
 pub mod http;
 
 pub mod crawl_args;
+
+pub mod webhook;

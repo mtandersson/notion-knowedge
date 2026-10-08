@@ -15,13 +15,17 @@ this model; adding it requires a new review. Notion is authoritative. Derived
 local content is disposable but remains confidential, including embeddings,
 page titles, graph edges, checkpoints and backups.
 
-Today [the MCP handler](../crates/mcp/src/lib.rs) advertises the contract-only `knowledge_search` tool, which returns
-an explicit retrieval-unavailable error without results. [The Notion](../crates/notion/src/lib.rs) and
-[retrieval](../crates/retrieval/src/lib.rs) adapters are placeholders: there
-are no Notion requests, active local databases, webhook endpoint, file fetcher
-or embedding provider. The stdio and HTTP transports are implemented. None of
-the application authorization, OAuth, scope, write-control or file/webhook
-protections below are implemented merely because this document requires them.
+The default bootstrap serves stdio/HTTP and the MCP tool catalog; retrieval
+calls remain unavailable until adapter composition is enabled. The Notion,
+retrieval and embedding adapter implementations exist, but default startup does
+not make Notion requests, open index/state databases or load a model. Explicit
+commands and composed services have their own documented boundaries.
+
+The opt-in [webhook endpoint](notion-webhooks.md) implements setup candidate
+capture and authenticated delivery validation. Durable admission and scoped
+refresh are not yet composed; verified deliveries receive 503. Application
+MCP authorization, OAuth and other release requirements below are not implied
+by the existence of adapter implementations or this document.
 
 Implemented protections and their limits:
 
@@ -76,7 +80,8 @@ Server -- document chunks --> local model OR explicit remote embedding provider
 Server -- minimized tool results --> MCP client / ChatGPT (external recipient)
 ```
 
-Except stdio/HTTP with the contract-only search catalog, these are intended flows. Each arrow
+These flows describe the target composition. Stdio/HTTP and opt-in webhook
+setup/authentication are shipped; the webhook queue/refresh path remains pending. Each arrow
 crosses a boundary even when the same process wires the components. Content
 crossing from Notion, files or retrieval into the agent is data, never an
 instruction or authorization grant. Sending a tool result to ChatGPT transfers
@@ -155,3 +160,8 @@ A reviewer should block capability enablement when a required mitigation is
 missing, even if ordinary CI is green. Security controls should gain behavioral
 negative-path tests in their implementation tickets; this documentation change
 adds no tests that merely assert prose.
+
+The opt-in [webhook boundary](notion-webhooks.md) implements bounded raw-byte
+HMAC verification and separate candidate setup capture. Unsigned setup does not
+establish trust. Bootstrap admission remains unavailable and returns 503; durable
+admission/deduplication and authoritative scoped refresh remain release gates.
