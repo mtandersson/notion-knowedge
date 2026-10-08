@@ -22,8 +22,9 @@ not make Notion requests, open index/state databases or load a model. Explicit
 commands and composed services have their own documented boundaries.
 
 The opt-in [webhook endpoint](notion-webhooks.md) implements setup candidate
-capture and authenticated delivery validation. Durable admission and scoped
-refresh are not yet composed; verified deliveries receive 503. Application
+capture, authenticated delivery validation and durable minimized SQLite receipt
+with scoped identity deduplication. Verified deliveries are acknowledged after
+commit; admission failure returns 503. Scoped authoritative refresh is pending. Application
 MCP authorization, OAuth and other release requirements below are not implied
 by the existence of adapter implementations or this document.
 
@@ -81,7 +82,8 @@ Server -- minimized tool results --> MCP client / ChatGPT (external recipient)
 ```
 
 These flows describe the target composition. Stdio/HTTP and opt-in webhook
-setup/authentication are shipped; the webhook queue/refresh path remains pending. Each arrow
+setup/authentication and durable inbox receipt are shipped; automatic webhook
+processing and scoped refresh remain pending. Each arrow
 crosses a boundary even when the same process wires the components. Content
 crossing from Notion, files or retrieval into the agent is data, never an
 instruction or authorization grant. Sending a tool result to ChatGPT transfers
@@ -163,5 +165,8 @@ adds no tests that merely assert prose.
 
 The opt-in [webhook boundary](notion-webhooks.md) implements bounded raw-byte
 HMAC verification and separate candidate setup capture. Unsigned setup does not
-establish trust. Bootstrap admission remains unavailable and returns 503; durable
-admission/deduplication and authoritative scoped refresh remain release gates.
+establish trust. Verified HTTP admission commits minimized hints to SQLite before
+acknowledgement. Duplicate and abrupt-restart tests cover retained pending work;
+claim generations fence completion after recovery. Queue retention/concurrency
+limits and authoritative scoped refresh remain release gates. Deleting SQLite
+state loses pending hints even though authoritative Notion content survives.

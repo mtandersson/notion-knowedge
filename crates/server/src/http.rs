@@ -43,7 +43,20 @@ pub async fn serve_with_handler(
         config,
     );
     let diagnostics = diagnostics_router(bind, diagnostics);
-    let webhooks = crate::webhook::router(settings.webhook, None);
+    let admission = match settings.webhook_state_file {
+        Some(path) => {
+            let store = tokio::task::spawn_blocking(move || {
+                notion_knowledge_retrieval::sync_state::SqliteSyncStateStore::open(path)
+            })
+            .await
+            .map_err(|_| io::Error::other("webhook inbox unavailable"))?
+            .map_err(|_| io::Error::other("webhook inbox unavailable"))?;
+            Some(Arc::new(crate::webhook::DurableAdmission(Arc::new(store)))
+                as Arc<dyn notion_knowledge_core::webhook::WebhookAdmission>)
+        }
+        None => None,
+    };
+    let webhooks = crate::webhook::router(settings.webhook, admission);
     let router = axum::Router::new()
         .merge(diagnostics)
         .nest_service("/mcp", service)

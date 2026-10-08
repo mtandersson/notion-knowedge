@@ -197,46 +197,85 @@ async fn http_client_initializes_discovers_calls_and_receives_structured_errors(
 }
 
 #[tokio::test]
-async fn production_webhook_route_authenticates_independently_of_mcp_browser_guards() {
+async fn production_webhook_acknowledges_committed_hints_and_deduplicates_after_restart() {
     use hmac::{Hmac, Mac};
+    use notion_knowledge_core::webhook::{EventKey, EventState, WebhookInbox};
+    use notion_knowledge_retrieval::sync_state::SqliteSyncStateStore;
     use sha2::Sha256;
-    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = socket.local_addr().unwrap().port();
-    drop(socket);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite");
     let id = "13950b26-c203-4f3b-b97d-93ec06319565";
     let key = "fixture-production-webhook-key";
-    let mut child = Command::new(env!("CARGO_BIN_EXE_notion-knowledge-server"))
-        .arg("--http")
-        .env_clear()
-        .env("NK_HTTP_PORT", port.to_string())
-        .env("NK_WEBHOOK_MODE", "verified")
-        .env("NK_WEBHOOK_VERIFICATION_TOKEN", key)
-        .env("NK_WEBHOOK_WORKSPACE_ID", id)
-        .env("NK_WEBHOOK_INTEGRATION_ID", id)
-        .env("NK_WEBHOOK_SUBSCRIPTION_ID", id)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-    timeout(Duration::from_secs(15),async {
-        let mut stderr=BufReader::new(child.stderr.take().unwrap());
-        loop { let mut line=String::new(); assert_ne!(stderr.read_line(&mut line).await.unwrap(),0); assert!(!line.contains(key)); if line.contains("Serving MCP over Streamable HTTP") {break;} }
-        let body=format!(r#"{{"id":"{id}","timestamp":"2026-10-08T00:00:00Z","workspace_id":"{id}","integration_id":"{id}","subscription_id":"{id}","type":"page.content_updated","entity":{{"id":"{id}","type":"page"}},"attempt_number":1}}"#);
-        let mut mac=Hmac::<Sha256>::new_from_slice(key.as_bytes()).unwrap();mac.update(body.as_bytes());let signature=format!("sha256={:x}",mac.finalize().into_bytes());
-        let client=Client::builder().no_proxy().build().unwrap();let url=format!("http://127.0.0.1:{port}/webhooks/notion");
-        // Bootstrap has no durable admission yet. Authenticated events must
-        // receive a retryable failure, rather than an acknowledgement of loss.
-        let response=client.post(&url).header("host","public-webhook.example").header("origin","https://api.notion.com")
-            .header("x-notion-signature",&signature).body(body.clone()).send().await.unwrap();
-        assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE);assert!(!response.text().await.unwrap().contains(key));
-        let mut headers=reqwest::header::HeaderMap::new();headers.append("x-notion-signature",signature.parse().unwrap());headers.append("x-notion-signature","sha256=00".parse().unwrap());
-        assert_eq!(client.post(&url).headers(headers).body(body.clone()).send().await.unwrap().status(),StatusCode::UNAUTHORIZED);
-        assert_eq!(client.post(&url).header("content-encoding","gzip").body(body.clone()).send().await.unwrap().status(),StatusCode::UNSUPPORTED_MEDIA_TYPE);
-        assert_eq!(client.post(&url).body(body).send().await.unwrap().status(),StatusCode::UNAUTHORIZED);
-        assert_eq!(client.post(&url).body(vec![b' ';64*1024+1]).send().await.unwrap().status(),StatusCode::PAYLOAD_TOO_LARGE);
-    }).await.unwrap();
-    child.kill().await.unwrap();
-    child.wait().await.unwrap();
+    let event_key = EventKey {
+        workspace_id: id.into(),
+        subscription_id: id.into(),
+        event_id: id.into(),
+    };
+    let sign = |body: &str| {
+        let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes()).unwrap();
+        mac.update(body.as_bytes());
+        format!("sha256={:x}", mac.finalize().into_bytes())
+    };
+    let client = Client::builder().no_proxy().build().unwrap();
+    for attempt in [1, 9] {
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = socket.local_addr().unwrap().port();
+        drop(socket);
+        let mut child = Command::new(env!("CARGO_BIN_EXE_notion-knowledge-server"))
+            .arg("--http")
+            .env_clear()
+            .env("NK_HTTP_PORT", port.to_string())
+            .env("NK_WEBHOOK_MODE", "verified")
+            .env("NK_WEBHOOK_VERIFICATION_TOKEN", key)
+            .env("NK_WEBHOOK_WORKSPACE_ID", id)
+            .env("NK_WEBHOOK_INTEGRATION_ID", id)
+            .env("NK_WEBHOOK_SUBSCRIPTION_ID", id)
+            .env("NK_WEBHOOK_STATE_FILE", &path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        timeout(Duration::from_secs(15),async {
+            let mut stderr=BufReader::new(child.stderr.take().unwrap());
+            loop {let mut line=String::new();assert_ne!(stderr.read_line(&mut line).await.unwrap(),0);assert!(!line.contains(key));if line.contains("Serving MCP over Streamable HTTP") {break;}}
+            let body=format!(r#"{{"id":"{id}","timestamp":"2026-10-08T00:00:00Z","workspace_id":"{id}","integration_id":"{id}","subscription_id":"{id}","type":"page.content_updated","entity":{{"id":"{id}","type":"page"}},"attempt_number":{attempt},"data":{{"private":"fixture-private-content"}}}}"#);
+            let url=format!("http://127.0.0.1:{port}/webhooks/notion");
+            for _ in 0..2 {
+                assert_eq!(client.post(&url).header("host","public-webhook.example").header("origin","https://api.notion.com").header("x-notion-signature",sign(&body)).body(body.clone()).send().await.unwrap().status(),StatusCode::OK);
+            }
+            // Opening another connection after the ACK sees a complete durable row.
+            let store=SqliteSyncStateStore::open(&path).unwrap();let saved=store.event(&event_key).unwrap().unwrap();
+            assert_eq!(saved.state,EventState::Pending);assert_eq!(saved.event.attempt_number,1);assert_eq!(saved.event.event_type,"page.content_updated");
+            let conflict=body.replace("page.content_updated","page.deleted");
+            assert_eq!(client.post(&url).header("x-notion-signature",sign(&conflict)).body(conflict).send().await.unwrap().status(),StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(store.event(&event_key).unwrap().unwrap(),saved);
+            let mut headers=reqwest::header::HeaderMap::new();headers.append("x-notion-signature",sign(&body).parse().unwrap());headers.append("x-notion-signature","sha256=00".parse().unwrap());
+            assert_eq!(client.post(&url).headers(headers).body(body.clone()).send().await.unwrap().status(),StatusCode::UNAUTHORIZED);
+            assert_eq!(client.post(&url).header("content-encoding","gzip").body(body.clone()).send().await.unwrap().status(),StatusCode::UNSUPPORTED_MEDIA_TYPE);
+            assert_eq!(client.post(&url).body(body).send().await.unwrap().status(),StatusCode::UNAUTHORIZED);
+            assert_eq!(client.post(&url).body(vec![b' ';64*1024+1]).send().await.unwrap().status(),StatusCode::PAYLOAD_TOO_LARGE);
+        }).await.unwrap();
+        // Abrupt termination immediately after receipt retains pending work.
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+        assert_eq!(
+            SqliteSyncStateStore::open(&path)
+                .unwrap()
+                .event(&event_key)
+                .unwrap()
+                .unwrap()
+                .state,
+            EventState::Pending
+        );
+    }
+    let bytes = std::fs::read(&path).unwrap();
+    for private in [key, "fixture-private-content", "sha256="] {
+        assert!(
+            !bytes
+                .windows(private.len())
+                .any(|window| window == private.as_bytes())
+        );
+    }
 }

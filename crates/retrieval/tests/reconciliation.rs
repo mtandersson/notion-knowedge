@@ -50,7 +50,10 @@ fn version_one_data_survives_upgrade_and_reopen() {
     raw.execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at_unix INTEGER NOT NULL); INSERT INTO schema_migrations VALUES(1,'initial_sync_state',0); INSERT INTO page_sync_state VALUES('page','hash','edited',0,0); INSERT INTO crawl_checkpoints VALUES('root','cursor',0); INSERT INTO webhook_events VALUES('event',0); INSERT INTO index_versions VALUES('chunks','v1',0);").unwrap();
     drop(raw);
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 2);
+    assert_eq!(
+        store.schema_version().unwrap(),
+        notion_knowledge_retrieval::sync_state::LATEST_SCHEMA_VERSION
+    );
     assert_eq!(
         store.page_state("page").unwrap().unwrap().content_hash(),
         Some("hash")
@@ -65,7 +68,10 @@ fn version_one_data_survives_upgrade_and_reopen() {
         "v1"
     );
     drop(store);
-    assert_eq!(db.open().schema_version().unwrap(), 2);
+    assert_eq!(
+        db.open().schema_version().unwrap(),
+        notion_knowledge_retrieval::sync_state::LATEST_SCHEMA_VERSION
+    );
 }
 #[test]
 fn scope_sets_are_canonical_and_resume_rejects_policy_generation_and_root_changes() {
