@@ -64,7 +64,7 @@ struct Envelope {
     #[serde(rename = "type")]
     event_type: String,
     entity: Entity,
-    attempt_number: u8,
+    attempt_number: u32,
 }
 #[derive(Deserialize)]
 struct Entity {
@@ -156,7 +156,7 @@ async fn receive(State(endpoint): State<Endpoint>, request: Request) -> StatusCo
             .into_iter()
             .all(|id| valid_id(id))
                 || chrono::DateTime::parse_from_rfc3339(&event.timestamp).is_err()
-                || !(1..=8).contains(&event.attempt_number)
+                || event.attempt_number == 0
                 || event.event_type.is_empty()
                 || event.event_type.len() > 128
                 || !event
@@ -361,6 +361,79 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         assert_eq!(sink.0.lock().unwrap().len(), 1);
+        handle.abort();
+    }
+    #[tokio::test]
+    async fn later_retries_and_new_event_names_remain_authenticated_hints() {
+        let sink = Arc::new(Sink::default());
+        let (url, handle) = server(verified(), Some(sink.clone())).await;
+        let mut value: serde_json::Value = serde_json::from_slice(&payload()).unwrap();
+        value["attempt_number"] = 9.into();
+        value["type"] = "page.future_event".into();
+        let body = serde_json::to_vec(&value).unwrap();
+        assert_eq!(
+            client()
+                .post(&url)
+                .header("x-notion-signature", signature(&body))
+                .body(body)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(sink.0.lock().unwrap()[0].attempt_number, 9);
+        value["attempt_number"] = 0.into();
+        let body = serde_json::to_vec(&value).unwrap();
+        assert_eq!(
+            client()
+                .post(&url)
+                .header("x-notion-signature", signature(&body))
+                .body(body)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        handle.abort();
+    }
+    #[tokio::test]
+    async fn chunked_delivery_enforces_raw_byte_authentication_and_stream_size_limit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (url, handle) = server(verified(), None).await;
+        let authority = url
+            .strip_prefix("http://")
+            .unwrap()
+            .strip_suffix("/webhooks/notion")
+            .unwrap();
+        for (body, expected) in [(payload(), "503"), (vec![b' '; MAX_BODY_BYTES + 1], "413")] {
+            let mut stream = tokio::net::TcpStream::connect(authority).await.unwrap();
+            let head = format!(
+                "POST /webhooks/notion HTTP/1.1\r\nHost: {authority}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nX-Notion-Signature: {}\r\n\r\n",
+                signature(&body)
+            );
+            stream.write_all(head.as_bytes()).await.unwrap();
+            for chunk in body.chunks(4096) {
+                stream
+                    .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                    .await
+                    .unwrap();
+                stream.write_all(chunk).await.unwrap();
+                stream.write_all(b"\r\n").await.unwrap();
+            }
+            stream.write_all(b"0\r\n\r\n").await.unwrap();
+            let mut response = Vec::new();
+            tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                String::from_utf8(response)
+                    .unwrap()
+                    .starts_with(&format!("HTTP/1.1 {expected}"))
+            );
+        }
         handle.abort();
     }
     #[tokio::test]

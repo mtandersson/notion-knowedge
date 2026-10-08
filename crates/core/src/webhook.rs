@@ -11,7 +11,7 @@ pub struct WebhookEvent {
     pub event_type: String,
     pub entity_id: String,
     pub entity_type: String,
-    pub attempt_number: u8,
+    pub attempt_number: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

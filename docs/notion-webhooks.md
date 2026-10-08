@@ -39,7 +39,7 @@ Verified mode requires exactly one `X-Notion-Signature: sha256=<64 hex digits>`.
 HMAC verifies the received bytes with a constant-time MAC comparison before JSON
 parsing. Re-serialized JSON is not used. Bodies are limited to 64 KiB, including
 chunked bodies; content encodings are rejected, reading takes at most ten seconds.
-The typed envelope validates UUIDs, RFC3339 time, attempt 1–8 and entity kind,
+The typed envelope validates UUIDs, RFC3339 time, a positive delivery attempt and entity kind,
 then checks the configured workspace, integration and subscription. Unknown
 lowercase event names remain representable for future subscriptions.
 
