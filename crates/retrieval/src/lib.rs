@@ -15,3 +15,5 @@ pub mod qwen;
 
 /// SQLite-backed durable operational state used by crawlers and index orchestration.
 pub mod sync_state;
+
+pub mod reconciliation;

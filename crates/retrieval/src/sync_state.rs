@@ -13,13 +13,20 @@ use notion_knowledge_core::sync_state::{
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
-pub const LATEST_SCHEMA_VERSION: i64 = 1;
+pub const LATEST_SCHEMA_VERSION: i64 = 2;
 
-const MIGRATIONS: &[(i64, &str, &str)] = &[(
-    1,
-    "initial_sync_state",
-    include_str!("../migrations/0001_initial.sql"),
-)];
+const MIGRATIONS: &[(i64, &str, &str)] = &[
+    (
+        1,
+        "initial_sync_state",
+        include_str!("../migrations/0001_initial.sql"),
+    ),
+    (
+        2,
+        "reconciliation_journal",
+        include_str!("../migrations/0002_reconciliation.sql"),
+    ),
+];
 
 /// One process-local connection guarded by a mutex. SQLite transactions provide
 /// the durable atomicity boundary; the mutex prevents concurrent use of one
@@ -70,7 +77,7 @@ impl SqliteSyncStateStore {
             .map_err(map_sqlite_error)
     }
 
-    fn lock_connection(&self) -> Result<MutexGuard<'_, Connection>, SyncStateError> {
+    pub(crate) fn lock_connection(&self) -> Result<MutexGuard<'_, Connection>, SyncStateError> {
         self.connection
             .lock()
             .map_err(|_| SyncStateError::Unavailable)
