@@ -122,7 +122,7 @@ async fn main() -> ExitCode {
     if env::args().skip(1).any(|arg| arg == "--diagnostics") {
         println!(
             "{}",
-            notion_knowledge_server::diagnostics::report_with_mode(
+            notion_knowledge_server::diagnostics::report(
                 notion_knowledge_server::diagnostics::bootstrap(&config).health(),
                 "one-shot",
                 config.read_only,
