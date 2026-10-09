@@ -40,7 +40,7 @@ jobs:
           persist-credentials: false
 
       - name: Run credential-free cleanup tests
-        run: python3 -m unittest discover -s scripts -p 'test-prune-issue-dependencies.py' -v
+        run: python3 scripts/test-prune-issue-dependencies.py -v
 
   cleanup:
     name: Manually audit or apply issue links
