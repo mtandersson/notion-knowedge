@@ -35,12 +35,11 @@ impl Write for BoundedJsonWriter {
     }
 }
 
-fn output_fits_budget(output: &serde_json::Value) -> bool {
+fn output_fits_budget(output: &impl serde::Serialize) -> bool {
     // A counting writer bounds serialization itself, without allocating an
     // unbounded second copy of an adapter's metadata into a JSON string.
     serde_json::to_writer(&mut BoundedJsonWriter { bytes: 0 }, output).is_ok()
 }
-
 
 /// Shared application handler for all MCP transports.
 ///
@@ -308,6 +307,13 @@ impl ServerHandler for KnowledgeServer {
                                 self.snippet_chars,
                             );
                         }
+                        // Check the adapter-owned data before json! copies it into
+                        // the structured response. Also check the final envelope.
+                        if !output_fits_budget(&results) {
+                            return Ok(error(
+                                "result_too_large: search results exceed the output budget; request fewer hits",
+                            ));
+                        }
                         let output = serde_json::json!({"results": results});
                         if !output_fits_budget(&output) {
                             return Ok(error(
@@ -383,6 +389,11 @@ impl ServerHandler for KnowledgeServer {
                                     }
                                 }));
                             }
+                        }
+                        if !output_fits_budget(&sources) {
+                            return Ok(error(
+                                "result_too_large: source expansion exceeds the output budget; request fewer references",
+                            ));
                         }
                         let output = serde_json::json!({"sources": sources});
                         if !output_fits_budget(&output) {
