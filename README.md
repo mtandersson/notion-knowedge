@@ -90,6 +90,13 @@ single-use Notion state linked to an already validated MCP PKCE transaction.
 There is no public redirect/callback route or usable OAuth login until #122 and
 the downstream grant/session controls are implemented.
 
+The staged [Notion callback verifier](docs/notion-oauth-callback.md) supports
+confidential server-side code exchange, typed Notion grant parsing and
+immutable user/workspace allowlisting using paired operator configuration.
+It deliberately does **not** mount the public callback route or issue MCP
+tokens until the grant store and resource authorization gates (#123–#129)
+exist. Notion credentials must never be sent to ChatGPT clients.
+
 The HTTP listener validates Host against loopback names and the configured IP,
 and validates browser Origin against the configured HTTP authority or localhost
 at the configured port. Clients without Origin are accepted. For remote access,
