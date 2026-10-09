@@ -39,6 +39,10 @@ impl OAuthDiscovery {
         })
     }
 
+    pub(crate) fn issuer(&self) -> &str {
+        &self.issuer
+    }
+
     fn protected_metadata_url(&self) -> String {
         // The root well-known route is also exposed; the suffixed URL is the
         // RFC 9728 canonical well-known location for a /mcp resource.

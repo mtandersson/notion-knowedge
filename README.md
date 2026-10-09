@@ -83,6 +83,13 @@ the server only publishes metadata; `/authorize`, `/token` and `/revoke` are
 unavailable and **all MCP calls return 401**. Discovery is not authentication,
 and remote/private deployment remains blocked until the rest of #117 ships.
 
+The [staged Notion OAuth redirect core](docs/notion-oauth-redirect.md) accepts
+`NK_NOTION_OAUTH_CLIENT_ID` plus `NK_NOTION_OAUTH_REDIRECT_URI` only as a
+pair, bound to the canonical issuer's HTTPS callback. It generates independent
+single-use Notion state linked to an already validated MCP PKCE transaction.
+There is no public redirect/callback route or usable OAuth login until #122 and
+the downstream grant/session controls are implemented.
+
 The HTTP listener validates Host against loopback names and the configured IP,
 and validates browser Origin against the configured HTTP authority or localhost
 at the configured port. Clients without Origin are accepted. For remote access,
