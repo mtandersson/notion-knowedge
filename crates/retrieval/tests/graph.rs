@@ -43,7 +43,10 @@ impl TestDb {
     fn new() -> Self {
         let id = NEXT_DB.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir()
-            .join(format!("notion-knowledge-graph-{}-{id}", std::process::id()))
+            .join(format!(
+                "notion-knowledge-graph-{}-{id}",
+                std::process::id()
+            ))
             .join("state.sqlite3");
         Self(path)
     }
@@ -69,7 +72,9 @@ fn graph_edges_roundtrip_across_restart_and_query_both_directions() {
     store
         .replace_page_edges("a-page", &[a_to_b.clone(), a_to_unknown.clone()])
         .unwrap();
-    store.replace_page_edges("c-page", &[c_to_b.clone()]).unwrap();
+    store
+        .replace_page_edges("c-page", std::slice::from_ref(&c_to_b))
+        .unwrap();
     drop(store);
 
     let reopened = SqliteSyncStateStore::open(&db.0).unwrap();
@@ -77,10 +82,7 @@ fn graph_edges_roundtrip_across_restart_and_query_both_directions() {
         reopened.edges_from("a-page").unwrap(),
         vec![a_to_unknown, a_to_b.clone()]
     );
-    assert_eq!(
-        reopened.edges_to("b-page").unwrap(),
-        vec![a_to_b, c_to_b]
-    );
+    assert_eq!(reopened.edges_to("b-page").unwrap(), vec![a_to_b, c_to_b]);
     assert!(reopened.edges_to("missing-page").unwrap().is_empty());
 }
 
@@ -92,12 +94,12 @@ fn replace_is_atomic_scoped_and_can_remove_stale_edges() {
     store
         .replace_page_edges("source", &[old.clone(), old.clone()])
         .unwrap();
-    store.replace_page_edges("other", &[other.clone()]).unwrap();
+    store.replace_page_edges("other", std::slice::from_ref(&other)).unwrap();
     assert_eq!(store.edges_from("source").unwrap(), vec![old]);
 
     let updated = page("source", "new", "relation", "property:p");
     store
-        .replace_page_edges("source", &[updated.clone()])
+        .replace_page_edges("source", std::slice::from_ref(&updated))
         .unwrap();
     assert_eq!(store.edges_from("source").unwrap(), vec![updated.clone()]);
     assert_eq!(store.edges_to("old").unwrap(), vec![other]);
@@ -113,7 +115,7 @@ fn invalid_input_cannot_erase_existing_graph() {
     let store = SqliteSyncStateStore::open_in_memory().unwrap();
     let original = page("owner", "target", "relation", "property:id");
     store
-        .replace_page_edges("owner", &[original.clone()])
+        .replace_page_edges("owner", std::slice::from_ref(&original))
         .unwrap();
 
     assert_eq!(
@@ -126,20 +128,28 @@ fn invalid_input_cannot_erase_existing_graph() {
     );
     assert!(store.edges_from("owner\n").is_err());
     assert!(store.edges_to("").is_err());
-    assert!(GraphEdge::new(
-        "owner".into(),
-        GraphTarget::Unresolved { reference: " ".into() },
-        "link".into(),
-        "block:a".into(),
-    )
-    .is_err());
-    assert!(GraphEdge::new(
-        "owner".into(),
-        GraphTarget::Page { page_id: "target".into() },
-        "".into(),
-        "block:a".into(),
-    )
-    .is_err());
+    assert!(
+        GraphEdge::new(
+            "owner".into(),
+            GraphTarget::Unresolved {
+                reference: " ".into()
+            },
+            "link".into(),
+            "block:a".into(),
+        )
+        .is_err()
+    );
+    assert!(
+        GraphEdge::new(
+            "owner".into(),
+            GraphTarget::Page {
+                page_id: "target".into()
+            },
+            "".into(),
+            "block:a".into(),
+        )
+        .is_err()
+    );
 
     assert_eq!(store.edges_from("owner").unwrap(), vec![original]);
 }
@@ -162,17 +172,21 @@ fn versioned_schema_enforces_target_invariant_and_has_lookup_indexes() {
     assert_eq!(migrated, "knowledge_graph_edges");
 
     for (target, unresolved) in [(None, None), (Some("page"), Some("unknown"))] {
-        assert!(connection
-            .execute(
-                "INSERT INTO graph_edges (
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO graph_edges (
                     source_page_id, target_page_id, unresolved_reference,
                     relation_type, provenance
                  ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params!["source", target, unresolved, "link", "block:1"],
-            )
-            .is_err());
+                    params!["source", target, unresolved, "link", "block:1"],
+                )
+                .is_err()
+        );
     }
-    let mut statement = connection.prepare("PRAGMA index_list(graph_edges)").unwrap();
+    let mut statement = connection
+        .prepare("PRAGMA index_list(graph_edges)")
+        .unwrap();
     let indexes: Vec<String> = statement
         .query_map([], |row| row.get(1))
         .unwrap()
@@ -184,6 +198,9 @@ fn versioned_schema_enforces_target_invariant_and_has_lookup_indexes() {
         "graph_edges_resolved_unique",
         "graph_edges_unresolved_unique",
     ] {
-        assert!(indexes.iter().any(|index| index == expected), "missing {expected}");
+        assert!(
+            indexes.iter().any(|index| index == expected),
+            "missing {expected}"
+        );
     }
 }
