@@ -26,6 +26,10 @@ fn has_prefix(value: &str, prefix: &str) -> bool {
         .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
 }
 
+fn terminates_url(character: char) -> bool {
+    character.is_whitespace() || matches!(character, '"' | '\'' | '<' | '>')
+}
+
 fn terminates_value(character: char) -> bool {
     character.is_whitespace() || matches!(character, '"' | '\'' | '<' | '>' | ',' | ';' | '&' | ')' | ']' | '}')
 }
@@ -126,7 +130,7 @@ pub fn redact_for_log(input: &str) -> String {
     while index < input.len() && emitted < MAX_LOG_CHARS {
         let value = &input[index..];
         let replacement = if has_prefix(value, "https://") || has_prefix(value, "http://") {
-            let length = value.find(terminates_value).unwrap_or(value.len());
+            let length = value.find(terminates_url).unwrap_or(value.len());
             Some((length, REDACTED_URL))
         } else if let Some(length) = credential_length(value, last) {
             Some((length, REDACTED_SECRET))
