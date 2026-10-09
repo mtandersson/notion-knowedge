@@ -143,4 +143,4 @@ is fixed and the applicable rollout smoke is green. This is a manual
 operator/client policy; no automatic failover or toggle is implemented by
 this documentation. See [diagnostics](diagnostics.md),
 [release rollback](releasing.md), [threat model](threat-model.md)
-and the eventual [cutover acceptance issue #115](https://github.com/mtandersson/notion-knowedge/issues/115).
+and the [primary-cutover acceptance gates](chatgpt-cutover-acceptance.md) (#115).
