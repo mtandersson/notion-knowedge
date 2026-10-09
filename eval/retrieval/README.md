@@ -128,9 +128,8 @@ between mode runs.
 
 Output JSON records, in stable dataset order, the ranked IDs and matching
 graded judgments for each query and mode; its human-readable stderr summary
-counts queries with any relevant hit and grade-3 hit at K. **Recall@K, MRR
-and nDCG remain issue #96**. The report contains no source document text or
-query wording. Runs from a fixed dataset/adapter/model should produce
+counts queries with any relevant hit and grade-3 hit at K, plus the ranking
+metrics below. The report contains no source document text or query wording. Runs from a fixed dataset/adapter/model should produce
 byte-identical JSON; a nondeterministic adapter fails this comparison and must
 be investigated rather than sorted/re-ranked by the harness.
 
@@ -144,6 +143,51 @@ the harness does not authorize or sanitize arbitrary external adapter code.
 The credential-free tests use a deterministic **contract stub**, not a real
 embedding model or full LanceDB evaluation. A complete model/index-specific
 report requires an actual adapter command; no production score is claimed.
+
+## Ranking metrics (#96)
+
+Run the exact-valued, credential-free metric tests with:
+
+```sh
+python3 scripts/test-retrieval-metrics.py
+python3 scripts/test-retrieval-eval.py
+```
+
+Every JSON `results[]` row now includes a `metrics` object and every
+`summary.<mode>.metrics` holds the **equal-weight macro mean across all
+queries**, including no-hit queries. The human-readable stderr summary includes
+those mean values. No document contents are added to the JSON output.
+Metric keys are `recall_at_1`, `recall_at_3`, `recall_at_5`,
+`recall_at_10`, `ndcg_at_1`, `ndcg_at_3`, `ndcg_at_5`,
+`ndcg_at_10`, and `mrr`.
+
+- **Recall@K** = number of unique judged-relevant **chunk IDs** in the first
+  K results divided by all graded-relevant chunk IDs in the query's complete
+  ground truth. Any grade 1–3 is binary relevant; unjudged chunks count as 0.
+  A partially relevant answer counts as relevant for recall.
+- **MRR** = reciprocal rank of the first grade 1–3 chunk within the requested
+  `top_k` (0 if none). The summary reports mean reciprocal rank across all
+  queries. Unlike nDCG, MRR does not distinguish grade 1 from grade 3.
+- **nDCG@K** uses graded exponential gain `2^grade - 1` and the
+  `log2(rank + 1)` positional discount, with rank starting at 1.
+  Divide observed DCG@K by the ideal DCG@K of **all** judged relevant chunks
+  ordered by descending grade. The metric is 0 for a zero-gain ranking;
+  ideal gain is never zero on this dataset's nonempty judgments.
+
+All metrics evaluate **chunks**, not pages. A result whose page matches but
+whose chunk is not judged gets grade 0; page-level evaluation would need a
+separately documented deduplication and ground truth conversion.
+Only cutoffs **at or below `--top-k`** are emitted. For example `--top-k 3`
+reports Recall@1/3 and nDCG@1/3, not a misleading Recall@5/10 from a truncated
+response. Set `--top-k 10` or higher to report all four advertised cutoffs.
+A short result list is treated as exhausted, not padded with synthetic hits.
+No-hit queries contribute zero to macro averages rather than being excluded.
+
+These metrics are deterministic calculations on the adapter's real ranked IDs,
+**not evidence of production search quality**. Current contract tests exercise
+a synthetic mode-aware stub and known hand-calculated metric values. The
+harness still needs a trusted real Qwen/LanceDB adapter and fixed
+model/index for meaningful quality results.
 
 ## Validate and maintain
 

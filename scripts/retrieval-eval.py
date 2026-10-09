@@ -11,6 +11,8 @@ import shlex
 import subprocess
 import sys
 
+from retrieval_metrics import macro_metrics, query_metrics
+
 MODES = ("vector", "fts", "hybrid")
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
@@ -155,21 +157,26 @@ def evaluate(data, command, modes, top_k, timeout):
             mode, data, chunks, top_k,
         )
         relevant_hits = direct_hits = 0
+        query_metric_rows = []
         for query in data["queries"]:
             judged = {j["source_id"]: j["grade"] for j in query["relevant"]}
             ranked = rankings[query["id"]]
             grades = [judged.get(cid, 0) for cid in ranked]
+            metrics = query_metrics(judged, ranked, top_k)
+            query_metric_rows.append(metrics)
             relevant_hits += any(grade > 0 for grade in grades)
             direct_hits += 3 in grades
             results.append({
                 "mode": mode, "query_id": query["id"],
                 "language": query["language"], "category": query["category"],
                 "ranked_source_ids": ranked, "grades": grades,
+                "metrics": metrics,
             })
         summaries[mode] = {
             "queries": len(data["queries"]),
             "queries_with_any_relevant_at_k": relevant_hits,
             "queries_with_direct_answer_at_k": direct_hits,
+            "metrics": macro_metrics(query_metric_rows),
         }
     return {
         "schema_version": 1, "dataset_id": data["dataset_id"],
@@ -210,7 +217,12 @@ def main(argv=None):
             print(
                 f"{mode}: {total['queries_with_any_relevant_at_k']}/{total['queries']} "
                 f"with relevant top-{args.top_k} hit; "
-                f"{total['queries_with_direct_answer_at_k']} with grade-3 hit",
+                f"{total['queries_with_direct_answer_at_k']} with grade-3 hit; "
+                f"MRR={total['metrics']['mrr']:.4f}; "
+                + ", ".join(
+                    f"{key}={value:.4f}" for key, value in total["metrics"].items()
+                    if key.startswith("recall_at_") or key.startswith("ndcg_at_")
+                ),
                 file=sys.stderr,
             )
         return 0

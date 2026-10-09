@@ -74,6 +74,19 @@ class EvaluationHarnessTests(unittest.TestCase):
         self.assertEqual(len(report["results"]), 72)
         self.assertEqual(set(report["summary"]), {"vector", "fts", "hybrid"})
         self.assertEqual(len(report["results"][0]["ranked_source_ids"]), 3)
+        expected = {"recall_at_1", "recall_at_3", "ndcg_at_1", "ndcg_at_3", "mrr"}
+        self.assertEqual(set(report["results"][0]["metrics"]), expected)
+        self.assertEqual(set(report["summary"]["vector"]["metrics"]), expected)
+        self.assertEqual(report["summary"]["vector"]["queries"], 24)
+        self.assertEqual(
+            report["summary"]["vector"]["metrics"]["mrr"],
+            sum(row["metrics"]["mrr"] for row in report["results"][:24]) / 24,
+        )
+        self.assertTrue(all(
+            0 <= value <= 1
+            for row in report["results"]
+            for value in row["metrics"].values()
+        ))
         self.assertNotEqual(
             report["results"][0]["ranked_source_ids"],
             report["results"][24]["ranked_source_ids"],
