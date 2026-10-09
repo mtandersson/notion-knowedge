@@ -297,3 +297,111 @@ async fn lost_lease_and_rejected_preparation_are_effect_free() {
     ).await, Ok(())));
     let _ = FtsIndexConfig::default();
 }
+
+fn wait_for(mut predicate: impl FnMut() -> bool) {
+    let begin = std::time::Instant::now();
+    while !predicate() {
+        assert!(begin.elapsed() < std::time::Duration::from_secs(25), "writer timed out");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn two_process_real_lance_writers_survive_observer_cancellation_and_reject_stale() {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let f = Fixture::new();
+    runtime.block_on(f.create());
+    let child = |name: &str| {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "process_writer_child", "--ignored", "--nocapture"])
+            .env("NK_LANCE_CHILD_ROOT", &f.root)
+            .env("NK_LANCE_CHILD_NAME", name)
+            .env("NK_LANCE_CHILD_FENCE", f.lease.fence.to_string())
+            .spawn()
+            .unwrap()
+    };
+    let mut first = child("one");
+    wait_for(|| f.root.join("one-entered").exists());
+    let mut second = child("two");
+    wait_for(|| f.root.join("two-prepared").exists());
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    assert!(!f.root.join("two-finished").exists());
+    assert!(first.try_wait().unwrap().is_none());
+    assert!(second.try_wait().unwrap().is_none());
+    // The first observed caller has been dropped, yet the owned commit thread
+    // still holds the guard and performs real Lance merge + FTS work.
+    fs::write(f.root.join("release"), "").unwrap();
+    wait_for(|| f.root.join("one-done").exists());
+    wait_for(|| f.root.join("two-finished").exists());
+    assert!(first.wait().unwrap().success());
+    assert!(second.wait().unwrap().success());
+    assert_eq!(
+        f.coordinator.receipt("one").unwrap().unwrap().status,
+        ReceiptStatus::Applied
+    );
+    assert_eq!(
+        f.coordinator.receipt("two").unwrap().unwrap().failure,
+        Some(FailureClass::Conflict)
+    );
+    runtime.block_on(async {
+        let readable = f.readable().await;
+        assert_eq!(readable.count_rows().await.unwrap(), 1);
+        assert_eq!(
+            readable.fts_query("text", "leaderblueberry", 10).await.unwrap().len(), 1
+        );
+        assert_eq!(
+            readable.fts_query("text", "contenderpapaya", 10).await.unwrap().len(), 0
+        );
+    });
+}
+
+#[tokio::test]
+#[ignore]
+async fn process_writer_child() {
+    let Ok(root) = std::env::var("NK_LANCE_CHILD_ROOT") else { return; };
+    let root = PathBuf::from(root);
+    let name = std::env::var("NK_LANCE_CHILD_NAME").unwrap();
+    let fence: i64 = std::env::var("NK_LANCE_CHILD_FENCE").unwrap().parse().unwrap();
+    let scope = ReconciliationScope::new(vec!["root".into()], vec![], "policy", "v1").unwrap();
+    let binding = CommitBinding::new("chunks", "workspace", &scope, "v1", 1).unwrap();
+    let coordinator = IndexCommitCoordinator::open(
+        root.join("index"), root.join("state.sqlite"), binding,
+    ).unwrap();
+    let embedding = EmbeddingMetadata::new(
+        "count".into(), "test-model".into(), "v1".into(), 3
+    ).unwrap();
+    let table = GuardedChunkTable::bind(
+        root.join("index"), "chunks", embedding.clone(), coordinator.clone(),
+    ).unwrap();
+    let provider = CountingProvider::new(embedding);
+    let lease = Lease { fence, expires_at: 110 };
+    let text = if name == "one" { "leaderblueberry" } else { "contenderpapaya" };
+    let prepared = table.prepare_page(
+        &provider, operation(&name, &name, false),
+        &[chunk("one", text, &name)],
+    ).await.unwrap();
+    if name == "one" {
+        let entered = root.join("one-entered");
+        let released = root.join("release");
+        let observer = table.commit_page(prepared, lease, clock(), move || async move {
+            fs::write(&entered, "").unwrap();
+            while !released.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            Ok(())
+        });
+        wait_for(|| root.join("one-entered").exists());
+        drop(observer); // owned mutation must continue across caller drop
+        wait_for(|| coordinator.receipt("one").unwrap().is_some_and(
+            |receipt| receipt.status == ReceiptStatus::Applied
+        ));
+        fs::write(root.join("one-done"), "").unwrap();
+    } else {
+        fs::write(root.join("two-prepared"), "").unwrap();
+        let result = table.commit_page(prepared, lease, clock(), || async {
+            Ok(())
+        }).await;
+        assert_eq!(result, Err(CommitError::Operation(FailureClass::Conflict)));
+        fs::write(root.join("two-finished"), "").unwrap();
+    }
+}
