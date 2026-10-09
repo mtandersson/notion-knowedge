@@ -84,7 +84,11 @@ fn credential_length(value: &str, prev: Option<char>) -> Option<usize> {
         {
             next += 1;
         }
-        while value.as_bytes().get(next).is_some_and(u8::is_ascii_whitespace) {
+        while value
+            .as_bytes()
+            .get(next)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
             next += 1;
         }
         if !value
@@ -95,7 +99,11 @@ fn credential_length(value: &str, prev: Option<char>) -> Option<usize> {
             continue;
         }
         next += 1;
-        while value.as_bytes().get(next).is_some_and(u8::is_ascii_whitespace) {
+        while value
+            .as_bytes()
+            .get(next)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
             next += 1;
         }
         if *key == "authorization" && has_prefix(&value[next..], "bearer ") {
