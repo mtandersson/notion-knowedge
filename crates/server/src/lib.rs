@@ -9,3 +9,6 @@ pub mod crawl_args;
 pub mod webhook;
 
 pub mod webhook_recovery;
+
+/// HTTPS OAuth discovery; never enables MCP authorization by itself.
+pub mod oauth_discovery;

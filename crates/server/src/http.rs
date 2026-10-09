@@ -60,10 +60,19 @@ pub async fn serve_with_handler(
         None => None,
     };
     let webhooks = crate::webhook::router(settings.webhook, admission);
+    // Discovery alone does not authenticate anyone. In that explicitly opted-in
+    // mode the real MCP SDK service is NOT mounted. The discovery router always
+    // challenges requests, including session/SSE and spurious bearer tokens.
+    // #120/#127 must supply a verified auth layer before re-enabling it.
+    let mcp = match settings.oauth_discovery {
+        Some(discovery) => crate::oauth_discovery::router(bind, discovery),
+        None => axum::Router::new()
+            .nest_service("/mcp", service)
+            .layer(middleware::from_fn(validate_json)),
+    };
     let router = axum::Router::new()
         .merge(diagnostics)
-        .nest_service("/mcp", service)
-        .layer(middleware::from_fn(validate_json))
+        .merge(mcp)
         .merge(webhooks);
     eprintln!("Serving MCP over Streamable HTTP at http://{bind}/mcp.");
     axum::serve(listener, router)
@@ -266,7 +275,7 @@ async fn health_response(State(diagnostics): State<crate::diagnostics::Diagnosti
 
 // The MCP service's SDK gates do not wrap sibling routes. Keep diagnostics
 // private to the same configured authority/loopback deployment boundary.
-async fn guard_diagnostics(
+pub(crate) async fn guard_diagnostics(
     State(bind): State<SocketAddr>,
     request: Request,
     next: Next,

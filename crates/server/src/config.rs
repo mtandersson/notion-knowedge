@@ -5,6 +5,8 @@ use std::{env, ffi::OsString, fmt, net::SocketAddr};
 #[derive(Debug)]
 pub struct Config {
     pub http_bind: SocketAddr,
+    /// Opt-in discovery mode; all MCP calls are denied pending real OAuth.
+    pub oauth_discovery: Option<crate::oauth_discovery::OAuthDiscovery>,
     pub notion_auth: NotionAuth,
     pub webhook: crate::webhook::WebhookConfig,
     pub webhook_debounce: notion_knowledge_core::webhook::DebounceWindow,
@@ -63,6 +65,31 @@ impl Config {
             .ok()
             .filter(|port| *port != 0)
             .ok_or_else(|| invalid("NK_HTTP_PORT", "must be an integer from 1 to 65535"))?;
+        let oauth_issuer = lookup("NK_OAUTH_ISSUER")
+            .map(|value| text(value, "NK_OAUTH_ISSUER"))
+            .transpose()?;
+        let oauth_resource = lookup("NK_OAUTH_RESOURCE")
+            .map(|value| text(value, "NK_OAUTH_RESOURCE"))
+            .transpose()?;
+        let oauth_discovery = match (oauth_issuer, oauth_resource) {
+            (None, None) => None,
+            (Some(issuer), Some(resource)) => Some(
+                crate::oauth_discovery::OAuthDiscovery::new(&issuer, &resource)
+                    .map_err(|key| invalid(key, "must be a canonical HTTPS origin/resource"))?,
+            ),
+            (None, Some(_)) => {
+                return Err(invalid(
+                    "NK_OAUTH_ISSUER",
+                    "required with NK_OAUTH_RESOURCE",
+                ));
+            }
+            (Some(_), None) => {
+                return Err(invalid(
+                    "NK_OAUTH_RESOURCE",
+                    "required with NK_OAUTH_ISSUER",
+                ));
+            }
+        };
         let notion_auth = match optional(&mut lookup, "NK_NOTION_AUTH", "none")?.as_str() {
             "none" => NotionAuth::None,
             "integration" => {
@@ -192,6 +219,7 @@ impl Config {
             webhook_state_file,
             webhook_debounce,
             http_bind: SocketAddr::new(host, port),
+            oauth_discovery,
             notion_auth,
             webhook,
         })
@@ -261,6 +289,30 @@ mod tests {
         .unwrap();
         assert_eq!(custom.webhook_debounce.quiet_ms, 10);
         assert_eq!(custom.webhook_debounce.max_delay_ms, 20);
+    }
+
+    #[test]
+    fn oauth_discovery_requires_both_canonical_https_uris() {
+        let valid = [
+            ("NK_OAUTH_ISSUER", "https://auth.example.com"),
+            ("NK_OAUTH_RESOURCE", "https://mcp.example.com/mcp"),
+        ];
+        assert!(parse(&valid).unwrap().oauth_discovery.is_some());
+        assert!(parse(&[]).unwrap().oauth_discovery.is_none());
+        assert_eq!(parse(&valid[..1]).unwrap_err().setting, "NK_OAUTH_RESOURCE");
+        assert_eq!(parse(&valid[1..]).unwrap_err().setting, "NK_OAUTH_ISSUER");
+        for (index, value) in [
+            (0, "http://auth.example.com"),
+            (0, "https://user@auth.example.com"),
+            (1, "https://mcp.example.com/mcp?key=private"),
+            (1, "http://mcp.example.com/mcp"),
+        ] {
+            let mut bad = valid;
+            bad[index].1 = value;
+            let error = parse(&bad).unwrap_err();
+            assert_eq!(error.setting, valid[index].0);
+            assert!(!error.to_string().contains(value));
+        }
     }
 
     #[test]

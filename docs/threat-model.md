@@ -2,7 +2,8 @@
 
 Reviewed baseline: 2026-10-02, main `04c638f`, for
 [#91](https://github.com/mtandersson/notion-knowedge/issues/91).
-OAuth trust-boundary addendum reviewed 2026-10-09 for [#118](https://github.com/mtandersson/notion-knowedge/issues/118);
+OAuth discovery implementation reviewed 2026-10-09 for [#119](https://github.com/mtandersson/notion-knowedge/issues/119);
+see [staged OAuth discovery](oauth-discovery.md). OAuth trust-boundary addendum reviewed 2026-10-09 for [#118](https://github.com/mtandersson/notion-knowedge/issues/118);
 see [OAuth trust and single-identity binding](oauth-trust-model.md).
 This is a security design and release checklist, not evidence that the planned
 controls have shipped or permission to expose private knowledge publicly.
@@ -16,6 +17,8 @@ and workspace, and configured Notion roots. Multi-user isolation is outside
 this model; adding it requires a new review. Notion is authoritative. Derived
 local content is disposable but remains confidential, including embeddings,
 page titles, graph edges, checkpoints and backups.
+
+Explicit HTTPS [OAuth discovery mode](oauth-discovery.md) now advertises RFC 9728/RFC 8414 metadata while blocking all MCP methods with a Bearer discovery challenge and returning 503 on reserved authorization/token/revocation endpoints. This is **not** login or token authorization; the existing anonymous bootstrap is unchanged when discovery is unset. A trusted proxy still must preserve the restricted backend Host/Origin rules. It must not be exposed as a private knowledge service until #120–#130 ship.
 
 The default bootstrap serves stdio/HTTP and the MCP tool catalog; retrieval
 calls remain unavailable until adapter composition is enabled. The Notion,
@@ -143,6 +146,21 @@ PKCE S256, single-use state/code, redirect and token binding, upstream secret
 storage, session invalidation, bounded revocation and safe proxy discovery.
 These are **requirements**, not a claim that the current HTTP server enforces
 MCP authorization.
+
+## OAuth discovery boundary review (2026-10-09, #119)
+
+The new [OAuth discovery router](oauth-discovery.md) activates only when the
+operator supplies **both** canonical HTTPS origins. It publishes fixed metadata
+and a 401 Bearer resource-metadata challenge on every MCP request instead of
+mounting the protocol service. Authorization, token and revocation endpoints
+are explicitly not implemented (503), so this does not make the deployment
+OAuth-capable. Invalid/ambiguous origins fail startup; `Host` and `Origin`
+spoofing are denied for the new routes. This code has no Notion credentials,
+no grant storage, no issued tokens and no access to protected MCP tools.
+Integration tests exercise real HTTP discovery and deny paths. Remaining
+risk: callers may discover an unavailable AS; reverse-proxy HTTPS and the
+actual OAuth authorization implementation remain future work, not a security
+waiver. Record changed routing and testing with #119 and keep #117 open.
 
 ## Bounded residual risks and release decision
 

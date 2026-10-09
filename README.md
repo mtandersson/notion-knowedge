@@ -77,6 +77,12 @@ using a configured read-only Notion backend after authorizing indexed references
 It distinguishes indexed and refreshed edit timestamps without updating the index.
 See [fresh-source verification](docs/fresh-source.md).
 
+Optional [OAuth discovery](docs/oauth-discovery.md) can be configured with the
+paired `NK_OAUTH_ISSUER` and `NK_OAUTH_RESOURCE` HTTPS settings. In that mode,
+the server only publishes metadata; `/authorize`, `/token` and `/revoke` are
+unavailable and **all MCP calls return 401**. Discovery is not authentication,
+and remote/private deployment remains blocked until the rest of #117 ships.
+
 The HTTP listener validates Host against loopback names and the configured IP,
 and validates browser Origin against the configured HTTP authority or localhost
 at the configured port. Clients without Origin are accepted. For remote access,
@@ -236,6 +242,9 @@ sanitized failure class, and exits without starting an MCP transport.
 | `NK_HTTP_PORT` | `3000` | An integer from 1 to 65535. |
 | `NK_NOTION_AUTH` | `none` | `none` or `integration`. This selects upstream Notion credentials, not MCP client authentication. |
 | `NOTION_TOKEN` | Unset | Required when `NK_NOTION_AUTH=integration`; must be nonempty and contain no whitespace or control characters. Ignored when authentication is `none`. |
+| `NK_OAUTH_ISSUER` | Unset | Paired with `NK_OAUTH_RESOURCE`: canonical HTTPS root issuer, e.g. `https://auth.example.com`. Enables **discovery only**. |
+| `NK_OAUTH_RESOURCE` | Unset | Paired with `NK_OAUTH_ISSUER`: canonical HTTPS MCP resource, e.g. `https://knowledge.example.com/mcp`. |
+
 
 An explicitly empty optional setting is invalid; defaults apply only when a
 variable is unset. OAuth configuration will be introduced with the OAuth
