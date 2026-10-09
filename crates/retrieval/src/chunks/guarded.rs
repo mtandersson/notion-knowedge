@@ -72,7 +72,7 @@ async fn open_current(
     // Do not use LanceChunkTable::open here: its legacy startup helper may
     // mutate FTS indices before a guard has been acquired.
     let table = database.open_table(table_name).execute().await?;
-    let table = table.checkout_current().await?;
+    // Keep the reopened handle writable. Only preparation pins a read snapshot.
     validate_table_schema(&table, embedding).await?;
     Ok(LanceChunkTable { table, embedding: embedding.clone() })
 }
@@ -189,6 +189,8 @@ impl GuardedChunkTable {
             return Err(ChunkTableError::InvalidRows("source snapshot identity mismatch".into()));
         }
         let snapshot = open_current(&self.index_directory, &self.table_name, &self.embedding)
+            .await?
+            .read_snapshot()
             .await?;
         let table_version = snapshot.table.version().await?;
         let predicate = format!("page_id = {}", sql_string(page_id));
