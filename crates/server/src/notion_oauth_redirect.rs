@@ -21,6 +21,9 @@ pub struct NotionOAuthConfig {
     redirect_uri: String,
 }
 impl NotionOAuthConfig {
+    pub(crate) fn client_id(&self) -> &str { &self.client_id }
+    pub(crate) fn redirect_uri(&self) -> &str { &self.redirect_uri }
+
     pub fn new(client_id: &str, redirect_uri: &str, issuer: &str) -> Result<Self, &'static str> {
         if client_id.is_empty()
             || client_id.len() > 128
