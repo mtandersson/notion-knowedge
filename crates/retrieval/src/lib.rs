@@ -25,3 +25,6 @@ pub mod webhook_debounce;
 /// Owned cross-process index commit coordination (local Unix filesystems).
 #[cfg(unix)]
 pub mod commit;
+
+/// Privacy-preserving durable agent-mutation audit records.
+pub mod audit;
