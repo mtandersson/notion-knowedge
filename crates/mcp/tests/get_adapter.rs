@@ -279,7 +279,7 @@ use notion_knowledge_core::backend::{
 
 struct FreshFixture {
     calls: Mutex<Vec<(String, String)>>,
-    edited: &'static str,
+    edited: String,
     behavior: FreshBehavior,
 }
 
@@ -303,7 +303,7 @@ impl FreshFixture {
             },
             url: "https://example.invalid/fresh".into(),
             title: "Fresh authoritative title".into(),
-            last_edited_time: self.edited.into(),
+            last_edited_time: self.edited.clone(),
             archived: matches!(self.behavior, FreshBehavior::Archived),
             properties: Default::default(),
         }
@@ -355,10 +355,10 @@ impl NotionRead for FreshFixture {
     }
 }
 
-fn fresh_fixture(edited: &'static str, behavior: FreshBehavior) -> Arc<FreshFixture> {
+fn fresh_fixture(edited: &str, behavior: FreshBehavior) -> Arc<FreshFixture> {
     Arc::new(FreshFixture {
         calls: Mutex::new(vec![]),
-        edited,
+        edited: edited.into(),
         behavior,
     })
 }
@@ -577,4 +577,144 @@ async fn successful_fresh_reads_leave_the_subsequent_indexed_snapshot_unchanged(
         before["result"]["structuredContent"],
         after["result"]["structuredContent"]
     );
+}
+
+/// Versioned evaluation matrix: a source can change after indexing, but a
+/// fresh authoritative read is never an index update or a fallback to stale
+/// data. These cases execute the real MCP handler against read-only fixtures.
+#[tokio::test]
+async fn versioned_freshness_scenarios_distinguish_stale_content_without_writing_it_back() {
+    let data: Value =
+        serde_json::from_str(include_str!("../../../eval/retrieval/freshness-v1.json")).unwrap();
+    assert_eq!(data["schema_version"], 1);
+    assert_eq!(data["dataset_id"], "freshness-fixtures-v1");
+    assert_eq!(data["indexed_last_edited_time"], "2026-10-07T11:00:00Z");
+
+    let scenarios = data["scenarios"].as_array().unwrap();
+    let mut ids = std::collections::BTreeSet::new();
+    assert!(scenarios.len() >= 7, "cover indexed and fresh outcomes");
+
+    for scenario in scenarios {
+        let name = scenario["id"].as_str().unwrap();
+        assert!(ids.insert(name), "duplicate scenario {name}");
+        let behavior = match scenario["backend_behavior"].as_str().unwrap() {
+            "valid" => FreshBehavior::Valid,
+            "unavailable" => FreshBehavior::Failed(BackendErrorKind::Unavailable),
+            "concurrent_edit" => FreshBehavior::ConcurrentEdit,
+            "archived" => FreshBehavior::Archived,
+            other => panic!("unknown fresh-source behavior {other}"),
+        };
+        let authoritative_time = scenario["authoritative_last_edited_time"].as_str().unwrap();
+        let indexed = indexed_fixture(Behavior::Valid);
+        let authoritative = fresh_fixture(authoritative_time, behavior);
+        let indexed_args = json!({
+            "refs": [{"kind": "page", "id": "page-1"}],
+            "max_chars": 256,
+            "freshness": "indexed"
+        });
+
+        // Snapshot the old indexed result before the authoritative read.
+        let before = exchange(indexed.clone(), indexed_args.clone()).await;
+        let before_source = &before["result"]["structuredContent"]["sources"][0];
+        assert_eq!(before_source["text"], "Expanded content for page-1");
+        assert_eq!(
+            before_source["provenance"]["indexed_last_edited_time"],
+            data["indexed_last_edited_time"],
+            "{name}"
+        );
+
+        let mut requested_args = indexed_args.clone();
+        match scenario["freshness"].as_str().unwrap() {
+            "default" => {
+                requested_args.as_object_mut().unwrap().remove("freshness");
+            }
+            "indexed" => {}
+            "fresh" => requested_args["freshness"] = json!("fresh"),
+            other => panic!("unknown freshness mode {other}"),
+        }
+        let result =
+            exchange_with_backend(indexed.clone(), requested_args, Some(authoritative.clone()))
+                .await;
+
+        if let Some(error) = scenario["expected_error"].as_str() {
+            assert_eq!(result["result"]["isError"], true, "{name}");
+            assert!(
+                result["result"]["structuredContent"].is_null(),
+                "{name}: no partial authoritative or stale fallback"
+            );
+            let message = result["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(message.starts_with(error), "{name}: {message}");
+            assert!(
+                !message.contains("Expanded content for page-1") && !message.contains("Färsk"),
+                "{name}: error must not expose source content"
+            );
+        } else {
+            assert!(
+                result.get("error").is_none(),
+                "{name}: unexpected JSON-RPC error"
+            );
+            let source = &result["result"]["structuredContent"]["sources"][0];
+            assert_eq!(
+                source["content_scope"], scenario["expected_content_scope"],
+                "{name}"
+            );
+            assert_eq!(
+                source["provenance"]["indexed_last_edited_time"], data["indexed_last_edited_time"],
+                "{name}"
+            );
+            match scenario["freshness"].as_str().unwrap() {
+                "fresh" => {
+                    assert_eq!(source["text"], "Färsk 🥖 authoritative page", "{name}");
+                    assert_eq!(
+                        source["provenance"]["refreshed_last_edited_time"],
+                        scenario["authoritative_last_edited_time"],
+                        "{name}"
+                    );
+                    assert_eq!(
+                        source["provenance"]["index_stale"], scenario["expected_index_stale"],
+                        "{name}"
+                    );
+                }
+                _ => {
+                    assert_eq!(source["text"], "Expanded content for page-1", "{name}");
+                    assert!(
+                        source["provenance"]
+                            .get("refreshed_last_edited_time")
+                            .is_none(),
+                        "{name}: indexed mode cannot claim freshness"
+                    );
+                    assert!(
+                        source["provenance"].get("index_stale").is_none(),
+                        "{name}: indexed mode cannot claim an authoritative comparison"
+                    );
+                }
+            }
+        }
+
+        let read_count = authoritative.calls.lock().unwrap().len();
+        if let Some(expected) = scenario["expected_notion_reads"].as_u64() {
+            assert_eq!(read_count, expected as usize, "{name}");
+        } else {
+            assert!(read_count > 0, "{name}: archived source was checked");
+        }
+
+        // A subsequent indexed request must see exactly the same old
+        // snapshot, even after successful fresh reads or failed verification.
+        let after =
+            exchange_with_backend(indexed.clone(), indexed_args, Some(authoritative.clone())).await;
+        assert_eq!(
+            before["result"]["structuredContent"], after["result"]["structuredContent"],
+            "{name}: read-only fresh access must never write back"
+        );
+        assert_eq!(
+            authoritative.calls.lock().unwrap().len(),
+            read_count,
+            "{name}: indexed mode should not call Notion"
+        );
+        assert_eq!(
+            indexed.calls.lock().unwrap().len(),
+            3,
+            "{name}: only three read-only source expansions expected"
+        );
+    }
 }

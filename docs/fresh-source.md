@@ -62,6 +62,13 @@ Fresh reads have no index or Notion write capability. They do not persist new
 content, timestamps, fingerprints or embeddings, and do not schedule an implicit
 reindex. Subsequent indexed calls continue to reflect the indexed snapshot.
 
+The [versioned stale-index evaluation matrix](../eval/retrieval/README.md#stale-index-and-authoritative-read-evaluation-101) exercises
+explicit and default indexed reads, newer and unchanged authoritative content,
+unavailable/archived/concurrently edited sources, and subsequent indexed
+read-back. It asserts per-scenario timestamp provenance and that an
+authoritative read never silently mutates the derived index. These
+synthetic scenarios test behavior, not production reconciliation latency.
+
 Verification uses credential-free MCP protocol fixtures for fresh/stale and
 unchanged pages, indexed default compatibility, stable-ID mapping, Unicode total
 bounds, repeated-page reads, concurrent edits, invalid metadata, unavailable

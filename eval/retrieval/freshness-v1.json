@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "dataset_id": "freshness-fixtures-v1",
+  "provenance": "Synthetic MCP read-only evaluation scenarios; no private Notion pages, credentials, or live index.",
+  "indexed_last_edited_time": "2026-10-07T11:00:00Z",
+  "scenarios": [
+    {
+      "id": "indexed-default-stale",
+      "freshness": "default",
+      "authoritative_last_edited_time": "2026-10-07T11:30:00Z",
+      "backend_behavior": "valid",
+      "expected_content_scope": "indexed",
+      "expected_index_stale": null,
+      "expected_error": null,
+      "expected_notion_reads": 0
+    },
+    {
+      "id": "indexed-explicit-stale",
+      "freshness": "indexed",
+      "authoritative_last_edited_time": "2026-10-07T11:30:00Z",
+      "backend_behavior": "valid",
+      "expected_content_scope": "indexed",
+      "expected_index_stale": null,
+      "expected_error": null,
+      "expected_notion_reads": 0
+    },
+    {
+      "id": "fresh-unchanged",
+      "freshness": "fresh",
+      "authoritative_last_edited_time": "2026-10-07T11:00:00Z",
+      "backend_behavior": "valid",
+      "expected_content_scope": "page",
+      "expected_index_stale": false,
+      "expected_error": null,
+      "expected_notion_reads": 2
+    },
+    {
+      "id": "fresh-newer",
+      "freshness": "fresh",
+      "authoritative_last_edited_time": "2026-10-07T11:30:00Z",
+      "backend_behavior": "valid",
+      "expected_content_scope": "page",
+      "expected_index_stale": true,
+      "expected_error": null,
+      "expected_notion_reads": 2
+    },
+    {
+      "id": "fresh-backend-unavailable",
+      "freshness": "fresh",
+      "authoritative_last_edited_time": "2026-10-07T11:30:00Z",
+      "backend_behavior": "unavailable",
+      "expected_content_scope": null,
+      "expected_index_stale": null,
+      "expected_error": "notion_unavailable",
+      "expected_notion_reads": 1
+    },
+    {
+      "id": "fresh-concurrent-edit",
+      "freshness": "fresh",
+      "authoritative_last_edited_time": "2026-10-07T11:30:00Z",
+      "backend_behavior": "concurrent_edit",
+      "expected_content_scope": null,
+      "expected_index_stale": null,
+      "expected_error": "notion_conflict",
+      "expected_notion_reads": 2
+    },
+    {
+      "id": "fresh-archived-source",
+      "freshness": "fresh",
+      "authoritative_last_edited_time": "2026-10-07T11:30:00Z",
+      "backend_behavior": "archived",
+      "expected_content_scope": null,
+      "expected_index_stale": null,
+      "expected_error": "source_not_accessible",
+      "expected_notion_reads": null
+    }
+  ]
+}

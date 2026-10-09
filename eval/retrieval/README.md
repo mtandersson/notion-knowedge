@@ -189,6 +189,41 @@ a synthetic mode-aware stub and known hand-calculated metric values. The
 harness still needs a trusted real Qwen/LanceDB adapter and fixed
 model/index for meaningful quality results.
 
+## Stale-index and authoritative read evaluation (#101)
+
+The versioned [freshness scenario matrix](freshness-v1.json) contains **seven
+synthetic cases** for an indexed page last edited at
+`2026-10-07T11:00:00Z`. It intentionally supplies a second, newer
+authoritative timestamp without modifying the index. No actual Notion API
+credentials or live documents are used.
+
+Run the cases against the **real MCP `knowledge_get` handler**, a
+mock `SourceExpansion` index and a read-only `NotionRead` backend:
+
+```sh
+nix develop --command cargo test -p notion-knowledge-mcp \
+  --test get_adapter versioned_freshness_scenarios --locked
+```
+
+The cases assert this lifecycle: `indexed` and omitted freshness
+preserve the old indexed text and **do not** imply that a source comparison has
+occurred; `fresh` with unchanged source returns authoritative whole-page text,
+both timestamps and `index_stale: false`; `fresh` after an edit
+returns newer source content with `index_stale: true` and preserves
+the old indexed timestamp. An unavailable source, archived page or concurrent
+edit returns a structured failure with no partial or stale fallback. The test
+reads the index **again after every scenario** and checks it is byte-for-byte
+identical; no fresh result is silently written back or advertised as an
+automatic reindex. It also asserts the read-only Notion call counts and that
+plain indexed reads never invoke the authoritative backend.
+
+The scenario file is separate from `personal-knowledge-v1.json` because
+the ranking fixture's relevance grades are not a notion of wall-clock
+freshness. This is a repeatable **behavioral regression**, not a latency/SLA
+measurement or evidence that production webhook synchronization meets its
+freshness target. Actual freshness after writes requires the production
+reconciliation/index writer and its separate integration tests.
+
 ## Validate and maintain
 
 Run the integrity and coverage checks with the repository toolchain:
