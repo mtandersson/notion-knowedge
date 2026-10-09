@@ -248,3 +248,55 @@ content and documented in provenance before being committed. The small balanced
 set is a baseline for regression comparisons, not evidence of general retrieval
 quality; broaden domains and independently review judgments before using scores
 for deployment decisions.
+
+## Exact identifier and lexical regression gate (#100)
+
+[`exact-identifiers-v1.json`](exact-identifiers-v1.json) is a **separate**
+versioned, entirely fictional ten-page / ten-query near-neighbor corpus.
+It exercises raw complete page/chunk IDs (including colons and hyphens),
+mixed letters and digits, Swedish titles and names, accents, an English
+query over a Swedish title, case variants and similar adjacent IDs. Every
+query identifies **one direct-answer chunk** (grade 3) and an explicit
+plausible distractor, avoiding a convenient positive-only fixture.
+
+A credential-free integration test drives the **real** embedded LanceDB
+FTS indices, the real vector index and the production hybrid RRF service.
+It reports (on failure) which query IDs lost their direct answer. The
+lexical and hybrid modes each must reach **at least 8/10 direct answers
+in the top three**, and full stable page/chunk ID lookups must return the
+exact target **at rank one in FTS**. A query with no hits counts as a
+miss; the two modes never average away one another's failures.
+
+```sh
+nix develop .#spike --command cargo test -p notion-knowledge-retrieval \
+  --features local-lancedb --test exact_identifier_regression --locked
+```
+
+The test intentionally uses a deterministic, **nonsemantic** embedding
+fixture and a lexical-favoring RRF configuration (semantic weight 0.1,
+lexical weight 1.0). It checks that BM25 evidence is not lost when real
+vector and fusion paths run; it is **not** evidence of real Qwen relevance
+or default-production hybrid scores. The dataset can also be passed to
+`scripts/retrieval-eval.py` with a trusted real adapter to compare FTS
+and hybrid scores, using the same chunk-level judgments. The regression
+test is the automatic executable gate, not a substitute for a full
+production-adapter evaluation.
+
+### Tokenization and case expectations
+
+The two raw stable-ID indices store the **entire** page/chunk ID as one
+token and do not lowercase, stem, strip stopwords or fold accents.
+Complete identifier probes therefore use the exact ID bytes (including
+case); they are not prefix or fuzzy lookups. Title and text FTS use the
+Swedish-first simple tokenizer, with stemming, Swedish stopword removal
+and no ASCII folding. The dataset has a lowercase `zx9q42` probe against
+uppercase document text and contrasts `Bergström` with `Bergstrom`:
+these are explicit regression cases for the configured backend, not a
+promise of generic case-insensitive identifier lookup or accent folding.
+Punctuation in arbitrary body-text codes is backend-tokenizer-dependent;
+the strict rank-one check is intentionally only for the raw stable IDs.
+See [FTS index](../../docs/fts-index.md) and
+[lexical search](../../docs/lexical-search.md).
+
+Changing chunk text, ground truth or tokenizer expectations requires a
+new `dataset_id` content revision and review of negative judgments.
