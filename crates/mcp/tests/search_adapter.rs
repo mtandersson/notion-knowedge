@@ -534,9 +534,15 @@ async fn search_rejects_oversized_citation_metadata_without_exposing_content() {
     let response = exchange(
         adapter,
         json!({"query":"bounded","limit":1,"mode":"semantic"}),
-    ).await;
+    )
+    .await;
     assert_eq!(response["result"]["isError"], true);
     assert!(response["result"]["structuredContent"].is_null());
-    assert!(response["result"]["content"][0]["text"].as_str().unwrap().starts_with("result_too_large:"));
+    assert!(
+        response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("result_too_large:")
+    );
     assert!(!response.to_string().contains("private-metadata"));
 }
