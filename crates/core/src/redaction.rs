@@ -77,7 +77,7 @@ fn credential_length(value: &str, prev: Option<char>) -> Option<usize> {
         while value.as_bytes().get(next).is_some_and(u8::is_ascii_whitespace) {
             next += 1;
         }
-        if !matches!(value.as_bytes().get(next), Some(b':' | b'=')) {
+        if !value.as_bytes().get(next).is_some_and(|ch| *ch == b':' || *ch == b'=') {
             continue;
         }
         next += 1;
