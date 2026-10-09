@@ -747,7 +747,6 @@ impl IndexCommitCoordinator {
             receiver.await.map_err(|_| CommitError::Unavailable)?
         }
     }
-
 }
 
 /// Available only inside the owned effect; does not hold a SQLite mutex.
