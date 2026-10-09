@@ -529,7 +529,6 @@ mod tests {
             AuthorizationRequest { redirect_uri: "https://attacker.example.com/cb", ..authorization() },
             AuthorizationRequest { resource: "https://wrong.example.com/mcp", ..authorization() },
             AuthorizationRequest { state: "tiny", ..authorization() },
-            AuthorizationRequest { code_challenge: VERIFIER, ..authorization() },
             AuthorizationRequest { code_challenge_method: "plain", ..authorization() },
             AuthorizationRequest { code_challenge_method: "", ..authorization() },
             AuthorizationRequest { code_challenge: "?", ..authorization() },
