@@ -31,7 +31,11 @@ fn terminates_url(character: char) -> bool {
 }
 
 fn terminates_value(character: char) -> bool {
-    character.is_whitespace() || matches!(character, '"' | '\'' | '<' | '>' | ',' | ';' | '&' | ')' | ']' | '}')
+    character.is_whitespace()
+        || matches!(
+            character,
+            '"' | '\'' | '<' | '>' | ',' | ';' | '&' | ')' | ']' | '}'
+        )
 }
 
 fn skip_secret_value(value: &str) -> Option<usize> {
@@ -52,9 +56,7 @@ fn skip_secret_value(value: &str) -> Option<usize> {
         return Some(value.len());
     }
 
-    let length = value
-        .find(terminates_value)
-        .unwrap_or(value.len());
+    let length = value.find(terminates_value).unwrap_or(value.len());
     (length != 0).then_some(length)
 }
 
@@ -75,13 +77,21 @@ fn credential_length(value: &str, prev: Option<char>) -> Option<usize> {
         }
         let mut next = key.len();
         // Both "token=value" and JSON '"token": "value"' are supported.
-        if value.as_bytes().get(next).is_some_and(|ch| *ch == b'"' || *ch == b'\'') {
+        if value
+            .as_bytes()
+            .get(next)
+            .is_some_and(|ch| *ch == b'"' || *ch == b'\'')
+        {
             next += 1;
         }
         while value.as_bytes().get(next).is_some_and(u8::is_ascii_whitespace) {
             next += 1;
         }
-        if !value.as_bytes().get(next).is_some_and(|ch| *ch == b':' || *ch == b'=') {
+        if !value
+            .as_bytes()
+            .get(next)
+            .is_some_and(|ch| *ch == b':' || *ch == b'=')
+        {
             continue;
         }
         next += 1;
@@ -177,7 +187,12 @@ mod tests {
     fn removes_json_grants_and_query_key_values() {
         let log = r#"{"access_token":"test-access-token","refresh_token":"test-refresh-token","client_secret":"test-client-secret"} token=another-token"#;
         let safe = redact_for_log(log);
-        for secret in ["test-access-token", "test-refresh-token", "test-client-secret", "another-token"] {
+        for secret in [
+            "test-access-token",
+            "test-refresh-token",
+            "test-client-secret",
+            "another-token",
+        ] {
             assert!(!safe.contains(secret));
         }
     }
@@ -195,7 +210,10 @@ mod tests {
 
     #[test]
     fn preserves_nonsecret_unicode_and_bounds_the_output() {
-        assert_eq!(redact_for_log("Sökning misslyckades: timeout"), "Sökning misslyckades: timeout");
+        assert_eq!(
+            redact_for_log("Sökning misslyckades: timeout"),
+            "Sökning misslyckades: timeout"
+        );
         let output = redact_for_log(&"x".repeat(5000));
         assert!(output.ends_with("[TRUNCATED]"));
         assert!(output.len() <= 4100);
