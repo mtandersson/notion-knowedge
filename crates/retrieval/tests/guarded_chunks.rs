@@ -299,14 +299,13 @@ async fn real_guarded_page_updates_reuse_vectors_and_reject_stale_and_source() {
         Ok(CommitOutcome::Applied)
     );
     assert_eq!(f.readable().await.count_rows().await.unwrap(), 0);
-    assert_eq!(
+    assert!(
         f.coordinator
             .state()
             .page_state("page")
             .unwrap()
             .unwrap()
-            .is_tombstone(),
-        true
+            .is_tombstone()
     );
 }
 
