@@ -34,6 +34,11 @@ use notion_knowledge_core::{
     },
 };
 
+#[cfg(unix)]
+mod guarded;
+#[cfg(unix)]
+pub use guarded::{GuardedChunkTable, PreparedPageMutation};
+
 pub const CHUNK_TABLE_SCHEMA_VERSION: &str = "1";
 const CANONICAL_CHUNK_SCHEMA_VERSION: &str = "1";
 const TABLE_SCHEMA_KEY: &str = "notion_knowledge.chunk_table.schema_version";
@@ -901,6 +906,8 @@ impl LanceChunkTable {
     ///
     /// A source batch may not repeat a chunk ID because LanceDB merge semantics
     /// do not define which duplicate source row should win.
+    /// Legacy uncoordinated write: only safe before coordinated writers start.
+    /// Production refresh, deletion and reconciliation MUST use GuardedChunkTable.
     pub async fn upsert(
         &self,
         embedding: &EmbeddingMetadata,
@@ -932,6 +939,8 @@ impl LanceChunkTable {
     /// refreshing citation metadata. Changed/new chunks are embedded once in a
     /// single provider batch. The final merge deletes target-page rows absent
     /// from the incoming snapshot, so retries converge to the same state.
+    /// Legacy uncoordinated write: does NOT participate in the SQLite journal
+    /// fence or the cross-process directory lock. Prefer GuardedChunkTable.
     pub async fn apply_page_diff(
         &self,
         provider: &dyn EmbeddingProvider,
