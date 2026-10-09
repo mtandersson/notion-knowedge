@@ -58,6 +58,93 @@ share judgments so language comparisons use the same information need. Both
 cross-language retrieval directions are included. Fixed dates and fictional
 statuses avoid dependence on today's date or a live Notion workspace.
 
+## Run the offline retrieval harness (#95)
+
+The harness takes this **fixed fictional dataset** and calls a configured
+subprocess adapter separately for `vector`, `fts`, and `hybrid`. The
+adapter must index/search the **same corpus, model revision and configuration**
+for every mode; the harness does **not** implement any backend, generate fake
+semantic embeddings, or substitute a synthetic ranker for production retrieval.
+
+From the repository root, after implementing an adapter bridge to the chosen
+backend:
+
+```sh
+python3 scripts/retrieval-eval.py \
+  --adapter "./path/to/your-retrieval-adapter" \
+  --dataset eval/retrieval/personal-knowledge-v1.json \
+  --modes vector,fts,hybrid --top-k 10 \
+  --output /tmp/notion-retrieval-eval.json
+python3 scripts/test-retrieval-eval.py
+```
+
+The adapter command is executed **without a shell**, once per requested mode.
+It receives one JSON object on stdin containing:
+
+```json
+{
+  "schema_version": 1,
+  "dataset_id": "personal-knowledge-fixtures-v1",
+  "as_of": "2026-03-02",
+  "mode": "vector",
+  "top_k": 10,
+  "pages": ["full page records from the dataset"],
+  "queries": [{"id": "semantic-energy-en", "text": "...",
+               "language": "en", "category": "semantic"}]
+}
+```
+
+It returns **only** a JSON object on stdout with the same schema version,
+dataset identity and requested mode, plus an entry for **every query**, even
+when no matches exist:
+
+```json
+{
+  "schema_version": 1,
+  "dataset_id": "personal-knowledge-fixtures-v1",
+  "mode": "vector",
+  "results": [
+    {
+      "query_id": "semantic-energy-en",
+      "ranked_source_ids": [
+        "fixture:chunk:project-lighthouse:overview"
+      ]
+    }
+  ]
+}
+```
+
+The example is illustrative: actual adapter output **must** be produced by
+the selected retrieval implementation, not derived from relevance judgments.
+IDs are **chunk IDs** in decreasing score order; ties must be deterministically
+ordered by the backend. The adapter must map its `semantic` search to
+`vector`, lexical/BM25 to `fts`, and configured fusion to
+`hybrid`. It must return no more than `top_k` items per query,
+include each query exactly once and emit no unknown or duplicate chunk IDs.
+The harness checks these invariants; an unsupported mode or missing index is
+an error rather than a fabricated zero-score result. Ensure the full corpus
+is indexed before answering any query. Do not insert or delete documents
+between mode runs.
+
+Output JSON records, in stable dataset order, the ranked IDs and matching
+graded judgments for each query and mode; its human-readable stderr summary
+counts queries with any relevant hit and grade-3 hit at K. **Recall@K, MRR
+and nDCG remain issue #96**. The report contains no source document text or
+query wording. Runs from a fixed dataset/adapter/model should produce
+byte-identical JSON; a nondeterministic adapter fails this comparison and must
+be investigated rather than sorted/re-ranked by the harness.
+
+Nonzero adapter status, timeout, invalid UTF-8/JSON, mismatched mode or
+dataset, omitted/duplicate query, unknown chunk, repeated rank or excess
+rank count fail with exit code 2. Exit code 0 means *the evaluation ran*,
+not that quality is acceptable. Adapter stdout/stderr on failure are
+intentionally not copied into logs because these may contain credentials or
+private data. Run only trusted local adapters with approved fixture data;
+the harness does not authorize or sanitize arbitrary external adapter code.
+The credential-free tests use a deterministic **contract stub**, not a real
+embedding model or full LanceDB evaluation. A complete model/index-specific
+report requires an actual adapter command; no production score is claimed.
+
 ## Validate and maintain
 
 Run the integrity and coverage checks with the repository toolchain:
