@@ -4734,6 +4734,7 @@ dependencies = [
  "notion-knowledge-notion",
  "notion-knowledge-retrieval",
  "reqwest 0.13.5",
+ "ring",
  "rmcp",
  "serde",
  "serde_json",

@@ -11,6 +11,8 @@ pub struct Config {
     pub notion_oauth_redirect: Option<crate::notion_oauth_redirect::NotionOAuthConfig>,
     /// Confidential Notion code exchange config, never a live MCP auth grant.
     pub notion_oauth_callback: Option<NotionCallbackSettings>,
+    /// Explicit opt-in sealed Notion grant state, never activated as MCP auth.
+    pub notion_grant_store: Option<GrantStoreSettings>,
     pub notion_auth: NotionAuth,
     pub webhook: crate::webhook::WebhookConfig,
     pub webhook_debounce: notion_knowledge_core::webhook::DebounceWindow,
@@ -23,6 +25,17 @@ pub struct Config {
 pub struct NotionCallbackSettings {
     pub client_secret: SecretToken,
     pub allowed: crate::notion_oauth_callback::NotionOwnerPolicy,
+}
+
+/// Paths refer to operator-managed secret key and private encrypted state.
+pub struct GrantStoreSettings {
+    key_file: std::path::PathBuf,
+    state_file: std::path::PathBuf,
+}
+impl fmt::Debug for GrantStoreSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("GrantStoreSettings([REDACTED])")
+    }
 }
 
 #[derive(Debug)]
@@ -62,6 +75,31 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 impl Config {
+    /// Validate the encrypted state before serving any HTTP or stdio MCP.
+    /// Missing, corrupt, wrong-key, expired, and foreign grants are never
+    /// interpreted as an authenticated principal.
+    pub fn validate_grant_store(&self) -> Result<(), crate::notion_grant_store::StoreError> {
+        let Some(settings) = &self.notion_grant_store else {
+            return Ok(());
+        };
+        let callback = self
+            .notion_oauth_callback
+            .as_ref()
+            .ok_or(crate::notion_grant_store::StoreError::Configuration)?;
+        let registration = self
+            .notion_oauth_redirect
+            .as_ref()
+            .ok_or(crate::notion_grant_store::StoreError::Configuration)?;
+        let store = crate::notion_grant_store::GrantStore::open(
+            &settings.key_file,
+            &settings.state_file,
+            registration.client_id(),
+            callback.allowed.clone(),
+        )?;
+        let _ = store.load()?;
+        Ok(())
+    }
+
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_lookup(|key| env::var_os(key))
     }
@@ -198,6 +236,60 @@ impl Config {
                 ));
             }
         };
+        let state_file = lookup("NK_NOTION_GRANT_STATE_FILE")
+            .map(|value| text(value, "NK_NOTION_GRANT_STATE_FILE"))
+            .transpose()?;
+        let key_file = lookup("NK_NOTION_GRANT_KEY_FILE")
+            .map(|value| text(value, "NK_NOTION_GRANT_KEY_FILE"))
+            .transpose()?;
+        let notion_grant_store = match (state_file, key_file) {
+            (None, None) => None,
+            (Some(state), Some(key)) => {
+                if notion_oauth_callback.is_none() {
+                    return Err(invalid(
+                        "NK_NOTION_OAUTH_CLIENT_SECRET",
+                        "complete Notion OAuth callback configuration required for grant state",
+                    ));
+                }
+                let valid_path = |value: &str| {
+                    let path = std::path::Path::new(value);
+                    path.is_absolute()
+                        && path.file_name().is_some()
+                        && !path
+                            .components()
+                            .any(|part| matches!(part, std::path::Component::ParentDir))
+                        && !value.contains(char::is_control)
+                };
+                if !valid_path(&state) {
+                    return Err(invalid(
+                        "NK_NOTION_GRANT_STATE_FILE",
+                        "must be a safe absolute path",
+                    ));
+                }
+                if !valid_path(&key) || state == key {
+                    return Err(invalid(
+                        "NK_NOTION_GRANT_KEY_FILE",
+                        "must be a separate safe absolute path",
+                    ));
+                }
+                Some(GrantStoreSettings {
+                    state_file: state.into(),
+                    key_file: key.into(),
+                })
+            }
+            (None, Some(_)) => {
+                return Err(invalid(
+                    "NK_NOTION_GRANT_STATE_FILE",
+                    "required with grant key file",
+                ));
+            }
+            (Some(_), None) => {
+                return Err(invalid(
+                    "NK_NOTION_GRANT_KEY_FILE",
+                    "required with grant state file",
+                ));
+            }
+        };
         let notion_auth = match optional(&mut lookup, "NK_NOTION_AUTH", "none")?.as_str() {
             "none" => NotionAuth::None,
             "integration" => {
@@ -330,6 +422,7 @@ impl Config {
             oauth_discovery,
             notion_oauth_redirect,
             notion_oauth_callback,
+            notion_grant_store,
             notion_auth,
             webhook,
         })
@@ -521,6 +614,60 @@ mod tests {
             if !bad.is_empty() {
                 assert!(!error.to_string().contains(bad));
             }
+        }
+    }
+
+    #[test]
+    fn sealed_grant_configuration_requires_key_state_pair_and_callback() {
+        let core = [
+            ("NK_OAUTH_ISSUER", "https://auth.example.com"),
+            ("NK_OAUTH_RESOURCE", "https://mcp.example.com/mcp"),
+            ("NK_NOTION_OAUTH_CLIENT_ID", "client-id"),
+            (
+                "NK_NOTION_OAUTH_REDIRECT_URI",
+                "https://auth.example.com/oauth/notion/callback",
+            ),
+            ("NK_NOTION_OAUTH_CLIENT_SECRET", "private-secret"),
+            ("NK_NOTION_ALLOWED_WORKSPACE_ID", "workspace-123"),
+            ("NK_NOTION_ALLOWED_USER_ID", "user-456"),
+        ];
+        let key = ("NK_NOTION_GRANT_KEY_FILE", "/run/notion/key");
+        let state = ("NK_NOTION_GRANT_STATE_FILE", "/var/lib/notion/grant");
+        let valid = [
+            core[0], core[1], core[2], core[3], core[4], core[5], core[6], key, state,
+        ];
+        assert!(parse(&valid).unwrap().notion_grant_store.is_some());
+        assert!(parse(&core).unwrap().notion_grant_store.is_none());
+        assert_eq!(
+            parse(&[
+                core[0], core[1], core[2], core[3], core[4], core[5], core[6], key
+            ])
+            .unwrap_err()
+            .setting,
+            "NK_NOTION_GRANT_STATE_FILE"
+        );
+        assert_eq!(
+            parse(&[
+                core[0], core[1], core[2], core[3], core[4], core[5], core[6], state
+            ])
+            .unwrap_err()
+            .setting,
+            "NK_NOTION_GRANT_KEY_FILE"
+        );
+        assert_eq!(
+            parse(&[key, state]).unwrap_err().setting,
+            "NK_NOTION_OAUTH_CLIENT_SECRET"
+        );
+        for malformed in ["relative/grant", "/tmp/../grant", "/var/lib/\ngrant"] {
+            let bad = ("NK_NOTION_GRANT_STATE_FILE", malformed);
+            assert_eq!(
+                parse(&[
+                    core[0], core[1], core[2], core[3], core[4], core[5], core[6], key, bad
+                ])
+                .unwrap_err()
+                .setting,
+                "NK_NOTION_GRANT_STATE_FILE"
+            );
         }
     }
 

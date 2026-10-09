@@ -21,3 +21,6 @@ pub mod notion_oauth_redirect;
 
 /// Notion OAuth callback and confidential code exchange; still not an exposed login.
 pub mod notion_oauth_callback;
+
+/// Encrypted versioned Notion grant store with immutable owner checks (#123).
+pub mod notion_grant_store;

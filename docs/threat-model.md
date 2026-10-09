@@ -194,6 +194,22 @@ callback. A successfully exchanged upstream token does not create an MCP
 authorization until #123/#127 store and enforce durable grant/epoch and
 revocation. This component is **not** permission to expose private MCP tools.
 
+## Encrypted OAuth grant state boundary (2026-10-09, #123)
+
+[The Notion grant store](notion-grant-store.md) encrypts both token material
+and identifying metadata using AES-256-GCM with a separately mounted private
+32-byte key. The versioned format binds its application namespace through
+AEAD associated data. Grant replacement uses a fresh random nonce/ID,
+strict file modes and an atomic fsync+rename; callback owner/workspace and
+client binding are rechecked at save and load. Wrong key, corruption,
+symlinks, permissive files and missing credential dependencies fail startup
+without rendering sensitive values in errors. A missing state file is never
+first-login approval. This store does **not** issue any MCP token, enable
+a public callback or establish durable revocation. Process-local write
+serialization alone is not a multi-pod or rollback/revocation guarantee:
+#124/#127 must implement distributed fencing and live epoch/revocation
+checks. Remote private MCP access remains blocked.
+
 ## Bounded residual risks and release decision
 
 The documented bootstrap operating envelope accepts local protocol access
