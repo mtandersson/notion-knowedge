@@ -96,7 +96,7 @@ pub fn tool(name: &str) -> Option<Tool> {
     let schema = input(name);
     let out = output();
     Some(
-        Tool::new(name, description, schema.as_object().unwrap().clone())
+        Tool::new(name.to_owned(), description, schema.as_object().unwrap().clone())
             .with_raw_output_schema(Arc::new(out.as_object().unwrap().clone()))
             .with_annotations(
                 ToolAnnotations::new()
