@@ -75,7 +75,10 @@ impl fmt::Debug for NotionTokenClient {
     }
 }
 impl NotionTokenClient {
-    pub fn new(registration: &NotionOAuthConfig, client_secret: &str) -> Result<Self, &'static str> {
+    pub fn new(
+        registration: &NotionOAuthConfig,
+        client_secret: &str,
+    ) -> Result<Self, &'static str> {
         if !valid_secret(client_secret) {
             return Err("NK_NOTION_OAUTH_CLIENT_SECRET");
         }
@@ -155,11 +158,19 @@ impl fmt::Debug for NotionGrant {
     }
 }
 impl NotionGrant {
-    pub fn workspace_id(&self) -> &str { &self.workspace_id }
-    pub fn owner_user_id(&self) -> &str { &self.owner_user_id }
-    pub fn bot_id(&self) -> &str { &self.bot_id }
+    pub fn workspace_id(&self) -> &str {
+        &self.workspace_id
+    }
+    pub fn owner_user_id(&self) -> &str {
+        &self.owner_user_id
+    }
+    pub fn bot_id(&self) -> &str {
+        &self.bot_id
+    }
     /// Only the future protected grant-store adapter may read these.
-    pub fn access_token(&self) -> &str { self.access_token.expose() }
+    pub fn access_token(&self) -> &str {
+        self.access_token.expose()
+    }
     pub fn refresh_token(&self) -> Option<&str> {
         self.refresh_token.as_ref().map(Secret::expose)
     }
@@ -172,8 +183,15 @@ impl NotionGrant {
             || !valid_id(&response.workspace_id)
             || !valid_id(&response.bot_id)
             || response.owner.kind != "user"
-            || response.owner.user.as_ref().is_none_or(|user| !valid_id(&user.id))
-            || response.refresh_token.as_ref().is_some_and(|token| !valid_secret(token))
+            || response
+                .owner
+                .user
+                .as_ref()
+                .is_none_or(|user| !valid_id(&user.id))
+            || response
+                .refresh_token
+                .as_ref()
+                .is_some_and(|token| !valid_secret(token))
         {
             return Err(CallbackError::InvalidGrant);
         }
@@ -204,7 +222,9 @@ struct NotionOwner {
     user: Option<NotionUser>,
 }
 #[derive(Deserialize)]
-struct NotionUser { id: String }
+struct NotionUser {
+    id: String,
+}
 
 /// A verified provider exchange is NOT an approved MCP grant. The returned
 /// MCP correlation handle is still unapproved and must be persisted with a
@@ -232,7 +252,11 @@ impl<'a> NotionCallback<'a> {
         exchanger: &'a NotionTokenClient,
         allowed: &'a NotionOwnerPolicy,
     ) -> Self {
-        Self { redirect, exchanger, allowed }
+        Self {
+            redirect,
+            exchanger,
+            allowed,
+        }
     }
 
     /// Parse raw query with a strict duplicate-parameter policy; consume
@@ -240,7 +264,10 @@ impl<'a> NotionCallback<'a> {
     /// error. Return only an independently validated provider identity.
     pub async fn complete(&self, raw_query: &str) -> Result<VerifiedCallback, CallbackError> {
         let params = CallbackParams::parse(raw_query)?;
-        let transaction = self.redirect.take(&params.state).ok_or(CallbackError::InvalidState)?;
+        let transaction = self
+            .redirect
+            .take(&params.state)
+            .ok_or(CallbackError::InvalidState)?;
         if params.error {
             return Err(CallbackError::RejectedByNotion);
         }
@@ -251,7 +278,10 @@ impl<'a> NotionCallback<'a> {
         {
             return Err(CallbackError::IdentityMismatch);
         }
-        Ok(VerifiedCallback { mcp_transaction: transaction, grant })
+        Ok(VerifiedCallback {
+            mcp_transaction: transaction,
+            grant,
+        })
     }
 }
 
@@ -288,7 +318,9 @@ impl CallbackParams {
         }
         let state = state.ok_or(CallbackError::InvalidCallback)?;
         if state.len() != 43
-            || !state.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+            || !state
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
         {
             return Err(CallbackError::InvalidCallback);
         }
@@ -298,7 +330,11 @@ impl CallbackParams {
         if error.is_none() && code.as_deref().is_none_or(|value| !valid_code(value)) {
             return Err(CallbackError::InvalidCallback);
         }
-        Ok(Self { state, code, error: error.is_some() })
+        Ok(Self {
+            state,
+            code,
+            error: error.is_some(),
+        })
     }
 }
 fn valid_percent_encoding(raw: &str) -> bool {
@@ -322,40 +358,65 @@ fn valid_percent_encoding(raw: &str) -> bool {
 fn valid_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
-        && value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 fn valid_secret(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 4096
         && value.is_ascii()
-        && !value.bytes().any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+        && !value
+            .bytes()
+            .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
 }
 fn valid_code(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 2048
         && value.is_ascii()
-        && !value.bytes().any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+        && !value
+            .bytes()
+            .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oauth_code::{AllowedNotionIdentity, AuthorizationFlow, AuthorizationRequest, Client as OAuthClient};
-    use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpListener};
+    use crate::oauth_code::{
+        AllowedNotionIdentity, AuthorizationFlow, AuthorizationRequest, Client as OAuthClient,
+    };
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
 
     const ISSUER: &str = "https://auth.example.com";
     const CALLBACK: &str = "https://auth.example.com/oauth/notion/callback";
     const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
     const SECRET: &str = "private-client-secret";
 
-    fn setup() -> (NotionOAuthRedirect, AuthorizationFlow, NotionOAuthConfig, NotionOwnerPolicy) {
+    fn setup() -> (
+        NotionOAuthRedirect,
+        AuthorizationFlow,
+        NotionOAuthConfig,
+        NotionOwnerPolicy,
+    ) {
         let registration = NotionOAuthConfig::new("test-client", CALLBACK, ISSUER).unwrap();
         let flow = AuthorizationFlow::new(
-            OAuthClient::new("chatgpt","https://chatgpt.example.com/cb","https://mcp.example.com/mcp").unwrap(),
-            AllowedNotionIdentity::new("workspace-123","user-456").unwrap()
+            OAuthClient::new(
+                "chatgpt",
+                "https://chatgpt.example.com/cb",
+                "https://mcp.example.com/mcp",
+            )
+            .unwrap(),
+            AllowedNotionIdentity::new("workspace-123", "user-456").unwrap(),
         );
-        (NotionOAuthRedirect::new(registration.clone()), flow, registration,
-         NotionOwnerPolicy::new("workspace-123","user-456").unwrap())
+        (
+            NotionOAuthRedirect::new(registration.clone()),
+            flow,
+            registration,
+            NotionOwnerPolicy::new("workspace-123", "user-456").unwrap(),
+        )
     }
     fn request<'a>() -> AuthorizationRequest<'a> {
         AuthorizationRequest {
@@ -369,7 +430,9 @@ mod tests {
             scope: "knowledge:read",
         }
     }
-    fn state(url: &str) -> &str { url.split("&state=").nth(1).unwrap() }
+    fn state(url: &str) -> &str {
+        url.split("&state=").nth(1).unwrap()
+    }
     fn grant_json(workspace: &str, kind: &str, user_id: &str) -> String {
         json!({
             "access_token": "secret_access_value",
@@ -378,7 +441,8 @@ mod tests {
             "bot_id": "bot-123",
             "workspace_id": workspace,
             "owner": {"type":kind,"user":{"object":"user","id":user_id}},
-        }).to_string()
+        })
+        .to_string()
     }
 
     async fn token_server(body: String, status: u16) -> (String, tokio::task::JoinHandle<String>) {
@@ -390,19 +454,29 @@ mod tests {
             let mut part = [0u8; 1024];
             loop {
                 let count = stream.read(&mut part).await.unwrap();
-                if count == 0 { break; }
+                if count == 0 {
+                    break;
+                }
                 input.extend_from_slice(&part[..count]);
                 if let Some(headers_end) = input.windows(4).position(|w| w == b"\r\n\r\n") {
                     let head = String::from_utf8_lossy(&input[..headers_end]);
-                    let length = head.lines().find_map(|line| {
-                        line.to_ascii_lowercase().strip_prefix("content-length: ").and_then(|v| v.parse::<usize>().ok())
-                    }).unwrap_or(0);
-                    if input.len() >= headers_end + 4 + length { break; }
+                    let length = head
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .and_then(|v| v.parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if input.len() >= headers_end + 4 + length {
+                        break;
+                    }
                 }
                 assert!(input.len() < 128 * 1024);
             }
             let response = format!(
-                "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+                "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
             );
             stream.write_all(response.as_bytes()).await.unwrap();
             String::from_utf8(input).unwrap()
@@ -415,10 +489,15 @@ mod tests {
         let (redirect, flow, registration, allowed) = setup();
         let start = redirect.begin(&flow, &request()).unwrap();
         let s = state(start.expose());
-        let (endpoint, task) = token_server(grant_json("workspace-123","user","user-456"),200).await;
-        let client = NotionTokenClient::new(&registration, SECRET).unwrap().for_local_fixture(&endpoint);
+        let (endpoint, task) =
+            token_server(grant_json("workspace-123", "user", "user-456"), 200).await;
+        let client = NotionTokenClient::new(&registration, SECRET)
+            .unwrap()
+            .for_local_fixture(&endpoint);
         let result = NotionCallback::new(&redirect, &client, &allowed)
-            .complete(&format!("code=notion-code&state={s}")).await.unwrap();
+            .complete(&format!("code=notion-code&state={s}"))
+            .await
+            .unwrap();
         assert_eq!(result.grant.workspace_id(), "workspace-123");
         assert_eq!(result.grant.owner_user_id(), "user-456");
         assert_eq!(result.grant.bot_id(), "bot-123");
@@ -429,9 +508,16 @@ mod tests {
         assert!(format!("{client:?}").contains("REDACTED"));
         let observed = task.await.unwrap();
         assert!(observed.starts_with("POST /v1/oauth/token HTTP/1.1"));
-        assert!(observed.to_ascii_lowercase().contains("authorization: basic "));
+        assert!(
+            observed
+                .to_ascii_lowercase()
+                .contains("authorization: basic ")
+        );
         assert!(observed.contains("\"grant_type\":\"authorization_code\""));
-        assert!(observed.contains("\"redirect_uri\":\"https://auth.example.com/oauth/notion/callback\""));
+        assert!(
+            observed
+                .contains("\"redirect_uri\":\"https://auth.example.com/oauth/notion/callback\"")
+        );
         assert!(!observed.contains("chatgpt-state-"));
         // Successfully exchanging a token NEVER approves the MCP grant.
         assert!(redirect.take(s).is_none());
@@ -439,14 +525,20 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_user_or_workspace_is_denied_after_provider_exchange() {
-        for (ws, owner) in [("evil-workspace","user-456"),("workspace-123","evil-user")] {
+        for (ws, owner) in [
+            ("evil-workspace", "user-456"),
+            ("workspace-123", "evil-user"),
+        ] {
             let (redirect, flow, registration, allowed) = setup();
             let start = redirect.begin(&flow, &request()).unwrap();
-            let (endpoint, task) = token_server(grant_json(ws, "user", owner),200).await;
-            let client = NotionTokenClient::new(&registration, SECRET).unwrap().for_local_fixture(&endpoint);
+            let (endpoint, task) = token_server(grant_json(ws, "user", owner), 200).await;
+            let client = NotionTokenClient::new(&registration, SECRET)
+                .unwrap()
+                .for_local_fixture(&endpoint);
             assert!(matches!(
-                NotionCallback::new(&redirect,&client,&allowed)
-                .complete(&format!("state={}&code=code-123", state(start.expose()))).await,
+                NotionCallback::new(&redirect, &client, &allowed)
+                    .complete(&format!("state={}&code=code-123", state(start.expose())))
+                    .await,
                 Err(CallbackError::IdentityMismatch)
             ));
             task.await.unwrap();
@@ -476,22 +568,37 @@ mod tests {
 
     #[tokio::test]
     async fn forged_or_replayed_state_is_denied_before_contacting_provider() {
-        let (redirect,flow,registration,allowed)=setup();
-        let start=redirect.begin(&flow,&request()).unwrap();
-        let s=state(start.expose());
-        let client=NotionTokenClient::new(&registration,SECRET).unwrap()
+        let (redirect, flow, registration, allowed) = setup();
+        let start = redirect.begin(&flow, &request()).unwrap();
+        let s = state(start.expose());
+        let client = NotionTokenClient::new(&registration, SECRET)
+            .unwrap()
             .for_local_fixture("http://127.0.0.1:1/v1/oauth/token");
-        let callback=NotionCallback::new(&redirect,&client,&allowed);
-        assert!(matches!(callback.complete("code=a&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").await,Err(CallbackError::InvalidState)));
-        assert!(matches!(callback.complete(&format!("error=access_denied&state={s}")).await,Err(CallbackError::RejectedByNotion)));
-        assert!(matches!(callback.complete(&format!("code=a&state={s}")).await,Err(CallbackError::InvalidState)));
+        let callback = NotionCallback::new(&redirect, &client, &allowed);
+        assert!(matches!(
+            callback
+                .complete("code=a&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .await,
+            Err(CallbackError::InvalidState)
+        ));
+        assert!(matches!(
+            callback
+                .complete(&format!("error=access_denied&state={s}"))
+                .await,
+            Err(CallbackError::RejectedByNotion)
+        ));
+        assert!(matches!(
+            callback.complete(&format!("code=a&state={s}")).await,
+            Err(CallbackError::InvalidState)
+        ));
     }
 
     #[test]
     fn strict_callback_query_denies_duplicate_params_and_injected_values() {
         const STATE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         for query in [
-            "","state=x&code=y",
+            "",
+            "state=x&code=y",
             "code=x",
             "code=x&state=too-short",
             "code=x&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -502,10 +609,18 @@ mod tests {
             "code=%00&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "code=x&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#fragment",
         ] {
-            assert!(CallbackParams::parse(query).is_err(), "bad query not rejected");
+            assert!(
+                CallbackParams::parse(query).is_err(),
+                "bad query not rejected"
+            );
         }
         assert!(CallbackParams::parse(&format!("state={STATE}&code=abc%2D123")).is_ok());
-        assert!(CallbackParams::parse(&format!("state={STATE}&error=access_denied&error_description=ignored")).is_ok());
+        assert!(
+            CallbackParams::parse(&format!(
+                "state={STATE}&error=access_denied&error_description=ignored"
+            ))
+            .is_ok()
+        );
     }
 
     #[test]
@@ -516,13 +631,16 @@ mod tests {
             json!({"access_token":"abc","token_type":"bearer","workspace_id":"workspace-123","bot_id":"bot-123","owner":{"type":"user","user":{"id":""}}}),
             json!({"access_token":"abc","token_type":"bearer","workspace_id":"workspace-123","bot_id":"bot-123","owner":{"type":"user","user":{"id":"user-456"}},"refresh_token":"bad token"}),
         ] {
-            assert!(matches!(NotionGrant::parse(data.to_string().as_bytes()),Err(CallbackError::InvalidGrant)));
+            assert!(matches!(
+                NotionGrant::parse(data.to_string().as_bytes()),
+                Err(CallbackError::InvalidGrant)
+            ));
         }
-        let (_,_,registration,_) = setup();
-        for secret in ["","bad secret","broken\nsecret"] {
-            assert!(NotionTokenClient::new(&registration,secret).is_err());
+        let (_, _, registration, _) = setup();
+        for secret in ["", "bad secret", "broken\nsecret"] {
+            assert!(NotionTokenClient::new(&registration, secret).is_err());
         }
-        assert!(NotionOwnerPolicy::new("","user-456").is_err());
-        assert!(NotionOwnerPolicy::new("workspace-123","").is_err());
+        assert!(NotionOwnerPolicy::new("", "user-456").is_err());
+        assert!(NotionOwnerPolicy::new("workspace-123", "").is_err());
     }
 }
