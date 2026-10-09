@@ -1,0 +1,72 @@
+name: Issue dependency cleanup
+
+on:
+  pull_request:
+    paths:
+      - scripts/prune-issue-dependencies.py
+      - scripts/test-prune-issue-dependencies.py
+      - .github/workflows/issue-dependency-cleanup.yml
+  workflow_dispatch:
+    inputs:
+      batch:
+        description: "A = redundant child gates; B = parent phase gates (run A first)"
+        required: true
+        type: choice
+        options:
+          - A
+          - B
+      apply:
+        description: "Actually remove dependencies (otherwise read-only audit)"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue-dependency-cleanup
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test dependency cleanup safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run credential-free cleanup tests
+        run: python3 -m unittest discover -s scripts -p 'test-prune-issue-dependencies.py' -v
+
+  cleanup:
+    name: Manually audit or apply issue links
+    needs: test
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Audit and optionally prune only explicitly allowlisted relationships
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BATCH: ${{ inputs.batch }}
+          APPLY: ${{ inputs.apply }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--batch "$BATCH")
+          if [[ "$APPLY" == 'true' ]]; then
+            args+=(--apply)
+          fi
+          python3 scripts/prune-issue-dependencies.py "${args[@]}"
