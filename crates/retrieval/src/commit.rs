@@ -326,6 +326,10 @@ impl IndexCommitCoordinator {
     pub fn binding(&self) -> &CommitBinding {
         &self.binding
     }
+    /// Canonical local directory owning the advisory guard and LanceDB tables.
+    pub fn index_directory(&self) -> &Path {
+        &self.index_path
+    }
     fn anchor(&self, initialize: bool) -> Result<(), CommitError> {
         let path = self.index_path.join(ANCHOR);
         let expected = format!(
