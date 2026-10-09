@@ -41,6 +41,10 @@ pub struct NotionOwnerPolicy {
     owner_user_id: String,
 }
 impl NotionOwnerPolicy {
+    pub(crate) fn matches(&self, workspace: &str, user: &str) -> bool {
+        self.workspace_id == workspace && self.owner_user_id == user
+    }
+
     pub fn new(workspace_id: &str, owner_user_id: &str) -> Result<Self, &'static str> {
         if !valid_id(workspace_id) {
             return Err("NK_NOTION_ALLOWED_WORKSPACE_ID");
@@ -151,6 +155,7 @@ pub struct NotionGrant {
     workspace_id: String,
     owner_user_id: String,
     bot_id: String,
+    expires_in: Option<u64>,
 }
 impl fmt::Debug for NotionGrant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -166,6 +171,20 @@ impl NotionGrant {
     }
     pub fn bot_id(&self) -> &str {
         &self.bot_id
+    }
+    pub fn expires_in(&self) -> Option<u64> {
+        self.expires_in
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture(workspace: &str, owner: &str, expires_in: Option<u64>) -> Self {
+        Self {
+            access_token: Secret::from_internal("test-access-secret".to_owned()),
+            refresh_token: Some(Secret::from_internal("test-refresh-secret".to_owned())),
+            workspace_id: workspace.to_owned(),
+            owner_user_id: owner.to_owned(),
+            bot_id: "bot-test".to_owned(),
+            expires_in,
+        }
     }
     /// Only the future protected grant-store adapter may read these.
     pub fn access_token(&self) -> &str {
@@ -188,6 +207,7 @@ impl NotionGrant {
                 .user
                 .as_ref()
                 .is_none_or(|user| !valid_id(&user.id))
+            || response.expires_in.is_some_and(|seconds| seconds == 0 || seconds > 31_536_000)
             || response
                 .refresh_token
                 .as_ref()
@@ -202,6 +222,7 @@ impl NotionGrant {
             workspace_id: response.workspace_id,
             owner_user_id,
             bot_id: response.bot_id,
+            expires_in: response.expires_in,
         })
     }
 }
@@ -214,6 +235,8 @@ struct TokenResponse {
     owner: NotionOwner,
     #[serde(default)]
     refresh_token: Option<String>,
+    #[serde(default)]
+    expires_in: Option<u64>,
 }
 #[derive(Deserialize)]
 struct NotionOwner {
