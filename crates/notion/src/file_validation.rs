@@ -146,9 +146,7 @@ fn parse_mime(declared: &str) -> Result<Kind, FileValidationError> {
     let kind = Kind::from_mime(&name).ok_or(FileValidationError::UnsupportedMime)?;
     if let Some(parameter) = parts.next() {
         if !matches!(kind, Kind::Text | Kind::Markdown | Kind::Csv)
-            || !parameter
-                .trim()
-                .eq_ignore_ascii_case("charset=utf-8")
+            || !parameter.trim().eq_ignore_ascii_case("charset=utf-8")
             || parts.next().is_some()
         {
             return Err(FileValidationError::UnsupportedMime);
@@ -176,8 +174,7 @@ fn sanitize_filename(input: &str) -> Result<String, FileValidationError> {
     let extension = extension.to_ascii_lowercase();
     if !matches!(
         extension.as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "pdf" | "txt" | "md"
-            | "markdown" | "csv"
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "pdf" | "txt" | "md" | "markdown" | "csv"
     ) {
         return Err(FileValidationError::UnsupportedExtension);
     }
@@ -185,8 +182,7 @@ fn sanitize_filename(input: &str) -> Result<String, FileValidationError> {
         .trim()
         .chars()
         .map(|ch| {
-            if !is_bidi_control(ch)
-                && (ch.is_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.'))
+            if !is_bidi_control(ch) && (ch.is_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.'))
             {
                 ch
             } else {
@@ -325,7 +321,11 @@ mod tests {
             ("animation.gif", "image/gif", GIF),
             ("picture.webp", "image/webp", WEBP),
             ("paper.pdf", "application/pdf", PDF),
-            ("notes.txt", "text/plain; charset=utf-8", "hej\nvärlden".as_bytes()),
+            (
+                "notes.txt",
+                "text/plain; charset=utf-8",
+                "hej\nvärlden".as_bytes(),
+            ),
             ("notes.md", "text/markdown", b"# Header".as_slice()),
             ("notes.markdown", "text/markdown", b"hej".as_slice()),
             ("data.csv", "text/csv", b"name,value\nhej,1".as_slice()),
@@ -344,7 +344,11 @@ mod tests {
             policy.validate("valid.txt", "text/plain", b"123456789"),
             Err(FileValidationError::FileTooLarge)
         );
-        assert!(policy.validate("valid.txt", "text/plain", b"12345678").is_ok());
+        assert!(
+            policy
+                .validate("valid.txt", "text/plain", b"12345678")
+                .is_ok()
+        );
         assert_eq!(
             policy.validate("empty.txt", "text/plain", b""),
             Err(FileValidationError::EmptyFile)
@@ -374,7 +378,10 @@ mod tests {
             ("evil.svg", "image/svg+xml"),
             ("active.html", "text/html"),
             ("script.exe", "application/octet-stream"),
-            ("macro.docm", "application/vnd.ms-word.document.macroEnabled.12"),
+            (
+                "macro.docm",
+                "application/vnd.ms-word.document.macroEnabled.12",
+            ),
             ("bundle.zip", "application/zip"),
         ] {
             assert!(policy.validate(name, mime, b"payload").is_err(), "{name}");
@@ -414,8 +421,17 @@ mod tests {
     #[test]
     fn rejects_bad_names_and_does_not_echo_private_inputs_in_errors() {
         let policy = FileValidationPolicy::default();
-        for filename in ["", "../", ".pdf", "no_extension", "secret.txt.exe", "bad\0name.txt"] {
-            let error = policy.validate(filename, "text/plain", b"safe").unwrap_err();
+        for filename in [
+            "",
+            "../",
+            ".pdf",
+            "no_extension",
+            "secret.txt.exe",
+            "bad\0name.txt",
+        ] {
+            let error = policy
+                .validate(filename, "text/plain", b"safe")
+                .unwrap_err();
             if !filename.is_empty() {
                 assert!(!error.to_string().contains(filename));
             }
