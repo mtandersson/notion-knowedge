@@ -12,3 +12,6 @@ pub mod webhook_recovery;
 
 /// HTTPS OAuth discovery; never enables MCP authorization by itself.
 pub mod oauth_discovery;
+
+/// Approved-grant-only OAuth authorization code and PKCE engine (#120).
+pub mod oauth_code;
