@@ -1,8 +1,8 @@
 use std::env;
 use std::process::ExitCode;
 
-use notion_knowledge_server::config::Config;
 use notion_knowledge_core::redaction::redact_for_log;
+use notion_knowledge_server::config::Config;
 use rmcp::{ServiceExt, service::QuitReason, transport::stdio};
 
 /// Every printable error crosses this final diagnostic redaction boundary.
@@ -89,7 +89,7 @@ async fn main() -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(error) => {
-                eprintln!("{error}");
+                eprintln!("{}", safe_error(&error));
                 ExitCode::FAILURE
             }
         };
@@ -104,7 +104,7 @@ async fn main() -> ExitCode {
         {
             Ok(client) => client,
             Err(error) => {
-                eprintln!("{error}");
+                eprintln!("{}", safe_error(&error));
                 return ExitCode::FAILURE;
             }
         };
@@ -114,7 +114,7 @@ async fn main() -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(error) => {
-                eprintln!("{error}");
+                eprintln!("{}", safe_error(&error));
                 ExitCode::FAILURE
             }
         };
@@ -183,7 +183,9 @@ mod tests {
 
     #[test]
     fn startup_error_path_removes_credentials_and_signed_urls() {
-        let reported = safe_error(&"request failed https://files.oaiusercontent.com/abc?token=veryprivate NOTION_TOKEN=secret_privatevalue");
+        let reported = safe_error(
+            &"request failed https://files.oaiusercontent.com/abc?token=veryprivate NOTION_TOKEN=secret_privatevalue",
+        );
         assert!(!reported.contains("veryprivate"));
         assert!(!reported.contains("privatevalue"));
         assert!(!reported.contains("files.oaiusercontent.com"));
