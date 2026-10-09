@@ -61,11 +61,7 @@ pub fn bootstrap(config: &Config) -> Diagnostics {
 }
 
 /// This allowlisted projection cannot carry adapter errors, tokens or signed URLs.
-pub fn report(health: Health, transport: &'static str) -> Value {
-    report_with_mode(health, transport, true)
-}
-
-pub fn report_with_mode(health: Health, transport: &'static str, read_only: bool) -> Value {
+pub fn report(health: Health, transport: &'static str, read_only: bool) -> Value {
     json!({
         "server": {"name": SERVER_NAME, "version": VERSION},
         "transport": transport,
