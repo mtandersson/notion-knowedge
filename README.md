@@ -189,6 +189,17 @@ Releases use the root Cargo workspace version and a reviewed changelog. See the
 changes and local index/operational-state migration requirements. Validate a
 publication with `python3 scripts/check-release.py --tag vX.Y.Z`.
 
+## Dual Notion connector rollout
+
+Use the [dual-connector migration playbook](docs/dual-connector-migration.md)
+to choose between official Notion and `notion-knowledge` for search, files and
+writes, check pilot readiness and recover safely. The official connector
+remains the default for private/authoritative workflows: the custom production
+bootstrap does not yet provide working private ChatGPT authentication or
+configured retrieval, and its staged write/file primitives are not MCP tools.
+The playbook includes a documented **non-sensitive** operational smoke checklist
+and distinguishes pilot targets from demonstrated results.
+
 ## Continuous integration
 
 The permanent GitHub Actions workflow at `.github/workflows/ci.yml` runs on every
