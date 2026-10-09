@@ -110,7 +110,9 @@ impl Config {
                         &redirect_uri,
                         issuer.issuer(),
                     )
-                    .map_err(|setting| invalid(setting, "invalid fixed Notion OAuth configuration"))?,
+                    .map_err(|setting| {
+                        invalid(setting, "invalid fixed Notion OAuth configuration")
+                    })?,
                 )
             }
             (None, Some(_)) => {
@@ -363,14 +365,25 @@ mod tests {
             "NK_NOTION_OAUTH_REDIRECT_URI",
             "https://auth.example.com/oauth/notion/callback",
         );
-        assert!(parse(&[base[0], base[1], client, callback])
-            .unwrap()
-            .notion_oauth_redirect
-            .is_some());
+        assert!(
+            parse(&[base[0], base[1], client, callback])
+                .unwrap()
+                .notion_oauth_redirect
+                .is_some()
+        );
         assert!(parse(&[]).unwrap().notion_oauth_redirect.is_none());
-        assert_eq!(parse(&[base[0], base[1], client]).unwrap_err().setting, callback.0);
-        assert_eq!(parse(&[base[0], base[1], callback]).unwrap_err().setting, client.0);
-        assert_eq!(parse(&[client, callback]).unwrap_err().setting, "NK_OAUTH_ISSUER");
+        assert_eq!(
+            parse(&[base[0], base[1], client]).unwrap_err().setting,
+            callback.0
+        );
+        assert_eq!(
+            parse(&[base[0], base[1], callback]).unwrap_err().setting,
+            client.0
+        );
+        assert_eq!(
+            parse(&[client, callback]).unwrap_err().setting,
+            "NK_OAUTH_ISSUER"
+        );
         for invalid_uri in [
             "http://auth.example.com/oauth/notion/callback",
             "https://evil.example.com/oauth/notion/callback",
