@@ -269,7 +269,7 @@ async fn health_response(State(diagnostics): State<crate::diagnostics::Diagnosti
     (
         status,
         [("cache-control", "no-store")],
-        axum::Json(crate::diagnostics::report_with_mode(
+        axum::Json(crate::diagnostics::report(
             health,
             "http",
             diagnostics.read_only(),
