@@ -213,6 +213,7 @@ impl GrantStore {
             || old.issued_at_unix != expected.record.issued_at_unix
             || old.access_token != expected.record.access_token
             || old.refresh_token != expected.record.refresh_token
+            || old.refresh_token.as_deref() == fresh.refresh_token()
             || old.workspace_id != fresh.workspace_id()
             || old.owner_user_id != fresh.owner_user_id()
             || old.bot_id != fresh.bot_id()
@@ -516,6 +517,22 @@ mod tests {
             store.save(&NotionGrant::fixture("foreign", "user-a", None)),
             Err(StoreError::IdentityMismatch)
         ));
+    }
+
+    #[test]
+    fn stale_refresh_snapshot_is_rejected_after_a_new_authorization() {
+        let (_dir, key, path, policy) = setup();
+        let store = GrantStore::open(&key, &path, "client-a", policy).unwrap();
+        let current = store.save(&NotionGrant::fixture("workspace-a", "user-a", Some(30))).unwrap();
+        let replacement = store.save(&NotionGrant::fixture("workspace-a", "user-a", Some(3600))).unwrap();
+        assert_ne!(current.grant_id(), replacement.grant_id());
+        assert_ne!(current.epoch(), replacement.epoch());
+        let snapshot = fs::read(&path).unwrap();
+        assert!(matches!(
+            store.rotate_refresh(&current, &NotionGrant::fixture("workspace-a", "user-a", Some(3600))),
+            Err(StoreError::IdentityMismatch)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), snapshot);
     }
 
     #[test]
