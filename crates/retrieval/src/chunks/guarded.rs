@@ -141,6 +141,28 @@ impl GuardedChunkTable {
         })
     }
 
+    /// Build or refresh the configured vector index under the same external
+    /// guard. Call after the initial crawl has populated real vectors; new page
+    /// commits subsequently keep any existing vector index up to date.
+    pub fn ensure_vector_index(
+        &self,
+        config: VectorIndexConfig,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> impl Future<Output = Result<(), CommitError>> + Send + 'static {
+        let directory = self.index_directory.clone();
+        let table_name = self.table_name.clone();
+        let embedding = self.embedding.clone();
+        self.coordinator.maintain(lease, clock, move |context| async move {
+            let current = open_current(&directory, &table_name, &embedding)
+                .await
+                .map_err(failure)?;
+            context.revalidate().map_err(fence_failure)?;
+            current.optimize_vector_index(&config).await.map_err(failure)?;
+            Ok(())
+        })
+    }
+
     /// Prepare a complete source page snapshot outside the commit guard.
     /// Neither embedding nor this immutable table revision authorizes a write.
     /// A deleted page must supply an empty chunk list and tombstone operation.
