@@ -44,7 +44,9 @@ impl OAuthDiscovery {
         // RFC 9728 canonical well-known location for a /mcp resource.
         format!(
             "{}/.well-known/oauth-protected-resource/mcp",
-            self.resource.strip_suffix("/mcp").expect("validated resource")
+            self.resource
+                .strip_suffix("/mcp")
+                .expect("validated resource")
         )
     }
 }
@@ -110,10 +112,7 @@ pub fn router(bind: SocketAddr, discovery: OAuthDiscovery) -> Router {
         .route("/authorize", get(not_implemented))
         .route("/token", axum::routing::post(not_implemented))
         .route("/revoke", axum::routing::post(not_implemented))
-        .route(
-            "/mcp",
-            get(deny_mcp).post(deny_mcp).delete(deny_mcp),
-        )
+        .route("/mcp", get(deny_mcp).post(deny_mcp).delete(deny_mcp))
         .with_state(discovery)
         // The SDK Host/Origin checks do not cover sibling routes. The trusted
         // reverse proxy must rewrite Host to the backend authority, as it does
@@ -193,10 +192,9 @@ mod tests {
 
     #[test]
     fn strict_https_metadata_config_rejects_ambiguous_or_unsafe_origins() {
-        assert!(OAuthDiscovery::new(
-            "https://login.example.com",
-            "https://mcp.example.com/mcp"
-        ).is_ok());
+        assert!(
+            OAuthDiscovery::new("https://login.example.com", "https://mcp.example.com/mcp").is_ok()
+        );
         for issuer in [
             "http://login.example.com",
             "https://login.example.com/",
