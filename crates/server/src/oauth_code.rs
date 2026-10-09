@@ -6,11 +6,11 @@
 use std::{
     collections::HashMap,
     fmt,
+    io::Read,
     sync::Mutex,
     time::{Duration, Instant},
 };
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Digest, Sha256};
 
 const CODE_TTL: Duration = Duration::from_secs(120);
@@ -424,7 +424,7 @@ fn digest(input: &str) -> [u8; 32] {
     Sha256::digest(input.as_bytes()).into()
 }
 fn pkce_challenge(verifier: &str) -> String {
-    URL_SAFE_NO_PAD.encode(digest(verifier))
+    base64_url(&digest(verifier))
 }
 fn valid_verifier(value: &str) -> bool {
     opaque_identifier(value, 43, 128)
@@ -441,10 +441,34 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     }
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
+fn base64_url(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let a = chunk[0];
+        output.push(ALPHABET[(a >> 2) as usize] as char);
+        let second = ((a & 3) << 4) | (chunk.get(1).copied().unwrap_or(0) >> 4);
+        output.push(ALPHABET[second as usize] as char);
+        if let Some(b) = chunk.get(1) {
+            let third = ((b & 15) << 2) | (chunk.get(2).copied().unwrap_or(0) >> 6);
+            output.push(ALPHABET[third as usize] as char);
+        }
+        if let Some(b) = chunk.get(2) {
+            output.push(ALPHABET[(b & 63) as usize] as char);
+        }
+    }
+    output
+}
+
 fn random_secret() -> Result<Secret, Error> {
     let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes).map_err(|_| Error::TemporarilyUnavailable)?;
-    Ok(Secret(URL_SAFE_NO_PAD.encode(bytes)))
+    // The supported Linux/macOS service runtime uses the OS CSPRNG.
+    // A failed entropy source aborts the operation; never mint a weak token.
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut bytes))
+        .map_err(|_| Error::TemporarilyUnavailable)?;
+    Ok(Secret(base64_url(&bytes)))
 }
 
 #[cfg(test)]
