@@ -28,6 +28,14 @@ commit; admission failure returns 503. Scoped authoritative refresh is pending. 
 MCP authorization, OAuth and other release requirements below are not implied
 by the existence of adapter implementations or this document.
 
+The [owned commit coordinator](index-commits.md) now supplies cooperative
+local index serialization and trusted SQLite/index/table/workspace/scope bindings.
+Independent-process tests cover aliases, conflicting state databases, caller
+cancellation, lease expiry and process death; checkpoint-failure tests preserve
+ambiguous pending work for replay. Local storage owners and all index writers
+must participate. This does not isolate raw SQLite/LanceDB writers or malicious
+filesystem replacement; actual LanceDB integration remains #257.
+
 Implemented protections and their limits:
 
 - [Startup configuration](../crates/server/src/config.rs) defaults to loopback,
