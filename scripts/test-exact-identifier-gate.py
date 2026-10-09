@@ -123,6 +123,8 @@ class ExactIdentifierGateTests(unittest.TestCase):
             lambda report: report["results"][0].update(grades=[0, 3]),
             lambda report: report["results"][0].update(ranked_source_ids=["fake:chunk"]),
             lambda report: report["summary"].pop("hybrid"),
+            lambda report: report["results"].__setitem__(0, []),
+            lambda report: report.update(results="not a list"),
         ]
         for mutation in mutations:
             with self.subTest(mutation=str(mutation)):
