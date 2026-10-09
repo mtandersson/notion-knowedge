@@ -1,7 +1,7 @@
 # Operator diagnostic redaction (#89)
 
 Short stderr diagnostics must pass through the server's
-\`redact::diagnostic\` formatter. It is applied to error output from the
+`redact::diagnostic` formatter. It is applied to error output from the
 configuration, local webhook recovery, Notion identity/crawl and HTTP
 composition-root paths. It is intentionally *not* a general data-loss
 prevention system.
@@ -12,7 +12,7 @@ The formatter removes:
   e.g. Notion temporary signed links and ChatGPT file download URLs.
 - Bearer/Basic authorization values and common OAuth/token/key-value fields,
   including quoted JSON, headers and raw query-like fragments.
-- Common Notion integration token prefixes (\`ntn_\`, \`secret_\`).
+- Common Notion integration token prefixes (`ntn_`, `secret_`).
 - The exact values of the operator's integration, webhook verification and
   Notion OAuth client secrets, even if the values use unrecognized formats.
 - Newlines in diagnostic strings, to avoid forging additional log records.
@@ -44,9 +44,9 @@ third-party loggers, which must be configured separately.
 
 ## Verification
 
-\`\`\`sh
+```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test -p notion-knowledge-server --lib --locked redact
 cargo test --workspace --locked
-\`\`\`
+```
