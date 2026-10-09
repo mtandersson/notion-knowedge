@@ -122,9 +122,10 @@ async fn main() -> ExitCode {
     if env::args().skip(1).any(|arg| arg == "--diagnostics") {
         println!(
             "{}",
-            notion_knowledge_server::diagnostics::report(
+            notion_knowledge_server::diagnostics::report_with_mode(
                 notion_knowledge_server::diagnostics::bootstrap(&config).health(),
-                "one-shot"
+                "one-shot",
+                config.read_only,
             )
         );
         return ExitCode::SUCCESS;
@@ -153,6 +154,7 @@ async fn main() -> ExitCode {
 
     eprintln!("Serving MCP over stdio.");
     let service = match notion_knowledge_mcp::KnowledgeServer::default()
+        .with_read_only(config.read_only)
         .serve(stdio())
         .await
     {
