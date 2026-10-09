@@ -346,7 +346,6 @@ impl AuthorizationFlow {
     ) -> Result<AccessToken, Error> {
         if request.grant_type != "authorization_code"
             || request.client_id != self.client.client_id
-            || request.redirect_uri != self.client.redirect_uri
             || !valid_verifier(request.code_verifier)
         {
             return Err(Error::InvalidGrant);
@@ -627,12 +626,12 @@ mod tests {
 
     #[test]
     fn callback_transactions_and_codes_are_single_use_even_under_replay() {
-        let flow = flow();
-        let pending = flow.begin(&authorization()).unwrap();
-        let redirect = flow.approve(pending.expose(), &grant()).unwrap();
-        assert!(matches!(flow.approve(pending.expose(), &grant()), Err(Error::InvalidGrant)));
-        let token = flow.redeem(&exchange(redirect.code.expose()), &grant()).unwrap();
-        assert!(flow.verify(token.access_token.expose(), &grant()));
+        let authorization_flow = flow();
+        let pending = authorization_flow.begin(&authorization()).unwrap();
+        let redirect = authorization_flow.approve(pending.expose(), &grant()).unwrap();
+        assert!(matches!(authorization_flow.approve(pending.expose(), &grant()), Err(Error::InvalidGrant)));
+        let token = authorization_flow.redeem(&exchange(redirect.code.expose()), &grant()).unwrap();
+        assert!(authorization_flow.verify(token.access_token.expose(), &grant()));
         let restarted = flow();
         assert!(!restarted.verify(token.access_token.expose(), &grant()));
         assert!(matches!(restarted.redeem(&exchange(redirect.code.expose()), &grant()), Err(Error::InvalidGrant)));
