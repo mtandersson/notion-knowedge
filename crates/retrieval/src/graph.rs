@@ -18,7 +18,10 @@ impl GraphEdgeStore for SqliteSyncStateStore {
         validate_identifier(source_page_id)?;
         // Validate the complete replacement before deleting anything. In
         // particular a caller cannot accidentally erase a different page.
-        if edges.iter().any(|edge| edge.source_page_id() != source_page_id) {
+        if edges
+            .iter()
+            .any(|edge| edge.source_page_id() != source_page_id)
+        {
             return Err(SyncStateError::InvalidInput);
         }
 
@@ -44,11 +47,10 @@ impl GraphEdgeStore for SqliteSyncStateStore {
                 )
                 .map_err(sqlite_failure)?;
             for edge in edges {
-                let (page_id, unresolved): (Option<&str>, Option<&str>) =
-                    match edge.target() {
-                        GraphTarget::Page { page_id } => (Some(page_id), None),
-                        GraphTarget::Unresolved { reference } => (None, Some(reference)),
-                    };
+                let (page_id, unresolved): (Option<&str>, Option<&str>) = match edge.target() {
+                    GraphTarget::Page { page_id } => (Some(page_id), None),
+                    GraphTarget::Unresolved { reference } => (None, Some(reference)),
+                };
                 statement
                     .execute(params![
                         source_page_id,
