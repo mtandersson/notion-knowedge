@@ -17,8 +17,9 @@ impl TempDir {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("nk-recovery-{name}-{}-{nonce}", std::process::id()));
+        let process_id = std::process::id();
+        let directory_name = format!("nk-recovery-{name}-{process_id}-{nonce}");
+        let path = std::env::temp_dir().join(directory_name);
         fs::create_dir_all(&path).unwrap();
         Self(path)
     }
