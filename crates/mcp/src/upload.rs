@@ -34,12 +34,14 @@ impl UploadFileRequest {
             || file.file_id.trim().is_empty()
             || file.file_id.len() > 256
             || file.file_id.chars().any(char::is_control)
-            || file.mime_type.as_ref().is_some_and(|s| {
-                s.len() > 256 || s.chars().any(char::is_control)
-            })
-            || file.file_name.as_ref().is_some_and(|s| {
-                s.len() > 512 || s.chars().any(char::is_control)
-            })
+            || file
+                .mime_type
+                .as_ref()
+                .is_some_and(|s| s.len() > 256 || s.chars().any(char::is_control))
+            || file
+                .file_name
+                .as_ref()
+                .is_some_and(|s| s.len() > 512 || s.chars().any(char::is_control))
         {
             return Err("invalid knowledge_upload_file metadata");
         }
@@ -150,6 +152,9 @@ mod tests {
             }
         }))
         .unwrap();
-        assert_eq!(invalid.validate(), Err("invalid knowledge_upload_file metadata"));
+        assert_eq!(
+            invalid.validate(),
+            Err("invalid knowledge_upload_file metadata")
+        );
     }
 }
