@@ -62,3 +62,7 @@ verify capability separation without coupling applications to HTTP.
 This completes the backend adapter objective, not the later semantic MCP tools,
 OAuth, scoped agent-write policies or real-account production smoke in their
 own epics. No unperformed live-account verification is implied.
+
+The metadata-only `PageLifecycle` companion port supplies
+[authoritative lifecycle scope evidence](notion-lifecycle.md) and revalidation
+without widening `NotionRead` into index mutation authority.
