@@ -23,7 +23,7 @@ jobs:
     name: Apply and verify reviewed issue graph cleanup
     if: >-
       github.ref == 'refs/heads/main' &&
-      github.event.head_commit.message == 'chore(issues): execute reviewed dependency cleanup once (#266)'
+      startsWith(github.event.head_commit.message, 'chore(issues): execute reviewed dependency cleanup once (#266)')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
