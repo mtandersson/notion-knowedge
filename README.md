@@ -89,7 +89,7 @@ citation/expanded-source metadata. That failure is an explicit
 `result_too_large` tool error, never a partial result. Clients should
 request fewer search hits or fewer source references. No file-upload or
 file-metadata MCP tool is exposed in the current server; future tool output
-must follow the same size-budget contract before being enabled. 
+must follow the same size-budget contract before being enabled.
 
 `knowledge_get` optionally verifies authoritative content with `freshness: "fresh"`,
 using a configured read-only Notion backend after authorizing indexed references.
