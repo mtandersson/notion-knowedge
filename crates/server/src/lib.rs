@@ -15,3 +15,6 @@ pub mod oauth_discovery;
 
 /// Approved-grant-only OAuth authorization code and PKCE engine (#120).
 pub mod oauth_code;
+
+/// Notion OAuth consent redirect and independent single-use CSRF state (#121).
+pub mod notion_oauth_redirect;
