@@ -101,7 +101,7 @@ impl NotionTokenClient {
     }
 
     #[cfg(test)]
-    fn for_local_fixture(mut self, endpoint: &str) -> Self {
+    pub(crate) fn for_local_fixture(mut self, endpoint: &str) -> Self {
         self.token_endpoint = endpoint.to_owned();
         self
     }
