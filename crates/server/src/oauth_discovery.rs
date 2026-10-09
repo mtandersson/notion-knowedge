@@ -42,7 +42,10 @@ impl OAuthDiscovery {
     fn protected_metadata_url(&self) -> String {
         // The root well-known route is also exposed; the suffixed URL is the
         // RFC 9728 canonical well-known location for a /mcp resource.
-        self.resource.replace("/mcp", "/.well-known/oauth-protected-resource/mcp")
+        format!(
+            "{}/.well-known/oauth-protected-resource/mcp",
+            self.resource.strip_suffix("/mcp").expect("validated resource")
+        )
     }
 }
 
