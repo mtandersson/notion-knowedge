@@ -27,7 +27,11 @@ pub struct Diagnostics {
 
 impl Diagnostics {
     pub fn new(notion: Arc<dyn HealthProbe>, index: Arc<dyn HealthProbe>) -> Self {
-        Self { notion, index, read_only: true }
+        Self {
+            notion,
+            index,
+            read_only: true,
+        }
     }
 
     pub fn with_read_only(mut self, read_only: bool) -> Self {
