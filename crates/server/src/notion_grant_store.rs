@@ -92,13 +92,6 @@ impl StoredGrant {
     pub fn expires_at_unix(&self) -> Option<u64> {
         self.record.expires_at_unix
     }
-    // Only server-side refresh / Notion adapters may obtain token material.
-    pub(crate) fn access_token(&self) -> &str {
-        &self.record.access_token
-    }
-    pub(crate) fn refresh_token(&self) -> Option<&str> {
-        self.record.refresh_token.as_deref()
-    }
 }
 
 /// Encrypts ALL records at rest with authenticated metadata and distinct
@@ -403,8 +396,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(reloaded.grant_id(), first.grant_id());
-        assert_eq!(reloaded.access_token(), "test-access-secret");
-        assert_eq!(reloaded.refresh_token(), Some("test-refresh-secret"));
+        assert_eq!(reloaded.record.access_token, "test-access-secret");
+        assert_eq!(reloaded.record.refresh_token.as_deref(), Some("test-refresh-secret"));
         let second = store.save(&grant).unwrap();
         assert_eq!(second.epoch(), 2);
         assert_ne!(second.grant_id(), first.grant_id());
