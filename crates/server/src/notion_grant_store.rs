@@ -12,7 +12,7 @@ use std::{
 };
 
 use ring::{
-    aead::{self, AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey},
+    aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey},
     rand::{SecureRandom, SystemRandom},
 };
 use serde::{Deserialize, Serialize};
@@ -174,10 +174,8 @@ impl GrantStore {
         let _guard = self.guard.lock().map_err(|_| StoreError::Unavailable)?;
         let record = self.read_record()?;
         if let Some(ref value) = record {
-            if value
-                .expires_at_unix
-                .is_some_and(|expiry| expiry <= now_unix()?)
-            {
+            let now = now_unix()?;
+            if value.expires_at_unix.is_some_and(|expiry| expiry <= now) {
                 return Err(StoreError::Expired);
             }
         }
