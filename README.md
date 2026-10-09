@@ -202,7 +202,12 @@ publication with `python3 scripts/check-release.py --tag vX.Y.Z`.
 
 Use the [dual-connector migration playbook](docs/dual-connector-migration.md)
 to choose between official Notion and `notion-knowledge` for search, files and
-writes, check pilot readiness and recover safely. The official connector
+writes, check pilot readiness and recover safely. [Primary ChatGPT cutover gates](docs/cutover-gates.md) define measurable
+quality, authorization, native-file, freshness, recovery, and connector-
+independence requirements. They are proposed acceptance thresholds, **not**
+evidence that the current server is ready to replace the official connector.
+
+The official connector
 remains the default for private/authoritative workflows: the custom production
 bootstrap does not yet provide working private ChatGPT authentication or
 configured retrieval, and its staged write/file primitives are not MCP tools.
