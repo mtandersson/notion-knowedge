@@ -253,7 +253,11 @@ pub trait AuditStore: Send + Sync {
 mod tests {
     use super::*;
 
-    fn event(tool: AuditTool, target: Option<String>, file: Option<SafeFileFacts>) -> Result<AuditEvent, AuditError> {
+    fn event(
+        tool: AuditTool,
+        target: Option<String>,
+        file: Option<SafeFileFacts>,
+    ) -> Result<AuditEvent, AuditError> {
         AuditEvent::new(
             1_800_000_000,
             AuditActor::ApprovedUser,
@@ -267,17 +271,45 @@ mod tests {
 
     #[test]
     fn only_canonical_identifiers_and_file_facts_can_enter_audit() {
-        assert!(event(
-            AuditTool::FileAttach,
-            Some("01234567-89ab-cdef-0123-456789abcdef".to_owned()),
-            Some(SafeFileFacts::new(FileKind::Image, 2048)),
-        ).is_ok());
-        for target in ["secret body", "https://example.com/?token=secret", "admin@example.com", "01234567-89ab-cdef-0123-456789abcdeg"] {
-            assert_eq!(event(AuditTool::PageReplace, Some(target.to_owned()), None), Err(AuditError::InvalidInput));
+        assert!(
+            event(
+                AuditTool::FileAttach,
+                Some("01234567-89ab-cdef-0123-456789abcdef".to_owned()),
+                Some(SafeFileFacts::new(FileKind::Image, 2048)),
+            )
+            .is_ok()
+        );
+        for target in [
+            "secret body",
+            "https://example.com/?token=secret",
+            "admin@example.com",
+            "01234567-89ab-cdef-0123-456789abcdeg",
+        ] {
+            assert_eq!(
+                event(AuditTool::PageReplace, Some(target.to_owned()), None),
+                Err(AuditError::InvalidInput)
+            );
         }
-        assert_eq!(event(AuditTool::PageCreate, None, Some(SafeFileFacts::new(FileKind::Other, 100))), Err(AuditError::InvalidInput));
-        assert_eq!(AuditEvent::new(1, AuditActor::Server, AuditTool::PageDelete, None,
-            AuditOutcome::Denied, "private text / token".into(), None), Err(AuditError::InvalidInput));
+        assert_eq!(
+            event(
+                AuditTool::PageCreate,
+                None,
+                Some(SafeFileFacts::new(FileKind::Other, 100))
+            ),
+            Err(AuditError::InvalidInput)
+        );
+        assert_eq!(
+            AuditEvent::new(
+                1,
+                AuditActor::Server,
+                AuditTool::PageDelete,
+                None,
+                AuditOutcome::Denied,
+                "private text / token".into(),
+                None
+            ),
+            Err(AuditError::InvalidInput)
+        );
     }
 
     #[test]
@@ -292,7 +324,13 @@ mod tests {
 
     #[test]
     fn errors_never_echo_sensitive_inputs() {
-        assert_eq!(AuditError::Unavailable.to_string(), "audit store unavailable");
-        assert_eq!(AuditError::InvalidInput.to_string(), "invalid audit metadata");
+        assert_eq!(
+            AuditError::Unavailable.to_string(),
+            "audit store unavailable"
+        );
+        assert_eq!(
+            AuditError::InvalidInput.to_string(),
+            "invalid audit metadata"
+        );
     }
 }
