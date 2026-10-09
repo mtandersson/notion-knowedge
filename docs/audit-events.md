@@ -17,7 +17,7 @@ closed-form metadata:
 | Actor | `approved_user`, `automation`, `server` | Names, emails, upstream user tokens |
 | Tool | `page_create`, `page_append`, `page_replace`, `page_delete`, `page_move`, `file_attach` | Free-form method or request text |
 | Target | Optional Notion page UUID | Page title, Markdown, content excerpts, URLs |
-| Outcome | `succeeded`, `denied`, `failed`, `indeterminate` | Raw HTTP errors or stack traces |
+| Outcome | `attempted`, `succeeded`, `denied`, `failed`, `indeterminate` | Raw HTTP errors or stack traces |
 | Correlation | Trusted generated 16–64 character safe identifier | Caller-provided query, token or URL |
 | File | Optional image/other class and byte length | Filename, MIME parameters, file content, signed download/upload URL |
 
@@ -44,7 +44,8 @@ Expired/future events are rejected, not misleadingly accepted then discarded.
 Failures return only `InvalidInput` or `Unavailable`.
 
 Keep the audit database and its parent directory private to the serving
-operator (on Unix: directory `0700`, file `0600`), with encrypted/protected
+operator (on Unix: directory `0700`, file `0600`; the adapter forces
+`0600` on the database file at open), with encrypted/protected
 backups if retained. The API does not create a new public HTTP route. In
 deployments with multiple writers, SQLite handles transaction locking for a
 *shared file*; do not put different writers on separate audit files. SQLite
@@ -52,7 +53,7 @@ transaction success is the local durability acknowledgment, not the same
 transaction as the external Notion mutation.
 
 **Audit-write failure policy:** for a planned write, check that durable audit
-storage is available and record the preflight/intent evidence before effects;
+storage is available and record an `attempted` event before effects;
 if the audit write fails, **deny the mutation**. After an attempted Notion
 mutation, record `succeeded`, `denied`, `failed` or
 `indeterminate` according to authoritative evidence. If that audit write
