@@ -150,6 +150,12 @@ impl PageOperation {
     pub fn id(&self) -> &str {
         &self.id
     }
+    pub fn revision(&self) -> &str {
+        &self.revision
+    }
+    pub fn action(&self) -> PageAction {
+        self.action
+    }
     pub fn checkpoint(&self) -> &PageSyncState {
         &self.checkpoint
     }
@@ -695,6 +701,49 @@ impl IndexCommitCoordinator {
             receiver.await.map_err(|_| CommitError::Unavailable)?
         }
     }
+    /// Own index bootstrap, startup FTS repair and other idempotent index-only
+    /// maintenance. A page receipt is intentionally not written: this API MUST
+    /// NOT be used to acknowledge a page update. The operation owns its runtime
+    /// and directory lock even after observer cancellation.
+    pub fn maintain<F, Fut>(
+        self: &Arc<Self>,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+        effect: F,
+    ) -> impl Future<Output = Result<(), CommitError>> + Send + 'static
+    where
+        F: FnOnce(CommitContext) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), FailureClass>> + Send + 'static,
+    {
+        let coordinator = self.clone();
+        let (sender, receiver) = oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("nk-index-maintenance".into())
+            .spawn(move || {
+                let result = (|| {
+                    let _guard = coordinator.acquire()?;
+                    coordinator.revalidate(&lease, clock())?;
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(io)?;
+                    let context = CommitContext {
+                        coordinator,
+                        lease,
+                        clock,
+                    };
+                    runtime
+                        .block_on(effect(context))
+                        .map_err(CommitError::Operation)
+                })();
+                let _ = sender.send(result);
+            });
+        async move {
+            spawned.map_err(io)?;
+            receiver.await.map_err(|_| CommitError::Unavailable)?
+        }
+    }
+
 }
 
 /// Available only inside the owned effect; does not hold a SQLite mutex.
