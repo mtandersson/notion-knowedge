@@ -94,7 +94,9 @@ fn replace_is_atomic_scoped_and_can_remove_stale_edges() {
     store
         .replace_page_edges("source", &[old.clone(), old.clone()])
         .unwrap();
-    store.replace_page_edges("other", std::slice::from_ref(&other)).unwrap();
+    store
+        .replace_page_edges("other", std::slice::from_ref(&other))
+        .unwrap();
     assert_eq!(store.edges_from("source").unwrap(), vec![old]);
 
     let updated = page("source", "new", "relation", "property:p");
