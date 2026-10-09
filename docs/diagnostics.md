@@ -71,14 +71,16 @@ HTTP 503 while preserving each dependency state:
 
 Dependency states are `healthy`, `unconfigured`, `unavailable`, and
 `unknown`.
+
 The `access.read_only` boolean reports the effective `NK_READ_ONLY` MCP
 tool-access policy (default `true`). In read-only mode the shared MCP
 handler advertises and dispatches only the audited read tools, and rejects
 mutation/file-upload tool names before reaching backend adapters. Explicit
 `NK_READ_ONLY=false` does not make currently unimplemented write tools
 available. This flag does not control webhook admission or operator CLI
-actions; those have independent authorization boundaries. All three endpoints use bounded in-memory snapshots and perform no
-upstream I/O. Their JSON is allowlisted and cannot contain configuration values,
+actions; those have independent authorization boundaries.
+
+All three endpoints use bounded in-memory snapshots and perform no upstream I/O. Their JSON is allowlisted and cannot contain configuration values,
 tokens, upstream error strings, document content, or signed URLs.
 
 For orchestration, use `/livez` for restart/liveness, `/readyz` for traffic
