@@ -12,6 +12,7 @@ enum Behavior {
     OutOfScope,
     UnauthorizedOutput,
     OversizeOutput,
+    OversizeMetadata,
     MismatchedReference,
 }
 
@@ -76,6 +77,9 @@ impl SourceExpansion for Fixture {
                 }
                 Behavior::OversizeOutput => {
                     sources[0].text = "x".repeat(query.max_chars + 1);
+                }
+                Behavior::OversizeMetadata => {
+                    sources[0].provenance.title = "private-metadata".repeat(50_000);
                 }
                 Behavior::MismatchedReference => {
                     sources[0].reference = StableSourceRef::Page("wrong-page".into());
@@ -717,4 +721,19 @@ async fn versioned_freshness_scenarios_distinguish_stale_content_without_writing
             "{name}: only three read-only source expansions expected"
         );
     }
+}
+
+#[tokio::test]
+async fn expansion_rejects_oversized_metadata_without_leaking_source() {
+    let response = exchange(
+        Arc::new(Fixture {
+            calls: Mutex::new(vec![]),
+            behavior: Behavior::OversizeMetadata,
+        }),
+        json!({"refs":[{"kind":"page","id":"page-1"}],"max_chars":1024}),
+    ).await;
+    assert_eq!(response["result"]["isError"], true);
+    assert!(response["result"]["structuredContent"].is_null());
+    assert!(response["result"]["content"][0]["text"].as_str().unwrap().starts_with("result_too_large:"));
+    assert!(!response.to_string().contains("private-metadata"));
 }
