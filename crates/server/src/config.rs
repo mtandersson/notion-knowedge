@@ -5,6 +5,8 @@ use std::{env, ffi::OsString, fmt, net::SocketAddr};
 #[derive(Debug)]
 pub struct Config {
     pub http_bind: SocketAddr,
+    /// Fail-closed MCP access mode; enabled unless explicitly opted out.
+    pub read_only: bool,
     /// Opt-in discovery mode; all MCP calls are denied pending real OAuth.
     pub oauth_discovery: Option<crate::oauth_discovery::OAuthDiscovery>,
     /// Optional, trusted Notion authorization redirect config; NOT a live HTTP login.
@@ -115,6 +117,11 @@ impl Config {
             .ok()
             .filter(|port| *port != 0)
             .ok_or_else(|| invalid("NK_HTTP_PORT", "must be an integer from 1 to 65535"))?;
+        let read_only = match optional(&mut lookup, "NK_READ_ONLY", "true")?.as_str() {
+            "true" => true,
+            "false" => false,
+            _ => return Err(invalid("NK_READ_ONLY", "must be true or false")),
+        };
         let oauth_issuer = lookup("NK_OAUTH_ISSUER")
             .map(|value| text(value, "NK_OAUTH_ISSUER"))
             .transpose()?;
@@ -419,6 +426,7 @@ impl Config {
             webhook_state_file,
             webhook_debounce,
             http_bind: SocketAddr::new(host, port),
+            read_only,
             oauth_discovery,
             notion_oauth_redirect,
             notion_oauth_callback,
@@ -668,6 +676,18 @@ mod tests {
                 .setting,
                 "NK_NOTION_GRANT_STATE_FILE"
             );
+        }
+    }
+
+    #[test]
+    fn read_only_mode_defaults_to_safe_and_requires_explicit_boolean() {
+        assert!(parse(&[]).unwrap().read_only);
+        assert!(parse(&[("NK_READ_ONLY", "true")]).unwrap().read_only);
+        assert!(!parse(&[("NK_READ_ONLY", "false")]).unwrap().read_only);
+        for invalid_value in ["", "0", "TRUE", "private-secret"] {
+            let error = parse(&[("NK_READ_ONLY", invalid_value)]).unwrap_err();
+            assert_eq!(error.setting, "NK_READ_ONLY");
+            assert!(!error.to_string().contains(invalid_value) || invalid_value.is_empty());
         }
     }
 
