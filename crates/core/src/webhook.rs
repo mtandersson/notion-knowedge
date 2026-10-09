@@ -36,6 +36,10 @@ pub struct EventKey {
     pub event_id: String,
 }
 impl WebhookEvent {
+    pub fn timestamp_order(&self) -> Option<(i64, u32)> {
+        let time = chrono::DateTime::parse_from_rfc3339(&self.timestamp).ok()?;
+        Some((time.timestamp(), time.timestamp_subsec_nanos()))
+    }
     pub fn valid_timestamp(&self) -> bool {
         chrono::DateTime::parse_from_rfc3339(&self.timestamp).is_ok()
     }
@@ -181,5 +185,71 @@ pub trait WebhookRecovery: WebhookInbox {
         generation: i64,
         now: i64,
         policy: RetryPolicy,
+    ) -> Result<(), InboxError>;
+}
+
+/// Trailing-edge quiet period, bounded by a maximum burst delay. Unix milliseconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DebounceWindow {
+    pub quiet_ms: i64,
+    pub max_delay_ms: i64,
+}
+impl Default for DebounceWindow {
+    fn default() -> Self {
+        Self {
+            quiet_ms: 5000,
+            max_delay_ms: 30000,
+        }
+    }
+}
+impl DebounceWindow {
+    pub fn validate(self) -> Result<Self, InboxError> {
+        if !(1..=60000).contains(&self.quiet_ms)
+            || !(self.quiet_ms..=300000).contains(&self.max_delay_ms)
+        {
+            return Err(InboxError::InvalidInput);
+        }
+        Ok(self)
+    }
+}
+
+/// Page identity is additionally isolated by workspace and subscription.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageWorkKey {
+    pub scope: InboxScope,
+    pub page_id: String,
+}
+/// Immutable set of events covered by one refresh. Arrivals after claim belong
+/// to a successor batch and cannot be acknowledged by this ownership token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageWorkClaim {
+    pub key: PageWorkKey,
+    pub generation: i64,
+    pub events: Vec<EventClaim>,
+    pub newest: WebhookEvent,
+}
+/// Durable page coalescing is separate from authoritative reads and index effects.
+/// A page claim is not the shared index-writer fence.
+pub trait WebhookDebounce: WebhookRecovery {
+    /// Receipt and page membership commit together. Only page content/property
+    /// update hints are grouped; unsupported event kinds remain normal inbox work.
+    fn receive_debounced(
+        &self,
+        event: &WebhookEvent,
+        now_ms: i64,
+        window: DebounceWindow,
+    ) -> Result<Receipt, InboxError>;
+    fn claim_page(
+        &self,
+        scope: &InboxScope,
+        now_ms: i64,
+        lease_seconds: i64,
+    ) -> Result<Option<PageWorkClaim>, InboxError>;
+    /// Applies the same bounded event recovery policy atomically to the snapshot.
+    fn complete_page(
+        &self,
+        claim: &PageWorkClaim,
+        now_ms: i64,
+        outcome: ProcessingOutcome,
     ) -> Result<(), InboxError>;
 }

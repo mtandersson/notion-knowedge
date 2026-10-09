@@ -199,7 +199,9 @@ async fn http_client_initializes_discovers_calls_and_receives_structured_errors(
 #[tokio::test]
 async fn production_webhook_acknowledges_committed_hints_and_deduplicates_after_restart() {
     use hmac::{Hmac, Mac};
-    use notion_knowledge_core::webhook::{EventKey, EventState, WebhookInbox};
+    use notion_knowledge_core::webhook::{
+        EventKey, EventState, InboxScope, ProcessingOutcome, WebhookDebounce, WebhookInbox,
+    };
     use notion_knowledge_retrieval::sync_state::SqliteSyncStateStore;
     use sha2::Sha256;
     let directory = tempfile::tempdir().unwrap();
@@ -231,6 +233,8 @@ async fn production_webhook_acknowledges_committed_hints_and_deduplicates_after_
             .env("NK_WEBHOOK_INTEGRATION_ID", id)
             .env("NK_WEBHOOK_SUBSCRIPTION_ID", id)
             .env("NK_WEBHOOK_STATE_FILE", &path)
+            .env("NK_WEBHOOK_DEBOUNCE_MS", "1000")
+            .env("NK_WEBHOOK_MAX_DELAY_MS", "3000")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -248,6 +252,13 @@ async fn production_webhook_acknowledges_committed_hints_and_deduplicates_after_
             // Opening another connection after the ACK sees a complete durable row.
             let store=SqliteSyncStateStore::open(&path).unwrap();let saved=store.event(&event_key).unwrap().unwrap();
             assert_eq!(saved.state,EventState::Pending);assert_eq!(saved.event.attempt_number,1);assert_eq!(saved.event.event_type,"page.content_updated");
+            if attempt==1 {
+                let second=body.replacen(&format!("\"id\":\"{id}\""),"\"id\":\"367cba44-b6f3-4c92-81e7-6a2e9659efd4\"",1).replace("page.content_updated","page.properties_updated").replace("00:00:00Z","00:00:01Z");
+                let third=second.replacen("367cba44-b6f3-4c92-81e7-6a2e9659efd4","aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",1).replace(&format!("\"entity\":{{\"id\":\"{id}\""),"\"entity\":{\"id\":\"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\"");
+                for hint in [second,third] {
+                    assert_eq!(client.post(&url).header("x-notion-signature",sign(&hint)).body(hint).send().await.unwrap().status(),StatusCode::OK);
+                }
+            }
             let conflict=body.replace("page.content_updated","page.deleted");
             assert_eq!(client.post(&url).header("x-notion-signature",sign(&conflict)).body(conflict).send().await.unwrap().status(),StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(store.event(&event_key).unwrap().unwrap(),saved);
@@ -270,6 +281,40 @@ async fn production_webhook_acknowledges_committed_hints_and_deduplicates_after_
             EventState::Pending
         );
     }
+    // Actual HTTP composition retained one page batch across restart, and kept
+    // a different page independently claimable. Use an injected future clock;
+    // no wall-clock sleep is required to verify persisted quiet-period wiring.
+    let store = SqliteSyncStateStore::open(&path).unwrap();
+    let scope = InboxScope {
+        workspace_id: id.into(),
+        subscription_id: id.into(),
+    };
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+        + 4000;
+    assert!(store.claim(&scope, now / 1000, 10).unwrap().is_none());
+    let first = store.claim_page(&scope, now, 10).unwrap().unwrap();
+    let second = store.claim_page(&scope, now, 10).unwrap().unwrap();
+    assert_ne!(first.key.page_id, second.key.page_id);
+    let same = if first.key.page_id == id {
+        &first
+    } else {
+        &second
+    };
+    assert_eq!(same.events.len(), 2);
+    assert_eq!(same.newest.event_type, "page.properties_updated");
+    store
+        .complete_page(&first, now + 1, ProcessingOutcome::Succeeded)
+        .unwrap();
+    store
+        .complete_page(&second, now + 1, ProcessingOutcome::Succeeded)
+        .unwrap();
+    assert!(store.claim_page(&scope, now + 2, 10).unwrap().is_none());
     let bytes = std::fs::read(&path).unwrap();
     for private in [key, "fixture-private-content", "sha256="] {
         assert!(

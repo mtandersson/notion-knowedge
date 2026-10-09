@@ -75,7 +75,8 @@ integration and current allowed roots through authoritative Notion reads. Inbox
 claims do not grant an indexing lock: workers must separately acquire the shared
 index-writer fence before effects. Effects and SQLite completion are not atomic;
 recovered work may execute again, so downstream writes must be idempotent.
-Automatic refresh, debounce and bounded retries remain #54–#57.
+Page debounce and bounded recovery are described below; authoritative refresh and
+production dispatch remain #55/#56 and #248.
 
 Legacy identity-only `webhook_events` rows are preserved, but cannot reconstruct
 pending hints or prove matching payloads. Their IDs conservatively reject new
@@ -132,3 +133,48 @@ original generation. These commands do not dispatch source/index processing; #24
 adds that composition after its dependencies. Inbox ownership does not fence an
 in-flight index write: processors still require shared index serialization and
 idempotent apply-before-ack.
+
+## Durable page debounce
+
+Verified HTTP admission atomically coalesces `page.content_updated` and
+`page.properties_updated` with `entity.type=page`. Notion's supported
+[content-update payload](https://developers.notion.com/reference/webhooks-events-delivery)
+identifies the page even when the edit adds/removes blocks; no block ID is used
+as a page key. Other kinds remain ordinary inbox events for the dispatcher.
+Generic block hints are not silently interpreted as pages. This grouping does
+not authorize a page or eliminate the authoritative reads and root checks.
+
+Set `NK_WEBHOOK_DEBOUNCE_MS` (default 5000, 1–60000 milliseconds) and
+`NK_WEBHOOK_MAX_DELAY_MS` (default 30000, quiet period through 300000 milliseconds).
+Both are validated at startup. The first pending event persists its window;
+newer events extend the trailing quiet deadline up to the original burst cap.
+Older events join the batch without postponing it; receipt duplicates never
+change deadlines. Latest metadata is selected by parsed UTC instant, with event
+ID as a deterministic tie break. Full changed content is not retained.
+
+Schema v5 adds page work and event membership without altering existing receipts,
+recovery counters or reconciliation state. Keys include canonical lowercase page
+ID, workspace and subscription. The SQLite `WebhookDebounce` port claims a due
+page as one immutable event snapshot. Different pages can have independent leases.
+Single-event claims/completion cannot take page-owned events. A new event received
+during a refresh remains pending in a successor batch, so the old completion cannot
+consume it. Completion verifies the actual stored snapshot and ownership generation.
+
+Each member consumes its existing bounded processing budget when claimed. Success
+or permanent failure completes just that snapshot; retryable members remain grouped
+with their own persisted backoff. A fresh event can proceed while older members wait
+for retry eligibility, without accelerating their retry clocks. Expired page claims
+recover with a new generation and consume another attempt; exhausted members become
+failed and detach. Operator requeue of failed members resumes ordinary inbox work.
+The quiet window applies to delivery bursts; crash recovery is immediately eligible
+under the same bounded policy as ordinary inbox recovery. Cancellation needs no
+memory-only timer: another process recovers the persisted lease. Clock values for
+page work are Unix milliseconds; event retry counters/deadlines retain Unix seconds.
+
+This delivers real production admission and the durable batch lifecycle. It does
+not yet execute source refresh or index writes: #55/#56 implement effects and #248
+composes the worker. A page lease is not an index-writer fence; effects still need
+shared index serialization and idempotent apply-before-ack. Real binary HTTP tests
+verify signed mixed bursts, two pages and restart retention against the SQLite
+adapter, and deterministic SQLite tests cover deadlines, offsets, successor batches,
+expiry boundaries, retry budgets and crash recovery without live Notion credentials.
