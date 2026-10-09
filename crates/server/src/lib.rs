@@ -24,3 +24,6 @@ pub mod notion_oauth_callback;
 
 /// Encrypted versioned Notion grant store with immutable owner checks (#123).
 pub mod notion_grant_store;
+
+/// Shared privacy-safe diagnostic formatting for stderr/log boundaries.
+pub mod redact;
