@@ -50,3 +50,6 @@ pub mod reconciliation;
 pub mod webhook;
 
 pub mod lifecycle;
+
+/// Structured, payload-free audit metadata and sink port for agent mutations.
+pub mod audit;
