@@ -308,6 +308,7 @@ def main():
             "Container diagnostics failed or leaked credentials")
     require(json.loads(diagnostic.stdout) == {
         "server": {"name": "notion-knowledge", "version": version}, "transport": "one-shot",
+        "access": {"read_only": True},
         "status": "degraded", "dependencies": {"notion": "unavailable", "index": "unavailable"}},
         "Configured credentials must not imply healthy adapters")
     valid = run_once(args.image, ["--check"])
