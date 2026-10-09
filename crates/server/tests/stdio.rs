@@ -109,10 +109,12 @@ async fn stdio_client_initializes_discovers_tools_and_exits_on_disconnect() {
     );
     assert!(responses[3]["result"].get("structuredContent").is_none());
     assert_eq!(responses[4]["result"]["isError"], true);
-    assert!(responses[4]["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .starts_with("file_upload_unavailable:"));
+    assert!(
+        responses[4]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("file_upload_unavailable:")
+    );
     assert!(!frames.join("").contains("private-sentinel"));
     assert!(!diagnostics.contains("private-sentinel"));
 }
