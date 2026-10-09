@@ -160,7 +160,9 @@ impl Config {
                 if secret.is_empty()
                     || secret.len() > 4096
                     || !secret.is_ascii()
-                    || secret.bytes().any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+                    || secret
+                        .bytes()
+                        .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
                 {
                     return Err(invalid(
                         "NK_NOTION_OAUTH_CLIENT_SECRET",
@@ -171,7 +173,10 @@ impl Config {
                     client_secret: SecretToken(secret),
                     allowed: crate::notion_oauth_callback::NotionOwnerPolicy::new(
                         &workspace, &user,
-                    ).map_err(|setting| invalid(setting, "must be a canonical nonempty owner identifier"))?,
+                    )
+                    .map_err(|setting| {
+                        invalid(setting, "must be a canonical nonempty owner identifier")
+                    })?,
                 })
             }
             (None, _, _) => {
@@ -477,20 +482,41 @@ mod tests {
         let workspace = ("NK_NOTION_ALLOWED_WORKSPACE_ID", "workspace-123");
         let owner = ("NK_NOTION_ALLOWED_USER_ID", "user-456");
         assert!(parse(&base).unwrap().notion_oauth_callback.is_none());
-        let correct = [base[0],base[1],base[2],base[3],secret,workspace,owner];
+        let correct = [base[0], base[1], base[2], base[3], secret, workspace, owner];
         assert!(parse(&correct).unwrap().notion_oauth_callback.is_some());
-        assert_eq!(parse(&[base[0],base[1],base[2],base[3],secret,owner])
-            .unwrap_err().setting, "NK_NOTION_ALLOWED_WORKSPACE_ID");
-        assert_eq!(parse(&[base[0],base[1],base[2],base[3],secret,workspace])
-            .unwrap_err().setting, "NK_NOTION_ALLOWED_USER_ID");
-        assert_eq!(parse(&[base[0],base[1],base[2],base[3],workspace,owner])
-            .unwrap_err().setting, "NK_NOTION_OAUTH_CLIENT_SECRET");
-        assert_eq!(parse(&[secret,workspace,owner]).unwrap_err().setting,
-            "NK_NOTION_OAUTH_CLIENT_ID");
-        for bad in ["","a secret","one\nsecret"] {
-            let error = parse(&[base[0],base[1],base[2],base[3],
-                ("NK_NOTION_OAUTH_CLIENT_SECRET",bad),workspace,owner])
-                .unwrap_err();
+        assert_eq!(
+            parse(&[base[0], base[1], base[2], base[3], secret, owner])
+                .unwrap_err()
+                .setting,
+            "NK_NOTION_ALLOWED_WORKSPACE_ID"
+        );
+        assert_eq!(
+            parse(&[base[0], base[1], base[2], base[3], secret, workspace])
+                .unwrap_err()
+                .setting,
+            "NK_NOTION_ALLOWED_USER_ID"
+        );
+        assert_eq!(
+            parse(&[base[0], base[1], base[2], base[3], workspace, owner])
+                .unwrap_err()
+                .setting,
+            "NK_NOTION_OAUTH_CLIENT_SECRET"
+        );
+        assert_eq!(
+            parse(&[secret, workspace, owner]).unwrap_err().setting,
+            "NK_NOTION_OAUTH_CLIENT_ID"
+        );
+        for bad in ["", "a secret", "one\nsecret"] {
+            let error = parse(&[
+                base[0],
+                base[1],
+                base[2],
+                base[3],
+                ("NK_NOTION_OAUTH_CLIENT_SECRET", bad),
+                workspace,
+                owner,
+            ])
+            .unwrap_err();
             assert_eq!(error.setting, "NK_NOTION_OAUTH_CLIENT_SECRET");
             assert!(!error.to_string().contains(bad));
         }
