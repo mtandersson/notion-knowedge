@@ -221,7 +221,7 @@ impl GrantStore {
 
     fn read_record(&self) -> Result<Option<Record>, StoreError> {
         self.validate_existing_file()?;
-        let mut file = match File::open(&self.file) {
+        let file = match File::open(&self.file) {
             Ok(value) => value,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err(StoreError::Unavailable),
@@ -330,7 +330,8 @@ mod tests {
         let store = GrantStore::open(&key,&path,"client-a",policy.clone()).unwrap();
         store.save(&NotionGrant::fixture("workspace-a","user-a",None)).unwrap();
         let mut raw = fs::read(&path).unwrap();
-        raw[raw.len()-1] ^= 0x80;
+        let last = raw.len() - 1;
+        raw[last] ^= 0x80;
         fs::write(&path,&raw).unwrap();
         assert!(matches!(store.load(),Err(StoreError::Corrupt)));
         assert!(matches!(GrantStore::open(&key,&path,"client-a",policy.clone()),Err(StoreError::Corrupt)));
