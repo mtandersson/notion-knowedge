@@ -397,7 +397,10 @@ mod tests {
             .unwrap();
         assert_eq!(reloaded.grant_id(), first.grant_id());
         assert_eq!(reloaded.record.access_token, "test-access-secret");
-        assert_eq!(reloaded.record.refresh_token.as_deref(), Some("test-refresh-secret"));
+        assert_eq!(
+            reloaded.record.refresh_token.as_deref(),
+            Some("test-refresh-secret")
+        );
         let second = store.save(&grant).unwrap();
         assert_eq!(second.epoch(), 2);
         assert_ne!(second.grant_id(), first.grant_id());
