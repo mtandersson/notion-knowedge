@@ -82,12 +82,14 @@ impl Config {
         let Some(settings) = &self.notion_grant_store else {
             return Ok(());
         };
-        let callback = self.notion_oauth_callback.as_ref().ok_or(
-            crate::notion_grant_store::StoreError::Configuration
-        )?;
-        let registration = self.notion_oauth_redirect.as_ref().ok_or(
-            crate::notion_grant_store::StoreError::Configuration
-        )?;
+        let callback = self
+            .notion_oauth_callback
+            .as_ref()
+            .ok_or(crate::notion_grant_store::StoreError::Configuration)?;
+        let registration = self
+            .notion_oauth_redirect
+            .as_ref()
+            .ok_or(crate::notion_grant_store::StoreError::Configuration)?;
         let store = crate::notion_grant_store::GrantStore::open(
             &settings.key_file,
             &settings.state_file,
@@ -251,23 +253,42 @@ impl Config {
                 }
                 let valid_path = |value: &str| {
                     let path = std::path::Path::new(value);
-                    path.is_absolute() && path.file_name().is_some()
-                        && !path.components().any(|part| matches!(part, std::path::Component::ParentDir))
+                    path.is_absolute()
+                        && path.file_name().is_some()
+                        && !path
+                            .components()
+                            .any(|part| matches!(part, std::path::Component::ParentDir))
                         && !value.contains(char::is_control)
                 };
                 if !valid_path(&state) {
-                    return Err(invalid("NK_NOTION_GRANT_STATE_FILE", "must be a safe absolute path"));
+                    return Err(invalid(
+                        "NK_NOTION_GRANT_STATE_FILE",
+                        "must be a safe absolute path",
+                    ));
                 }
                 if !valid_path(&key) || state == key {
-                    return Err(invalid("NK_NOTION_GRANT_KEY_FILE", "must be a separate safe absolute path"));
+                    return Err(invalid(
+                        "NK_NOTION_GRANT_KEY_FILE",
+                        "must be a separate safe absolute path",
+                    ));
                 }
                 Some(GrantStoreSettings {
                     state_file: state.into(),
                     key_file: key.into(),
                 })
             }
-            (None, Some(_)) => return Err(invalid("NK_NOTION_GRANT_STATE_FILE", "required with grant key file")),
-            (Some(_), None) => return Err(invalid("NK_NOTION_GRANT_KEY_FILE", "required with grant state file")),
+            (None, Some(_)) => {
+                return Err(invalid(
+                    "NK_NOTION_GRANT_STATE_FILE",
+                    "required with grant key file",
+                ));
+            }
+            (Some(_), None) => {
+                return Err(invalid(
+                    "NK_NOTION_GRANT_KEY_FILE",
+                    "required with grant state file",
+                ));
+            }
         };
         let notion_auth = match optional(&mut lookup, "NK_NOTION_AUTH", "none")?.as_str() {
             "none" => NotionAuth::None,
@@ -602,25 +623,51 @@ mod tests {
             ("NK_OAUTH_ISSUER", "https://auth.example.com"),
             ("NK_OAUTH_RESOURCE", "https://mcp.example.com/mcp"),
             ("NK_NOTION_OAUTH_CLIENT_ID", "client-id"),
-            ("NK_NOTION_OAUTH_REDIRECT_URI", "https://auth.example.com/oauth/notion/callback"),
+            (
+                "NK_NOTION_OAUTH_REDIRECT_URI",
+                "https://auth.example.com/oauth/notion/callback",
+            ),
             ("NK_NOTION_OAUTH_CLIENT_SECRET", "private-secret"),
             ("NK_NOTION_ALLOWED_WORKSPACE_ID", "workspace-123"),
             ("NK_NOTION_ALLOWED_USER_ID", "user-456"),
         ];
         let key = ("NK_NOTION_GRANT_KEY_FILE", "/run/notion/key");
         let state = ("NK_NOTION_GRANT_STATE_FILE", "/var/lib/notion/grant");
-        let valid = [core[0],core[1],core[2],core[3],core[4],core[5],core[6],key,state];
+        let valid = [
+            core[0], core[1], core[2], core[3], core[4], core[5], core[6], key, state,
+        ];
         assert!(parse(&valid).unwrap().notion_grant_store.is_some());
         assert!(parse(&core).unwrap().notion_grant_store.is_none());
-        assert_eq!(parse(&[core[0],core[1],core[2],core[3],core[4],core[5],core[6],key])
-            .unwrap_err().setting,"NK_NOTION_GRANT_STATE_FILE");
-        assert_eq!(parse(&[core[0],core[1],core[2],core[3],core[4],core[5],core[6],state])
-            .unwrap_err().setting,"NK_NOTION_GRANT_KEY_FILE");
-        assert_eq!(parse(&[key,state]).unwrap_err().setting,"NK_NOTION_OAUTH_CLIENT_SECRET");
-        for malformed in ["relative/grant", "/tmp/../grant","/var/lib/\ngrant"] {
+        assert_eq!(
+            parse(&[
+                core[0], core[1], core[2], core[3], core[4], core[5], core[6], key
+            ])
+            .unwrap_err()
+            .setting,
+            "NK_NOTION_GRANT_STATE_FILE"
+        );
+        assert_eq!(
+            parse(&[
+                core[0], core[1], core[2], core[3], core[4], core[5], core[6], state
+            ])
+            .unwrap_err()
+            .setting,
+            "NK_NOTION_GRANT_KEY_FILE"
+        );
+        assert_eq!(
+            parse(&[key, state]).unwrap_err().setting,
+            "NK_NOTION_OAUTH_CLIENT_SECRET"
+        );
+        for malformed in ["relative/grant", "/tmp/../grant", "/var/lib/\ngrant"] {
             let bad = ("NK_NOTION_GRANT_STATE_FILE", malformed);
-            assert_eq!(parse(&[core[0],core[1],core[2],core[3],core[4],core[5],core[6],key,bad])
-                .unwrap_err().setting,"NK_NOTION_GRANT_STATE_FILE");
+            assert_eq!(
+                parse(&[
+                    core[0], core[1], core[2], core[3], core[4], core[5], core[6], key, bad
+                ])
+                .unwrap_err()
+                .setting,
+                "NK_NOTION_GRANT_STATE_FILE"
+            );
         }
     }
 
