@@ -7,6 +7,8 @@ pub struct Config {
     pub http_bind: SocketAddr,
     /// Opt-in discovery mode; all MCP calls are denied pending real OAuth.
     pub oauth_discovery: Option<crate::oauth_discovery::OAuthDiscovery>,
+    /// Optional, trusted Notion authorization redirect config; NOT a live HTTP login.
+    pub notion_oauth_redirect: Option<crate::notion_oauth_redirect::NotionOAuthConfig>,
     pub notion_auth: NotionAuth,
     pub webhook: crate::webhook::WebhookConfig,
     pub webhook_debounce: notion_knowledge_core::webhook::DebounceWindow,
@@ -87,6 +89,40 @@ impl Config {
                 return Err(invalid(
                     "NK_OAUTH_RESOURCE",
                     "required with NK_OAUTH_ISSUER",
+                ));
+            }
+        };
+        let notion_oauth_client_id = lookup("NK_NOTION_OAUTH_CLIENT_ID")
+            .map(|value| text(value, "NK_NOTION_OAUTH_CLIENT_ID"))
+            .transpose()?;
+        let notion_oauth_redirect_uri = lookup("NK_NOTION_OAUTH_REDIRECT_URI")
+            .map(|value| text(value, "NK_NOTION_OAUTH_REDIRECT_URI"))
+            .transpose()?;
+        let notion_oauth_redirect = match (notion_oauth_client_id, notion_oauth_redirect_uri) {
+            (None, None) => None,
+            (Some(client_id), Some(redirect_uri)) => {
+                let issuer = oauth_discovery.as_ref().ok_or_else(|| {
+                    invalid("NK_OAUTH_ISSUER", "required before Notion OAuth redirect")
+                })?;
+                Some(
+                    crate::notion_oauth_redirect::NotionOAuthConfig::new(
+                        &client_id,
+                        &redirect_uri,
+                        issuer.issuer(),
+                    )
+                    .map_err(|setting| invalid(setting, "invalid fixed Notion OAuth configuration"))?,
+                )
+            }
+            (None, Some(_)) => {
+                return Err(invalid(
+                    "NK_NOTION_OAUTH_CLIENT_ID",
+                    "required with NK_NOTION_OAUTH_REDIRECT_URI",
+                ));
+            }
+            (Some(_), None) => {
+                return Err(invalid(
+                    "NK_NOTION_OAUTH_REDIRECT_URI",
+                    "required with NK_NOTION_OAUTH_CLIENT_ID",
                 ));
             }
         };
@@ -220,6 +256,7 @@ impl Config {
             webhook_debounce,
             http_bind: SocketAddr::new(host, port),
             oauth_discovery,
+            notion_oauth_redirect,
             notion_auth,
             webhook,
         })
@@ -312,6 +349,37 @@ mod tests {
             let error = parse(&bad).unwrap_err();
             assert_eq!(error.setting, valid[index].0);
             assert!(!error.to_string().contains(value));
+        }
+    }
+
+    #[test]
+    fn notion_oauth_redirect_requires_paired_registration_and_canonical_issuer_callback() {
+        let base = [
+            ("NK_OAUTH_ISSUER", "https://auth.example.com"),
+            ("NK_OAUTH_RESOURCE", "https://mcp.example.com/mcp"),
+        ];
+        let client = ("NK_NOTION_OAUTH_CLIENT_ID", "client-id");
+        let callback = (
+            "NK_NOTION_OAUTH_REDIRECT_URI",
+            "https://auth.example.com/oauth/notion/callback",
+        );
+        assert!(parse(&[base[0], base[1], client, callback])
+            .unwrap()
+            .notion_oauth_redirect
+            .is_some());
+        assert!(parse(&[]).unwrap().notion_oauth_redirect.is_none());
+        assert_eq!(parse(&[base[0], base[1], client]).unwrap_err().setting, callback.0);
+        assert_eq!(parse(&[base[0], base[1], callback]).unwrap_err().setting, client.0);
+        assert_eq!(parse(&[client, callback]).unwrap_err().setting, "NK_OAUTH_ISSUER");
+        for invalid_uri in [
+            "http://auth.example.com/oauth/notion/callback",
+            "https://evil.example.com/oauth/notion/callback",
+            "https://auth.example.com/oauth/notion/callback?next=evil",
+        ] {
+            let invalid = ("NK_NOTION_OAUTH_REDIRECT_URI", invalid_uri);
+            let error = parse(&[base[0], base[1], client, invalid]).unwrap_err();
+            assert_eq!(error.setting, invalid.0);
+            assert!(!error.to_string().contains(invalid_uri));
         }
     }
 
