@@ -207,7 +207,9 @@ impl NotionGrant {
                 .user
                 .as_ref()
                 .is_none_or(|user| !valid_id(&user.id))
-            || response.expires_in.is_some_and(|seconds| seconds == 0 || seconds > 31_536_000)
+            || response
+                .expires_in
+                .is_some_and(|seconds| seconds == 0 || seconds > 31_536_000)
             || response
                 .refresh_token
                 .as_ref()
