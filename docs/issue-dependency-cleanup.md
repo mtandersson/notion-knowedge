@@ -4,6 +4,35 @@ The dependency graph is authoritative in GitHub's **issue relationships**,
 not issue Markdown. This cleanup uses the [GitHub issue dependencies API](https://docs.github.com/en/rest/issues/issue-dependencies)
 to inspect and (optionally) delete only explicitly allowlisted edges.
 
+## One-time execution for the already approved cleanup
+
+The repository also has a specially guarded, one-shot workflow in
+`.github/workflows/run-dependency-cleanup-once.yml`. This workflow
+automatically runs the **previously reviewed** batch A (99 links) and batch B
+(11 links) *after* its own PR is merged into protected `main` with the
+deliberately specific squash commit title:
+
+```text
+chore(issues): execute reviewed dependency cleanup once (#266)
+```
+
+It is **not enabled by ordinary pushes or pull requests**: the push must
+modify the one-shot workflow file on `main`, and the first line of the
+commit message must contain the exact title. Its run is serialized with the
+existing manual workflow, runs credential-free tests first, then read-only
+preflight checks, then applies each bounded batch using
+`scripts/prune-issue-dependencies.py`. After each batch it validates
+critical OAuth and LanceDB dependencies; the last step explicitly verifies
+that #124 still depends on #123 but not #9.
+
+This is a single approved operational migration: it does **not** mutate
+#257/#254/#255, and it leaves the preexisting manual dry-run workflow
+available. If GitHub Actions stops or fails partway through, the migration
+script is idempotent; inspect the Actions logs and rerun the manual
+workflow for the incomplete batch rather than creating a new automatic
+trigger. Do not claim #266 is completed until both batches have
+actually passed the live API verification.
+
 ## Run from GitHub Actions
 
 After the cleanup workflow is reviewed and merged, open the repository's
