@@ -150,7 +150,9 @@ async fn validate_json(request: Request, next: Next) -> Response {
         Err(_) => return oversized_request(),
     };
     if !is_json {
-        return next.run(Request::from_parts(parts, Body::from(bytes))).await;
+        return next
+            .run(Request::from_parts(parts, Body::from(bytes)))
+            .await;
     }
     let parsed = serde_json::from_slice::<Value>(&bytes);
     let request_id = parsed
