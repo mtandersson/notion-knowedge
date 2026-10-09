@@ -9,10 +9,20 @@ pub struct Config {
     pub oauth_discovery: Option<crate::oauth_discovery::OAuthDiscovery>,
     /// Optional, trusted Notion authorization redirect config; NOT a live HTTP login.
     pub notion_oauth_redirect: Option<crate::notion_oauth_redirect::NotionOAuthConfig>,
+    /// Confidential Notion code exchange config, never a live MCP auth grant.
+    pub notion_oauth_callback: Option<NotionCallbackSettings>,
     pub notion_auth: NotionAuth,
     pub webhook: crate::webhook::WebhookConfig,
     pub webhook_debounce: notion_knowledge_core::webhook::DebounceWindow,
     pub webhook_state_file: Option<std::path::PathBuf>,
+}
+
+/// Secrets are excluded from Debug; allowed identifiers are provisioned,
+/// never enrolled from a Notion token response.
+#[derive(Debug)]
+pub struct NotionCallbackSettings {
+    pub client_secret: SecretToken,
+    pub allowed: crate::notion_oauth_callback::NotionOwnerPolicy,
 }
 
 #[derive(Debug)]
@@ -125,6 +135,61 @@ impl Config {
                 return Err(invalid(
                     "NK_NOTION_OAUTH_REDIRECT_URI",
                     "required with NK_NOTION_OAUTH_CLIENT_ID",
+                ));
+            }
+        };
+        let notion_secret = lookup("NK_NOTION_OAUTH_CLIENT_SECRET")
+            .map(|value| text(value, "NK_NOTION_OAUTH_CLIENT_SECRET"))
+            .transpose()?;
+        let allowed_workspace = lookup("NK_NOTION_ALLOWED_WORKSPACE_ID")
+            .map(|value| text(value, "NK_NOTION_ALLOWED_WORKSPACE_ID"))
+            .transpose()?;
+        let allowed_user = lookup("NK_NOTION_ALLOWED_USER_ID")
+            .map(|value| text(value, "NK_NOTION_ALLOWED_USER_ID"))
+            .transpose()?;
+        let notion_oauth_callback = match (notion_secret, allowed_workspace, allowed_user) {
+            (None, None, None) => None,
+            (Some(secret), Some(workspace), Some(user)) => {
+                if notion_oauth_redirect.is_none() {
+                    return Err(invalid(
+                        "NK_NOTION_OAUTH_CLIENT_ID",
+                        "Notion OAuth client and callback registration required",
+                    ));
+                }
+                // Validate secret without ever putting its value in errors.
+                if secret.is_empty()
+                    || secret.len() > 4096
+                    || !secret.is_ascii()
+                    || secret.bytes().any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+                {
+                    return Err(invalid(
+                        "NK_NOTION_OAUTH_CLIENT_SECRET",
+                        "must be a nonempty server-only credential",
+                    ));
+                }
+                Some(NotionCallbackSettings {
+                    client_secret: SecretToken(secret),
+                    allowed: crate::notion_oauth_callback::NotionOwnerPolicy::new(
+                        &workspace, &user,
+                    ).map_err(|setting| invalid(setting, "must be a canonical nonempty owner identifier"))?,
+                })
+            }
+            (None, _, _) => {
+                return Err(invalid(
+                    "NK_NOTION_OAUTH_CLIENT_SECRET",
+                    "required with Notion OAuth callback policy",
+                ));
+            }
+            (_, None, _) => {
+                return Err(invalid(
+                    "NK_NOTION_ALLOWED_WORKSPACE_ID",
+                    "required with Notion OAuth callback policy",
+                ));
+            }
+            (_, _, None) => {
+                return Err(invalid(
+                    "NK_NOTION_ALLOWED_USER_ID",
+                    "required with Notion OAuth callback policy",
                 ));
             }
         };
@@ -259,6 +324,7 @@ impl Config {
             http_bind: SocketAddr::new(host, port),
             oauth_discovery,
             notion_oauth_redirect,
+            notion_oauth_callback,
             notion_auth,
             webhook,
         })
@@ -393,6 +459,40 @@ mod tests {
             let error = parse(&[base[0], base[1], client, invalid]).unwrap_err();
             assert_eq!(error.setting, invalid.0);
             assert!(!error.to_string().contains(invalid_uri));
+        }
+    }
+
+    #[test]
+    fn notion_callback_credentials_and_immutable_owner_must_be_complete() {
+        let base = [
+            ("NK_OAUTH_ISSUER", "https://auth.example.com"),
+            ("NK_OAUTH_RESOURCE", "https://mcp.example.com/mcp"),
+            ("NK_NOTION_OAUTH_CLIENT_ID", "client-123"),
+            (
+                "NK_NOTION_OAUTH_REDIRECT_URI",
+                "https://auth.example.com/oauth/notion/callback",
+            ),
+        ];
+        let secret = ("NK_NOTION_OAUTH_CLIENT_SECRET", "private-credential");
+        let workspace = ("NK_NOTION_ALLOWED_WORKSPACE_ID", "workspace-123");
+        let owner = ("NK_NOTION_ALLOWED_USER_ID", "user-456");
+        assert!(parse(&base).unwrap().notion_oauth_callback.is_none());
+        let correct = [base[0],base[1],base[2],base[3],secret,workspace,owner];
+        assert!(parse(&correct).unwrap().notion_oauth_callback.is_some());
+        assert_eq!(parse(&[base[0],base[1],base[2],base[3],secret,owner])
+            .unwrap_err().setting, "NK_NOTION_ALLOWED_WORKSPACE_ID");
+        assert_eq!(parse(&[base[0],base[1],base[2],base[3],secret,workspace])
+            .unwrap_err().setting, "NK_NOTION_ALLOWED_USER_ID");
+        assert_eq!(parse(&[base[0],base[1],base[2],base[3],workspace,owner])
+            .unwrap_err().setting, "NK_NOTION_OAUTH_CLIENT_SECRET");
+        assert_eq!(parse(&[secret,workspace,owner]).unwrap_err().setting,
+            "NK_NOTION_OAUTH_CLIENT_ID");
+        for bad in ["","a secret","one\nsecret"] {
+            let error = parse(&[base[0],base[1],base[2],base[3],
+                ("NK_NOTION_OAUTH_CLIENT_SECRET",bad),workspace,owner])
+                .unwrap_err();
+            assert_eq!(error.setting, "NK_NOTION_OAUTH_CLIENT_SECRET");
+            assert!(!error.to_string().contains(bad));
         }
     }
 
