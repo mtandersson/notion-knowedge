@@ -342,6 +342,11 @@ jobs:
       - name: Verify final runtime image
         run: python3 scripts/smoke-container.py --prebuilt --builder-image notion-knowledge:smoke-builder
 
+      - name: Smoke test local Docker Compose stack
+        run: |
+          docker tag notion-knowledge:smoke notion-knowledge:local
+          python3 scripts/smoke-compose.py --prebuilt
+
       # Keep compilation as an export root; a cached final image can skip it.
       - name: Export verified builder root
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository

@@ -190,6 +190,22 @@ to back up SQLite and credentials safely, validate index/SQLite bindings and
 run component recovery checks. Notion stays authoritative. Production full-scope
 recovery remains gated on the outstanding indexing/reconciliation integration.
 
+## Local Docker Compose stack
+
+Start a loopback-only MCP development service with durable named volumes for
+index, state and model data:
+
+```sh
+./scripts/compose-dev.sh up -d --build
+./scripts/compose-dev.sh down
+```
+
+The wrapper resolves the required Docker image version from `Cargo.toml`. The
+current HTTP bootstrap responds to liveness checks but has no configured search
+index, so `/readyz` can return 503. Credentials are optional and must be
+supplied through the ignored `.env` file or shell environment. See the
+[Compose setup, safety and smoke test guide](docs/compose.md).
+
 ## Releases
 
 Releases use the root Cargo workspace version and a reviewed changelog. See the
