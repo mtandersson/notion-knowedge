@@ -51,9 +51,7 @@ pub struct Client {
 }
 impl Client {
     pub fn new(client_id: &str, redirect_uri: &str, resource: &str) -> Result<Self, Error> {
-        if !opaque_identifier(client_id, 1, 128)
-            || !https_url(redirect_uri)
-            || !https_url(resource)
+        if !opaque_identifier(client_id, 1, 128) || !https_url(redirect_uri) || !https_url(resource)
         {
             return Err(Error::InvalidRequest);
         }
@@ -94,9 +92,7 @@ pub struct AllowedNotionIdentity {
 }
 impl AllowedNotionIdentity {
     pub fn new(workspace_id: &str, owner_user_id: &str) -> Result<Self, Error> {
-        if !opaque_identifier(workspace_id, 1, 128)
-            || !opaque_identifier(owner_user_id, 1, 128)
-        {
+        if !opaque_identifier(workspace_id, 1, 128) || !opaque_identifier(owner_user_id, 1, 128) {
             return Err(Error::InvalidRequest);
         }
         Ok(Self {
@@ -261,7 +257,10 @@ impl AuthorizationFlow {
             return Err(Error::InvalidTarget);
         }
         let handle = random_secret()?;
-        let mut records = self.records.lock().map_err(|_| Error::TemporarilyUnavailable)?;
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| Error::TemporarilyUnavailable)?;
         records.sweep(now);
         if records.pending.len() >= PENDING_LIMIT {
             return Err(Error::TemporarilyUnavailable);
@@ -300,7 +299,10 @@ impl AuthorizationFlow {
             return Err(Error::AccessDenied);
         }
         let code = random_secret()?;
-        let mut records = self.records.lock().map_err(|_| Error::TemporarilyUnavailable)?;
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| Error::TemporarilyUnavailable)?;
         records.sweep(now);
         let Some(pending) = records.pending.remove(&digest(transaction)) else {
             return Err(Error::InvalidGrant);
@@ -353,7 +355,10 @@ impl AuthorizationFlow {
         if request.resource != self.client.resource {
             return Err(Error::InvalidTarget);
         }
-        let mut records = self.records.lock().map_err(|_| Error::TemporarilyUnavailable)?;
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| Error::TemporarilyUnavailable)?;
         records.sweep(now);
         // Consume atomically, even after an incorrect verifier. This prevents
         // unlimited brute-force attempts and replay by parallel callers.
@@ -441,8 +446,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 fn base64_url(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let a = chunk[0];
@@ -529,7 +533,9 @@ mod tests {
         assert_eq!(redirect.state, STATE);
         assert_eq!(redirect.redirect_uri, REDIRECT);
         assert_ne!(redirect.code.expose(), start.expose());
-        let token = flow.redeem(&exchange(redirect.code.expose()), &grant()).unwrap();
+        let token = flow
+            .redeem(&exchange(redirect.code.expose()), &grant())
+            .unwrap();
         assert_eq!(token.token_type, "Bearer");
         assert_eq!(token.expires_in, 600);
         assert_eq!(token.scope, "knowledge:read");
@@ -547,15 +553,42 @@ mod tests {
     fn all_authorization_inputs_are_bound_and_no_plain_pkce() {
         let flow = flow();
         for invalid in [
-            AuthorizationRequest { response_type: "token", ..authorization() },
-            AuthorizationRequest { client_id: "wrong", ..authorization() },
-            AuthorizationRequest { redirect_uri: "https://attacker.example.com/cb", ..authorization() },
-            AuthorizationRequest { resource: "https://wrong.example.com/mcp", ..authorization() },
-            AuthorizationRequest { state: "tiny", ..authorization() },
-            AuthorizationRequest { code_challenge_method: "plain", ..authorization() },
-            AuthorizationRequest { code_challenge_method: "", ..authorization() },
-            AuthorizationRequest { code_challenge: "?", ..authorization() },
-            AuthorizationRequest { scope: "admin", ..authorization() },
+            AuthorizationRequest {
+                response_type: "token",
+                ..authorization()
+            },
+            AuthorizationRequest {
+                client_id: "wrong",
+                ..authorization()
+            },
+            AuthorizationRequest {
+                redirect_uri: "https://attacker.example.com/cb",
+                ..authorization()
+            },
+            AuthorizationRequest {
+                resource: "https://wrong.example.com/mcp",
+                ..authorization()
+            },
+            AuthorizationRequest {
+                state: "tiny",
+                ..authorization()
+            },
+            AuthorizationRequest {
+                code_challenge_method: "plain",
+                ..authorization()
+            },
+            AuthorizationRequest {
+                code_challenge_method: "",
+                ..authorization()
+            },
+            AuthorizationRequest {
+                code_challenge: "?",
+                ..authorization()
+            },
+            AuthorizationRequest {
+                scope: "admin",
+                ..authorization()
+            },
         ] {
             assert!(flow.begin(&invalid).is_err());
         }
@@ -568,11 +601,23 @@ mod tests {
     fn grant_allowlist_is_mandatory_before_code_and_at_exchange() {
         let flow = flow();
         let pending = flow.begin(&authorization()).unwrap();
-        let wrong_user = ApprovedNotionGrant { owner_user_id: "attacker", ..grant() };
-        let wrong_workspace = ApprovedNotionGrant { workspace_id: "attacker", ..grant() };
-        let invalid_owner = ApprovedNotionGrant { owner_type: "bot", ..grant() };
+        let wrong_user = ApprovedNotionGrant {
+            owner_user_id: "attacker",
+            ..grant()
+        };
+        let wrong_workspace = ApprovedNotionGrant {
+            workspace_id: "attacker",
+            ..grant()
+        };
+        let invalid_owner = ApprovedNotionGrant {
+            owner_type: "bot",
+            ..grant()
+        };
         for invalid in [&wrong_user, &wrong_workspace, &invalid_owner] {
-            assert!(matches!(flow.approve(pending.expose(), invalid), Err(Error::AccessDenied)));
+            assert!(matches!(
+                flow.approve(pending.expose(), invalid),
+                Err(Error::AccessDenied)
+            ));
         }
         let redirect = flow.approve(pending.expose(), &grant()).unwrap();
         assert!(matches!(
@@ -590,14 +635,29 @@ mod tests {
         let flow = flow();
         let pending = flow.begin(&authorization()).unwrap();
         let redirect = flow.approve(pending.expose(), &grant()).unwrap();
-        let wrong_verifier = TokenRequest { code_verifier: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", ..exchange(redirect.code.expose()) };
-        assert!(matches!(flow.redeem(&wrong_verifier, &grant()), Err(Error::InvalidGrant)));
-        assert!(matches!(flow.redeem(&exchange(redirect.code.expose()), &grant()), Err(Error::InvalidGrant)));
+        let wrong_verifier = TokenRequest {
+            code_verifier: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            ..exchange(redirect.code.expose())
+        };
+        assert!(matches!(
+            flow.redeem(&wrong_verifier, &grant()),
+            Err(Error::InvalidGrant)
+        ));
+        assert!(matches!(
+            flow.redeem(&exchange(redirect.code.expose()), &grant()),
+            Err(Error::InvalidGrant)
+        ));
         let pending = flow.begin(&authorization()).unwrap();
         let redirect = flow.approve(pending.expose(), &grant()).unwrap();
-        let wrong_redirect = TokenRequest { redirect_uri: "https://evil.example.com/", ..exchange(redirect.code.expose()) };
+        let wrong_redirect = TokenRequest {
+            redirect_uri: "https://evil.example.com/",
+            ..exchange(redirect.code.expose())
+        };
         assert!(flow.redeem(&wrong_redirect, &grant()).is_err());
-        assert!(flow.redeem(&exchange(redirect.code.expose()), &grant()).is_err());
+        assert!(
+            flow.redeem(&exchange(redirect.code.expose()), &grant())
+                .is_err()
+        );
     }
 
     #[test]
@@ -610,15 +670,26 @@ mod tests {
             Err(Error::InvalidGrant)
         ));
         let pending = flow.begin_at(&authorization(), now).unwrap();
-        let redirect = flow.approve_at(pending.expose(), &grant(), now + Duration::from_secs(1)).unwrap();
+        let redirect = flow
+            .approve_at(pending.expose(), &grant(), now + Duration::from_secs(1))
+            .unwrap();
         assert!(matches!(
-            flow.redeem_at(&exchange(redirect.code.expose()), &grant(), now + CODE_TTL + Duration::from_secs(1)),
+            flow.redeem_at(
+                &exchange(redirect.code.expose()),
+                &grant(),
+                now + CODE_TTL + Duration::from_secs(1)
+            ),
             Err(Error::InvalidGrant)
         ));
         let pending = flow.begin_at(&authorization(), now).unwrap();
         let redirect = flow.approve_at(pending.expose(), &grant(), now).unwrap();
-        let token = flow.redeem_at(&exchange(redirect.code.expose()), &grant(), now).unwrap();
-        let next_epoch = ApprovedNotionGrant { epoch: 2, ..grant() };
+        let token = flow
+            .redeem_at(&exchange(redirect.code.expose()), &grant(), now)
+            .unwrap();
+        let next_epoch = ApprovedNotionGrant {
+            epoch: 2,
+            ..grant()
+        };
         assert!(!flow.verify_at(token.access_token.expose(), &next_epoch, now));
         assert!(!flow.verify_at(token.access_token.expose(), &grant(), now + ACCESS_TTL));
         assert!(!flow.verify_at("unissued-token", &grant(), now));
@@ -628,12 +699,22 @@ mod tests {
     fn callback_transactions_and_codes_are_single_use_even_under_replay() {
         let authorization_flow = flow();
         let pending = authorization_flow.begin(&authorization()).unwrap();
-        let redirect = authorization_flow.approve(pending.expose(), &grant()).unwrap();
-        assert!(matches!(authorization_flow.approve(pending.expose(), &grant()), Err(Error::InvalidGrant)));
-        let token = authorization_flow.redeem(&exchange(redirect.code.expose()), &grant()).unwrap();
+        let redirect = authorization_flow
+            .approve(pending.expose(), &grant())
+            .unwrap();
+        assert!(matches!(
+            authorization_flow.approve(pending.expose(), &grant()),
+            Err(Error::InvalidGrant)
+        ));
+        let token = authorization_flow
+            .redeem(&exchange(redirect.code.expose()), &grant())
+            .unwrap();
         assert!(authorization_flow.verify(token.access_token.expose(), &grant()));
         let restarted = flow();
         assert!(!restarted.verify(token.access_token.expose(), &grant()));
-        assert!(matches!(restarted.redeem(&exchange(redirect.code.expose()), &grant()), Err(Error::InvalidGrant)));
+        assert!(matches!(
+            restarted.redeem(&exchange(redirect.code.expose()), &grant()),
+            Err(Error::InvalidGrant)
+        ));
     }
 }
