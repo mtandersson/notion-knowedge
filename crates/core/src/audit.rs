@@ -45,6 +45,8 @@ impl AuditTool {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuditOutcome {
+    /// Durable pre-effect intent record; not proof of an external write.
+    Attempted,
     Succeeded,
     Denied,
     Failed,
@@ -55,6 +57,7 @@ pub enum AuditOutcome {
 impl AuditOutcome {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Attempted => "attempted",
             Self::Succeeded => "succeeded",
             Self::Denied => "denied",
             Self::Failed => "failed",
@@ -169,6 +172,7 @@ impl AuditEvent {
                 .as_deref()
                 .is_some_and(|id| !valid_notion_id(id))
             || (file.is_some() && tool != AuditTool::FileAttach)
+            || (outcome == AuditOutcome::Succeeded && target_page_id.is_none())
         {
             return Err(AuditError::InvalidInput);
         }
