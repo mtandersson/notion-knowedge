@@ -181,6 +181,14 @@ HTTP support. See [container build, run and verification instructions](docs/cont
 This bootstrap does not yet load models or process indexes; #104 remains open
 for the adapter integration in #145.
 
+## Releases
+
+Releases use the root Cargo workspace version and a reviewed changelog. See the
+[release/versioning and migration procedure](docs/releasing.md) and
+[CHANGELOG.md](CHANGELOG.md). Draft release notes must disclose MCP tool-schema
+changes and local index/operational-state migration requirements. Validate a
+publication with `python3 scripts/check-release.py --tag vX.Y.Z`.
+
 ## Continuous integration
 
 The permanent GitHub Actions workflow at `.github/workflows/ci.yml` runs on every
