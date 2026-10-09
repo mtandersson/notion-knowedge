@@ -3,9 +3,9 @@
 `retrieval::commit::IndexCommitCoordinator` is the production operational API
 for cooperative local index writers. Schema v6 adds trusted bindings, a random
 durable database identity, generation history and payload-free operation receipts;
-all earlier SQLite tables survive the atomic migration. This API does not yet
-wrap LanceDB: #257 must integrate real prepare/commit, FTS/vector maintenance,
-replay and search checks. #254 and #55 remain open until their children deliver.
+all earlier SQLite tables survive the atomic migration. The guarded local LanceDB adapter now exposes a concrete, opt-in complete-page
+prepare/commit path. #254 and #55 remain open until the end-to-end children are
+verified; legacy callers and downstream composition are not automatically fenced.
 
 ## Trusted authority and serialization
 
@@ -134,3 +134,77 @@ delayed effects, polled observer cancellation, caller runtime drop and lease
 expiry. A killed owning process leaves durable Pending work that replays after
 reopen. These prove the operational coordinator contract; #257 supplies the
 separate actual LanceDB mutation/search acceptance evidence.
+
+## Real guarded LanceDB pages (issue #257)
+
+The `local-lancedb` + Unix `chunks::GuardedChunkTable` API is the **participating**
+writer boundary; `chunks::LanceChunkTable::{upsert,apply_page_diff,create,open,open_with_policy}`
+and direct FTS/vector maintenance remain legacy/uncoordinated and may NOT be
+called concurrently with coordinated writers. The guard is cooperative and
+does not intercept arbitrary LanceDB handles or other process code.
+
+1. Initialize the durable `IndexCommitCoordinator` for the **existing** canonical
+   index directory and trusted `CommitBinding`; obtain the live journal lease.
+   `GuardedChunkTable::bind(index_dir, table_name, embedding, coordinator)`
+   validates the same index and bound table. Do not use a separate database
+   directory or a second coordinator with independent SQLite state.
+2. On first startup call `create_empty(lease, clock)` only if no table exists.
+   For an existing table, call `ensure_startup_indexes(lease, clock)`.
+   Both are owned directory-locked operations and maintain FTS inside that
+   lock. After an initial crawl call `ensure_vector_index(config, lease, clock)`
+   to build/optimize the ANN index under the same guard.
+3. Build an immutable `PageOperation` with trusted action, page, source
+   revision, payload-free hash and checkpoint. Source fetch and full page
+   verification must happen before preparation. Call
+   `prepare_page(provider, operation, complete_chunks)` outside the guard.
+   This pins an actual Lance table version, checks provider/model/vector space
+   and workspace/last-edit metadata, reuses equal-hash vectors, and embeds
+   only new/changed text. Empty `Refresh` snapshots remove obsolete page
+   rows but still checkpoint Present; `Delete` requires a tombstone and
+   empty snapshot.
+4. Call `commit_page(prepared, lease, clock, async_precommit_check)`.
+   The operation-owned cross-process guard reopens the actual current Lance
+   table, validates its exact version (a change requires **repreparation**),
+   rejects chunk-ID collisions with other pages, verifies journal
+   fence/scope/binding, and invokes the async callback after embeddings.
+   Callback must **actually reread** source revision, ancestry and scope and
+   fail with a sanitized `FailureClass` if they changed. The callback cannot
+   establish an atomic Notion snapshot; later upstream edits are handled by
+   reconciliation. A rejected check produces no Lance effects.
+5. Under the **same guard**, the adapter merges complete page membership or
+   deletes the page and awaits lexical FTS and existing vector-index
+   maintenance. Only after these external effects complete can the coordinator
+   atomically checkpoint SQLite and mark its operation receipt Applied.
+   Cancellation of the caller cannot drop the operation-owned lock. If an
+   operation succeeds in Lance but fails at the SQLite checkpoint, re-fetch,
+   revalidate and **prepare again** from the actual current table version,
+   then replay the **same** operation identity under a new live fence.
+   Never replay an old prepared vector/table snapshot blindly.
+
+The `PageOperation` source revision/hash are caller-owned opaque identities.
+The adapter validates structure and persisted state, not the truth of a
+remote source response. An already Applied identical receipt is idempotently
+acknowledged without reexecuting its callback. Callback failures and table
+version conflicts leave a non-Applied receipt for explicit reconciliation.
+
+**Participating writers:** #255 authoritative refresh should prepare from
+current source and use `commit_page` with its final source/ancestry/scope
+callback. #252 lifecycle deletion should prepare a tombstone, confirm
+authoritative absence and commit that empty page under the same API. #242
+periodic reconciliation should replay using new preparation and the current
+journal fence. All must coordinate startup index maintenance and avoid direct
+LanceDB writes. This integration makes the reusable index boundary available;
+it does not claim those downstream orchestrators already use it, nor that
+independently written legacy callers acquire locks.
+
+Test with the real credential-free storage path:
+
+```sh
+nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --test guarded_chunks --locked
+nix develop .#spike --command cargo clippy -p notion-knowledge-retrieval --all-targets --features local-lancedb --locked -- -D warnings
+```
+
+The test suite exercises true LanceDB vector/FTS query results, SQLite
+receipts, failed source checks, stale versions, empty-page deletion, counting
+embeddings, provider mismatch and apply-before-checkpoint replay; subprocess
+serialization must also be verified before #257 can be closed.
