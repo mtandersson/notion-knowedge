@@ -115,7 +115,7 @@ runbook.
 
 ## Cutover decision and rollback
 
-An operator and independent reviewer must check all seven gate groups and the
+An operator and independent reviewer must check all G0–G6 gate groups and the
 full smoke matrix, sign the evidence record, and explicitly authorize the
 client-side change. First preserve a working official connection as the
 fallback during the dual-connector pilot (#114); **only** after G0–G6 pass
