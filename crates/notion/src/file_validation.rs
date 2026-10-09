@@ -185,7 +185,9 @@ fn sanitize_filename(input: &str) -> Result<String, FileValidationError> {
         .trim()
         .chars()
         .map(|ch| {
-            if ch.is_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.') {
+            if !is_bidi_control(ch)
+                && (ch.is_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.'))
+            {
                 ch
             } else {
                 '_'
@@ -323,7 +325,7 @@ mod tests {
             ("animation.gif", "image/gif", GIF),
             ("picture.webp", "image/webp", WEBP),
             ("paper.pdf", "application/pdf", PDF),
-            ("notes.txt", "text/plain; charset=utf-8", b"hej\nvärlden".as_slice()),
+            ("notes.txt", "text/plain; charset=utf-8", "hej\nvärlden".as_bytes()),
             ("notes.md", "text/markdown", b"# Header".as_slice()),
             ("notes.markdown", "text/markdown", b"hej".as_slice()),
             ("data.csv", "text/csv", b"name,value\nhej,1".as_slice()),
@@ -414,7 +416,9 @@ mod tests {
         let policy = FileValidationPolicy::default();
         for filename in ["", "../", ".pdf", "no_extension", "secret.txt.exe", "bad\0name.txt"] {
             let error = policy.validate(filename, "text/plain", b"safe").unwrap_err();
-            assert!(!error.to_string().contains(filename));
+            if !filename.is_empty() {
+                assert!(!error.to_string().contains(filename));
+            }
         }
     }
 
