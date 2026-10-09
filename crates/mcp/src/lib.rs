@@ -125,6 +125,7 @@ impl KnowledgeServer {
 
 pub mod get;
 pub mod search;
+pub mod upload;
 
 impl ServerHandler for KnowledgeServer {
     async fn list_tools(
@@ -133,7 +134,7 @@ impl ServerHandler for KnowledgeServer {
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
         Ok(rmcp::model::ListToolsResult {
-            tools: vec![search::tool(), get::tool()],
+            tools: vec![search::tool(), get::tool(), upload::tool()],
             ..Default::default()
         })
     }
@@ -142,6 +143,7 @@ impl ServerHandler for KnowledgeServer {
         match name {
             "knowledge_search" => Some(search::tool()),
             "knowledge_get" => Some(get::tool()),
+            "knowledge_upload_file" => Some(upload::tool()),
             _ => None,
         }
     }
@@ -158,6 +160,21 @@ impl ServerHandler for KnowledgeServer {
         };
 
         match request.name.as_ref() {
+            "knowledge_upload_file" => {
+                let input: upload::UploadFileRequest =
+                    serde_json::from_value(serde_json::Value::Object(arguments)).map_err(|_| {
+                        rmcp::ErrorData::invalid_params(
+                            "invalid knowledge_upload_file arguments",
+                            None,
+                        )
+                    })?;
+                input
+                    .validate()
+                    .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
+                Ok(error(
+                    "file_upload_unavailable: file input accepted but Notion ingestion is not configured; no download or upload was attempted",
+                ))
+            }
             "knowledge_search" => {
                 let input: search::SearchRequest =
                     serde_json::from_value(serde_json::Value::Object(arguments)).map_err(|_| {
