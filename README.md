@@ -81,7 +81,9 @@ The HTTP listener validates Host against loopback names and the configured IP,
 and validates browser Origin against the configured HTTP authority or localhost
 at the configured port. Clients without Origin are accepted. For remote access,
 place this listener behind a trusted HTTPS proxy; public hostname routing and
-MCP authentication are separate deployment work.
+MCP authentication are separate deployment work. The [OAuth trust and single-identity
+binding design](docs/oauth-trust-model.md) defines the planned ChatGPT/MCP and
+MCP/Notion authorization boundaries; it is **not implemented** in this bootstrap.
 
 For MCP Inspector-style clients, build the binary with
 `cargo build -p notion-knowledge-server` and configure the stdio command as the
