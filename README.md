@@ -169,6 +169,8 @@ cargo build --workspace --release --locked
 
 ## Diagnostics
 
+Operator-facing error messages pass through [central diagnostic redaction](docs/log-redaction.md) to mask bearer credentials, known configured secrets and whole HTTP(S) URLs (including signed file links). This is a safety net, not a reason to log raw private data.
+
 Use `--version` for the Cargo release identity, `--diagnostics` for a one-shot
 composition report, and HTTP `GET /health` for current serving-process dependency
 health. The bootstrap reports unavailable adapters honestly (HTTP 503). See
