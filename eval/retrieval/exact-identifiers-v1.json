@@ -1,0 +1,320 @@
+{
+  "schema_version": 1,
+  "dataset_id": "exact-identifier-fixtures-v1",
+  "as_of": "2026-03-02",
+  "provenance": "Hand-authored fictional near-neighbor examples for exact lexical/identifier regression; no private Notion content.",
+  "pages": [
+    {
+      "id": "fixture:page:inventory-zx9q42",
+      "title": "Inventory Batch ZX9Q42",
+      "language": "en",
+      "status": "active",
+      "updated_at": "2026-02-10",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:inventory-zx9q42:main",
+          "text": "Inventory key ZX9Q42 was checked in the equipment room."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:inventory-zx9q43",
+      "title": "Inventory Batch ZX9Q43",
+      "language": "en",
+      "status": "active",
+      "updated_at": "2026-02-10",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:inventory-zx9q43:main",
+          "text": "Inventory key ZX9Q43 was checked in the equipment room."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:service-lm2026r17",
+      "title": "Service Note LM2026R17",
+      "language": "en",
+      "status": "active",
+      "updated_at": "2026-02-10",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:service-lm2026r17:main",
+          "text": "Service record LM2026R17 has a completed inspection."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:service-lm2026r18",
+      "title": "Service Note LM2026R18",
+      "language": "en",
+      "status": "active",
+      "updated_at": "2026-02-10",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:service-lm2026r18:main",
+          "text": "Service record LM2026R18 has a completed inspection."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:report-bergstrom",
+      "title": "Årsrapport Bergström 2026",
+      "language": "sv",
+      "status": "active",
+      "updated_at": "2026-02-10",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:report-bergstrom:main",
+          "text": "Bergström reviewed the Swedish annual report for 2026."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:report-bergstrom-ascii",
+      "title": "Arsrapport Bergstrom 2025",
+      "language": "en",
+      "status": "active",
+      "updated_at": "2026-02-10",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:report-bergstrom-ascii:main",
+          "text": "Bergstrom reviewed the earlier English report in 2025."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:helios-42b",
+      "title": "Project Helios 42B",
+      "language": "en",
+      "status": "active",
+      "updated_at": "2026-02-10",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:helios-42b:main",
+          "text": "Sprint 42B in Project Helios has an approved release note."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:helios-42a",
+      "title": "Project Helios 42A",
+      "language": "en",
+      "status": "active",
+      "updated_at": "2026-02-10",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:helios-42a:main",
+          "text": "Sprint 42A in Project Helios has an earlier release note."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:storage-september",
+      "title": "Förrådsinventering September",
+      "language": "sv",
+      "status": "active",
+      "updated_at": "2026-02-10",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:storage-september:main",
+          "text": "September inventory of the storage room lists spare lamps."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:storage-august",
+      "title": "Förrådsinventering Augusti",
+      "language": "sv",
+      "status": "active",
+      "updated_at": "2026-02-10",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:storage-august:main",
+          "text": "August inventory of the storage room lists spare batteries."
+        }
+      ]
+    }
+  ],
+  "queries": [
+    {
+      "id": "chunk-id-en",
+      "language": "en",
+      "category": "exact_name",
+      "text": "fixture:chunk:inventory-zx9q42:main",
+      "intent": "Raw chunk ID with colons, hyphen and digits",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:inventory-zx9q42:main",
+          "grade": 3,
+          "rationale": "The exact identifier or title refers to inventory-zx9q42, not its close distractor."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:inventory-zx9q43:main"
+      ]
+    },
+    {
+      "id": "page-id-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "text": "fixture:page:service-lm2026r17",
+      "intent": "Raw page ID must not match its near-neighbor",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:service-lm2026r17:main",
+          "grade": 3,
+          "rationale": "The exact identifier or title refers to service-lm2026r17, not its close distractor."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:service-lm2026r18:main"
+      ]
+    },
+    {
+      "id": "mixed-id-en",
+      "language": "en",
+      "category": "exact_name",
+      "text": "ZX9Q42",
+      "intent": "Mixed letter/digit exact inventory key",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:inventory-zx9q42:main",
+          "grade": 3,
+          "rationale": "The exact identifier or title refers to inventory-zx9q42, not its close distractor."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:inventory-zx9q43:main"
+      ]
+    },
+    {
+      "id": "mixed-case-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "text": "zx9q42",
+      "intent": "Lowercase query for uppercase alphanumeric inventory key",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:inventory-zx9q42:main",
+          "grade": 3,
+          "rationale": "The exact identifier or title refers to inventory-zx9q42, not its close distractor."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:inventory-zx9q43:main"
+      ]
+    },
+    {
+      "id": "service-code-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "text": "LM2026R17",
+      "intent": "Similar service codes differing in final digit",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:service-lm2026r17:main",
+          "grade": 3,
+          "rationale": "The exact identifier or title refers to service-lm2026r17, not its close distractor."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:service-lm2026r18:main"
+      ]
+    },
+    {
+      "id": "name-umlaut-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "text": "Bergström",
+      "intent": "Swedish family name with ö against ASCII look-alike",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:report-bergstrom:main",
+          "grade": 3,
+          "rationale": "The exact identifier or title refers to report-bergstrom, not its close distractor."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:report-bergstrom-ascii:main"
+      ]
+    },
+    {
+      "id": "report-title-en",
+      "language": "en",
+      "category": "exact_name",
+      "text": "Årsrapport Bergström 2026",
+      "intent": "Swedish title in an English-language query context",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:report-bergstrom:main",
+          "grade": 3,
+          "rationale": "The exact identifier or title refers to report-bergstrom, not its close distractor."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:report-bergstrom-ascii:main"
+      ]
+    },
+    {
+      "id": "sprint-en",
+      "language": "en",
+      "category": "exact_name",
+      "text": "Sprint 42B",
+      "intent": "Mixed number/letter sprint identifier in content",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:helios-42b:main",
+          "grade": 3,
+          "rationale": "The exact identifier or title refers to helios-42b, not its close distractor."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:helios-42a:main"
+      ]
+    },
+    {
+      "id": "sprint-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "text": "Project Helios 42B",
+      "intent": "Title with number-letter discriminator",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:helios-42b:main",
+          "grade": 3,
+          "rationale": "The exact identifier or title refers to helios-42b, not its close distractor."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:helios-42a:main"
+      ]
+    },
+    {
+      "id": "month-title-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "text": "Förrådsinventering September",
+      "intent": "Swedish compound title with neighboring month",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:storage-september:main",
+          "grade": 3,
+          "rationale": "The exact identifier or title refers to storage-september, not its close distractor."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:storage-august:main"
+      ]
+    }
+  ]
+}
