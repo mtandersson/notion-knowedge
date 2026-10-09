@@ -46,7 +46,9 @@ fn boundary_before(text: &str, at: usize) -> bool {
 fn opaque_end(text: &str, from: usize) -> usize {
     text[from..]
         .char_indices()
-        .find(|(_, ch)| ch.is_whitespace() || matches!(ch, '"' | '\'' | '<' | '>' | ',' | ';' | ')' | '}' | ']'))
+        .find(|(_, ch)| {
+            ch.is_whitespace() || matches!(ch, '"' | '\'' | '<' | '>' | ',' | ';' | ')' | '}' | ']')
+        })
         .map_or(text.len(), |(offset, _)| from + offset)
 }
 
@@ -115,17 +117,33 @@ pub fn redact_with_secrets(message: &str, secrets: &[&str]) -> String {
                 }
                 let mut cursor = index + key.len();
                 // Accept JSON's quoted key: "access_token": "...".
-                if clean.as_bytes().get(cursor).is_some_and(|b| *b == b'"' || *b == b'\'') {
+                if clean
+                    .as_bytes()
+                    .get(cursor)
+                    .is_some_and(|b| *b == b'"' || *b == b'\'')
+                {
                     cursor += 1;
                 }
-                while clean.as_bytes().get(cursor).is_some_and(u8::is_ascii_whitespace) {
+                while clean
+                    .as_bytes()
+                    .get(cursor)
+                    .is_some_and(u8::is_ascii_whitespace)
+                {
                     cursor += 1;
                 }
-                if !clean.as_bytes().get(cursor).is_some_and(|b| *b == b':' || *b == b'=') {
+                if !clean
+                    .as_bytes()
+                    .get(cursor)
+                    .is_some_and(|b| *b == b':' || *b == b'=')
+                {
                     continue;
                 }
                 cursor += 1;
-                while clean.as_bytes().get(cursor).is_some_and(u8::is_ascii_whitespace) {
+                while clean
+                    .as_bytes()
+                    .get(cursor)
+                    .is_some_and(u8::is_ascii_whitespace)
+                {
                     cursor += 1;
                 }
                 let quote = match clean.as_bytes().get(cursor) {
@@ -201,7 +219,14 @@ mod tests {
         let message = "get https://s3.us-west-2.amazonaws.com/file?id=private&X-Amz-Signature=ABC;other=DEF and https://files.oaiusercontent.com/a/private?token=hello failed";
         let cleaned = redact(message);
         assert!(cleaned.contains("[REDACTED_URL]"));
-        for secret in ["private", "ABC", "DEF", "hello", "s3.us-west", "files.oaiusercontent"] {
+        for secret in [
+            "private",
+            "ABC",
+            "DEF",
+            "hello",
+            "s3.us-west",
+            "files.oaiusercontent",
+        ] {
             assert!(!cleaned.contains(secret), "{secret} leaked");
         }
     }
@@ -238,7 +263,10 @@ mod tests {
 
     #[test]
     fn ordinary_errors_and_unicode_survive() {
-        assert_eq!(redact("Timeout för sidan: försök igen"), "Timeout för sidan: försök igen");
+        assert_eq!(
+            redact("Timeout för sidan: försök igen"),
+            "Timeout för sidan: försök igen"
+        );
         assert_eq!(redact("tool failed: code 503"), "tool failed: code 503");
     }
 
