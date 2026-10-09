@@ -224,6 +224,6 @@ mod tests {
         );
         let output = redact_for_log(&"x".repeat(5000));
         assert!(output.ends_with("[TRUNCATED]"));
-        assert!(output.len() <= 4100);
+        assert_eq!(output.len(), 4096 + "[TRUNCATED]".len());
     }
 }
