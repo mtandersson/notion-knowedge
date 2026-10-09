@@ -83,7 +83,10 @@ async fn open_current(
     let table = database.open_table(table_name).execute().await?;
     // Keep the reopened handle writable. Only preparation pins a read snapshot.
     validate_table_schema(&table, embedding).await?;
-    Ok(LanceChunkTable { table, embedding: embedding.clone() })
+    Ok(LanceChunkTable {
+        table,
+        embedding: embedding.clone(),
+    })
 }
 
 impl GuardedChunkTable {
@@ -208,11 +211,14 @@ impl GuardedChunkTable {
         validate_page_snapshot(page_id, chunks)?;
         if chunks.iter().any(|chunk| {
             chunk.metadata.source.workspace_id != self.coordinator.binding().workspace()
-                || operation.checkpoint().last_edited_time().is_some_and(
-                    |revision| chunk.metadata.last_edited_time != revision
-                )
+                || operation
+                    .checkpoint()
+                    .last_edited_time()
+                    .is_some_and(|revision| chunk.metadata.last_edited_time != revision)
         }) {
-            return Err(ChunkTableError::InvalidRows("source snapshot identity mismatch".into()));
+            return Err(ChunkTableError::InvalidRows(
+                "source snapshot identity mismatch".into(),
+            ));
         }
         let snapshot = open_current(&self.index_directory, &self.table_name, &self.embedding)
             .await?
