@@ -48,7 +48,9 @@ This is a cooperative orchestration lease, not automatic isolation of arbitrary
 LanceDB or existing `SyncStateStore` callers. Future webhook writers, index rebuilds
 and reconciliation must acquire this same global lease and revalidate the actual
 index generation against the scope before resume and each external mutation.
-They must also hold an external commit fence/serialization guard through the
+The [owned index commit coordinator](index-commits.md) now supplies the external
+serialization guard and trusted binding API; concrete LanceDB integration remains
+#257. They must hold that guard through the
 index write: expiry cannot cancel a write already in flight in another database.
 The journal rejects stale acknowledgments, but cannot undo that external write.
 The runner must stop applying when renewal or generation validation fails.

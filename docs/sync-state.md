@@ -37,6 +37,9 @@ Schema version 1 contains:
 Schema v2 adds the [reconciliation journal](reconciliation-journal.md).
 Schema v3 adds `webhook_inbox`: minimized authenticated hints plus durable
 processing state and claim generations. See [webhook semantics](notion-webhooks.md).
+Schema v4 adds bounded webhook recovery and v5 adds durable per-page debounce.
+Schema v6 adds the [owned commit coordinator](index-commits.md), trusted index
+bindings, database identity, generation history and page operation receipts.
 No Notion page body, raw webhook payload, access token, or credential is stored.
 
 ## Atomicity and deduplication
@@ -64,6 +67,14 @@ authoritative reconciliation before an intentional rebuild:
 1. stop users of the store;
 2. delete the SQLite database and its sidecar files;
 3. open the configured path again.
+
+A coordinator-bound index also retains its database identity in the index
+directory. A replacement SQLite file cannot claim that existing binding. With
+all writers stopped, explicitly rebuild/reinitialize the index and its binding
+as part of the same trusted recovery plan; do not remove an anchor to bypass
+a mismatch during normal operation. Pending operation receipts can represent
+external effects that already committed, so preserve them for idempotent replay
+or use the explicit supersession policy before changing authority.
 
 Migrations recreate an empty store without contacting Notion. A later sync can
 repopulate page/checkpoint/index state from authoritative or derived sources as

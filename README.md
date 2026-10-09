@@ -328,6 +328,8 @@ local model runtimes.
 
 The [durable reconciliation journal](docs/reconciliation-journal.md) supplies scoped, fenced, resumable operational storage for periodic reconciliation.
 
+The [owned index commit coordinator](docs/index-commits.md) binds trusted local index authority and serializes cancellable callers through durable page checkpoints; concrete LanceDB consumers follow separately.
+
 The [storage pipeline acceptance smoke](docs/storage-pipeline-smoke.md) maps the integrated local persistence, embedding, incremental indexing and recovery contracts to reproducible checks.
 
 The [production LanceDB chunk table](docs/lancedb-chunks.md) persists canonical
