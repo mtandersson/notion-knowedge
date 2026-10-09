@@ -399,7 +399,7 @@ mod tests {
                 .validate("../../my:secret?.PDF", "application/pdf", PDF)
                 .unwrap()
                 .filename,
-            "my_secret_.pdf"
+            "my_secret.pdf"
         );
         assert_eq!(
             policy
