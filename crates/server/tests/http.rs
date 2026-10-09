@@ -85,6 +85,7 @@ async fn http_client_initializes_discovers_calls_and_receives_structured_errors(
         assert_eq!(health, json!({
             "server": {"name":"notion-knowledge", "version":env!("CARGO_PKG_VERSION")},
             "transport":"http", "status":"degraded",
+            "access":{"read_only":true},
             "dependencies":{"notion":"unconfigured", "index":"unavailable"}
         }));
         for url in [&live_url, &ready_url, &health_url] {
