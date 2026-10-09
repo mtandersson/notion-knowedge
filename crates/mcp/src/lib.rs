@@ -140,34 +140,6 @@ impl KnowledgeServer {
 pub mod get;
 pub mod search;
 
-#[cfg(test)]
-mod access_mode_tests {
-    use super::*;
-
-    #[test]
-    fn default_deny_guards_future_mutations_in_both_modes() {
-        let read_only = KnowledgeServer::default();
-        for name in ["knowledge_search", "knowledge_get"] {
-            assert!(read_only.tool_permitted(name));
-            assert!(read_only.get_tool(name).is_some());
-        }
-        for name in [
-            "notion_create_page",
-            "notion_update_page",
-            "notion_delete_page",
-            "notion_upload_file",
-            "future_write",
-        ] {
-            assert!(!read_only.tool_permitted(name));
-            assert!(read_only.get_tool(name).is_none());
-        }
-        let explicitly_writable = read_only.with_read_only(false);
-        assert!(explicitly_writable.tool_permitted("notion_create_page"));
-        // A writable configuration does not magically expose unimplemented tools.
-        assert!(explicitly_writable.get_tool("notion_create_page").is_none());
-    }
-}
-
 impl ServerHandler for KnowledgeServer {
     async fn list_tools(
         &self,
@@ -439,5 +411,33 @@ impl ServerHandler for KnowledgeServer {
                 notion_knowledge_core::VERSION,
             ),
         )
+    }
+}
+
+#[cfg(test)]
+mod access_mode_tests {
+    use super::*;
+
+    #[test]
+    fn default_deny_guards_future_mutations_in_both_modes() {
+        let read_only = KnowledgeServer::default();
+        for name in ["knowledge_search", "knowledge_get"] {
+            assert!(read_only.tool_permitted(name));
+            assert!(read_only.get_tool(name).is_some());
+        }
+        for name in [
+            "notion_create_page",
+            "notion_update_page",
+            "notion_delete_page",
+            "notion_upload_file",
+            "future_write",
+        ] {
+            assert!(!read_only.tool_permitted(name));
+            assert!(read_only.get_tool(name).is_none());
+        }
+        let explicitly_writable = read_only.with_read_only(false);
+        assert!(explicitly_writable.tool_permitted("notion_create_page"));
+        // A writable configuration does not magically expose unimplemented tools.
+        assert!(explicitly_writable.get_tool("notion_create_page").is_none());
     }
 }
