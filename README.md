@@ -181,6 +181,15 @@ HTTP support. See [container build, run and verification instructions](docs/cont
 This bootstrap does not yet load models or process indexes; #104 remains open
 for the adapter integration in #145.
 
+## Local state backup and recovery
+
+Local state contains both disposable retrieval indexes and durable operational
+coordination (queued webhooks, checkpoints and commit receipts). Before any
+restore or rebuild, use the [local-state recovery runbook](docs/local-state-recovery.md)
+to back up SQLite and credentials safely, validate index/SQLite bindings and
+run component recovery checks. Notion stays authoritative. Production full-scope
+recovery remains gated on the outstanding indexing/reconciliation integration.
+
 ## Releases
 
 Releases use the root Cargo workspace version and a reviewed changelog. See the
