@@ -2,12 +2,7 @@
 //! The audit database must live in an operator-restricted directory. It never
 //! accepts arbitrary message text, URLs, request bodies or file contents.
 
-use std::{
-    fs,
-    path::Path,
-    sync::Mutex,
-    time::Duration,
-};
+use std::{fs, path::Path, sync::Mutex, time::Duration};
 
 use notion_knowledge_core::audit::{AuditError, AuditEvent, AuditRetention, AuditStore};
 use rusqlite::{Connection, TransactionBehavior, params};
@@ -38,7 +33,10 @@ impl SqliteAuditStore {
         )
     }
 
-    fn from_connection(connection: Connection, retention: AuditRetention) -> Result<Self, AuditError> {
+    fn from_connection(
+        connection: Connection,
+        retention: AuditRetention,
+    ) -> Result<Self, AuditError> {
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|_| AuditError::Unavailable)?;
@@ -80,7 +78,10 @@ impl AuditStore for SqliteAuditStore {
             .file()
             .map(|file| i64::try_from(file.size_bytes()).map_err(|_| AuditError::InvalidInput))
             .transpose()?;
-        let mut connection = self.connection.lock().map_err(|_| AuditError::Unavailable)?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| AuditError::Unavailable)?;
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| AuditError::Unavailable)?;
@@ -112,7 +113,10 @@ impl AuditStore for SqliteAuditStore {
 
     fn prune(&self, trusted_now_unix: i64) -> Result<u64, AuditError> {
         let cutoff = self.retention.cutoff(trusted_now_unix)?;
-        let connection = self.connection.lock().map_err(|_| AuditError::Unavailable)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| AuditError::Unavailable)?;
         let count = connection
             .execute(
                 "DELETE FROM agent_audit_events WHERE occurred_at_unix <= ?1",
@@ -148,7 +152,9 @@ mod tests {
             .connection
             .lock()
             .unwrap()
-            .query_row("SELECT COUNT(*) FROM agent_audit_events", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM agent_audit_events", [], |row| {
+                row.get(0)
+            })
             .unwrap()
     }
 
@@ -161,17 +167,30 @@ mod tests {
         assert_eq!(count(&store), 1); // previous event expired during append
         assert_eq!(store.prune(300_000), Ok(1));
         assert_eq!(count(&store), 0);
-        assert_eq!(store.record(&event(10), 300_000), Err(AuditError::InvalidInput));
+        assert_eq!(
+            store.record(&event(10), 300_000),
+            Err(AuditError::InvalidInput)
+        );
         assert_eq!(count(&store), 0);
     }
 
     #[test]
     fn never_record_unauditable_or_future_events() {
         let store = SqliteAuditStore::open_in_memory(AuditRetention::default()).unwrap();
-        assert_eq!(store.record(&event(500), 499), Err(AuditError::InvalidInput));
-        let huge = AuditEvent::new(500, AuditActor::Server, AuditTool::FileAttach, None,
-            AuditOutcome::Failed, "request_0123456789abcdef".into(),
-            Some(SafeFileFacts::new(FileKind::Other, u64::MAX))).unwrap();
+        assert_eq!(
+            store.record(&event(500), 499),
+            Err(AuditError::InvalidInput)
+        );
+        let huge = AuditEvent::new(
+            500,
+            AuditActor::Server,
+            AuditTool::FileAttach,
+            None,
+            AuditOutcome::Failed,
+            "request_0123456789abcdef".into(),
+            Some(SafeFileFacts::new(FileKind::Other, u64::MAX)),
+        )
+        .unwrap();
         assert_eq!(store.record(&huge, 501), Err(AuditError::InvalidInput));
         assert_eq!(count(&store), 0);
     }
@@ -179,8 +198,12 @@ mod tests {
     #[test]
     fn persists_across_reopen_without_private_payload_columns() {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let path = std::env::temp_dir().join(format!("nk-audit-{}-{nonce}.sqlite", std::process::id()));
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("nk-audit-{}-{nonce}.sqlite", std::process::id()));
         {
             let store = SqliteAuditStore::open(&path, AuditRetention::default()).unwrap();
             store.record(&event(100), 101).unwrap();
@@ -188,10 +211,17 @@ mod tests {
         {
             let store = SqliteAuditStore::open(&path, AuditRetention::default()).unwrap();
             assert_eq!(count(&store), 1);
-            let names: String = store.connection.lock().unwrap().prepare(
-                "SELECT name FROM pragma_table_info('agent_audit_events') ORDER BY cid"
-            ).unwrap().query_map([], |row| row.get::<_, String>(0)).unwrap()
-            .map(|item| item.unwrap()).collect::<Vec<_>>().join(",");
+            let names: String = store
+                .connection
+                .lock()
+                .unwrap()
+                .prepare("SELECT name FROM pragma_table_info('agent_audit_events') ORDER BY cid")
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .map(|item| item.unwrap())
+                .collect::<Vec<_>>()
+                .join(",");
             assert!(!names.contains("body"));
             assert!(!names.contains("url"));
             assert!(!names.contains("filename"));
