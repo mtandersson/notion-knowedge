@@ -93,7 +93,9 @@ or expanding the allowed roots.
 5. **Write/file and primary cutover:** stay on the official connector until
    relevant upload/write/security features and smoke tests ship. #115 owns
    the final numerical quality, freshness, recovery, file and write
-   acceptance gates and the decision to disable the official connector.\n   See the [explicit go/no-go matrix](cutover-acceptance.md); no gates are\n   claimed as passed until linked evidence has been reviewed.
+   acceptance gates and the decision to disable the official connector.
+   See the [explicit go/no-go matrix](cutover-acceptance.md); no gates are
+   claimed as passed until linked evidence has been reviewed.
    Passing the read-only pilot does **not** authorize that final step.
 
 If a metric cannot be measured, coverage is too sparse, a critical authorization
