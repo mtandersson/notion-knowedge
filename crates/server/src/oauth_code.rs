@@ -195,6 +195,10 @@ impl Records {
 /// never serialize OAuth codes or MCP bearer tokens.
 pub struct Secret(String);
 impl Secret {
+    /// For constructing an outbound redirect URL that must itself be redacted.
+    pub(crate) fn from_internal(value: String) -> Self {
+        Self(value)
+    }
     pub fn expose(&self) -> &str {
         &self.0
     }
@@ -464,7 +468,7 @@ fn base64_url(input: &[u8]) -> String {
     output
 }
 
-fn random_secret() -> Result<Secret, Error> {
+pub(crate) fn random_secret() -> Result<Secret, Error> {
     let mut bytes = [0u8; 32];
     // The supported Linux/macOS service runtime uses the OS CSPRNG.
     // A failed entropy source aborts the operation; never mint a weak token.
