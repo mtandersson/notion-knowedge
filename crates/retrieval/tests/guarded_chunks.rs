@@ -205,7 +205,16 @@ async fn real_guarded_page_updates_reuse_vectors_and_reject_stale_and_source() {
     );
     // Building ANN is also owned by the same directory lock.
     guarded
-        .ensure_vector_index(VectorIndexConfig::default(), f.lease.clone(), clock())
+        .ensure_vector_index(
+            VectorIndexConfig {
+                num_partitions: Some(1),
+                sample_rate: 8,
+                max_iterations: 20,
+                ..VectorIndexConfig::default()
+            },
+            f.lease.clone(),
+            clock(),
+        )
         .await
         .unwrap();
     let table = f.readable().await;
@@ -477,10 +486,16 @@ fn two_process_real_lance_writers_survive_observer_cancellation_and_reject_stale
             .spawn()
             .unwrap()
     };
+    // Both child coordinators must first open their bindings and prepare while
+    // the directory is unlocked. Starting child two after the first holds the
+    // guard would block *initialization*, not just its stale commit.
     let mut first = child("one");
-    wait_for(|| f.root.join("one-entered").exists());
+    wait_for(|| f.root.join("one-prepared").exists());
     let mut second = child("two");
     wait_for(|| f.root.join("two-prepared").exists());
+    fs::write(f.root.join("one-begin"), "").unwrap();
+    wait_for(|| f.root.join("one-entered").exists());
+    fs::write(f.root.join("two-begin"), "").unwrap();
     std::thread::sleep(std::time::Duration::from_millis(150));
     assert!(!f.root.join("two-finished").exists());
     assert!(first.try_wait().unwrap().is_none());
@@ -567,6 +582,8 @@ async fn process_writer_child() {
         .await
         .unwrap();
     if name == "one" {
+        fs::write(root.join("one-prepared"), "").unwrap();
+        wait_for(|| root.join("one-begin").exists());
         let entered = root.join("one-entered");
         let released = root.join("release");
         let observer = table.commit_page(prepared, lease, clock(), move || async move {
@@ -587,6 +604,7 @@ async fn process_writer_child() {
         fs::write(root.join("one-done"), "").unwrap();
     } else {
         fs::write(root.join("two-prepared"), "").unwrap();
+        wait_for(|| root.join("two-begin").exists());
         let result = table
             .commit_page(prepared, lease, clock(), || async { Ok(()) })
             .await;
