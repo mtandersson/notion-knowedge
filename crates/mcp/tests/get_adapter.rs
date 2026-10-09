@@ -579,22 +579,16 @@ async fn successful_fresh_reads_leave_the_subsequent_indexed_snapshot_unchanged(
     );
 }
 
-
 /// Versioned evaluation matrix: a source can change after indexing, but a
 /// fresh authoritative read is never an index update or a fallback to stale
 /// data. These cases execute the real MCP handler against read-only fixtures.
 #[tokio::test]
 async fn versioned_freshness_scenarios_distinguish_stale_content_without_writing_it_back() {
-    let data: Value = serde_json::from_str(include_str!(
-        "../../../eval/retrieval/freshness-v1.json"
-    ))
-    .unwrap();
+    let data: Value =
+        serde_json::from_str(include_str!("../../../eval/retrieval/freshness-v1.json")).unwrap();
     assert_eq!(data["schema_version"], 1);
     assert_eq!(data["dataset_id"], "freshness-fixtures-v1");
-    assert_eq!(
-        data["indexed_last_edited_time"],
-        "2026-10-07T11:00:00Z"
-    );
+    assert_eq!(data["indexed_last_edited_time"], "2026-10-07T11:00:00Z");
 
     let scenarios = data["scenarios"].as_array().unwrap();
     let mut ids = std::collections::BTreeSet::new();
@@ -610,9 +604,7 @@ async fn versioned_freshness_scenarios_distinguish_stale_content_without_writing
             "archived" => FreshBehavior::Archived,
             other => panic!("unknown fresh-source behavior {other}"),
         };
-        let authoritative_time = scenario["authoritative_last_edited_time"]
-            .as_str()
-            .unwrap();
+        let authoritative_time = scenario["authoritative_last_edited_time"].as_str().unwrap();
         let indexed = indexed_fixture(Behavior::Valid);
         let authoritative = fresh_fixture(authoritative_time, behavior);
         let indexed_args = json!({
@@ -640,12 +632,9 @@ async fn versioned_freshness_scenarios_distinguish_stale_content_without_writing
             "fresh" => requested_args["freshness"] = json!("fresh"),
             other => panic!("unknown freshness mode {other}"),
         }
-        let result = exchange_with_backend(
-            indexed.clone(),
-            requested_args,
-            Some(authoritative.clone()),
-        )
-        .await;
+        let result =
+            exchange_with_backend(indexed.clone(), requested_args, Some(authoritative.clone()))
+                .await;
 
         if let Some(error) = scenario["expected_error"].as_str() {
             assert_eq!(result["result"]["isError"], true, "{name}");
@@ -656,8 +645,7 @@ async fn versioned_freshness_scenarios_distinguish_stale_content_without_writing
             let message = result["result"]["content"][0]["text"].as_str().unwrap();
             assert!(message.starts_with(error), "{name}: {message}");
             assert!(
-                !message.contains("Expanded content for page-1")
-                    && !message.contains("Färsk"),
+                !message.contains("Expanded content for page-1") && !message.contains("Färsk"),
                 "{name}: error must not expose source content"
             );
         } else {
@@ -667,13 +655,11 @@ async fn versioned_freshness_scenarios_distinguish_stale_content_without_writing
             );
             let source = &result["result"]["structuredContent"]["sources"][0];
             assert_eq!(
-                source["content_scope"],
-                scenario["expected_content_scope"],
+                source["content_scope"], scenario["expected_content_scope"],
                 "{name}"
             );
             assert_eq!(
-                source["provenance"]["indexed_last_edited_time"],
-                data["indexed_last_edited_time"],
+                source["provenance"]["indexed_last_edited_time"], data["indexed_last_edited_time"],
                 "{name}"
             );
             match scenario["freshness"].as_str().unwrap() {
@@ -685,8 +671,7 @@ async fn versioned_freshness_scenarios_distinguish_stale_content_without_writing
                         "{name}"
                     );
                     assert_eq!(
-                        source["provenance"]["index_stale"],
-                        scenario["expected_index_stale"],
+                        source["provenance"]["index_stale"], scenario["expected_index_stale"],
                         "{name}"
                     );
                 }
@@ -715,15 +700,10 @@ async fn versioned_freshness_scenarios_distinguish_stale_content_without_writing
 
         // A subsequent indexed request must see exactly the same old
         // snapshot, even after successful fresh reads or failed verification.
-        let after = exchange_with_backend(
-            indexed.clone(),
-            indexed_args,
-            Some(authoritative.clone()),
-        )
-        .await;
+        let after =
+            exchange_with_backend(indexed.clone(), indexed_args, Some(authoritative.clone())).await;
         assert_eq!(
-            before["result"]["structuredContent"],
-            after["result"]["structuredContent"],
+            before["result"]["structuredContent"], after["result"]["structuredContent"],
             "{name}: read-only fresh access must never write back"
         );
         assert_eq!(
