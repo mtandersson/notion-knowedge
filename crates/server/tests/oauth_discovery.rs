@@ -84,13 +84,22 @@ async fn generic_oauth_client_discovers_metadata_but_cannot_access_unimplemented
     assert_eq!(server.headers()["cache-control"], "no-store");
     let server: Value = server.json().await.unwrap();
     assert_eq!(server["issuer"], issuer);
-    assert_eq!(server["authorization_endpoint"], format!("{issuer}/authorize"));
+    assert_eq!(
+        server["authorization_endpoint"],
+        format!("{issuer}/authorize")
+    );
     assert_eq!(server["token_endpoint"], format!("{issuer}/token"));
     assert_eq!(server["revocation_endpoint"], format!("{issuer}/revoke"));
     assert_eq!(server["response_types_supported"], json!(["code"]));
-    assert_eq!(server["grant_types_supported"], json!(["authorization_code"]));
+    assert_eq!(
+        server["grant_types_supported"],
+        json!(["authorization_code"])
+    );
     assert_eq!(server["code_challenge_methods_supported"], json!(["S256"]));
-    assert_eq!(server["token_endpoint_auth_methods_supported"], json!(["none"]));
+    assert_eq!(
+        server["token_endpoint_auth_methods_supported"],
+        json!(["none"])
+    );
     assert_eq!(server["protected_resources"], json!([resource]));
 
     // Advertised endpoints are deliberately unavailable, with no success or
@@ -156,11 +165,20 @@ async fn generic_oauth_client_discovers_metadata_but_cannot_access_unimplemented
 #[tokio::test]
 async fn incomplete_or_non_https_discovery_configuration_fails_before_binding() {
     for (issuer, resource) in [
-        (Some("http://auth.example.com"), Some("https://mcp.example.com/mcp")),
+        (
+            Some("http://auth.example.com"),
+            Some("https://mcp.example.com/mcp"),
+        ),
         (Some("https://auth.example.com"), None),
         (None, Some("https://mcp.example.com/mcp")),
-        (Some("https://auth.example.com"), Some("https://other.example.com/private")),
-        (Some("https://auth.example.com#fragment"), Some("https://mcp.example.com/mcp")),
+        (
+            Some("https://auth.example.com"),
+            Some("https://other.example.com/private"),
+        ),
+        (
+            Some("https://auth.example.com#fragment"),
+            Some("https://mcp.example.com/mcp"),
+        ),
     ] {
         let mut child = Command::new(env!("CARGO_BIN_EXE_notion-knowledge-server"));
         child.arg("--check").env_clear();
