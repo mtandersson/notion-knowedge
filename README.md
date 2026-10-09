@@ -97,6 +97,13 @@ It deliberately does **not** mount the public callback route or issue MCP
 tokens until the grant store and resource authorization gates (#123–#129)
 exist. Notion credentials must never be sent to ChatGPT clients.
 
+The [encrypted Notion OAuth grant store](docs/notion-grant-store.md) is an
+opt-in, operator-controlled AES-256-GCM file with a separate 32-byte key file.
+Configure `NK_NOTION_GRANT_KEY_FILE` and `NK_NOTION_GRANT_STATE_FILE` as a
+pair alongside the full callback identity settings. Startup rejects corrupt,
+expired or wrong-owner state rather than enabling login. The store is still
+**not** an active source of MCP authentication or permission.
+
 The HTTP listener validates Host against loopback names and the configured IP,
 and validates browser Origin against the configured HTTP authority or localhost
 at the configured port. Clients without Origin are accepted. For remote access,
