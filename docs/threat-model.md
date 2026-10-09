@@ -125,7 +125,7 @@ not priority labels or a claim that completing one ticket secures the system.
 
 The full target authentication chain is defined in [oauth-trust-model.md](oauth-trust-model.md).
 It does **not** describe shipped controls. Notion's OAuth token response must
-identify the explicitly configured **both** `workspace_id` and `owner.user.id`;
+identify **both** the explicitly configured `workspace_id` and `owner.user.id`;
 neither an OAuth callback, email, workspace name, bot ID nor the first login may
 enroll or replace the allowed identity. A valid upstream Notion grant is necessary
 but insufficient to authorize a ChatGPT MCP token. MCP tokens have their own
