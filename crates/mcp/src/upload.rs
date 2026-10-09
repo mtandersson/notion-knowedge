@@ -145,7 +145,7 @@ mod tests {
         }
         let invalid: UploadFileRequest = serde_json::from_value(json!({
             "file": {
-                "download_url": "https://files.example.test/\\nsecret",
+                "download_url": "https://files.example.test/\nsecret",
                 "file_id": "file_abc"
             }
         }))
