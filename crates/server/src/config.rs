@@ -78,10 +78,16 @@ impl Config {
                     .map_err(|key| invalid(key, "must be a canonical HTTPS origin/resource"))?,
             ),
             (None, Some(_)) => {
-                return Err(invalid("NK_OAUTH_ISSUER", "required with NK_OAUTH_RESOURCE"));
+                return Err(invalid(
+                    "NK_OAUTH_ISSUER",
+                    "required with NK_OAUTH_RESOURCE",
+                ));
             }
             (Some(_), None) => {
-                return Err(invalid("NK_OAUTH_RESOURCE", "required with NK_OAUTH_ISSUER"));
+                return Err(invalid(
+                    "NK_OAUTH_RESOURCE",
+                    "required with NK_OAUTH_ISSUER",
+                ));
             }
         };
         let notion_auth = match optional(&mut lookup, "NK_NOTION_AUTH", "none")?.as_str() {
