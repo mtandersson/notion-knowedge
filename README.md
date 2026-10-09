@@ -200,6 +200,14 @@ configured retrieval, and its staged write/file primitives are not MCP tools.
 The playbook includes a documented **non-sensitive** operational smoke checklist
 and distinguishes pilot targets from demonstrated results.
 
+## Backup and recovery
+
+Operational SQLite processing state must be backed up consistently; LanceDB
+retrieval indexes are derived and rebuildable from Notion. Restoring a
+coordinator-bound SQLite/index pair requires trusted identity and filesystem
+binding validation. See the [backup and recovery runbook](docs/backup-recovery.md)
+for a fail-closed operator procedure and credential-free smoke tests.
+
 ## Continuous integration
 
 The permanent GitHub Actions workflow at `.github/workflows/ci.yml` runs on every
