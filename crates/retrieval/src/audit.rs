@@ -23,6 +23,12 @@ impl SqliteAuditStore {
             fs::create_dir_all(parent).map_err(|_| AuditError::Unavailable)?;
         }
         let connection = Connection::open(path).map_err(|_| AuditError::Unavailable)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                .map_err(|_| AuditError::Unavailable)?;
+        }
         Self::from_connection(connection, retention)
     }
 
@@ -50,7 +56,7 @@ impl SqliteAuditStore {
                      tool TEXT NOT NULL CHECK(tool IN (
                          'page_create','page_append','page_replace','page_delete','page_move','file_attach')),
                      target_page_id TEXT,
-                     outcome TEXT NOT NULL CHECK(outcome IN ('succeeded','denied','failed','indeterminate')),
+                     outcome TEXT NOT NULL CHECK(outcome IN ('attempted','succeeded','denied','failed','indeterminate')),
                      correlation_id TEXT NOT NULL,
                      file_kind TEXT CHECK(file_kind IS NULL OR file_kind IN ('image','other')),
                      file_size_bytes INTEGER CHECK(file_size_bytes IS NULL OR file_size_bytes >= 0),
