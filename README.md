@@ -249,6 +249,13 @@ configured retrieval, and its staged write/file primitives are not MCP tools.
 The playbook includes a documented **non-sensitive** operational smoke checklist
 and distinguishes pilot targets from demonstrated results.
 
+## ChatGPT file input
+
+The staged [`knowledge_upload_file` single-file input contract](docs/chatgpt-file-parameters.md)
+advertises `_meta["openai/fileParams"]` and accepts ChatGPT file references without
+Drive staging. It deliberately returns `file_upload_unavailable` until secure
+download, scope authorization and native Notion attachment are implemented.
+
 ## Continuous integration
 
 The permanent GitHub Actions workflow at `.github/workflows/ci.yml` runs on every

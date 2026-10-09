@@ -27,10 +27,22 @@ def require(condition, message):
 
 def search_catalog(value):
     tools = value.get("tools", [])
-    require(len(tools) == 2, "Tool discovery failed")
+    names = [tool.get("name") for tool in tools]
+    require(len(names) == len(set(names)), "Duplicate MCP tool names")
     search = next((tool for tool in tools if tool.get("name") == "knowledge_search"), None)
     get = next((tool for tool in tools if tool.get("name") == "knowledge_get"), None)
-    require(search is not None and get is not None, "Expected knowledge tools missing")
+    upload = next((tool for tool in tools if tool.get("name") == "knowledge_upload_file"), None)
+    require(search is not None and get is not None and upload is not None,
+            "Expected knowledge tools missing")
+    require(upload.get("_meta", {}).get("openai/fileParams") == ["file"],
+            "ChatGPT file parameter descriptor missing")
+    file_input = upload["inputSchema"]["properties"]["file"]
+    require(upload["inputSchema"]["required"] == ["file"], "Top-level file must be required")
+    require(file_input["required"] == ["download_url", "file_id"],
+            "ChatGPT file required properties incorrect")
+    for field in ("download_url", "file_id", "mime_type", "file_name"):
+        require(file_input["properties"][field]["type"] == "string",
+                f"ChatGPT {field} input schema missing")
     require(search["inputSchema"]["properties"]["mode"]["enum"] == ["semantic", "lexical", "hybrid"], "Search modes missing")
     require("score" in search["outputSchema"]["properties"]["results"]["items"]["properties"], "Search scores missing")
     require(get["inputSchema"]["required"] == ["refs", "max_chars"], "knowledge_get inputs missing")
