@@ -19,6 +19,7 @@ const SECRET_KEYS: &[&str] = &[
     "cookie",
     "set-cookie",
     "download_url",
+    "url",
     "signed_url",
     "file_url",
     "code_verifier",
@@ -52,6 +53,15 @@ fn opaque_end(text: &str, from: usize) -> usize {
         .map_or(text.len(), |(offset, _)| from + offset)
 }
 
+fn url_end(text: &str, from: usize) -> usize {
+    text[from..]
+        .char_indices()
+        .find(|(_, ch)| {
+            ch.is_whitespace() || matches!(ch, '"' | '\'' | '<' | '>')
+        })
+        .map_or(text.len(), |(offset, _)| from + offset)
+}
+
 /// Remove URL capabilities, authentication schemes, known secret formats and
 /// sensitive key/value fields, including JSON and header-like representations.
 /// URLs are removed *whole*; retaining their path would leak private file IDs.
@@ -77,10 +87,7 @@ pub fn redact_with_secrets(message: &str, secrets: &[&str]) -> String {
         if starts_with_ci(tail, "https://") || starts_with_ci(tail, "http://") {
             // A URL can contain unescaped & and ;, so only stop at whitespace
             // or a closing string/HTML delimiter; never preserve its query.
-            let end = clean[index..]
-                .char_indices()
-                .find(|(_, ch)| ch.is_whitespace() || matches!(ch, '"' | '\'' | '<' | '>'))
-                .map_or(clean.len(), |(offset, _)| index + offset);
+            let end = url_end(&clean, index);
             output.push_str("[REDACTED_URL]");
             index = end;
             continue;
@@ -165,6 +172,10 @@ pub fn redact_with_secrets(message: &str, secrets: &[&str]) -> String {
                         "Basic ".len()
                     };
                     opaque_end(&clean, cursor + scheme_len)
+                } else if starts_with_ci(&clean[cursor..], "https://")
+                    || starts_with_ci(&clean[cursor..], "http://")
+                {
+                    url_end(&clean, cursor)
                 } else if let Some(quote) = quote {
                     clean[cursor..]
                         .find(quote)
@@ -229,6 +240,16 @@ mod tests {
         ] {
             assert!(!cleaned.contains(secret), "{secret} leaked");
         }
+    }
+
+    #[test]
+    fn unquoted_urls_and_json_escaped_urls_do_not_leak_capabilities() {
+        let message = "download_url=https://files.example.net/private?sig=FIRST;other=SECOND rejected";
+        let clean = redact(message);
+        assert!(!clean.contains("FIRST"));
+        assert!(!clean.contains("SECOND"));
+        let escaped = r#"{"url":"https:\/\/files.example.net\/private?sig=HIDDEN"}"#;
+        assert!(!redact(escaped).contains("HIDDEN"));
     }
 
     #[test]
