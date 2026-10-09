@@ -62,9 +62,23 @@ fn canonical_https(value: &str, required_path: &str) -> bool {
     // Prevent userinfo, encoded delimiters and ambiguously interpreted
     // authorities; this also rejects URL fragments and query strings by the
     // final exact-string comparison.
-    if authority.host().is_empty()
-        || !authority.as_str().bytes().all(|b| {
-            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']')
+    let host = authority.as_str();
+    // Production discovery serves canonical DNS origins on HTTPS/443 only.
+    // No ambiguous explicit port, IPv6 zone, IP literal, userinfo or
+    // noncanonical hostname is allowed.
+    if host != host.to_ascii_lowercase()
+        || !host.contains('.')
+        || host.starts_with('.')
+        || host.ends_with('.')
+        || host.contains("..")
+        || host.parse::<std::net::IpAddr>().is_ok()
+        || !host.split('.').all(|label| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         })
     {
         return false;
