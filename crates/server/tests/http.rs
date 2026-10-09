@@ -162,6 +162,20 @@ async fn http_client_initializes_discovers_calls_and_receives_structured_errors(
         let media = post().body("{").header("content-type", "text/plain")
             .send().await.unwrap();
         assert_eq!(media.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        // Both declared JSON and unsupported media must be bounded before
+        // SDK parsing; oversized failures use a structured, redacted envelope.
+        for media_type in ["application/json", "text/plain"] {
+            let response = post()
+                .header("content-type", media_type)
+                .body(vec![b'x'; 4 * 1024 * 1024 + 1])
+                .send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(body["jsonrpc"], "2.0");
+            assert_eq!(body["id"], Value::Null);
+            assert_eq!(body["error"]["code"], -32000);
+            assert!(!body.to_string().contains("xxx"));
+        }
         let stream = client.get(&url).header("accept", "text/event-stream")
             .header("mcp-session-id", &session)
             .header("mcp-protocol-version", "2025-03-26").send().await.unwrap();
