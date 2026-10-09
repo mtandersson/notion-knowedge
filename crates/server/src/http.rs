@@ -51,7 +51,10 @@ pub async fn serve_with_handler(
             .await
             .map_err(|_| io::Error::other("webhook inbox unavailable"))?
             .map_err(|_| io::Error::other("webhook inbox unavailable"))?;
-            Some(Arc::new(crate::webhook::DurableAdmission(Arc::new(store)))
+            Some(Arc::new(crate::webhook::DurableAdmission(
+                Arc::new(store),
+                settings.webhook_debounce,
+            ))
                 as Arc<dyn notion_knowledge_core::webhook::WebhookAdmission>)
         }
         None => None,

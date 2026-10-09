@@ -252,7 +252,8 @@ only after selecting `NK_NOTION_AUTH=integration`. Keep secret-bearing `.env`
 files out of Git and never put secrets in `.envrc`.
 
 Verified Notion webhooks use a durable SQLite inbox configured with
-`NK_WEBHOOK_STATE_FILE`; see [setup and delivery semantics](docs/notion-webhooks.md).
+`NK_WEBHOOK_STATE_FILE`; page content/property bursts use configurable
+`NK_WEBHOOK_DEBOUNCE_MS` and `NK_WEBHOOK_MAX_DELAY_MS`. See [setup and delivery semantics](docs/notion-webhooks.md).
 
 ## Workspace
 

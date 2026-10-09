@@ -31,7 +31,10 @@ pub enum WebhookConfig {
 
 /// Isolate synchronous SQLite commits from the async HTTP executor. A cancelled
 /// wait cannot roll back a completed receipt; redelivery observes the same row.
-pub struct DurableAdmission(pub Arc<notion_knowledge_retrieval::sync_state::SqliteSyncStateStore>);
+pub struct DurableAdmission(
+    pub Arc<notion_knowledge_retrieval::sync_state::SqliteSyncStateStore>,
+    pub notion_knowledge_core::webhook::DebounceWindow,
+);
 impl WebhookAdmission for DurableAdmission {
     fn admit(
         &self,
@@ -44,13 +47,23 @@ impl WebhookAdmission for DurableAdmission {
                 + '_,
         >,
     > {
-        use notion_knowledge_core::webhook::{AdmissionError, WebhookInbox};
+        use notion_knowledge_core::webhook::{AdmissionError, WebhookDebounce};
         let store = self.0.clone();
+        let window = self.1;
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || store.receive(&event))
-                .await
-                .map_err(|_| AdmissionError::Unavailable)?
-                .map_err(|_| AdmissionError::Unavailable)?;
+            tokio::task::spawn_blocking(move || {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|_| AdmissionError::Unavailable)?;
+                let now_ms =
+                    i64::try_from(now.as_millis()).map_err(|_| AdmissionError::Unavailable)?;
+                store
+                    .receive_debounced(&event, now_ms, window)
+                    .map_err(|_| AdmissionError::Unavailable)
+            })
+            .await
+            .map_err(|_| AdmissionError::Unavailable)?
+            .map_err(|_| AdmissionError::Unavailable)?;
             Ok(())
         })
     }

@@ -7,6 +7,7 @@ pub struct Config {
     pub http_bind: SocketAddr,
     pub notion_auth: NotionAuth,
     pub webhook: crate::webhook::WebhookConfig,
+    pub webhook_debounce: notion_knowledge_core::webhook::DebounceWindow,
     pub webhook_state_file: Option<std::path::PathBuf>,
 }
 
@@ -157,8 +158,39 @@ impl Config {
             } else {
                 None
             };
+        let mut webhook_debounce = notion_knowledge_core::webhook::DebounceWindow::default();
+        for (name, target, maximum) in [
+            (
+                "NK_WEBHOOK_DEBOUNCE_MS",
+                &mut webhook_debounce.quiet_ms,
+                60000,
+            ),
+            (
+                "NK_WEBHOOK_MAX_DELAY_MS",
+                &mut webhook_debounce.max_delay_ms,
+                300000,
+            ),
+        ] {
+            if let Some(value) = lookup(name) {
+                let raw = text(value, name)?;
+                *target = raw
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|n| (1..=maximum).contains(n))
+                    .ok_or_else(|| {
+                        invalid(name, "must be an integer within the documented range")
+                    })?;
+            }
+        }
+        webhook_debounce.validate().map_err(|_| {
+            invalid(
+                "NK_WEBHOOK_MAX_DELAY_MS",
+                "must be at least NK_WEBHOOK_DEBOUNCE_MS",
+            )
+        })?;
         Ok(Self {
             webhook_state_file,
+            webhook_debounce,
             http_bind: SocketAddr::new(host, port),
             notion_auth,
             webhook,
@@ -198,6 +230,37 @@ mod tests {
                 .find(|(name, _)| *name == key)
                 .map(|(_, value)| OsString::from(value))
         })
+    }
+
+    #[test]
+    fn debounce_windows_are_bounded_and_cap_cannot_be_shorter_than_quiet() {
+        let defaults = parse(&[]).unwrap().webhook_debounce;
+        assert_eq!(defaults.quiet_ms, 5000);
+        assert_eq!(defaults.max_delay_ms, 30000);
+        for bad in ["", "0", "60001", "-1", "private-invalid-value"] {
+            let error = parse(&[("NK_WEBHOOK_DEBOUNCE_MS", bad)])
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("NK_WEBHOOK_DEBOUNCE_MS"));
+            if !bad.is_empty() {
+                assert!(!error.contains(bad));
+            }
+        }
+        assert!(
+            parse(&[
+                ("NK_WEBHOOK_DEBOUNCE_MS", "60000"),
+                ("NK_WEBHOOK_MAX_DELAY_MS", "59999")
+            ])
+            .is_err()
+        );
+        assert!(parse(&[("NK_WEBHOOK_MAX_DELAY_MS", "300001")]).is_err());
+        let custom = parse(&[
+            ("NK_WEBHOOK_DEBOUNCE_MS", "10"),
+            ("NK_WEBHOOK_MAX_DELAY_MS", "20"),
+        ])
+        .unwrap();
+        assert_eq!(custom.webhook_debounce.quiet_ms, 10);
+        assert_eq!(custom.webhook_debounce.max_delay_ms, 20);
     }
 
     #[test]
