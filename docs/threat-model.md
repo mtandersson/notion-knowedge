@@ -162,6 +162,23 @@ risk: callers may discover an unavailable AS; reverse-proxy HTTPS and the
 actual OAuth authorization implementation remain future work, not a security
 waiver. Record changed routing and testing with #119 and keep #117 open.
 
+## Notion upstream OAuth redirect boundary (2026-10-09, #121)
+
+The [Notion redirect component](notion-oauth-redirect.md) is currently only a
+server-side helper. It binds the fixed Notion `owner=user` authorization URL
+to a separate 256-bit random, short-lived, single-use state and a separately
+validated MCP PKCE pending transaction. The redirect URL does not expose the
+MCP transaction, confidential Notion client secret or any bearer token.
+The exact registered HTTPS callback must match the canonical MCP issuer;
+no browser-driven callback/Host/Forwarded override is permitted.
+Notion's integration permissions are configured out of band, and users select
+shared content at consent; there is no request-scoped elevation of permissions.
+The redirect helper cannot establish the real authorizing Notion identity.
+Until #122 supplies the provider callback, authoritative token exchange,
+allowlisted owner/workspace validation and #123–#129 bind live durable grant
+and MCP sessions, the public auth/token endpoints stay 503 and MCP stays 401.
+Treat callback state and query strings as secrets in future proxy logging.
+
 ## Bounded residual risks and release decision
 
 The documented bootstrap operating envelope accepts local protocol access
