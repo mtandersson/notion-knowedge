@@ -2,6 +2,7 @@ use std::env;
 use std::process::ExitCode;
 
 use notion_knowledge_server::config::Config;
+use notion_knowledge_core::redaction::redact_for_log;
 use rmcp::{ServiceExt, service::QuitReason, transport::stdio};
 
 fn components() -> [&'static str; 4] {
@@ -31,7 +32,7 @@ async fn main() -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(error) => {
-                eprintln!("Webhook operator error: {error}");
+                eprintln!("Webhook operator error: {}", redact_for_log(&error.to_string()));
                 ExitCode::from(2)
             }
         };
@@ -39,14 +40,14 @@ async fn main() -> ExitCode {
     let config = match Config::from_env() {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("Configuration error: {error}");
+            eprintln!("Configuration error: {}", redact_for_log(&error.to_string()));
             return ExitCode::from(2);
         }
     };
     // Never start HTTP, stdio, diagnostics or --check with a corrupt or
     // foreign encrypted Notion grant. A missing state means unapproved.
     if let Err(error) = config.validate_grant_store() {
-        eprintln!("Notion grant state error: {error}");
+        eprintln!("Notion grant state error: {}", redact_for_log(&error.to_string()));
         return ExitCode::from(2);
     }
     let args: Vec<_> = env::args().skip(1).collect();
@@ -55,7 +56,7 @@ async fn main() -> ExitCode {
         {
             Ok(scope) => scope,
             Err(error) => {
-                eprintln!("Invalid discovery scope: {error}.");
+                eprintln!("Invalid discovery scope: {}.", redact_for_log(&error.to_string()));
                 return ExitCode::from(2);
             }
         };
@@ -68,7 +69,7 @@ async fn main() -> ExitCode {
         {
             Ok(client) => client,
             Err(error) => {
-                eprintln!("{error}");
+                eprintln!("{}", redact_for_log(&error.to_string()));
                 return ExitCode::FAILURE;
             }
         };
@@ -145,7 +146,7 @@ async fn main() -> ExitCode {
         return match notion_knowledge_server::http::serve(config).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                eprintln!("MCP HTTP service failed: {error}");
+                eprintln!("MCP HTTP service failed: {}", redact_for_log(&error.to_string()));
                 ExitCode::FAILURE
             }
         };
