@@ -144,13 +144,12 @@ fn parse_mime(declared: &str) -> Result<Kind, FileValidationError> {
     let mut parts = declared.trim().split(';');
     let name = parts.next().unwrap_or("").trim().to_ascii_lowercase();
     let kind = Kind::from_mime(&name).ok_or(FileValidationError::UnsupportedMime)?;
-    if let Some(parameter) = parts.next() {
-        if !matches!(kind, Kind::Text | Kind::Markdown | Kind::Csv)
+    if let Some(parameter) = parts.next()
+        && (!matches!(kind, Kind::Text | Kind::Markdown | Kind::Csv)
             || !parameter.trim().eq_ignore_ascii_case("charset=utf-8")
-            || parts.next().is_some()
-        {
-            return Err(FileValidationError::UnsupportedMime);
-        }
+            || parts.next().is_some())
+    {
+        return Err(FileValidationError::UnsupportedMime);
     }
     Ok(kind)
 }
