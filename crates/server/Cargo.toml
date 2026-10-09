@@ -18,6 +18,8 @@ serde = { version = "1", features = ["derive"] }
 hmac = "0.12"
 tempfile = "3"
 sha2 = "0.10"
+base64 = "0.22"
+getrandom = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [dev-dependencies]
