@@ -153,7 +153,7 @@ pub fn redact_with_secrets(message: &str, secrets: &[&str]) -> String {
                 {
                     cursor += 1;
                 }
-                let quote = match clean.as_bytes().get(cursor) {
+                let quote = match clean.as_bytes().get(cursor).copied() {
                     Some(b'"') => Some('"'),
                     Some(b'\'') => Some('\''),
                     _ => None,
