@@ -37,6 +37,7 @@ impl SemanticSearch for Fixture {
                 4 => hits[0].text =
                     "åäö😀 See [file](https://files.example/path?X-%41mz-Signature=secret) after"
                         .into(),
+                5 => hits[0].source.title = "private-metadata".repeat(50_000),
                 _ => {}
             }
             Ok(hits)
@@ -521,4 +522,21 @@ async fn unsupported_metadata_filters_fail_before_any_adapter_call() {
         false
     );
     assert_eq!(schema["properties"]["filters"]["properties"]["metadata"]["properties"]["properties"]["items"]["oneOf"].as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn search_rejects_oversized_citation_metadata_without_exposing_content() {
+    let adapter = Arc::new(Fixture {
+        calls: Mutex::new(vec![]),
+        fail: false,
+        invalid_output: 5,
+    });
+    let response = exchange(
+        adapter,
+        json!({"query":"bounded","limit":1,"mode":"semantic"}),
+    ).await;
+    assert_eq!(response["result"]["isError"], true);
+    assert!(response["result"]["structuredContent"].is_null());
+    assert!(response["result"]["content"][0]["text"].as_str().unwrap().starts_with("result_too_large:"));
+    assert!(!response.to_string().contains("private-metadata"));
 }
