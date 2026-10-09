@@ -24,6 +24,7 @@ pub struct KnowledgeServer {
     root_page_ids: Arc<[String]>,
     snippet_chars: usize,
     fresh_source: Option<Arc<dyn notion_knowledge_core::backend::NotionRead>>,
+    write_design_preview: bool,
 }
 
 impl Default for KnowledgeServer {
@@ -31,6 +32,7 @@ impl Default for KnowledgeServer {
         Self {
             snippet_chars: 2000,
             fresh_source: None,
+            write_design_preview: false,
             search: None,
             hybrid_search: None,
             lexical_search: None,
@@ -41,6 +43,22 @@ impl Default for KnowledgeServer {
 }
 
 impl KnowledgeServer {
+    /// Opt-in schema-preview for development tests only. No mutation backend is
+    /// configured: every preview write call fails without touching Notion.
+    pub fn with_write_design_preview(mut self) -> Self {
+        self.write_design_preview = true;
+        self
+    }
+
+    /// Shared discovery catalog for both MCP transport implementations.
+    pub fn tool_catalog(&self) -> Vec<rmcp::model::Tool> {
+        let mut catalog = vec![search::tool(), get::tool()];
+        if self.write_design_preview {
+            catalog.extend(write_contract::tools());
+        }
+        catalog
+    }
+
     /// Configure read-only authoritative Notion access for explicit fresh get calls.
     pub fn and_fresh_source(
         mut self,
@@ -125,6 +143,7 @@ impl KnowledgeServer {
 
 pub mod get;
 pub mod search;
+pub mod write_contract;
 
 impl ServerHandler for KnowledgeServer {
     async fn list_tools(
@@ -133,7 +152,7 @@ impl ServerHandler for KnowledgeServer {
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
         Ok(rmcp::model::ListToolsResult {
-            tools: vec![search::tool(), get::tool()],
+            tools: self.tool_catalog(),
             ..Default::default()
         })
     }
@@ -142,6 +161,7 @@ impl ServerHandler for KnowledgeServer {
         match name {
             "knowledge_search" => Some(search::tool()),
             "knowledge_get" => Some(get::tool()),
+            name if self.write_design_preview => write_contract::tool(name),
             _ => None,
         }
     }
@@ -371,6 +391,9 @@ impl ServerHandler for KnowledgeServer {
                         "retrieval_unavailable: source expansion dependency returned invalid output; no content was returned",
                     )),
                 }
+            }
+            name if self.write_design_preview && write_contract::is_planned_write(name) => {
+                Ok(error("workflow_unavailable: semantic write tool is a schema preview; no mutation was attempted"))
             }
             _ => Err(rmcp::ErrorData::invalid_params("unknown tool", None)),
         }
