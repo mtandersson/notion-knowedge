@@ -137,7 +137,17 @@ pub fn redact_with_secrets(message: &str, secrets: &[&str]) -> String {
                     cursor += 1;
                 }
                 // Preserve the field name and delimiters, but never the value.
-                let end = if let Some(quote) = quote {
+                let end = if matches!(*key, "authorization" | "proxy-authorization")
+                    && (starts_with_ci(&clean[cursor..], "Bearer ")
+                        || starts_with_ci(&clean[cursor..], "Basic "))
+                {
+                    let scheme_len = if starts_with_ci(&clean[cursor..], "Bearer ") {
+                        "Bearer ".len()
+                    } else {
+                        "Basic ".len()
+                    };
+                    opaque_end(&clean, cursor + scheme_len)
+                } else if let Some(quote) = quote {
                     clean[cursor..]
                         .find(quote)
                         .map_or(clean.len(), |offset| cursor + offset)
