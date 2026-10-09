@@ -79,6 +79,7 @@ fn one_shot_diagnostics_expose_only_identity_and_honest_dependency_states() {
             serde_json::json!({
                 "server": {"name": "notion-knowledge", "version": env!("CARGO_PKG_VERSION")},
                 "transport": "one-shot", "status": "degraded",
+                "access": {"read_only": true},
                 "dependencies": {"notion": expected, "index": "unavailable"}
             })
         );
