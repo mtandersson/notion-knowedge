@@ -28,7 +28,7 @@ main-only `workflow_dispatch` job receives `issues: write` permissions.
 Using an existing GitHub CLI login with repository **Issues: write** permission:
 
 ```sh
-python3 -m unittest discover -s scripts -p 'test-prune-issue-dependencies.py' -v
+python3 scripts/test-prune-issue-dependencies.py -v
 
 gh auth status
 python3 scripts/prune-issue-dependencies.py --batch A
