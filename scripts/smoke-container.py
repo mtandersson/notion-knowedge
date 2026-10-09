@@ -227,6 +227,7 @@ def http_smoke(image):
             ("/health", 503, {
                 "server": {"name": "notion-knowledge", "version": workspace_version()},
                 "transport": "http", "status": "degraded",
+                "access": {"read_only": True},
                 "dependencies": {"notion": "unconfigured", "index": "unavailable"}}),
         ]:
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
