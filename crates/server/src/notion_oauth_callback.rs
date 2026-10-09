@@ -114,7 +114,8 @@ impl NotionTokenClient {
             "grant_type": "authorization_code",
             "code": code,
             "redirect_uri": self.redirect_uri
-        })).await
+        }))
+        .await
     }
 
     /// Server-only refresh; never send the refresh token to a browser, log or
@@ -127,7 +128,8 @@ impl NotionTokenClient {
         self.token_request(json!({
             "grant_type": "refresh_token",
             "refresh_token": refresh_token
-        })).await
+        }))
+        .await
     }
 
     async fn token_request(&self, params: serde_json::Value) -> Result<NotionGrant, CallbackError> {
