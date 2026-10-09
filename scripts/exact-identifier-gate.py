@@ -99,7 +99,7 @@ def main(argv=None):
     try:
         evidence = evaluate_gate(load_json(args.dataset), load_json(args.report),
                                  args.min_top1, args.min_top3)
-    except (GateError, KeyError, TypeError) as error:
+    except (GateError, KeyError, TypeError, AttributeError) as error:
         print(f"exact-identifier-gate: invalid measurement ({error})", file=sys.stderr)
         return 2
     for mode, result in evidence.items():
