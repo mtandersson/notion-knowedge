@@ -91,9 +91,9 @@ or expanding the allowed roots.
    expected/not-found status and failures without storing private query text.
    These are **proposed migration thresholds**, not measured results.
 5. **Write/file and primary cutover:** stay on the official connector until
-   relevant upload/write/security features and smoke tests ship. #115 owns
+   relevant upload/write/security features and smoke tests ship. [the primary cutover gates](cutover-gates.md) (#115) define
    the final numerical quality, freshness, recovery, file and write
-   acceptance gates and the decision to disable the official connector.
+   acceptance requirements before the official connector may be disabled.
    Passing the read-only pilot does **not** authorize that final step.
 
 If a metric cannot be measured, coverage is too sparse, a critical authorization
