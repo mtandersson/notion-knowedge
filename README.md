@@ -100,9 +100,16 @@ exist. Notion credentials must never be sent to ChatGPT clients.
 The [encrypted Notion OAuth grant store](docs/notion-grant-store.md) is an
 opt-in, operator-controlled AES-256-GCM file with a separate 32-byte key file.
 Configure `NK_NOTION_GRANT_KEY_FILE` and `NK_NOTION_GRANT_STATE_FILE` as a
-pair alongside the full callback identity settings. Startup rejects corrupt,
-expired or wrong-owner state rather than enabling login. The store is still
+pair alongside the full callback identity settings. Startup rejects corrupt or wrong-owner state rather than enabling login;
+expired credentials require refresh before use. The store is still
 **not** an active source of MCP authentication or permission.
+
+[Server-only Notion token refresh](docs/notion-oauth-refresh.md) now uses the
+same confidential Notion client, immutable owner/workspace check and the sealed
+grant store. Calls within a single refresh coordinator serialize renewal,
+atomically rotate both token values, and fail closed on provider or storage
+errors. Multi-process fencing and live MCP token/session revocation are still
+required before enabling remote access.
 
 The HTTP listener validates Host against loopback names and the configured IP,
 and validates browser Origin against the configured HTTP authority or localhost
