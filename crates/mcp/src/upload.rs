@@ -106,8 +106,20 @@ mod tests {
     #[test]
     fn single_chatgpt_file_accepts_optional_metadata_without_staging() {
         for value in [
-            json!({"file":{"download_url":"https://files.example.test/download?q=secret","file_id":"file_abc"}}),
-            json!({"file":{"download_url":"https://files.example.test/download","file_id":"file_xyz","mime_type":"image/png","file_name":"image.png"}}),
+            json!({
+                "file": {
+                    "download_url": "https://files.example.test/download?q=secret",
+                    "file_id": "file_abc"
+                }
+            }),
+            json!({
+                "file": {
+                    "download_url": "https://files.example.test/download",
+                    "file_id": "file_xyz",
+                    "mime_type": "image/png",
+                    "file_name": "image.png"
+                }
+            }),
         ] {
             let request: UploadFileRequest = serde_json::from_value(value).unwrap();
             assert!(request.validate().is_ok());
@@ -121,11 +133,23 @@ mod tests {
             json!({"file":{"download_url":"https://files.example.test/"}}),
             json!({"file":{"download_url":"secret","file_id":"file_abc","extra":true}}),
             json!({"file":[{"download_url":"https://files.example.test","file_id":"file_abc"}]}),
-            json!({"file":{"download_url":"https://files.example.test","file_id":"file_abc"},"target":"sneaky"}),
+            json!({
+                "file": {
+                    "download_url": "https://files.example.test",
+                    "file_id": "file_abc"
+                },
+                "target": "sneaky"
+            }),
         ] {
             assert!(serde_json::from_value::<UploadFileRequest>(value).is_err());
         }
-        let invalid: UploadFileRequest = serde_json::from_value(json!({"file":{"download_url":"https://files.example.test/\nsecret","file_id":"file_abc"}})).unwrap();
+        let invalid: UploadFileRequest = serde_json::from_value(json!({
+            "file": {
+                "download_url": "https://files.example.test/\\nsecret",
+                "file_id": "file_abc"
+            }
+        }))
+        .unwrap();
         assert_eq!(invalid.validate(), Err("invalid knowledge_upload_file metadata"));
     }
 }
