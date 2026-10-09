@@ -151,7 +151,13 @@ mod access_mode_tests {
             assert!(read_only.tool_permitted(name));
             assert!(read_only.get_tool(name).is_some());
         }
-        for name in ["notion_create_page", "notion_update_page", "notion_delete_page", "notion_upload_file", "future_write"] {
+        for name in [
+            "notion_create_page",
+            "notion_update_page",
+            "notion_delete_page",
+            "notion_upload_file",
+            "future_write",
+        ] {
             assert!(!read_only.tool_permitted(name));
             assert!(read_only.get_tool(name).is_none());
         }
@@ -161,7 +167,6 @@ mod access_mode_tests {
         assert!(explicitly_writable.get_tool("notion_create_page").is_none());
     }
 }
-
 
 impl ServerHandler for KnowledgeServer {
     async fn list_tools(
