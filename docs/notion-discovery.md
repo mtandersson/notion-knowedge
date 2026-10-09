@@ -119,3 +119,8 @@ reads and `crawl_roots` (the explicitly empty-rule compatibility API) do not
 apply a separate configured policy automatically. A failed run provides no
 handoff; callers must not treat it as authorization to reuse old scope. The
 same concurrent-edit/snapshot limitations above apply to exclusion ancestry.
+
+For a selected page's current physical upward ancestry and safe lifecycle
+removal candidates, use [authoritative lifecycle evidence](notion-lifecycle.md).
+A missing entry in this downward report never proves deletion or out-of-scope
+status. The lifecycle port supplies separate source/scope revalidation evidence.

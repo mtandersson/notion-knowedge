@@ -29,3 +29,5 @@ mod transport;
 pub use transport::RequestMetrics;
 
 pub mod documents;
+
+pub mod lifecycle;
