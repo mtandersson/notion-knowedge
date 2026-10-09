@@ -43,6 +43,12 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // Never start HTTP, stdio, diagnostics or --check with a corrupt or
+    // foreign encrypted Notion grant. A missing state means unapproved.
+    if let Err(error) = config.validate_grant_store() {
+        eprintln!("Notion grant state error: {error}");
+        return ExitCode::from(2);
+    }
     let args: Vec<_> = env::args().skip(1).collect();
     if let Some(position) = args.iter().position(|arg| arg == "--crawl-dry-run") {
         let (roots, rules) = match notion_knowledge_server::crawl_args::parse(&args[position + 1..])
