@@ -274,6 +274,20 @@ Run the same check locally with:
 
 ## Configuration
 
+### MCP read-only access
+
+`NK_READ_ONLY=true` is the default for both stdio and Streamable HTTP. Only
+explicitly audited read tools (`knowledge_search` and `knowledge_get`) can be
+advertised or dispatched in this mode. Unknown tools, Notion mutations and
+file uploads cannot be invoked through the MCP handler; the access check runs
+before any tool adapter. Set `NK_READ_ONLY=false` **explicitly** only when an
+operator intends to permit implemented mutation tools. This flag does not
+implement or activate writing: the current bootstrap exposes read tools only.
+Invalid values fail startup instead of enabling writes. `--diagnostics` and
+`GET /health` expose the effective `access.read_only` boolean without
+revealing secrets. This setting controls MCP tool access, not the independent
+Notion webhook inbox or operator CLI.
+
 The server reads environment variables once at startup and validates them
 before reporting readiness. `--check` performs the same validation and exits
 with status 0 on success or 2 on a configuration error. Normal startup also
