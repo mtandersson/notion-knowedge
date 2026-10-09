@@ -18,8 +18,8 @@ serde = { version = "1", features = ["derive"] }
 hmac = "0.12"
 tempfile = "3"
 sha2 = "0.10"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [dev-dependencies]
-reqwest = { version = "0.13", default-features = false, features = ["json"] }
 tokio = { workspace = true, features = ["process", "io-util", "time"] }

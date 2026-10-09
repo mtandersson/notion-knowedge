@@ -179,6 +179,21 @@ allowlisted owner/workspace validation and #123–#129 bind live durable grant
 and MCP sessions, the public auth/token endpoints stay 503 and MCP stays 401.
 Treat callback state and query strings as secrets in future proxy logging.
 
+## Confidential Notion OAuth callback review (2026-10-09, #122)
+
+[Notion callback verification](notion-oauth-callback.md) consumes the
+independent expiring, single-use state **before any outbound token exchange**.
+Only the confidential server can send the Notion client secret in Basic auth
+to a fixed HTTPS endpoint, with redirects disabled, 12-second timeouts and
+bounded response bodies. Parsed grants require `owner.type=user` and exact
+operator-pinned workspace/user IDs before returning a still **unapproved**
+MCP transaction. Typed secrets have redacted diagnostics; provider errors and
+callback query values are never logged or returned. Testing uses a local
+fake Notion provider and negative-path cases; it does not expose a live HTTP
+callback. A successfully exchanged upstream token does not create an MCP
+authorization until #123/#127 store and enforce durable grant/epoch and
+revocation. This component is **not** permission to expose private MCP tools.
+
 ## Bounded residual risks and release decision
 
 The documented bootstrap operating envelope accepts local protocol access
