@@ -4,17 +4,22 @@
 //! commit lock. A prepared value is only a proposal, never permission to write.
 //! Every externally visible effect is performed by an operation-owned runtime
 //! while the directory-inode guard is held.
-use std::{collections::{HashMap, HashSet}, future::Future, path::{Path, PathBuf}, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
+use super::*;
+use crate::commit::{
+    CommitError, CommitOutcome, IndexCommitCoordinator, PageAction, PageOperation,
+};
 use notion_knowledge_core::{
     embedding::{self, EmbeddingMetadata, EmbeddingProvider},
     indexed::IndexedChunk,
     reconciliation::{FailureClass, Lease},
 };
-use crate::commit::{
-    CommitError, CommitOutcome, IndexCommitCoordinator, PageAction, PageOperation,
-};
-use super::*;
 
 /// A trusted binding to the same canonical local Lance directory that the
 /// operational SQLite database exclusively owns.
@@ -47,8 +52,10 @@ impl PreparedPageMutation {
 
 fn failure(error: ChunkTableError) -> FailureClass {
     match error {
-        ChunkTableError::Storage | ChunkTableError::Serialization
-        | ChunkTableError::InvalidSchema(_) | ChunkTableError::InvalidRows(_) => FailureClass::Index,
+        ChunkTableError::Storage
+        | ChunkTableError::Serialization
+        | ChunkTableError::InvalidSchema(_)
+        | ChunkTableError::InvalidRows(_) => FailureClass::Index,
         ChunkTableError::Io | ChunkTableError::InvalidPath => FailureClass::Unavailable,
         ChunkTableError::Embedding(_) => FailureClass::Source,
     }
@@ -56,8 +63,10 @@ fn failure(error: ChunkTableError) -> FailureClass {
 
 fn fence_failure(error: CommitError) -> FailureClass {
     match error {
-        CommitError::InvalidInput | CommitError::BindingMismatch
-        | CommitError::LeaseLost | CommitError::Conflict => FailureClass::Conflict,
+        CommitError::InvalidInput
+        | CommitError::BindingMismatch
+        | CommitError::LeaseLost
+        | CommitError::Conflict => FailureClass::Conflict,
         CommitError::Unavailable | CommitError::Operation(_) => FailureClass::Unavailable,
     }
 }
@@ -88,8 +97,11 @@ impl GuardedChunkTable {
     ) -> Result<Self, ChunkTableError> {
         validate_table_name(table_name)?;
         let canonical = std::fs::canonicalize(directory)?;
-        if canonical != coordinator.index_directory() || table_name != coordinator.binding().table() {
-            return Err(ChunkTableError::InvalidSchema("untrusted index binding".into()));
+        if canonical != coordinator.index_directory() || table_name != coordinator.binding().table()
+        {
+            return Err(ChunkTableError::InvalidSchema(
+                "untrusted index binding".into(),
+            ));
         }
         chunk_schema(&embedding)?;
         Ok(Self {
@@ -111,13 +123,14 @@ impl GuardedChunkTable {
         let directory = self.index_directory.clone();
         let table_name = self.table_name.clone();
         let embedding = self.embedding.clone();
-        self.coordinator.maintain(lease, clock, move |context| async move {
-            context.revalidate().map_err(fence_failure)?;
-            LanceChunkTable::create(directory, &table_name, embedding)
-                .await
-                .map_err(failure)?;
-            Ok(())
-        })
+        self.coordinator
+            .maintain(lease, clock, move |context| async move {
+                context.revalidate().map_err(fence_failure)?;
+                LanceChunkTable::create(directory, &table_name, embedding)
+                    .await
+                    .map_err(failure)?;
+                Ok(())
+            })
     }
 
     /// Guarded startup repair for any missing FTS index. This is not a page
@@ -130,15 +143,22 @@ impl GuardedChunkTable {
         let directory = self.index_directory.clone();
         let table_name = self.table_name.clone();
         let embedding = self.embedding.clone();
-        self.coordinator.maintain(lease, clock, move |context| async move {
-            let current = open_current(&directory, &table_name, &embedding)
-                .await
-                .map_err(failure)?;
-            context.revalidate().map_err(fence_failure)?;
-            current.ensure_fts_index(&FtsIndexConfig::default()).await.map_err(failure)?;
-            current.validate_vector_index_layout().await.map_err(failure)?;
-            Ok(())
-        })
+        self.coordinator
+            .maintain(lease, clock, move |context| async move {
+                let current = open_current(&directory, &table_name, &embedding)
+                    .await
+                    .map_err(failure)?;
+                context.revalidate().map_err(fence_failure)?;
+                current
+                    .ensure_fts_index(&FtsIndexConfig::default())
+                    .await
+                    .map_err(failure)?;
+                current
+                    .validate_vector_index_layout()
+                    .await
+                    .map_err(failure)?;
+                Ok(())
+            })
     }
 
     /// Build or refresh the configured vector index under the same external
@@ -153,14 +173,18 @@ impl GuardedChunkTable {
         let directory = self.index_directory.clone();
         let table_name = self.table_name.clone();
         let embedding = self.embedding.clone();
-        self.coordinator.maintain(lease, clock, move |context| async move {
-            let current = open_current(&directory, &table_name, &embedding)
-                .await
-                .map_err(failure)?;
-            context.revalidate().map_err(fence_failure)?;
-            current.optimize_vector_index(&config).await.map_err(failure)?;
-            Ok(())
-        })
+        self.coordinator
+            .maintain(lease, clock, move |context| async move {
+                let current = open_current(&directory, &table_name, &embedding)
+                    .await
+                    .map_err(failure)?;
+                context.revalidate().map_err(fence_failure)?;
+                current
+                    .optimize_vector_index(&config)
+                    .await
+                    .map_err(failure)?;
+                Ok(())
+            })
     }
 
     /// Prepare a complete source page snapshot outside the commit guard.
@@ -177,7 +201,9 @@ impl GuardedChunkTable {
         if matches!(operation.action(), PageAction::Unchanged)
             || (operation.action() == PageAction::Delete && !chunks.is_empty())
         {
-            return Err(ChunkTableError::InvalidRows("invalid complete page action".into()));
+            return Err(ChunkTableError::InvalidRows(
+                "invalid complete page action".into(),
+            ));
         }
         validate_page_snapshot(page_id, chunks)?;
         if chunks.iter().any(|chunk| {
@@ -198,12 +224,17 @@ impl GuardedChunkTable {
         let mut existing = HashMap::new();
         for row in old {
             if existing.insert(row.chunk_id.clone(), row).is_some() {
-                return Err(ChunkTableError::InvalidRows("duplicate persisted chunk identity".into()));
+                return Err(ChunkTableError::InvalidRows(
+                    "duplicate persisted chunk identity".into(),
+                ));
             }
         }
         let ids: HashSet<&str> = chunks.iter().map(|chunk| chunk.chunk_id.as_str()).collect();
         let mut metrics = ChunkDiffMetrics {
-            removed: existing.keys().filter(|id| !ids.contains(id.as_str())).count(),
+            removed: existing
+                .keys()
+                .filter(|id| !ids.contains(id.as_str()))
+                .count(),
             ..ChunkDiffMetrics::default()
         };
         let mut embed_positions = Vec::new();
@@ -230,20 +261,28 @@ impl GuardedChunkTable {
         } else {
             embedding::embed_batch(provider, &embed_inputs).await?
         };
-        let mut generated = embed_positions.into_iter().zip(vectors).collect::<HashMap<_, _>>();
+        let mut generated = embed_positions
+            .into_iter()
+            .zip(vectors)
+            .collect::<HashMap<_, _>>();
         let mut rows = Vec::with_capacity(chunks.len());
         for (position, chunk) in chunks.iter().enumerate() {
             let vector = match generated.remove(&position) {
                 Some(vector) => vector,
-                None => existing.get(&chunk.chunk_id)
+                None => existing
+                    .get(&chunk.chunk_id)
                     .filter(|old| old.content_hash == chunk.content_hash)
                     .map(|old| old.vector.clone())
-                    .ok_or_else(|| ChunkTableError::InvalidRows("missing unchanged vector".into()))?,
+                    .ok_or_else(|| {
+                        ChunkTableError::InvalidRows("missing unchanged vector".into())
+                    })?,
             };
             rows.push(EmbeddedChunk::new(chunk.clone(), vector));
         }
         if !generated.is_empty() {
-            return Err(ChunkTableError::InvalidRows("inconsistent embedding result".into()));
+            return Err(ChunkTableError::InvalidRows(
+                "inconsistent embedding result".into(),
+            ));
         }
         validate_rows(&rows, self.embedding.dimension())?;
         Ok(PreparedPageMutation {
@@ -279,61 +318,100 @@ impl GuardedChunkTable {
         let table_name = self.table_name.clone();
         let embedding = self.embedding.clone();
         let operation = prepared.operation.clone();
-        self.coordinator.submit(operation, lease, clock, move |context| async move {
-            if prepared.embedding != embedding || context.binding().table() != table_name {
-                return Err(FailureClass::Conflict);
-            }
-            // Always reopen under the guard: a retained Table handle is not
-            // proof of the actual current version after another process wrote.
-            let current = open_current(&directory, &table_name, &embedding)
-                .await
-                .map_err(failure)?;
-            let version = current.table.version().await.map_err(|_| FailureClass::Index)?;
-            if version != prepared.table_version {
-                return Err(FailureClass::Conflict);
-            }
-            if !prepared.rows.is_empty() {
-                let chunk_ids = prepared.rows.iter().map(|row| row.chunk.chunk_id.clone()).collect::<Vec<_>>();
-                let collisions = current
-                    .rows_matching(id_list_predicate("chunk_id", &chunk_ids))
-                    .await
-                    .map_err(failure)?;
-                if collisions.iter().any(|row| row.page_id != prepared.operation.checkpoint().page_id()) {
+        self.coordinator
+            .submit(operation, lease, clock, move |context| async move {
+                if prepared.embedding != embedding || context.binding().table() != table_name {
                     return Err(FailureClass::Conflict);
                 }
-            }
-            context.revalidate().map_err(fence_failure)?;
-            precommit_source_check().await?;
-            context.revalidate().map_err(fence_failure)?;
-            let predicate = format!(
-                "page_id = {}",
-                sql_string(prepared.operation.checkpoint().page_id())
-            );
-            if prepared.rows.is_empty() {
-                current.table.delete(&predicate).await.map_err(|_| FailureClass::Index)?;
-            } else {
-                let batch = rows_to_batch(&prepared.rows, &embedding).map_err(failure)?;
-                let schema = batch.schema();
-                let mut merge = current.table.merge_insert(&["page_id", "chunk_id"]);
-                merge.when_matched_update_all(None)
-                    .when_not_matched_insert_all()
-                    .when_not_matched_by_source_delete(Some(predicate));
-                merge.execute(Box::new(RecordBatchIterator::new(
-                    vec![Ok(batch)].into_iter(), schema,
-                ))).await.map_err(|_| FailureClass::Index)?;
-            }
-            // No detached maintenance: serialization extends to the end of
-            // both index families' real on-disk mutations.
-            current.ensure_fts_index(&FtsIndexConfig::default()).await.map_err(failure)?;
-            current.optimize_fts_index().await.map_err(failure)?;
-            let indices = current.table.list_indices().await.map_err(|_| FailureClass::Index)?;
-            if indices.iter().any(|index| index.name == CHUNK_VECTOR_INDEX_NAME) {
-                current.validate_vector_index_layout().await.map_err(failure)?;
-                current.table.optimize(OptimizeAction::Index(
-                    OptimizeOptions::new().index_names(vec![CHUNK_VECTOR_INDEX_NAME.to_owned()])
-                )).await.map_err(|_| FailureClass::Index)?;
-            }
-            Ok(())
-        })
+                // Always reopen under the guard: a retained Table handle is not
+                // proof of the actual current version after another process wrote.
+                let current = open_current(&directory, &table_name, &embedding)
+                    .await
+                    .map_err(failure)?;
+                let version = current
+                    .table
+                    .version()
+                    .await
+                    .map_err(|_| FailureClass::Index)?;
+                if version != prepared.table_version {
+                    return Err(FailureClass::Conflict);
+                }
+                if !prepared.rows.is_empty() {
+                    let chunk_ids = prepared
+                        .rows
+                        .iter()
+                        .map(|row| row.chunk.chunk_id.clone())
+                        .collect::<Vec<_>>();
+                    let collisions = current
+                        .rows_matching(id_list_predicate("chunk_id", &chunk_ids))
+                        .await
+                        .map_err(failure)?;
+                    if collisions
+                        .iter()
+                        .any(|row| row.page_id != prepared.operation.checkpoint().page_id())
+                    {
+                        return Err(FailureClass::Conflict);
+                    }
+                }
+                context.revalidate().map_err(fence_failure)?;
+                precommit_source_check().await?;
+                context.revalidate().map_err(fence_failure)?;
+                let predicate = format!(
+                    "page_id = {}",
+                    sql_string(prepared.operation.checkpoint().page_id())
+                );
+                if prepared.rows.is_empty() {
+                    current
+                        .table
+                        .delete(&predicate)
+                        .await
+                        .map_err(|_| FailureClass::Index)?;
+                } else {
+                    let batch = rows_to_batch(&prepared.rows, &embedding).map_err(failure)?;
+                    let schema = batch.schema();
+                    let mut merge = current.table.merge_insert(&["page_id", "chunk_id"]);
+                    merge
+                        .when_matched_update_all(None)
+                        .when_not_matched_insert_all()
+                        .when_not_matched_by_source_delete(Some(predicate));
+                    merge
+                        .execute(Box::new(RecordBatchIterator::new(
+                            vec![Ok(batch)].into_iter(),
+                            schema,
+                        )))
+                        .await
+                        .map_err(|_| FailureClass::Index)?;
+                }
+                // No detached maintenance: serialization extends to the end of
+                // both index families' real on-disk mutations.
+                current
+                    .ensure_fts_index(&FtsIndexConfig::default())
+                    .await
+                    .map_err(failure)?;
+                current.optimize_fts_index().await.map_err(failure)?;
+                let indices = current
+                    .table
+                    .list_indices()
+                    .await
+                    .map_err(|_| FailureClass::Index)?;
+                if indices
+                    .iter()
+                    .any(|index| index.name == CHUNK_VECTOR_INDEX_NAME)
+                {
+                    current
+                        .validate_vector_index_layout()
+                        .await
+                        .map_err(failure)?;
+                    current
+                        .table
+                        .optimize(OptimizeAction::Index(
+                            OptimizeOptions::new()
+                                .index_names(vec![CHUNK_VECTOR_INDEX_NAME.to_owned()]),
+                        ))
+                        .await
+                        .map_err(|_| FailureClass::Index)?;
+                }
+                Ok(())
+            })
     }
 }
