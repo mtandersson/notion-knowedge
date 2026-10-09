@@ -518,7 +518,9 @@ mod tests {
             ])
             .unwrap_err();
             assert_eq!(error.setting, "NK_NOTION_OAUTH_CLIENT_SECRET");
-            assert!(!error.to_string().contains(bad));
+            if !bad.is_empty() {
+                assert!(!error.to_string().contains(bad));
+            }
         }
     }
 
