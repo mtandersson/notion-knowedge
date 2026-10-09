@@ -731,9 +731,15 @@ async fn expansion_rejects_oversized_metadata_without_leaking_source() {
             behavior: Behavior::OversizeMetadata,
         }),
         json!({"refs":[{"kind":"page","id":"page-1"}],"max_chars":1024}),
-    ).await;
+    )
+    .await;
     assert_eq!(response["result"]["isError"], true);
     assert!(response["result"]["structuredContent"].is_null());
-    assert!(response["result"]["content"][0]["text"].as_str().unwrap().starts_with("result_too_large:"));
+    assert!(
+        response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("result_too_large:")
+    );
     assert!(!response.to_string().contains("private-metadata"));
 }
