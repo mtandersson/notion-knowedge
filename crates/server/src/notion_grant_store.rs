@@ -199,7 +199,9 @@ impl GrantStore {
         expected: &StoredGrant,
         fresh: &NotionGrant,
     ) -> Result<StoredGrant, StoreError> {
-        if !self.policy.matches(fresh.workspace_id(), fresh.owner_user_id())
+        if !self
+            .policy
+            .matches(fresh.workspace_id(), fresh.owner_user_id())
             || fresh.bot_id() != expected.record.bot_id
             || fresh.refresh_token().is_none()
             || fresh.expires_in().is_none()
@@ -221,7 +223,8 @@ impl GrantStore {
             return Err(StoreError::IdentityMismatch);
         }
         let now = now_unix()?;
-        let expires = now.checked_add(fresh.expires_in().ok_or(StoreError::Corrupt)?)
+        let expires = now
+            .checked_add(fresh.expires_in().ok_or(StoreError::Corrupt)?)
             .ok_or(StoreError::Corrupt)?;
         let record = Record {
             schema: SCHEMA,
@@ -523,13 +526,20 @@ mod tests {
     fn stale_refresh_snapshot_is_rejected_after_a_new_authorization() {
         let (_dir, key, path, policy) = setup();
         let store = GrantStore::open(&key, &path, "client-a", policy).unwrap();
-        let current = store.save(&NotionGrant::fixture("workspace-a", "user-a", Some(30))).unwrap();
-        let replacement = store.save(&NotionGrant::fixture("workspace-a", "user-a", Some(3600))).unwrap();
+        let current = store
+            .save(&NotionGrant::fixture("workspace-a", "user-a", Some(30)))
+            .unwrap();
+        let replacement = store
+            .save(&NotionGrant::fixture("workspace-a", "user-a", Some(3600)))
+            .unwrap();
         assert_ne!(current.grant_id(), replacement.grant_id());
         assert_ne!(current.epoch(), replacement.epoch());
         let snapshot = fs::read(&path).unwrap();
         assert!(matches!(
-            store.rotate_refresh(&current, &NotionGrant::fixture("workspace-a", "user-a", Some(3600))),
+            store.rotate_refresh(
+                &current,
+                &NotionGrant::fixture("workspace-a", "user-a", Some(3600))
+            ),
             Err(StoreError::IdentityMismatch)
         ));
         assert_eq!(fs::read(&path).unwrap(), snapshot);
