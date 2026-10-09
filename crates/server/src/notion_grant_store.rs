@@ -12,7 +12,7 @@ use std::{
 };
 
 use ring::{
-    aead::{self, Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM},
+    aead::{self, AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey},
     rand::{SecureRandom, SystemRandom},
 };
 use serde::{Deserialize, Serialize};
@@ -74,15 +74,31 @@ impl std::fmt::Debug for StoredGrant {
     }
 }
 impl StoredGrant {
-    pub fn grant_id(&self) -> &str { &self.record.grant_id }
-    pub fn epoch(&self) -> u64 { self.record.epoch }
-    pub fn workspace_id(&self) -> &str { &self.record.workspace_id }
-    pub fn owner_user_id(&self) -> &str { &self.record.owner_user_id }
-    pub fn issued_at_unix(&self) -> u64 { self.record.issued_at_unix }
-    pub fn expires_at_unix(&self) -> Option<u64> { self.record.expires_at_unix }
+    pub fn grant_id(&self) -> &str {
+        &self.record.grant_id
+    }
+    pub fn epoch(&self) -> u64 {
+        self.record.epoch
+    }
+    pub fn workspace_id(&self) -> &str {
+        &self.record.workspace_id
+    }
+    pub fn owner_user_id(&self) -> &str {
+        &self.record.owner_user_id
+    }
+    pub fn issued_at_unix(&self) -> u64 {
+        self.record.issued_at_unix
+    }
+    pub fn expires_at_unix(&self) -> Option<u64> {
+        self.record.expires_at_unix
+    }
     // Only server-side refresh / Notion adapters may obtain token material.
-    pub(crate) fn access_token(&self) -> &str { &self.record.access_token }
-    pub(crate) fn refresh_token(&self) -> Option<&str> { self.record.refresh_token.as_deref() }
+    pub(crate) fn access_token(&self) -> &str {
+        &self.record.access_token
+    }
+    pub(crate) fn refresh_token(&self) -> Option<&str> {
+        self.record.refresh_token.as_deref()
+    }
 }
 
 /// Encrypts ALL records at rest with authenticated metadata and distinct
@@ -103,27 +119,41 @@ impl std::fmt::Debug for GrantStore {
 impl GrantStore {
     /// A missing data file means "no approved grant", not first-login
     /// enrollment. Any unreadable, corrupt or foreign existing state fails.
-    pub fn open(key_file: &Path, state_file: &Path, client_id: &str, policy: NotionOwnerPolicy) -> Result<Self, StoreError> {
-        if !valid_path(key_file) || !valid_path(state_file) || key_file == state_file
-            || client_id.is_empty() || client_id.len() > 128 {
+    pub fn open(
+        key_file: &Path,
+        state_file: &Path,
+        client_id: &str,
+        policy: NotionOwnerPolicy,
+    ) -> Result<Self, StoreError> {
+        if !valid_path(key_file)
+            || !valid_path(state_file)
+            || key_file == state_file
+            || client_id.is_empty()
+            || client_id.len() > 128
+        {
             return Err(StoreError::Configuration);
         }
         let directory = state_file.parent().ok_or(StoreError::Configuration)?;
         require_directory(directory)?;
         let key_metadata = fs::symlink_metadata(key_file).map_err(|_| StoreError::Configuration)?;
-        if !key_metadata.file_type().is_file()
-            || key_metadata.permissions().mode() & 0o077 != 0 {
+        if !key_metadata.file_type().is_file() || key_metadata.permissions().mode() & 0o077 != 0 {
             return Err(StoreError::Configuration);
         }
         let mut key_bytes = [0u8; 32];
         let mut key_source = File::open(key_file).map_err(|_| StoreError::Configuration)?;
-        key_source.read_exact(&mut key_bytes).map_err(|_| StoreError::Configuration)?;
+        key_source
+            .read_exact(&mut key_bytes)
+            .map_err(|_| StoreError::Configuration)?;
         let mut extra = [0u8; 1];
-        if key_source.read(&mut extra).map_err(|_| StoreError::Configuration)? != 0 {
+        if key_source
+            .read(&mut extra)
+            .map_err(|_| StoreError::Configuration)?
+            != 0
+        {
             return Err(StoreError::Configuration);
         }
         let key = LessSafeKey::new(
-            UnboundKey::new(&AES_256_GCM, &key_bytes).map_err(|_| StoreError::Configuration)?
+            UnboundKey::new(&AES_256_GCM, &key_bytes).map_err(|_| StoreError::Configuration)?,
         );
         // No retained plaintext key buffer after key schedule initialization.
         key_bytes.fill(0);
@@ -144,7 +174,10 @@ impl GrantStore {
         let _guard = self.guard.lock().map_err(|_| StoreError::Unavailable)?;
         let record = self.read_record()?;
         if let Some(ref value) = record {
-            if value.expires_at_unix.is_some_and(|expiry| expiry <= now_unix()?) {
+            if value
+                .expires_at_unix
+                .is_some_and(|expiry| expiry <= now_unix()?)
+            {
                 return Err(StoreError::Expired);
             }
         }
@@ -156,7 +189,10 @@ impl GrantStore {
     /// Every replacement receives a fresh grant ID and increasing epoch,
     /// invalidating earlier session bindings once #127 enforces them.
     pub fn save(&self, grant: &NotionGrant) -> Result<StoredGrant, StoreError> {
-        if !self.policy.matches(grant.workspace_id(), grant.owner_user_id()) {
+        if !self
+            .policy
+            .matches(grant.workspace_id(), grant.owner_user_id())
+        {
             return Err(StoreError::IdentityMismatch);
         }
         let _guard = self.guard.lock().map_err(|_| StoreError::Unavailable)?;
@@ -166,11 +202,14 @@ impl GrantStore {
             None => 1,
         };
         let now = now_unix()?;
-        let expires = grant.expires_in().map(|seconds| {
-            now.checked_add(seconds).ok_or(StoreError::Corrupt)
-        }).transpose()?;
+        let expires = grant
+            .expires_in()
+            .map(|seconds| now.checked_add(seconds).ok_or(StoreError::Corrupt))
+            .transpose()?;
         let mut grant_id = [0u8; 16];
-        SystemRandom::new().fill(&mut grant_id).map_err(|_| StoreError::Unavailable)?;
+        SystemRandom::new()
+            .fill(&mut grant_id)
+            .map_err(|_| StoreError::Unavailable)?;
         let record = Record {
             schema: SCHEMA,
             grant_id: hex(&grant_id),
@@ -189,30 +228,48 @@ impl GrantStore {
             return Err(StoreError::Unavailable);
         }
         let mut nonce_bytes = [0u8; NONCE_LEN];
-        SystemRandom::new().fill(&mut nonce_bytes).map_err(|_| StoreError::Unavailable)?;
+        SystemRandom::new()
+            .fill(&mut nonce_bytes)
+            .map_err(|_| StoreError::Unavailable)?;
         let mut ciphertext = raw;
         self.key
-            .seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce_bytes), Aad::from(AAD), &mut ciphertext)
+            .seal_in_place_append_tag(
+                Nonce::assume_unique_for_key(nonce_bytes),
+                Aad::from(AAD),
+                &mut ciphertext,
+            )
             .map_err(|_| StoreError::Unavailable)?;
         let directory = self.file.parent().ok_or(StoreError::Configuration)?;
         require_directory(directory)?;
-        let mut tmp = tempfile::NamedTempFile::new_in(directory).map_err(|_| StoreError::Unavailable)?;
-        tmp.as_file_mut().set_permissions(fs::Permissions::from_mode(0o600))
+        let mut tmp =
+            tempfile::NamedTempFile::new_in(directory).map_err(|_| StoreError::Unavailable)?;
+        tmp.as_file_mut()
+            .set_permissions(fs::Permissions::from_mode(0o600))
             .map_err(|_| StoreError::Unavailable)?;
-        tmp.write_all(MAGIC).and_then(|_| tmp.write_all(&nonce_bytes))
-            .and_then(|_| tmp.write_all(&ciphertext)).map_err(|_| StoreError::Unavailable)?;
-        tmp.as_file_mut().sync_all().map_err(|_| StoreError::Unavailable)?;
+        tmp.write_all(MAGIC)
+            .and_then(|_| tmp.write_all(&nonce_bytes))
+            .and_then(|_| tmp.write_all(&ciphertext))
+            .map_err(|_| StoreError::Unavailable)?;
+        tmp.as_file_mut()
+            .sync_all()
+            .map_err(|_| StoreError::Unavailable)?;
         // Do not follow links or overwrite suspicious existing state.
         self.validate_existing_file()?;
-        tmp.persist(&self.file).map_err(|_| StoreError::Unavailable)?;
-        File::open(directory).and_then(|d| d.sync_all()).map_err(|_| StoreError::Unavailable)?;
+        tmp.persist(&self.file)
+            .map_err(|_| StoreError::Unavailable)?;
+        File::open(directory)
+            .and_then(|d| d.sync_all())
+            .map_err(|_| StoreError::Unavailable)?;
         Ok(StoredGrant { record })
     }
 
     fn validate_existing_file(&self) -> Result<(), StoreError> {
         match fs::symlink_metadata(&self.file) {
-            Ok(metadata) if metadata.file_type().is_file()
-                && metadata.permissions().mode() & 0o077 == 0 => Ok(()),
+            Ok(metadata)
+                if metadata.file_type().is_file() && metadata.permissions().mode() & 0o077 == 0 =>
+            {
+                Ok(())
+            }
             Ok(_) => Err(StoreError::Corrupt),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(_) => Err(StoreError::Unavailable),
@@ -227,43 +284,63 @@ impl GrantStore {
             Err(_) => return Err(StoreError::Unavailable),
         };
         let mut raw = Vec::new();
-        file.take((MAX_FILE + 1) as u64).read_to_end(&mut raw).map_err(|_| StoreError::Unavailable)?;
-        if raw.len() <= MAGIC.len() + NONCE_LEN + TAG_LEN || raw.len() > MAX_FILE
-            || &raw[..MAGIC.len()] != MAGIC {
+        file.take((MAX_FILE + 1) as u64)
+            .read_to_end(&mut raw)
+            .map_err(|_| StoreError::Unavailable)?;
+        if raw.len() <= MAGIC.len() + NONCE_LEN + TAG_LEN
+            || raw.len() > MAX_FILE
+            || &raw[..MAGIC.len()] != MAGIC
+        {
             return Err(StoreError::Corrupt);
         }
         let mut nonce = [0u8; NONCE_LEN];
         nonce.copy_from_slice(&raw[MAGIC.len()..MAGIC.len() + NONCE_LEN]);
         let mut payload = raw[MAGIC.len() + NONCE_LEN..].to_vec();
-        let plaintext = self.key.open_in_place(
-            Nonce::assume_unique_for_key(nonce),
-            Aad::from(AAD),
-            &mut payload,
-        ).map_err(|_| StoreError::Corrupt)?;
+        let plaintext = self
+            .key
+            .open_in_place(
+                Nonce::assume_unique_for_key(nonce),
+                Aad::from(AAD),
+                &mut payload,
+            )
+            .map_err(|_| StoreError::Corrupt)?;
         let record: Record = serde_json::from_slice(plaintext).map_err(|_| StoreError::Corrupt)?;
         if record.schema != SCHEMA
             || record.epoch == 0
-            || record.grant_id.len() != 32 || !record.grant_id.bytes().all(|b| b.is_ascii_hexdigit())
+            || record.grant_id.len() != 32
+            || !record.grant_id.bytes().all(|b| b.is_ascii_hexdigit())
             || record.bot_id.is_empty()
             || record.issued_at_unix == 0
-            || record.expires_at_unix.is_some_and(|at| at <= record.issued_at_unix)
+            || record
+                .expires_at_unix
+                .is_some_and(|at| at <= record.issued_at_unix)
             || record.access_token.is_empty()
             || record.refresh_token.as_ref().is_some_and(String::is_empty)
-        { return Err(StoreError::Corrupt); }
+        {
+            return Err(StoreError::Corrupt);
+        }
         if record.notion_client_id != self.notion_client_id
-            || !self.policy.matches(&record.workspace_id, &record.owner_user_id) {
+            || !self
+                .policy
+                .matches(&record.workspace_id, &record.owner_user_id)
+        {
             return Err(StoreError::IdentityMismatch);
         }
         Ok(Some(record))
     }
 }
 fn now_unix() -> Result<u64, StoreError> {
-    Ok(SystemTime::now().duration_since(UNIX_EPOCH)
-        .map_err(|_| StoreError::Unavailable)?.as_secs())
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| StoreError::Unavailable)?
+        .as_secs())
 }
 fn valid_path(path: &Path) -> bool {
-    path.is_absolute() && path.file_name().is_some()
-        && !path.components().any(|c| matches!(c, std::path::Component::ParentDir))
+    path.is_absolute()
+        && path.file_name().is_some()
+        && !path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
 }
 fn require_directory(path: &Path) -> Result<(), StoreError> {
     let m = fs::symlink_metadata(path).map_err(|_| StoreError::Configuration)?;
@@ -299,7 +376,7 @@ mod tests {
 
     #[test]
     fn encrypted_round_trip_is_durable_and_secrets_never_on_disk() {
-        let (_dir,key,path,policy) = setup();
+        let (_dir, key, path, policy) = setup();
         let store = GrantStore::open(&key, &path, "client-a", policy.clone()).unwrap();
         assert!(store.load().unwrap().is_none());
         let grant = NotionGrant::fixture("workspace-a", "user-a", Some(3600));
@@ -310,11 +387,23 @@ mod tests {
         assert!(format!("{first:?}").contains("REDACTED"));
         let bytes = fs::read(&path).unwrap();
         assert!(bytes.starts_with(MAGIC));
-        for secret in ["test-access-secret","test-refresh-secret","workspace-a","user-a"] {
+        for secret in [
+            "test-access-secret",
+            "test-refresh-secret",
+            "workspace-a",
+            "user-a",
+        ] {
             assert!(!bytes.windows(secret.len()).any(|w| w == secret.as_bytes()));
         }
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-        let reloaded = GrantStore::open(&key, &path, "client-a", policy).unwrap().load().unwrap().unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let reloaded = GrantStore::open(&key, &path, "client-a", policy)
+            .unwrap()
+            .load()
+            .unwrap()
+            .unwrap();
         assert_eq!(reloaded.grant_id(), first.grant_id());
         assert_eq!(reloaded.access_token(), "test-access-secret");
         assert_eq!(reloaded.refresh_token(), Some("test-refresh-secret"));
@@ -326,47 +415,81 @@ mod tests {
 
     #[test]
     fn wrong_key_tampering_schema_and_foreign_owner_fail_closed() {
-        let (_dir,key,path,policy) = setup();
-        let store = GrantStore::open(&key,&path,"client-a",policy.clone()).unwrap();
-        store.save(&NotionGrant::fixture("workspace-a","user-a",None)).unwrap();
+        let (_dir, key, path, policy) = setup();
+        let store = GrantStore::open(&key, &path, "client-a", policy.clone()).unwrap();
+        store
+            .save(&NotionGrant::fixture("workspace-a", "user-a", None))
+            .unwrap();
         let mut raw = fs::read(&path).unwrap();
         let last = raw.len() - 1;
         raw[last] ^= 0x80;
-        fs::write(&path,&raw).unwrap();
-        assert!(matches!(store.load(),Err(StoreError::Corrupt)));
-        assert!(matches!(GrantStore::open(&key,&path,"client-a",policy.clone()),Err(StoreError::Corrupt)));
+        fs::write(&path, &raw).unwrap();
+        assert!(matches!(store.load(), Err(StoreError::Corrupt)));
+        assert!(matches!(
+            GrantStore::open(&key, &path, "client-a", policy.clone()),
+            Err(StoreError::Corrupt)
+        ));
         // Restore a valid envelope, then test a different key and identity.
         fs::remove_file(&path).unwrap();
-        store.save(&NotionGrant::fixture("workspace-a","user-a",None)).unwrap();
-        fs::write(&key,[7u8;32]).unwrap();
-        assert!(matches!(GrantStore::open(&key,&path,"client-a",policy.clone()),Err(StoreError::Corrupt)));
-        fs::write(&key,[42u8;32]).unwrap();
-        assert!(matches!(GrantStore::open(&key,&path,"different-client",policy.clone()),Err(StoreError::IdentityMismatch)));
-        let foreign = NotionOwnerPolicy::new("foreign","user-a").unwrap();
-        assert!(matches!(GrantStore::open(&key,&path,"client-a",foreign),Err(StoreError::IdentityMismatch)));
-        assert!(matches!(store.save(&NotionGrant::fixture("foreign","user-a",None)),Err(StoreError::IdentityMismatch)));
+        store
+            .save(&NotionGrant::fixture("workspace-a", "user-a", None))
+            .unwrap();
+        fs::write(&key, [7u8; 32]).unwrap();
+        assert!(matches!(
+            GrantStore::open(&key, &path, "client-a", policy.clone()),
+            Err(StoreError::Corrupt)
+        ));
+        fs::write(&key, [42u8; 32]).unwrap();
+        assert!(matches!(
+            GrantStore::open(&key, &path, "different-client", policy.clone()),
+            Err(StoreError::IdentityMismatch)
+        ));
+        let foreign = NotionOwnerPolicy::new("foreign", "user-a").unwrap();
+        assert!(matches!(
+            GrantStore::open(&key, &path, "client-a", foreign),
+            Err(StoreError::IdentityMismatch)
+        ));
+        assert!(matches!(
+            store.save(&NotionGrant::fixture("foreign", "user-a", None)),
+            Err(StoreError::IdentityMismatch)
+        ));
     }
 
     #[test]
     fn symlinks_permissive_modes_and_missing_key_are_rejected() {
-        let (dir,key,path,policy) = setup();
-        fs::set_permissions(&key,fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(matches!(GrantStore::open(&key,&path,"client-a",policy.clone()),Err(StoreError::Configuration)));
-        fs::set_permissions(&key,fs::Permissions::from_mode(0o600)).unwrap();
+        let (dir, key, path, policy) = setup();
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(
+            GrantStore::open(&key, &path, "client-a", policy.clone()),
+            Err(StoreError::Configuration)
+        ));
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
         let link = dir.path().join("link");
-        std::os::unix::fs::symlink(&key,&link).unwrap();
-        assert!(matches!(GrantStore::open(&link,&path,"client-a",policy.clone()),Err(StoreError::Configuration)));
-        fs::write(&path,b"plaintext-grant").unwrap();
-        assert!(matches!(GrantStore::open(&key,&path,"client-a",policy.clone()),Err(StoreError::Corrupt)));
+        std::os::unix::fs::symlink(&key, &link).unwrap();
+        assert!(matches!(
+            GrantStore::open(&link, &path, "client-a", policy.clone()),
+            Err(StoreError::Configuration)
+        ));
+        fs::write(&path, b"plaintext-grant").unwrap();
+        assert!(matches!(
+            GrantStore::open(&key, &path, "client-a", policy.clone()),
+            Err(StoreError::Corrupt)
+        ));
         fs::remove_file(&path).unwrap();
-        let store = GrantStore::open(&key,&path,"client-a",policy.clone()).unwrap();
+        let store = GrantStore::open(&key, &path, "client-a", policy.clone()).unwrap();
         let outside = dir.path().join("outside");
-        fs::write(&outside,b"not-a-grant").unwrap();
-        std::os::unix::fs::symlink(&outside,&path).unwrap();
-        assert!(matches!(store.load(),Err(StoreError::Corrupt)));
-        assert!(matches!(store.save(&NotionGrant::fixture("workspace-a","user-a",None)),Err(StoreError::Corrupt)));
+        fs::write(&outside, b"not-a-grant").unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        assert!(matches!(store.load(), Err(StoreError::Corrupt)));
+        assert!(matches!(
+            store.save(&NotionGrant::fixture("workspace-a", "user-a", None)),
+            Err(StoreError::Corrupt)
+        ));
         fs::remove_file(&path).unwrap();
         fs::remove_file(&key).unwrap();
-        assert!(matches!(GrantStore::open(&key,&path,"client-a",policy),Err(StoreError::Configuration)));
+        assert!(matches!(
+            GrantStore::open(&key, &path, "client-a", policy),
+            Err(StoreError::Configuration)
+        ));
     }
 }
