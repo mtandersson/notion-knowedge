@@ -110,7 +110,9 @@ impl Config {
         mut lookup: impl FnMut(&str) -> Option<OsString>,
     ) -> Result<Self, ConfigError> {
         let log_level = notion_knowledge_core::logging::Level::parse(&optional(
-            &mut lookup, "NK_LOG_LEVEL", "info",
+            &mut lookup,
+            "NK_LOG_LEVEL",
+            "info",
         )?)
         .ok_or_else(|| invalid("NK_LOG_LEVEL", "must be off, error, warn, info or debug"))?;
         let host = optional(&mut lookup, "NK_HTTP_HOST", "127.0.0.1")?
