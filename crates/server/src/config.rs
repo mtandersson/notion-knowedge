@@ -611,6 +611,63 @@ mod tests {
     }
 
     #[test]
+    fn configured_notion_scope_requires_trusted_pair_and_integration() {
+        const WORKSPACE: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        const ROOT: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        assert!(parse(&[]).unwrap().notion_scope.is_none());
+        assert_eq!(
+            parse(&[("NK_NOTION_SCOPE_ROOTS", ROOT)])
+                .unwrap_err()
+                .setting,
+            "NK_NOTION_SCOPE_ROOTS"
+        );
+        assert_eq!(
+            parse(&[("NK_NOTION_SCOPE_WORKSPACE_ID", WORKSPACE)])
+                .unwrap_err()
+                .setting,
+            "NK_NOTION_SCOPE_ROOTS"
+        );
+        assert_eq!(
+            parse(&[
+                ("NK_NOTION_SCOPE_ROOTS", ROOT),
+                ("NK_NOTION_SCOPE_WORKSPACE_ID", WORKSPACE)
+            ])
+            .unwrap_err()
+            .setting,
+            "NK_NOTION_AUTH"
+        );
+        let good = parse(&[
+            ("NK_NOTION_AUTH", "integration"),
+            ("NOTION_TOKEN", "private-fixture-credential"),
+            ("NK_NOTION_SCOPE_ROOTS", ROOT),
+            ("NK_NOTION_SCOPE_WORKSPACE_ID", WORKSPACE),
+            ("NK_NOTION_SCOPE_GENERATION", "3"),
+        ]).unwrap();
+        let scope = good.notion_scope.unwrap();
+        assert_eq!(scope.generation, 3);
+        assert_eq!(scope.workspace_id, WORKSPACE);
+        assert_eq!(scope.roots[0].0, ROOT);
+
+        for (key, value) in [
+            ("NK_NOTION_SCOPE_ROOTS", "untrusted-root"),
+            ("NK_NOTION_SCOPE_WORKSPACE_ID", "untrusted-workspace"),
+            ("NK_NOTION_SCOPE_GENERATION", "0"),
+        ] {
+            let mut inputs = vec![
+                ("NK_NOTION_AUTH", "integration"),
+                ("NOTION_TOKEN", "private-fixture-credential"),
+                ("NK_NOTION_SCOPE_ROOTS", ROOT),
+                ("NK_NOTION_SCOPE_WORKSPACE_ID", WORKSPACE),
+                ("NK_NOTION_SCOPE_GENERATION", "3"),
+            ];
+            inputs.iter_mut().find(|item| item.0 == key).unwrap().1 = value;
+            let err = parse(&inputs).unwrap_err();
+            assert_eq!(err.setting, key);
+            assert!(!err.to_string().contains("untrusted-"));
+        }
+    }
+
+    #[test]
     fn development_bearer_requires_explicit_mode_and_strong_private_configuration() {
         const TOKEN: &str = "local-dev-0123456789-abcdefghijklmnopqrstuvwxyz";
         assert!(parse(&[]).unwrap().bearer_fallback.is_none());
