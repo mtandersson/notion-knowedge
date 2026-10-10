@@ -2,11 +2,24 @@ use serde_json::{Value, json};
 
 pub fn assert_search_catalog(tools: &Value) {
     let tools = tools.as_array().expect("tools catalog");
-    assert_eq!(tools.len(), 2);
+    assert_eq!(tools.len(), 3);
     let tool = tools
         .iter()
         .find(|tool| tool["name"] == "knowledge_search")
         .expect("knowledge_search tool");
+    let upload = tools
+        .iter()
+        .find(|tool| tool["name"] == "knowledge_upload_file")
+        .expect("knowledge_upload_file tool");
+    assert_eq!(upload["_meta"]["openai/fileParams"], json!(["file"]));
+    assert_eq!(upload["annotations"]["readOnlyHint"], false);
+    assert_eq!(upload["inputSchema"]["required"], json!(["file"]));
+    let file = &upload["inputSchema"]["properties"]["file"];
+    assert_eq!(file["required"], json!(["download_url", "file_id"]));
+    assert_eq!(file["additionalProperties"], false);
+    for field in ["download_url", "file_id", "mime_type", "file_name"] {
+        assert_eq!(file["properties"][field]["type"], "string");
+    }
     let get = tools
         .iter()
         .find(|tool| tool["name"] == "knowledge_get")

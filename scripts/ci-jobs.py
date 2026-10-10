@@ -28,6 +28,9 @@ def path_jobs(path):
     if path.startswith('crates/') and '/tests/' in path and path.endswith('.rs'):
         # Docker's context allowlist includes every .rs file, even tests.
         return RUST | {'container'}
+    if path in {'compose.yaml', 'scripts/compose-dev.sh',
+                'scripts/smoke-compose.py'}:
+        return {'container'}
     if path in {'Dockerfile', '.dockerignore', 'scripts/smoke-container.py'}:
         return {'container'}
     if path.startswith('crates/') and (path.endswith('.rs') or

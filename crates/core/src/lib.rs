@@ -40,6 +40,9 @@ pub mod source;
 /// Durable operational sync-state contracts. Concrete databases belong in adapters.
 pub mod sync_state;
 
+/// Provider-independent graph edge contracts.
+pub mod graph;
+
 /// Configurable reciprocal-rank fusion of independent retrieval paths.
 pub mod hybrid;
 
