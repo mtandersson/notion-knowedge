@@ -395,7 +395,10 @@ impl Config {
             (None, None) => None,
             (Some(roots), Some(workspace)) => {
                 if !matches!(notion_auth, NotionAuth::Integration(_)) {
-                    return Err(invalid("NK_NOTION_AUTH", "integration required for authoritative scope"));
+                    return Err(invalid(
+                        "NK_NOTION_AUTH",
+                        "integration required for authoritative scope",
+                    ));
                 }
                 let parse = |value: &str| {
                     notion_knowledge_notion::pages::page_id(value)
@@ -404,17 +407,26 @@ impl Config {
                         .map(|id| id.0)
                 };
                 let workspace_id = parse(&workspace).ok_or_else(|| {
-                    invalid("NK_NOTION_SCOPE_WORKSPACE_ID", "must be canonical page UUID")
+                    invalid(
+                        "NK_NOTION_SCOPE_WORKSPACE_ID",
+                        "must be canonical page UUID",
+                    )
                 })?;
                 let root_ids: Option<Vec<_>> = roots
                     .split(',')
                     .map(|part| parse(part).map(notion_knowledge_core::backend::PageId))
                     .collect();
                 let root_ids = root_ids.ok_or_else(|| {
-                    invalid("NK_NOTION_SCOPE_ROOTS", "must be comma-separated canonical UUIDs")
+                    invalid(
+                        "NK_NOTION_SCOPE_ROOTS",
+                        "must be comma-separated canonical UUIDs",
+                    )
                 })?;
                 if root_ids.is_empty() || root_ids.len() > 100 {
-                    return Err(invalid("NK_NOTION_SCOPE_ROOTS", "must contain 1 to 100 roots"));
+                    return Err(invalid(
+                        "NK_NOTION_SCOPE_ROOTS",
+                        "must contain 1 to 100 roots",
+                    ));
                 }
                 let generation = optional(&mut lookup, "NK_NOTION_SCOPE_GENERATION", "1")?
                     .parse::<u64>()
@@ -430,7 +442,12 @@ impl Config {
                     exclusions: notion_knowledge_core::discovery::ExclusionRules::default(),
                 })
             }
-            _ => return Err(invalid("NK_NOTION_SCOPE_ROOTS", "workspace and root IDs must be configured together")),
+            _ => {
+                return Err(invalid(
+                    "NK_NOTION_SCOPE_ROOTS",
+                    "workspace and root IDs must be configured together",
+                ));
+            }
         };
         let mode = optional(&mut lookup, "NK_WEBHOOK_MODE", "disabled")?;
         let webhook = match mode.as_str() {
