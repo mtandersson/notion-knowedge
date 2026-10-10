@@ -130,8 +130,12 @@ fn explicit_design_preview_discovery_separates_narrow_writes_and_destructive_arc
             );
         }
         assert_eq!(
-            tool["inputSchema"]["properties"].get("confirmation_id").is_some(),
-            tool["inputSchema"]["properties"].get("section_anchor").is_some()
+            tool["inputSchema"]["properties"]
+                .get("confirmation_id")
+                .is_some(),
+            tool["inputSchema"]["properties"]
+                .get("section_anchor")
+                .is_some()
         );
     }
     assert!(

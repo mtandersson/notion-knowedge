@@ -144,7 +144,12 @@ impl Config {
             match optional(&mut lookup, "NK_DESTRUCTIVE_WRITES", "false")?.as_str() {
                 "false" => false,
                 "true" if !read_only => true,
-                "true" => return Err(invalid("NK_DESTRUCTIVE_WRITES", "requires NK_READ_ONLY=false")),
+                "true" => {
+                    return Err(invalid(
+                        "NK_DESTRUCTIVE_WRITES",
+                        "requires NK_READ_ONLY=false",
+                    ));
+                }
                 _ => return Err(invalid("NK_DESTRUCTIVE_WRITES", "must be true or false")),
             };
         let oauth_issuer = lookup("NK_OAUTH_ISSUER")
@@ -998,20 +1003,28 @@ mod tests {
     #[test]
     fn destructive_writes_require_separate_operator_opt_in() {
         assert!(!parse(&[]).unwrap().destructive_writes_enabled);
-        assert!(!parse(&[("NK_READ_ONLY", "false")]).unwrap().destructive_writes_enabled);
-        assert!(parse(&[
-            ("NK_READ_ONLY", "false"),
-            ("NK_DESTRUCTIVE_WRITES", "true")
-        ]).unwrap().destructive_writes_enabled);
+        assert!(
+            !parse(&[("NK_READ_ONLY", "false")])
+                .unwrap()
+                .destructive_writes_enabled
+        );
+        assert!(
+            parse(&[("NK_READ_ONLY", "false"), ("NK_DESTRUCTIVE_WRITES", "true")])
+                .unwrap()
+                .destructive_writes_enabled
+        );
         assert_eq!(
-            parse(&[("NK_DESTRUCTIVE_WRITES", "true")]).unwrap_err().setting,
+            parse(&[("NK_DESTRUCTIVE_WRITES", "true")])
+                .unwrap_err()
+                .setting,
             "NK_DESTRUCTIVE_WRITES"
         );
         for invalid_value in ["", "1", "TRUE", " true ", "private-sentinel"] {
             let error = parse(&[
                 ("NK_READ_ONLY", "false"),
                 ("NK_DESTRUCTIVE_WRITES", invalid_value),
-            ]).unwrap_err();
+            ])
+            .unwrap_err();
             assert_eq!(error.setting, "NK_DESTRUCTIVE_WRITES");
             assert!(!error.to_string().contains("private-sentinel"));
         }

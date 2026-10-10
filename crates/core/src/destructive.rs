@@ -81,9 +81,8 @@ impl ConfirmationRequest {
     ) -> Result<Self, ConfirmationError> {
         let identifier = |s: &str, min: usize, max: usize| {
             (min..=max).contains(&s.len())
-                && s.bytes().all(|b| {
-                    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':')
-                })
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
         };
         if !operation.is_destructive()
             || !identifier(trusted_scope, 1, 128)
@@ -111,8 +110,7 @@ pub enum ConfirmationDecision {
     Unavailable,
 }
 
-pub type ConfirmationFuture<'a> =
-    Pin<Box<dyn Future<Output = ConfirmationDecision> + Send + 'a>>;
+pub type ConfirmationFuture<'a> = Pin<Box<dyn Future<Output = ConfirmationDecision> + Send + 'a>>;
 
 /// Implement only with a trusted operator/interactive confirmation backend.
 /// A client-submitted confirmation ID must be validated by that backend,

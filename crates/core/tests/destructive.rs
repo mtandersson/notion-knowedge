@@ -42,7 +42,11 @@ fn all_write_operations_are_classified_conservatively() {
     for (name, operation, destructive) in [
         ("knowledge_create_page", WriteOperation::CreatePage, false),
         ("knowledge_append", WriteOperation::Append, false),
-        ("knowledge_update_section", WriteOperation::UpdateSection, true),
+        (
+            "knowledge_update_section",
+            WriteOperation::UpdateSection,
+            true,
+        ),
         ("knowledge_archive_page", WriteOperation::ArchivePage, true),
     ] {
         assert_eq!(WriteOperation::from_tool_name(name), Some(operation));
@@ -50,7 +54,10 @@ fn all_write_operations_are_classified_conservatively() {
     }
     assert!(WriteOperation::ReplaceContent.is_destructive());
     assert!(WriteOperation::DeletePage.is_destructive());
-    assert_eq!(WriteOperation::from_tool_name("knowledge_delete_everything"), None);
+    assert_eq!(
+        WriteOperation::from_tool_name("knowledge_delete_everything"),
+        None
+    );
 }
 
 #[tokio::test]
@@ -76,7 +83,10 @@ async fn unavailable_declined_and_missing_provider_fail_closed_without_retry() {
     ));
     for (decision, expected) in [
         (ConfirmationDecision::Declined, ConfirmationError::Declined),
-        (ConfirmationDecision::Unavailable, ConfirmationError::Unavailable),
+        (
+            ConfirmationDecision::Unavailable,
+            ConfirmationError::Unavailable,
+        ),
     ] {
         let provider = Provider::new(decision);
         assert!(matches!(
@@ -122,8 +132,18 @@ fn malformed_claims_and_nondestructive_confirmation_requests_are_rejected() {
     );
     for (scope, target, digest, key) in [
         ("", "page", "a".repeat(64), "idempotency-key-0123456789"),
-        ("workspace", "../page", "a".repeat(64), "idempotency-key-0123456789"),
-        ("workspace", "page", "invalid".to_owned(), "idempotency-key-0123456789"),
+        (
+            "workspace",
+            "../page",
+            "a".repeat(64),
+            "idempotency-key-0123456789",
+        ),
+        (
+            "workspace",
+            "page",
+            "invalid".to_owned(),
+            "idempotency-key-0123456789",
+        ),
         ("workspace", "page", "a".repeat(64), "short"),
     ] {
         assert_eq!(
