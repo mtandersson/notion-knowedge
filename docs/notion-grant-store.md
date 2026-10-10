@@ -85,6 +85,11 @@ appear in plaintext on disk.
 
 ## Boundary and limitations
 
+- The callback-to-store boundary in #298 uses NotionCallback::complete_and_persist
+  to require a matching confidential Notion client before code exchange,
+  then saves verified grants atomically. A preexisting bot identity must match
+  the new verified grant; switching integration bots requires an explicit,
+  controlled state reset rather than a silent account change.
 - The store only accepts an already typed, verified `NotionGrant` and
   independently compares owner+workspace against the immutable operator
   policy before storing. Every load rechecks the configured Notion client,
