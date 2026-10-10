@@ -34,13 +34,10 @@ impl std::error::Error for ScopeError {}
 
 fn canonical_id(value: &str) -> bool {
     value.len() == 36
-        && value
-            .bytes()
-            .enumerate()
-            .all(|(index, byte)| match index {
-                8 | 13 | 18 | 23 => byte == b'-',
-                _ => byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase(),
-            })
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase(),
+        })
 }
 
 fn valid_scope(scope: &LifecycleScope) -> bool {
@@ -79,10 +76,7 @@ pub struct AuthorizedPage {
 }
 
 impl RootScopeGate {
-    pub fn new(
-        source: Arc<dyn PageLifecycle>,
-        scope: LifecycleScope,
-    ) -> Result<Self, ScopeError> {
+    pub fn new(source: Arc<dyn PageLifecycle>, scope: LifecycleScope) -> Result<Self, ScopeError> {
         if !valid_scope(&scope) {
             return Err(ScopeError::InvalidConfiguration);
         }
