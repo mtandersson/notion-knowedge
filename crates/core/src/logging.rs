@@ -3,7 +3,7 @@
 
 use std::{
     future::Future,
-    sync::atomic::{AtomicU64, AtomicU8, Ordering},
+    sync::atomic::{AtomicU8, AtomicU64, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -26,7 +26,10 @@ impl CorrelationId {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let number = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        Self(format!("{millis:016x}{:08x}{number:016x}", std::process::id()))
+        Self(format!(
+            "{millis:016x}{:08x}{number:016x}",
+            std::process::id()
+        ))
     }
 
     pub fn as_str(&self) -> &str {
@@ -163,7 +166,10 @@ pub fn emit(
     level: Level,
 ) {
     if level != Level::Off && level as u8 <= LOG_LEVEL.load(Ordering::Relaxed) {
-        eprintln!("{}", event_json(id, operation, outcome, elapsed, status, level));
+        eprintln!(
+            "{}",
+            event_json(id, operation, outcome, elapsed, status, level)
+        );
     }
 }
 
