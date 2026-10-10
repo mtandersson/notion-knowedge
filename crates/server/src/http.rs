@@ -150,7 +150,7 @@ fn probe_liveness(bind: SocketAddr, bearer: Option<&str>) -> io::Result<bool> {
     stream.set_write_timeout(Some(timeout))?;
     // Only sent over the local loopback health probe; never printed.
     let auth_header = bearer
-        .map(|token| format!("Authorization: Bearer {token}\\r\\n"))
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
         .unwrap_or_default();
     write!(
         stream,
