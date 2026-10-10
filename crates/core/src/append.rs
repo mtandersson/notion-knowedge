@@ -151,7 +151,9 @@ pub async fn append_once(
     let revision = check_revision(reader, &request.page_id, &expected)
         .await
         .map_err(|failure| match failure {
-            RevisionError::Conflict(_) | RevisionError::Inactive(_) => AppendError::RevisionConflict,
+            RevisionError::Conflict(_) | RevisionError::Inactive(_) => {
+                AppendError::RevisionConflict
+            }
             RevisionError::InvalidPrecondition => AppendError::InvalidInput,
             RevisionError::Read(_) => AppendError::Unavailable,
         })?;
@@ -163,9 +165,12 @@ pub async fn append_once(
     if before.page.id != request.page_id
         || before.page.archived
         || before.page.last_edited_time != revision.last_edited_time
-        || request.expected_markdown_sha256.as_ref().is_some_and(|expected| {
-            !expected.eq_ignore_ascii_case(&markdown_sha256(&before.markdown))
-        })
+        || request
+            .expected_markdown_sha256
+            .as_ref()
+            .is_some_and(|expected| {
+                !expected.eq_ignore_ascii_case(&markdown_sha256(&before.markdown))
+            })
     {
         return Err(AppendError::RevisionConflict);
     }
