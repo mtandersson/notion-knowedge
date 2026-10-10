@@ -36,6 +36,8 @@ replacement are intentional; an unchanged body yields `NoChange`.
   rejected before any plan is returned.
 - If a following sibling heading exists, nonempty replacement content must
   end with a newline so it cannot absorb the next heading.
+- New headings at the same or higher level than the selected anchor are denied
+  so an inserted sibling/parent cannot escape the intended section boundary.
 - Enhanced Notion `<unknown`/`<page`/`<database`/`<data-source` markers
   inside the **selected** range prevent planning. Such constructs elsewhere
   are left untouched. This intentionally favors a denied edit over losing
