@@ -283,3 +283,19 @@ fn trailing_lower_level_heading_belongs_to_selected_parent() {
     assert_eq!(p.preview(), "# Parent\nparent rewritten\n");
     assert!(p.untouched_suffix().is_empty());
 }
+
+#[test]
+fn replacement_cannot_introduce_new_sibling_or_parent_headings() {
+    let original = "# Document\n## Target\nold\n## Next\nprotected\n";
+    for attempt in [
+        "new\n## Unauthorized sibling\n",
+        "new\n# Unauthorized parent\n",
+    ] {
+        assert_eq!(
+            plan_section(original, at(2, "Target"), attempt).unwrap_err(),
+            SectionError::Unsupported
+        );
+    }
+    let p = plan(original, 2, "Target", "new\n### Allowed child\ntext\n");
+    assert_eq!(p.untouched_suffix(), "## Next\nprotected\n");
+}
