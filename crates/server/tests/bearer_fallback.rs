@@ -62,10 +62,18 @@ async fn exercise(health_protected: bool) {
             .unwrap();
         assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(unauthorized.headers()["cache-control"], "no-store");
-        assert_eq!(unauthorized.headers()["www-authenticate"], "Bearer realm=\"notion-knowledge-dev\"");
+        assert_eq!(
+            unauthorized.headers()["www-authenticate"],
+            "Bearer realm=\"notion-knowledge-dev\""
+        );
         assert!(!unauthorized.text().await.unwrap().contains(TOKEN));
 
-        for credential in ["Basic local", "Bearer wrong", "Bearer ", "Bearer wrong extra"] {
+        for credential in [
+            "Basic local",
+            "Bearer wrong",
+            "Bearer ",
+            "Bearer wrong extra",
+        ] {
             let bad = client
                 .post(&endpoint)
                 .header("authorization", credential)
@@ -108,7 +116,10 @@ async fn exercise(health_protected: bool) {
             .await
             .unwrap();
         assert_eq!(accepted.status(), StatusCode::OK);
-        let session = accepted.headers()["mcp-session-id"].to_str().unwrap().to_owned();
+        let session = accepted.headers()["mcp-session-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
         assert!(!accepted.text().await.unwrap().contains(TOKEN));
 
         for method in ["GET", "DELETE"] {
