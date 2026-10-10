@@ -2,7 +2,7 @@
 
 use std::{io, net::SocketAddr, sync::Arc, time::Instant};
 
-use notion_knowledge_core::logging::{self, CorrelationId, Level, Operation, Outcome};
+use notion_knowledge_core::logging::{self, CorrelationId, Operation, Outcome};
 
 /// Maximum HTTP MCP POST body, independent of its declared content type.
 /// Stdio input bounds and semantic-tool output budgets are separate contracts.
@@ -115,11 +115,7 @@ async fn correlate_request(request: Request, next: Next) -> Response {
         outcome,
         started.elapsed(),
         Some(status.as_u16()),
-        if status.is_server_error() {
-            Level::Warn
-        } else {
-            Level::Info
-        },
+        outcome.level(),
     );
     response
 }
