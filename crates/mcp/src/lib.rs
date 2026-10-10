@@ -551,7 +551,7 @@ impl ServerHandler for KnowledgeServer {
                                 ));
                             };
                             if !permit.belongs_to_any(&authorized_roots)
-                                || !permit.belongs_to_any(&[source.provenance.root_page_id.clone()])
+                                || !permit.belongs_to_any(std::slice::from_ref(&source.provenance.root_page_id))
                                 || gate
                                     .revalidate(&permit, gate.configured_scope())
                                     .await
@@ -600,7 +600,7 @@ impl ServerHandler for KnowledgeServer {
                                 ));
                             };
                             if !permit.belongs_to_any(&authorized_roots)
-                                || !permit.belongs_to_any(&[source.provenance.root_page_id.clone()])
+                                || !permit.belongs_to_any(std::slice::from_ref(&source.provenance.root_page_id))
                                 || gate
                                     .revalidate(&permit, gate.configured_scope())
                                     .await
