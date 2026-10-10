@@ -1055,7 +1055,8 @@ mod tests {
         let configured = parse(&[
             ("NK_TOOL_ALLOWLIST", "read,knowledge_append"),
             ("NK_TOOL_BLOCKLIST", "knowledge_get"),
-        ]).unwrap();
+        ])
+        .unwrap();
         assert!(configured.capability_policy.permits("knowledge_search"));
         assert!(!configured.capability_policy.permits("knowledge_get"));
         assert!(configured.capability_policy.permits("knowledge_append"));
@@ -1065,9 +1066,12 @@ mod tests {
             assert_eq!(err.reason, "unknown or malformed capability");
             assert!(!err.to_string().contains("invalid_unknown_operation"));
         }
-        assert!(!parse(&[("NK_TOOL_ALLOWLIST", "")])
-            .unwrap()
-            .capability_policy.permits("knowledge_get"));
+        assert!(
+            !parse(&[("NK_TOOL_ALLOWLIST", "")])
+                .unwrap()
+                .capability_policy
+                .permits("knowledge_get")
+        );
     }
 
     #[test]

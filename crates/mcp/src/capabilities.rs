@@ -96,9 +96,9 @@ impl CapabilityPolicy {
         if self.blocklist.contains(operation) || self.blocklist.contains(category) {
             return false;
         }
-        self.allowlist.as_ref().is_none_or(|allow| {
-            allow.contains(operation) || allow.contains(category)
-        })
+        self.allowlist
+            .as_ref()
+            .is_none_or(|allow| allow.contains(operation) || allow.contains(category))
     }
 }
 
