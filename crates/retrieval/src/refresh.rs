@@ -22,7 +22,8 @@ use sha2::{Digest, Sha256};
 use crate::{
     chunks::{ChunkDiffMetrics, ChunkTableError, GuardedChunkTable},
     commit::{
-        CommitBinding, CommitError, CommitOutcome, IndexCommitCoordinator, PageAction, PageOperation,
+        CommitBinding, CommitError, CommitOutcome, IndexCommitCoordinator, PageAction,
+        PageOperation,
     },
 };
 
@@ -181,9 +182,13 @@ impl AuthoritativePageRefresh {
             serde_json::to_vec(&document).map_err(|_| RefreshError::InvalidConfiguration)?;
         hasher.update(serialized);
         let revision = format!("{:x}", hasher.finalize());
-        let operation = PageOperation::new(operation_id, &revision, PageAction::Refresh, checkpoint)
-            .map_err(RefreshError::from)?;
-        let prepared = self.guard.prepare_page(provider, operation, &chunks).await?;
+        let operation =
+            PageOperation::new(operation_id, &revision, PageAction::Refresh, checkpoint)
+                .map_err(RefreshError::from)?;
+        let prepared = self
+            .guard
+            .prepare_page(provider, operation, &chunks)
+            .await?;
         let diff = prepared.metrics();
 
         // The commit's callback is invoked by the operation-owned runtime
@@ -218,13 +223,19 @@ async fn verify_source(
     scope: &LifecycleScope,
     expected: &IndexedDocument,
 ) -> Result<(), FailureClass> {
-    let gate =
-        RootScopeGate::new(Arc::new(notion.clone()), scope.clone()).map_err(|_| FailureClass::Conflict)?;
-    let permit = gate.authorize(page).await.map_err(|_| FailureClass::Source)?;
+    let gate = RootScopeGate::new(Arc::new(notion.clone()), scope.clone())
+        .map_err(|_| FailureClass::Conflict)?;
+    let permit = gate
+        .authorize(page)
+        .await
+        .map_err(|_| FailureClass::Source)?;
     if !permit.belongs_to_any(std::slice::from_ref(&root.0)) {
         return Err(FailureClass::Source);
     }
-    let fresh = notion.read_content(&page.0).await.map_err(|_| FailureClass::Source)?;
+    let fresh = notion
+        .read_content(&page.0)
+        .await
+        .map_err(|_| FailureClass::Source)?;
     if fresh.page.archived
         || fresh.page.id != *page
         || fresh.page.url != expected.metadata.url
