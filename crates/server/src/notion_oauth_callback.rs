@@ -356,7 +356,10 @@ impl<'a> NotionCallback<'a> {
         if !store.matches_client(&self.exchanger.client_id) {
             return Err(PersistError::Store(StoreError::IdentityMismatch));
         }
-        let verified = self.complete(raw_query).await.map_err(PersistError::Callback)?;
+        let verified = self
+            .complete(raw_query)
+            .await
+            .map_err(PersistError::Callback)?;
         // save() atomically rechecks the immutable workspace, user and bot
         // under the storage mutex before replacing any credential pair.
         store.save(&verified.grant).map_err(PersistError::Store)
@@ -671,7 +674,12 @@ mod tests {
         ));
     }
 
-    fn sealed_store() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf, GrantStore) {
+    fn sealed_store() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        GrantStore,
+    ) {
         use std::{fs, os::unix::fs::PermissionsExt};
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("grant.key");
@@ -711,7 +719,11 @@ mod tests {
             "workspace-123",
             "user-456",
         ] {
-            assert!(!encrypted.windows(text.len()).any(|part| part == text.as_bytes()));
+            assert!(
+                !encrypted
+                    .windows(text.len())
+                    .any(|part| part == text.as_bytes())
+            );
         }
         let reopened = GrantStore::open(
             &key,
@@ -740,7 +752,8 @@ mod tests {
     async fn foreign_client_is_denied_before_state_consumption_or_network() {
         let (redirect, flow, registration, allowed) = setup();
         let (_dir, key, file, _store) = sealed_store();
-        let wrong_store = GrantStore::open(&key, &file, "different-client", allowed.clone()).unwrap();
+        let wrong_store =
+            GrantStore::open(&key, &file, "different-client", allowed.clone()).unwrap();
         let start = redirect.begin(&flow, &request()).unwrap();
         let state = state(start.expose()).to_owned();
         let client = NotionTokenClient::new(&registration, SECRET)
@@ -769,7 +782,11 @@ mod tests {
             // Existing state has bot-test, whereas a matching callback
             // from the fixture exchanges a different bot-123 integration.
             store
-                .save(&NotionGrant::fixture("workspace-123", "user-456", Some(3600)))
+                .save(&NotionGrant::fixture(
+                    "workspace-123",
+                    "user-456",
+                    Some(3600),
+                ))
                 .unwrap();
             let before = fs::read(&path).unwrap();
             let start = redirect.begin(&flow, &request()).unwrap();
@@ -787,7 +804,10 @@ mod tests {
             if bot_change {
                 assert_eq!(error, PersistError::Store(StoreError::IdentityMismatch));
             } else {
-                assert_eq!(error, PersistError::Callback(CallbackError::IdentityMismatch));
+                assert_eq!(
+                    error,
+                    PersistError::Callback(CallbackError::IdentityMismatch)
+                );
             }
             task.await.unwrap();
             assert_eq!(fs::read(&path).unwrap(), before);
@@ -803,7 +823,8 @@ mod tests {
         fs::write(&path, b"corrupted-secret-state").unwrap();
         let before = fs::read(&path).unwrap();
         let start = redirect.begin(&flow, &request()).unwrap();
-        let (endpoint, task) = token_server(grant_json("workspace-123", "user", "user-456"), 200).await;
+        let (endpoint, task) =
+            token_server(grant_json("workspace-123", "user", "user-456"), 200).await;
         let client = NotionTokenClient::new(&registration, SECRET)
             .unwrap()
             .for_local_fixture(&endpoint);
