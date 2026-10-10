@@ -72,6 +72,17 @@ and cancels active sessions. Both transports share the [semantic search contract
 valid search calls in the default bootstrap return an explicit retrieval-unavailable tool error. The isolated [semantic MCP spike](docs/semantic-mcp-spike.md) explicitly configures real local semantic retrieval through this same handler and transport wiring.
 Calls to unknown tools return protocol errors.
 
+### Optional local HTTP bearer fallback
+
+For development and emergency diagnostics only, set `NK_HTTP_AUTH=bearer`
+and provide a randomly generated `NK_HTTP_BEARER_TOKEN`. The MCP endpoint then
+requires a valid bearer token on **every HTTP request**, including session
+continuation and SSE. This mode is opt-in, restricted to a loopback listener
+and **not** the production ChatGPT OAuth model (#117). Health endpoints retain
+an independent policy via `NK_HTTP_HEALTH_AUTH=none|bearer`.
+See [development bearer authentication](docs/development-bearer-auth.md)
+for configuration, security limits and tests.
+
 ### Payload limits
 
 The Streamable HTTP `/mcp` endpoint accepts at most **4 MiB** per POST body
@@ -248,6 +259,13 @@ bootstrap does not yet provide working private ChatGPT authentication or
 configured retrieval, and its staged write/file primitives are not MCP tools.
 The playbook includes a documented **non-sensitive** operational smoke checklist
 and distinguishes pilot targets from demonstrated results.
+
+## Mutation audit model
+
+The [privacy-aware audit event contract](docs/audit-events.md) defines a
+payload-free agent-mutation record and a separate durable SQLite store with
+bounded retention. It is an available component, not yet wired to production
+MCP writes; future mutation workflows must enforce its failure policy.
 
 ## ChatGPT file input
 
