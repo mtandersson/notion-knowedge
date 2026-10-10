@@ -330,7 +330,7 @@ mod tests {
         y.unwrap();
         let seen = provider.await.unwrap();
         assert!(seen.starts_with("POST /v1/oauth/token HTTP/1.1"));
-        assert!(seen.contains("rotated") == false);
+        assert!(!seen.contains("rotated"));
         let fresh = store.load_for_refresh().unwrap().unwrap();
         assert_eq!(fresh.epoch(), old.epoch());
         assert_eq!(fresh.grant_id(), old.grant_id());
