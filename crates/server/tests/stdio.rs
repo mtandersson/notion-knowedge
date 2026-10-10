@@ -37,6 +37,7 @@ async fn stdio_client_initializes_discovers_tools_and_exits_on_disconnect() {
             json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
             json!({"jsonrpc": "2.0", "id": 3, "method": "ping"}),
             json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"knowledge_search","arguments":{"query":"find notes","limit":5,"mode":"hybrid","filters":{"page_ids":["page-1"]}}}}),
+            json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"knowledge_upload_file","arguments":{"file":{"download_url":"https://files.example.test/input?token=private-sentinel","file_id":"file_test"}}}}),
         ] {
             stdin.write_all(request.to_string().as_bytes()).await?;
             stdin.write_all(b"\n").await?;
@@ -107,4 +108,13 @@ async fn stdio_client_initializes_discovers_tools_and_exits_on_disconnect() {
             .starts_with("retrieval_unavailable:")
     );
     assert!(responses[3]["result"].get("structuredContent").is_none());
+    assert_eq!(responses[4]["result"]["isError"], true);
+    assert!(
+        responses[4]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("file_upload_unavailable:")
+    );
+    assert!(!frames.join("").contains("private-sentinel"));
+    assert!(!diagnostics.contains("private-sentinel"));
 }
