@@ -5,6 +5,8 @@ use std::{env, ffi::OsString, fmt, net::SocketAddr};
 #[derive(Debug)]
 pub struct Config {
     pub http_bind: SocketAddr,
+    /// Highest level emitted to stderr as redacted, structured JSON.
+    pub log_level: notion_knowledge_core::logging::Level,
     /// Opt-in discovery mode; all MCP calls are denied pending real OAuth.
     pub oauth_discovery: Option<crate::oauth_discovery::OAuthDiscovery>,
     /// Optional, trusted Notion authorization redirect config; NOT a live HTTP login.
@@ -107,6 +109,10 @@ impl Config {
     pub(crate) fn from_lookup(
         mut lookup: impl FnMut(&str) -> Option<OsString>,
     ) -> Result<Self, ConfigError> {
+        let log_level = notion_knowledge_core::logging::Level::parse(&optional(
+            &mut lookup, "NK_LOG_LEVEL", "info",
+        )?)
+        .ok_or_else(|| invalid("NK_LOG_LEVEL", "must be off, error, warn, info or debug"))?;
         let host = optional(&mut lookup, "NK_HTTP_HOST", "127.0.0.1")?
             .parse()
             .map_err(|_| invalid("NK_HTTP_HOST", "must be an IPv4 or IPv6 address"))?;
@@ -419,6 +425,7 @@ impl Config {
             webhook_state_file,
             webhook_debounce,
             http_bind: SocketAddr::new(host, port),
+            log_level,
             oauth_discovery,
             notion_oauth_redirect,
             notion_oauth_callback,
