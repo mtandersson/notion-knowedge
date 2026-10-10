@@ -220,6 +220,15 @@ pub fn plan_section(
     if original_body == replacement {
         return Err(SectionError::NoChange);
     }
+    // Reject any new equal/higher-level heading. Such a heading would escape
+    // the caller's selected body semantically even if the byte-range edit is
+    // correctly bounded. Lower-level children remain permitted.
+    if Parser::new_ext(replacement, Options::all()).any(|event| {
+        matches!(event, Event::Start(Tag::Heading { level, .. })
+            if level_number(level) <= anchor.level)
+    }) {
+        return Err(SectionError::Unsupported);
+    }
     let before = markdown[..heading_end].to_owned();
     let after = markdown[end..].to_owned();
     let mut proposed = String::with_capacity(before.len() + replacement.len() + after.len());
