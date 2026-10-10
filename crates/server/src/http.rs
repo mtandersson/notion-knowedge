@@ -44,7 +44,8 @@ pub async fn serve_with_handler(
     let diagnostics = crate::diagnostics::bootstrap(&settings);
     let handler = crate::root_scope::attach_root_scope(handler, &settings)
         .map_err(io::Error::other)?
-        .with_read_only(settings.read_only);
+        .with_read_only(settings.read_only)
+        .with_destructive_writes_enabled(settings.destructive_writes_enabled);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let mut config = StreamableHttpServerConfig::default();
     // Keep the SDK's DNS rebinding protection, including for configured IPs.

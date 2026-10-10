@@ -74,3 +74,6 @@ pub mod root_scope;
 
 /// Opt-in, scope-checked, durable once-only Notion append application workflow.
 pub mod append;
+
+/// Server-trusted confirmation gate for destructive operations (#82).
+pub mod destructive;

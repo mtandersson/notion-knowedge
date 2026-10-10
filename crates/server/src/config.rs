@@ -9,6 +9,8 @@ pub struct Config {
     pub log_level: notion_knowledge_core::logging::Level,
     /// Fail-closed MCP access mode; enabled unless explicitly opted out.
     pub read_only: bool,
+    /// Explicit second gate for destructive operations; defaults disabled.
+    pub destructive_writes_enabled: bool,
     /// Explicit developer/emergency HTTP-only bearer mode, never OAuth.
     pub bearer_fallback: Option<SecretToken>,
     /// Diagnostics authentication is independent from the MCP route.
@@ -138,6 +140,18 @@ impl Config {
             "false" => false,
             _ => return Err(invalid("NK_READ_ONLY", "must be true or false")),
         };
+        let destructive_writes_enabled =
+            match optional(&mut lookup, "NK_DESTRUCTIVE_WRITES", "false")?.as_str() {
+                "false" => false,
+                "true" if !read_only => true,
+                "true" => {
+                    return Err(invalid(
+                        "NK_DESTRUCTIVE_WRITES",
+                        "requires NK_READ_ONLY=false",
+                    ));
+                }
+                _ => return Err(invalid("NK_DESTRUCTIVE_WRITES", "must be true or false")),
+            };
         let oauth_issuer = lookup("NK_OAUTH_ISSUER")
             .map(|value| text(value, "NK_OAUTH_ISSUER"))
             .transpose()?;
@@ -563,6 +577,7 @@ impl Config {
             http_bind: SocketAddr::new(host, port),
             log_level,
             read_only,
+            destructive_writes_enabled,
             bearer_fallback,
             health_requires_bearer,
             oauth_discovery,
@@ -982,6 +997,36 @@ mod tests {
             let error = parse(&[("NK_READ_ONLY", invalid_value)]).unwrap_err();
             assert_eq!(error.setting, "NK_READ_ONLY");
             assert!(!error.to_string().contains(invalid_value) || invalid_value.is_empty());
+        }
+    }
+
+    #[test]
+    fn destructive_writes_require_separate_operator_opt_in() {
+        assert!(!parse(&[]).unwrap().destructive_writes_enabled);
+        assert!(
+            !parse(&[("NK_READ_ONLY", "false")])
+                .unwrap()
+                .destructive_writes_enabled
+        );
+        assert!(
+            parse(&[("NK_READ_ONLY", "false"), ("NK_DESTRUCTIVE_WRITES", "true")])
+                .unwrap()
+                .destructive_writes_enabled
+        );
+        assert_eq!(
+            parse(&[("NK_DESTRUCTIVE_WRITES", "true")])
+                .unwrap_err()
+                .setting,
+            "NK_DESTRUCTIVE_WRITES"
+        );
+        for invalid_value in ["", "1", "TRUE", " true ", "private-sentinel"] {
+            let error = parse(&[
+                ("NK_READ_ONLY", "false"),
+                ("NK_DESTRUCTIVE_WRITES", invalid_value),
+            ])
+            .unwrap_err();
+            assert_eq!(error.setting, "NK_DESTRUCTIVE_WRITES");
+            assert!(!error.to_string().contains("private-sentinel"));
         }
     }
 
