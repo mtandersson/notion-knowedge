@@ -260,6 +260,13 @@ configured retrieval, and its staged write/file primitives are not MCP tools.
 The playbook includes a documented **non-sensitive** operational smoke checklist
 and distinguishes pilot targets from demonstrated results.
 
+## Mutation audit model
+
+The [privacy-aware audit event contract](docs/audit-events.md) defines a
+payload-free agent-mutation record and a separate durable SQLite store with
+bounded retention. It is an available component, not yet wired to production
+MCP writes; future mutation workflows must enforce its failure policy.
+
 ## ChatGPT file input
 
 The staged [`knowledge_upload_file` single-file input contract](docs/chatgpt-file-parameters.md)
