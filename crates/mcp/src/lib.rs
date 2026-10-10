@@ -11,6 +11,7 @@ use rmcp::{
     model::{Implementation, ServerCapabilities, ServerConfig},
 };
 use std::{io::Write, sync::Arc};
+use notion_knowledge_core::logging::{EventGuard, Operation};
 
 /// Maximum JSON payload returned by a semantic tool, including citation metadata.
 /// Enforced for both stdio and Streamable HTTP after adapter composition.
@@ -181,6 +182,7 @@ impl ServerHandler for KnowledgeServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        let _log = EventGuard::new(Operation::McpTool);
         Ok(rmcp::model::ListToolsResult {
             tools: self.tool_catalog(),
             ..Default::default()
@@ -202,6 +204,7 @@ impl ServerHandler for KnowledgeServer {
         request: rmcp::model::CallToolRequestParams,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+        let _log = EventGuard::new(Operation::McpTool);
         let arguments = request.arguments.unwrap_or_default();
         let error = |message: &str| {
             rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(message)])
