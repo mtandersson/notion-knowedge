@@ -119,7 +119,7 @@ impl NotionClient {
             rate_limits: self.transport.rate_limits.load(Ordering::Relaxed),
         }
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-fixtures"))]
     pub(crate) fn without_retries(mut self) -> Self {
         self.transport = std::sync::Arc::new(Transport {
             max_retries: 0,
