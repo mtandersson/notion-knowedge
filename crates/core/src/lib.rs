@@ -71,3 +71,6 @@ pub mod idempotency;
 
 /// Fresh physical-ancestry authorization gate shared by future MCP tools.
 pub mod root_scope;
+
+/// Opt-in, scope-checked, durable once-only Notion append application workflow.
+pub mod append;
