@@ -186,6 +186,27 @@ Production build:
 cargo build --workspace --release --locked
 ```
 
+## Structured operation logs
+
+Set `NK_LOG_LEVEL` to `off`, `error`, `warn`, `info` (default), or `debug`.
+Invalid levels fail startup without echoing the supplied value. Operation events
+are one JSON object per line on **stderr**, so stdio JSON-RPC stdout remains
+unchanged. Each event includes `timestamp_unix_ms`, `level`,
+`correlation_id`, `operation`, `duration_ms`, `outcome` and
+`http_status` (null when not applicable). Operations are an allowlisted enum
+rather than user-input strings, and payloads, titles, URLs, auth headers,
+request parameters and upstream errors are **never logged**.
+
+HTTP assigns each incoming request a new server-generated ID and returns it
+as the `x-correlation-id` response header; a client-supplied header cannot
+override it. Awaited Notion calls and durable webhook admissions reuse the
+request context; detached index commit threads capture the ID before spawn.
+Stdio MCP tool calls also have their own operation IDs. `completed` on a
+tool event means the handler returned, not that a tool's business outcome
+succeeded. Response/status failures remain visible on HTTP and Notion events.
+Server logs are sensitive operational metadata; apply normal access controls,
+retention and log-shipping redaction policies.
+
 ## Diagnostics
 
 Use `--version` for the Cargo release identity, `--diagnostics` for a one-shot
