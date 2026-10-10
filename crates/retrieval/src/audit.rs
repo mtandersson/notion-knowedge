@@ -22,6 +22,29 @@ impl SqliteAuditStore {
         {
             fs::create_dir_all(parent).map_err(|_| AuditError::Unavailable)?;
         }
+        #[cfg(unix)]
+        {
+            use std::{io::ErrorKind, os::unix::fs::OpenOptionsExt};
+            // SQLite's default CREATE mode can briefly be readable before a
+            // subsequent chmod. Pre-create privately, even under a permissive
+            // process umask. Never follow an existing symlink at open.
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+            {
+                Ok(_) => {}
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                    if !fs::symlink_metadata(path)
+                        .is_ok_and(|metadata| metadata.file_type().is_file())
+                    {
+                        return Err(AuditError::Unavailable);
+                    }
+                }
+                Err(_) => return Err(AuditError::Unavailable),
+            }
+        }
         let connection = Connection::open(path).map_err(|_| AuditError::Unavailable)?;
         #[cfg(unix)]
         {
@@ -248,6 +271,11 @@ mod tests {
         {
             let store = SqliteAuditStore::open(&path, AuditRetention::default()).unwrap();
             store.record(&event(100), 101).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            }
         }
         {
             let store = SqliteAuditStore::open(&path, AuditRetention::default()).unwrap();
