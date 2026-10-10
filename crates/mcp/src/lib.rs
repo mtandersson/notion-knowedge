@@ -6,6 +6,7 @@
 /// Stable component identifier used by the bootstrap composition smoke check.
 pub const COMPONENT: &str = "mcp";
 
+use notion_knowledge_core::logging::{EventGuard, Operation};
 use rmcp::{
     ServerHandler,
     model::{Implementation, ServerCapabilities, ServerConfig},
@@ -198,6 +199,7 @@ impl ServerHandler for KnowledgeServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        let _log = EventGuard::new(Operation::McpTool);
         Ok(rmcp::model::ListToolsResult {
             tools: self.tool_catalog(),
             ..Default::default()
@@ -222,6 +224,7 @@ impl ServerHandler for KnowledgeServer {
         request: rmcp::model::CallToolRequestParams,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+        let _log = EventGuard::new(Operation::McpTool);
         // Check before argument handling or invoking any adapter; the same
         // handler serves stdio and HTTP, so there is no transport bypass.
         if !self.tool_permitted(request.name.as_ref()) {

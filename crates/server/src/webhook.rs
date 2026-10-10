@@ -8,7 +8,10 @@ use axum::{
     routing::post,
 };
 use hmac::{Hmac, Mac};
-use notion_knowledge_core::webhook::{WebhookAdmission, WebhookEvent};
+use notion_knowledge_core::{
+    logging::{self, EventGuard, Operation, Outcome},
+    webhook::{WebhookAdmission, WebhookEvent},
+};
 use serde::Deserialize;
 use sha2::Sha256;
 use std::{io::Write, path::PathBuf, sync::Arc, time::Duration};
@@ -51,15 +54,25 @@ impl WebhookAdmission for DurableAdmission {
         let store = self.0.clone();
         let window = self.1;
         Box::pin(async move {
+            let correlation = logging::current_id();
             tokio::task::spawn_blocking(move || {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|_| AdmissionError::Unavailable)?;
-                let now_ms =
-                    i64::try_from(now.as_millis()).map_err(|_| AdmissionError::Unavailable)?;
-                store
-                    .receive_debounced(&event, now_ms, window)
-                    .map_err(|_| AdmissionError::Unavailable)
+                let mut log = EventGuard::with_id(Operation::WebhookAdmission, correlation);
+                let result = (|| {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_err(|_| AdmissionError::Unavailable)?;
+                    let now_ms =
+                        i64::try_from(now.as_millis()).map_err(|_| AdmissionError::Unavailable)?;
+                    store
+                        .receive_debounced(&event, now_ms, window)
+                        .map_err(|_| AdmissionError::Unavailable)
+                })();
+                log.finish(if result.is_ok() {
+                    Outcome::Success
+                } else {
+                    Outcome::Failed
+                });
+                result
             })
             .await
             .map_err(|_| AdmissionError::Unavailable)?

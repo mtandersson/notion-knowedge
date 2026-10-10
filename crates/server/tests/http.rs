@@ -58,6 +58,9 @@ async fn http_client_initializes_discovers_calls_and_receives_structured_errors(
         let live = client.get(&live_url).send().await.unwrap();
         assert_eq!(live.status(), StatusCode::OK);
         assert_eq!(live.headers()["cache-control"], "no-store");
+        let first_id = live.headers()["x-correlation-id"].to_str().unwrap().to_owned();
+        assert_eq!(first_id.len(), 40);
+        assert!(first_id.bytes().all(|b| b.is_ascii_hexdigit()));
         assert_eq!(
             live.json::<Value>().await.unwrap(),
             json!({
@@ -69,6 +72,16 @@ async fn http_client_initializes_discovers_calls_and_receives_structured_errors(
         let ready = client.get(&ready_url).send().await.unwrap();
         assert_eq!(ready.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(ready.headers()["cache-control"], "no-store");
+        let second_id = ready.headers()["x-correlation-id"].to_str().unwrap();
+        assert_ne!(first_id, second_id);
+        let spoofed = client.get(&live_url)
+            .header("x-correlation-id", "private-sentinel-forged")
+            .send().await.unwrap();
+        assert_eq!(spoofed.status(), StatusCode::OK);
+        assert_ne!(
+            spoofed.headers()["x-correlation-id"].to_str().unwrap(),
+            "private-sentinel-forged"
+        );
         assert_eq!(
             ready.json::<Value>().await.unwrap(),
             json!({

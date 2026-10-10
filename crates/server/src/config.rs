@@ -5,6 +5,8 @@ use std::{env, ffi::OsString, fmt, net::SocketAddr};
 #[derive(Debug)]
 pub struct Config {
     pub http_bind: SocketAddr,
+    /// Highest level emitted to stderr as redacted, structured JSON.
+    pub log_level: notion_knowledge_core::logging::Level,
     /// Fail-closed MCP access mode; enabled unless explicitly opted out.
     pub read_only: bool,
     /// Explicit developer/emergency HTTP-only bearer mode, never OAuth.
@@ -113,6 +115,12 @@ impl Config {
     pub(crate) fn from_lookup(
         mut lookup: impl FnMut(&str) -> Option<OsString>,
     ) -> Result<Self, ConfigError> {
+        let log_level = notion_knowledge_core::logging::Level::parse(&optional(
+            &mut lookup,
+            "NK_LOG_LEVEL",
+            "info",
+        )?)
+        .ok_or_else(|| invalid("NK_LOG_LEVEL", "must be off, error, warn, info or debug"))?;
         let host = optional(&mut lookup, "NK_HTTP_HOST", "127.0.0.1")?
             .parse()
             .map_err(|_| invalid("NK_HTTP_HOST", "must be an IPv4 or IPv6 address"))?;
@@ -485,6 +493,7 @@ impl Config {
             webhook_state_file,
             webhook_debounce,
             http_bind: SocketAddr::new(host, port),
+            log_level,
             read_only,
             bearer_fallback,
             health_requires_bearer,
@@ -608,6 +617,25 @@ mod tests {
             .setting,
             "NK_HTTP_AUTH"
         );
+    }
+
+    #[test]
+    fn structured_log_level_is_operator_controlled_without_reflecting_secrets() {
+        use notion_knowledge_core::logging::Level;
+        assert_eq!(parse(&[]).unwrap().log_level, Level::Info);
+        assert_eq!(
+            parse(&[("NK_LOG_LEVEL", "DEBUG")]).unwrap().log_level,
+            Level::Debug
+        );
+        assert_eq!(
+            parse(&[("NK_LOG_LEVEL", "off")]).unwrap().log_level,
+            Level::Off
+        );
+        let bad = parse(&[("NK_LOG_LEVEL", "authorization=private-sentinel")])
+            .unwrap_err()
+            .to_string();
+        assert!(bad.contains("NK_LOG_LEVEL"));
+        assert!(!bad.contains("private-sentinel"));
     }
 
     #[test]

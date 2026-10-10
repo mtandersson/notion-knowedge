@@ -146,6 +146,23 @@ async fn stdio_exchange(read_only: bool) {
     }
     assert!(!frames.join("").contains("private-sentinel"));
     assert!(!diagnostics.contains("private-sentinel"));
+    // Every discovered/called tool has a JSON event, but no request body or
+    // synthetic private URL is copied into it.
+    let events: Vec<Value> = diagnostics
+        .lines()
+        .filter(|line| line.starts_with('{'))
+        .map(|line| serde_json::from_str(line).expect("structured log entry"))
+        .collect();
+    assert!(
+        events.len() >= 3,
+        "missing MCP operation events: {diagnostics}"
+    );
+    for event in events {
+        assert_eq!(event["operation"], "mcp_tool");
+        assert_eq!(event["outcome"], "completed");
+        assert!(event["correlation_id"].as_str().unwrap().len() >= 32);
+        assert!(event["duration_ms"].is_number());
+    }
 }
 
 #[tokio::test]

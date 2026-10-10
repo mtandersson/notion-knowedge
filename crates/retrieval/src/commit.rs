@@ -12,6 +12,7 @@ use std::{
 };
 
 use notion_knowledge_core::{
+    logging::{self, EventGuard, Operation, Outcome},
     reconciliation::{FailureClass, Lease, ReconciliationScope, validate},
     sync_state::PageSyncState,
 };
@@ -669,10 +670,12 @@ impl IndexCommitCoordinator {
         Fut: Future<Output = Result<(), FailureClass>> + Send + 'static,
     {
         let coordinator = self.clone();
+        let correlation = logging::current_id();
         let (sender, receiver) = oneshot::channel();
         let spawned = std::thread::Builder::new()
             .name("nk-index-commit".into())
             .spawn(move || {
+                let mut log = EventGuard::with_id(Operation::IndexCommit, correlation);
                 let result = (|| {
                     let _guard = coordinator.acquire()?;
                     coordinator.revalidate(&lease, clock())?;
@@ -698,6 +701,11 @@ impl IndexCommitCoordinator {
                         }
                     }
                 })();
+                log.finish(if result.is_ok() {
+                    Outcome::Success
+                } else {
+                    Outcome::Failed
+                });
                 let _ = sender.send(result);
             });
         async move {
