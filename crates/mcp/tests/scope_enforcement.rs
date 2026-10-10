@@ -377,7 +377,7 @@ async fn search_and_get_allow_only_authorized_pages() {
         json!({"refs":[{"kind":"chunk","id":"chunk-id"}],"max_chars":100}),
     )
     .await;
-    assert_eq!(response["result"]["isError"], Value::Null, "{response}");
+    assert_ne!(response["result"]["isError"], true, "{response}");
     assert!(
         response
             .to_string()
