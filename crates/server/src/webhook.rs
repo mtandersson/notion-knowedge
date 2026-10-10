@@ -58,16 +58,20 @@ impl WebhookAdmission for DurableAdmission {
             tokio::task::spawn_blocking(move || {
                 let mut log = EventGuard::with_id(Operation::WebhookAdmission, correlation);
                 let result = (|| {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|_| AdmissionError::Unavailable)?;
-                let now_ms =
-                    i64::try_from(now.as_millis()).map_err(|_| AdmissionError::Unavailable)?;
-                store
-                    .receive_debounced(&event, now_ms, window)
-                    .map_err(|_| AdmissionError::Unavailable)
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_err(|_| AdmissionError::Unavailable)?;
+                    let now_ms =
+                        i64::try_from(now.as_millis()).map_err(|_| AdmissionError::Unavailable)?;
+                    store
+                        .receive_debounced(&event, now_ms, window)
+                        .map_err(|_| AdmissionError::Unavailable)
                 })();
-                log.finish(if result.is_ok() { Outcome::Success } else { Outcome::Failed });
+                log.finish(if result.is_ok() {
+                    Outcome::Success
+                } else {
+                    Outcome::Failed
+                });
                 result
             })
             .await
