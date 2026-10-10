@@ -194,12 +194,19 @@ fn sanitize_filename(input: &str) -> Result<String, FileValidationError> {
         return Err(FileValidationError::InvalidFilename);
     }
     let mut stem = stem.to_owned();
-    if [
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "LPT1", "LPT2", "LPT3",
-    ]
-    .iter()
-    .any(|reserved| stem.eq_ignore_ascii_case(reserved))
-    {
+    // Windows recognizes device names even before an extra filename suffix.
+    let device = stem.split('.').next().unwrap_or("").trim_end();
+    let upper = device.to_ascii_uppercase();
+    let numbered_device = upper
+        .strip_prefix("COM")
+        .or_else(|| upper.strip_prefix("LPT"))
+        .is_some_and(|suffix| {
+            matches!(
+                suffix,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        });
+    if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered_device {
         stem.insert(0, '_');
     }
     let max_stem_bytes = MAX_FILENAME_BYTES - extension.len() - 1;
@@ -455,6 +462,40 @@ mod tests {
             "rapport_evil.pdf"
         );
         assert!(is_bidi_control('\u{202e}'));
+    }
+
+    #[test]
+    fn windows_device_names_are_safe_even_with_additional_suffixes() {
+        let policy = FileValidationPolicy::default();
+        for stem in [
+            "CON",
+            "con.notes",
+            "NUL.backup",
+            "PRN",
+            "AUX",
+            "COM4",
+            "com9.notes",
+            "LPT4",
+            "lpt9.backup",
+            "COM¹",
+            "LPT²",
+            "COM³",
+            "CON .notes",
+        ] {
+            let name = format!("{stem}.txt");
+            let result = policy.validate(&name, "text/plain", b"notes").unwrap();
+            assert!(result.filename.starts_with('_'), "{name}");
+            assert!(result.filename.ends_with(".txt"));
+        }
+        for name in ["company.txt", "COM10.txt", "LPT10.txt", "notes.CON.txt"] {
+            assert_eq!(
+                policy
+                    .validate(name, "text/plain", b"notes")
+                    .unwrap()
+                    .filename,
+                name
+            );
+        }
     }
 
     #[test]
