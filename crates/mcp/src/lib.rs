@@ -6,12 +6,12 @@
 /// Stable component identifier used by the bootstrap composition smoke check.
 pub const COMPONENT: &str = "mcp";
 
+use notion_knowledge_core::logging::{EventGuard, Operation};
 use rmcp::{
     ServerHandler,
     model::{Implementation, ServerCapabilities, ServerConfig},
 };
 use std::{io::Write, sync::Arc};
-use notion_knowledge_core::logging::{EventGuard, Operation};
 
 /// Maximum JSON payload returned by a semantic tool, including citation metadata.
 /// Enforced for both stdio and Streamable HTTP after adapter composition.
