@@ -1,5 +1,7 @@
 //! Read-only scoped canonical snapshots; no index or embedding side effects.
-use crate::{NotionClient, link_graph::page_link_edges, links::extract_relationships, pages::page_id};
+use crate::{
+    NotionClient, link_graph::page_link_edges, links::extract_relationships, pages::page_id,
+};
 use notion_knowledge_core::{
     backend::{BackendError, BackendErrorKind, Page, PageContent, PageId},
     chunking::{ChunkConfig, chunk_document},

@@ -80,11 +80,7 @@ pub fn page_link_edges(
                         reference: page_id.clone(),
                     }
                 };
-                (
-                    "link:block",
-                    target,
-                    format!("block:{page_id}:{block_id}"),
-                )
+                ("link:block", target, format!("block:{page_id}:{block_id}"))
             }
             Some(LinkTarget::External { .. }) => continue,
             None if mention || (kind == "link" && notion_host(&reference.raw_target)) => {

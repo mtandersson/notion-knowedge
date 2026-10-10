@@ -7,10 +7,7 @@ use notion_knowledge_core::{
     indexed::{IndexedDocument, IndexedMetadata, SchemaVersion, SourceMetadata},
     sync_state::SyncStateError,
 };
-use notion_knowledge_notion::{
-    documents::DocumentSnapshot,
-    link_graph::page_link_edges,
-};
+use notion_knowledge_notion::{documents::DocumentSnapshot, link_graph::page_link_edges};
 use notion_knowledge_retrieval::sync_state::SqliteSyncStateStore;
 
 const SOURCE: &str = "11111111-1111-4111-8111-111111111111";
@@ -86,12 +83,18 @@ fn explicit_links_mentions_and_blocks_deduplicate_canonically() {
     assert_eq!(edges.len(), 2);
     assert!(edges.iter().any(|edge| {
         edge.relation_type() == "link:page"
-            && edge.target() == &GraphTarget::Page { page_id: INSIDE.into() }
+            && edge.target()
+                == &GraphTarget::Page {
+                    page_id: INSIDE.into(),
+                }
             && edge.provenance() == "markdown:0"
     }));
     assert!(edges.iter().any(|edge| {
         edge.relation_type() == "link:block"
-            && edge.target() == &GraphTarget::Page { page_id: INSIDE.into() }
+            && edge.target()
+                == &GraphTarget::Page {
+                    page_id: INSIDE.into(),
+                }
             && edge.provenance().starts_with("markdown:")
     }));
 }
@@ -104,14 +107,16 @@ fn excluded_targets_are_unresolved_and_external_urls_never_become_nodes() {
     let edges = page_link_edges(&content(&markdown), &discovery()).unwrap();
     assert_eq!(edges.len(), 2);
     assert!(edges.iter().any(|edge| {
-        edge.target() == &GraphTarget::Unresolved {
-            reference: OUTSIDE.into(),
-        }
+        edge.target()
+            == &GraphTarget::Unresolved {
+                reference: OUTSIDE.into(),
+            }
     }));
     assert!(edges.iter().any(|edge| {
-        edge.target() == &GraphTarget::Page {
-            page_id: INSIDE.into(),
-        }
+        edge.target()
+            == &GraphTarget::Page {
+                page_id: INSIDE.into(),
+            }
     }));
     assert!(!edges.iter().any(|edge| edge.provenance().contains("evil")));
 }
@@ -138,7 +143,11 @@ fn fenced_code_and_escaped_tags_do_not_create_graph_edges() {
     let markdown = format!(
         "`[literal](https://notion.so/{INSIDE})`\n```html\n<mention-page url=\"https://notion.so/{INSIDE}\"/>\n```\n\\<mention-page url=\"https://notion.so/{INSIDE}\"/>"
     );
-    assert!(page_link_edges(&content(&markdown), &discovery()).unwrap().is_empty());
+    assert!(
+        page_link_edges(&content(&markdown), &discovery())
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -146,11 +155,16 @@ fn reindex_is_idempotent_and_removes_only_old_link_family() {
     let store = SqliteSyncStateStore::open_in_memory().unwrap();
     let relation = GraphEdge::new(
         SOURCE.into(),
-        GraphTarget::Page { page_id: INSIDE.into() },
+        GraphTarget::Page {
+            page_id: INSIDE.into(),
+        },
         "relation:stable-id".into(),
         "property:stable-id".into(),
-    ).unwrap();
-    store.replace_page_relation_edges(SOURCE, &[relation.clone()]).unwrap();
+    )
+    .unwrap();
+    store
+        .replace_page_relation_edges(SOURCE, &[relation.clone()])
+        .unwrap();
 
     let initial = snapshot(&format!(
         "[inside](https://notion.so/{INSIDE})\n[outside](https://notion.so/{OUTSIDE})"
@@ -185,10 +199,13 @@ fn malformed_input_is_rejected_before_graph_replacement() {
     assert_eq!(store.edges_from(SOURCE).unwrap(), existing);
     let relation = GraphEdge::new(
         SOURCE.into(),
-        GraphTarget::Page { page_id: INSIDE.into() },
+        GraphTarget::Page {
+            page_id: INSIDE.into(),
+        },
         "relation:stable-id".into(),
         "property:stable-id".into(),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(
         store.replace_page_link_edges(SOURCE, &[relation]),
         Err(SyncStateError::InvalidInput)
@@ -205,7 +222,10 @@ fn a_discovery_without_the_source_page_cannot_authorize_edges() {
     let mut allowed = discovery();
     allowed.remove(SOURCE);
     assert_eq!(
-        page_link_edges(&content(&format!("[page](https://notion.so/{INSIDE})")), &allowed),
+        page_link_edges(
+            &content(&format!("[page](https://notion.so/{INSIDE})")),
+            &allowed
+        ),
         Err(SyncStateError::InvalidInput)
     );
 }
