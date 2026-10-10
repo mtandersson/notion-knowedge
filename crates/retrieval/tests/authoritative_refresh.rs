@@ -19,7 +19,7 @@ use notion_knowledge_core::{
 };
 use notion_knowledge_notion::NotionClient;
 use notion_knowledge_retrieval::{
-    chunks::{GuardedChunkTable, LanceChunkTable},
+    chunks::{GuardedChunkTable, LanceChunkTable, VectorIndexConfig},
     commit::{CommitBinding, CommitOutcome, IndexCommitCoordinator},
     refresh::{AuthoritativePageRefresh, RefreshError},
 };
@@ -263,6 +263,15 @@ async fn create_metadata_content_delete_duplicate_and_persistent_restart() {
     assert_eq!(table.fts_query("text", "Saffron", 10).await.unwrap().len(), 1);
     assert!(source.body_reads.load(Ordering::SeqCst) > 0);
     assert!(source.attempts.load(Ordering::SeqCst) >= 20);
+    index.guarded().ensure_vector_index(VectorIndexConfig {
+        num_partitions: Some(1),
+        sample_rate: 8,
+        max_iterations: 20,
+        ..VectorIndexConfig::default()
+    }, index.lease.clone(), clock()).await.unwrap();
+    assert!(!index.table().await.vector_query(
+        &[30.0, 1.0, 0.0], 10, 1,
+    ).await.unwrap().is_empty());
 
     // No changed rows, no embedding, no index rewrite, no new receipt.
     let duplicate = refresh.refresh_page(&page, &root, "event-create-001", &provider, index.lease.clone(), clock()).await.unwrap();
@@ -360,7 +369,9 @@ async fn changed_source_during_embedding_fails_commit_without_ack_or_index_mutat
     assert_eq!(failure.unwrap_err(), RefreshError::Conflict);
     assert_eq!(index.table().await.count_rows().await.unwrap(), 0);
     assert!(index.coordinator.state().page_state(PAGE).unwrap().is_none());
-    let redo = handler.refresh_page(&page, &root, "raced-source", &provider, index.lease.clone(), clock()).await.unwrap();
+    // An already claimed event ID cannot silently change its proposal.
+    assert_eq!(handler.refresh_page(&page, &root, "raced-source", &provider, index.lease.clone(), clock()).await.unwrap_err(), RefreshError::Conflict);
+    let redo = handler.refresh_page(&page, &root, "post-race-new-event", &provider, index.lease.clone(), clock()).await.unwrap();
     assert_eq!(redo.outcome, CommitOutcome::Applied);
     assert!(index.table().await.count_rows().await.unwrap() > 0);
 }
