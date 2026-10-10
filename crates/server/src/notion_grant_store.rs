@@ -200,6 +200,21 @@ impl GrantStore {
         Ok(self.read_record()?.map(|record| StoredGrant { record }))
     }
 
+    /// Recheck the exact sealed grant generation immediately before issuing a
+    /// downstream request. A replaced/revoked snapshot must not be reused.
+    /// Cross-process rollback/revocation fencing is still #127/#128.
+    pub(crate) fn still_current(&self, grant: &StoredGrant) -> Result<bool, StoreError> {
+        let _guard = self.guard.lock().map_err(|_| StoreError::Unavailable)?;
+        let current = self.read_record()?;
+        Ok(current.is_some_and(|record| {
+            record.grant_id == grant.record.grant_id
+                && record.epoch == grant.record.epoch
+                && record.issued_at_unix == grant.record.issued_at_unix
+                && record.access_token == grant.record.access_token
+                && record.refresh_token == grant.record.refresh_token
+        }))
+    }
+
     /// Atomically rotate the complete access/refresh pair after a trusted
     /// provider response. The original grant_id/epoch intentionally survive:
     /// refreshing an upstream token does not confer a new MCP authorization.
