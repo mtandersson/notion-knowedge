@@ -7,13 +7,21 @@ use std::{fs, path::Path, sync::Mutex, time::Duration};
 use notion_knowledge_core::idempotency::{
     IdempotencyError, MutationClaim, Reservation, VerifiedReceipt, WriteIdempotencyStore,
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 
 pub struct SqliteIdempotencyStore {
     connection: Mutex<Connection>,
 }
 
-type Stored = (String, String, Option<String>, Option<String>, Option<String>);
+type Stored = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 
 fn unavailable(_: rusqlite::Error) -> IdempotencyError {
     IdempotencyError::Unavailable
@@ -28,16 +36,21 @@ fn existing(
             "SELECT request_digest, status, page_id, url, last_edited_time
              FROM mutation_claims WHERE key_digest = ?1",
             params![key_digest],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .optional()
         .map_err(unavailable)
 }
 
-fn checked(
-    stored: Option<Stored>,
-    claim: &MutationClaim,
-) -> Result<Stored, IdempotencyError> {
+fn checked(stored: Option<Stored>, claim: &MutationClaim) -> Result<Stored, IdempotencyError> {
     let row = stored.ok_or(IdempotencyError::NotReserved)?;
     if row.0 != claim.request_digest() {
         return Err(IdempotencyError::KeyConflict);
@@ -100,9 +113,7 @@ impl SqliteIdempotencyStore {
 
     pub fn open_existing(path: impl AsRef<Path>) -> Result<Self, IdempotencyError> {
         let path = path.as_ref();
-        if !fs::symlink_metadata(path)
-            .is_ok_and(|metadata| metadata.file_type().is_file())
-        {
+        if !fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file()) {
             return Err(IdempotencyError::Unavailable);
         }
         let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
@@ -141,7 +152,9 @@ impl SqliteIdempotencyStore {
             return Err(IdempotencyError::CorruptState);
         }
         connection
-            .query_row("SELECT COUNT(*) FROM mutation_claims", [], |row| row.get::<_, i64>(0))
+            .query_row("SELECT COUNT(*) FROM mutation_claims", [], |row| {
+                row.get::<_, i64>(0)
+            })
             .map_err(|_| IdempotencyError::CorruptState)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -149,7 +162,9 @@ impl SqliteIdempotencyStore {
     }
 
     fn transaction(&self) -> Result<std::sync::MutexGuard<'_, Connection>, IdempotencyError> {
-        self.connection.lock().map_err(|_| IdempotencyError::Unavailable)
+        self.connection
+            .lock()
+            .map_err(|_| IdempotencyError::Unavailable)
     }
 }
 
