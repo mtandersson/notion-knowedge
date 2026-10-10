@@ -31,3 +31,5 @@ pub use transport::RequestMetrics;
 pub mod documents;
 
 pub mod lifecycle;
+
+pub mod file_download;
