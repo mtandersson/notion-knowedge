@@ -122,6 +122,14 @@ pub enum Outcome {
 }
 
 impl Outcome {
+    pub fn level(self) -> Level {
+        match self {
+            Self::Completed | Self::Success => Level::Info,
+            Self::Rejected => Level::Warn,
+            Self::Failed => Level::Error,
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Completed => "completed",
@@ -208,7 +216,7 @@ impl Drop for EventGuard {
             self.outcome,
             self.started.elapsed(),
             None,
-            Level::Info,
+            self.outcome.level(),
         );
     }
 }
