@@ -194,7 +194,20 @@ fn sanitize_filename(input: &str) -> Result<String, FileValidationError> {
         return Err(FileValidationError::InvalidFilename);
     }
     let mut stem = stem.to_owned();
-    // Windows recognizes device names even before an extra filename suffix.
+    let max_stem_bytes = MAX_FILENAME_BYTES - extension.len() - 1;
+    if stem.len() > max_stem_bytes {
+        let mut cut = max_stem_bytes;
+        while !stem.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        stem.truncate(cut);
+        stem = stem.trim_end_matches([' ', '.', '_']).to_owned();
+    }
+    if stem.is_empty() {
+        return Err(FileValidationError::InvalidFilename);
+    }
+    // Check the final bounded stem: truncation can reveal a device name.
+    // Windows recognizes devices even before an extra filename suffix.
     let device = stem.split('.').next().unwrap_or("").trim_end();
     let upper = device.to_ascii_uppercase();
     let numbered_device = upper
@@ -207,19 +220,11 @@ fn sanitize_filename(input: &str) -> Result<String, FileValidationError> {
             )
         });
     if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered_device {
-        stem.insert(0, '_');
-    }
-    let max_stem_bytes = MAX_FILENAME_BYTES - extension.len() - 1;
-    if stem.len() > max_stem_bytes {
-        let mut cut = max_stem_bytes;
-        while !stem.is_char_boundary(cut) {
-            cut -= 1;
+        if stem.len() == max_stem_bytes {
+            stem.pop(); // Make room for the prefix without splitting Unicode.
+            stem = stem.trim_end_matches([' ', '.', '_']).to_owned();
         }
-        stem.truncate(cut);
-        stem = stem.trim_end_matches([' ', '.', '_']).to_owned();
-    }
-    if stem.is_empty() {
-        return Err(FileValidationError::InvalidFilename);
+        stem.insert(0, '_');
     }
     Ok(format!("{stem}.{extension}"))
 }
@@ -495,6 +500,29 @@ mod tests {
                     .filename,
                 name
             );
+        }
+    }
+
+    #[test]
+    fn bounded_filenames_remain_safe_for_windows_devices() {
+        let policy = FileValidationPolicy::default();
+        for device in [
+            "CON", "PRN", "AUX", "NUL", "COM1", "com9", "LPT1", "lpt9", "COM¹", "LPT²",
+        ] {
+            for stem in [
+                format!("{device}{}x", " ".repeat(200)),
+                format!("{device}.{}", "å".repeat(200)),
+            ] {
+                let name = format!("{stem}.txt");
+                let result = policy.validate(&name, "text/plain", b"notes").unwrap();
+                assert!(
+                    result.filename.starts_with('_'),
+                    "{device}: {}",
+                    result.filename
+                );
+                assert!(result.filename.len() <= MAX_FILENAME_BYTES);
+                assert!(result.filename.ends_with(".txt"));
+            }
         }
     }
 
