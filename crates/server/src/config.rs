@@ -7,6 +7,12 @@ pub struct Config {
     pub http_bind: SocketAddr,
     /// Highest level emitted to stderr as redacted, structured JSON.
     pub log_level: notion_knowledge_core::logging::Level,
+    /// Fail-closed MCP access mode; enabled unless explicitly opted out.
+    pub read_only: bool,
+    /// Explicit developer/emergency HTTP-only bearer mode, never OAuth.
+    pub bearer_fallback: Option<SecretToken>,
+    /// Diagnostics authentication is independent from the MCP route.
+    pub health_requires_bearer: bool,
     /// Opt-in discovery mode; all MCP calls are denied pending real OAuth.
     pub oauth_discovery: Option<crate::oauth_discovery::OAuthDiscovery>,
     /// Optional, trusted Notion authorization redirect config; NOT a live HTTP login.
@@ -123,6 +129,11 @@ impl Config {
             .ok()
             .filter(|port| *port != 0)
             .ok_or_else(|| invalid("NK_HTTP_PORT", "must be an integer from 1 to 65535"))?;
+        let read_only = match optional(&mut lookup, "NK_READ_ONLY", "true")?.as_str() {
+            "true" => true,
+            "false" => false,
+            _ => return Err(invalid("NK_READ_ONLY", "must be true or false")),
+        };
         let oauth_issuer = lookup("NK_OAUTH_ISSUER")
             .map(|value| text(value, "NK_OAUTH_ISSUER"))
             .transpose()?;
@@ -148,6 +159,61 @@ impl Config {
                 ));
             }
         };
+        // A static bearer is deliberately never a production default and
+        // cannot coexist with the fail-closed OAuth discovery endpoint.
+        let bearer_mode = optional(&mut lookup, "NK_HTTP_AUTH", "none")?;
+        let bearer_value = lookup("NK_HTTP_BEARER_TOKEN");
+        let bearer_fallback = match (bearer_mode.as_str(), bearer_value) {
+            ("none", None) => None,
+            ("none", Some(_)) => {
+                return Err(invalid(
+                    "NK_HTTP_BEARER_TOKEN",
+                    "requires explicit bearer mode",
+                ));
+            }
+            ("bearer", Some(value)) => {
+                if oauth_discovery.is_some() {
+                    return Err(invalid(
+                        "NK_HTTP_AUTH",
+                        "cannot coexist with OAuth discovery",
+                    ));
+                }
+                if !SocketAddr::new(host, port).ip().is_loopback() {
+                    return Err(invalid(
+                        "NK_HTTP_HOST",
+                        "bearer fallback requires loopback binding",
+                    ));
+                }
+                let token = text(value, "NK_HTTP_BEARER_TOKEN")?;
+                if !(32..=256).contains(&token.len())
+                    || !token
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
+                {
+                    return Err(invalid(
+                        "NK_HTTP_BEARER_TOKEN",
+                        "requires 32-256 printable URL-safe ASCII characters",
+                    ));
+                }
+                Some(SecretToken(token))
+            }
+            ("bearer", None) => {
+                return Err(invalid("NK_HTTP_BEARER_TOKEN", "required in bearer mode"));
+            }
+            _ => return Err(invalid("NK_HTTP_AUTH", "must be none or bearer")),
+        };
+        let health_requires_bearer =
+            match optional(&mut lookup, "NK_HTTP_HEALTH_AUTH", "none")?.as_str() {
+                "none" => false,
+                "bearer" if bearer_fallback.is_some() => true,
+                "bearer" => {
+                    return Err(invalid(
+                        "NK_HTTP_HEALTH_AUTH",
+                        "bearer health authentication requires bearer HTTP mode",
+                    ));
+                }
+                _ => return Err(invalid("NK_HTTP_HEALTH_AUTH", "must be none or bearer")),
+            };
         let notion_oauth_client_id = lookup("NK_NOTION_OAUTH_CLIENT_ID")
             .map(|value| text(value, "NK_NOTION_OAUTH_CLIENT_ID"))
             .transpose()?;
@@ -428,6 +494,9 @@ impl Config {
             webhook_debounce,
             http_bind: SocketAddr::new(host, port),
             log_level,
+            read_only,
+            bearer_fallback,
+            health_requires_bearer,
             oauth_discovery,
             notion_oauth_redirect,
             notion_oauth_callback,
@@ -470,6 +539,84 @@ mod tests {
                 .find(|(name, _)| *name == key)
                 .map(|(_, value)| OsString::from(value))
         })
+    }
+
+    #[test]
+    fn development_bearer_requires_explicit_mode_and_strong_private_configuration() {
+        const TOKEN: &str = "local-dev-0123456789-abcdefghijklmnopqrstuvwxyz";
+        assert!(parse(&[]).unwrap().bearer_fallback.is_none());
+        assert!(!parse(&[]).unwrap().health_requires_bearer);
+        assert_eq!(
+            parse(&[("NK_HTTP_BEARER_TOKEN", TOKEN)])
+                .unwrap_err()
+                .setting,
+            "NK_HTTP_BEARER_TOKEN"
+        );
+        assert_eq!(
+            parse(&[("NK_HTTP_AUTH", "bearer")]).unwrap_err().setting,
+            "NK_HTTP_BEARER_TOKEN"
+        );
+        for bad in ["", "short", "private bad credential", "a\\nsecret"] {
+            let error =
+                parse(&[("NK_HTTP_AUTH", "bearer"), ("NK_HTTP_BEARER_TOKEN", bad)]).unwrap_err();
+            assert_eq!(error.setting, "NK_HTTP_BEARER_TOKEN");
+            if !bad.is_empty() {
+                assert!(!format!("{error:?}").contains(bad));
+            }
+        }
+        for bad_mode in ["Bearer", "auto", ""] {
+            assert_eq!(
+                parse(&[("NK_HTTP_AUTH", bad_mode)]).unwrap_err().setting,
+                "NK_HTTP_AUTH"
+            );
+        }
+        let config = parse(&[("NK_HTTP_AUTH", "bearer"), ("NK_HTTP_BEARER_TOKEN", TOKEN)]).unwrap();
+        assert_eq!(
+            config.bearer_fallback.as_ref().unwrap().expose_secret(),
+            TOKEN
+        );
+        assert!(!format!("{config:?}").contains(TOKEN));
+        assert!(!config.health_requires_bearer);
+        let protected = parse(&[
+            ("NK_HTTP_AUTH", "bearer"),
+            ("NK_HTTP_BEARER_TOKEN", TOKEN),
+            ("NK_HTTP_HEALTH_AUTH", "bearer"),
+        ])
+        .unwrap();
+        assert!(protected.health_requires_bearer);
+        assert_eq!(
+            parse(&[("NK_HTTP_HEALTH_AUTH", "bearer")])
+                .unwrap_err()
+                .setting,
+            "NK_HTTP_HEALTH_AUTH"
+        );
+        assert_eq!(
+            parse(&[("NK_HTTP_HEALTH_AUTH", "public")])
+                .unwrap_err()
+                .setting,
+            "NK_HTTP_HEALTH_AUTH"
+        );
+        assert_eq!(
+            parse(&[
+                ("NK_HTTP_AUTH", "bearer"),
+                ("NK_HTTP_BEARER_TOKEN", TOKEN),
+                ("NK_HTTP_HOST", "0.0.0.0"),
+            ])
+            .unwrap_err()
+            .setting,
+            "NK_HTTP_HOST"
+        );
+        assert_eq!(
+            parse(&[
+                ("NK_HTTP_AUTH", "bearer"),
+                ("NK_HTTP_BEARER_TOKEN", TOKEN),
+                ("NK_OAUTH_ISSUER", "https://auth.example.com"),
+                ("NK_OAUTH_RESOURCE", "https://mcp.example.com/mcp"),
+            ])
+            .unwrap_err()
+            .setting,
+            "NK_HTTP_AUTH"
+        );
     }
 
     #[test]
@@ -696,6 +843,18 @@ mod tests {
                 .setting,
                 "NK_NOTION_GRANT_STATE_FILE"
             );
+        }
+    }
+
+    #[test]
+    fn read_only_mode_defaults_to_safe_and_requires_explicit_boolean() {
+        assert!(parse(&[]).unwrap().read_only);
+        assert!(parse(&[("NK_READ_ONLY", "true")]).unwrap().read_only);
+        assert!(!parse(&[("NK_READ_ONLY", "false")]).unwrap().read_only);
+        for invalid_value in ["", "0", "TRUE", "private-secret"] {
+            let error = parse(&[("NK_READ_ONLY", invalid_value)]).unwrap_err();
+            assert_eq!(error.setting, "NK_READ_ONLY");
+            assert!(!error.to_string().contains(invalid_value) || invalid_value.is_empty());
         }
     }
 

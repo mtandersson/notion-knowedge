@@ -19,7 +19,7 @@ Only the first two are required **inside the file object**. Exactly one
 object is accepted, not an array. The server validates the structured
 parameter, including sensible metadata length limits, but does **not** follow
 the URL, download bytes, write to storage or attach anything to Notion yet.
-A valid tool call returns a clearly marked `file_upload_unavailable` *tool
+With explicit `NK_READ_ONLY=false`, a valid tool call returns a clearly marked `file_upload_unavailable` *tool
 error*, not success. A missing file or invalid schema is a structured
 `invalid_params` error. Neither path logs or echoes a temporary file URL.
 
@@ -55,3 +55,7 @@ the actual server discovery response. No credentials or external file fetch
 are involved.
 
 Reference: [OpenAI plugin file-parameter contract](https://developers.openai.com/plugins/reference#file-parameters).
+
+The default `NK_READ_ONLY=true` hides this mutation-capable schema and rejects
+direct upload calls before argument handling. Writable mode enables the staged
+unavailable contract only; it does not enable downloading or uploading.

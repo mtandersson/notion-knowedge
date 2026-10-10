@@ -59,3 +59,6 @@ pub mod reconciliation;
 pub mod webhook;
 
 pub mod lifecycle;
+
+/// Restricted privacy-aware agent mutation audit contracts.
+pub mod audit;

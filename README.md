@@ -72,6 +72,17 @@ and cancels active sessions. Both transports share the [semantic search contract
 valid search calls in the default bootstrap return an explicit retrieval-unavailable tool error. The isolated [semantic MCP spike](docs/semantic-mcp-spike.md) explicitly configures real local semantic retrieval through this same handler and transport wiring.
 Calls to unknown tools return protocol errors.
 
+### Optional local HTTP bearer fallback
+
+For development and emergency diagnostics only, set `NK_HTTP_AUTH=bearer`
+and provide a randomly generated `NK_HTTP_BEARER_TOKEN`. The MCP endpoint then
+requires a valid bearer token on **every HTTP request**, including session
+continuation and SSE. This mode is opt-in, restricted to a loopback listener
+and **not** the production ChatGPT OAuth model (#117). Health endpoints retain
+an independent policy via `NK_HTTP_HEALTH_AUTH=none|bearer`.
+See [development bearer authentication](docs/development-bearer-auth.md)
+for configuration, security limits and tests.
+
 ### Payload limits
 
 The Streamable HTTP `/mcp` endpoint accepts at most **4 MiB** per POST body
@@ -186,6 +197,10 @@ Production build:
 cargo build --workspace --release --locked
 ```
 
+## File upload input validation
+
+A [fail-closed MIME, signature, size and filename validator](docs/file-validation.md) is available for future opt-in Notion File Upload workflows. The default single-part limit is 5 MiB; no live file upload tool is enabled by this component.
+
 ## Structured operation logs
 
 Set `NK_LOG_LEVEL` to `off`, `error`, `warn`, `info` (default), or `debug`.
@@ -270,11 +285,23 @@ configured retrieval, and its staged write/file primitives are not MCP tools.
 The playbook includes a documented **non-sensitive** operational smoke checklist
 and distinguishes pilot targets from demonstrated results.
 
+## Mutation audit model
+
+The [privacy-aware audit event contract](docs/audit-events.md) defines a
+payload-free agent-mutation record and a separate durable SQLite store with
+bounded retention. It is an available component, not yet wired to production
+MCP writes; future mutation workflows must enforce its failure policy.
+
 ## ChatGPT file input
+
+The [request-scoped temporary file downloader](docs/temporary-file-download.md)
+provides bounded streaming, exact HTTPS source-host admission, public-address
+DNS pinning and private temporary-file ownership for future authenticated ingestion.
 
 The staged [`knowledge_upload_file` single-file input contract](docs/chatgpt-file-parameters.md)
 advertises `_meta["openai/fileParams"]` and accepts ChatGPT file references without
-Drive staging. It deliberately returns `file_upload_unavailable` until secure
+Drive staging. It is hidden by default read-only mode; explicit `NK_READ_ONLY=false` exposes
+the schema and returns `file_upload_unavailable` until secure
 download, scope authorization and native Notion attachment are implemented.
 
 ## Continuous integration
@@ -336,6 +363,20 @@ Run the same check locally with:
 ```
 
 ## Configuration
+
+### MCP read-only access
+
+`NK_READ_ONLY=true` is the default for both stdio and Streamable HTTP. Only
+explicitly audited read tools (`knowledge_search` and `knowledge_get`) can be
+advertised or dispatched in this mode. Unknown tools, Notion mutations and
+file uploads cannot be invoked through the MCP handler; the access check runs
+before any tool adapter. Set `NK_READ_ONLY=false` **explicitly** only when an
+operator intends to permit implemented mutation tools. This flag does not
+implement or activate writing: the current bootstrap exposes read tools by default, with only the unavailable upload schema in explicit writable mode.
+Invalid values fail startup instead of enabling writes. `--diagnostics` and
+`GET /health` expose the effective `access.read_only` boolean without
+revealing secrets. This setting controls MCP tool access, not the independent
+Notion webhook inbox or operator CLI.
 
 The server reads environment variables once at startup and validates them
 before reporting readiness. `--check` performs the same validation and exits
