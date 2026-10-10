@@ -92,6 +92,13 @@ impl StoredGrant {
     pub fn expires_at_unix(&self) -> Option<u64> {
         self.record.expires_at_unix
     }
+    /// Server-only refresh credential; never put this in audit or MCP output.
+    pub(crate) fn refresh_token(&self) -> Option<&str> {
+        self.record.refresh_token.as_deref()
+    }
+    pub(crate) fn bot_id(&self) -> &str {
+        &self.record.bot_id
+    }
 }
 
 /// Encrypts ALL records at rest with authenticated metadata and distinct
@@ -175,6 +182,67 @@ impl GrantStore {
         Ok(record.map(|record| StoredGrant { record }))
     }
 
+    /// Returns the decrypted grant record for server-only refresh, even when
+    /// expired. Cryptographic integrity and exact configured identity are
+    /// still mandatory; expiry does NOT enroll a new user.
+    pub(crate) fn load_for_refresh(&self) -> Result<Option<StoredGrant>, StoreError> {
+        let _guard = self.guard.lock().map_err(|_| StoreError::Unavailable)?;
+        Ok(self.read_record()?.map(|record| StoredGrant { record }))
+    }
+
+    /// Atomically rotate the complete access/refresh pair after a trusted
+    /// provider response. The original grant_id/epoch intentionally survive:
+    /// refreshing an upstream token does not confer a new MCP authorization.
+    /// Recheck the exact previous credential snapshot to reject stale writers.
+    pub(crate) fn rotate_refresh(
+        &self,
+        expected: &StoredGrant,
+        fresh: &NotionGrant,
+    ) -> Result<StoredGrant, StoreError> {
+        if !self
+            .policy
+            .matches(fresh.workspace_id(), fresh.owner_user_id())
+            || fresh.bot_id() != expected.record.bot_id
+            || fresh.refresh_token().is_none()
+            || fresh.expires_in().is_none()
+        {
+            return Err(StoreError::IdentityMismatch);
+        }
+        let _guard = self.guard.lock().map_err(|_| StoreError::Unavailable)?;
+        let old = self.read_record()?.ok_or(StoreError::Corrupt)?;
+        if old.grant_id != expected.record.grant_id
+            || old.epoch != expected.record.epoch
+            || old.issued_at_unix != expected.record.issued_at_unix
+            || old.access_token != expected.record.access_token
+            || old.refresh_token != expected.record.refresh_token
+            || old.refresh_token.as_deref() == fresh.refresh_token()
+            || old.workspace_id != fresh.workspace_id()
+            || old.owner_user_id != fresh.owner_user_id()
+            || old.bot_id != fresh.bot_id()
+        {
+            return Err(StoreError::IdentityMismatch);
+        }
+        let now = now_unix()?;
+        let expires = now
+            .checked_add(fresh.expires_in().ok_or(StoreError::Corrupt)?)
+            .ok_or(StoreError::Corrupt)?;
+        let record = Record {
+            schema: SCHEMA,
+            grant_id: old.grant_id,
+            epoch: old.epoch,
+            notion_client_id: self.notion_client_id.clone(),
+            workspace_id: old.workspace_id,
+            owner_user_id: old.owner_user_id,
+            bot_id: old.bot_id,
+            issued_at_unix: now,
+            expires_at_unix: Some(expires),
+            access_token: fresh.access_token().to_owned(),
+            refresh_token: Some(fresh.refresh_token().ok_or(StoreError::Corrupt)?.to_owned()),
+        };
+        self.write_record(&record)?;
+        Ok(StoredGrant { record })
+    }
+
     /// Persist only a typed, already-verified Notion callback grant that
     /// matches the immutable operator policy. This does NOT approve MCP login.
     /// Every replacement receives a fresh grant ID and increasing epoch,
@@ -214,7 +282,12 @@ impl GrantStore {
             access_token: grant.access_token().to_owned(),
             refresh_token: grant.refresh_token().map(str::to_owned),
         };
-        let raw = serde_json::to_vec(&record).map_err(|_| StoreError::Unavailable)?;
+        self.write_record(&record)?;
+        Ok(StoredGrant { record })
+    }
+
+    fn write_record(&self, record: &Record) -> Result<(), StoreError> {
+        let raw = serde_json::to_vec(record).map_err(|_| StoreError::Unavailable)?;
         if raw.len() + MAGIC.len() + NONCE_LEN + TAG_LEN > MAX_FILE {
             return Err(StoreError::Unavailable);
         }
@@ -251,7 +324,7 @@ impl GrantStore {
         File::open(directory)
             .and_then(|d| d.sync_all())
             .map_err(|_| StoreError::Unavailable)?;
-        Ok(StoredGrant { record })
+        Ok(())
     }
 
     fn validate_existing_file(&self) -> Result<(), StoreError> {
@@ -447,6 +520,29 @@ mod tests {
             store.save(&NotionGrant::fixture("foreign", "user-a", None)),
             Err(StoreError::IdentityMismatch)
         ));
+    }
+
+    #[test]
+    fn stale_refresh_snapshot_is_rejected_after_a_new_authorization() {
+        let (_dir, key, path, policy) = setup();
+        let store = GrantStore::open(&key, &path, "client-a", policy).unwrap();
+        let current = store
+            .save(&NotionGrant::fixture("workspace-a", "user-a", Some(30)))
+            .unwrap();
+        let replacement = store
+            .save(&NotionGrant::fixture("workspace-a", "user-a", Some(3600)))
+            .unwrap();
+        assert_ne!(current.grant_id(), replacement.grant_id());
+        assert_ne!(current.epoch(), replacement.epoch());
+        let snapshot = fs::read(&path).unwrap();
+        assert!(matches!(
+            store.rotate_refresh(
+                &current,
+                &NotionGrant::fixture("workspace-a", "user-a", Some(3600))
+            ),
+            Err(StoreError::IdentityMismatch)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), snapshot);
     }
 
     #[test]

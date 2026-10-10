@@ -210,6 +210,20 @@ serialization alone is not a multi-pod or rollback/revocation guarantee:
 #124/#127 must implement distributed fencing and live epoch/revocation
 checks. Remote private MCP access remains blocked.
 
+## Notion OAuth refresh concurrency boundary (2026-10-09, #124)
+
+[Server-only Notion refresh](notion-oauth-refresh.md) performs confidential
+Basic-auth token exchange, rechecks the complete immutable
+user/workspace/bot binding, and atomically replaces the sealed access/refresh
+pair using a stale-write compare-and-swap guard. Calls sharing one coordinator
+serialize their external refresh and sealed commit, avoiding concurrent use
+of the same single-use upstream refresh token **inside one process**.
+Expired or uncertain-lifetime grants are not usable without refresh.
+Unknown/changed identity, missing refresh-token rotation, upstream failure or
+storage failure return sanitized errors without exposing old tokens.
+A separate multi-process lock, anti-rollback revocation store and every-MCP-
+request authorization are **not** present: #127/#128 remain deployment gates.
+
 ## Bounded residual risks and release decision
 
 The documented bootstrap operating envelope accepts local protocol access

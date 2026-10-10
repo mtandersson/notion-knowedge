@@ -34,10 +34,11 @@ enrollment. A missing/malformed key, wrong file mode, symlinked state,
 corrupted ciphertext, wrong key, wrong Notion integration/client ID or
 mismatched approved workspace/user all **fail closed with sanitized errors**.
 Startup calls `Config::validate_grant_store()` before HTTP/stdio/diagnostics
-and `--check` execution when the store is configured. Startup with an
-expired grant also fails closed, requiring operator-managed reauthorization;
-no silent fallback to a new account. Errors contain neither raw paths nor
-plaintext secrets.
+and `--check` execution when the store is configured. Startup validates the encrypted grant and identity even when its access token
+has expired, permitting the server-only [refresh coordinator](notion-oauth-refresh.md)
+to attempt renewal. Expired and unknown-expiry grants are **not usable**
+without a successful refresh. Errors contain neither raw paths nor plaintext
+secrets.
 
 Keys and state must be backed up/recovered **together** under independent
 access control. Losing the encryption key makes stored tokens permanently
@@ -93,7 +94,12 @@ appear in plaintext on disk.
   cannot mint a ChatGPT/MCP token and does not call
   `AuthorizationFlow::approve`. #127 must bind these records to live
   application authorization and enforce revocation and root-policy checks.
-- The current writer uses a process-local mutex. **Multi-process
+- Refresh rotation preserves the grant ID and epoch, atomically replaces the
+encrypted access/refresh pair and compares the expected prior token snapshot.
+See [#124 refresh](notion-oauth-refresh.md) for why a shared in-process
+coordinator is required and why refresh failures deny stale credentials.
+
+The current writer uses a process-local mutex. **Multi-process
   write fencing, crash-safe refresh/rotation, rollback prevention,
   and durable revocation** remain open in #124/#127; do not share the
   state file between active writers. An attacker with write access
