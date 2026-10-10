@@ -49,7 +49,7 @@ impl PageAlias {
 /// such as Swedish å, ä, ö are preserved, not transliterated or discarded.
 /// An empty/oversized/unsafe query is an error, not a match-all lookup.
 pub fn normalized(name: &str) -> Result<String, SyncStateError> {
-    if name.chars().any(char::is_control) {
+    if name.chars().any(|c| c.is_control() && c != '\t') {
         return Err(SyncStateError::InvalidInput);
     }
     let collapsed = name.split_whitespace().collect::<Vec<_>>().join(" ");
