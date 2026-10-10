@@ -691,7 +691,11 @@ impl IndexCommitCoordinator {
                         }
                     }
                 })();
-                log.finish(if result.is_ok() { Outcome::Success } else { Outcome::Failed });
+                log.finish(if result.is_ok() {
+                    Outcome::Success
+                } else {
+                    Outcome::Failed
+                });
                 let _ = sender.send(result);
             });
         async move {
