@@ -251,6 +251,10 @@ and distinguishes pilot targets from demonstrated results.
 
 ## ChatGPT file input
 
+The [request-scoped temporary file downloader](docs/temporary-file-download.md)
+provides bounded streaming, exact HTTPS source-host admission, public-address
+DNS pinning and private temporary-file ownership for future authenticated ingestion.
+
 The staged [`knowledge_upload_file` single-file input contract](docs/chatgpt-file-parameters.md)
 advertises `_meta["openai/fileParams"]` and accepts ChatGPT file references without
 Drive staging. It deliberately returns `file_upload_unavailable` until secure
