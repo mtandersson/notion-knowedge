@@ -106,8 +106,14 @@ async fn trusted_approval_is_bound_to_operation_scope_target_and_payload() {
         .require_confirmation(&original, Some(&provider))
         .await
         .unwrap();
-    let mut changed = original.clone();
-    changed.target_id = "another-page".to_owned();
+    let changed = ConfirmationRequest::new(
+        original.operation(),
+        original.trusted_scope(),
+        "another-page",
+        original.request_sha256(),
+        original.idempotency_key(),
+    )
+    .unwrap();
     assert_eq!(permit.consume(&changed), Err(ConfirmationError::Mismatch));
     let permit = policy
         .require_confirmation(&original, Some(&provider))

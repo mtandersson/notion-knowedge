@@ -41,11 +41,11 @@ impl WriteOperation {
 /// Never construct this object directly from untrusted MCP JSON.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ConfirmationRequest {
-    pub operation: WriteOperation,
-    pub trusted_scope: String,
-    pub target_id: String,
-    pub request_sha256: String,
-    pub idempotency_key: String,
+    operation: WriteOperation,
+    trusted_scope: String,
+    target_id: String,
+    request_sha256: String,
+    idempotency_key: String,
 }
 
 impl fmt::Debug for ConfirmationRequest {
@@ -100,6 +100,26 @@ impl ConfirmationRequest {
             request_sha256: request_sha256.to_ascii_lowercase(),
             idempotency_key: idempotency_key.to_owned(),
         })
+    }
+
+    pub fn operation(&self) -> WriteOperation {
+        self.operation
+    }
+
+    pub fn trusted_scope(&self) -> &str {
+        &self.trusted_scope
+    }
+
+    pub fn target_id(&self) -> &str {
+        &self.target_id
+    }
+
+    pub fn request_sha256(&self) -> &str {
+        &self.request_sha256
+    }
+
+    pub fn idempotency_key(&self) -> &str {
+        &self.idempotency_key
     }
 }
 
