@@ -189,13 +189,17 @@ async fn require_development_bearer(
                     && !credential.bytes().any(|byte| byte.is_ascii_whitespace())
             })
             .is_some_and(|(_, presented)| {
-                // Fixed-length hashes and a constant-time verifier avoid
-                // timing comparisons and accidental credential echoing.
-                let expected =
-                    ring::digest::digest(&ring::digest::SHA256, token.expose_secret().as_bytes());
-                let received = ring::digest::digest(&ring::digest::SHA256, presented.as_bytes());
-                ring::constant_time::verify_slices_are_equal(expected.as_ref(), received.as_ref())
-                    .is_ok()
+                // HMAC verifies a fixed challenge in constant time without
+                // comparing strings or exposing either credential.
+                let challenge = b"notion-knowledge-developer-bearer-v1";
+                let expected_key = ring::hmac::Key::new(
+                    ring::hmac::HMAC_SHA256,
+                    token.expose_secret().as_bytes(),
+                );
+                let received_key =
+                    ring::hmac::Key::new(ring::hmac::HMAC_SHA256, presented.as_bytes());
+                let proof = ring::hmac::sign(&received_key, challenge);
+                ring::hmac::verify(&expected_key, challenge, proof.as_ref()).is_ok()
             })
     } else {
         false
