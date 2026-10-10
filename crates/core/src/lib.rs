@@ -74,3 +74,6 @@ pub mod root_scope;
 
 /// Opt-in, scope-checked, durable once-only Notion append application workflow.
 pub mod append;
+
+/// Lossless pure unique-section planner for future bounded edits (#311).
+pub mod sections;
