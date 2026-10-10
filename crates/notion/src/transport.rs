@@ -152,7 +152,11 @@ impl NotionClient {
             outcome,
             started.elapsed(),
             status,
-            if matches!(outcome, Outcome::Failed) { Level::Warn } else { Level::Info },
+            if matches!(outcome, Outcome::Failed) {
+                Level::Warn
+            } else {
+                Level::Info
+            },
         );
         result
     }
