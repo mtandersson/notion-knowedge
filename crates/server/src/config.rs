@@ -11,6 +11,7 @@ pub struct Config {
     pub read_only: bool,
     /// Explicit second gate for destructive operations; defaults disabled.
     pub destructive_writes_enabled: bool,
+    pub capability_policy: notion_knowledge_mcp::capabilities::CapabilityPolicy,
     /// Explicit developer/emergency HTTP-only bearer mode, never OAuth.
     pub bearer_fallback: Option<SecretToken>,
     /// Diagnostics authentication is independent from the MCP route.
@@ -152,6 +153,24 @@ impl Config {
                 }
                 _ => return Err(invalid("NK_DESTRUCTIVE_WRITES", "must be true or false")),
             };
+        let allowlist = lookup("NK_TOOL_ALLOWLIST")
+            .map(|value| text(value, "NK_TOOL_ALLOWLIST"))
+            .transpose()?;
+        let blocklist = lookup("NK_TOOL_BLOCKLIST")
+            .map(|value| text(value, "NK_TOOL_BLOCKLIST"))
+            .transpose()?;
+        let capability_policy = notion_knowledge_mcp::capabilities::CapabilityPolicy::from_lists(
+            allowlist.as_deref(),
+            blocklist.as_deref(),
+        )
+        .map_err(|error| match error {
+            notion_knowledge_mcp::capabilities::PolicyListError::Allowlist => {
+                invalid("NK_TOOL_ALLOWLIST", "unknown or malformed capability")
+            }
+            notion_knowledge_mcp::capabilities::PolicyListError::Blocklist => {
+                invalid("NK_TOOL_BLOCKLIST", "unknown or malformed capability")
+            }
+        })?;
         let oauth_issuer = lookup("NK_OAUTH_ISSUER")
             .map(|value| text(value, "NK_OAUTH_ISSUER"))
             .transpose()?;
@@ -578,6 +597,7 @@ impl Config {
             log_level,
             read_only,
             destructive_writes_enabled,
+            capability_policy,
             bearer_fallback,
             health_requires_bearer,
             oauth_discovery,
@@ -1028,6 +1048,26 @@ mod tests {
             assert_eq!(error.setting, "NK_DESTRUCTIVE_WRITES");
             assert!(!error.to_string().contains("private-sentinel"));
         }
+    }
+
+    #[test]
+    fn operation_lists_validate_exact_identifiers_and_report_only_setting_names() {
+        let configured = parse(&[
+            ("NK_TOOL_ALLOWLIST", "read,knowledge_append"),
+            ("NK_TOOL_BLOCKLIST", "knowledge_get"),
+        ]).unwrap();
+        assert!(configured.capability_policy.permits("knowledge_search"));
+        assert!(!configured.capability_policy.permits("knowledge_get"));
+        assert!(configured.capability_policy.permits("knowledge_append"));
+        for key in ["NK_TOOL_ALLOWLIST", "NK_TOOL_BLOCKLIST"] {
+            let err = parse(&[(key, "invalid_unknown_operation")]).unwrap_err();
+            assert_eq!(err.setting, key);
+            assert_eq!(err.reason, "unknown or malformed capability");
+            assert!(!err.to_string().contains("invalid_unknown_operation"));
+        }
+        assert!(!parse(&[("NK_TOOL_ALLOWLIST", "")])
+            .unwrap()
+            .capability_policy.permits("knowledge_get"));
     }
 
     #[test]

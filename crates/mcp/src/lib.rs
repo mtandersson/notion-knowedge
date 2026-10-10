@@ -58,6 +58,7 @@ pub struct KnowledgeServer {
     read_only: bool,
     /// Additional opt-in gate for all destructive write operations.
     destructive_writes_enabled: bool,
+    capability_policy: capabilities::CapabilityPolicy,
     fresh_source: Option<Arc<dyn notion_knowledge_core::backend::NotionRead>>,
     write_design_preview: bool,
 }
@@ -68,6 +69,7 @@ impl Default for KnowledgeServer {
             snippet_chars: 2000,
             read_only: true,
             destructive_writes_enabled: false,
+            capability_policy: capabilities::CapabilityPolicy::default(),
             fresh_source: None,
             write_design_preview: false,
             search: None,
@@ -86,6 +88,7 @@ impl KnowledgeServer {
     fn tool_permitted(&self, name: &str) -> bool {
         (!self.read_only || matches!(name, "knowledge_search" | "knowledge_get"))
             && (self.destructive_writes_enabled || !write_contract::is_destructive_write(name))
+            && self.capability_policy.permits(name)
     }
 
     pub fn with_read_only(mut self, read_only: bool) -> Self {
@@ -95,6 +98,11 @@ impl KnowledgeServer {
 
     pub fn with_destructive_writes_enabled(mut self, enabled: bool) -> Self {
         self.destructive_writes_enabled = enabled;
+        self
+    }
+
+    pub fn with_capability_policy(mut self, policy: capabilities::CapabilityPolicy) -> Self {
+        self.capability_policy = policy;
         self
     }
 
@@ -232,6 +240,7 @@ impl KnowledgeServer {
     }
 }
 
+pub mod capabilities;
 pub mod get;
 pub mod search;
 pub mod upload;
@@ -698,7 +707,8 @@ mod access_mode_tests {
             assert!(read_only.get_tool(name).is_none());
         }
         let explicitly_writable = read_only.with_read_only(false);
-        assert!(explicitly_writable.tool_permitted("notion_create_page"));
+        assert!(!explicitly_writable.tool_permitted("notion_create_page"));
+        assert!(explicitly_writable.tool_permitted("knowledge_upload_file"));
         // A writable configuration does not magically expose unimplemented tools.
         assert!(explicitly_writable.get_tool("notion_create_page").is_none());
     }
