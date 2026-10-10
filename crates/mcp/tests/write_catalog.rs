@@ -44,6 +44,7 @@ fn writable_discovery_preserves_read_and_unavailable_upload_contracts() {
 fn explicit_design_preview_discovery_separates_narrow_writes_and_destructive_archiving() {
     let server = KnowledgeServer::default()
         .with_read_only(false)
+        .with_destructive_writes_enabled(true)
         .with_write_design_preview();
     let tools = server.tool_catalog();
     assert_eq!(tools.len(), 7);
@@ -128,10 +129,9 @@ fn explicit_design_preview_discovery_separates_narrow_writes_and_destructive_arc
                     .contains(&json!(required))
             );
         }
-        assert!(
-            tool["inputSchema"]["properties"]
-                .get("confirmation_id")
-                .is_none()
+        assert_eq!(
+            tool["inputSchema"]["properties"].get("confirmation_id").is_some(),
+            tool["inputSchema"]["properties"].get("section_anchor").is_some()
         );
     }
     assert!(
@@ -180,5 +180,19 @@ fn read_only_catalog_hides_all_mutation_schemas_even_with_preview_enabled() {
         "knowledge_archive_page",
     ] {
         assert!(server.get_tool(name).is_none());
+    }
+}
+
+#[test]
+fn default_destructive_gate_hides_preview_schemas_without_disabling_safe_writes() {
+    let server = KnowledgeServer::default()
+        .with_read_only(false)
+        .with_write_design_preview();
+    assert_eq!(server.tool_catalog().len(), 5);
+    for name in ["knowledge_update_section", "knowledge_archive_page"] {
+        assert!(server.get_tool(name).is_none());
+    }
+    for name in ["knowledge_create_page", "knowledge_append"] {
+        assert!(server.get_tool(name).is_some());
     }
 }

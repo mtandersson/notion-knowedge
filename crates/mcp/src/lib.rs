@@ -56,6 +56,8 @@ pub struct KnowledgeServer {
     snippet_chars: usize,
     /// Deny mutation-capable tools unless the operator explicitly disables read-only mode.
     read_only: bool,
+    /// Additional opt-in gate for all destructive write operations.
+    destructive_writes_enabled: bool,
     fresh_source: Option<Arc<dyn notion_knowledge_core::backend::NotionRead>>,
     write_design_preview: bool,
 }
@@ -65,6 +67,7 @@ impl Default for KnowledgeServer {
         Self {
             snippet_chars: 2000,
             read_only: true,
+            destructive_writes_enabled: false,
             fresh_source: None,
             write_design_preview: false,
             search: None,
@@ -81,11 +84,17 @@ impl KnowledgeServer {
     /// Enforce the configured access mode before exposing or dispatching MCP tools.
     /// Only explicitly audited read tools are permitted in read-only mode.
     fn tool_permitted(&self, name: &str) -> bool {
-        !self.read_only || matches!(name, "knowledge_search" | "knowledge_get")
+        (!self.read_only || matches!(name, "knowledge_search" | "knowledge_get"))
+            && (self.destructive_writes_enabled || !write_contract::is_destructive_write(name))
     }
 
     pub fn with_read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
+        self
+    }
+
+    pub fn with_destructive_writes_enabled(mut self, enabled: bool) -> Self {
+        self.destructive_writes_enabled = enabled;
         self
     }
 

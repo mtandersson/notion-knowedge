@@ -13,6 +13,11 @@ const NAMES: [&str; 4] = [
     "knowledge_archive_page",
 ];
 
+pub fn is_destructive_write(name: &str) -> bool {
+    notion_knowledge_core::destructive::WriteOperation::from_tool_name(name)
+        .is_some_and(|operation| operation.is_destructive())
+}
+
 pub fn is_planned_write(name: &str) -> bool {
     NAMES.contains(&name)
 }
@@ -51,7 +56,8 @@ fn input(name: &str) -> Value {
             required.extend(["page_id", "markdown", "expected_last_edited_time"]);
             if name == "knowledge_update_section" {
                 fields.insert("section_anchor".into(), short_id());
-                required.push("section_anchor");
+                fields.insert("confirmation_id".into(), short_id());
+                required.extend(["section_anchor", "confirmation_id"]);
             }
         }
         "knowledge_archive_page" => {
@@ -102,6 +108,7 @@ pub fn tool(name: &str) -> Option<Tool> {
         ),
         _ => unreachable!(),
     };
+    debug_assert_eq!(destructive, is_destructive_write(name));
     let schema = input(name);
     let out = output();
     Some(
