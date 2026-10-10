@@ -12,11 +12,11 @@ use notion_knowledge_core::{
         PageLifecycle, PhysicalParent,
     },
     search::{
-        SearchFuture, SearchHit, SearchSource, SearchUnavailable, SemanticQuery, SemanticSearch,
+        SearchFuture, SearchHit, SearchSource, SemanticQuery, SemanticSearch,
     },
     source::{
         ExpandedSource, SourceContentScope, SourceExpandQuery, SourceExpansion,
-        SourceExpansionFuture, SourceProvenance, StableSourceRef,
+        SourceExpansionFuture, SourceProvenance,
     },
 };
 use notion_knowledge_mcp::KnowledgeServer;
@@ -320,7 +320,7 @@ async fn search_and_get_allow_only_authorized_pages() {
         "knowledge_search",
         json!({"query":"secret","limit":1,"mode":"semantic"}),
     ).await;
-    assert_eq!(response["result"]["isError"], Value::Null, "{response}");
+    assert_ne!(response["result"]["isError"], true, "{response}");
     assert!(response.to_string().contains("PRIVATE_CONTENT_SHOULD_NOT_LEAK"));
 
     let adapter = Expand::new();
