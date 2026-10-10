@@ -7,10 +7,11 @@ repository.workspace = true
 [features]
 default = []
 local-qwen = ["dep:candle-core", "dep:candle-nn", "dep:fastembed", "dep:tokenizers", "dep:sha2", "dep:serde_json"]
-local-lancedb = ["dep:arrow-array", "dep:arrow-schema", "dep:futures", "dep:lancedb", "dep:lance", "dep:object_store", "dep:serde_json"]
+local-lancedb = ["dep:arrow-array", "dep:arrow-schema", "dep:futures", "dep:lancedb", "dep:lance", "dep:object_store", "dep:serde_json", "dep:notion-knowledge-notion", "dep:sha2"]
 
 [dependencies]
 notion-knowledge-core = { path = "../core" }
+notion-knowledge-notion = { path = "../notion", optional = true }
 
 arrow-array = { version = "=58.4.0", optional = true }
 arrow-schema = { version = "=58.4.0", optional = true }
@@ -32,7 +33,6 @@ serde_json = { version = "1", optional = true }
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 
 [dev-dependencies]
-notion-knowledge-notion = { path = "../notion" }
 bytes = "1"
 async-trait = "0.1"
 
