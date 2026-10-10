@@ -79,9 +79,32 @@ fn one_shot_diagnostics_expose_only_identity_and_honest_dependency_states() {
             serde_json::json!({
                 "server": {"name": "notion-knowledge", "version": env!("CARGO_PKG_VERSION")},
                 "transport": "one-shot", "status": "degraded",
+                "access": {"read_only": true},
                 "dependencies": {"notion": expected, "index": "unavailable"}
             })
         );
+    }
+}
+
+#[test]
+fn writable_mode_requires_explicit_opt_in_and_is_reported() {
+    let output = Command::new(env!("CARGO_BIN_EXE_notion-knowledge-server"))
+        .env_clear()
+        .env("NK_READ_ONLY", "false")
+        .arg("--diagnostics")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["access"]["read_only"], false);
+    assert!(output.stderr.is_empty());
+
+    for invalid in ["", "0", "FALSE", "private-sentinel"] {
+        let check = run(&[("NK_READ_ONLY", invalid)], true);
+        assert_eq!(check.status.code(), Some(2));
+        let error = String::from_utf8(check.stderr).unwrap();
+        assert!(error.contains("NK_READ_ONLY"));
+        assert!(!error.contains("private-sentinel"));
     }
 }
 

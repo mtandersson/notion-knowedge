@@ -8,10 +8,10 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
-#[tokio::test]
-async fn stdio_client_initializes_discovers_tools_and_exits_on_disconnect() {
+async fn stdio_exchange(read_only: bool) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_notion-knowledge-server"))
         .env_clear()
+        .env("NK_READ_ONLY", if read_only { "true" } else { "false" })
         .env("NK_NOTION_AUTH", "integration")
         .env("NOTION_TOKEN", "secret-sentinel")
         .stdin(Stdio::piped())
@@ -88,7 +88,9 @@ async fn stdio_client_initializes_discovers_tools_and_exits_on_disconnect() {
     for (index, response) in responses.iter().enumerate() {
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], index + 1);
-        assert!(response.get("error").is_none(), "{response}");
+        if index < 4 || !read_only {
+            assert!(response.get("error").is_none(), "{response}");
+        }
     }
     let initialized = &responses[0]["result"];
     assert_eq!(initialized["protocolVersion"], "2025-03-26");
@@ -98,7 +100,26 @@ async fn stdio_client_initializes_discovers_tools_and_exits_on_disconnect() {
         initialized["serverInfo"]["version"],
         env!("CARGO_PKG_VERSION")
     );
-    common::assert_search_catalog(&responses[1]["result"]["tools"]);
+    let tools = &responses[1]["result"]["tools"];
+    if read_only {
+        common::assert_search_catalog(tools);
+    } else {
+        let tools = tools.as_array().unwrap();
+        assert_eq!(tools.len(), 3);
+        let upload = tools
+            .iter()
+            .find(|tool| tool["name"] == "knowledge_upload_file")
+            .unwrap();
+        assert_eq!(upload["_meta"]["openai/fileParams"], json!(["file"]));
+        let reads = Value::Array(
+            tools
+                .iter()
+                .filter(|tool| tool["name"] != "knowledge_upload_file")
+                .cloned()
+                .collect(),
+        );
+        common::assert_search_catalog(&reads);
+    }
     assert_eq!(responses[2]["result"], json!({}));
     assert_eq!(responses[3]["result"]["isError"], true);
     assert!(
@@ -108,13 +129,31 @@ async fn stdio_client_initializes_discovers_tools_and_exits_on_disconnect() {
             .starts_with("retrieval_unavailable:")
     );
     assert!(responses[3]["result"].get("structuredContent").is_none());
-    assert_eq!(responses[4]["result"]["isError"], true);
-    assert!(
-        responses[4]["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .starts_with("file_upload_unavailable:")
-    );
+    if read_only {
+        assert_eq!(responses[4]["error"]["code"], -32602);
+        assert_eq!(
+            responses[4]["error"]["message"],
+            "tool unavailable in read-only mode"
+        );
+    } else {
+        assert_eq!(responses[4]["result"]["isError"], true);
+        assert!(
+            responses[4]["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("file_upload_unavailable:")
+        );
+    }
     assert!(!frames.join("").contains("private-sentinel"));
     assert!(!diagnostics.contains("private-sentinel"));
+}
+
+#[tokio::test]
+async fn stdio_read_only_hides_uploads_and_rejects_direct_calls() {
+    stdio_exchange(true).await;
+}
+
+#[tokio::test]
+async fn stdio_explicit_write_mode_exposes_only_unavailable_upload_schema() {
+    stdio_exchange(false).await;
 }

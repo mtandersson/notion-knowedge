@@ -409,11 +409,14 @@ fn independent_processes_serialize_aliases_after_caller_and_parent_runtime_drop(
 fn independent_process_cannot_bypass_active_guard_with_other_state_or_expired_lease() {
     let f = Fixture::new();
     let c = f.coordinator();
-    let lease = c.state().acquire_lease(now(), 1).unwrap();
+    // Child startup and scheduler load must not advance lease time. Expiry
+    // is controlled only after the first owned effect is confirmed active.
+    fs::write(f.root.join("controlled-clock"), "").unwrap();
+    let lease = c.state().acquire_lease(10, 1).unwrap();
     let mut one = child(&f, &f.index, &f.state, "one", &lease, "drop-observer");
     wait_for(|| f.root.join("one-entered").exists());
-    wait_for(|| now() >= lease.expires_at);
-    let next = c.state().acquire_lease(now(), 100).unwrap();
+    fs::write(f.root.join("clock-expired"), "").unwrap();
+    let next = c.state().acquire_lease(11, 100).unwrap();
     let mut two = child(&f, &f.index, &f.state, "two", &next, "normal");
     let mut other = child(
         &f,
@@ -475,10 +478,22 @@ fn commit_child() {
         .enable_all()
         .build()
         .unwrap();
+    let clock_root = root.clone();
+    let child_clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || {
+        if clock_root.join("controlled-clock").exists() {
+            if clock_root.join("clock-expired").exists() {
+                11
+            } else {
+                10
+            }
+        } else {
+            now()
+        }
+    });
     let observer = c.submit(
         operation(&name),
         lease,
-        Arc::new(now),
+        child_clock.clone(),
         move |ctx| async move {
             ctx.revalidate().unwrap();
             assert!(ctx.state().index_version("chunks").unwrap().is_none());
@@ -506,7 +521,7 @@ fn commit_child() {
         }
         drop(runtime);
         wait_for(|| root.join(format!("{name}-completed")).exists());
-        if now() < expires {
+        if child_clock() < expires {
             wait_for(|| {
                 c.receipt(&name)
                     .unwrap()

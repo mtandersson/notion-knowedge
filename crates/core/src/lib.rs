@@ -13,6 +13,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod health;
 
+/// Sanitized diagnostic projection for untrusted error strings.
+pub mod redaction;
+
 /// Canonical, provider-independent indexed content contracts.
 pub mod indexed;
 
@@ -53,3 +56,6 @@ pub mod reconciliation;
 pub mod webhook;
 
 pub mod lifecycle;
+
+/// Restricted privacy-aware agent mutation audit contracts.
+pub mod audit;

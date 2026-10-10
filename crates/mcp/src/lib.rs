@@ -52,14 +52,19 @@ pub struct KnowledgeServer {
     source_expansion: Option<Arc<dyn notion_knowledge_core::source::SourceExpansion>>,
     root_page_ids: Arc<[String]>,
     snippet_chars: usize,
+    /// Deny mutation-capable tools unless the operator explicitly disables read-only mode.
+    read_only: bool,
     fresh_source: Option<Arc<dyn notion_knowledge_core::backend::NotionRead>>,
+    write_design_preview: bool,
 }
 
 impl Default for KnowledgeServer {
     fn default() -> Self {
         Self {
             snippet_chars: 2000,
+            read_only: true,
             fresh_source: None,
+            write_design_preview: false,
             search: None,
             hybrid_search: None,
             lexical_search: None,
@@ -70,6 +75,36 @@ impl Default for KnowledgeServer {
 }
 
 impl KnowledgeServer {
+    /// Enforce the configured access mode before exposing or dispatching MCP tools.
+    /// Only explicitly audited read tools are permitted in read-only mode.
+    fn tool_permitted(&self, name: &str) -> bool {
+        !self.read_only || matches!(name, "knowledge_search" | "knowledge_get")
+    }
+
+    pub fn with_read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+
+    /// Opt-in schema-preview for development tests only. No mutation backend is
+    /// configured: every preview write call fails without touching Notion.
+    pub fn with_write_design_preview(mut self) -> Self {
+        self.write_design_preview = true;
+        self
+    }
+
+    /// Shared discovery catalog for both MCP transport implementations.
+    pub fn tool_catalog(&self) -> Vec<rmcp::model::Tool> {
+        let mut catalog = vec![search::tool(), get::tool(), upload::tool()];
+        if self.write_design_preview {
+            catalog.extend(write_contract::tools());
+        }
+        catalog
+            .into_iter()
+            .filter(|tool| self.tool_permitted(tool.name.as_ref()))
+            .collect()
+    }
+
     /// Configure read-only authoritative Notion access for explicit fresh get calls.
     pub fn and_fresh_source(
         mut self,
@@ -155,6 +190,7 @@ impl KnowledgeServer {
 pub mod get;
 pub mod search;
 pub mod upload;
+pub mod write_contract;
 
 impl ServerHandler for KnowledgeServer {
     async fn list_tools(
@@ -163,16 +199,20 @@ impl ServerHandler for KnowledgeServer {
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
         Ok(rmcp::model::ListToolsResult {
-            tools: vec![search::tool(), get::tool(), upload::tool()],
+            tools: self.tool_catalog(),
             ..Default::default()
         })
     }
 
     fn get_tool(&self, name: &str) -> Option<rmcp::model::Tool> {
+        if !self.tool_permitted(name) {
+            return None;
+        }
         match name {
             "knowledge_search" => Some(search::tool()),
             "knowledge_get" => Some(get::tool()),
             "knowledge_upload_file" => Some(upload::tool()),
+            name if self.write_design_preview => write_contract::tool(name),
             _ => None,
         }
     }
@@ -182,6 +222,14 @@ impl ServerHandler for KnowledgeServer {
         request: rmcp::model::CallToolRequestParams,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+        // Check before argument handling or invoking any adapter; the same
+        // handler serves stdio and HTTP, so there is no transport bypass.
+        if !self.tool_permitted(request.name.as_ref()) {
+            return Err(rmcp::ErrorData::invalid_params(
+                "tool unavailable in read-only mode",
+                None,
+            ));
+        }
         let arguments = request.arguments.unwrap_or_default();
         let error = |message: &str| {
             rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(message)])
@@ -440,6 +488,11 @@ impl ServerHandler for KnowledgeServer {
                     )),
                 }
             }
+            name if self.write_design_preview && write_contract::is_planned_write(name) => {
+                Ok(error(
+                    "workflow_unavailable: semantic write tool is a schema preview; no mutation was attempted",
+                ))
+            }
             _ => Err(rmcp::ErrorData::invalid_params("unknown tool", None)),
         }
     }
@@ -451,5 +504,33 @@ impl ServerHandler for KnowledgeServer {
                 notion_knowledge_core::VERSION,
             ),
         )
+    }
+}
+
+#[cfg(test)]
+mod access_mode_tests {
+    use super::*;
+
+    #[test]
+    fn default_deny_guards_future_mutations_in_both_modes() {
+        let read_only = KnowledgeServer::default();
+        for name in ["knowledge_search", "knowledge_get"] {
+            assert!(read_only.tool_permitted(name));
+            assert!(read_only.get_tool(name).is_some());
+        }
+        for name in [
+            "notion_create_page",
+            "notion_update_page",
+            "notion_delete_page",
+            "notion_upload_file",
+            "future_write",
+        ] {
+            assert!(!read_only.tool_permitted(name));
+            assert!(read_only.get_tool(name).is_none());
+        }
+        let explicitly_writable = read_only.with_read_only(false);
+        assert!(explicitly_writable.tool_permitted("notion_create_page"));
+        // A writable configuration does not magically expose unimplemented tools.
+        assert!(explicitly_writable.get_tool("notion_create_page").is_none());
     }
 }
