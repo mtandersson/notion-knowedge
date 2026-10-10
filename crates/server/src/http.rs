@@ -9,7 +9,7 @@ const MAX_MCP_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 use axum::{
     body::{Body, to_bytes},
     extract::{Request, State},
-    http::{Method, StatusCode, header::CONTENT_TYPE},
+    http::{Method, StatusCode, header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, WWW_AUTHENTICATE}},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
@@ -46,7 +46,17 @@ pub async fn serve_with_handler(
         Arc::new(LocalSessionManager::default()),
         config,
     );
+    let bearer = settings.bearer_fallback.map(Arc::new);
     let diagnostics = diagnostics_router(bind, diagnostics);
+    let diagnostics = if settings.health_requires_bearer {
+        // The health policy is independent of the MCP auth policy.
+        diagnostics.layer(middleware::from_fn_with_state(
+            bearer.clone().expect("validated health authentication"),
+            require_development_bearer,
+        ))
+    } else {
+        diagnostics
+    };
     let admission = match settings.webhook_state_file {
         Some(path) => {
             let store = tokio::task::spawn_blocking(move || {
@@ -70,9 +80,21 @@ pub async fn serve_with_handler(
     // #120/#127 must supply a verified auth layer before re-enabling it.
     let mcp = match settings.oauth_discovery {
         Some(discovery) => crate::oauth_discovery::router(bind, discovery),
-        None => axum::Router::new()
-            .nest_service("/mcp", service)
-            .layer(middleware::from_fn(validate_json)),
+        None => {
+            let mcp = axum::Router::new()
+                .nest_service("/mcp", service)
+                .layer(middleware::from_fn(validate_json));
+            if let Some(token) = bearer {
+                // Authentication is the outermost MCP gate, before body parsing,
+                // initialization, session lookup and all tool dispatch.
+                mcp.layer(middleware::from_fn_with_state(
+                    token,
+                    require_development_bearer,
+                ))
+            } else {
+                mcp
+            }
+        },
     };
     let router = axum::Router::new()
         .merge(diagnostics)
@@ -95,7 +117,14 @@ pub fn container_healthcheck(settings: &crate::config::Config) -> io::Result<boo
     if !command_line_uses_http(&pid1) {
         return Ok(true);
     }
-    probe_liveness(settings.http_bind)
+    probe_liveness(
+        settings.http_bind,
+        if settings.health_requires_bearer {
+            settings.bearer_fallback.as_ref().map(|token| token.expose_secret())
+        } else {
+            None
+        },
+    )
 }
 
 fn command_line_uses_http(command_line: &[u8]) -> bool {
@@ -104,7 +133,7 @@ fn command_line_uses_http(command_line: &[u8]) -> bool {
         .any(|argument| argument == b"--http")
 }
 
-fn probe_liveness(bind: SocketAddr) -> io::Result<bool> {
+fn probe_liveness(bind: SocketAddr, bearer: Option<&str>) -> io::Result<bool> {
     use std::io::{Read, Write};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpStream};
     use std::time::Duration;
@@ -119,15 +148,72 @@ fn probe_liveness(bind: SocketAddr) -> io::Result<bool> {
     let mut stream = TcpStream::connect_timeout(&target, timeout)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
+    // Only sent over the local loopback health probe; never printed.
+    let auth_header = bearer
+        .map(|token| format!("Authorization: Bearer {token}\\r\\n"))
+        .unwrap_or_default();
     write!(
         stream,
-        "GET /livez HTTP/1.1\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n",
+        "GET /livez HTTP/1.1\r\nHost: localhost:{}\r\n{auth_header}Connection: close\r\n\r\n",
         bind.port()
     )?;
     stream.flush()?;
     let mut response = [0_u8; 64];
     let read = stream.read(&mut response)?;
     Ok(response[..read].starts_with(b"HTTP/1.1 200"))
+}
+
+// Check the static developer token on *every* MCP HTTP request, including
+// GET/SSE, DELETE and subsequent calls with an existing MCP session ID.
+// Never include the supplied header or configured credential in responses.
+async fn require_development_bearer(
+    State(token): State<Arc<crate::config::SecretToken>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let mut headers = request.headers().get_all(AUTHORIZATION).iter();
+    let accepted = if let (Some(header), None) = (headers.next(), headers.next()) {
+        header
+            .to_str()
+            .ok()
+            .and_then(|value| value.split_once(' '))
+            .filter(|(scheme, credential)| {
+                scheme.eq_ignore_ascii_case("Bearer")
+                    && !credential.is_empty()
+                    && !credential.bytes().any(|byte| byte.is_ascii_whitespace())
+            })
+            .is_some_and(|(_, presented)| {
+                // Fixed-length hashes and a constant-time verifier avoid
+                // timing comparisons and accidental credential echoing.
+                let expected = ring::digest::digest(
+                    &ring::digest::SHA256,
+                    token.expose_secret().as_bytes(),
+                );
+                let received = ring::digest::digest(
+                    &ring::digest::SHA256,
+                    presented.as_bytes(),
+                );
+                ring::constant_time::verify_slices_are_equal(
+                    expected.as_ref(),
+                    received.as_ref(),
+                )
+                .is_ok()
+            })
+    } else {
+        false
+    };
+    if !accepted {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [
+                (CACHE_CONTROL, "no-store"),
+                (WWW_AUTHENTICATE, "Bearer realm=\"notion-knowledge-dev\""),
+            ],
+            "Unauthorized",
+        )
+            .into_response();
+    }
+    next.run(request).await
 }
 
 // The SDK returns plain text when deserializing malformed request bodies.
