@@ -105,11 +105,12 @@ pub async fn check_revision(
     if page.archived {
         return Err(RevisionError::Inactive(metadata));
     }
-    if expected_time.is_some_and(|time| time != current_time)
-        || expected.markdown_sha256.as_deref().is_some_and(|hash| {
-            !hash.eq_ignore_ascii_case(current_hash.as_deref().expect("hash read above"))
-        })
-    {
+    let hash_changed = match (expected.markdown_sha256.as_deref(), current_hash.as_deref()) {
+        (Some(expected_hash), Some(actual_hash)) => !expected_hash.eq_ignore_ascii_case(actual_hash),
+        (None, _) => false,
+        _ => return Err(internal_error()),
+    };
+    if expected_time.is_some_and(|time| time != current_time) || hash_changed {
         return Err(RevisionError::Conflict(metadata));
     }
     Ok(metadata)
