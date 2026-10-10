@@ -7,7 +7,7 @@ use notion_knowledge_notion::NotionClient;
 
 use crate::{
     config::Config,
-    notion_grant_store::{GrantStore, StoreError},
+    notion_grant_store::GrantStore,
     notion_oauth_callback::NotionTokenClient,
     notion_oauth_refresh::{NotionRefresh, RefreshError},
 };
@@ -249,7 +249,7 @@ mod tests {
         let credentials = build_runtime(store.clone(), policy, "http://127.0.0.1:1/v1/oauth/token");
         let called = AtomicBool::new(false);
         credentials
-            .with_client(|client| async {
+            .with_client(|client| async move {
                 assert!(format!("{client:?}").contains("REDACTED"));
                 called.store(true, Ordering::SeqCst);
                 Ok::<_, BackendError>(())
