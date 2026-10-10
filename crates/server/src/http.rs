@@ -1,6 +1,8 @@
 //! Streamable HTTP wiring; application behavior remains in the MCP crate.
 
-use std::{io, net::SocketAddr, sync::Arc};
+use std::{io, net::SocketAddr, sync::Arc, time::Instant};
+
+use notion_knowledge_core::logging::{self, CorrelationId, Level, Operation, Outcome};
 
 /// Maximum HTTP MCP POST body, independent of its declared content type.
 /// Stdio input bounds and semantic-tool output budgets are separate contracts.
@@ -9,7 +11,7 @@ const MAX_MCP_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 use axum::{
     body::{Body, to_bytes},
     extract::{Request, State},
-    http::{Method, StatusCode, header::CONTENT_TYPE},
+    http::{Method, StatusCode, HeaderValue, header::CONTENT_TYPE},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
@@ -30,6 +32,7 @@ pub async fn serve_with_handler(
     settings: crate::config::Config,
     handler: notion_knowledge_mcp::KnowledgeServer,
 ) -> io::Result<()> {
+    logging::set_level(settings.log_level);
     let bind = settings.http_bind;
     let diagnostics = crate::diagnostics::bootstrap(&settings);
     let listener = tokio::net::TcpListener::bind(bind).await?;
@@ -77,7 +80,8 @@ pub async fn serve_with_handler(
     let router = axum::Router::new()
         .merge(diagnostics)
         .merge(mcp)
-        .merge(webhooks);
+        .merge(webhooks)
+        .layer(middleware::from_fn(correlate_request));
     eprintln!("Serving MCP over Streamable HTTP at http://{bind}/mcp.");
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {
@@ -85,6 +89,35 @@ pub async fn serve_with_handler(
             cancellation.cancel();
         })
         .await
+}
+
+/// Generated server-side IDs cannot be spoofed using client-supplied headers.
+/// Instrument the outer router, including rejected requests and health probes.
+async fn correlate_request(request: Request, next: Next) -> Response {
+    let id = CorrelationId::new();
+    let started = Instant::now();
+    let mut response = logging::scope(id.clone(), next.run(request)).await;
+    let status = response.status();
+    response.headers_mut().insert(
+        "x-correlation-id",
+        HeaderValue::from_str(id.as_str()).expect("generated correlation ID is ASCII"),
+    );
+    let outcome = if status.is_success() {
+        Outcome::Success
+    } else if status.is_client_error() {
+        Outcome::Rejected
+    } else {
+        Outcome::Failed
+    };
+    logging::emit(
+        &id,
+        Operation::HttpRequest,
+        outcome,
+        started.elapsed(),
+        Some(status.as_u16()),
+        if status.is_server_error() { Level::Warn } else { Level::Info },
+    );
+    response
 }
 
 /// Docker invokes this one-shot probe from inside the running container.
