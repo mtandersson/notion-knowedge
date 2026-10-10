@@ -65,3 +65,6 @@ pub mod audit;
 
 /// Fresh, fail-closed optimistic preconditions for future safe write workflows.
 pub mod revision;
+
+/// Durable mutation claims and verified once-only receipts.
+pub mod idempotency;
