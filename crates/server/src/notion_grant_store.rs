@@ -263,7 +263,10 @@ impl GrantStore {
         let old = self.read_record()?;
         // A different bot means a different Notion integration, even if the
         // workspace and owner have not changed. Never switch silently.
-        if old.as_ref().is_some_and(|record| record.bot_id != grant.bot_id()) {
+        if old
+            .as_ref()
+            .is_some_and(|record| record.bot_id != grant.bot_id())
+        {
             return Err(StoreError::IdentityMismatch);
         }
         let epoch = match old {
