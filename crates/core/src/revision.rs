@@ -7,7 +7,7 @@
 use chrono::DateTime;
 use sha2::{Digest, Sha256};
 
-use crate::backend::{BackendError, BackendErrorKind, NotionRead, Page, PageId};
+use crate::backend::{BackendError, BackendErrorKind, NotionRead, PageId};
 
 /// A caller's revision, captured from an earlier authoritative read.
 /// SHA-256 is over the **exact UTF-8 Markdown bytes**, not indexed/search text.
