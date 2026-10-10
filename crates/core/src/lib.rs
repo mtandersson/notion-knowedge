@@ -16,6 +16,9 @@ pub mod health;
 /// Sanitized diagnostic projection for untrusted error strings.
 pub mod redaction;
 
+/// Payload-free structured operations and task-scoped correlation IDs.
+pub mod logging;
+
 /// Canonical, provider-independent indexed content contracts.
 pub mod indexed;
 
