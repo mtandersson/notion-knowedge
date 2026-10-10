@@ -248,10 +248,11 @@ mod tests {
             .unwrap();
         let credentials = build_runtime(store.clone(), policy, "http://127.0.0.1:1/v1/oauth/token");
         let called = AtomicBool::new(false);
+        let called_ref = &called;
         credentials
             .with_client(|client| async move {
                 assert!(format!("{client:?}").contains("REDACTED"));
-                called.store(true, Ordering::SeqCst);
+                called_ref.store(true, Ordering::SeqCst);
                 Ok::<_, BackendError>(())
             })
             .await
