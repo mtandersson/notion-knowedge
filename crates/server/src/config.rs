@@ -22,6 +22,8 @@ pub struct Config {
     /// Explicit opt-in sealed Notion grant state, never activated as MCP auth.
     pub notion_grant_store: Option<GrantStoreSettings>,
     pub notion_auth: NotionAuth,
+    /// Trusted process-level root policy; no MCP request can broaden it.
+    pub notion_scope: Option<notion_knowledge_core::lifecycle::LifecycleScope>,
     pub webhook: crate::webhook::WebhookConfig,
     pub webhook_debounce: notion_knowledge_core::webhook::DebounceWindow,
     pub webhook_state_file: Option<std::path::PathBuf>,
@@ -383,6 +385,70 @@ impl Config {
             }
             _ => return Err(invalid("NK_NOTION_AUTH", "must be none or integration")),
         };
+        let roots = lookup("NK_NOTION_SCOPE_ROOTS")
+            .map(|value| text(value, "NK_NOTION_SCOPE_ROOTS"))
+            .transpose()?;
+        let workspace = lookup("NK_NOTION_SCOPE_WORKSPACE_ID")
+            .map(|value| text(value, "NK_NOTION_SCOPE_WORKSPACE_ID"))
+            .transpose()?;
+        let notion_scope = match (roots, workspace) {
+            (None, None) => None,
+            (Some(roots), Some(workspace)) => {
+                if !matches!(notion_auth, NotionAuth::Integration(_)) {
+                    return Err(invalid(
+                        "NK_NOTION_AUTH",
+                        "integration required for authoritative scope",
+                    ));
+                }
+                let parse = |value: &str| {
+                    notion_knowledge_notion::pages::page_id(value)
+                        .ok()
+                        .filter(|id| id.0 == value)
+                        .map(|id| id.0)
+                };
+                let workspace_id = parse(&workspace).ok_or_else(|| {
+                    invalid(
+                        "NK_NOTION_SCOPE_WORKSPACE_ID",
+                        "must be canonical page UUID",
+                    )
+                })?;
+                let root_ids: Option<Vec<_>> = roots
+                    .split(',')
+                    .map(|part| parse(part).map(notion_knowledge_core::backend::PageId))
+                    .collect();
+                let root_ids = root_ids.ok_or_else(|| {
+                    invalid(
+                        "NK_NOTION_SCOPE_ROOTS",
+                        "must be comma-separated canonical UUIDs",
+                    )
+                })?;
+                if root_ids.is_empty() || root_ids.len() > 100 {
+                    return Err(invalid(
+                        "NK_NOTION_SCOPE_ROOTS",
+                        "must contain 1 to 100 roots",
+                    ));
+                }
+                let generation = optional(&mut lookup, "NK_NOTION_SCOPE_GENERATION", "1")?
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|number| *number > 0)
+                    .ok_or_else(|| {
+                        invalid("NK_NOTION_SCOPE_GENERATION", "must be a positive integer")
+                    })?;
+                Some(notion_knowledge_core::lifecycle::LifecycleScope {
+                    workspace_id,
+                    generation,
+                    roots: root_ids,
+                    exclusions: notion_knowledge_core::discovery::ExclusionRules::default(),
+                })
+            }
+            _ => {
+                return Err(invalid(
+                    "NK_NOTION_SCOPE_ROOTS",
+                    "workspace and root IDs must be configured together",
+                ));
+            }
+        };
         let mode = optional(&mut lookup, "NK_WEBHOOK_MODE", "disabled")?;
         let webhook = match mode.as_str() {
             "disabled" => crate::webhook::WebhookConfig::Disabled,
@@ -504,6 +570,7 @@ impl Config {
             notion_oauth_callback,
             notion_grant_store,
             notion_auth,
+            notion_scope,
             webhook,
         })
     }
@@ -541,6 +608,64 @@ mod tests {
                 .find(|(name, _)| *name == key)
                 .map(|(_, value)| OsString::from(value))
         })
+    }
+
+    #[test]
+    fn configured_notion_scope_requires_trusted_pair_and_integration() {
+        const WORKSPACE: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        const ROOT: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        assert!(parse(&[]).unwrap().notion_scope.is_none());
+        assert_eq!(
+            parse(&[("NK_NOTION_SCOPE_ROOTS", ROOT)])
+                .unwrap_err()
+                .setting,
+            "NK_NOTION_SCOPE_ROOTS"
+        );
+        assert_eq!(
+            parse(&[("NK_NOTION_SCOPE_WORKSPACE_ID", WORKSPACE)])
+                .unwrap_err()
+                .setting,
+            "NK_NOTION_SCOPE_ROOTS"
+        );
+        assert_eq!(
+            parse(&[
+                ("NK_NOTION_SCOPE_ROOTS", ROOT),
+                ("NK_NOTION_SCOPE_WORKSPACE_ID", WORKSPACE)
+            ])
+            .unwrap_err()
+            .setting,
+            "NK_NOTION_AUTH"
+        );
+        let good = parse(&[
+            ("NK_NOTION_AUTH", "integration"),
+            ("NOTION_TOKEN", "private-fixture-credential"),
+            ("NK_NOTION_SCOPE_ROOTS", ROOT),
+            ("NK_NOTION_SCOPE_WORKSPACE_ID", WORKSPACE),
+            ("NK_NOTION_SCOPE_GENERATION", "3"),
+        ])
+        .unwrap();
+        let scope = good.notion_scope.unwrap();
+        assert_eq!(scope.generation, 3);
+        assert_eq!(scope.workspace_id, WORKSPACE);
+        assert_eq!(scope.roots[0].0, ROOT);
+
+        for (key, value) in [
+            ("NK_NOTION_SCOPE_ROOTS", "untrusted-root"),
+            ("NK_NOTION_SCOPE_WORKSPACE_ID", "untrusted-workspace"),
+            ("NK_NOTION_SCOPE_GENERATION", "0"),
+        ] {
+            let mut inputs = vec![
+                ("NK_NOTION_AUTH", "integration"),
+                ("NOTION_TOKEN", "private-fixture-credential"),
+                ("NK_NOTION_SCOPE_ROOTS", ROOT),
+                ("NK_NOTION_SCOPE_WORKSPACE_ID", WORKSPACE),
+                ("NK_NOTION_SCOPE_GENERATION", "3"),
+            ];
+            inputs.iter_mut().find(|item| item.0 == key).unwrap().1 = value;
+            let err = parse(&inputs).unwrap_err();
+            assert_eq!(err.setting, key);
+            assert!(!err.to_string().contains("untrusted-"));
+        }
     }
 
     #[test]

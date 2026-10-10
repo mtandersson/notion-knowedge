@@ -1,3 +1,4 @@
+mod scope_fixture;
 use notion_knowledge_core::source::*;
 use notion_knowledge_mcp::KnowledgeServer;
 use rmcp::ServiceExt;
@@ -42,9 +43,10 @@ impl SourceExpansion for Fixture {
                         StableSourceRef::Page(page_id) => {
                             (page_id.clone(), vec![format!("{page_id}-chunk")])
                         }
-                        StableSourceRef::Chunk(chunk_id) => {
-                            ("page-for-chunk".into(), vec![chunk_id.clone()])
-                        }
+                        StableSourceRef::Chunk(chunk_id) => (
+                            "99999999-9999-9999-9999-999999999999".into(),
+                            vec![chunk_id.clone()],
+                        ),
                     };
                     let full = format!("Expanded content for {page_id}");
                     let text: String = full.chars().take(remaining).collect();
@@ -102,12 +104,15 @@ async fn exchange_with_backend(
 ) -> Value {
     let (client, server) = tokio::io::duplex(65_536);
     let task = tokio::spawn(async move {
-        let mut handler =
-            KnowledgeServer::with_source_expansion(adapter, vec!["root-1".into()]).unwrap();
+        let mut handler = KnowledgeServer::with_source_expansion(
+            adapter,
+            vec!["22222222-2222-2222-2222-222222222222".into()],
+        )
+        .unwrap();
         if let Some(backend) = backend {
             handler = handler.and_fresh_source(backend);
         }
-        handler
+        scope_fixture::secured(handler)
             .serve(server)
             .await
             .unwrap()
@@ -152,7 +157,7 @@ async fn expands_page_and_chunk_refs_with_server_owned_scope_and_provenance() {
         json!({
             "refs":[
                 {"kind":"chunk","id":"stable-chunk"},
-                {"kind":"page","id":"page-2"}
+                {"kind":"page","id":"77777777-7777-7777-7777-777777777777"}
             ],
             "max_chars":256
         }),
@@ -172,12 +177,18 @@ async fn expands_page_and_chunk_refs_with_server_owned_scope_and_provenance() {
         sources[0]["provenance"]["chunk_ids"],
         json!(["stable-chunk"])
     );
-    assert_eq!(sources[0]["provenance"]["root_page_id"], "root-1");
+    assert_eq!(
+        sources[0]["provenance"]["root_page_id"],
+        "22222222-2222-2222-2222-222222222222"
+    );
     assert_eq!(
         sources[1]["reference"],
-        json!({"kind":"page","id":"page-2"})
+        json!({"kind":"page","id":"77777777-7777-7777-7777-777777777777"})
     );
-    assert_eq!(sources[1]["provenance"]["page_id"], "page-2");
+    assert_eq!(
+        sources[1]["provenance"]["page_id"],
+        "77777777-7777-7777-7777-777777777777"
+    );
     assert!(
         response["result"]["content"]
             .as_array()
@@ -190,7 +201,10 @@ async fn expands_page_and_chunk_refs_with_server_owned_scope_and_provenance() {
 
     let calls = adapter.calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].root_page_ids, vec!["root-1".to_owned()]);
+    assert_eq!(
+        calls[0].root_page_ids,
+        vec!["22222222-2222-2222-2222-222222222222".to_owned()]
+    );
     assert_eq!(calls[0].max_chars, 256);
     assert_eq!(calls[0].refs.len(), 2);
 }
@@ -205,7 +219,7 @@ async fn missing_and_out_of_scope_refs_share_the_same_safe_public_error() {
         });
         let response = exchange(
             adapter,
-            json!({"refs":[{"kind":"page","id":"page-1"}],"max_chars":128}),
+            json!({"refs":[{"kind":"page","id":"11111111-1111-1111-1111-111111111111"}],"max_chars":128}),
         )
         .await;
         assert_eq!(response["result"]["isError"], true);
@@ -225,8 +239,8 @@ async fn missing_and_out_of_scope_refs_share_the_same_safe_public_error() {
 async fn invalid_arguments_never_execute_source_expansion() {
     for arguments in [
         json!({"refs":[],"max_chars":128}),
-        json!({"refs":[{"kind":"page","id":"page-1"}],"max_chars":128,"freshness":"automatic"}),
-        json!({"refs":[{"kind":"page","id":"page-1"}],"max_chars":0}),
+        json!({"refs":[{"kind":"page","id":"11111111-1111-1111-1111-111111111111"}],"max_chars":128,"freshness":"automatic"}),
+        json!({"refs":[{"kind":"page","id":"11111111-1111-1111-1111-111111111111"}],"max_chars":0}),
         json!({"refs":[{"kind":"page","id":"   "}],"max_chars":128}),
         json!({"refs":[{"kind":"page","id":"same"},{"kind":"page","id":"same"}],"max_chars":128}),
     ] {
@@ -321,7 +335,9 @@ impl NotionRead for FreshFixture {
             .unwrap()
             .push(("content".into(), id.0.clone()));
         Box::pin(async move {
-            if matches!(self.behavior, FreshBehavior::FailedSecondPage) && id.0 == "page-2" {
+            if matches!(self.behavior, FreshBehavior::FailedSecondPage)
+                && id.0 == "77777777-7777-7777-7777-777777777777"
+            {
                 return Err(BackendError {
                     kind: BackendErrorKind::Unavailable,
                     operation: "fixture",
@@ -397,7 +413,10 @@ async fn fresh_reads_by_resolved_stable_page_id_and_reports_stale_or_unchanged_i
             source["reference"],
             json!({"kind":"chunk","id":"stable-chunk"})
         );
-        assert_eq!(source["provenance"]["page_id"], "page-for-chunk");
+        assert_eq!(
+            source["provenance"]["page_id"],
+            "99999999-9999-9999-9999-999999999999"
+        );
         assert_eq!(
             source["provenance"]["indexed_last_edited_time"],
             "2026-10-07T11:00:00Z"
@@ -411,8 +430,14 @@ async fn fresh_reads_by_resolved_stable_page_id_and_reports_stale_or_unchanged_i
         assert_eq!(
             *fresh.calls.lock().unwrap(),
             vec![
-                ("content".into(), "page-for-chunk".into()),
-                ("metadata".into(), "page-for-chunk".into())
+                (
+                    "content".into(),
+                    "99999999-9999-9999-9999-999999999999".into()
+                ),
+                (
+                    "metadata".into(),
+                    "99999999-9999-9999-9999-999999999999".into()
+                )
             ]
         );
         // Only the read-only expansion capability is called, exactly once.
@@ -424,7 +449,7 @@ async fn fresh_reads_by_resolved_stable_page_id_and_reports_stale_or_unchanged_i
 async fn default_and_explicit_indexed_reads_do_not_call_notion_or_claim_refresh() {
     for freshness in [None, Some("indexed")] {
         let fresh = fresh_fixture("2026-10-07T11:30:00Z", FreshBehavior::Valid);
-        let mut args = json!({"refs":[{"kind":"page","id":"page-1"}], "max_chars":128});
+        let mut args = json!({"refs":[{"kind":"page","id":"11111111-1111-1111-1111-111111111111"}], "max_chars":128});
         if let Some(mode) = freshness {
             args["freshness"] = json!(mode);
         }
@@ -432,7 +457,10 @@ async fn default_and_explicit_indexed_reads_do_not_call_notion_or_claim_refresh(
             exchange_with_backend(indexed_fixture(Behavior::Valid), args, Some(fresh.clone()))
                 .await;
         let source = &response["result"]["structuredContent"]["sources"][0];
-        assert_eq!(source["text"], "Expanded content for page-1");
+        assert_eq!(
+            source["text"],
+            "Expanded content for 11111111-1111-1111-1111-111111111111"
+        );
         assert_eq!(source["content_scope"], "indexed");
         assert!(
             source["provenance"]
@@ -481,7 +509,7 @@ async fn fresh_failures_are_explicit_and_never_fall_back_to_indexed_content() {
         let response = exchange_with_backend(
             indexed_fixture(Behavior::Valid),
             json!({
-                "refs":[{"kind":"page","id":"page-1"}], "max_chars":128, "freshness":"fresh"
+                "refs":[{"kind":"page","id":"11111111-1111-1111-1111-111111111111"}], "max_chars":128, "freshness":"fresh"
             }),
             Some(fresh_fixture("2026-10-07T11:30:00Z", behavior)),
         )
@@ -498,7 +526,7 @@ async fn fresh_failures_are_explicit_and_never_fall_back_to_indexed_content() {
     let response = exchange(
         indexed_fixture(Behavior::Valid),
         json!({
-            "refs":[{"kind":"page","id":"page-1"}], "max_chars":128, "freshness":"fresh"
+            "refs":[{"kind":"page","id":"11111111-1111-1111-1111-111111111111"}], "max_chars":128, "freshness":"fresh"
         }),
     )
     .await;
@@ -537,7 +565,7 @@ async fn fresh_cannot_bypass_indexed_identity_and_root_authorization() {
 async fn a_later_page_failure_returns_no_partial_content_and_preserves_indexed_reads() {
     let indexed = indexed_fixture(Behavior::Valid);
     let fresh = fresh_fixture("2026-10-07T11:30:00Z", FreshBehavior::FailedSecondPage);
-    let args = json!({"refs":[{"kind":"page","id":"page-1"},{"kind":"page","id":"page-2"}], "max_chars":256});
+    let args = json!({"refs":[{"kind":"page","id":"11111111-1111-1111-1111-111111111111"},{"kind":"page","id":"77777777-7777-7777-7777-777777777777"}], "max_chars":256});
     let before = exchange(indexed.clone(), args.clone()).await;
     let mut fresh_args = args.clone();
     fresh_args["freshness"] = json!("fresh");
@@ -547,9 +575,18 @@ async fn a_later_page_failure_returns_no_partial_content_and_preserves_indexed_r
     assert_eq!(
         *fresh.calls.lock().unwrap(),
         vec![
-            ("content".into(), "page-1".into()),
-            ("metadata".into(), "page-1".into()),
-            ("content".into(), "page-2".into())
+            (
+                "content".into(),
+                "11111111-1111-1111-1111-111111111111".into()
+            ),
+            (
+                "metadata".into(),
+                "11111111-1111-1111-1111-111111111111".into()
+            ),
+            (
+                "content".into(),
+                "77777777-7777-7777-7777-777777777777".into()
+            )
         ]
     );
     let after = exchange(indexed, args).await;
@@ -562,7 +599,7 @@ async fn a_later_page_failure_returns_no_partial_content_and_preserves_indexed_r
 #[tokio::test]
 async fn successful_fresh_reads_leave_the_subsequent_indexed_snapshot_unchanged() {
     let indexed = indexed_fixture(Behavior::Valid);
-    let args = json!({"refs":[{"kind":"page","id":"page-1"}], "max_chars":256});
+    let args = json!({"refs":[{"kind":"page","id":"11111111-1111-1111-1111-111111111111"}], "max_chars":256});
     let before = exchange(indexed.clone(), args.clone()).await;
     let mut fresh_args = args.clone();
     fresh_args["freshness"] = json!("fresh");
@@ -612,7 +649,7 @@ async fn versioned_freshness_scenarios_distinguish_stale_content_without_writing
         let indexed = indexed_fixture(Behavior::Valid);
         let authoritative = fresh_fixture(authoritative_time, behavior);
         let indexed_args = json!({
-            "refs": [{"kind": "page", "id": "page-1"}],
+            "refs": [{"kind": "page", "id": "11111111-1111-1111-1111-111111111111"}],
             "max_chars": 256,
             "freshness": "indexed"
         });
@@ -620,7 +657,10 @@ async fn versioned_freshness_scenarios_distinguish_stale_content_without_writing
         // Snapshot the old indexed result before the authoritative read.
         let before = exchange(indexed.clone(), indexed_args.clone()).await;
         let before_source = &before["result"]["structuredContent"]["sources"][0];
-        assert_eq!(before_source["text"], "Expanded content for page-1");
+        assert_eq!(
+            before_source["text"],
+            "Expanded content for 11111111-1111-1111-1111-111111111111"
+        );
         assert_eq!(
             before_source["provenance"]["indexed_last_edited_time"],
             data["indexed_last_edited_time"],
@@ -649,7 +689,8 @@ async fn versioned_freshness_scenarios_distinguish_stale_content_without_writing
             let message = result["result"]["content"][0]["text"].as_str().unwrap();
             assert!(message.starts_with(error), "{name}: {message}");
             assert!(
-                !message.contains("Expanded content for page-1") && !message.contains("Färsk"),
+                !message.contains("Expanded content for 11111111-1111-1111-1111-111111111111")
+                    && !message.contains("Färsk"),
                 "{name}: error must not expose source content"
             );
         } else {
@@ -680,7 +721,10 @@ async fn versioned_freshness_scenarios_distinguish_stale_content_without_writing
                     );
                 }
                 _ => {
-                    assert_eq!(source["text"], "Expanded content for page-1", "{name}");
+                    assert_eq!(
+                        source["text"], "Expanded content for 11111111-1111-1111-1111-111111111111",
+                        "{name}"
+                    );
                     assert!(
                         source["provenance"]
                             .get("refreshed_last_edited_time")
@@ -730,7 +774,7 @@ async fn expansion_rejects_oversized_metadata_without_leaking_source() {
             calls: Mutex::new(vec![]),
             behavior: Behavior::OversizeMetadata,
         }),
-        json!({"refs":[{"kind":"page","id":"page-1"}],"max_chars":1024}),
+        json!({"refs":[{"kind":"page","id":"11111111-1111-1111-1111-111111111111"}],"max_chars":1024}),
     )
     .await;
     assert_eq!(response["result"]["isError"], true);

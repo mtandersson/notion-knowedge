@@ -1,3 +1,4 @@
+mod scope_fixture;
 use notion_knowledge_core::search::*;
 use notion_knowledge_mcp::KnowledgeServer;
 use rmcp::ServiceExt;
@@ -22,7 +23,7 @@ impl SemanticSearch for Fixture {
                 score: 0.75,
                 source: SearchSource {
                     last_edited_time: "2026-10-07T12:00:00Z".into(),
-                    page_id: "page-1".into(),
+                    page_id: "11111111-1111-1111-1111-111111111111".into(),
                     chunk_id: "stable-chunk".into(),
                     url: "https://example.invalid/page".into(),
                     title: "Fixture".into(),
@@ -63,7 +64,7 @@ impl LexicalSearch for LexicalFixture {
                 score: 2.5,
                 source: SearchSource {
                     last_edited_time: "2026-10-07T12:00:00Z".into(),
-                    page_id: "lexical-page".into(),
+                    page_id: "88888888-8888-8888-8888-888888888888".into(),
                     chunk_id: "lexical-chunk".into(),
                     url: "https://example.invalid/lexical".into(),
                     title: "Lexical fixture".into(),
@@ -75,6 +76,7 @@ impl LexicalSearch for LexicalFixture {
     }
 }
 async fn exchange_server(server_handler: KnowledgeServer, arguments: Value) -> Value {
+    let server_handler = scope_fixture::secured(server_handler);
     let (client, server) = tokio::io::duplex(65536);
     let task = tokio::spawn(async move {
         server_handler
@@ -125,7 +127,7 @@ async fn semantic_calls_preserve_citations_and_pass_filters_to_domain_port() {
         fail: false,
         invalid_output: 0,
     });
-    let response = exchange(adapter.clone(), json!({"query":"question","limit":2,"mode":"semantic","filters":{"page_ids":["page-1","page-2"],"root_page_ids":["root-1"],"metadata":{"workspace_ids":["workspace"],"page_kind":"database","edited":{"from":"2026-10-07T00:00:00Z"},"properties":[{"operator":"contains","property_id":"tags","value":"rust"}]}}})).await;
+    let response = exchange(adapter.clone(), json!({"query":"question","limit":2,"mode":"semantic","filters":{"page_ids":["11111111-1111-1111-1111-111111111111","77777777-7777-7777-7777-777777777777"],"root_page_ids":["22222222-2222-2222-2222-222222222222"],"metadata":{"workspace_ids":["workspace"],"page_kind":"database","edited":{"from":"2026-10-07T00:00:00Z"},"properties":[{"operator":"contains","property_id":"tags","value":"rust"}]}}})).await;
     assert!(response.get("error").is_none());
     let result = &response["result"]["structuredContent"]["results"][0];
     assert_eq!(result["source"]["chunk_id"], "stable-chunk");
@@ -139,7 +141,10 @@ async fn semantic_calls_preserve_citations_and_pass_filters_to_domain_port() {
     );
     let calls = adapter.calls.lock().unwrap();
     assert_eq!(calls[0].page_ids.as_ref().unwrap().len(), 2);
-    assert_eq!(calls[0].root_page_ids.as_ref().unwrap(), &["root-1"]);
+    assert_eq!(
+        calls[0].root_page_ids.as_ref().unwrap(),
+        &["22222222-2222-2222-2222-222222222222"]
+    );
 }
 #[tokio::test]
 async fn lexical_mode_calls_lexical_port_and_preserves_filters_and_citations() {
@@ -153,14 +158,17 @@ async fn lexical_mode_calls_lexical_port_and_preserves_filters_and_citations() {
             "query":"exact-term",
             "limit":3,
             "mode":"lexical",
-            "filters":{"page_ids":["page-1"],"root_page_ids":["root-1","root-2"]}
+            "filters":{"page_ids":["11111111-1111-1111-1111-111111111111"],"root_page_ids":["22222222-2222-2222-2222-222222222222","33333333-3333-3333-3333-333333333333"]}
         }),
     )
     .await;
 
     assert!(response.get("error").is_none());
     let result = &response["result"]["structuredContent"]["results"][0];
-    assert_eq!(result["source"]["page_id"], "lexical-page");
+    assert_eq!(
+        result["source"]["page_id"],
+        "88888888-8888-8888-8888-888888888888"
+    );
     assert_eq!(result["source"]["chunk_id"], "lexical-chunk");
     assert_eq!(result["source"]["block_id"], "block-lexical");
     assert_eq!(result["score"], 2.5);
@@ -169,10 +177,16 @@ async fn lexical_mode_calls_lexical_port_and_preserves_filters_and_citations() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].query, "exact-term");
     assert_eq!(calls[0].limit, 3);
-    assert_eq!(calls[0].page_ids.as_ref().unwrap(), &["page-1"]);
+    assert_eq!(
+        calls[0].page_ids.as_ref().unwrap(),
+        &["11111111-1111-1111-1111-111111111111"]
+    );
     assert_eq!(
         calls[0].root_page_ids.as_ref().unwrap(),
-        &["root-1", "root-2"]
+        &[
+            "22222222-2222-2222-2222-222222222222",
+            "33333333-3333-3333-3333-333333333333"
+        ]
     );
 }
 
@@ -263,7 +277,7 @@ async fn configured_hybrid_fuses_both_ports_and_serializes_path_provenance() {
         ..Default::default()
     };
     let hybrid = Arc::new(HybridFusion::new(semantic.clone(), lexical.clone(), config).unwrap());
-    let response = exchange_server(KnowledgeServer::default().and_hybrid_search(hybrid), json!({"query":"question","limit":2,"mode":"hybrid","filters":{"page_ids":["page-1"],"root_page_ids":["root-1"],"metadata":{"workspace_ids":["workspace"],"page_kind":"database","edited":{"from":"2026-10-07T00:00:00Z"},"properties":[{"operator":"contains","property_id":"tags","value":"rust"}]}}})).await;
+    let response = exchange_server(KnowledgeServer::default().and_hybrid_search(hybrid), json!({"query":"question","limit":2,"mode":"hybrid","filters":{"page_ids":["11111111-1111-1111-1111-111111111111"],"root_page_ids":["22222222-2222-2222-2222-222222222222"],"metadata":{"workspace_ids":["workspace"],"page_kind":"database","edited":{"from":"2026-10-07T00:00:00Z"},"properties":[{"operator":"contains","property_id":"tags","value":"rust"}]}}})).await;
     let results = response["result"]["structuredContent"]["results"]
         .as_array()
         .unwrap();
@@ -280,13 +294,14 @@ async fn configured_hybrid_fuses_both_ports_and_serializes_path_provenance() {
             .unwrap(),
         &["workspace"]
     );
-    assert_eq!(results[0]["matched_paths"], json!(["lexical"]));
-    assert_eq!(results[1]["matched_paths"], json!(["semantic"]));
+    // Equal RRF scores sort by canonical page identity: semantic UUID first.
+    assert_eq!(results[0]["matched_paths"], json!(["semantic"]));
+    assert_eq!(results[1]["matched_paths"], json!(["lexical"]));
     for calls in [
         semantic.calls.lock().unwrap()[0].page_ids.clone(),
         lexical.calls.lock().unwrap()[0].page_ids.clone(),
     ] {
-        assert_eq!(calls.unwrap(), ["page-1"]);
+        assert_eq!(calls.unwrap(), ["11111111-1111-1111-1111-111111111111"]);
     }
     assert_eq!(semantic.calls.lock().unwrap()[0].limit, 7);
     assert_eq!(lexical.calls.lock().unwrap()[0].limit, 7);
@@ -295,7 +310,7 @@ async fn configured_hybrid_fuses_both_ports_and_serializes_path_provenance() {
             .root_page_ids
             .as_ref()
             .unwrap(),
-        &["root-1"]
+        &["22222222-2222-2222-2222-222222222222"]
     );
 }
 
@@ -417,8 +432,11 @@ async fn configured_roots_always_narrow_all_search_modes() {
     for mode in ["semantic", "lexical", "hybrid"] {
         for requested in [
             None,
-            Some(json!(["outside", "allowed"])),
-            Some(json!(["outside"])),
+            Some(json!([
+                "66666666-6666-6666-6666-666666666666",
+                "55555555-5555-5555-5555-555555555555"
+            ])),
+            Some(json!(["66666666-6666-6666-6666-666666666666"])),
         ] {
             let semantic = Arc::new(Fixture {
                 calls: Mutex::new(vec![]),
@@ -440,7 +458,7 @@ async fn configured_roots_always_narrow_all_search_modes() {
             let server = KnowledgeServer::with_search(semantic.clone())
                 .and_lexical_search(lexical.clone())
                 .and_hybrid_search(hybrid)
-                .with_root_page_ids(vec!["allowed".into()])
+                .with_root_page_ids(vec!["55555555-5555-5555-5555-555555555555".into()])
                 .unwrap();
             let mut filters = json!({"metadata":{"workspace_ids":["workspace"],"properties":[{"operator":"equals","property_id":"x","value":{"type":"boolean","value":true}}]}});
             if let Some(roots) = &requested {
@@ -452,7 +470,7 @@ async fn configured_roots_always_narrow_all_search_modes() {
             )
             .await;
             assert!(response.get("error").is_none());
-            if requested == Some(json!(["outside"])) {
+            if requested == Some(json!(["66666666-6666-6666-6666-666666666666"])) {
                 assert_eq!(
                     response["result"]["structuredContent"]["results"],
                     json!([])
@@ -467,7 +485,10 @@ async fn configured_roots_always_narrow_all_search_modes() {
                     .iter()
                     .map(|q| &q.root_page_ids)
                 {
-                    assert_eq!(roots.as_ref().unwrap(), &["allowed"]);
+                    assert_eq!(
+                        roots.as_ref().unwrap(),
+                        &["55555555-5555-5555-5555-555555555555"]
+                    );
                 }
                 for roots in lexical
                     .calls
@@ -476,7 +497,10 @@ async fn configured_roots_always_narrow_all_search_modes() {
                     .iter()
                     .map(|q| &q.root_page_ids)
                 {
-                    assert_eq!(roots.as_ref().unwrap(), &["allowed"]);
+                    assert_eq!(
+                        roots.as_ref().unwrap(),
+                        &["55555555-5555-5555-5555-555555555555"]
+                    );
                 }
                 assert_eq!(
                     semantic.calls.lock().unwrap().len(),
