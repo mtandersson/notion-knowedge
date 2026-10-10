@@ -31,3 +31,6 @@ pub mod commit;
 
 /// Dedicated durable, privacy-limited agent mutation audit store.
 pub mod audit;
+
+/// Separate persistent once-only write ledger (never part of disposable indexes).
+pub mod idempotency;
