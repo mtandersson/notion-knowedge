@@ -285,3 +285,22 @@ fn the_database_stores_only_hashes_of_request_identifiers() {
         );
     }
 }
+
+#[test]
+fn untrusted_receipt_urls_are_never_stored_for_replay() {
+    for url in [
+        "http://www.notion.so/page-123",
+        "https://attacker.example/page-123",
+        "https://notion.so.attacker.example/page-123",
+        "https://user:pass@www.notion.so/page-123",
+    ] {
+        assert_eq!(
+            VerifiedReceipt::from_readback(
+                "page-123".into(),
+                url.into(),
+                "2026-10-10T10:00:00Z".into(),
+            ),
+            Err(IdempotencyError::InvalidInput)
+        );
+    }
+}
