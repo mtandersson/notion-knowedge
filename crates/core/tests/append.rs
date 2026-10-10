@@ -292,8 +292,14 @@ async fn single_append_preserves_exact_original_and_replays_only_verified_receip
     let mut different = request();
     different.markdown = "another append".into();
     assert_eq!(
-        append_once(source.as_ref(), source.as_ref(), &gate(source.clone()), &ledger, different)
-            .await,
+        append_once(
+            source.as_ref(),
+            source.as_ref(),
+            &gate(source.clone()),
+            &ledger,
+            different
+        )
+        .await,
         Err(AppendError::IdempotencyConflict)
     );
     assert_eq!(source.writes.load(Ordering::SeqCst), 1);
@@ -306,13 +312,27 @@ async fn invalid_and_out_of_scope_calls_cannot_reserve_or_write() {
     let mut empty = request();
     empty.markdown = " ".into();
     assert_eq!(
-        append_once(source.as_ref(), source.as_ref(), &gate(source.clone()), &ledger, empty).await,
+        append_once(
+            source.as_ref(),
+            source.as_ref(),
+            &gate(source.clone()),
+            &ledger,
+            empty
+        )
+        .await,
         Err(AppendError::InvalidInput)
     );
 
     source.deny_scope.store(true, Ordering::SeqCst);
     assert_eq!(
-        append_once(source.as_ref(), source.as_ref(), &gate(source.clone()), &ledger, request()).await,
+        append_once(
+            source.as_ref(),
+            source.as_ref(),
+            &gate(source.clone()),
+            &ledger,
+            request()
+        )
+        .await,
         Err(AppendError::NotAuthorized)
     );
     assert_eq!(ledger.starts.load(Ordering::SeqCst), 0);
@@ -326,14 +346,26 @@ async fn stale_revision_denies_without_mutating_and_does_not_replay() {
     let mut wrong = request();
     wrong.expected_last_edited_time = "2026-10-08T09:00:00Z".into();
     assert_eq!(
-        append_once(source.as_ref(), source.as_ref(), &gate(source.clone()), &ledger, wrong.clone())
-            .await,
+        append_once(
+            source.as_ref(),
+            source.as_ref(),
+            &gate(source.clone()),
+            &ledger,
+            wrong.clone()
+        )
+        .await,
         Err(AppendError::RevisionConflict)
     );
     assert_eq!(source.writes.load(Ordering::SeqCst), 0);
     assert_eq!(
-        append_once(source.as_ref(), source.as_ref(), &gate(source.clone()), &ledger, wrong)
-            .await,
+        append_once(
+            source.as_ref(),
+            source.as_ref(),
+            &gate(source.clone()),
+            &ledger,
+            wrong
+        )
+        .await,
         Err(AppendError::OutcomeUnknown)
     );
 }
@@ -344,8 +376,14 @@ async fn timeout_after_commit_does_not_send_second_patch() {
     let ledger = Ledger::default();
     for _ in 0..2 {
         assert_eq!(
-            append_once(source.as_ref(), source.as_ref(), &gate(source.clone()), &ledger, request())
-                .await,
+            append_once(
+                source.as_ref(),
+                source.as_ref(),
+                &gate(source.clone()),
+                &ledger,
+                request()
+            )
+            .await,
             Err(AppendError::OutcomeUnknown)
         );
     }
@@ -359,13 +397,25 @@ async fn readback_preserves_original_or_keeps_key_unknown() {
         let source = Fixture::new(mode);
         let ledger = Ledger::default();
         assert_eq!(
-            append_once(source.as_ref(), source.as_ref(), &gate(source.clone()), &ledger, request())
-                .await,
+            append_once(
+                source.as_ref(),
+                source.as_ref(),
+                &gate(source.clone()),
+                &ledger,
+                request()
+            )
+            .await,
             Err(AppendError::OutcomeUnknown)
         );
         assert_eq!(
-            append_once(source.as_ref(), source.as_ref(), &gate(source.clone()), &ledger, request())
-                .await,
+            append_once(
+                source.as_ref(),
+                source.as_ref(),
+                &gate(source.clone()),
+                &ledger,
+                request()
+            )
+            .await,
             Err(AppendError::OutcomeUnknown)
         );
         assert_eq!(source.writes.load(Ordering::SeqCst), 1);
@@ -378,8 +428,14 @@ async fn scope_change_before_write_fails_without_patch() {
     source.deny_revalidation.store(true, Ordering::SeqCst);
     let ledger = Ledger::default();
     assert_eq!(
-        append_once(source.as_ref(), source.as_ref(), &gate(source.clone()), &ledger, request())
-            .await,
+        append_once(
+            source.as_ref(),
+            source.as_ref(),
+            &gate(source.clone()),
+            &ledger,
+            request()
+        )
+        .await,
         Err(AppendError::NotAuthorized)
     );
     assert_eq!(source.writes.load(Ordering::SeqCst), 0);
@@ -392,8 +448,14 @@ async fn hash_precondition_must_match_exact_fresh_markdown() {
     let mut invalid = request();
     invalid.expected_markdown_sha256 = Some("e".repeat(64));
     assert_eq!(
-        append_once(source.as_ref(), source.as_ref(), &gate(source.clone()), &ledger, invalid)
-            .await,
+        append_once(
+            source.as_ref(),
+            source.as_ref(),
+            &gate(source.clone()),
+            &ledger,
+            invalid
+        )
+        .await,
         Err(AppendError::RevisionConflict)
     );
     assert_eq!(source.writes.load(Ordering::SeqCst), 0);
