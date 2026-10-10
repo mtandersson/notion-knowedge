@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
+    notion_grant_store::{GrantStore, StoreError, StoredGrant},
     notion_oauth_redirect::{NotionOAuthConfig, NotionOAuthRedirect},
     oauth_code::Secret,
 };
@@ -269,6 +270,19 @@ struct NotionUser {
     id: String,
 }
 
+/// A sanitized failure in the internal callback-to-sealed-store step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PersistError {
+    Callback(CallbackError),
+    Store(StoreError),
+}
+impl fmt::Display for PersistError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Notion authorization could not be stored. Please start again.")
+    }
+}
+impl std::error::Error for PersistError {}
+
 /// A verified provider exchange is NOT an approved MCP grant. The returned
 /// MCP correlation handle is still unapproved and must be persisted with a
 /// matching immutable Notion identity plus epoch (#123) before #120 approve().
@@ -325,6 +339,27 @@ impl<'a> NotionCallback<'a> {
             mcp_transaction: transaction,
             grant,
         })
+    }
+
+    /// Commit a verified callback to the configured encrypted grant store.
+    /// This is a server-internal composition boundary, NOT a mounted HTTP
+    /// callback, MCP consent approval or bearer-token issuance. The pending
+    /// MCP transaction is deliberately discarded after the sealed commit.
+    pub async fn complete_and_persist(
+        &self,
+        raw_query: &str,
+        store: &GrantStore,
+    ) -> Result<StoredGrant, PersistError> {
+        // A callback verifier must never write to a store belonging to a
+        // different Notion application. Reject before consuming CSRF state or
+        // sending a confidential authorization code to the wrong client.
+        if !store.matches_client(&self.exchanger.client_id) {
+            return Err(PersistError::Store(StoreError::IdentityMismatch));
+        }
+        let verified = self.complete(raw_query).await.map_err(PersistError::Callback)?;
+        // save() atomically rechecks the immutable workspace, user and bot
+        // under the storage mutex before replacing any credential pair.
+        store.save(&verified.grant).map_err(PersistError::Store)
     }
 }
 
