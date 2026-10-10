@@ -139,12 +139,13 @@ async fn http_client_initializes_discovers_calls_and_receives_structured_errors(
         }
         // The public MCP wire path rejects writes and uploads even when the
         // client bypasses tools/list and tries a direct call.
-        for attempted_write in ["notion_create_page", "notion_upload_file"] {
+        for attempted_write in ["knowledge_create_page", "knowledge_append", "knowledge_update_section", "knowledge_archive_page", "knowledge_upload_file"] {
             let rejected = frame(post().json(&json!({
                 "jsonrpc":"2.0", "id":30, "method":"tools/call",
                 "params":{"name":attempted_write, "arguments":{}}
             })).send().await.unwrap()).await;
-            assert!(rejected["error"]["code"].is_number());
+            assert_eq!(rejected["error"]["code"], -32602);
+            assert_eq!(rejected["error"]["message"], "tool unavailable in read-only mode");
         }
         let called = frame(post().json(&json!({"jsonrpc":"2.0", "id":3, "method":"tools/call", "params":{"name":"unknown-tool", "arguments":{}}}))
             .send().await.unwrap()).await;
