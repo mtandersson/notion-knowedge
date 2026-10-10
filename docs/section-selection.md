@@ -40,8 +40,10 @@ replacement are intentional; an unchanged body yields `NoChange`.
   so an inserted sibling/parent cannot escape the intended section boundary.
 - Enhanced Notion `<unknown`/`<page`/`<database`/`<data-source` markers
   inside the **selected** range prevent planning. Such constructs elsewhere
-  are left untouched. This intentionally favors a denied edit over losing
-  unsupported blocks.
+  are left untouched *when the parser can establish the exact heading bounds*.
+  A raw HTML block that obscures the heading (without a blank-line boundary)
+  causes `NotFound`, not a guessed edit. This intentionally favors a denied
+  edit over losing unsupported blocks.
 
 ### Not yet supported / security boundary
 
