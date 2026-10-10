@@ -163,7 +163,7 @@ fn reindex_is_idempotent_and_removes_only_old_link_family() {
     )
     .unwrap();
     store
-        .replace_page_relation_edges(SOURCE, &[relation.clone()])
+        .replace_page_relation_edges(SOURCE, std::slice::from_ref(&relation))
         .unwrap();
 
     let initial = snapshot(&format!(
