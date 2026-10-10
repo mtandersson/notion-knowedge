@@ -81,7 +81,11 @@ fn resolved_unresolved_multirelation_and_property_provenance() {
                 reference: "outside".into(),
             }
     }));
-    assert!(!result.iter().any(|edge| edge.relation_type().contains("people")));
+    assert!(
+        !result
+            .iter()
+            .any(|edge| edge.relation_type().contains("people"))
+    );
 }
 
 #[test]
@@ -99,16 +103,21 @@ fn idempotent_replacement_preserves_links_and_removes_stale_relations() {
     store
         .replace_page_edges("source", std::slice::from_ref(&link))
         .unwrap();
-    let initial = relation_edges(&metadata(relations(&["inside-a", "outside"])), &pages())
+    let initial = relation_edges(&metadata(relations(&["inside-a", "outside"])), &pages()).unwrap();
+    store
+        .replace_page_relation_edges("source", &initial)
         .unwrap();
-    store.replace_page_relation_edges("source", &initial).unwrap();
-    store.replace_page_relation_edges("source", &initial).unwrap();
+    store
+        .replace_page_relation_edges("source", &initial)
+        .unwrap();
     assert_eq!(store.edges_from("source").unwrap().len(), 3);
     assert_eq!(store.edges_to("inside-a").unwrap().len(), 1);
     assert!(store.edges_to("outside").unwrap().is_empty());
 
     let updated = relation_edges(&metadata(relations(&["inside-b"])), &pages()).unwrap();
-    store.replace_page_relation_edges("source", &updated).unwrap();
+    store
+        .replace_page_relation_edges("source", &updated)
+        .unwrap();
     assert_eq!(store.edges_from("source").unwrap().len(), 2);
     assert!(store.edges_to("inside-a").unwrap().is_empty());
     assert_eq!(store.edges_to("inside-b").unwrap().len(), 2);
@@ -122,7 +131,9 @@ fn idempotent_replacement_preserves_links_and_removes_stale_relations() {
 fn invalid_or_cross_family_batch_does_not_delete_existing_edges() {
     let store = SqliteSyncStateStore::open_in_memory().unwrap();
     let initial = relation_edges(&metadata(relations(&["inside-a"])), &pages()).unwrap();
-    store.replace_page_relation_edges("source", &initial).unwrap();
+    store
+        .replace_page_relation_edges("source", &initial)
+        .unwrap();
 
     let untrusted_link = GraphEdge::new(
         "source".into(),

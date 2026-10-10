@@ -6,9 +6,9 @@ use notion_knowledge_core::{
     discovery::{DiscoveryReport, ExclusionRules},
     fingerprint::{content_hash, identify_chunks},
     graph::GraphEdgeStore,
+    indexed::{IndexedChunk, IndexedDocument, IndexedMetadata, SchemaVersion, SourceMetadata},
     relations::relation_edges,
     sync_state::{SyncStateError, validate_identifier},
-    indexed::{IndexedChunk, IndexedDocument, IndexedMetadata, SchemaVersion, SourceMetadata},
 };
 
 #[derive(Debug, serde::Serialize)]
@@ -22,10 +22,7 @@ pub struct DocumentSnapshot {
 /// The caller must first ensure this snapshot is current for its trusted root,
 /// commit lease and exclusion policy. This method cannot grant graph traversal.
 impl DocumentSnapshot {
-    pub fn persist_relation_edges(
-        &self,
-        store: &dyn GraphEdgeStore,
-    ) -> Result<(), SyncStateError> {
+    pub fn persist_relation_edges(&self, store: &dyn GraphEdgeStore) -> Result<(), SyncStateError> {
         use std::collections::BTreeSet;
 
         // A selected-page snapshot has the *full* authorized discovery set,
