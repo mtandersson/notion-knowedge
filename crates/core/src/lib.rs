@@ -13,6 +13,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod health;
 
+/// Sanitized diagnostic projection for untrusted error strings.
+pub mod redaction;
+
 /// Canonical, provider-independent indexed content contracts.
 pub mod indexed;
 
@@ -39,6 +42,9 @@ pub mod source;
 
 /// Durable operational sync-state contracts. Concrete databases belong in adapters.
 pub mod sync_state;
+
+/// Provider-independent graph edge contracts.
+pub mod graph;
 
 /// Configurable reciprocal-rank fusion of independent retrieval paths.
 pub mod hybrid;

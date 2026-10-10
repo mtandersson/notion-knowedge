@@ -45,6 +45,20 @@ jobs:
       - name: Test input selection and final gate
         run: python3 scripts/test-ci-jobs.py
 
+      - name: Check release metadata and validation tests
+        run: |
+          python3 scripts/check-release.py
+          python3 scripts/test-release.py
+
+      - name: Test offline retrieval evaluation harness
+        run: python3 scripts/test-retrieval-eval.py
+
+      - name: Verify retrieval ranking metrics
+        run: python3 scripts/test-retrieval-metrics.py
+
+      - name: Test exact identifier retrieval quality gate
+        run: python3 scripts/test-exact-identifier-gate.py
+
       - name: Select relevant jobs
         id: select
         env:
@@ -330,6 +344,11 @@ jobs:
 
       - name: Verify final runtime image
         run: python3 scripts/smoke-container.py --prebuilt --builder-image notion-knowledge:smoke-builder
+
+      - name: Smoke test local Docker Compose stack
+        run: |
+          docker tag notion-knowledge:smoke notion-knowledge:local
+          python3 scripts/smoke-compose.py --prebuilt
 
       # Keep compilation as an export root; a cached final image can skip it.
       - name: Export verified builder root

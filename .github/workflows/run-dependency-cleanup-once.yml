@@ -1,0 +1,76 @@
+# One-shot, operator-authorized execution for issue #266.
+# This workflow is intentionally NOT a general mutation hook. It fires only
+# when this specific file is first merged to main *with the exact commit title*
+# below, and every edit remains subject to normal protected-main PR checks.
+name: Execute reviewed dependency cleanup once
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/run-dependency-cleanup-once.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue-dependency-cleanup
+  cancel-in-progress: false
+
+jobs:
+  remove-artificial-dependencies:
+    name: Apply and verify reviewed issue graph cleanup
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      startsWith(github.event.head_commit.message, 'chore(issues): execute reviewed dependency cleanup once (#266)')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout committed, reviewed source without persisting credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify cleanup scripts before any API mutation
+        run: python3 scripts/test-prune-issue-dependencies.py -v
+
+      - name: Dry-run redundant child-level relationships (batch A)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/prune-issue-dependencies.py --batch A
+
+      - name: Remove and verify redundant child-level relationships (batch A)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/prune-issue-dependencies.py --batch A --apply --delay 0.5
+
+      - name: Dry-run parent-level roadmap-only relationships (batch B)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/prune-issue-dependencies.py --batch B
+
+      - name: Remove and verify parent-level roadmap-only relationships (batch B)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/prune-issue-dependencies.py --batch B --apply --delay 0.5
+
+      - name: Re-verify both cleaned batches and the intact OAuth dependency
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/prune-issue-dependencies.py --batch A
+          python3 scripts/prune-issue-dependencies.py --batch B
+          # #123 remains the genuine predecessor to #124. All unrelated
+          # file-ingestion phase blockers should be gone after successful B.
+          actual="$(gh api /repos/mtandersson/notion-knowedge/issues/124/dependencies/blocked_by --jq '[.[].number] | sort | join(",")')"
+          if [[ "$actual" != "123" ]]; then
+            echo "::error::Unexpected #124 blocker graph after cleanup (actual: $actual)"
+            exit 1
+          fi
+          echo "Verified #124 still depends on #123; unrelated #9 edge removed"

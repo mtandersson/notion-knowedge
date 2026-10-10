@@ -58,6 +58,172 @@ share judgments so language comparisons use the same information need. Both
 cross-language retrieval directions are included. Fixed dates and fictional
 statuses avoid dependence on today's date or a live Notion workspace.
 
+## Run the offline retrieval harness (#95)
+
+The harness takes this **fixed fictional dataset** and calls a configured
+subprocess adapter separately for `vector`, `fts`, and `hybrid`. The
+adapter must index/search the **same corpus, model revision and configuration**
+for every mode; the harness does **not** implement any backend, generate fake
+semantic embeddings, or substitute a synthetic ranker for production retrieval.
+
+From the repository root, after implementing an adapter bridge to the chosen
+backend:
+
+```sh
+python3 scripts/retrieval-eval.py \
+  --adapter "./path/to/your-retrieval-adapter" \
+  --dataset eval/retrieval/personal-knowledge-v1.json \
+  --modes vector,fts,hybrid --top-k 10 \
+  --output /tmp/notion-retrieval-eval.json
+python3 scripts/test-retrieval-eval.py
+```
+
+The adapter command is executed **without a shell**, once per requested mode.
+It receives one JSON object on stdin containing:
+
+```json
+{
+  "schema_version": 1,
+  "dataset_id": "personal-knowledge-fixtures-v1",
+  "as_of": "2026-03-02",
+  "mode": "vector",
+  "top_k": 10,
+  "pages": ["full page records from the dataset"],
+  "queries": [{"id": "semantic-energy-en", "text": "...",
+               "language": "en", "category": "semantic"}]
+}
+```
+
+It returns **only** a JSON object on stdout with the same schema version,
+dataset identity and requested mode, plus an entry for **every query**, even
+when no matches exist:
+
+```json
+{
+  "schema_version": 1,
+  "dataset_id": "personal-knowledge-fixtures-v1",
+  "mode": "vector",
+  "results": [
+    {
+      "query_id": "semantic-energy-en",
+      "ranked_source_ids": [
+        "fixture:chunk:project-lighthouse:overview"
+      ]
+    }
+  ]
+}
+```
+
+The example is illustrative: actual adapter output **must** be produced by
+the selected retrieval implementation, not derived from relevance judgments.
+IDs are **chunk IDs** in decreasing score order; ties must be deterministically
+ordered by the backend. The adapter must map its `semantic` search to
+`vector`, lexical/BM25 to `fts`, and configured fusion to
+`hybrid`. It must return no more than `top_k` items per query,
+include each query exactly once and emit no unknown or duplicate chunk IDs.
+The harness checks these invariants; an unsupported mode or missing index is
+an error rather than a fabricated zero-score result. Ensure the full corpus
+is indexed before answering any query. Do not insert or delete documents
+between mode runs.
+
+Output JSON records, in stable dataset order, the ranked IDs and matching
+graded judgments for each query and mode; its human-readable stderr summary
+counts queries with any relevant hit and grade-3 hit at K, plus the ranking
+metrics below. The report contains no source document text or query wording. Runs from a fixed dataset/adapter/model should produce
+byte-identical JSON; a nondeterministic adapter fails this comparison and must
+be investigated rather than sorted/re-ranked by the harness.
+
+Nonzero adapter status, timeout, invalid UTF-8/JSON, mismatched mode or
+dataset, omitted/duplicate query, unknown chunk, repeated rank or excess
+rank count fail with exit code 2. Exit code 0 means *the evaluation ran*,
+not that quality is acceptable. Adapter stdout/stderr on failure are
+intentionally not copied into logs because these may contain credentials or
+private data. Run only trusted local adapters with approved fixture data;
+the harness does not authorize or sanitize arbitrary external adapter code.
+The credential-free tests use a deterministic **contract stub**, not a real
+embedding model or full LanceDB evaluation. A complete model/index-specific
+report requires an actual adapter command; no production score is claimed.
+
+## Ranking metrics (#96)
+
+Run the exact-valued, credential-free metric tests with:
+
+```sh
+python3 scripts/test-retrieval-metrics.py
+python3 scripts/test-retrieval-eval.py
+```
+
+Every JSON `results[]` row now includes a `metrics` object and every
+`summary.<mode>.metrics` holds the **equal-weight macro mean across all
+queries**, including no-hit queries. The human-readable stderr summary includes
+those mean values. No document contents are added to the JSON output.
+Metric keys are `recall_at_1`, `recall_at_3`, `recall_at_5`,
+`recall_at_10`, `ndcg_at_1`, `ndcg_at_3`, `ndcg_at_5`,
+`ndcg_at_10`, and `mrr`.
+
+- **Recall@K** = number of unique judged-relevant **chunk IDs** in the first
+  K results divided by all graded-relevant chunk IDs in the query's complete
+  ground truth. Any grade 1–3 is binary relevant; unjudged chunks count as 0.
+  A partially relevant answer counts as relevant for recall.
+- **MRR** = reciprocal rank of the first grade 1–3 chunk within the requested
+  `top_k` (0 if none). The summary reports mean reciprocal rank across all
+  queries. Unlike nDCG, MRR does not distinguish grade 1 from grade 3.
+- **nDCG@K** uses graded exponential gain `2^grade - 1` and the
+  `log2(rank + 1)` positional discount, with rank starting at 1.
+  Divide observed DCG@K by the ideal DCG@K of **all** judged relevant chunks
+  ordered by descending grade. The metric is 0 for a zero-gain ranking;
+  ideal gain is never zero on this dataset's nonempty judgments.
+
+All metrics evaluate **chunks**, not pages. A result whose page matches but
+whose chunk is not judged gets grade 0; page-level evaluation would need a
+separately documented deduplication and ground truth conversion.
+Only cutoffs **at or below `--top-k`** are emitted. For example `--top-k 3`
+reports Recall@1/3 and nDCG@1/3, not a misleading Recall@5/10 from a truncated
+response. Set `--top-k 10` or higher to report all four advertised cutoffs.
+A short result list is treated as exhausted, not padded with synthetic hits.
+No-hit queries contribute zero to macro averages rather than being excluded.
+
+These metrics are deterministic calculations on the adapter's real ranked IDs,
+**not evidence of production search quality**. Current contract tests exercise
+a synthetic mode-aware stub and known hand-calculated metric values. The
+harness still needs a trusted real Qwen/LanceDB adapter and fixed
+model/index for meaningful quality results.
+
+## Stale-index and authoritative read evaluation (#101)
+
+The versioned [freshness scenario matrix](freshness-v1.json) contains **seven
+synthetic cases** for an indexed page last edited at
+`2026-10-07T11:00:00Z`. It intentionally supplies a second, newer
+authoritative timestamp without modifying the index. No actual Notion API
+credentials or live documents are used.
+
+Run the cases against the **real MCP `knowledge_get` handler**, a
+mock `SourceExpansion` index and a read-only `NotionRead` backend:
+
+```sh
+nix develop --command cargo test -p notion-knowledge-mcp \
+  --test get_adapter versioned_freshness_scenarios --locked
+```
+
+The cases assert this lifecycle: `indexed` and omitted freshness
+preserve the old indexed text and **do not** imply that a source comparison has
+occurred; `fresh` with unchanged source returns authoritative whole-page text,
+both timestamps and `index_stale: false`; `fresh` after an edit
+returns newer source content with `index_stale: true` and preserves
+the old indexed timestamp. An unavailable source, archived page or concurrent
+edit returns a structured failure with no partial or stale fallback. The test
+reads the index **again after every scenario** and checks it is byte-for-byte
+identical; no fresh result is silently written back or advertised as an
+automatic reindex. It also asserts the read-only Notion call counts and that
+plain indexed reads never invoke the authoritative backend.
+
+The scenario file is separate from `personal-knowledge-v1.json` because
+the ranking fixture's relevance grades are not a notion of wall-clock
+freshness. This is a repeatable **behavioral regression**, not a latency/SLA
+measurement or evidence that production webhook synchronization meets its
+freshness target. Actual freshness after writes requires the production
+reconciliation/index writer and its separate integration tests.
+
 ## Validate and maintain
 
 Run the integrity and coverage checks with the repository toolchain:
@@ -82,3 +248,57 @@ content and documented in provenance before being committed. The small balanced
 set is a baseline for regression comparisons, not evidence of general retrieval
 quality; broaden domains and independently review judgments before using scores
 for deployment decisions.
+
+## Exact-identifier and lexical regression gate (#100)
+
+`exact-identifiers-v1.json` is a second, **fictional and isolated** bilingual
+corpus. Four exact lookup patterns are paired in English and Swedish: order
+references (`ORD7241B` vs. `ORD7241C`), hyphenated issue IDs
+(`ISSUE-7B42` vs. `ISSUE-7B43`), Swedish personal names
+(`Elin Åberg` vs. `Elin Ågren`) and mixed-case alphanumeric asset IDs
+(`AbC731x` vs. `AbC731y`). The eight indexed pages contain eight
+distinct chunks, with one directly relevant source and one plausible near-miss
+per query. All strings and names are invented.
+
+Evaluate the **same complete indexed corpus** against the real FTS and hybrid
+adapters configured for production, then enforce the measured quality floor:
+
+```sh
+python3 scripts/retrieval-eval.py \
+  --dataset eval/retrieval/exact-identifiers-v1.json \
+  --adapter "./path/to/real-retrieval-adapter" \
+  --modes fts,hybrid --top-k 3 \
+  --output /tmp/exact-identifiers.json
+python3 scripts/exact-identifier-gate.py \
+  --dataset eval/retrieval/exact-identifiers-v1.json \
+  --report /tmp/exact-identifiers.json
+python3 scripts/test-exact-identifier-gate.py
+```
+
+The quality gate exits **0** only when both FTS and hybrid put the exact chunk
+first in at least 75% of all eight queries and include it in the first three
+in at least 75%. Each identifier family needs a top-three hit in at least one
+language, and each language needs at least half its queries successful. Exit
+**1** is a legitimate regression; exit **2** means invalid/incomplete evidence.
+Both `--min-top1` and `--min-top3` are configurable from 0 through 1. The
+gate rechecks query identities, source membership, grades, language metadata and
+required modes instead of trusting report summary counts. It uses actual ranked
+chunk IDs, not a page-title substring oracle or fabricated similarity scores.
+
+**Case and tokenization contract:** Letter case differs deliberately in one
+Swedish query (`abc731X` versus source `AbC731x`); a successful lookup
+must not require identical casing. Accented `Åberg` must remain
+distinguishable from the near-match `Ågren`. A hyphenated issue number
+tests how the production FTS tokenizer and query parser split punctuation:
+it must still favor the complete intended identity over the adjacent number.
+The order and asset references test letters joined to digits, including a
+one-character suffix change. A raw-tokenizer exact-ID index does not by itself
+prove free-text codes work; keep the cases as **real FTS/hybrid** regression
+measurements.
+
+CI runs the isolated checker and dataset contract tests without Notion tokens
+or model downloads. Those synthetic checker inputs **do not** count as real
+FTS/hybrid quality evidence; publish a real-adapter report before claiming the
+measured quality floor holds for a production index. Until the configured
+production adapter bridge is runnable, this gate enforces the report contract
+but cannot certify an actual retrieval recall score.
