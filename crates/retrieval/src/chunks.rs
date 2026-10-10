@@ -23,7 +23,7 @@ use lancedb::{
 };
 use notion_knowledge_core::{
     embedding::{self, EmbeddingError, EmbeddingMetadata, EmbeddingProvider},
-    indexed::{IndexedChunk, SchemaVersion},
+    indexed::{IndexedChunk, IndexedMetadata, LinkTarget, PropertyValue, SchemaVersion, SourceMetadata},
     search::{
         LexicalQuery, LexicalSearch, SearchFuture, SearchHit, SearchSource, SearchUnavailable,
         SemanticQuery, SemanticSearch,
@@ -1048,6 +1048,48 @@ impl LanceChunkTable {
         Ok(metrics)
     }
 
+    /// Read a complete persisted page snapshot without mutating LanceDB.
+    /// These rows are NOT authorization evidence; callers must separately check
+    /// trusted live physical ancestry before any source refresh or disclosure.
+    pub async fn page_chunks(&self, page_id: &str) -> Result<Vec<IndexedChunk>, ChunkTableError> {
+        if page_id.is_empty() || page_id.chars().any(char::is_control) {
+            return Err(ChunkTableError::InvalidRows("invalid page identity".into()));
+        }
+        let current = self.read_snapshot().await?;
+        let rows = current.rows_matching(format!("page_id = {}", sql_string(page_id))).await?;
+        let mut ids = HashSet::new();
+        let mut chunks = Vec::with_capacity(rows.len());
+        for row in rows {
+            if row.page_id != page_id || !ids.insert(row.chunk_id.clone()) {
+                return Err(ChunkTableError::InvalidRows("invalid persisted page membership".into()));
+            }
+            chunks.push(IndexedChunk {
+                schema_version: SchemaVersion::V1,
+                chunk_id: row.chunk_id,
+                metadata: IndexedMetadata {
+                    page_id: row.page_id,
+                    block_id: row.block_id,
+                    url: row.url,
+                    title: row.title,
+                    heading_path: row.heading_path,
+                    last_edited_time: row.last_edited_time,
+                    source: SourceMetadata {
+                        workspace_id: row.workspace_id,
+                        root_page_id: row.root_page_id,
+                        database_id: row.database_id,
+                        data_source_id: row.data_source_id,
+                    },
+                    properties: row.properties,
+                },
+                text: row.text,
+                content_hash: row.content_hash,
+                links: row.links,
+            });
+        }
+        chunks.sort_by(|a,b| a.chunk_id.cmp(&b.chunk_id));
+        Ok(chunks)
+    }
+
     async fn rows_matching(&self, predicate: String) -> Result<Vec<StoredChunk>, ChunkTableError> {
         let batches: Vec<RecordBatch> = self
             .table
@@ -1235,6 +1277,11 @@ struct StoredChunk {
     title: String,
     heading_path: Vec<String>,
     root_page_id: String,
+    workspace_id: String,
+    database_id: Option<String>,
+    data_source_id: Option<String>,
+    properties: std::collections::BTreeMap<String, PropertyValue>,
+    links: Vec<LinkTarget>,
     text: String,
     content_hash: String,
     vector: Vec<f32>,
@@ -1484,11 +1531,20 @@ fn decode_stored_chunks(batches: &[RecordBatch]) -> Result<Vec<StoredChunk>, Chu
         let titles = string_column(batch, "title")?;
         let headings = string_column(batch, "heading_path_json")?;
         let roots = string_column(batch, "root_page_id")?;
+        let workspaces = string_column(batch, "workspace_id")?;
+        let databases = string_column(batch, "database_id")?;
+        let data_sources = string_column(batch, "data_source_id")?;
+        let properties = string_column(batch, "properties_json")?;
+        let links = string_column(batch, "links_json")?;
+        let versions = string_column(batch, "schema_version")?;
         let texts = string_column(batch, "text")?;
         let hashes = string_column(batch, "content_hash")?;
         let edited = string_column(batch, "last_edited_time")?;
         let vectors = vector_column(batch, "vector")?;
         for row in 0..batch.num_rows() {
+            if versions.value(row) != CANONICAL_CHUNK_SCHEMA_VERSION {
+                return Err(ChunkTableError::InvalidSchema("persisted chunk version mismatch".into()));
+            }
             rows.push(StoredChunk {
                 last_edited_time: edited.value(row).to_owned(),
                 chunk_id: chunk_ids.value(row).to_owned(),
@@ -1498,6 +1554,11 @@ fn decode_stored_chunks(batches: &[RecordBatch]) -> Result<Vec<StoredChunk>, Chu
                 title: titles.value(row).to_owned(),
                 heading_path: serde_json::from_str(headings.value(row))?,
                 root_page_id: roots.value(row).to_owned(),
+                workspace_id: workspaces.value(row).to_owned(),
+                database_id: (!databases.is_null(row)).then(|| databases.value(row).to_owned()),
+                data_source_id: (!data_sources.is_null(row)).then(|| data_sources.value(row).to_owned()),
+                properties: serde_json::from_str(properties.value(row))?,
+                links: serde_json::from_str(links.value(row))?,
                 text: texts.value(row).to_owned(),
                 content_hash: hashes.value(row).to_owned(),
                 vector: decode_vector(vectors, row)?,
