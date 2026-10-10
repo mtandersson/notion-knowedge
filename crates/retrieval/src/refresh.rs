@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use notion_knowledge_core::{
-    backend::{BackendErrorKind, NotionRead, PageId},
+    backend::{BackendErrorKind, PageId},
     chunking::ChunkConfig,
     embedding::EmbeddingProvider,
     indexed::IndexedDocument,
