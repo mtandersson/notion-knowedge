@@ -1,13 +1,5 @@
 #![cfg(all(unix, feature = "local-lancedb"))]
 //! Credential-free, real Notion HTTP -> real SQLite/LanceDB integration.
-use std::{
-    fs,
-    path::PathBuf,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-    },
-};
 use notion_knowledge_core::{
     backend::PageId,
     chunking::ChunkConfig,
@@ -24,6 +16,14 @@ use notion_knowledge_retrieval::{
     refresh::{AuthoritativePageRefresh, RefreshError},
 };
 use serde_json::{Value, json};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    },
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const PAGE: &str = "11111111-1111-1111-1111-111111111111";
@@ -87,7 +87,13 @@ impl HttpNotion {
                 assert!(req.contains("notion-version: 2026-03-11"));
                 assert!(req.starts_with("GET /v1/"));
                 counts.fetch_add(1, Ordering::SeqCst);
-                let route = req.lines().next().unwrap().split_whitespace().nth(1).unwrap();
+                let route = req
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap();
                 let snapshot = values.lock().unwrap().clone();
                 let response = if route == format!("/v1/pages/{PAGE}/markdown") {
                     bodies.fetch_add(1, Ordering::SeqCst);
@@ -99,29 +105,56 @@ impl HttpNotion {
                         "unknown_block_ids": []
                     })
                 } else if route == format!("/v1/pages/{PAGE}") {
-                    page_metadata(PAGE, &snapshot.parent, &snapshot.title, &snapshot.revision, snapshot.archived)
+                    page_metadata(
+                        PAGE,
+                        &snapshot.parent,
+                        &snapshot.title,
+                        &snapshot.revision,
+                        snapshot.archived,
+                    )
                 } else if route == format!("/v1/pages/{ROOT}") {
                     page_metadata(ROOT, "workspace", "Root", "2026-10-10T11:00:00Z", false)
                 } else if route == format!("/v1/pages/{FOREIGN}") {
-                    page_metadata(FOREIGN, "workspace", "Foreign", "2026-10-10T11:00:00Z", false)
-                } else { panic!("unexpected fetch route; related pages must not be fetched: {route}") };
+                    page_metadata(
+                        FOREIGN,
+                        "workspace",
+                        "Foreign",
+                        "2026-10-10T11:00:00Z",
+                        false,
+                    )
+                } else {
+                    panic!("unexpected fetch route; related pages must not be fetched: {route}")
+                };
                 let bad = fail.swap(false, Ordering::SeqCst);
                 let body = if bad { json!({}) } else { response }.to_string();
                 let status = if bad { 503 } else { 200 };
                 stream.write_all(format!("HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
             }
         });
-        Self { state, attempts, body_reads, fail_once, server, port }
+        Self {
+            state,
+            attempts,
+            body_reads,
+            fail_once,
+            server,
+            port,
+        }
     }
     fn client(&self) -> Arc<NotionClient> {
-        Arc::new(NotionClient::integration("fixture-credential").unwrap().with_loopback_fixture(self.port))
+        Arc::new(
+            NotionClient::integration("fixture-credential")
+                .unwrap()
+                .with_loopback_fixture(self.port),
+        )
     }
     fn change(&self, change: impl FnOnce(&mut Model)) {
         change(&mut self.state.lock().unwrap());
     }
 }
 impl Drop for HttpNotion {
-    fn drop(&mut self) { self.server.abort(); }
+    fn drop(&mut self) {
+        self.server.abort();
+    }
 }
 fn page_metadata(id: &str, parent: &str, title: &str, revision: &str, archived: bool) -> Value {
     json!({
@@ -160,13 +193,17 @@ impl CountingProvider {
             race: Mutex::new(None),
         }
     }
-    fn embeddings(&self) -> usize { self.count.load(Ordering::SeqCst) }
+    fn embeddings(&self) -> usize {
+        self.count.load(Ordering::SeqCst)
+    }
     fn race_on_next_embedding(&self, source: Arc<Mutex<Model>>) {
         *self.race.lock().unwrap() = Some(source);
     }
 }
 impl EmbeddingProvider for CountingProvider {
-    fn metadata(&self) -> &EmbeddingMetadata { &self.metadata }
+    fn metadata(&self) -> &EmbeddingMetadata {
+        &self.metadata
+    }
     fn embed_batch<'a>(&'a self, texts: &'a [String]) -> EmbeddingFuture<'a> {
         self.count.fetch_add(texts.len(), Ordering::SeqCst);
         if let Some(state) = self.race.lock().unwrap().take() {
@@ -175,11 +212,16 @@ impl EmbeddingProvider for CountingProvider {
             model.revision = "2026-10-10T12:00:09Z".into();
         }
         Box::pin(async move {
-            Ok(texts.iter().map(|text| vec![text.len() as f32, 1.0, 0.0]).collect())
+            Ok(texts
+                .iter()
+                .map(|text| vec![text.len() as f32, 1.0, 0.0])
+                .collect())
         })
     }
 }
-fn clock() -> Arc<dyn Fn() -> i64 + Send + Sync> { Arc::new(|| 10) }
+fn clock() -> Arc<dyn Fn() -> i64 + Send + Sync> {
+    Arc::new(|| 10)
+}
 fn authority() -> LifecycleScope {
     LifecycleScope {
         workspace_id: WORKSPACE.into(),
@@ -200,24 +242,38 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
-            "nk-refresh-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)
+            "nk-refresh-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let index = root.join("index");
         let db = root.join("state.sqlite");
         fs::create_dir_all(&index).unwrap();
-        let journal_scope = ReconciliationScope::new(
-            vec![ROOT.into()], vec![], "phase3", "1"
-        ).unwrap();
+        let journal_scope =
+            ReconciliationScope::new(vec![ROOT.into()], vec![], "phase3", "1").unwrap();
         let binding = CommitBinding::new("chunks", WORKSPACE, &journal_scope, "1", 1).unwrap();
         let coordinator = IndexCommitCoordinator::initialize(&index, &db, binding).unwrap();
         let lease = coordinator.state().acquire_lease(10, 100).unwrap();
-        let embed = EmbeddingMetadata::new("count".into(), "fixture".into(), "v1".into(), 3).unwrap();
-        Self { root, index, db, coordinator, journal_scope, embed, lease }
+        let embed =
+            EmbeddingMetadata::new("count".into(), "fixture".into(), "v1".into(), 3).unwrap();
+        Self {
+            root,
+            index,
+            db,
+            coordinator,
+            journal_scope,
+            embed,
+            lease,
+        }
     }
     fn guarded(&self) -> GuardedChunkTable {
         GuardedChunkTable::bind(
-            &self.index, "chunks", self.embed.clone(), self.coordinator.clone()
-        ).unwrap()
+            &self.index,
+            "chunks",
+            self.embed.clone(),
+            self.coordinator.clone(),
+        )
+        .unwrap()
     }
     fn handler(&self, client: Arc<NotionClient>) -> AuthoritativePageRefresh {
         AuthoritativePageRefresh::new(
@@ -227,20 +283,28 @@ impl Fixture {
             authority(),
             &self.journal_scope,
             ChunkConfig::default(),
-        ).unwrap()
+        )
+        .unwrap()
     }
     async fn create(&self) {
-        self.guarded().create_empty(self.lease.clone(), clock()).await.unwrap();
+        self.guarded()
+            .create_empty(self.lease.clone(), clock())
+            .await
+            .unwrap();
     }
     async fn table(&self) -> LanceChunkTable {
-        LanceChunkTable::open(&self.index, "chunks", self.embed.clone()).await.unwrap()
+        LanceChunkTable::open(&self.index, "chunks", self.embed.clone())
+            .await
+            .unwrap()
     }
 }
 impl Drop for Fixture {
-    fn drop(&mut self) { let _ = fs::remove_dir_all(&self.root); }
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
 }
 
-#[tokio::test(flavor="multi_thread", worker_threads=2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_metadata_content_delete_duplicate_and_persistent_restart() {
     let index = Fixture::new();
     index.create().await;
@@ -251,7 +315,17 @@ async fn create_metadata_content_delete_duplicate_and_persistent_restart() {
     let page = PageId(PAGE.into());
     let root = PageId(ROOT.into());
 
-    let first = refresh.refresh_page(&page, &root, "event-create-001", &provider, index.lease.clone(), clock()).await.unwrap();
+    let first = refresh
+        .refresh_page(
+            &page,
+            &root,
+            "event-create-001",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
     assert_eq!(first.outcome, CommitOutcome::Applied);
     assert!(first.diff.added > 0);
     let initial_embeds = provider.embeddings();
@@ -260,21 +334,48 @@ async fn create_metadata_content_delete_duplicate_and_persistent_restart() {
     assert!(!chunks.is_empty());
     let original_ids: Vec<_> = chunks.iter().map(|c| c.chunk_id.clone()).collect();
     let table = index.table().await;
-    assert_eq!(table.fts_query("text", "Saffron", 10).await.unwrap().len(), 1);
+    assert_eq!(
+        table.fts_query("text", "Saffron", 10).await.unwrap().len(),
+        1
+    );
     assert!(source.body_reads.load(Ordering::SeqCst) > 0);
     assert!(source.attempts.load(Ordering::SeqCst) >= 20);
-    index.guarded().ensure_vector_index(VectorIndexConfig {
-        num_partitions: Some(1),
-        sample_rate: 8,
-        max_iterations: 20,
-        ..VectorIndexConfig::default()
-    }, index.lease.clone(), clock()).await.unwrap();
-    assert!(!index.table().await.vector_query(
-        &[30.0, 1.0, 0.0], 10, 1,
-    ).await.unwrap().is_empty());
+    index
+        .guarded()
+        .ensure_vector_index(
+            VectorIndexConfig {
+                num_partitions: Some(1),
+                sample_rate: 8,
+                max_iterations: 20,
+                ..VectorIndexConfig::default()
+            },
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !index
+            .table()
+            .await
+            .vector_query(&[30.0, 1.0, 0.0], 10, 1,)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     // No changed rows, no embedding, no index rewrite, no new receipt.
-    let duplicate = refresh.refresh_page(&page, &root, "event-create-001", &provider, index.lease.clone(), clock()).await.unwrap();
+    let duplicate = refresh
+        .refresh_page(
+            &page,
+            &root,
+            "event-create-001",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
     assert_eq!(duplicate.outcome, CommitOutcome::AlreadyApplied);
     assert_eq!(provider.embeddings(), initial_embeds);
 
@@ -283,42 +384,95 @@ async fn create_metadata_content_delete_duplicate_and_persistent_restart() {
         m.title = "Renamed".into();
         m.revision = "2026-10-10T12:00:01Z".into();
     });
-    let updated = refresh.refresh_page(&page, &root, "event-title-002", &provider, index.lease.clone(), clock()).await.unwrap();
+    let updated = refresh
+        .refresh_page(
+            &page,
+            &root,
+            "event-title-002",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
     assert_eq!(updated.outcome, CommitOutcome::Applied);
     assert_eq!(updated.diff.added, 0);
     assert_eq!(provider.embeddings(), initial_embeds);
     let rows = index.guarded().page_chunks(PAGE).await.unwrap();
-    assert_eq!(rows.iter().map(|c| c.chunk_id.clone()).collect::<Vec<_>>(), original_ids);
+    assert_eq!(
+        rows.iter().map(|c| c.chunk_id.clone()).collect::<Vec<_>>(),
+        original_ids
+    );
     assert!(rows.iter().all(|c| c.metadata.title == "Renamed"));
 
     source.change(|m| {
         m.markdown = "# Intro\n\nSaffron ravioli.\n\n## Brand new\n\nViolet soups.\n".into();
         m.revision = "2026-10-10T12:00:02Z".into();
     });
-    let change = refresh.refresh_page(&page, &root, "event-body-003", &provider, index.lease.clone(), clock()).await.unwrap();
+    let change = refresh
+        .refresh_page(
+            &page,
+            &root,
+            "event-body-003",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
     assert_eq!(change.outcome, CommitOutcome::Applied);
     assert!(change.diff.changed > 0 || change.diff.added > 0);
     assert!(provider.embeddings() > initial_embeds);
     let table = index.table().await;
-    assert_eq!(table.fts_query("text", "evergreen", 10).await.unwrap().len(), 0);
-    assert_eq!(table.fts_query("text", "Violet", 10).await.unwrap().len(), 1);
+    assert_eq!(
+        table
+            .fts_query("text", "evergreen", 10)
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        table.fts_query("text", "Violet", 10).await.unwrap().len(),
+        1
+    );
 
     // Reopen both operational DB and the actual Lance table after restart.
-    let reopened = IndexCommitCoordinator::open(
-        &index.index, &index.db, index.coordinator.binding().clone()
-    ).unwrap();
+    let reopened =
+        IndexCommitCoordinator::open(&index.index, &index.db, index.coordinator.binding().clone())
+            .unwrap();
     let refreshed = AuthoritativePageRefresh::new(
         client,
-        GuardedChunkTable::bind(&index.index, "chunks", index.embed.clone(), reopened.clone()).unwrap(),
-        reopened.clone(), authority(), &index.journal_scope, ChunkConfig::default(),
-    ).unwrap();
+        GuardedChunkTable::bind(
+            &index.index,
+            "chunks",
+            index.embed.clone(),
+            reopened.clone(),
+        )
+        .unwrap(),
+        reopened.clone(),
+        authority(),
+        &index.journal_scope,
+        ChunkConfig::default(),
+    )
+    .unwrap();
     let before = provider.embeddings();
-    let result = refreshed.refresh_page(&page, &root, "event-after-restart-004", &provider, index.lease.clone(), clock()).await.unwrap();
+    let result = refreshed
+        .refresh_page(
+            &page,
+            &root,
+            "event-after-restart-004",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
     assert_eq!(result.outcome, CommitOutcome::AlreadyApplied);
     assert_eq!(provider.embeddings(), before);
 }
 
-#[tokio::test(flavor="multi_thread", worker_threads=2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn out_of_scope_recovery_archive_and_failed_source_do_not_corrupt_index() {
     let index = Fixture::new();
     index.create().await;
@@ -328,34 +482,88 @@ async fn out_of_scope_recovery_archive_and_failed_source_do_not_corrupt_index() 
     let page = PageId(PAGE.into());
     let root = PageId(ROOT.into());
     source.change(|model| model.parent = FOREIGN.into());
-    let denied = handler.refresh_page(&page, &root, "out-of-scope", &provider, index.lease.clone(), clock()).await;
+    let denied = handler
+        .refresh_page(
+            &page,
+            &root,
+            "out-of-scope",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await;
     assert_eq!(denied.unwrap_err(), RefreshError::OutOfScope);
     assert_eq!(provider.embeddings(), 0);
     assert_eq!(index.table().await.count_rows().await.unwrap(), 0);
 
     source.change(|model| model.parent = ROOT.into());
     source.fail_once.store(true, Ordering::SeqCst);
-    let failed = handler.refresh_page(&page, &root, "source-failed", &provider, index.lease.clone(), clock()).await;
+    let failed = handler
+        .refresh_page(
+            &page,
+            &root,
+            "source-failed",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await;
     assert_eq!(failed.unwrap_err(), RefreshError::Source);
     assert_eq!(index.table().await.count_rows().await.unwrap(), 0);
 
-    let applied = handler.refresh_page(&page, &root, "moved-inside", &provider, index.lease.clone(), clock()).await.unwrap();
+    let applied = handler
+        .refresh_page(
+            &page,
+            &root,
+            "moved-inside",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
     assert_eq!(applied.outcome, CommitOutcome::Applied);
     let count = index.table().await.count_rows().await.unwrap();
     assert!(count > 0);
 
-    source.change(|m| { m.archived = true; m.revision = "2026-10-10T12:00:03Z".into(); });
-    let denied = handler.refresh_page(&page, &root, "archived", &provider, index.lease.clone(), clock()).await;
+    source.change(|m| {
+        m.archived = true;
+        m.revision = "2026-10-10T12:00:03Z".into();
+    });
+    let denied = handler
+        .refresh_page(
+            &page,
+            &root,
+            "archived",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await;
     assert!(denied.is_err());
     assert_eq!(index.table().await.count_rows().await.unwrap(), count);
-    source.change(|m| { m.archived = false; m.revision = "2026-10-10T12:00:04Z".into(); });
+    source.change(|m| {
+        m.archived = false;
+        m.revision = "2026-10-10T12:00:04Z".into();
+    });
     assert_eq!(
-        handler.refresh_page(&page, &root, "restored", &provider, index.lease.clone(), clock()).await.unwrap().outcome,
+        handler
+            .refresh_page(
+                &page,
+                &root,
+                "restored",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap()
+            .outcome,
         CommitOutcome::Applied
     );
 }
 
-#[tokio::test(flavor="multi_thread", worker_threads=2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn changed_source_during_embedding_fails_commit_without_ack_or_index_mutation() {
     let index = Fixture::new();
     index.create().await;
@@ -365,18 +573,57 @@ async fn changed_source_during_embedding_fails_commit_without_ack_or_index_mutat
     provider.race_on_next_embedding(source.state.clone());
     let page = PageId(PAGE.into());
     let root = PageId(ROOT.into());
-    let failure = handler.refresh_page(&page, &root, "raced-source", &provider, index.lease.clone(), clock()).await;
+    let failure = handler
+        .refresh_page(
+            &page,
+            &root,
+            "raced-source",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await;
     assert_eq!(failure.unwrap_err(), RefreshError::Conflict);
     assert_eq!(index.table().await.count_rows().await.unwrap(), 0);
-    assert!(index.coordinator.state().page_state(PAGE).unwrap().is_none());
+    assert!(
+        index
+            .coordinator
+            .state()
+            .page_state(PAGE)
+            .unwrap()
+            .is_none()
+    );
     // An already claimed event ID cannot silently change its proposal.
-    assert_eq!(handler.refresh_page(&page, &root, "raced-source", &provider, index.lease.clone(), clock()).await.unwrap_err(), RefreshError::Conflict);
-    let redo = handler.refresh_page(&page, &root, "post-race-new-event", &provider, index.lease.clone(), clock()).await.unwrap();
+    assert_eq!(
+        handler
+            .refresh_page(
+                &page,
+                &root,
+                "raced-source",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap_err(),
+        RefreshError::Conflict
+    );
+    let redo = handler
+        .refresh_page(
+            &page,
+            &root,
+            "post-race-new-event",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
     assert_eq!(redo.outcome, CommitOutcome::Applied);
     assert!(index.table().await.count_rows().await.unwrap() > 0);
 }
 
-#[tokio::test(flavor="multi_thread", worker_threads=2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn provider_identity_or_scope_generation_mismatch_blocks_index_effects() {
     let index = Fixture::new();
     index.create().await;
@@ -385,18 +632,36 @@ async fn provider_identity_or_scope_generation_mismatch_blocks_index_effects() {
     wrong_scope.generation = 2;
     assert!(matches!(
         AuthoritativePageRefresh::new(
-            source.client(), index.guarded(), index.coordinator.clone(),
-            wrong_scope, &index.journal_scope, ChunkConfig::default(),
-        ), Err(RefreshError::InvalidConfiguration)
+            source.client(),
+            index.guarded(),
+            index.coordinator.clone(),
+            wrong_scope,
+            &index.journal_scope,
+            ChunkConfig::default(),
+        ),
+        Err(RefreshError::InvalidConfiguration)
     ));
 
     let provider = CountingProvider::new(
-        EmbeddingMetadata::new("different-provider".into(), "fixture".into(), "v1".into(), 3).unwrap()
+        EmbeddingMetadata::new(
+            "different-provider".into(),
+            "fixture".into(),
+            "v1".into(),
+            3,
+        )
+        .unwrap(),
     );
-    let result = index.handler(source.client()).refresh_page(
-        &PageId(PAGE.into()), &PageId(ROOT.into()), "bad-vector-space",
-        &provider, index.lease.clone(), clock(),
-    ).await;
+    let result = index
+        .handler(source.client())
+        .refresh_page(
+            &PageId(PAGE.into()),
+            &PageId(ROOT.into()),
+            "bad-vector-space",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await;
     assert_eq!(result.unwrap_err(), RefreshError::Index);
     assert_eq!(index.table().await.count_rows().await.unwrap(), 0);
 }
