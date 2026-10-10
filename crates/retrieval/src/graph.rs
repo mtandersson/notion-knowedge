@@ -123,6 +123,67 @@ impl GraphEdgeStore for SqliteSyncStateStore {
         transaction.commit().map_err(sqlite_failure)
     }
 
+    fn replace_page_link_edges(
+        &self,
+        source_page_id: &str,
+        edges: &[GraphEdge],
+    ) -> Result<(), SyncStateError> {
+        validate_identifier(source_page_id)?;
+        // Fail before DELETE on malformed or cross-family input. A page link
+        // update can NEVER delete relation-property edges from #61.
+        if edges.iter().any(|edge| {
+            edge.source_page_id() != source_page_id
+                || !matches!(
+                    edge.relation_type(),
+                    "link:page" | "link:block" | "link:invalid"
+                )
+                || !edge
+                    .provenance()
+                    .strip_prefix("markdown:")
+                    .is_some_and(|offset| offset.parse::<usize>().is_ok())
+        }) {
+            return Err(SyncStateError::InvalidInput);
+        }
+
+        let mut connection = self.lock_connection()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_failure)?;
+        tx.execute(
+            "DELETE FROM graph_edges
+             WHERE source_page_id = ?1 AND substr(relation_type, 1, 5) = 'link:'",
+            params![source_page_id],
+        )
+        .map_err(sqlite_failure)?;
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO graph_edges (
+                        source_page_id, target_page_id, unresolved_reference,
+                        relation_type, provenance
+                     ) VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT DO NOTHING",
+                )
+                .map_err(sqlite_failure)?;
+            for edge in edges {
+                let (page_id, unresolved): (Option<&str>, Option<&str>) = match edge.target() {
+                    GraphTarget::Page { page_id } => (Some(page_id), None),
+                    GraphTarget::Unresolved { reference } => (None, Some(reference)),
+                };
+                insert
+                    .execute(params![
+                        source_page_id,
+                        page_id,
+                        unresolved,
+                        edge.relation_type(),
+                        edge.provenance()
+                    ])
+                    .map_err(sqlite_failure)?;
+            }
+        }
+        tx.commit().map_err(sqlite_failure)
+    }
+
     fn edges_from(&self, source_page_id: &str) -> Result<Vec<GraphEdge>, SyncStateError> {
         validate_identifier(source_page_id)?;
         let connection = self.lock_connection()?;

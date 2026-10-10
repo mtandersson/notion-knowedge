@@ -13,6 +13,7 @@ serde = { version = "1", features = ["derive"] }
 
 pulldown-cmark = { version = "0.13", default-features = false }
 quick-xml = "0.41"
+sha2 = "0.10"
 tokio = { workspace = true, features = ["sync", "time", "net", "fs", "io-util"] }
 tempfile = "3"
 

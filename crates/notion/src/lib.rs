@@ -23,6 +23,9 @@ pub mod content;
 
 pub mod links;
 
+/// Scoped graph projection from parsed Notion page links and mentions.
+pub mod link_graph;
+
 pub mod replacement;
 
 mod transport;
