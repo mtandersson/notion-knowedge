@@ -19,7 +19,10 @@ fn replaces_only_the_exact_section_body_and_preserves_higher_siblings() {
     let proposed = "# Document\nIntro\n## Target\nNew paragraph\n\n### New child\nnew detail\n\n## Sibling\nKeep *all* of this\n# Footer\nEnd\n";
     assert_eq!(edit.preview(), proposed);
     assert!(edit.verify_readback(proposed));
-    assert_eq!(edit.original_body(), "Old paragraph\n### Child\n- old detail\n");
+    assert_eq!(
+        edit.original_body(),
+        "Old paragraph\n### Child\n- old detail\n"
+    );
     assert_eq!(edit.replacement_body(), replacement);
     assert!(edit.untouched_prefix().ends_with("## Target\n"));
     assert!(edit.untouched_suffix().starts_with("## Sibling\n"));
@@ -95,14 +98,20 @@ fn blockquoted_and_indented_headings_are_not_targets_or_sibling_boundaries() {
         SectionError::NotFound
     );
     assert_eq!(
-        plan_section("  - item\n    ## Target\n    detail\n", at(2, "Target"), "new\n").unwrap_err(),
+        plan_section(
+            "  - item\n    ## Target\n    detail\n",
+            at(2, "Target"),
+            "new\n"
+        )
+        .unwrap_err(),
         SectionError::NotFound
     );
 }
 
 #[test]
 fn unicode_and_crlf_source_are_byte_exact() {
-    let original = "Preamble 😊\r\n## Räksmörgås 🦐\r\nHallå 世界\r\n\r\n## Efteråt\r\nÄndra inte\r\n";
+    let original =
+        "Preamble 😊\r\n## Räksmörgås 🦐\r\nHallå 世界\r\n\r\n## Efteråt\r\nÄndra inte\r\n";
     let edit = plan(original, 2, "Räksmörgås 🦐", "Nytt 🦊\r\n");
     assert_eq!(
         edit.preview(),
@@ -110,8 +119,10 @@ fn unicode_and_crlf_source_are_byte_exact() {
     );
     assert!(edit.verify_readback(&edit.preview()));
     assert_eq!(&original[edit.body_range.clone()], "Hallå 世界\r\n\r\n");
-    assert_eq!(edit.preview().as_bytes()[..edit.untouched_prefix().len()],
-        *edit.untouched_prefix().as_bytes());
+    assert_eq!(
+        edit.preview().as_bytes()[..edit.untouched_prefix().len()],
+        *edit.untouched_prefix().as_bytes()
+    );
 }
 
 #[test]
@@ -174,14 +185,22 @@ fn unsupported_enhanced_notion_markup_in_selected_body_is_denied() {
 
 #[test]
 fn unaffected_enhanced_markup_is_not_rewritten() {
-    let original = "# Page\n<unknown alt=\"keep\"/>\n## Target\nold\n## Next\n<page url=\"keep\"/>\n";
+    let original =
+        "# Page\n<unknown alt=\"keep\"/>\n## Target\nold\n## Next\n<page url=\"keep\"/>\n";
     let p = plan(original, 2, "Target", "new\n");
-    assert_eq!(p.preview(), "# Page\n<unknown alt=\"keep\"/>\n## Target\nnew\n## Next\n<page url=\"keep\"/>\n");
+    assert_eq!(
+        p.preview(),
+        "# Page\n<unknown alt=\"keep\"/>\n## Target\nnew\n## Next\n<page url=\"keep\"/>\n"
+    );
 }
 
 #[test]
 fn headings_containing_inline_markup_are_not_guessed() {
-    for literal in ["## **Important**\ntext\n", "## [Important](https://example.com)\n", "Important\n---------\n"] {
+    for literal in [
+        "## **Important**\ntext\n",
+        "## [Important](https://example.com)\n",
+        "Important\n---------\n",
+    ] {
         assert_eq!(
             plan_section(literal, at(2, "Important"), "new\n").unwrap_err(),
             SectionError::NotFound
@@ -193,7 +212,10 @@ fn headings_containing_inline_markup_are_not_guessed() {
 fn setext_heading_bounds_an_existing_atx_section() {
     let original = "## Target\nold\nAnother title\n=============\nsafe\n";
     let p = plan(original, 2, "Target", "new\n");
-    assert_eq!(p.preview(), "## Target\nnew\nAnother title\n=============\nsafe\n");
+    assert_eq!(
+        p.preview(),
+        "## Target\nnew\nAnother title\n=============\nsafe\n"
+    );
 }
 
 #[test]
