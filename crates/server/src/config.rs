@@ -543,7 +543,9 @@ mod tests {
             let error =
                 parse(&[("NK_HTTP_AUTH", "bearer"), ("NK_HTTP_BEARER_TOKEN", bad)]).unwrap_err();
             assert_eq!(error.setting, "NK_HTTP_BEARER_TOKEN");
-            assert!(!format!("{error:?}").contains(bad));
+            if !bad.is_empty() {
+                assert!(!format!("{error:?}").contains(bad));
+            }
         }
         for bad_mode in ["Bearer", "auto", ""] {
             assert_eq!(
