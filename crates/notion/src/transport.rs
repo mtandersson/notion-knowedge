@@ -1,7 +1,7 @@
 //! Shared request admission and conservative replay policy. No payload diagnostics.
 use crate::NotionClient;
 use notion_knowledge_core::backend::{BackendError, BackendErrorKind};
-use notion_knowledge_core::logging::{self, Level, Operation, Outcome};
+use notion_knowledge_core::logging::{self, Operation, Outcome};
 use reqwest::{RequestBuilder, Response};
 use std::{
     sync::atomic::{AtomicU64, Ordering},
@@ -152,11 +152,7 @@ impl NotionClient {
             outcome,
             started.elapsed(),
             status,
-            if matches!(outcome, Outcome::Failed) {
-                Level::Warn
-            } else {
-                Level::Info
-            },
+            outcome.level(),
         );
         result
     }
