@@ -13,7 +13,7 @@ use notion_knowledge_core::sync_state::{
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
-pub const LATEST_SCHEMA_VERSION: i64 = 7;
+pub const LATEST_SCHEMA_VERSION: i64 = 8;
 
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
@@ -50,6 +50,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         7,
         "knowledge_graph_edges",
         include_str!("../migrations/0007_graph_edges.sql"),
+    ),
+    (
+        8,
+        "knowledge_graph_aliases",
+        include_str!("../migrations/0008_graph_aliases.sql"),
     ),
 ];
 
