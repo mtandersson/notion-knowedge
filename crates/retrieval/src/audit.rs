@@ -181,6 +181,41 @@ mod tests {
     }
 
     #[test]
+    fn failed_append_rolls_back_retention_and_reports_only_a_safe_error() {
+        let store = SqliteAuditStore::open_in_memory(AuditRetention::days(1).unwrap()).unwrap();
+        store.record(&event(100_000), 100_001).unwrap();
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_audit BEFORE INSERT ON agent_audit_events
+             BEGIN SELECT RAISE(ABORT, 'private-upstream-sentinel'); END;",
+            )
+            .unwrap();
+        let error = store.record(&event(200_000), 200_001).unwrap_err();
+        assert_eq!(error, AuditError::Unavailable);
+        assert!(!format!("{error:?} {error}").contains("private-upstream-sentinel"));
+        assert_eq!(
+            count(&store),
+            1,
+            "failed append must roll back its retention deletion"
+        );
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch("PRAGMA query_only=ON;")
+            .unwrap();
+        assert_eq!(store.prune(200_001), Err(AuditError::Unavailable));
+        assert_eq!(
+            count(&store),
+            1,
+            "failed pruning must preserve the existing record"
+        );
+    }
+
+    #[test]
     fn never_record_unauditable_or_future_events() {
         let store = SqliteAuditStore::open_in_memory(AuditRetention::default()).unwrap();
         assert_eq!(
