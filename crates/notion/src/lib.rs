@@ -32,4 +32,7 @@ pub mod documents;
 
 pub mod lifecycle;
 
+/// Input checks for future opt-in Notion File Upload workflows.
+pub mod file_validation;
+pub use file_validation::{FileValidationError, FileValidationPolicy, ValidatedFile};
 pub mod file_download;

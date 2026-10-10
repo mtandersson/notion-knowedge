@@ -197,6 +197,10 @@ Production build:
 cargo build --workspace --release --locked
 ```
 
+## File upload input validation
+
+A [fail-closed MIME, signature, size and filename validator](docs/file-validation.md) is available for future opt-in Notion File Upload workflows. The default single-part limit is 5 MiB; no live file upload tool is enabled by this component.
+
 ## Diagnostics
 
 Use `--version` for the Cargo release identity, `--diagnostics` for a one-shot
