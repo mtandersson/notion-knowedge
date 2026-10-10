@@ -162,6 +162,13 @@ pub fn plan_section(
         if let Event::Start(Tag::Heading { level, .. }) = event {
             let depth = level_number(level);
             let start = range.start;
+            // Only top-level heading markers can bound a page section.
+            // Nested list/blockquote headings have a prefix or indentation.
+            // Setext headings at column zero still bound a prior section.
+            let top_level = start == 0 || markdown.as_bytes()[start - 1] == b'\n';
+            if !top_level {
+                continue;
+            }
             if depth == anchor.level && exact_heading(markdown, start, &anchor) {
                 matches.push(start);
             }
