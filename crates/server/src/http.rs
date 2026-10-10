@@ -36,6 +36,10 @@ pub async fn serve_with_handler(
     handler: notion_knowledge_mcp::KnowledgeServer,
 ) -> io::Result<()> {
     logging::set_level(settings.log_level);
+    // Construct ONE shared refresh coordinator per HTTP server. OAuth discovery
+    // remains fail-closed; no MCP bearer or callback routes are enabled here.
+    let _notion_oauth = crate::notion_oauth_runtime::NotionOAuthRuntime::from_config(&settings)
+        .map_err(|_| io::Error::other("Notion OAuth credential runtime unavailable"))?;
     let bind = settings.http_bind;
     let diagnostics = crate::diagnostics::bootstrap(&settings);
     let handler = handler.with_read_only(settings.read_only);
