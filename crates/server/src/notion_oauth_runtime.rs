@@ -45,6 +45,7 @@ fn map_refresh(error: RefreshError) -> CredentialError {
 #[derive(Clone)]
 pub struct NotionOAuthRuntime {
     coordinator: Arc<NotionRefresh<'static>>,
+    store: Arc<GrantStore>,
 }
 impl fmt::Debug for NotionOAuthRuntime {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -79,12 +80,14 @@ impl NotionOAuthRuntime {
             .map_err(|_| CredentialError::Unavailable)?;
         let http = NotionTokenClient::new(registration, callback.client_secret.expose_secret())
             .map_err(|_| CredentialError::Configuration)?;
+        let store = Arc::new(store);
         Ok(Some(Self {
             coordinator: Arc::new(NotionRefresh::shared(
-                Arc::new(store),
+                store.clone(),
                 Arc::new(http),
                 Arc::new(callback.allowed.clone()),
             )),
+            store,
         }))
     }
 
@@ -97,6 +100,13 @@ impl NotionOAuthRuntime {
         Fut: Future<Output = Result<T, BackendError>>,
     {
         let grant = self.coordinator.ensure_fresh().await.map_err(map_refresh)?;
+        if !self
+            .store
+            .still_current(&grant)
+            .map_err(|_| CredentialError::Unavailable)?
+        {
+            return Err(CredentialError::IdentityMismatch);
+        }
         let client = NotionClient::integration(grant.access_token())
             .map_err(|_| CredentialError::Unavailable)?;
         operation(client)
@@ -108,6 +118,13 @@ impl NotionOAuthRuntime {
     /// sealed callback's immutable integration identity. Never return tokens.
     pub async fn verify_bot_identity(&self) -> Result<(), CredentialError> {
         let grant = self.coordinator.ensure_fresh().await.map_err(map_refresh)?;
+        if !self
+            .store
+            .still_current(&grant)
+            .map_err(|_| CredentialError::Unavailable)?
+        {
+            return Err(CredentialError::IdentityMismatch);
+        }
         let client = NotionClient::integration(grant.access_token())
             .map_err(|_| CredentialError::Unavailable)?;
         let remote = client
