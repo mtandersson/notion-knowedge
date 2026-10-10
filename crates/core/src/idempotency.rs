@@ -71,7 +71,9 @@ impl MutationClaim {
         let safe = |value: &str, maximum: usize| {
             !value.is_empty()
                 && value.len() <= maximum
-                && value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
         };
         if !safe(trusted_scope, 128)
             || key.len() < 16
@@ -86,7 +88,11 @@ impl MutationClaim {
             key_digest: digest(b"nk-idempotency-key-v1", &[trusted_scope, key]),
             request_digest: digest(
                 b"nk-idempotency-request-v1",
-                &[operation.as_str(), target, &payload_sha256.to_ascii_lowercase()],
+                &[
+                    operation.as_str(),
+                    target,
+                    &payload_sha256.to_ascii_lowercase(),
+                ],
             ),
         })
     }
