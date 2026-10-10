@@ -3,6 +3,7 @@
 
 use std::{
     future::Future,
+    io::Write,
     sync::atomic::{AtomicU8, AtomicU64, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -174,7 +175,11 @@ pub fn emit(
     level: Level,
 ) {
     if level != Level::Off && level as u8 <= LOG_LEVEL.load(Ordering::Relaxed) {
-        eprintln!(
+        // Logging must never abort request processing if a supervisor closes
+        // stderr (or a test stops consuming its pipe).
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
             "{}",
             event_json(id, operation, outcome, elapsed, status, level)
         );
