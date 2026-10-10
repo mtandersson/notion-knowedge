@@ -49,6 +49,7 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    notion_knowledge_core::logging::set_level(config.log_level);
     // Never start HTTP, stdio, diagnostics or --check with a corrupt or
     // foreign encrypted Notion grant. A missing state means unapproved.
     if let Err(error) = config.validate_grant_store() {
