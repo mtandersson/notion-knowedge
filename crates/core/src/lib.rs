@@ -62,3 +62,6 @@ pub mod lifecycle;
 
 /// Restricted privacy-aware agent mutation audit contracts.
 pub mod audit;
+
+/// Fresh, fail-closed optimistic preconditions for future safe write workflows.
+pub mod revision;
