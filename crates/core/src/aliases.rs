@@ -84,7 +84,10 @@ impl AliasSources {
         if !title && ids.is_empty() {
             return Err(SyncStateError::InvalidInput);
         }
-        Ok(Self { title, property_ids: ids })
+        Ok(Self {
+            title,
+            property_ids: ids,
+        })
     }
 
     /// Extract only text/string-valued configured properties; numeric, relation
