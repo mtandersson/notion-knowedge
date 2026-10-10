@@ -83,9 +83,8 @@ impl SectionPlan {
     /// Construct a candidate for local tests and diff previews ONLY. Do not
     /// send it to a whole-page replacement endpoint (see #312).
     pub fn preview(&self) -> String {
-        let mut output = String::with_capacity(
-            self.before.len() + self.replacement.len() + self.after.len(),
-        );
+        let mut output =
+            String::with_capacity(self.before.len() + self.replacement.len() + self.after.len());
         output.push_str(&self.before);
         output.push_str(&self.replacement);
         output.push_str(&self.after);
@@ -125,15 +124,17 @@ fn valid_anchor(anchor: &SectionAnchor) -> bool {
 /// Fenced examples, blockquoted headings, setext headings, list headings,
 /// inline markup and headings with attributes are not valid target anchors.
 fn exact_heading(markdown: &str, start: usize, anchor: &SectionAnchor) -> bool {
-    if start > markdown.len()
-        || (start > 0 && markdown.as_bytes()[start - 1] != b'\n')
-    {
+    if start > markdown.len() || (start > 0 && markdown.as_bytes()[start - 1] != b'\n') {
         return false;
     }
     let line = &markdown[start..];
     let end = line.find('\n').unwrap_or(line.len());
     let line = line[..end].strip_suffix('\r').unwrap_or(&line[..end]);
-    let expected = format!("{} {}", "#".repeat(usize::from(anchor.level)), anchor.heading);
+    let expected = format!(
+        "{} {}",
+        "#".repeat(usize::from(anchor.level)),
+        anchor.heading
+    );
     line == expected
 }
 
