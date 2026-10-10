@@ -91,7 +91,13 @@ pub async fn check_revision(
         let hash = markdown_sha256(&content.markdown);
         (content.page, Some(hash))
     } else {
-        (reader.fetch_page(page_id).await.map_err(RevisionError::Read)?, None)
+        (
+            reader
+                .fetch_page(page_id)
+                .await
+                .map_err(RevisionError::Read)?,
+            None,
+        )
     };
     if &page.id != page_id {
         return Err(internal_error());
@@ -106,7 +112,9 @@ pub async fn check_revision(
         return Err(RevisionError::Inactive(metadata));
     }
     let hash_changed = match (expected.markdown_sha256.as_deref(), current_hash.as_deref()) {
-        (Some(expected_hash), Some(actual_hash)) => !expected_hash.eq_ignore_ascii_case(actual_hash),
+        (Some(expected_hash), Some(actual_hash)) => {
+            !expected_hash.eq_ignore_ascii_case(actual_hash)
+        }
         (None, _) => false,
         _ => return Err(internal_error()),
     };
