@@ -72,11 +72,11 @@ fn heading_level_disambiguates_same_text_at_different_depths() {
 
 #[test]
 fn fenced_pseudorubrics_and_inline_text_do_not_count_as_anchors() {
-    let original = "~~~md\n## Target\n~~~\n\n\`## Target\`\n## Target\nreal body\n# End\n";
+    let original = "~~~md\n## Target\n~~~\n\n`## Target`\n## Target\nreal body\n# End\n";
     let p = plan(original, 2, "Target", "new body\n");
     assert_eq!(
         p.preview(),
-        "~~~md\n## Target\n~~~\n\n\`## Target\`\n## Target\nnew body\n# End\n"
+        "~~~md\n## Target\n~~~\n\n`## Target`\n## Target\nnew body\n# End\n"
     );
     assert_eq!(
         plan_section("~~~\n## Target\n~~~\n", at(2, "Target"), "new\n").unwrap_err(),
