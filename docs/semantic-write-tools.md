@@ -1,8 +1,8 @@
 # Semantic Notion write-tool surface (#76)
 
 This is a **contract design**, not a working write implementation. The
-production `KnowledgeServer` still advertises only read-only
-`knowledge_search` and `knowledge_get`. Nothing in this issue grants Notion
+production `KnowledgeServer` advertises read-only `knowledge_search` and
+`knowledge_get`, plus the unavailable `knowledge_upload_file` schema. Nothing in this issue grants Notion
 credentials, a writable scope, a confirmation policy or an API invocation.
 
 ## Agent-facing tools
@@ -40,8 +40,8 @@ blindly replay: reconcile source state and the durable idempotency record.
 
 Read tools remain semantically distinct: their
 `annotations.readOnlyHint = true`. Proposed write-tool annotations always
-specify `readOnlyHint = false`; only `knowledge_archive_page` sets
-`destructiveHint = true`. All planned writes have `openWorldHint = true`
+specify `readOnlyHint = false`; section replacement and archiving set `destructiveHint = true` because
+both can remove existing content. All planned writes have `openWorldHint = true`
 because Notion API calls depend on an external system.
 
 ## Default discovery vs schema-preview
@@ -61,7 +61,7 @@ The catalog and schema checks run without credentials or Notion access:
 nix develop --command cargo test -p notion-knowledge-mcp --test write_catalog --locked
 ```
 
-That test verifies the normal catalog remains two read-only tools; preview
+That test verifies the normal catalog preserves the two read tools and unavailable upload schema; preview
 tool names, bounded non-generic schemas, required target/revision/idempotency
 fields and destructive annotations are distinct. The shared discovery
 construction is used by the actual MCP handler. This test cannot prove that

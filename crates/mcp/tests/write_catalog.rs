@@ -9,12 +9,20 @@ fn serialized(tool: rmcp::model::Tool) -> Value {
 }
 
 #[test]
-fn default_discovery_exposes_only_annotated_read_tools() {
+fn default_discovery_preserves_read_and_unavailable_upload_contracts() {
     let server = KnowledgeServer::default();
     let tools = server.tool_catalog();
-    assert_eq!(tools.len(), 2, "unimplemented writes must not be advertised");
+    assert_eq!(
+        tools.len(),
+        3,
+        "unimplemented writes must not be advertised"
+    );
     for tool in tools {
         let wire = serialized(tool);
+        if wire["name"] == "knowledge_upload_file" {
+            assert_eq!(wire["annotations"]["readOnlyHint"], false);
+            continue;
+        }
         assert!(["knowledge_search", "knowledge_get"].contains(&wire["name"].as_str().unwrap()));
         assert_eq!(wire["annotations"]["readOnlyHint"], true);
         assert_eq!(wire["annotations"]["destructiveHint"], false);
@@ -25,7 +33,10 @@ fn default_discovery_exposes_only_annotated_read_tools() {
         "knowledge_update_section",
         "knowledge_archive_page",
     ] {
-        assert!(server.get_tool(name).is_none(), "{name} must not be callable by default");
+        assert!(
+            server.get_tool(name).is_none(),
+            "{name} must not be callable by default"
+        );
     }
 }
 
@@ -33,18 +44,30 @@ fn default_discovery_exposes_only_annotated_read_tools() {
 fn explicit_design_preview_discovery_separates_narrow_writes_and_destructive_archiving() {
     let server = KnowledgeServer::default().with_write_design_preview();
     let tools = server.tool_catalog();
-    assert_eq!(tools.len(), 6);
+    assert_eq!(tools.len(), 7);
     let names: BTreeSet<String> = tools
         .iter()
-        .map(|tool| serialized(tool.clone())["name"].as_str().unwrap().to_owned())
+        .map(|tool| {
+            serialized(tool.clone())["name"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
         .collect();
     assert_eq!(
         names,
         [
-            "knowledge_search", "knowledge_get", "knowledge_create_page",
-            "knowledge_append", "knowledge_update_section", "knowledge_archive_page",
+            "knowledge_search",
+            "knowledge_get",
+            "knowledge_upload_file",
+            "knowledge_create_page",
+            "knowledge_append",
+            "knowledge_update_section",
+            "knowledge_archive_page",
         ]
-        .into_iter().map(str::to_owned).collect()
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
     );
     for name in [
         "knowledge_create_page",
@@ -55,7 +78,10 @@ fn explicit_design_preview_discovery_separates_narrow_writes_and_destructive_arc
         let wire = serialized(server.get_tool(name).expect("preview tool"));
         let input = &wire["inputSchema"];
         assert_eq!(wire["annotations"]["readOnlyHint"], false);
-        assert_eq!(wire["annotations"]["destructiveHint"], name == "knowledge_archive_page");
+        assert_eq!(
+            wire["annotations"]["destructiveHint"],
+            matches!(name, "knowledge_archive_page" | "knowledge_update_section")
+        );
         assert_eq!(wire["annotations"]["openWorldHint"], true);
         assert_eq!(input["additionalProperties"], false);
         let required = input["required"].as_array().unwrap();
@@ -63,15 +89,29 @@ fn explicit_design_preview_discovery_separates_narrow_writes_and_destructive_arc
             assert!(required.contains(&json!(common)), "{name} missing {common}");
             assert_eq!(input["properties"][common]["minLength"], 1);
         }
-        assert!(wire["description"].as_str().unwrap().contains("PREVIEW ONLY"));
-        assert_eq!(wire["outputSchema"]["required"], json!([
-            "page_id", "url", "last_edited_time", "verified"
-        ]));
-        assert_eq!(wire["outputSchema"]["properties"]["verified"]["const"], true);
+        assert!(
+            wire["description"]
+                .as_str()
+                .unwrap()
+                .contains("PREVIEW ONLY")
+        );
+        assert_eq!(
+            wire["outputSchema"]["required"],
+            json!(["page_id", "url", "last_edited_time", "verified"])
+        );
+        assert_eq!(
+            wire["outputSchema"]["properties"]["verified"]["const"],
+            true
+        );
     }
     let create = serialized(server.get_tool("knowledge_create_page").unwrap());
     for key in ["parent_page_id", "title", "markdown"] {
-        assert!(create["inputSchema"]["required"].as_array().unwrap().contains(&json!(key)));
+        assert!(
+            create["inputSchema"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(key))
+        );
     }
     assert!(create["inputSchema"]["properties"].get("page_id").is_none());
 
@@ -79,17 +119,44 @@ fn explicit_design_preview_discovery_separates_narrow_writes_and_destructive_arc
     let update = serialized(server.get_tool("knowledge_update_section").unwrap());
     for tool in [&append, &update] {
         for required in ["page_id", "expected_last_edited_time", "markdown"] {
-            assert!(tool["inputSchema"]["required"].as_array().unwrap().contains(&json!(required)));
+            assert!(
+                tool["inputSchema"]["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(required))
+            );
         }
-        assert!(tool["inputSchema"]["properties"].get("confirmation_id").is_none());
+        assert!(
+            tool["inputSchema"]["properties"]
+                .get("confirmation_id")
+                .is_none()
+        );
     }
-    assert!(append["inputSchema"]["properties"].get("section_anchor").is_none());
-    assert!(update["inputSchema"]["required"].as_array().unwrap().contains(&json!("section_anchor")));
+    assert!(
+        append["inputSchema"]["properties"]
+            .get("section_anchor")
+            .is_none()
+    );
+    assert!(
+        update["inputSchema"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("section_anchor"))
+    );
     let archive = serialized(server.get_tool("knowledge_archive_page").unwrap());
     for key in ["page_id", "expected_last_edited_time", "confirmation_id"] {
-        assert!(archive["inputSchema"]["required"].as_array().unwrap().contains(&json!(key)));
+        assert!(
+            archive["inputSchema"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(key))
+        );
     }
-    assert!(archive["inputSchema"]["properties"].get("markdown").is_none());
+    assert!(
+        archive["inputSchema"]["properties"]
+            .get("markdown")
+            .is_none()
+    );
     assert!(server.get_tool("knowledge_update_page").is_none());
     assert!(server.get_tool("arbitrary_notion_block").is_none());
 }

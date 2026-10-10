@@ -34,14 +34,20 @@ fn input(name: &str) -> Value {
     match name {
         "knowledge_create_page" => {
             fields.insert("parent_page_id".into(), short_id());
-            fields.insert("title".into(), json!({"type":"string","minLength":1,"maxLength":200,"pattern":"\\S"}));
+            fields.insert(
+                "title".into(),
+                json!({"type":"string","minLength":1,"maxLength":200,"pattern":"\\S"}),
+            );
             fields.insert("markdown".into(), content());
             required.extend(["parent_page_id", "title", "markdown"]);
         }
         "knowledge_append" | "knowledge_update_section" => {
             fields.insert("page_id".into(), short_id());
             fields.insert("markdown".into(), content());
-            fields.insert("expected_last_edited_time".into(), json!({"type":"string","minLength":1,"maxLength":128,"format":"date-time"}));
+            fields.insert(
+                "expected_last_edited_time".into(),
+                json!({"type":"string","minLength":1,"maxLength":128,"format":"date-time"}),
+            );
             required.extend(["page_id", "markdown", "expected_last_edited_time"]);
             if name == "knowledge_update_section" {
                 fields.insert("section_anchor".into(), short_id());
@@ -50,7 +56,10 @@ fn input(name: &str) -> Value {
         }
         "knowledge_archive_page" => {
             fields.insert("page_id".into(), short_id());
-            fields.insert("expected_last_edited_time".into(), json!({"type":"string","minLength":1,"maxLength":128,"format":"date-time"}));
+            fields.insert(
+                "expected_last_edited_time".into(),
+                json!({"type":"string","minLength":1,"maxLength":128,"format":"date-time"}),
+            );
             fields.insert("confirmation_id".into(), short_id());
             required.extend(["page_id", "expected_last_edited_time", "confirmation_id"]);
         }
@@ -61,13 +70,13 @@ fn input(name: &str) -> Value {
 
 fn output() -> Value {
     json!({"type":"object","additionalProperties":false,
-        "required":["page_id","url","last_edited_time","verified"],
-        "properties":{
-            "page_id":short_id(),
-            "url":{"type":"string","minLength":1},
-            "last_edited_time":{"type":"string","minLength":1},
-            "verified":{"const":true}
-        }})
+    "required":["page_id","url","last_edited_time","verified"],
+    "properties":{
+        "page_id":short_id(),
+        "url":{"type":"string","minLength":1},
+        "last_edited_time":{"type":"string","minLength":1},
+        "verified":{"const":true}
+    }})
 }
 
 pub fn tool(name: &str) -> Option<Tool> {
@@ -85,7 +94,7 @@ pub fn tool(name: &str) -> Option<Tool> {
         ),
         "knowledge_update_section" => (
             "DESIGN PREVIEW ONLY: replace only a named section anchored on one authorized page, guarded by source revision and idempotency. Not a whole-page update or delete; unavailable until implementation ships.",
-            false,
+            true,
         ),
         "knowledge_archive_page" => (
             "DESIGN PREVIEW ONLY: explicitly destructive archive operation on one authorized page. Requires server-issued confirmation, source revision and idempotency; never hidden in generic update. Unavailable until confirmation workflow ships.",
@@ -96,17 +105,24 @@ pub fn tool(name: &str) -> Option<Tool> {
     let schema = input(name);
     let out = output();
     Some(
-        Tool::new(name.to_owned(), description, schema.as_object().unwrap().clone())
-            .with_raw_output_schema(Arc::new(out.as_object().unwrap().clone()))
-            .with_annotations(
-                ToolAnnotations::new()
-                    .read_only(false)
-                    .destructive(destructive)
-                    .open_world(true),
-            ),
+        Tool::new(
+            name.to_owned(),
+            description,
+            schema.as_object().unwrap().clone(),
+        )
+        .with_raw_output_schema(Arc::new(out.as_object().unwrap().clone()))
+        .with_annotations(
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(destructive)
+                .open_world(true),
+        ),
     )
 }
 
 pub fn tools() -> Vec<Tool> {
-    NAMES.iter().map(|name| tool(name).expect("canonical name")).collect()
+    NAMES
+        .iter()
+        .map(|name| tool(name).expect("canonical name"))
+        .collect()
 }
