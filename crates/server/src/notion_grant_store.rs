@@ -117,6 +117,11 @@ impl std::fmt::Debug for GrantStore {
     }
 }
 impl GrantStore {
+    /// Confirm that the callback token exchanger is the configured Notion app.
+    pub(crate) fn matches_client(&self, client_id: &str) -> bool {
+        self.notion_client_id == client_id
+    }
+
     /// A missing data file means "no approved grant", not first-login
     /// enrollment. Any unreadable, corrupt or foreign existing state fails.
     pub fn open(
@@ -256,6 +261,11 @@ impl GrantStore {
         }
         let _guard = self.guard.lock().map_err(|_| StoreError::Unavailable)?;
         let old = self.read_record()?;
+        // A different bot means a different Notion integration, even if the
+        // workspace and owner have not changed. Never switch silently.
+        if old.as_ref().is_some_and(|record| record.bot_id != grant.bot_id()) {
+            return Err(StoreError::IdentityMismatch);
+        }
         let epoch = match old {
             Some(record) => record.epoch.checked_add(1).ok_or(StoreError::Corrupt)?,
             None => 1,
