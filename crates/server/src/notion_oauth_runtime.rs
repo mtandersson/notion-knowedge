@@ -175,7 +175,7 @@ mod tests {
         (dir, key, state, store, policy)
     }
 
-    fn runtime(
+    fn build_runtime(
         store: Arc<GrantStore>,
         policy: Arc<NotionOwnerPolicy>,
         endpoint: &str,
@@ -246,7 +246,7 @@ mod tests {
         store
             .save(&NotionGrant::fixture("workspace-a", "user-a", Some(3600)))
             .unwrap();
-        let credentials = runtime(store.clone(), policy, "http://127.0.0.1:1/v1/oauth/token");
+        let credentials = build_runtime(store.clone(), policy, "http://127.0.0.1:1/v1/oauth/token");
         let called = AtomicBool::new(false);
         credentials
             .with_client(|client| async {
@@ -263,7 +263,7 @@ mod tests {
     #[tokio::test]
     async fn missing_expired_unknown_and_wrong_owner_never_run_requests() {
         let (_dir, _key, _state, store, policy) = setup();
-        let runtime = runtime(store.clone(), policy.clone(), "http://127.0.0.1:1/v1/oauth/token");
+        let runtime = build_runtime(store.clone(), policy.clone(), "http://127.0.0.1:1/v1/oauth/token");
         let invoked = AtomicBool::new(false);
         assert_eq!(
             runtime
@@ -294,7 +294,7 @@ mod tests {
             .save(&NotionGrant::fixture("workspace-a", "user-a", Some(3600)))
             .unwrap();
         let foreign = Arc::new(NotionOwnerPolicy::new("wrong-workspace", "user-a").unwrap());
-        let runtime = runtime(store, foreign, "http://127.0.0.1:1/v1/oauth/token");
+        let runtime = build_runtime(store, foreign, "http://127.0.0.1:1/v1/oauth/token");
         assert_eq!(
             runtime
                 .with_client(|_| async {
@@ -314,7 +314,7 @@ mod tests {
             .save(&NotionGrant::fixture("workspace-a", "user-a", Some(120)))
             .unwrap();
         let (endpoint, provider) = provider().await;
-        let runtime = runtime(store.clone(), policy.clone(), &endpoint);
+        let runtime = build_runtime(store.clone(), policy.clone(), &endpoint);
         let a = runtime.clone();
         let b = runtime.clone();
         let (x, y) = tokio::join!(
@@ -336,7 +336,7 @@ mod tests {
         let reopened = Arc::new(
             GrantStore::open(&key, &state, "client-a", policy.as_ref().clone()).unwrap(),
         );
-        runtime(reopened, policy, "http://127.0.0.1:1/v1/oauth/token")
+        build_runtime(reopened, policy, "http://127.0.0.1:1/v1/oauth/token")
             .with_client(|_| async { Ok::<_, BackendError>(()) })
             .await
             .unwrap();
@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn errors_and_runtime_debug_do_not_contain_credentials() {
         let (_dir, _key, _state, store, policy) = setup();
-        let runtime = runtime(store, policy, "http://127.0.0.1:1/v1/oauth/token");
+        let runtime = build_runtime(store, policy, "http://127.0.0.1:1/v1/oauth/token");
         assert_eq!(format!("{runtime:?}"), "NotionOAuthRuntime([REDACTED])");
         let error = CredentialError::Unavailable;
         assert!(!format!("{error:?} {error}").contains("server-secret"));
