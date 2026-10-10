@@ -2,7 +2,8 @@
 
 This is a **contract design**, not a working write implementation. The
 production `KnowledgeServer` advertises read-only `knowledge_search` and
-`knowledge_get`, plus the unavailable `knowledge_upload_file` schema. Nothing in this issue grants Notion
+`knowledge_get`. Explicit writable configuration can additionally expose the
+unavailable `knowledge_upload_file` schema. Nothing in this issue grants Notion
 credentials, a writable scope, a confirmation policy or an API invocation.
 
 ## Agent-facing tools
@@ -48,7 +49,7 @@ because Notion API calls depend on an external system.
 
 The default catalog **does not expose any planned write tool**, even when
 Notion access is present. An explicitly constructed development test handler
-can call `KnowledgeServer::with_write_design_preview()` to expose the four
+can disable read-only mode and call `KnowledgeServer::with_write_design_preview()` to expose the four
 proposed schemas in `tools/list` / `get_tool`. **Every preview invocation
 returns `workflow_unavailable` with no mutation attempted**; this is not
 an operator setting or production startup option and must not be presented as
@@ -61,7 +62,7 @@ The catalog and schema checks run without credentials or Notion access:
 nix develop --command cargo test -p notion-knowledge-mcp --test write_catalog --locked
 ```
 
-That test verifies the normal catalog preserves the two read tools and unavailable upload schema; preview
+That test verifies the normal read-only catalog preserves the two read tools, hides upload/write schemas even in preview, and explicit writable mode preserves the unavailable upload schema; preview
 tool names, bounded non-generic schemas, required target/revision/idempotency
 fields and destructive annotations are distinct. The shared discovery
 construction is used by the actual MCP handler. This test cannot prove that

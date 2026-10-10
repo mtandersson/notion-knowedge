@@ -85,6 +85,7 @@ async fn http_client_initializes_discovers_calls_and_receives_structured_errors(
         assert_eq!(health, json!({
             "server": {"name":"notion-knowledge", "version":env!("CARGO_PKG_VERSION")},
             "transport":"http", "status":"degraded",
+            "access":{"read_only":true},
             "dependencies":{"notion":"unconfigured", "index":"unavailable"}
         }));
         for url in [&live_url, &ready_url, &health_url] {
@@ -135,6 +136,16 @@ async fn http_client_initializes_discovers_calls_and_receives_structured_errors(
             let result = frame(post().json(&json!({"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"knowledge_search","arguments":arguments}})).send().await.unwrap()).await;
             assert_eq!(result["error"]["code"], -32602);
             assert!(!result.to_string().contains("secret-input"));
+        }
+        // The public MCP wire path rejects writes and uploads even when the
+        // client bypasses tools/list and tries a direct call.
+        for attempted_write in ["knowledge_create_page", "knowledge_append", "knowledge_update_section", "knowledge_archive_page", "knowledge_upload_file"] {
+            let rejected = frame(post().json(&json!({
+                "jsonrpc":"2.0", "id":30, "method":"tools/call",
+                "params":{"name":attempted_write, "arguments":{}}
+            })).send().await.unwrap()).await;
+            assert_eq!(rejected["error"]["code"], -32602);
+            assert_eq!(rejected["error"]["message"], "tool unavailable in read-only mode");
         }
         let called = frame(post().json(&json!({"jsonrpc":"2.0", "id":3, "method":"tools/call", "params":{"name":"unknown-tool", "arguments":{}}}))
             .send().await.unwrap()).await;
