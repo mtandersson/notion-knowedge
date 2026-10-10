@@ -2,6 +2,10 @@
 
 use std::{io, net::SocketAddr, sync::Arc};
 
+/// Maximum HTTP MCP POST body, independent of its declared content type.
+/// Stdio input bounds and semantic-tool output budgets are separate contracts.
+const MAX_MCP_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+
 use axum::{
     body::{Body, to_bytes},
     extract::{Request, State},
@@ -131,22 +135,26 @@ fn probe_liveness(bind: SocketAddr) -> io::Result<bool> {
 // Validate JSON at the transport boundary so these protocol failures retain
 // JSON-RPC envelopes. Bound buffering; GET/SSE responses pass through untouched.
 async fn validate_json(request: Request, next: Next) -> Response {
-    if request.method() != Method::POST
-        || !request
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.starts_with("application/json"))
-    {
+    if request.method() != Method::POST {
         return next.run(request).await;
     }
+    // Enforce the limit *before* handing bodies to the SDK, even for an
+    // unsupported media type. Otherwise non-JSON POST bodies bypass the cap.
+    let is_json = request
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/json"));
     let (parts, body) = request.into_parts();
-    let bytes = match to_bytes(body, 4 * 1024 * 1024).await {
+    let bytes = match to_bytes(body, MAX_MCP_REQUEST_BYTES).await {
         Ok(bytes) => bytes,
-        Err(_) => {
-            return (StatusCode::PAYLOAD_TOO_LARGE, "Request body exceeds limit").into_response();
-        }
+        Err(_) => return oversized_request(),
     };
+    if !is_json {
+        return next
+            .run(Request::from_parts(parts, Body::from(bytes)))
+            .await;
+    }
     let parsed = serde_json::from_slice::<Value>(&bytes);
     let request_id = parsed
         .as_ref()
@@ -191,6 +199,17 @@ async fn validate_json(request: Request, next: Next) -> Response {
         return protocol_error(request_id, -32600, "Invalid MCP protocol request");
     }
     response
+}
+
+fn oversized_request() -> Response {
+    (
+        StatusCode::PAYLOAD_TOO_LARGE,
+        axum::Json(json!({
+            "jsonrpc": "2.0", "id": null,
+            "error": {"code": -32000, "message": "Request body exceeds limit"}
+        })),
+    )
+        .into_response()
 }
 
 fn protocol_error(id: Value, code: i32, message: &str) -> Response {

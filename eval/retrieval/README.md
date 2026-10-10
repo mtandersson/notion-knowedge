@@ -248,3 +248,57 @@ content and documented in provenance before being committed. The small balanced
 set is a baseline for regression comparisons, not evidence of general retrieval
 quality; broaden domains and independently review judgments before using scores
 for deployment decisions.
+
+## Exact-identifier and lexical regression gate (#100)
+
+`exact-identifiers-v1.json` is a second, **fictional and isolated** bilingual
+corpus. Four exact lookup patterns are paired in English and Swedish: order
+references (`ORD7241B` vs. `ORD7241C`), hyphenated issue IDs
+(`ISSUE-7B42` vs. `ISSUE-7B43`), Swedish personal names
+(`Elin Åberg` vs. `Elin Ågren`) and mixed-case alphanumeric asset IDs
+(`AbC731x` vs. `AbC731y`). The eight indexed pages contain eight
+distinct chunks, with one directly relevant source and one plausible near-miss
+per query. All strings and names are invented.
+
+Evaluate the **same complete indexed corpus** against the real FTS and hybrid
+adapters configured for production, then enforce the measured quality floor:
+
+```sh
+python3 scripts/retrieval-eval.py \
+  --dataset eval/retrieval/exact-identifiers-v1.json \
+  --adapter "./path/to/real-retrieval-adapter" \
+  --modes fts,hybrid --top-k 3 \
+  --output /tmp/exact-identifiers.json
+python3 scripts/exact-identifier-gate.py \
+  --dataset eval/retrieval/exact-identifiers-v1.json \
+  --report /tmp/exact-identifiers.json
+python3 scripts/test-exact-identifier-gate.py
+```
+
+The quality gate exits **0** only when both FTS and hybrid put the exact chunk
+first in at least 75% of all eight queries and include it in the first three
+in at least 75%. Each identifier family needs a top-three hit in at least one
+language, and each language needs at least half its queries successful. Exit
+**1** is a legitimate regression; exit **2** means invalid/incomplete evidence.
+Both `--min-top1` and `--min-top3` are configurable from 0 through 1. The
+gate rechecks query identities, source membership, grades, language metadata and
+required modes instead of trusting report summary counts. It uses actual ranked
+chunk IDs, not a page-title substring oracle or fabricated similarity scores.
+
+**Case and tokenization contract:** Letter case differs deliberately in one
+Swedish query (`abc731X` versus source `AbC731x`); a successful lookup
+must not require identical casing. Accented `Åberg` must remain
+distinguishable from the near-match `Ågren`. A hyphenated issue number
+tests how the production FTS tokenizer and query parser split punctuation:
+it must still favor the complete intended identity over the adjacent number.
+The order and asset references test letters joined to digits, including a
+one-character suffix change. A raw-tokenizer exact-ID index does not by itself
+prove free-text codes work; keep the cases as **real FTS/hybrid** regression
+measurements.
+
+CI runs the isolated checker and dataset contract tests without Notion tokens
+or model downloads. Those synthetic checker inputs **do not** count as real
+FTS/hybrid quality evidence; publish a real-adapter report before claiming the
+measured quality floor holds for a production index. Until the configured
+production adapter bridge is runnable, this gate enforces the report contract
+but cannot certify an actual retrieval recall score.
