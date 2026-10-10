@@ -9,7 +9,10 @@ const MAX_MCP_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 use axum::{
     body::{Body, to_bytes},
     extract::{Request, State},
-    http::{Method, StatusCode, header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, WWW_AUTHENTICATE}},
+    http::{
+        Method, StatusCode,
+        header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, WWW_AUTHENTICATE},
+    },
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
@@ -94,7 +97,7 @@ pub async fn serve_with_handler(
             } else {
                 mcp
             }
-        },
+        }
     };
     let router = axum::Router::new()
         .merge(diagnostics)
@@ -120,7 +123,10 @@ pub fn container_healthcheck(settings: &crate::config::Config) -> io::Result<boo
     probe_liveness(
         settings.http_bind,
         if settings.health_requires_bearer {
-            settings.bearer_fallback.as_ref().map(|token| token.expose_secret())
+            settings
+                .bearer_fallback
+                .as_ref()
+                .map(|token| token.expose_secret())
         } else {
             None
         },
@@ -185,19 +191,11 @@ async fn require_development_bearer(
             .is_some_and(|(_, presented)| {
                 // Fixed-length hashes and a constant-time verifier avoid
                 // timing comparisons and accidental credential echoing.
-                let expected = ring::digest::digest(
-                    &ring::digest::SHA256,
-                    token.expose_secret().as_bytes(),
-                );
-                let received = ring::digest::digest(
-                    &ring::digest::SHA256,
-                    presented.as_bytes(),
-                );
-                ring::constant_time::verify_slices_are_equal(
-                    expected.as_ref(),
-                    received.as_ref(),
-                )
-                .is_ok()
+                let expected =
+                    ring::digest::digest(&ring::digest::SHA256, token.expose_secret().as_bytes());
+                let received = ring::digest::digest(&ring::digest::SHA256, presented.as_bytes());
+                ring::constant_time::verify_slices_are_equal(expected.as_ref(), received.as_ref())
+                    .is_ok()
             })
     } else {
         false
