@@ -71,7 +71,7 @@ pub async fn check_revision(
     let expected_time = expected
         .last_edited_time
         .as_deref()
-        .map(|time| DateTime::parse_from_rfc3339(time))
+        .map(DateTime::parse_from_rfc3339)
         .transpose()
         .map_err(|_| RevisionError::InvalidPrecondition)?;
     if expected
