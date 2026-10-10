@@ -40,6 +40,7 @@ processing state and claim generations. See [webhook semantics](notion-webhooks.
 Schema v4 adds bounded webhook recovery and v5 adds durable per-page debounce.
 Schema v6 adds the [owned commit coordinator](index-commits.md), trusted index
 bindings, database identity, generation history and page operation receipts.
+Schema v7 adds the independently queryable [derived graph edge table](knowledge-graph.md), with versioned migration history and indexes for both source and resolved target page IDs.
 No Notion page body, raw webhook payload, access token, or credential is stored.
 
 ## Atomicity and deduplication

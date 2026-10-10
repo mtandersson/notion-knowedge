@@ -72,6 +72,25 @@ and cancels active sessions. Both transports share the [semantic search contract
 valid search calls in the default bootstrap return an explicit retrieval-unavailable tool error. The isolated [semantic MCP spike](docs/semantic-mcp-spike.md) explicitly configures real local semantic retrieval through this same handler and transport wiring.
 Calls to unknown tools return protocol errors.
 
+### Payload limits
+
+The Streamable HTTP `/mcp` endpoint accepts at most **4 MiB** per POST body
+(including unsupported media types). Larger requests return HTTP **413** with
+a redacted JSON-RPC error envelope (`-32000`, null ID). GET/SSE streams are
+not buffered by this ingress limit. The Notion webhook endpoint has a stricter
+**64 KiB** raw-body cap, returning HTTP **413** for excess data; it rejects
+compressed request bodies and authenticates accepted raw bytes before admission.
+
+Both stdio and HTTP share semantic-tool limits: `knowledge_search` accepts at
+most 100 results with at most 2,000 characters of text each, while
+`knowledge_get` caps aggregate source text at 65,536 characters. Both tools
+also reject output whose serialized JSON exceeds **512 KiB**, including
+citation/expanded-source metadata. That failure is an explicit
+`result_too_large` tool error, never a partial result. Clients should
+request fewer search hits or fewer source references. No file-upload or
+file-metadata MCP tool is exposed in the current server; future tool output
+must follow the same size-budget contract before being enabled.
+
 `knowledge_get` optionally verifies authoritative content with `freshness: "fresh"`,
 using a configured read-only Notion backend after authorizing indexed references.
 It distinguishes indexed and refreshed edit timestamps without updating the index.
@@ -190,6 +209,22 @@ to back up SQLite and credentials safely, validate index/SQLite bindings and
 run component recovery checks. Notion stays authoritative. Production full-scope
 recovery remains gated on the outstanding indexing/reconciliation integration.
 
+## Local Docker Compose stack
+
+Start a loopback-only MCP development service with durable named volumes for
+index, state and model data:
+
+```sh
+./scripts/compose-dev.sh up -d --build
+./scripts/compose-dev.sh down
+```
+
+The wrapper resolves the required Docker image version from `Cargo.toml`. The
+current HTTP bootstrap responds to liveness checks but has no configured search
+index, so `/readyz` can return 503. Credentials are optional and must be
+supplied through the ignored `.env` file or shell environment. See the
+[Compose setup, safety and smoke test guide](docs/compose.md).
+
 ## Releases
 
 Releases use the root Cargo workspace version and a reviewed changelog. See the
@@ -220,6 +255,13 @@ The [privacy-aware audit event contract](docs/audit-events.md) defines a
 payload-free agent-mutation record and a separate durable SQLite store with
 bounded retention. It is an available component, not yet wired to production
 MCP writes; future mutation workflows must enforce its failure policy.
+
+## ChatGPT file input
+
+The staged [`knowledge_upload_file` single-file input contract](docs/chatgpt-file-parameters.md)
+advertises `_meta["openai/fileParams"]` and accepts ChatGPT file references without
+Drive staging. It deliberately returns `file_upload_unavailable` until secure
+download, scope authorization and native Notion attachment are implemented.
 
 ## Continuous integration
 
