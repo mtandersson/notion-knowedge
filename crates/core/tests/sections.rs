@@ -210,7 +210,7 @@ fn headings_containing_inline_markup_are_not_guessed() {
 
 #[test]
 fn setext_heading_bounds_an_existing_atx_section() {
-    let original = "## Target\nold\nAnother title\n=============\nsafe\n";
+    let original = "## Target\nold\n\nAnother title\n=============\nsafe\n";
     let p = plan(original, 2, "Target", "new\n");
     assert_eq!(
         p.preview(),
