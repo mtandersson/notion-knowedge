@@ -31,18 +31,9 @@ def search_catalog(value):
     require(len(names) == len(set(names)), "Duplicate MCP tool names")
     search = next((tool for tool in tools if tool.get("name") == "knowledge_search"), None)
     get = next((tool for tool in tools if tool.get("name") == "knowledge_get"), None)
-    upload = next((tool for tool in tools if tool.get("name") == "knowledge_upload_file"), None)
-    require(search is not None and get is not None and upload is not None,
-            "Expected knowledge tools missing")
-    require(upload.get("_meta", {}).get("openai/fileParams") == ["file"],
-            "ChatGPT file parameter descriptor missing")
-    file_input = upload["inputSchema"]["properties"]["file"]
-    require(upload["inputSchema"]["required"] == ["file"], "Top-level file must be required")
-    require(file_input["required"] == ["download_url", "file_id"],
-            "ChatGPT file required properties incorrect")
-    for field in ("download_url", "file_id", "mime_type", "file_name"):
-        require(file_input["properties"][field]["type"] == "string",
-                f"ChatGPT {field} input schema missing")
+    require(set(names) == {"knowledge_search", "knowledge_get"},
+            "Read-only catalog must hide all mutation and upload tools")
+    require(search is not None and get is not None, "Expected read tools missing")
     require(search["inputSchema"]["properties"]["mode"]["enum"] == ["semantic", "lexical", "hybrid"], "Search modes missing")
     require("score" in search["outputSchema"]["properties"]["results"]["items"]["properties"], "Search scores missing")
     require(get["inputSchema"]["required"] == ["refs", "max_chars"], "knowledge_get inputs missing")
@@ -239,6 +230,7 @@ def http_smoke(image):
             ("/health", 503, {
                 "server": {"name": "notion-knowledge", "version": workspace_version()},
                 "transport": "http", "status": "degraded",
+                "access": {"read_only": True},
                 "dependencies": {"notion": "unconfigured", "index": "unavailable"}}),
         ]:
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
@@ -320,6 +312,7 @@ def main():
             "Container diagnostics failed or leaked credentials")
     require(json.loads(diagnostic.stdout) == {
         "server": {"name": "notion-knowledge", "version": version}, "transport": "one-shot",
+        "access": {"read_only": True},
         "status": "degraded", "dependencies": {"notion": "unavailable", "index": "unavailable"}},
         "Configured credentials must not imply healthy adapters")
     valid = run_once(args.image, ["--check"])

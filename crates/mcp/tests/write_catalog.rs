@@ -9,8 +9,8 @@ fn serialized(tool: rmcp::model::Tool) -> Value {
 }
 
 #[test]
-fn default_discovery_preserves_read_and_unavailable_upload_contracts() {
-    let server = KnowledgeServer::default();
+fn writable_discovery_preserves_read_and_unavailable_upload_contracts() {
+    let server = KnowledgeServer::default().with_read_only(false);
     let tools = server.tool_catalog();
     assert_eq!(
         tools.len(),
@@ -42,7 +42,9 @@ fn default_discovery_preserves_read_and_unavailable_upload_contracts() {
 
 #[test]
 fn explicit_design_preview_discovery_separates_narrow_writes_and_destructive_archiving() {
-    let server = KnowledgeServer::default().with_write_design_preview();
+    let server = KnowledgeServer::default()
+        .with_read_only(false)
+        .with_write_design_preview();
     let tools = server.tool_catalog();
     assert_eq!(tools.len(), 7);
     let names: BTreeSet<String> = tools
@@ -159,4 +161,24 @@ fn explicit_design_preview_discovery_separates_narrow_writes_and_destructive_arc
     );
     assert!(server.get_tool("knowledge_update_page").is_none());
     assert!(server.get_tool("arbitrary_notion_block").is_none());
+}
+
+#[test]
+fn read_only_catalog_hides_all_mutation_schemas_even_with_preview_enabled() {
+    let server = KnowledgeServer::default().with_write_design_preview();
+    let names: Vec<_> = server
+        .tool_catalog()
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect();
+    assert_eq!(names, ["knowledge_search", "knowledge_get"]);
+    for name in [
+        "knowledge_upload_file",
+        "knowledge_create_page",
+        "knowledge_append",
+        "knowledge_update_section",
+        "knowledge_archive_page",
+    ] {
+        assert!(server.get_tool(name).is_none());
+    }
 }

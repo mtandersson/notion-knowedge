@@ -271,7 +271,8 @@ MCP writes; future mutation workflows must enforce its failure policy.
 
 The staged [`knowledge_upload_file` single-file input contract](docs/chatgpt-file-parameters.md)
 advertises `_meta["openai/fileParams"]` and accepts ChatGPT file references without
-Drive staging. It deliberately returns `file_upload_unavailable` until secure
+Drive staging. It is hidden by default read-only mode; explicit `NK_READ_ONLY=false` exposes
+the schema and returns `file_upload_unavailable` until secure
 download, scope authorization and native Notion attachment are implemented.
 
 ## Continuous integration
@@ -333,6 +334,20 @@ Run the same check locally with:
 ```
 
 ## Configuration
+
+### MCP read-only access
+
+`NK_READ_ONLY=true` is the default for both stdio and Streamable HTTP. Only
+explicitly audited read tools (`knowledge_search` and `knowledge_get`) can be
+advertised or dispatched in this mode. Unknown tools, Notion mutations and
+file uploads cannot be invoked through the MCP handler; the access check runs
+before any tool adapter. Set `NK_READ_ONLY=false` **explicitly** only when an
+operator intends to permit implemented mutation tools. This flag does not
+implement or activate writing: the current bootstrap exposes read tools by default, with only the unavailable upload schema in explicit writable mode.
+Invalid values fail startup instead of enabling writes. `--diagnostics` and
+`GET /health` expose the effective `access.read_only` boolean without
+revealing secrets. This setting controls MCP tool access, not the independent
+Notion webhook inbox or operator CLI.
 
 The server reads environment variables once at startup and validates them
 before reporting readiness. `--check` performs the same validation and exits

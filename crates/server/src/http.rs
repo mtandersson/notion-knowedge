@@ -35,6 +35,7 @@ pub async fn serve_with_handler(
 ) -> io::Result<()> {
     let bind = settings.http_bind;
     let diagnostics = crate::diagnostics::bootstrap(&settings);
+    let handler = handler.with_read_only(settings.read_only);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let mut config = StreamableHttpServerConfig::default();
     // Keep the SDK's DNS rebinding protection, including for configured IPs.
@@ -373,7 +374,11 @@ async fn health_response(State(diagnostics): State<crate::diagnostics::Diagnosti
     (
         status,
         [("cache-control", "no-store")],
-        axum::Json(crate::diagnostics::report(health, "http")),
+        axum::Json(crate::diagnostics::report(
+            health,
+            "http",
+            diagnostics.read_only(),
+        )),
     )
         .into_response()
 }
