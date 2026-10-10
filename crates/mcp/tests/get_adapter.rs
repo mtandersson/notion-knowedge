@@ -43,9 +43,10 @@ impl SourceExpansion for Fixture {
                         StableSourceRef::Page(page_id) => {
                             (page_id.clone(), vec![format!("{page_id}-chunk")])
                         }
-                        StableSourceRef::Chunk(chunk_id) => {
-                            ("99999999-9999-9999-9999-999999999999".into(), vec![chunk_id.clone()])
-                        }
+                        StableSourceRef::Chunk(chunk_id) => (
+                            "99999999-9999-9999-9999-999999999999".into(),
+                            vec![chunk_id.clone()],
+                        ),
                     };
                     let full = format!("Expanded content for {page_id}");
                     let text: String = full.chars().take(remaining).collect();
@@ -103,8 +104,11 @@ async fn exchange_with_backend(
 ) -> Value {
     let (client, server) = tokio::io::duplex(65_536);
     let task = tokio::spawn(async move {
-        let mut handler =
-            KnowledgeServer::with_source_expansion(adapter, vec!["22222222-2222-2222-2222-222222222222".into()]).unwrap();
+        let mut handler = KnowledgeServer::with_source_expansion(
+            adapter,
+            vec!["22222222-2222-2222-2222-222222222222".into()],
+        )
+        .unwrap();
         if let Some(backend) = backend {
             handler = handler.and_fresh_source(backend);
         }
@@ -173,12 +177,18 @@ async fn expands_page_and_chunk_refs_with_server_owned_scope_and_provenance() {
         sources[0]["provenance"]["chunk_ids"],
         json!(["stable-chunk"])
     );
-    assert_eq!(sources[0]["provenance"]["root_page_id"], "22222222-2222-2222-2222-222222222222");
+    assert_eq!(
+        sources[0]["provenance"]["root_page_id"],
+        "22222222-2222-2222-2222-222222222222"
+    );
     assert_eq!(
         sources[1]["reference"],
         json!({"kind":"page","id":"77777777-7777-7777-7777-777777777777"})
     );
-    assert_eq!(sources[1]["provenance"]["page_id"], "77777777-7777-7777-7777-777777777777");
+    assert_eq!(
+        sources[1]["provenance"]["page_id"],
+        "77777777-7777-7777-7777-777777777777"
+    );
     assert!(
         response["result"]["content"]
             .as_array()
@@ -191,7 +201,10 @@ async fn expands_page_and_chunk_refs_with_server_owned_scope_and_provenance() {
 
     let calls = adapter.calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].root_page_ids, vec!["22222222-2222-2222-2222-222222222222".to_owned()]);
+    assert_eq!(
+        calls[0].root_page_ids,
+        vec!["22222222-2222-2222-2222-222222222222".to_owned()]
+    );
     assert_eq!(calls[0].max_chars, 256);
     assert_eq!(calls[0].refs.len(), 2);
 }
@@ -322,7 +335,9 @@ impl NotionRead for FreshFixture {
             .unwrap()
             .push(("content".into(), id.0.clone()));
         Box::pin(async move {
-            if matches!(self.behavior, FreshBehavior::FailedSecondPage) && id.0 == "77777777-7777-7777-7777-777777777777" {
+            if matches!(self.behavior, FreshBehavior::FailedSecondPage)
+                && id.0 == "77777777-7777-7777-7777-777777777777"
+            {
                 return Err(BackendError {
                     kind: BackendErrorKind::Unavailable,
                     operation: "fixture",
@@ -398,7 +413,10 @@ async fn fresh_reads_by_resolved_stable_page_id_and_reports_stale_or_unchanged_i
             source["reference"],
             json!({"kind":"chunk","id":"stable-chunk"})
         );
-        assert_eq!(source["provenance"]["page_id"], "99999999-9999-9999-9999-999999999999");
+        assert_eq!(
+            source["provenance"]["page_id"],
+            "99999999-9999-9999-9999-999999999999"
+        );
         assert_eq!(
             source["provenance"]["indexed_last_edited_time"],
             "2026-10-07T11:00:00Z"
@@ -412,8 +430,14 @@ async fn fresh_reads_by_resolved_stable_page_id_and_reports_stale_or_unchanged_i
         assert_eq!(
             *fresh.calls.lock().unwrap(),
             vec![
-                ("content".into(), "99999999-9999-9999-9999-999999999999".into()),
-                ("metadata".into(), "99999999-9999-9999-9999-999999999999".into())
+                (
+                    "content".into(),
+                    "99999999-9999-9999-9999-999999999999".into()
+                ),
+                (
+                    "metadata".into(),
+                    "99999999-9999-9999-9999-999999999999".into()
+                )
             ]
         );
         // Only the read-only expansion capability is called, exactly once.
@@ -433,7 +457,10 @@ async fn default_and_explicit_indexed_reads_do_not_call_notion_or_claim_refresh(
             exchange_with_backend(indexed_fixture(Behavior::Valid), args, Some(fresh.clone()))
                 .await;
         let source = &response["result"]["structuredContent"]["sources"][0];
-        assert_eq!(source["text"], "Expanded content for 11111111-1111-1111-1111-111111111111");
+        assert_eq!(
+            source["text"],
+            "Expanded content for 11111111-1111-1111-1111-111111111111"
+        );
         assert_eq!(source["content_scope"], "indexed");
         assert!(
             source["provenance"]
@@ -548,9 +575,18 @@ async fn a_later_page_failure_returns_no_partial_content_and_preserves_indexed_r
     assert_eq!(
         *fresh.calls.lock().unwrap(),
         vec![
-            ("content".into(), "11111111-1111-1111-1111-111111111111".into()),
-            ("metadata".into(), "11111111-1111-1111-1111-111111111111".into()),
-            ("content".into(), "77777777-7777-7777-7777-777777777777".into())
+            (
+                "content".into(),
+                "11111111-1111-1111-1111-111111111111".into()
+            ),
+            (
+                "metadata".into(),
+                "11111111-1111-1111-1111-111111111111".into()
+            ),
+            (
+                "content".into(),
+                "77777777-7777-7777-7777-777777777777".into()
+            )
         ]
     );
     let after = exchange(indexed, args).await;
@@ -621,7 +657,10 @@ async fn versioned_freshness_scenarios_distinguish_stale_content_without_writing
         // Snapshot the old indexed result before the authoritative read.
         let before = exchange(indexed.clone(), indexed_args.clone()).await;
         let before_source = &before["result"]["structuredContent"]["sources"][0];
-        assert_eq!(before_source["text"], "Expanded content for 11111111-1111-1111-1111-111111111111");
+        assert_eq!(
+            before_source["text"],
+            "Expanded content for 11111111-1111-1111-1111-111111111111"
+        );
         assert_eq!(
             before_source["provenance"]["indexed_last_edited_time"],
             data["indexed_last_edited_time"],
@@ -650,7 +689,8 @@ async fn versioned_freshness_scenarios_distinguish_stale_content_without_writing
             let message = result["result"]["content"][0]["text"].as_str().unwrap();
             assert!(message.starts_with(error), "{name}: {message}");
             assert!(
-                !message.contains("Expanded content for 11111111-1111-1111-1111-111111111111") && !message.contains("Färsk"),
+                !message.contains("Expanded content for 11111111-1111-1111-1111-111111111111")
+                    && !message.contains("Färsk"),
                 "{name}: error must not expose source content"
             );
         } else {
@@ -681,7 +721,10 @@ async fn versioned_freshness_scenarios_distinguish_stale_content_without_writing
                     );
                 }
                 _ => {
-                    assert_eq!(source["text"], "Expanded content for 11111111-1111-1111-1111-111111111111", "{name}");
+                    assert_eq!(
+                        source["text"], "Expanded content for 11111111-1111-1111-1111-111111111111",
+                        "{name}"
+                    );
                     assert!(
                         source["provenance"]
                             .get("refreshed_last_edited_time")
