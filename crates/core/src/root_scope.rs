@@ -76,6 +76,24 @@ pub struct AuthorizedPage {
 }
 
 impl AuthorizedPage {
+    /// Container IDs derived solely from the already-verified physical
+    /// ancestry, never from index metadata, relations, or caller hints.
+    pub fn physical_containers(&self) -> (Option<&str>, Option<&str>) {
+        let database = self
+            .evidence
+            .ancestry
+            .iter()
+            .find(|node| node.kind == LifecycleKind::Database)
+            .map(|node| node.id.as_str());
+        let data_source = self
+            .evidence
+            .ancestry
+            .iter()
+            .find(|node| node.kind == LifecycleKind::DataSource)
+            .map(|node| node.id.as_str());
+        (database, data_source)
+    }
+
     /// Restrict a verified physical root to the effective operator/caller
     /// intersection. Indexed root labels are never proof of membership.
     pub fn belongs_to_any(&self, roots: &[String]) -> bool {

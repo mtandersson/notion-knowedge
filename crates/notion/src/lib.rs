@@ -36,3 +36,6 @@ pub mod lifecycle;
 pub mod file_validation;
 pub use file_validation::{FileValidationError, FileValidationPolicy, ValidatedFile};
 pub mod file_download;
+
+/// One-page, read-only canonical refresh preparation under live physical scope.
+pub mod prepare;
