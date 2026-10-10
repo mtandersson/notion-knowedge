@@ -146,7 +146,6 @@ async fn correlate_request(request: Request, next: Next) -> Response {
     response
 }
 
-
 /// Docker invokes this one-shot probe from inside the running container.
 /// HTTP deployments must answer their liveness endpoint. Stdio deployments
 /// have no listener, so Docker process liveness is sufficient there.
