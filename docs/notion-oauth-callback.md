@@ -61,6 +61,24 @@ possible but **never enables callback handling or token issuance**.
    The method never calls `AuthorizationFlow::approve` or issues an MCP
    token merely because Notion exchanged a code.
 
+## Sealed callback persistence (#298)
+
+The server-internal NotionCallback::complete_and_persist(raw_query, store) now composes
+the existing single-use callback validator with the AES-256-GCM grant store.
+It rejects a mismatched Notion client **before** consuming callback state or
+contacting Notion. After confidential code exchange and immutable owner/workspace
+verification, the store independently rechecks the owner, workspace and
+existing bot identity under its write lock, before atomically persisting the
+full access/refresh-token pair and expiry metadata. Failed validation or
+corrupt state does not replace the existing grant. The new grant receives a
+fresh grant ID and authorization epoch and survives a process restart.
+
+**This component is not mounted at an HTTP endpoint**. The pending MCP
+transaction is intentionally discarded by this persistence-only operation;
+neither an MCP session, authorization code nor bearer token is issued.
+Production callback routing and complete session authorization remain
+separate work under #120/#125/#126/#127/#128 and #129; refresh wiring is #299.
+
 **Crucial next gate:** the grant store in #123 must protect credentials,
 record exact identity and integration binding, assign a durable
 `grant_id`/authorization epoch, and check the configured Notion roots
