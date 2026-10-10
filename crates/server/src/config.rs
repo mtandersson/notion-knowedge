@@ -151,20 +151,29 @@ impl Config {
         let bearer_fallback = match (bearer_mode.as_str(), bearer_value) {
             ("none", None) => None,
             ("none", Some(_)) => {
-                return Err(invalid("NK_HTTP_BEARER_TOKEN", "requires explicit bearer mode"));
+                return Err(invalid(
+                    "NK_HTTP_BEARER_TOKEN",
+                    "requires explicit bearer mode",
+                ));
             }
             ("bearer", Some(value)) => {
                 if oauth_discovery.is_some() {
-                    return Err(invalid("NK_HTTP_AUTH", "cannot coexist with OAuth discovery"));
+                    return Err(invalid(
+                        "NK_HTTP_AUTH",
+                        "cannot coexist with OAuth discovery",
+                    ));
                 }
                 if !SocketAddr::new(host, port).ip().is_loopback() {
-                    return Err(invalid("NK_HTTP_HOST", "bearer fallback requires loopback binding"));
+                    return Err(invalid(
+                        "NK_HTTP_HOST",
+                        "bearer fallback requires loopback binding",
+                    ));
                 }
                 let token = text(value, "NK_HTTP_BEARER_TOKEN")?;
                 if !(32..=256).contains(&token.len())
-                    || !token.bytes().all(|b| {
-                        b.is_ascii_alphanumeric() || b"-._~".contains(&b)
-                    })
+                    || !token
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
                 {
                     return Err(invalid(
                         "NK_HTTP_BEARER_TOKEN",
@@ -521,7 +530,9 @@ mod tests {
         assert!(parse(&[]).unwrap().bearer_fallback.is_none());
         assert!(!parse(&[]).unwrap().health_requires_bearer);
         assert_eq!(
-            parse(&[("NK_HTTP_BEARER_TOKEN", TOKEN)]).unwrap_err().setting,
+            parse(&[("NK_HTTP_BEARER_TOKEN", TOKEN)])
+                .unwrap_err()
+                .setting,
             "NK_HTTP_BEARER_TOKEN"
         );
         assert_eq!(
@@ -529,8 +540,8 @@ mod tests {
             "NK_HTTP_BEARER_TOKEN"
         );
         for bad in ["", "short", "private bad credential", "a\\nsecret"] {
-            let error = parse(&[("NK_HTTP_AUTH", "bearer"), ("NK_HTTP_BEARER_TOKEN", bad)])
-                .unwrap_err();
+            let error =
+                parse(&[("NK_HTTP_AUTH", "bearer"), ("NK_HTTP_BEARER_TOKEN", bad)]).unwrap_err();
             assert_eq!(error.setting, "NK_HTTP_BEARER_TOKEN");
             assert!(!format!("{error:?}").contains(bad));
         }
@@ -540,23 +551,30 @@ mod tests {
                 "NK_HTTP_AUTH"
             );
         }
-        let config = parse(&[("NK_HTTP_AUTH", "bearer"), ("NK_HTTP_BEARER_TOKEN", TOKEN)])
-            .unwrap();
-        assert_eq!(config.bearer_fallback.as_ref().unwrap().expose_secret(), TOKEN);
+        let config = parse(&[("NK_HTTP_AUTH", "bearer"), ("NK_HTTP_BEARER_TOKEN", TOKEN)]).unwrap();
+        assert_eq!(
+            config.bearer_fallback.as_ref().unwrap().expose_secret(),
+            TOKEN
+        );
         assert!(!format!("{config:?}").contains(TOKEN));
         assert!(!config.health_requires_bearer);
         let protected = parse(&[
             ("NK_HTTP_AUTH", "bearer"),
             ("NK_HTTP_BEARER_TOKEN", TOKEN),
             ("NK_HTTP_HEALTH_AUTH", "bearer"),
-        ]).unwrap();
+        ])
+        .unwrap();
         assert!(protected.health_requires_bearer);
         assert_eq!(
-            parse(&[("NK_HTTP_HEALTH_AUTH", "bearer")]).unwrap_err().setting,
+            parse(&[("NK_HTTP_HEALTH_AUTH", "bearer")])
+                .unwrap_err()
+                .setting,
             "NK_HTTP_HEALTH_AUTH"
         );
         assert_eq!(
-            parse(&[("NK_HTTP_HEALTH_AUTH", "public")]).unwrap_err().setting,
+            parse(&[("NK_HTTP_HEALTH_AUTH", "public")])
+                .unwrap_err()
+                .setting,
             "NK_HTTP_HEALTH_AUTH"
         );
         assert_eq!(
@@ -564,7 +582,9 @@ mod tests {
                 ("NK_HTTP_AUTH", "bearer"),
                 ("NK_HTTP_BEARER_TOKEN", TOKEN),
                 ("NK_HTTP_HOST", "0.0.0.0"),
-            ]).unwrap_err().setting,
+            ])
+            .unwrap_err()
+            .setting,
             "NK_HTTP_HOST"
         );
         assert_eq!(
@@ -573,7 +593,9 @@ mod tests {
                 ("NK_HTTP_BEARER_TOKEN", TOKEN),
                 ("NK_OAUTH_ISSUER", "https://auth.example.com"),
                 ("NK_OAUTH_RESOURCE", "https://mcp.example.com/mcp"),
-            ]).unwrap_err().setting,
+            ])
+            .unwrap_err()
+            .setting,
             "NK_HTTP_AUTH"
         );
     }
