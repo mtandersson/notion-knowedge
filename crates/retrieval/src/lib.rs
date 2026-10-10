@@ -19,6 +19,9 @@ pub mod sync_state;
 /// SQLite-backed derived page relationship edges.
 pub mod graph;
 
+/// Scoped, durable lookup for canonical Notion page aliases.
+pub mod aliases;
+
 pub mod reconciliation;
 
 pub mod webhook;

@@ -160,7 +160,7 @@ fn invalid_input_cannot_erase_existing_graph() {
 fn versioned_schema_enforces_target_invariant_and_has_lookup_indexes() {
     let db = TestDb::new();
     let store = SqliteSyncStateStore::open(&db.0).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 7);
+    assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     drop(store);
 
     let connection = Connection::open(&db.0).unwrap();

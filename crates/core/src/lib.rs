@@ -49,6 +49,9 @@ pub mod sync_state;
 /// Provider-independent graph edge contracts.
 pub mod graph;
 
+/// Canonical page-name aliases derived only from configured indexed metadata.
+pub mod aliases;
+
 /// Configurable reciprocal-rank fusion of independent retrieval paths.
 pub mod hybrid;
 
