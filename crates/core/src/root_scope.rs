@@ -75,7 +75,21 @@ pub struct AuthorizedPage {
     evidence: LifecycleEvidence,
 }
 
+impl AuthorizedPage {
+    /// Restrict a verified physical root to the effective operator/caller
+    /// intersection. Indexed root labels are never proof of membership.
+    pub fn belongs_to_any(&self, roots: &[String]) -> bool {
+        matches!(&self.evidence.status, LifecycleStatus::Allowed { roots: physical }
+            if physical.iter().any(|id| roots.iter().any(|root| root == id)))
+    }
+}
+
 impl RootScopeGate {
+    /// Trust roots only from this server-constructed policy.
+    pub fn configured_scope(&self) -> &LifecycleScope {
+        &self.scope
+    }
+
     pub fn new(source: Arc<dyn PageLifecycle>, scope: LifecycleScope) -> Result<Self, ScopeError> {
         if !valid_scope(&scope) {
             return Err(ScopeError::InvalidConfiguration);
