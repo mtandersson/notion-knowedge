@@ -78,9 +78,13 @@ impl HttpNotion {
                 loop {
                     let mut part = [0u8; 2048];
                     let size = stream.read(&mut part).await.unwrap();
-                    if size == 0 { return; }
+                    if size == 0 {
+                        return;
+                    }
                     bytes.extend_from_slice(&part[..size]);
-                    if bytes.windows(4).any(|v| v == b"\r\n\r\n") { break; }
+                    if bytes.windows(4).any(|v| v == b"\r\n\r\n") {
+                        break;
+                    }
                 }
                 let req = String::from_utf8(bytes).unwrap();
                 assert!(req.contains("authorization: Bearer fixture-credential"));
