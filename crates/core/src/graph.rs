@@ -86,6 +86,15 @@ pub trait GraphEdgeStore: Send + Sync {
         edges: &[GraphEdge],
     ) -> Result<(), SyncStateError>;
 
+    /// Atomically replace only Markdown/Notion-link edges for a single page.
+    /// Must preserve relation-property and other independently indexed edges.
+    /// Empty replacement removes stale links after edits or page deletion.
+    fn replace_page_link_edges(
+        &self,
+        source_page_id: &str,
+        edges: &[GraphEdge],
+    ) -> Result<(), SyncStateError>;
+
     fn edges_from(&self, source_page_id: &str) -> Result<Vec<GraphEdge>, SyncStateError>;
 
     /// Only resolved targets can be queried as authoritative graph nodes.

@@ -56,7 +56,8 @@ fn target(raw: &str) -> Option<LinkTarget> {
     let notion = host == "notion.so"
         || host.ends_with(".notion.so")
         || host == "notion.site"
-        || host.ends_with(".notion.site");
+        || host.ends_with(".notion.site")
+        || host == "app.notion.com";
     if notion {
         let page_id = page_id(raw).ok()?.0;
         if let Some(fragment) = url.fragment().filter(|s| !s.is_empty()) {

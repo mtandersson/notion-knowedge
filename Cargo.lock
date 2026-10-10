@@ -4701,6 +4701,7 @@ dependencies = [
  "reqwest 0.13.5",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
 ]
@@ -4720,6 +4721,7 @@ dependencies = [
  "lance",
  "lancedb",
  "notion-knowledge-core",
+ "notion-knowledge-notion",
  "object_store 0.14.2",
  "rusqlite",
  "serde_json",
