@@ -23,7 +23,9 @@ use lancedb::{
 };
 use notion_knowledge_core::{
     embedding::{self, EmbeddingError, EmbeddingMetadata, EmbeddingProvider},
-    indexed::{IndexedChunk, IndexedMetadata, LinkTarget, PropertyValue, SchemaVersion, SourceMetadata},
+    indexed::{
+        IndexedChunk, IndexedMetadata, LinkTarget, PropertyValue, SchemaVersion, SourceMetadata,
+    },
     search::{
         LexicalQuery, LexicalSearch, SearchFuture, SearchHit, SearchSource, SearchUnavailable,
         SemanticQuery, SemanticSearch,
@@ -1056,12 +1058,16 @@ impl LanceChunkTable {
             return Err(ChunkTableError::InvalidRows("invalid page identity".into()));
         }
         let current = self.read_snapshot().await?;
-        let rows = current.rows_matching(format!("page_id = {}", sql_string(page_id))).await?;
+        let rows = current
+            .rows_matching(format!("page_id = {}", sql_string(page_id)))
+            .await?;
         let mut ids = HashSet::new();
         let mut chunks = Vec::with_capacity(rows.len());
         for row in rows {
             if row.page_id != page_id || !ids.insert(row.chunk_id.clone()) {
-                return Err(ChunkTableError::InvalidRows("invalid persisted page membership".into()));
+                return Err(ChunkTableError::InvalidRows(
+                    "invalid persisted page membership".into(),
+                ));
             }
             chunks.push(IndexedChunk {
                 schema_version: SchemaVersion::V1,
@@ -1086,7 +1092,7 @@ impl LanceChunkTable {
                 links: row.links,
             });
         }
-        chunks.sort_by(|a,b| a.chunk_id.cmp(&b.chunk_id));
+        chunks.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
         Ok(chunks)
     }
 
@@ -1543,7 +1549,9 @@ fn decode_stored_chunks(batches: &[RecordBatch]) -> Result<Vec<StoredChunk>, Chu
         let vectors = vector_column(batch, "vector")?;
         for row in 0..batch.num_rows() {
             if versions.value(row) != CANONICAL_CHUNK_SCHEMA_VERSION {
-                return Err(ChunkTableError::InvalidSchema("persisted chunk version mismatch".into()));
+                return Err(ChunkTableError::InvalidSchema(
+                    "persisted chunk version mismatch".into(),
+                ));
             }
             rows.push(StoredChunk {
                 last_edited_time: edited.value(row).to_owned(),
@@ -1556,7 +1564,8 @@ fn decode_stored_chunks(batches: &[RecordBatch]) -> Result<Vec<StoredChunk>, Chu
                 root_page_id: roots.value(row).to_owned(),
                 workspace_id: workspaces.value(row).to_owned(),
                 database_id: (!databases.is_null(row)).then(|| databases.value(row).to_owned()),
-                data_source_id: (!data_sources.is_null(row)).then(|| data_sources.value(row).to_owned()),
+                data_source_id: (!data_sources.is_null(row))
+                    .then(|| data_sources.value(row).to_owned()),
                 properties: serde_json::from_str(properties.value(row))?,
                 links: serde_json::from_str(links.value(row))?,
                 text: texts.value(row).to_owned(),
