@@ -671,6 +671,154 @@ mod tests {
         ));
     }
 
+    fn sealed_store() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf, GrantStore) {
+        use std::{fs, os::unix::fs::PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("grant.key");
+        fs::write(&key, [42u8; 32]).unwrap();
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
+        let state = dir.path().join("sealed-grant");
+        let policy = NotionOwnerPolicy::new("workspace-123", "user-456").unwrap();
+        let store = GrantStore::open(&key, &state, "test-client", policy).unwrap();
+        (dir, key, state, store)
+    }
+
+    #[tokio::test]
+    async fn verified_callback_persists_encrypted_grant_without_approving_mcp() {
+        use std::fs;
+        let (redirect, flow, registration, allowed) = setup();
+        let (_dir, key, state_file, store) = sealed_store();
+        let start = redirect.begin(&flow, &request()).unwrap();
+        let state = state(start.expose()).to_owned();
+        let (endpoint, task) =
+            token_server(grant_json("workspace-123", "user", "user-456"), 200).await;
+        let client = NotionTokenClient::new(&registration, SECRET)
+            .unwrap()
+            .for_local_fixture(&endpoint);
+        let persisted = NotionCallback::new(&redirect, &client, &allowed)
+            .complete_and_persist(&format!("code=notion-code&state={state}"), &store)
+            .await
+            .unwrap();
+        task.await.unwrap();
+        assert_eq!(persisted.epoch(), 1);
+        assert_eq!(persisted.owner_user_id(), "user-456");
+        assert_eq!(persisted.workspace_id(), "workspace-123");
+        assert_eq!(persisted.bot_id(), "bot-123");
+        let encrypted = fs::read(&state_file).unwrap();
+        for text in [
+            "secret_access_value",
+            "secret_refresh_value",
+            "workspace-123",
+            "user-456",
+        ] {
+            assert!(!encrypted.windows(text.len()).any(|part| part == text.as_bytes()));
+        }
+        let reopened = GrantStore::open(
+            &key,
+            &state_file,
+            "test-client",
+            NotionOwnerPolicy::new("workspace-123", "user-456").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            reopened.load_for_refresh().unwrap().unwrap().grant_id(),
+            persisted.grant_id()
+        );
+        // Callback state is single-use, and persistence alone never issues
+        // an MCP authorization code or access token.
+        assert!(redirect.take(&state).is_none());
+        assert!(matches!(
+            NotionCallback::new(&redirect, &client, &allowed)
+                .complete_and_persist(&format!("code=replay&state={state}"), &store)
+                .await,
+            Err(PersistError::Callback(CallbackError::InvalidState))
+        ));
+        assert!(format!("{persisted:?}").contains("REDACTED"));
+    }
+
+    #[tokio::test]
+    async fn foreign_client_is_denied_before_state_consumption_or_network() {
+        let (redirect, flow, registration, allowed) = setup();
+        let (_dir, key, file, _store) = sealed_store();
+        let wrong_store = GrantStore::open(&key, &file, "different-client", allowed.clone()).unwrap();
+        let start = redirect.begin(&flow, &request()).unwrap();
+        let state = state(start.expose()).to_owned();
+        let client = NotionTokenClient::new(&registration, SECRET)
+            .unwrap()
+            .for_local_fixture("http://127.0.0.1:1/v1/oauth/token");
+        assert!(matches!(
+            NotionCallback::new(&redirect, &client, &allowed)
+                .complete_and_persist(&format!("code=secret&state={state}"), &wrong_store)
+                .await,
+            Err(PersistError::Store(StoreError::IdentityMismatch))
+        ));
+        assert!(redirect.take(&state).is_some());
+        assert!(wrong_store.load().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn wrong_owner_or_bot_cannot_replace_existing_sealed_grant() {
+        use std::fs;
+        for (workspace, owner, bot_change) in [
+            ("wrong-workspace", "user-456", false),
+            ("workspace-123", "wrong-user", false),
+            ("workspace-123", "user-456", true),
+        ] {
+            let (redirect, flow, registration, allowed) = setup();
+            let (_dir, _key, path, store) = sealed_store();
+            // Existing state has bot-test, whereas a matching callback
+            // from the fixture exchanges a different bot-123 integration.
+            store
+                .save(&NotionGrant::fixture("workspace-123", "user-456", Some(3600)))
+                .unwrap();
+            let before = fs::read(&path).unwrap();
+            let start = redirect.begin(&flow, &request()).unwrap();
+            let (endpoint, task) = token_server(grant_json(workspace, "user", owner), 200).await;
+            let client = NotionTokenClient::new(&registration, SECRET)
+                .unwrap()
+                .for_local_fixture(&endpoint);
+            let error = NotionCallback::new(&redirect, &client, &allowed)
+                .complete_and_persist(
+                    &format!("code=auth-code&state={}", state(start.expose())),
+                    &store,
+                )
+                .await
+                .unwrap_err();
+            if bot_change {
+                assert_eq!(error, PersistError::Store(StoreError::IdentityMismatch));
+            } else {
+                assert_eq!(error, PersistError::Callback(CallbackError::IdentityMismatch));
+            }
+            task.await.unwrap();
+            assert_eq!(fs::read(&path).unwrap(), before);
+            assert!(!format!("{error:?} {error}").contains("secret_access_value"));
+        }
+    }
+
+    #[tokio::test]
+    async fn corrupt_or_unsafe_sealed_state_never_gets_overwritten() {
+        use std::fs;
+        let (redirect, flow, registration, allowed) = setup();
+        let (_dir, _key, path, store) = sealed_store();
+        fs::write(&path, b"corrupted-secret-state").unwrap();
+        let before = fs::read(&path).unwrap();
+        let start = redirect.begin(&flow, &request()).unwrap();
+        let (endpoint, task) = token_server(grant_json("workspace-123", "user", "user-456"), 200).await;
+        let client = NotionTokenClient::new(&registration, SECRET)
+            .unwrap()
+            .for_local_fixture(&endpoint);
+        let error = NotionCallback::new(&redirect, &client, &allowed)
+            .complete_and_persist(
+                &format!("code=auth-code&state={}", state(start.expose())),
+                &store,
+            )
+            .await
+            .unwrap_err();
+        task.await.unwrap();
+        assert_eq!(error, PersistError::Store(StoreError::Corrupt));
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
     #[test]
     fn strict_callback_query_denies_duplicate_params_and_injected_values() {
         const STATE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
