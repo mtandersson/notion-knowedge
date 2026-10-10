@@ -77,6 +77,15 @@ pub trait GraphEdgeStore: Send + Sync {
         edges: &[GraphEdge],
     ) -> Result<(), SyncStateError>;
 
+    /// Atomically replace only relation-property edges for this page. Other
+    /// edge families (such as future Markdown links) must be left intact.
+    /// Empty input removes stale relation edges, e.g. deleted properties.
+    fn replace_page_relation_edges(
+        &self,
+        source_page_id: &str,
+        edges: &[GraphEdge],
+    ) -> Result<(), SyncStateError>;
+
     fn edges_from(&self, source_page_id: &str) -> Result<Vec<GraphEdge>, SyncStateError>;
 
     /// Only resolved targets can be queried as authoritative graph nodes.
