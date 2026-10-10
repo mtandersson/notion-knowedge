@@ -70,6 +70,14 @@ impl<'a> NotionRefresh<'a> {
             .load_for_refresh()
             .map_err(map_store)?
             .ok_or(RefreshError::NoGrant)?;
+        // The coordinator's allowlist is an independent trust boundary from
+        // the storage policy. Check it even when no network refresh is needed.
+        if !self
+            .policy
+            .matches(existing.workspace_id(), existing.owner_user_id())
+        {
+            return Err(RefreshError::InvalidIdentity);
+        }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| RefreshError::StoreUnavailable)?
@@ -265,6 +273,23 @@ mod tests {
         let result = refresh.ensure_fresh().await.unwrap();
         assert_eq!(result.epoch(), before.epoch());
         assert_eq!(result.grant_id(), before.grant_id());
+    }
+
+    #[tokio::test]
+    async fn mismatched_coordinator_policy_denies_even_healthy_cached_grant() {
+        let (_dir, store, _policy, _) = setup();
+        store
+            .save(&NotionGrant::fixture("workspace-a", "user-a", Some(3600)))
+            .unwrap();
+        // A different runtime policy must never bypass checks just because
+        // a sealed token is not close to expiration.
+        let incompatible = NotionOwnerPolicy::new("different-workspace", "user-a").unwrap();
+        let http = client("http://127.0.0.1:1/v1/oauth/token");
+        let refresh = NotionRefresh::new(&store, &http, &incompatible);
+        assert!(matches!(
+            refresh.ensure_fresh().await,
+            Err(RefreshError::InvalidIdentity)
+        ));
     }
 
     #[tokio::test]
