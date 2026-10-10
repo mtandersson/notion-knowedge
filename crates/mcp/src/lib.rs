@@ -118,7 +118,11 @@ impl KnowledgeServer {
         let gate = notion_knowledge_core::root_scope::RootScopeGate::new(source, scope)
             .map_err(|_| "invalid authoritative root scope")?;
         if self.root_page_ids.iter().any(|id| {
-            !gate.configured_scope().roots.iter().any(|root| &root.0 == id)
+            !gate
+                .configured_scope()
+                .roots
+                .iter()
+                .any(|root| &root.0 == id)
         }) {
             return Err("configured index roots must belong to authoritative scope");
         }
@@ -205,7 +209,11 @@ impl KnowledgeServer {
         }
         if let Some(gate) = &self.root_gate
             && root_page_ids.iter().any(|id| {
-                !gate.configured_scope().roots.iter().any(|root| &root.0 == id)
+                !gate
+                    .configured_scope()
+                    .roots
+                    .iter()
+                    .any(|root| &root.0 == id)
             })
         {
             return Err("configured index roots must belong to authoritative scope");
@@ -299,7 +307,9 @@ impl ServerHandler for KnowledgeServer {
                     ));
                 }
                 let Some(gate) = &self.root_gate else {
-                    return Ok(error("root_scope_unavailable: trusted root authorization is not configured"));
+                    return Ok(error(
+                        "root_scope_unavailable: trusted root authorization is not configured",
+                    ));
                 };
                 let filters = input.filters;
                 let page_ids = filters.as_ref().and_then(|f| f.page_ids.clone());
@@ -325,7 +335,11 @@ impl ServerHandler for KnowledgeServer {
                     root_page_ids = Some(roots);
                 }
                 let effective_roots = root_page_ids.clone().unwrap_or_else(|| {
-                    gate.configured_scope().roots.iter().map(|r| r.0.clone()).collect()
+                    gate.configured_scope()
+                        .roots
+                        .iter()
+                        .map(|r| r.0.clone())
+                        .collect()
                 });
                 // Explicit caller-supplied IDs must be authorized before search.
                 if let Some(ids) = &page_ids {
@@ -335,7 +349,10 @@ impl ServerHandler for KnowledgeServer {
                             return Ok(error("source_not_accessible: page not in approved scope"));
                         };
                         if !permit.belongs_to_any(&effective_roots)
-                            || gate.revalidate(&permit, gate.configured_scope()).await.is_err()
+                            || gate
+                                .revalidate(&permit, gate.configured_scope())
+                                .await
+                                .is_err()
                         {
                             return Ok(error("source_not_accessible: page not in approved scope"));
                         }
@@ -415,14 +432,22 @@ impl ServerHandler for KnowledgeServer {
                     {
                         // Indexed source metadata is not authorization evidence.
                         for hit in &results {
-                            let page = notion_knowledge_core::backend::PageId(hit.source.page_id.clone());
+                            let page =
+                                notion_knowledge_core::backend::PageId(hit.source.page_id.clone());
                             let Ok(permit) = gate.authorize(&page).await else {
-                                return Ok(error("source_not_accessible: search returned unapproved page"));
+                                return Ok(error(
+                                    "source_not_accessible: search returned unapproved page",
+                                ));
                             };
                             if !permit.belongs_to_any(&effective_roots)
-                                || gate.revalidate(&permit, gate.configured_scope()).await.is_err()
+                                || gate
+                                    .revalidate(&permit, gate.configured_scope())
+                                    .await
+                                    .is_err()
                             {
-                                return Ok(error("source_not_accessible: search returned unapproved page"));
+                                return Ok(error(
+                                    "source_not_accessible: search returned unapproved page",
+                                ));
                             }
                         }
                         for hit in &mut results {
@@ -466,7 +491,9 @@ impl ServerHandler for KnowledgeServer {
                     .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
 
                 let Some(gate) = &self.root_gate else {
-                    return Ok(error("root_scope_unavailable: trusted root authorization is not configured"));
+                    return Ok(error(
+                        "root_scope_unavailable: trusted root authorization is not configured",
+                    ));
                 };
                 let refs: Vec<_> = input
                     .refs
@@ -475,7 +502,11 @@ impl ServerHandler for KnowledgeServer {
                     .collect();
                 let max_chars = input.max_chars as usize;
                 let authorized_roots: Vec<String> = if self.root_page_ids.is_empty() {
-                    gate.configured_scope().roots.iter().map(|r| r.0.clone()).collect()
+                    gate.configured_scope()
+                        .roots
+                        .iter()
+                        .map(|r| r.0.clone())
+                        .collect()
                 } else {
                     self.root_page_ids.iter().cloned().collect()
                 };
@@ -486,7 +517,10 @@ impl ServerHandler for KnowledgeServer {
                             return Ok(error("source_not_accessible: page not in approved scope"));
                         };
                         if !permit.belongs_to_any(&authorized_roots)
-                            || gate.revalidate(&permit, gate.configured_scope()).await.is_err()
+                            || gate
+                                .revalidate(&permit, gate.configured_scope())
+                                .await
+                                .is_err()
                         {
                             return Ok(error("source_not_accessible: page not in approved scope"));
                         }
@@ -504,23 +538,27 @@ impl ServerHandler for KnowledgeServer {
                 };
                 match adapter.expand(query).await {
                     Ok(mut sources)
-                        if get::valid_output(
-                            &sources,
-                            &refs,
-                            max_chars,
-                            &authorized_roots,
-                        ) =>
+                        if get::valid_output(&sources, &refs, max_chars, &authorized_roots) =>
                     {
                         // Chunk IDs resolve to page identities only after expansion.
                         for source in &sources {
-                            let page = notion_knowledge_core::backend::PageId(source.provenance.page_id.clone());
+                            let page = notion_knowledge_core::backend::PageId(
+                                source.provenance.page_id.clone(),
+                            );
                             let Ok(permit) = gate.authorize(&page).await else {
-                                return Ok(error("source_not_accessible: expanded page not in approved scope"));
+                                return Ok(error(
+                                    "source_not_accessible: expanded page not in approved scope",
+                                ));
                             };
                             if !permit.belongs_to_any(&authorized_roots)
-                                || gate.revalidate(&permit, gate.configured_scope()).await.is_err()
+                                || gate
+                                    .revalidate(&permit, gate.configured_scope())
+                                    .await
+                                    .is_err()
                             {
-                                return Ok(error("source_not_accessible: expanded page not in approved scope"));
+                                return Ok(error(
+                                    "source_not_accessible: expanded page not in approved scope",
+                                ));
                             }
                         }
                         if input.freshness == get::Freshness::Fresh {
@@ -552,14 +590,23 @@ impl ServerHandler for KnowledgeServer {
                         }
                         // A fresh read may race a move; inspect again before disclosure.
                         for source in &sources {
-                            let page = notion_knowledge_core::backend::PageId(source.provenance.page_id.clone());
+                            let page = notion_knowledge_core::backend::PageId(
+                                source.provenance.page_id.clone(),
+                            );
                             let Ok(permit) = gate.authorize(&page).await else {
-                                return Ok(error("source_not_accessible: page moved outside approved scope"));
+                                return Ok(error(
+                                    "source_not_accessible: page moved outside approved scope",
+                                ));
                             };
                             if !permit.belongs_to_any(&authorized_roots)
-                                || gate.revalidate(&permit, gate.configured_scope()).await.is_err()
+                                || gate
+                                    .revalidate(&permit, gate.configured_scope())
+                                    .await
+                                    .is_err()
                             {
-                                return Ok(error("source_not_accessible: page moved outside approved scope"));
+                                return Ok(error(
+                                    "source_not_accessible: page moved outside approved scope",
+                                ));
                             }
                         }
                         if !output_fits_budget(&sources) {
