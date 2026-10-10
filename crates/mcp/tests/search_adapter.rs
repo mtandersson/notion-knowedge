@@ -294,8 +294,9 @@ async fn configured_hybrid_fuses_both_ports_and_serializes_path_provenance() {
             .unwrap(),
         &["workspace"]
     );
-    assert_eq!(results[0]["matched_paths"], json!(["lexical"]));
-    assert_eq!(results[1]["matched_paths"], json!(["semantic"]));
+    // Equal RRF scores sort by canonical page identity: semantic UUID first.
+    assert_eq!(results[0]["matched_paths"], json!(["semantic"]));
+    assert_eq!(results[1]["matched_paths"], json!(["lexical"]));
     for calls in [
         semantic.calls.lock().unwrap()[0].page_ids.clone(),
         lexical.calls.lock().unwrap()[0].page_ids.clone(),
