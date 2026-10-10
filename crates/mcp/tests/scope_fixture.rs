@@ -63,10 +63,13 @@ impl PageLifecycle for Fixture {
             } else {
                 vec![
                     node(&page.0, parent),
-                    node(ROOT, PhysicalParent::Object {
-                        kind: LifecycleKind::Page,
-                        id: ALLOWED_ROOT.into(),
-                    }),
+                    node(
+                        ROOT,
+                        PhysicalParent::Object {
+                            kind: LifecycleKind::Page,
+                            id: ALLOWED_ROOT.into(),
+                        },
+                    ),
                     node(ALLOWED_ROOT, PhysicalParent::Workspace),
                 ]
             };
@@ -96,17 +99,19 @@ impl PageLifecycle for Fixture {
 }
 
 pub fn secured(handler: KnowledgeServer) -> KnowledgeServer {
-    handler.and_authoritative_scope(
-        Arc::new(Fixture),
-        LifecycleScope {
-            workspace_id: WORKSPACE.into(),
-            generation: 1,
-            roots: vec![
-                PageId(ROOT.into()),
-                PageId(OTHER_ROOT.into()),
-                PageId(ALLOWED_ROOT.into()),
-            ],
-            exclusions: ExclusionRules::default(),
-        },
-    ).unwrap()
+    handler
+        .and_authoritative_scope(
+            Arc::new(Fixture),
+            LifecycleScope {
+                workspace_id: WORKSPACE.into(),
+                generation: 1,
+                roots: vec![
+                    PageId(ROOT.into()),
+                    PageId(OTHER_ROOT.into()),
+                    PageId(ALLOWED_ROOT.into()),
+                ],
+                exclusions: ExclusionRules::default(),
+            },
+        )
+        .unwrap()
 }
