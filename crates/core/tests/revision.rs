@@ -144,7 +144,9 @@ async fn concurrent_edit_blocks_stale_write_and_explicit_refresh_allows_retry() 
         source.markdown = "An unrelated human edit".into();
     }
 
-    let error = check_revision(&reader, &target(), &stale).await.unwrap_err();
+    let error = check_revision(&reader, &target(), &stale)
+        .await
+        .unwrap_err();
     let RevisionError::Conflict(metadata) = error else {
         panic!("a stale revision must produce a conflict");
     };
@@ -154,13 +156,11 @@ async fn concurrent_edit_blocks_stale_write_and_explicit_refresh_allows_retry() 
 
     // Caller must re-fetch and consciously construct a new precondition.
     let reread = reader.fetch_page(&target()).await.unwrap();
-    assert!(check_revision(
-        &reader,
-        &target(),
-        &time_only(&reread.last_edited_time)
-    )
-    .await
-    .is_ok());
+    assert!(
+        check_revision(&reader, &target(), &time_only(&reread.last_edited_time))
+            .await
+            .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -215,20 +215,29 @@ async fn archived_or_inconsistent_source_fails_closed_without_content_in_errors(
     reader.current.lock().unwrap().page.id = PageId("different".into());
     assert!(matches!(
         check_revision(&reader, &target(), &time_only(T0)).await,
-        Err(RevisionError::Read(BackendError { kind: BackendErrorKind::Internal, .. }))
+        Err(RevisionError::Read(BackendError {
+            kind: BackendErrorKind::Internal,
+            ..
+        }))
     ));
 
     let reader = fixture();
     reader.current.lock().unwrap().page.last_edited_time = "malformed".into();
     assert!(matches!(
         check_revision(&reader, &target(), &time_only(T0)).await,
-        Err(RevisionError::Read(BackendError { kind: BackendErrorKind::Internal, .. }))
+        Err(RevisionError::Read(BackendError {
+            kind: BackendErrorKind::Internal,
+            ..
+        }))
     ));
 
     let mut reader = fixture();
     reader.failure = Some(BackendErrorKind::Unavailable);
     assert!(matches!(
         check_revision(&reader, &target(), &time_only(T0)).await,
-        Err(RevisionError::Read(BackendError { kind: BackendErrorKind::Unavailable, .. }))
+        Err(RevisionError::Read(BackendError {
+            kind: BackendErrorKind::Unavailable,
+            ..
+        }))
     ));
 }
