@@ -148,6 +148,7 @@ async fn exercise(health_protected: bool) {
             .bearer_auth(TOKEN)
             .header("mcp-session-id", &session)
             .header("mcp-protocol-version", "2025-03-26")
+            .header("accept", "application/json, text/event-stream")
             .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
             .send()
             .await
