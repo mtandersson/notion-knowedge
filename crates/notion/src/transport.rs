@@ -1,10 +1,11 @@
 //! Shared request admission and conservative replay policy. No payload diagnostics.
 use crate::NotionClient;
 use notion_knowledge_core::backend::{BackendError, BackendErrorKind};
+use notion_knowledge_core::logging::{self, Level, Operation, Outcome};
 use reqwest::{RequestBuilder, Response};
 use std::{
     sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
+    time::{Duration, Instant as StdInstant},
 };
 use tokio::{sync::Mutex, time::Instant};
 
@@ -127,6 +128,36 @@ impl NotionClient {
         self
     }
     pub(crate) async fn send(
+        &self,
+        request: RequestBuilder,
+        replay_safe: bool,
+        operation: &'static str,
+    ) -> Result<Response, BackendError> {
+        let id = logging::current_id();
+        let started = StdInstant::now();
+        let result = self.send_inner(request, replay_safe, operation).await;
+        let (outcome, status) = match &result {
+            Ok(response) if response.status().is_success() => {
+                (Outcome::Success, Some(response.status().as_u16()))
+            }
+            Ok(response) if response.status().is_client_error() => {
+                (Outcome::Rejected, Some(response.status().as_u16()))
+            }
+            Ok(response) => (Outcome::Failed, Some(response.status().as_u16())),
+            Err(_) => (Outcome::Failed, None),
+        };
+        logging::emit(
+            &id,
+            Operation::NotionApi,
+            outcome,
+            started.elapsed(),
+            status,
+            if matches!(outcome, Outcome::Failed) { Level::Warn } else { Level::Info },
+        );
+        result
+    }
+
+    async fn send_inner(
         &self,
         request: RequestBuilder,
         replay_safe: bool,
