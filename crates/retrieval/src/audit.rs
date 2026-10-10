@@ -27,7 +27,8 @@ impl SqliteAuditStore {
             use std::{io::ErrorKind, os::unix::fs::OpenOptionsExt};
             // SQLite's default CREATE mode can briefly be readable before a
             // subsequent chmod. Pre-create privately, even under a permissive
-            // process umask. Never follow an existing symlink at open.
+            // process umask. Reject pre-existing symlinks; the operator-private
+            // parent directory must prevent path replacement during open.
             match fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -274,7 +275,10 @@ mod tests {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+                assert_eq!(
+                    fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
             }
         }
         {
