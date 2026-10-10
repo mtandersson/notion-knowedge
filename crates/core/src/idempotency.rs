@@ -125,11 +125,22 @@ impl VerifiedReceipt {
         url: String,
         last_edited_time: String,
     ) -> Result<Self, IdempotencyError> {
+        let trusted_url = url::Url::parse(&url).ok().is_some_and(|parsed| {
+            let host = parsed.host_str().unwrap_or_default();
+            let notion_host = matches!(host, "notion.so" | "www.notion.so" | "app.notion.com")
+                || host == "notion.site"
+                || host.ends_with(".notion.site");
+            parsed.scheme() == "https"
+                && parsed.username().is_empty()
+                && parsed.password().is_none()
+                && parsed.port().is_none()
+                && notion_host
+        });
         if page_id.is_empty()
             || page_id.len() > 128
             || page_id.chars().any(char::is_control)
             || url.len() > 2048
-            || !url.starts_with("https://")
+            || !trusted_url
             || chrono::DateTime::parse_from_rfc3339(&last_edited_time).is_err()
         {
             return Err(IdempotencyError::InvalidInput);
