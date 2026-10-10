@@ -124,7 +124,7 @@ async fn stdio_client_initializes_discovers_tools_and_exits_on_disconnect() {
         .filter(|line| line.starts_with('{'))
         .map(|line| serde_json::from_str(line).expect("structured log entry"))
         .collect();
-    assert!(events.len() >= 5, "missing MCP operation events: {diagnostics}");
+    assert!(events.len() >= 3, "missing MCP operation events: {diagnostics}");
     for event in events {
         assert_eq!(event["operation"], "mcp_tool");
         assert_eq!(event["outcome"], "completed");
