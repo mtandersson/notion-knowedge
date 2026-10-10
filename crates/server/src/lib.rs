@@ -28,5 +28,8 @@ pub mod notion_grant_store;
 /// Server-only serialized Notion refresh and sealed credential rotation (#124).
 pub mod notion_oauth_refresh;
 
+/// Trusted Notion scope composition shared by HTTP and stdio.
+pub mod root_scope;
+
 /// Single shared HTTP-process Notion OAuth credential composition (#299).
 pub mod notion_oauth_runtime;

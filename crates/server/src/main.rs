@@ -188,11 +188,17 @@ async fn main() -> ExitCode {
     }
 
     eprintln!("Serving MCP over stdio.");
-    let service = match notion_knowledge_mcp::KnowledgeServer::default()
-        .with_read_only(config.read_only)
-        .serve(stdio())
-        .await
-    {
+    let handler = match notion_knowledge_server::root_scope::attach_root_scope(
+        notion_knowledge_mcp::KnowledgeServer::default(),
+        &config,
+    ) {
+        Ok(handler) => handler.with_read_only(config.read_only),
+        Err(error) => {
+            eprintln!("MCP root policy error: {}", safe_error(&error));
+            return ExitCode::FAILURE;
+        }
+    };
+    let service = match handler.serve(stdio()).await {
         Ok(service) => service,
         Err(_) => {
             eprintln!("MCP stdio initialization failed.");
