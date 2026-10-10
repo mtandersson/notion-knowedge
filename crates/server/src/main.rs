@@ -194,7 +194,8 @@ async fn main() -> ExitCode {
     ) {
         Ok(handler) => handler
             .with_read_only(config.read_only)
-            .with_destructive_writes_enabled(config.destructive_writes_enabled),
+            .with_destructive_writes_enabled(config.destructive_writes_enabled)
+            .with_capability_policy(config.capability_policy.clone()),
         Err(error) => {
             eprintln!("MCP root policy error: {}", safe_error(&error));
             return ExitCode::FAILURE;
