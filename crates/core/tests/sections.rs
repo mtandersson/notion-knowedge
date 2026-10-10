@@ -186,11 +186,20 @@ fn unsupported_enhanced_notion_markup_in_selected_body_is_denied() {
 #[test]
 fn unaffected_enhanced_markup_is_not_rewritten() {
     let original =
-        "# Page\n<unknown alt=\"keep\"/>\n## Target\nold\n## Next\n<page url=\"keep\"/>\n";
+        "# Page\n<unknown alt=\"keep\"/>\n\n## Target\nold\n## Next\n<page url=\"keep\"/>\n";
     let p = plan(original, 2, "Target", "new\n");
     assert_eq!(
         p.preview(),
-        "# Page\n<unknown alt=\"keep\"/>\n## Target\nnew\n## Next\n<page url=\"keep\"/>\n"
+        "# Page\n<unknown alt=\"keep\"/>\n\n## Target\nnew\n## Next\n<page url=\"keep\"/>\n"
+    );
+}
+
+#[test]
+fn raw_html_without_safe_block_boundary_does_not_guess_an_anchor() {
+    let original = "# Page\n<unknown alt=\"keep\"/>\n## Target\nold\n";
+    assert_eq!(
+        plan_section(original, at(2, "Target"), "new\n").unwrap_err(),
+        SectionError::NotFound
     );
 }
 
