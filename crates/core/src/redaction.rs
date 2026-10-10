@@ -60,15 +60,15 @@ fn skip_secret_value(value: &str) -> Option<usize> {
     (length != 0).then_some(length)
 }
 
-fn credential_length(value: &str, prev: Option<char>) -> Option<usize> {
+fn credential_length(value: &str, prev: Option<char>) -> Option<(usize, usize)> {
     if prev.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
         return None;
     }
 
-    // Header-style "Bearer <token>" without a named key.
-    if has_prefix(value, "bearer ") {
-        let token_start = "bearer ".len();
-        return skip_secret_value(&value[token_start..]).map(|n| token_start + n);
+    // Header-style Bearer credentials permit spaces or tabs as separators.
+    if has_prefix(value, "bearer") && value.as_bytes().get(6).is_some_and(u8::is_ascii_whitespace) {
+        let token_start = 6 + value[6..].len() - value[6..].trim_start().len();
+        return skip_secret_value(&value[token_start..]).map(|n| (token_start + n, token_start));
     }
 
     for key in CREDENTIAL_KEYS {
@@ -106,11 +106,24 @@ fn credential_length(value: &str, prev: Option<char>) -> Option<usize> {
         {
             next += 1;
         }
-        if *key == "authorization" && has_prefix(&value[next..], "bearer ") {
-            next += "bearer ".len();
+        // Preserve the credential key for actionable configuration diagnostics.
+        let value_start = next;
+        if *key == "authorization" {
+            // Unquoted header values contain an auth scheme and a credential.
+            // Quoted values are consumed in full by skip_secret_value below.
+            let suffix = &value[next..];
+            if let Some(separator) = suffix.find(char::is_whitespace)
+                && !suffix.starts_with(['"', '\''])
+                && suffix[..separator]
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+            {
+                next += separator;
+                next += value[next..].len() - value[next..].trim_start().len();
+            }
         }
         if let Some(length) = skip_secret_value(&value[next..]) {
-            return Some(next + length);
+            return Some((next + length, value_start));
         }
     }
     None
@@ -149,17 +162,22 @@ pub fn redact_for_log(input: &str) -> String {
         let value = &input[index..];
         let replacement = if has_prefix(value, "https://") || has_prefix(value, "http://") {
             let length = value.find(terminates_url).unwrap_or(value.len());
-            Some((length, REDACTED_URL))
-        } else if let Some(length) = credential_length(value, last) {
-            Some((length, REDACTED_SECRET))
+            Some((length, 0, REDACTED_URL))
+        } else if let Some((length, prefix)) = credential_length(value, last) {
+            Some((length, prefix, REDACTED_SECRET))
         } else {
-            secret_prefix_length(value, last).map(|length| (length, REDACTED_SECRET))
+            secret_prefix_length(value, last).map(|length| (length, 0, REDACTED_SECRET))
         };
-        if let Some((length, substitute)) = replacement {
+        if let Some((length, prefix, substitute)) = replacement {
             // Avoid accepting an empty URL and getting stuck on malformed text.
             if length > 0 {
-                output.push_str(substitute);
-                emitted += substitute.chars().count();
+                for ch in value[..prefix].chars().chain(substitute.chars()) {
+                    if emitted == MAX_LOG_CHARS {
+                        break;
+                    }
+                    output.push(ch);
+                    emitted += 1;
+                }
                 last = value[..length].chars().next_back();
                 index += length;
                 continue;
@@ -189,6 +207,24 @@ mod tests {
         assert!(!safe.contains("secret_examplevalue"));
         assert!(!safe.contains("ntn_examplevalue"));
         assert!(safe.contains("[REDACTED_SECRET]"));
+    }
+
+    #[test]
+    fn preserves_setting_names_and_removes_header_credentials() {
+        let safe = redact_for_log("NOTION_TOKEN: invalid value");
+        assert!(safe.contains("NOTION_TOKEN"));
+        assert!(!safe.contains("invalid"));
+        for input in [
+            "Authorization: Basic c3ludGhldGljOmNyZWRlbnRpYWw=",
+            "Authorization: Bearer\tfixture-credential",
+            "Bearer\tfixture-credential",
+            "Authorization: \"Basic fixture-credential\"",
+        ] {
+            let safe = redact_for_log(input);
+            assert!(!safe.contains("fixture-credential"));
+            assert!(!safe.contains("c3ludGhldGlj"));
+            assert!(safe.contains("[REDACTED_SECRET]"));
+        }
     }
 
     #[test]
@@ -225,5 +261,9 @@ mod tests {
         let output = redact_for_log(&"x".repeat(5000));
         assert!(output.ends_with("[TRUNCATED]"));
         assert_eq!(output.len(), 4096 + "[TRUNCATED]".len());
+        let padded = format!("token={}private-value trailing", " ".repeat(5000));
+        let output = redact_for_log(&padded);
+        assert!(output.chars().count() <= 4096 + "[TRUNCATED]".len());
+        assert!(!output.contains("private-value"));
     }
 }

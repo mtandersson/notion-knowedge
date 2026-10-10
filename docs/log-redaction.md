@@ -23,6 +23,8 @@ The sanitizer:
   (including `NOTION_TOKEN`, `access_token`, `refresh_token`,
   `client_secret`, `api_key`, `authorization`) and recognizable
   `secret_`, `ntn_`, `sk-` token forms with `[REDACTED_SECRET]`;
+  credential setting names are retained for actionable configuration errors,
+  and unquoted Authorization schemes (including Basic) are consumed with their credentials;
 - bounds the resulting diagnostic to 4,096 Unicode characters plus a
   truncation marker. Nonsecret UTF-8 diagnostic context is preserved.
 
