@@ -551,6 +551,7 @@ impl ServerHandler for KnowledgeServer {
                                 ));
                             };
                             if !permit.belongs_to_any(&authorized_roots)
+                                || !permit.belongs_to_any(&[source.provenance.root_page_id.clone()])
                                 || gate
                                     .revalidate(&permit, gate.configured_scope())
                                     .await
@@ -599,6 +600,7 @@ impl ServerHandler for KnowledgeServer {
                                 ));
                             };
                             if !permit.belongs_to_any(&authorized_roots)
+                                || !permit.belongs_to_any(&[source.provenance.root_page_id.clone()])
                                 || gate
                                     .revalidate(&permit, gate.configured_scope())
                                     .await
