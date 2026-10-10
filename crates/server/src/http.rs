@@ -11,7 +11,7 @@ const MAX_MCP_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 use axum::{
     body::{Body, to_bytes},
     extract::{Request, State},
-    http::{Method, StatusCode, HeaderValue, header::CONTENT_TYPE},
+    http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
@@ -115,7 +115,11 @@ async fn correlate_request(request: Request, next: Next) -> Response {
         outcome,
         started.elapsed(),
         Some(status.as_u16()),
-        if status.is_server_error() { Level::Warn } else { Level::Info },
+        if status.is_server_error() {
+            Level::Warn
+        } else {
+            Level::Info
+        },
     );
     response
 }
