@@ -166,7 +166,10 @@ fn committing_requires_a_reservation_and_never_changes_an_existing_receipt() {
         store.record_verified(&operation, &changed),
         Err(IdempotencyError::KeyConflict)
     );
-    assert_eq!(store.begin(&operation).unwrap(), Reservation::Replay(receipt()));
+    assert_eq!(
+        store.begin(&operation).unwrap(),
+        Reservation::Replay(receipt())
+    );
 }
 
 #[test]
@@ -186,7 +189,10 @@ fn simultaneous_process_connections_reserve_only_once() {
             })
         })
         .collect();
-    let decisions: Vec<_> = threads.into_iter().map(|task| task.join().unwrap()).collect();
+    let decisions: Vec<_> = threads
+        .into_iter()
+        .map(|task| task.join().unwrap())
+        .collect();
     assert_eq!(
         decisions
             .iter()
@@ -211,7 +217,10 @@ fn ledger_loss_and_malformed_preconditions_fail_closed() {
         Err(IdempotencyError::Unavailable)
     ));
     let store = SqliteIdempotencyStore::initialize_new(db.path()).unwrap();
-    assert_eq!(store.begin(&claim(KEY, "body")).unwrap(), Reservation::ExecuteOnce);
+    assert_eq!(
+        store.begin(&claim(KEY, "body")).unwrap(),
+        Reservation::ExecuteOnce
+    );
     drop(store);
     assert!(matches!(
         SqliteIdempotencyStore::initialize_new(db.path()),
@@ -236,7 +245,13 @@ fn ledger_loss_and_malformed_preconditions_fail_closed() {
         );
     }
     assert_eq!(
-        MutationClaim::new("trusted-workspace-1", KEY, MutationOperation::Append, "page-123", "invalid"),
+        MutationClaim::new(
+            "trusted-workspace-1",
+            KEY,
+            MutationOperation::Append,
+            "page-123",
+            "invalid"
+        ),
         Err(IdempotencyError::InvalidInput)
     );
 }
