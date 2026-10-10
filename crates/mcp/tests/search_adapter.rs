@@ -141,7 +141,10 @@ async fn semantic_calls_preserve_citations_and_pass_filters_to_domain_port() {
     );
     let calls = adapter.calls.lock().unwrap();
     assert_eq!(calls[0].page_ids.as_ref().unwrap().len(), 2);
-    assert_eq!(calls[0].root_page_ids.as_ref().unwrap(), &["22222222-2222-2222-2222-222222222222"]);
+    assert_eq!(
+        calls[0].root_page_ids.as_ref().unwrap(),
+        &["22222222-2222-2222-2222-222222222222"]
+    );
 }
 #[tokio::test]
 async fn lexical_mode_calls_lexical_port_and_preserves_filters_and_citations() {
@@ -162,7 +165,10 @@ async fn lexical_mode_calls_lexical_port_and_preserves_filters_and_citations() {
 
     assert!(response.get("error").is_none());
     let result = &response["result"]["structuredContent"]["results"][0];
-    assert_eq!(result["source"]["page_id"], "88888888-8888-8888-8888-888888888888");
+    assert_eq!(
+        result["source"]["page_id"],
+        "88888888-8888-8888-8888-888888888888"
+    );
     assert_eq!(result["source"]["chunk_id"], "lexical-chunk");
     assert_eq!(result["source"]["block_id"], "block-lexical");
     assert_eq!(result["score"], 2.5);
@@ -171,10 +177,16 @@ async fn lexical_mode_calls_lexical_port_and_preserves_filters_and_citations() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].query, "exact-term");
     assert_eq!(calls[0].limit, 3);
-    assert_eq!(calls[0].page_ids.as_ref().unwrap(), &["11111111-1111-1111-1111-111111111111"]);
+    assert_eq!(
+        calls[0].page_ids.as_ref().unwrap(),
+        &["11111111-1111-1111-1111-111111111111"]
+    );
     assert_eq!(
         calls[0].root_page_ids.as_ref().unwrap(),
-        &["22222222-2222-2222-2222-222222222222", "33333333-3333-3333-3333-333333333333"]
+        &[
+            "22222222-2222-2222-2222-222222222222",
+            "33333333-3333-3333-3333-333333333333"
+        ]
     );
 }
 
@@ -419,7 +431,10 @@ async fn configured_roots_always_narrow_all_search_modes() {
     for mode in ["semantic", "lexical", "hybrid"] {
         for requested in [
             None,
-            Some(json!(["66666666-6666-6666-6666-666666666666", "55555555-5555-5555-5555-555555555555"])),
+            Some(json!([
+                "66666666-6666-6666-6666-666666666666",
+                "55555555-5555-5555-5555-555555555555"
+            ])),
             Some(json!(["66666666-6666-6666-6666-666666666666"])),
         ] {
             let semantic = Arc::new(Fixture {
@@ -469,7 +484,10 @@ async fn configured_roots_always_narrow_all_search_modes() {
                     .iter()
                     .map(|q| &q.root_page_ids)
                 {
-                    assert_eq!(roots.as_ref().unwrap(), &["55555555-5555-5555-5555-555555555555"]);
+                    assert_eq!(
+                        roots.as_ref().unwrap(),
+                        &["55555555-5555-5555-5555-555555555555"]
+                    );
                 }
                 for roots in lexical
                     .calls
@@ -478,7 +496,10 @@ async fn configured_roots_always_narrow_all_search_modes() {
                     .iter()
                     .map(|q| &q.root_page_ids)
                 {
-                    assert_eq!(roots.as_ref().unwrap(), &["55555555-5555-5555-5555-555555555555"]);
+                    assert_eq!(
+                        roots.as_ref().unwrap(),
+                        &["55555555-5555-5555-5555-555555555555"]
+                    );
                 }
                 assert_eq!(
                     semantic.calls.lock().unwrap().len(),
