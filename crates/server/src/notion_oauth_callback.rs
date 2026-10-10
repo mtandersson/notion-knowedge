@@ -101,7 +101,7 @@ impl NotionTokenClient {
     }
 
     #[cfg(test)]
-    fn for_local_fixture(mut self, endpoint: &str) -> Self {
+    pub(crate) fn for_local_fixture(mut self, endpoint: &str) -> Self {
         self.token_endpoint = endpoint.to_owned();
         self
     }
@@ -110,19 +110,37 @@ impl NotionTokenClient {
         if !valid_code(code) {
             return Err(CallbackError::InvalidCallback);
         }
-        // Never log the reqwest request or propagate its error: Basic auth and
-        // provider bodies are confidential. The same fixed callback is sent to
-        // the provider as was used in the outbound authorization redirect.
+        self.token_request(json!({
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": self.redirect_uri
+        }))
+        .await
+    }
+
+    /// Server-only refresh; never send the refresh token to a browser, log or
+    /// MCP output. The response is parsed through the SAME strict typed grant
+    /// validator used by initial authorization.
+    pub(crate) async fn refresh(&self, refresh_token: &str) -> Result<NotionGrant, CallbackError> {
+        if !valid_secret(refresh_token) {
+            return Err(CallbackError::InvalidGrant);
+        }
+        self.token_request(json!({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token
+        }))
+        .await
+    }
+
+    async fn token_request(&self, params: serde_json::Value) -> Result<NotionGrant, CallbackError> {
+        // Never log the reqwest request or propagate its error: Basic auth,
+        // refresh tokens and provider bodies are confidential.
         let mut response = self
             .http
             .post(&self.token_endpoint)
             .basic_auth(&self.client_id, Some(self.client_secret.expose()))
             .header(reqwest::header::ACCEPT, "application/json")
-            .json(&json!({
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": self.redirect_uri
-            }))
+            .json(&params)
             .send()
             .await
             .map_err(|_| CallbackError::TokenExchangeFailed)?;

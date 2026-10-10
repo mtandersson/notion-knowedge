@@ -104,7 +104,9 @@ impl Config {
             registration.client_id(),
             callback.allowed.clone(),
         )?;
-        let _ = store.load()?;
+        // An expired access token is still a valid *sealed* grant which may
+        // be refreshed by #124. Never treat it as authorized or usable here.
+        let _ = store.load_for_refresh()?;
         Ok(())
     }
 
