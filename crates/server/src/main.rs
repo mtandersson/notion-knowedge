@@ -120,6 +120,28 @@ async fn main() -> ExitCode {
             }
         };
     }
+    // Explicit local operator probe: the real Notion identity request obtains
+    // an access token ONLY through the validated sealed-grant refresh path.
+    // This is not an OAuth callback, public HTTP route, or MCP auth grant.
+    if env::args().skip(1).any(|arg| arg == "--notion-oauth-identity") {
+        let runtime = match notion_knowledge_server::notion_oauth_runtime::NotionOAuthRuntime::from_config(&config) {
+            Ok(Some(runtime)) => runtime,
+            _ => {
+                eprintln!("Notion OAuth credentials unavailable.");
+                return ExitCode::FAILURE;
+            }
+        };
+        return match runtime.verify_bot_identity().await {
+            Ok(()) => {
+                println!("Notion OAuth integration identity verified.");
+                ExitCode::SUCCESS
+            }
+            Err(_) => {
+                eprintln!("Notion OAuth integration identity not verified.");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if env::args().skip(1).any(|arg| arg == "--healthcheck") {
         return match notion_knowledge_server::http::container_healthcheck(&config) {
             Ok(true) => ExitCode::SUCCESS,
