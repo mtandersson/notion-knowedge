@@ -642,7 +642,8 @@ mod tests {
             ("NK_NOTION_SCOPE_ROOTS", ROOT),
             ("NK_NOTION_SCOPE_WORKSPACE_ID", WORKSPACE),
             ("NK_NOTION_SCOPE_GENERATION", "3"),
-        ]).unwrap();
+        ])
+        .unwrap();
         let scope = good.notion_scope.unwrap();
         assert_eq!(scope.generation, 3);
         assert_eq!(scope.workspace_id, WORKSPACE);
