@@ -7,9 +7,27 @@ use crate::{
 };
 use std::{
     fmt,
+    ops::Deref,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Mutex;
+
+/// Borrowed for existing local callers, owned for a long-lived process
+/// coordinator. Owned parts have 'static lifetime and can be shared safely.
+enum Part<'a, T> {
+    Borrowed(&'a T),
+    Owned(Arc<T>),
+}
+impl<T> Deref for Part<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        match self {
+            Self::Borrowed(value) => value,
+            Self::Owned(value) => value.as_ref(),
+        }
+    }
+}
 
 /// Refresh proactively before the token expires to avoid requests crossing
 /// the provider's expiry boundary. No expiry means "must refresh", not valid.
@@ -35,9 +53,9 @@ impl std::error::Error for RefreshError {}
 /// concurrent requests coalesce rather than submitting the same one-time
 /// refresh token twice. No second refresh happens when the first succeeded.
 pub struct NotionRefresh<'a> {
-    store: &'a GrantStore,
-    client: &'a NotionTokenClient,
-    policy: &'a NotionOwnerPolicy,
+    store: Part<'a, GrantStore>,
+    client: Part<'a, NotionTokenClient>,
+    policy: Part<'a, NotionOwnerPolicy>,
     serial: Mutex<()>,
 }
 impl fmt::Debug for NotionRefresh<'_> {
@@ -52,9 +70,9 @@ impl<'a> NotionRefresh<'a> {
         policy: &'a NotionOwnerPolicy,
     ) -> Self {
         Self {
-            store,
-            client,
-            policy,
+            store: Part::Borrowed(store),
+            client: Part::Borrowed(client),
+            policy: Part::Borrowed(policy),
             serial: Mutex::new(()),
         }
     }
@@ -115,6 +133,23 @@ impl<'a> NotionRefresh<'a> {
             .map_err(map_store)
     }
 }
+/// Construct exactly once in the HTTP server composition root and share the
+/// returned Arc across every Notion request. No self-references or leaks.
+impl NotionRefresh<'static> {
+    pub fn shared(
+        store: Arc<GrantStore>,
+        client: Arc<NotionTokenClient>,
+        policy: Arc<NotionOwnerPolicy>,
+    ) -> Self {
+        Self {
+            store: Part::Owned(store),
+            client: Part::Owned(client),
+            policy: Part::Owned(policy),
+            serial: Mutex::new(()),
+        }
+    }
+}
+
 fn map_store(error: StoreError) -> RefreshError {
     match error {
         StoreError::IdentityMismatch => RefreshError::InvalidIdentity,

@@ -92,6 +92,11 @@ impl StoredGrant {
     pub fn expires_at_unix(&self) -> Option<u64> {
         self.record.expires_at_unix
     }
+    /// Only the server-internal OAuth credential runtime may pass this token
+    /// into the Notion backend adapter. Never expose it in MCP or logs.
+    pub(crate) fn access_token(&self) -> &str {
+        &self.record.access_token
+    }
     /// Server-only refresh credential; never put this in audit or MCP output.
     pub(crate) fn refresh_token(&self) -> Option<&str> {
         self.record.refresh_token.as_deref()
@@ -193,6 +198,21 @@ impl GrantStore {
     pub(crate) fn load_for_refresh(&self) -> Result<Option<StoredGrant>, StoreError> {
         let _guard = self.guard.lock().map_err(|_| StoreError::Unavailable)?;
         Ok(self.read_record()?.map(|record| StoredGrant { record }))
+    }
+
+    /// Recheck the exact sealed grant generation immediately before issuing a
+    /// downstream request. A replaced/revoked snapshot must not be reused.
+    /// Cross-process rollback/revocation fencing is still #127/#128.
+    pub(crate) fn still_current(&self, grant: &StoredGrant) -> Result<bool, StoreError> {
+        let _guard = self.guard.lock().map_err(|_| StoreError::Unavailable)?;
+        let current = self.read_record()?;
+        Ok(current.is_some_and(|record| {
+            record.grant_id == grant.record.grant_id
+                && record.epoch == grant.record.epoch
+                && record.issued_at_unix == grant.record.issued_at_unix
+                && record.access_token == grant.record.access_token
+                && record.refresh_token == grant.record.refresh_token
+        }))
     }
 
     /// Atomically rotate the complete access/refresh pair after a trusted
