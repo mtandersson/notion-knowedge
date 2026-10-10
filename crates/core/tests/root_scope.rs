@@ -285,7 +285,7 @@ fn policy_rejects_unconfigured_ambiguous_or_noncanonical_roots() {
     invalid.roots = vec![PageId("https://www.notion.so/other".into())];
     cases.push(invalid);
     let mut upper = scope();
-    upper.workspace_id = WORKSPACE.to_uppercase();
+    upper.workspace_id = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA".into();
     cases.push(upper);
     for policy in cases {
         assert!(matches!(
