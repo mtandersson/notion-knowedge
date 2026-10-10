@@ -193,9 +193,11 @@ impl PageLifecycle for Fixture {
     }
 }
 
+type LedgerRecord = (String, u8, Option<VerifiedReceipt>);
+
 #[derive(Default)]
 struct Ledger {
-    state: Mutex<HashMap<String, (String, u8, Option<VerifiedReceipt>)>>,
+    state: Mutex<HashMap<String, LedgerRecord>>,
     starts: AtomicUsize,
 }
 impl WriteIdempotencyStore for Ledger {
