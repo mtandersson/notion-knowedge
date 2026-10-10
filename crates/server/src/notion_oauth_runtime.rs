@@ -169,9 +169,8 @@ mod tests {
         fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
         let state = dir.path().join("state");
         let policy = Arc::new(NotionOwnerPolicy::new("workspace-a", "user-a").unwrap());
-        let store = Arc::new(
-            GrantStore::open(&key, &state, "client-a", policy.as_ref().clone()).unwrap(),
-        );
+        let store =
+            Arc::new(GrantStore::open(&key, &state, "client-a", policy.as_ref().clone()).unwrap());
         (dir, key, state, store, policy)
     }
 
@@ -229,7 +228,8 @@ mod tests {
                 "owner":{"type":"user","user":{"id":"user-a"}},
                 "bot_id":"bot-test",
                 "expires_in":3600
-            }).to_string();
+            })
+            .to_string();
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
@@ -263,7 +263,11 @@ mod tests {
     #[tokio::test]
     async fn missing_expired_unknown_and_wrong_owner_never_run_requests() {
         let (_dir, _key, _state, store, policy) = setup();
-        let runtime = build_runtime(store.clone(), policy.clone(), "http://127.0.0.1:1/v1/oauth/token");
+        let runtime = build_runtime(
+            store.clone(),
+            policy.clone(),
+            "http://127.0.0.1:1/v1/oauth/token",
+        );
         let invoked = AtomicBool::new(false);
         assert_eq!(
             runtime
@@ -333,9 +337,8 @@ mod tests {
         assert_eq!(fresh.refresh_token(), Some("rotated-refresh"));
         let ciphertext = fs::read(&state).unwrap();
         assert!(!ciphertext.windows(15).any(|b| b == b"rotated-refresh"));
-        let reopened = Arc::new(
-            GrantStore::open(&key, &state, "client-a", policy.as_ref().clone()).unwrap(),
-        );
+        let reopened =
+            Arc::new(GrantStore::open(&key, &state, "client-a", policy.as_ref().clone()).unwrap());
         build_runtime(reopened, policy, "http://127.0.0.1:1/v1/oauth/token")
             .with_client(|_| async { Ok::<_, BackendError>(()) })
             .await
