@@ -37,3 +37,7 @@ pub mod audit;
 
 /// Separate persistent once-only write ledger (never part of disposable indexes).
 pub mod idempotency;
+
+/// Real authoritative selected-page refresh through guarded SQLite/LanceDB.
+#[cfg(all(unix, feature = "local-lancedb"))]
+pub mod refresh;
