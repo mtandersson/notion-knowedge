@@ -195,6 +195,16 @@ impl GuardedChunkTable {
             })
     }
 
+    /// Read persisted canonical chunks for one selected page, preserving
+    /// metadata, stable identities and the old verified content fingerprints.
+    /// This is local preparation input only, never source scope evidence.
+    pub async fn page_chunks(&self, page_id: &str) -> Result<Vec<IndexedChunk>, ChunkTableError> {
+        open_current(&self.index_directory, &self.table_name, &self.embedding)
+            .await?
+            .page_chunks(page_id)
+            .await
+    }
+
     /// Prepare a complete source page snapshot outside the commit guard.
     /// Neither embedding nor this immutable table revision authorizes a write.
     /// A deleted page must supply an empty chunk list and tombstone operation.
