@@ -82,7 +82,10 @@ const PROBES: &[Probe] = &[
 ];
 
 fn fixture_path() -> PathBuf {
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     std::env::temp_dir().join(format!(
         "notion-knowledge-ci-retrieval-{}-{nonce}",
         std::process::id()
@@ -107,7 +110,12 @@ async fn native_fts_and_vector_top1_quality_gate() {
             &embedding,
             &[
                 EmbeddedChunk::new(
-                    fixture_chunk("vehicle", "vehicle", "Vehicle logs", "Vehicle telemetry records"),
+                    fixture_chunk(
+                        "vehicle",
+                        "vehicle",
+                        "Vehicle logs",
+                        "Vehicle telemetry records",
+                    ),
                     vec![1.0, 0.0, 0.0],
                 ),
                 EmbeddedChunk::new(
@@ -115,7 +123,12 @@ async fn native_fts_and_vector_top1_quality_gate() {
                     vec![0.0, 1.0, 0.0],
                 ),
                 EmbeddedChunk::new(
-                    fixture_chunk("hike", "hike", "Vandring", "Planera en vandring med ryggsäck"),
+                    fixture_chunk(
+                        "hike",
+                        "hike",
+                        "Vandring",
+                        "Planera en vandring med ryggsäck",
+                    ),
                     vec![0.0, 0.0, 1.0],
                 ),
                 EmbeddedChunk::new(
