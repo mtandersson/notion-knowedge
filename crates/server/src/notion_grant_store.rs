@@ -92,6 +92,11 @@ impl StoredGrant {
     pub fn expires_at_unix(&self) -> Option<u64> {
         self.record.expires_at_unix
     }
+    /// Only the server-internal OAuth credential runtime may pass this token
+    /// into the Notion backend adapter. Never expose it in MCP or logs.
+    pub(crate) fn access_token(&self) -> &str {
+        &self.record.access_token
+    }
     /// Server-only refresh credential; never put this in audit or MCP output.
     pub(crate) fn refresh_token(&self) -> Option<&str> {
         self.record.refresh_token.as_deref()
