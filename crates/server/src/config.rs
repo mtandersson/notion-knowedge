@@ -471,6 +471,25 @@ mod tests {
     }
 
     #[test]
+    fn structured_log_level_is_operator_controlled_without_reflecting_secrets() {
+        use notion_knowledge_core::logging::Level;
+        assert_eq!(parse(&[]).unwrap().log_level, Level::Info);
+        assert_eq!(
+            parse(&[("NK_LOG_LEVEL", "DEBUG")]).unwrap().log_level,
+            Level::Debug
+        );
+        assert_eq!(
+            parse(&[("NK_LOG_LEVEL", "off")]).unwrap().log_level,
+            Level::Off
+        );
+        let bad = parse(&[("NK_LOG_LEVEL", "authorization=private-sentinel")])
+            .unwrap_err()
+            .to_string();
+        assert!(bad.contains("NK_LOG_LEVEL"));
+        assert!(!bad.contains("private-sentinel"));
+    }
+
+    #[test]
     fn debounce_windows_are_bounded_and_cap_cannot_be_shorter_than_quiet() {
         let defaults = parse(&[]).unwrap().webhook_debounce;
         assert_eq!(defaults.quiet_ms, 5000);
