@@ -5,7 +5,10 @@ use notion_knowledge_core::{
     chunking::{ChunkConfig, chunk_document},
     discovery::{DiscoveryReport, ExclusionRules},
     fingerprint::{content_hash, identify_chunks},
+    graph::GraphEdgeStore,
     indexed::{IndexedChunk, IndexedDocument, IndexedMetadata, SchemaVersion, SourceMetadata},
+    relations::relation_edges,
+    sync_state::{SyncStateError, validate_identifier},
 };
 
 #[derive(Debug, serde::Serialize)]
@@ -13,6 +16,56 @@ pub struct DocumentSnapshot {
     pub discovery: DiscoveryReport,
     pub documents: Vec<IndexedDocument>,
     pub chunks: Vec<IndexedChunk>,
+}
+
+/// Persist relation-property edges only from a *completed* authorized crawl.
+/// The caller must first ensure this snapshot is current for its trusted root,
+/// commit lease and exclusion policy. This method cannot grant graph traversal.
+impl DocumentSnapshot {
+    pub fn persist_relation_edges(&self, store: &dyn GraphEdgeStore) -> Result<(), SyncStateError> {
+        use std::collections::BTreeSet;
+
+        // A selected-page snapshot has the *full* authorized discovery set,
+        // even when only the selected page's content was read.
+        if self.discovery.roots.len() != 1 {
+            return Err(SyncStateError::InvalidInput);
+        }
+        let root = &self.discovery.roots[0];
+        validate_identifier(root)?;
+        let allowed: BTreeSet<_> = self.discovery.pages.iter().map(|p| p.id.clone()).collect();
+        if allowed.len() != self.discovery.pages.len() {
+            return Err(SyncStateError::InvalidInput);
+        }
+        let mut prepared = Vec::with_capacity(self.documents.len());
+        let mut seen = BTreeSet::new();
+        let mut workspace = None;
+        for doc in &self.documents {
+            if !seen.insert(doc.metadata.page_id.clone())
+                || doc.metadata.source.root_page_id != *root
+                || !allowed.contains(&doc.metadata.page_id)
+            {
+                return Err(SyncStateError::InvalidInput);
+            }
+            let current = &doc.metadata.source.workspace_id;
+            validate_identifier(current)?;
+            if workspace.is_some_and(|previous| previous != current) {
+                return Err(SyncStateError::InvalidInput);
+            }
+            workspace = Some(current);
+            prepared.push((
+                doc.metadata.page_id.as_str(),
+                relation_edges(&doc.metadata, &allowed)?,
+            ));
+        }
+
+        // All data is validated before the first write. Each page replacement
+        // is its own SQLite transaction; a multi-page index commit still needs
+        // its existing application-level fence / reconciliation coordinator.
+        for (page_id, edges) in prepared {
+            store.replace_page_relation_edges(page_id, &edges)?;
+        }
+        Ok(())
+    }
 }
 
 fn error(kind: BackendErrorKind) -> BackendError {

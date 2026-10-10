@@ -49,6 +49,9 @@ pub mod sync_state;
 /// Provider-independent graph edge contracts.
 pub mod graph;
 
+/// Safe graph-edge derivation from normalized Notion relation properties.
+pub mod relations;
+
 /// Canonical page-name aliases derived only from configured indexed metadata.
 pub mod aliases;
 
