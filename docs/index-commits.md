@@ -200,11 +200,22 @@ independently written legacy callers acquire locks.
 Test with the real credential-free storage path:
 
 ```sh
-nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --test guarded_chunks --locked
+nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --locked
 nix develop .#spike --command cargo clippy -p notion-knowledge-retrieval --all-targets --features local-lancedb --locked -- -D warnings
 ```
 
 The test suite exercises true LanceDB vector/FTS query results, SQLite
 receipts, failed source checks, stale versions, empty-page deletion, counting
-embeddings, provider mismatch and apply-before-checkpoint replay; subprocess
-serialization must also be verified before #257 can be closed.
+embeddings, provider mismatch and apply-before-checkpoint replay. Private Unix
+unit-test fixtures delegate to the real local object store through Lance's
+`file-object-store` scheme, which avoids optimized IO bypassing the wrapper.
+They pause actual data and lexical-index write completion while a second
+independent writer waits; the first observer is dropped and its lease expires
+with IO still pending. An existing ANN index is maintained in the same owned
+operation. The expired operation cannot acknowledge SQLite; a stale contender
+must reprepare, and replay converges vector search, lexical search and durable
+checkpoint state. Separate fixtures reject changed scope generations without
+search effects and inject an index-write failure after page merge to verify
+repair before acknowledgment. This instrumentation is excluded from production
+builds; the normal optimized local filesystem path remains covered by the
+integration suite.

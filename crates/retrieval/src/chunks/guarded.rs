@@ -77,10 +77,15 @@ async fn open_current(
     embedding: &EmbeddingMetadata,
 ) -> Result<LanceChunkTable, ChunkTableError> {
     let uri = local_database_uri(directory)?;
+    #[cfg(all(test, unix))]
+    let uri = io_tests::test_uri(directory, uri);
     let database = lancedb::connect(&uri).execute().await?;
     // Do not use LanceChunkTable::open here: its legacy startup helper may
     // mutate FTS indices before a guard has been acquired.
-    let table = database.open_table(table_name).execute().await?;
+    let builder = database.open_table(table_name);
+    #[cfg(all(test, unix))]
+    let builder = io_tests::instrument(directory, builder);
+    let table = builder.execute().await?;
     // Keep the reopened handle writable. Only preparation pins a read snapshot.
     validate_table_schema(&table, embedding).await?;
     Ok(LanceChunkTable {
@@ -421,3 +426,6 @@ impl GuardedChunkTable {
             })
     }
 }
+
+#[cfg(all(test, unix))]
+mod io_tests;
