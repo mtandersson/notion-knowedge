@@ -75,8 +75,44 @@ under #123 can be refreshed in place. Since expired records need
 renewal, startup now validates cryptographic integrity and owner
 binding using `load_for_refresh()` *without* treating expiry as
 malformed state. The runtime may only **use** a grant after
-`ensure_fresh()` succeeds. This module does not currently connect
-the staged OAuth components to production HTTP handlers.
+`ensure_fresh()` succeeds. The server-internal runtime is now wired at HTTP startup, but no OAuth
+callback or authorized MCP credential dispatch route is enabled.
+
+## Shared server runtime (#299)
+
+The HTTP composition root constructs **one** `NotionOAuthRuntime` when
+encrypted grant settings are configured, and retains its shared
+`NotionRefresh<'static>` coordinator for the entire process lifetime.
+Each internal `with_client` operation calls `ensure_fresh()` before
+creating a temporary `NotionClient` with the decrypted server-only OAuth
+access token. Before dispatch, the sealed grant's `grant_id`, epoch,
+issuance time and complete access/refresh credential snapshot are checked
+against the current state, rejecting stale/replaced grants. Every
+refresh failure, missing grant, corrupt state or identity mismatch denies
+the operation; no separate static `NOTION_TOKEN` fallback is considered.
+
+An operator can test an actual Notion get-self request via
+`--notion-oauth-identity` with the approved sealed grant. The command
+checks the remote bot ID against the immutable verified callback grant
+and reports **only** a fixed success/failure message, never any
+credentials or provider responses.
+
+**This does not activate OAuth HTTP login or authenticated MCP access.**
+The production OAuth discovery router still denies `/authorize`,
+`/token` and `/mcp` pending #120/#125/#126/#127/#128 and #129. The
+runtime is an internal credential composer and local operator probe;
+it must be explicitly connected to authorized backend tool handlers
+after the MCP authorization and durable revocation gates land. The
+legacy `NK_NOTION_AUTH=integration` operator token remains a separate
+opt-in mode and is NEVER a fallback for failed OAuth refresh.
+
+**Deployment/security:** one shared coordinator per HTTP process, one
+writer for the private sealed file. Do not scale it across workers/pods
+without distributed fencing. Snapshot checks prevent known stale
+generations at dispatch, but cannot guarantee revocation of an
+already in-flight request; #127/#128 own session- and per-request
+authorization/revocation enforcement. Restore key and state together
+or reauthorize after a lost key or failed provider rotation.
 
 ## Verification
 

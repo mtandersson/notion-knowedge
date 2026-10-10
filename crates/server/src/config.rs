@@ -37,8 +37,8 @@ pub struct NotionCallbackSettings {
 
 /// Paths refer to operator-managed secret key and private encrypted state.
 pub struct GrantStoreSettings {
-    key_file: std::path::PathBuf,
-    state_file: std::path::PathBuf,
+    pub(crate) key_file: std::path::PathBuf,
+    pub(crate) state_file: std::path::PathBuf,
 }
 impl fmt::Debug for GrantStoreSettings {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
