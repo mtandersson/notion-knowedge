@@ -1,8 +1,6 @@
-use std::{
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    },
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use notion_knowledge_core::{
@@ -93,7 +91,11 @@ impl PageLifecycle for FakeLifecycle {
     ) -> BackendFuture<'a, LifecycleEvidence> {
         Box::pin(async move {
             self.inspections.fetch_add(1, Ordering::SeqCst);
-            self.evidence.lock().unwrap().clone().ok_or_else(denied_backend)
+            self.evidence
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(denied_backend)
         })
     }
 
@@ -192,11 +194,8 @@ async fn metadata_ambiguity_and_exclusions_fail_closed() {
         list
     };
     for evidence in cases {
-        let gate = RootScopeGate::new(
-            Arc::new(FakeLifecycle::new(evidence)),
-            base.clone(),
-        )
-        .unwrap();
+        let gate =
+            RootScopeGate::new(Arc::new(FakeLifecycle::new(evidence)), base.clone()).unwrap();
         assert!(gate.authorize(&PageId(PAGE.into())).await.is_err());
     }
 
