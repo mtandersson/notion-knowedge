@@ -4,7 +4,7 @@ use notion_knowledge_core::{
     backend::PageId,
     chunking::ChunkConfig,
     discovery::ExclusionRules,
-    embedding::{EmbeddingError, EmbeddingFuture, EmbeddingMetadata, EmbeddingProvider},
+    embedding::{EmbeddingFuture, EmbeddingMetadata, EmbeddingProvider},
     lifecycle::LifecycleScope,
     reconciliation::{Lease, ReconciliationJournal, ReconciliationScope},
     sync_state::SyncStateStore,
