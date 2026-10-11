@@ -39,8 +39,9 @@ ancestry and exclusions, fetches one complete authoritative Notion page twice,
 reuses `identify_chunks` stable IDs and returns a canonical document/chunks.
 No relation, link or page hint is ever followed to expand authority.
 
-If the full canonical page and persisted checkpoint are unchanged, return a
-no-effect result. Otherwise, `GuardedChunkTable::prepare_page` embeds **only**
+If the full canonical page and persisted checkpoint are unchanged and the
+event has no existing receipt, return a no-effect result. Existing receipts still pass guarded identity and generation checks; unresolved
+receipts complete even when another event already applied that snapshot. Otherwise, `GuardedChunkTable::prepare_page` embeds **only**
 changed/new chunk content and reuses existing vectors for identical chunks.
 Metadata, title, timestamp, URL and properties update citations without
 re-embedding, and removed chunks are excluded from the complete snapshot.
@@ -52,6 +53,16 @@ physical ancestry under that guard, rejecting any change to selected ID,
 source revision, title, properties, URL, content or scope. The guard compares
 the pinned Lance table version and current SQLite fence; a conflict requires
 discarding the stale proposal and starting over from new authoritative reads.
+
+The durable event ID remains stable across retries. Before acknowledgement,
+refresh retries may replace a pending/failed proposal with freshly authorized
+current source content for the same page, action and scope generation. This
+replacement runs under the existing external guard, so an earlier owned commit
+must finish first. Applied and superseded receipts remain immutable. A duplicate Applied event
+returns already-applied even if the source has since changed; a distinct event
+owns the newer refresh. Generic non-refresh operations still require exact
+proposal identity. A source race
+therefore does not require a second webhook to make the original work retryable.
 
 A completed index effect precedes durable SQLite checkpoint/receipt. A crash
 after effects but before checkpoint remains safely replayable through the

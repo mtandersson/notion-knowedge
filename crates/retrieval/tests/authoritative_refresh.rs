@@ -27,6 +27,7 @@ use std::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const PAGE: &str = "11111111-1111-1111-1111-111111111111";
+const OTHER: &str = "55555555-5555-5555-5555-555555555555";
 const ROOT: &str = "22222222-2222-2222-2222-222222222222";
 const FOREIGN: &str = "33333333-3333-3333-3333-333333333333";
 const WORKSPACE: &str = "44444444-4444-4444-4444-444444444444";
@@ -116,6 +117,12 @@ impl HttpNotion {
                         &snapshot.revision,
                         snapshot.archived,
                     )
+                } else if route == format!("/v1/pages/{OTHER}/markdown") {
+                    json!({"object":"page_markdown", "id":OTHER,
+                        "markdown":"# Separate\n\nUntouched cinnamon.\n", "truncated":false,
+                        "unknown_block_ids":[]})
+                } else if route == format!("/v1/pages/{OTHER}") {
+                    page_metadata(OTHER, ROOT, "Separate", "2026-10-10T11:00:00Z", false)
                 } else if route == format!("/v1/pages/{ROOT}") {
                     page_metadata(ROOT, "workspace", "Root", "2026-10-10T11:00:00Z", false)
                 } else if route == format!("/v1/pages/{FOREIGN}") {
@@ -223,6 +230,12 @@ impl EmbeddingProvider for CountingProvider {
         })
     }
 }
+fn chunk_config() -> ChunkConfig {
+    ChunkConfig {
+        target_chars: 48,
+        overlap_chars: 0,
+    }
+}
 fn clock() -> Arc<dyn Fn() -> i64 + Send + Sync> {
     Arc::new(|| 10)
 }
@@ -286,7 +299,7 @@ impl Fixture {
             self.coordinator.clone(),
             authority(),
             &self.journal_scope,
-            ChunkConfig::default(),
+            chunk_config(),
         )
         .unwrap()
     }
@@ -319,6 +332,20 @@ async fn create_metadata_content_delete_duplicate_and_persistent_restart() {
     let page = PageId(PAGE.into());
     let root = PageId(ROOT.into());
 
+    refresh
+        .refresh_page(
+            &PageId(OTHER.into()),
+            &root,
+            "event-other",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let other_chunks = index.guarded().page_chunks(OTHER).await.unwrap();
+    let other_embeds = provider.embeddings();
+
     let first = refresh
         .refresh_page(
             &page,
@@ -333,7 +360,7 @@ async fn create_metadata_content_delete_duplicate_and_persistent_restart() {
     assert_eq!(first.outcome, CommitOutcome::Applied);
     assert!(first.diff.added > 0);
     let initial_embeds = provider.embeddings();
-    assert_eq!(initial_embeds, first.diff.added);
+    assert_eq!(initial_embeds - other_embeds, first.diff.added);
     let chunks = index.guarded().page_chunks(PAGE).await.unwrap();
     assert!(!chunks.is_empty());
     let original_ids: Vec<_> = chunks.iter().map(|c| c.chunk_id.clone()).collect();
@@ -388,6 +415,33 @@ async fn create_metadata_content_delete_duplicate_and_persistent_restart() {
         m.title = "Renamed".into();
         m.revision = "2026-10-10T12:00:01Z".into();
     });
+    // An already acknowledged ID is harmless after later source edits; a
+    // distinct update event owns the new refresh and citations stay unchanged.
+    assert_eq!(
+        refresh
+            .refresh_page(
+                &page,
+                &root,
+                "event-create-001",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap()
+            .outcome,
+        CommitOutcome::AlreadyApplied
+    );
+    assert!(
+        index
+            .guarded()
+            .page_chunks(PAGE)
+            .await
+            .unwrap()
+            .iter()
+            .all(|chunk| chunk.metadata.title == "First")
+    );
+
     let updated = refresh
         .refresh_page(
             &page,
@@ -426,7 +480,21 @@ async fn create_metadata_content_delete_duplicate_and_persistent_restart() {
         .unwrap();
     assert_eq!(change.outcome, CommitOutcome::Applied);
     assert!(change.diff.changed > 0 || change.diff.added > 0);
-    assert!(provider.embeddings() > initial_embeds);
+    assert_eq!(
+        provider.embeddings() - initial_embeds,
+        change.diff.changed + change.diff.added
+    );
+    let refreshed_chunks = index.guarded().page_chunks(PAGE).await.unwrap();
+    let unchanged = chunks
+        .iter()
+        .find(|chunk| chunk.text.contains("Saffron"))
+        .unwrap();
+    assert!(
+        refreshed_chunks
+            .iter()
+            .any(|chunk| chunk.chunk_id == unchanged.chunk_id
+                && chunk.content_hash == unchanged.content_hash)
+    );
     let table = index.table().await;
     assert_eq!(
         table
@@ -438,6 +506,21 @@ async fn create_metadata_content_delete_duplicate_and_persistent_restart() {
     );
     assert_eq!(
         table.fts_query("text", "Violet", 10).await.unwrap().len(),
+        1
+    );
+
+    assert_eq!(
+        index.guarded().page_chunks(OTHER).await.unwrap(),
+        other_chunks
+    );
+    assert_eq!(
+        index
+            .table()
+            .await
+            .fts_query("text", "cinnamon", 10)
+            .await
+            .unwrap()
+            .len(),
         1
     );
 
@@ -457,7 +540,7 @@ async fn create_metadata_content_delete_duplicate_and_persistent_restart() {
         reopened.clone(),
         authority(),
         &index.journal_scope,
-        ChunkConfig::default(),
+        chunk_config(),
     )
     .unwrap();
     let before = provider.embeddings();
@@ -597,26 +680,13 @@ async fn changed_source_during_embedding_fails_commit_without_ack_or_index_mutat
             .unwrap()
             .is_none()
     );
-    // An already claimed event ID cannot silently change its proposal.
-    assert_eq!(
-        handler
-            .refresh_page(
-                &page,
-                &root,
-                "raced-source",
-                &provider,
-                index.lease.clone(),
-                clock()
-            )
-            .await
-            .unwrap_err(),
-        RefreshError::Conflict
-    );
+    // Retry the original durable work item after the authoritative source
+    // changes. No replacement webhook/event ID is required for recovery.
     let redo = handler
         .refresh_page(
             &page,
             &root,
-            "post-race-new-event",
+            "raced-source",
             &provider,
             index.lease.clone(),
             clock(),
@@ -641,7 +711,7 @@ async fn provider_identity_or_scope_generation_mismatch_blocks_index_effects() {
             index.coordinator.clone(),
             wrong_scope,
             &index.journal_scope,
-            ChunkConfig::default(),
+            chunk_config(),
         ),
         Err(RefreshError::InvalidConfiguration)
     ));
@@ -668,4 +738,225 @@ async fn provider_identity_or_scope_generation_mismatch_blocks_index_effects() {
         .await;
     assert_eq!(result.unwrap_err(), RefreshError::Index);
     assert_eq!(index.table().await.count_rows().await.unwrap(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn original_event_recovers_after_index_apply_before_ack_and_changed_source() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let provider = CountingProvider::new(index.embed.clone());
+    let page = PageId(PAGE.into());
+    let root = PageId(ROOT.into());
+    let sql = rusqlite::Connection::open(&index.db).unwrap();
+    sql.execute_batch("CREATE TRIGGER fail_checkpoint BEFORE UPDATE OF status ON index_commit_receipts WHEN NEW.status=1 BEGIN SELECT RAISE(ABORT,'injected ack failure');END;").unwrap();
+    assert_eq!(
+        index
+            .handler(source.client())
+            .refresh_page(
+                &page,
+                &root,
+                "interrupted-event",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap_err(),
+        RefreshError::Unavailable
+    );
+    assert!(
+        index
+            .coordinator
+            .state()
+            .page_state(PAGE)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        index
+            .table()
+            .await
+            .fts_query("text", "Saffron", 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    sql.execute_batch("DROP TRIGGER fail_checkpoint;").unwrap();
+    drop(sql);
+
+    // Restart with durable SQLite + index effects intact, then retry the same
+    // event even when Notion has changed while the original ack was missing.
+    let reopened =
+        IndexCommitCoordinator::open(&index.index, &index.db, index.coordinator.binding().clone())
+            .unwrap();
+    let handler = AuthoritativePageRefresh::new(
+        source.client(),
+        GuardedChunkTable::bind(
+            &index.index,
+            "chunks",
+            index.embed.clone(),
+            reopened.clone(),
+        )
+        .unwrap(),
+        reopened.clone(),
+        authority(),
+        &index.journal_scope,
+        chunk_config(),
+    )
+    .unwrap();
+    source.change(|model| {
+        model.title = "After restart".into();
+        model.revision = "2026-10-10T12:00:05Z".into();
+    });
+    let embeddings = provider.embeddings();
+    assert_eq!(
+        handler
+            .refresh_page(
+                &page,
+                &root,
+                "interrupted-event",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap()
+            .outcome,
+        CommitOutcome::Applied
+    );
+    assert_eq!(provider.embeddings(), embeddings);
+    assert!(
+        index
+            .guarded()
+            .page_chunks(PAGE)
+            .await
+            .unwrap()
+            .iter()
+            .all(|chunk| chunk.metadata.title == "After restart")
+    );
+    assert_eq!(
+        reopened
+            .receipt("interrupted-event")
+            .unwrap()
+            .unwrap()
+            .status,
+        notion_knowledge_retrieval::commit::ReceiptStatus::Applied
+    );
+    assert_eq!(
+        reopened
+            .receipt("interrupted-event")
+            .unwrap()
+            .unwrap()
+            .attempts,
+        2
+    );
+    // Unchanged content is insufficient to acknowledge an event identity
+    // owned by an older scope generation, even when its earlier effect applied.
+    let next_scope = ReconciliationScope::new(vec![ROOT.into()], vec![], "phase3", "2").unwrap();
+    let next_binding = CommitBinding::new("chunks", WORKSPACE, &next_scope, "2", 2).unwrap();
+    let next = reopened
+        .change_scope(next_binding, &index.lease, 10)
+        .unwrap();
+    let mut lifecycle_scope = authority();
+    lifecycle_scope.generation = 2;
+    let next_handler = AuthoritativePageRefresh::new(
+        source.client(),
+        GuardedChunkTable::bind(&index.index, "chunks", index.embed.clone(), next.clone()).unwrap(),
+        next,
+        lifecycle_scope,
+        &next_scope,
+        chunk_config(),
+    )
+    .unwrap();
+    assert_eq!(
+        next_handler
+            .refresh_page(
+                &page,
+                &root,
+                "interrupted-event",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap_err(),
+        RefreshError::Conflict
+    );
+    assert_eq!(
+        next_handler
+            .refresh_page(
+                &page,
+                &root,
+                "legitimate-new-scope-event",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap()
+            .outcome,
+        CommitOutcome::AlreadyApplied
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn successful_later_event_does_not_leave_original_retry_receipt_unresolved() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let handler = index.handler(source.client());
+    let provider = CountingProvider::new(index.embed.clone());
+    let page = PageId(PAGE.into());
+    let root = PageId(ROOT.into());
+    let sql = rusqlite::Connection::open(&index.db).unwrap();
+    sql.execute_batch("CREATE TRIGGER fail_checkpoint BEFORE UPDATE OF status ON index_commit_receipts WHEN NEW.status=1 BEGIN SELECT RAISE(ABORT,'injected ack failure');END;").unwrap();
+    assert!(
+        handler
+            .refresh_page(
+                &page,
+                &root,
+                "original",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .is_err()
+    );
+    sql.execute_batch("DROP TRIGGER fail_checkpoint;").unwrap();
+    handler
+        .refresh_page(
+            &page,
+            &root,
+            "later",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let embeddings = provider.embeddings();
+    handler
+        .refresh_page(
+            &page,
+            &root,
+            "original",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(provider.embeddings(), embeddings);
+    assert_eq!(
+        index
+            .coordinator
+            .receipt("original")
+            .unwrap()
+            .unwrap()
+            .status,
+        notion_knowledge_retrieval::commit::ReceiptStatus::Applied
+    );
 }
