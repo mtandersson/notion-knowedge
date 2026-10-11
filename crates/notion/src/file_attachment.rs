@@ -26,7 +26,7 @@ pub struct AttachedFile {
     pub page_id: PageId,
     pub block_id: String,
     pub upload_id: String,
-    /// True only when a fresh authoritative block GET confirms the image.
+    /// True only when a fresh authoritative block GET confirms the file.
     pub verified: bool,
 }
 
@@ -72,12 +72,11 @@ fn valid_upload(upload: &UploadedFile) -> bool {
             "application/pdf" | "text/plain" | "text/markdown" | "text/csv"
         )
         && upload.filename.len() <= 128
-        && upload.filename.len() >= 5
         && !upload.filename.starts_with('.')
         && !upload.filename.ends_with(['.', ' '])
         && !upload.filename.contains('/')
         && !upload.filename.contains('\\')
-        && !upload.filename.chars().any(|ch| ch.is_control())
+        && !upload.filename.chars().any(|ch| ch.is_control() || matches!(ch, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
         && match upload.mime_type.as_str() {
             "application/pdf" => upload.filename.ends_with(".pdf"),
             "text/plain" => upload.filename.ends_with(".txt"),
@@ -301,7 +300,7 @@ mod tests {
         (
             "PATCH /v1/blocks/11111111-1111-1111-1111-111111111111/children".into(),
             200,
-            json!({"object":"list","results":[block("image",PAGE,json!({}))]}),
+            json!({"object":"list","results":[block("file",PAGE,json!({}))]}),
         )
     }
     fn readback(parent: &str) -> (String, u16, Value) {
@@ -560,4 +559,25 @@ mod tests {
             "notes.pdf"
         ));
     }
+    #[test]
+    fn short_safe_filenames_match_the_upload_validator() {
+        let mut item = upload("text/markdown");
+        item.filename = "a.md".into();
+        assert!(valid_upload(&item));
+        item.filename = "r.md".into();
+        assert!(valid_upload(&item));
+    }
+
+    #[test]
+    fn metadata_rejects_bidi_spoofing_and_wrong_mime_suffix() {
+        let mut item = upload("application/pdf");
+        item.filename = "r\u{202e}.pdf".into();
+        assert!(!valid_upload(&item));
+        item.filename = "notes.txt".into();
+        assert!(!valid_upload(&item));
+        item.filename = "notes.pdf".into();
+        item.status = UploadStatus::Uploaded;
+        assert!(valid_upload(&item));
+    }
+
 }
