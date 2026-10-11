@@ -74,9 +74,9 @@ unserialized write or source-side mutation exists in this workflow.
 - Notion does not provide an atomic page snapshot/CAS. A change after the final
   precommit read can be picked up by the next webhook/reconciliation event.
 - This refresh path indexes **allowed active pages only**. Authoritative
-  inactive/out-of-scope deletion, tombstones and recovery dispatch belong to
-  #252; uncertain Notion 404/403 and webhook hints NEVER trigger speculative
-  deletion in this module.
+  inactive/out-of-scope deletion and tombstones use the
+  [shared lifecycle handler](phase3-lifecycle-effects.md); uncertain Notion
+  404/403 and webhook hints NEVER trigger speculative deletion.
 - Worker startup, queue scheduling, bounded retry and dead-letter reporting
   belong to #248/#57. Periodic full reconciliation belongs to #242/#243.
 - All participating production writers must use the same #254 external guard;

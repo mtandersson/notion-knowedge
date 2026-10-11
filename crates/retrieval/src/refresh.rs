@@ -11,7 +11,7 @@ use notion_knowledge_core::{
     chunking::ChunkConfig,
     embedding::EmbeddingProvider,
     indexed::IndexedDocument,
-    lifecycle::LifecycleScope,
+    lifecycle::{LifecycleEvidence, LifecycleScope, LifecycleStatus, PageLifecycle},
     reconciliation::{FailureClass, Lease, ReconciliationScope},
     root_scope::RootScopeGate,
     sync_state::{PageSyncState, SyncStateStore},
@@ -21,7 +21,10 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     chunks::{ChunkDiffMetrics, ChunkTableError, GuardedChunkTable},
-    commit::{CommitBinding, CommitError, CommitOutcome, IndexCommitCoordinator, PageOperation},
+    commit::{
+        CommitBinding, CommitError, CommitOutcome, IndexCommitCoordinator, PageAction,
+        PageOperation,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +51,8 @@ impl From<ChunkTableError> for RefreshError {
 impl From<CommitError> for RefreshError {
     fn from(error: CommitError) -> Self {
         match error {
-            CommitError::InvalidInput | CommitError::BindingMismatch => Self::InvalidConfiguration,
+            CommitError::InvalidInput => Self::InvalidConfiguration,
+            CommitError::BindingMismatch => Self::Conflict,
             CommitError::LeaseLost | CommitError::Conflict => Self::Conflict,
             CommitError::Unavailable | CommitError::Operation(FailureClass::Unavailable) => {
                 Self::Unavailable
@@ -106,6 +110,98 @@ impl AuthoritativePageRefresh {
         })
     }
 
+    /// Apply a page hint using current authoritative status, never its event
+    /// type. All allowed transitions share the canonical refresh pipeline.
+    /// Negative evidence is revalidated inside the same SQLite/Lance guard.
+    pub async fn apply_lifecycle(
+        &self,
+        page: &PageId,
+        operation_id: &str,
+        provider: &dyn EmbeddingProvider,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Result<RefreshResult, RefreshError> {
+        let evidence =
+            self.notion
+                .lifecycle(page, &self.scope)
+                .await
+                .map_err(|error| match error.kind {
+                    BackendErrorKind::Conflict => RefreshError::Conflict,
+                    _ => RefreshError::Source,
+                })?;
+        if let LifecycleStatus::Allowed { roots } = &evidence.status {
+            let root = roots.first().ok_or(RefreshError::Source)?;
+            return self
+                .refresh_page_inner(
+                    page,
+                    &PageId(root.clone()),
+                    operation_id,
+                    provider,
+                    lease,
+                    clock,
+                    true,
+                )
+                .await;
+        }
+        let previous = self.guard.page_chunks(&page.0).await?;
+        let owned_state = self
+            .coordinator
+            .state()
+            .page_state(&page.0)
+            .map_err(|_| RefreshError::Unavailable)?
+            .is_some();
+        let owned_work = self
+            .coordinator
+            .owns_page_work(&page.0)
+            .map_err(RefreshError::from)?;
+        if (!owned_state && !owned_work && previous.is_empty())
+            || previous.iter().any(|chunk| {
+                chunk.metadata.source.workspace_id != self.scope.workspace_id
+                    || !self
+                        .scope
+                        .roots
+                        .iter()
+                        .any(|root| root.0 == chunk.metadata.source.root_page_id)
+            })
+        {
+            return Err(RefreshError::OutOfScope);
+        }
+        let selected = evidence.ancestry.first().ok_or(RefreshError::Source)?;
+        let checkpoint = PageSyncState::tombstone(page.0.clone(), Some(selected.revision.clone()))
+            .map_err(|_| RefreshError::InvalidConfiguration)?;
+        // Evidence includes the physical chain and policy, not merely a source
+        // timestamp. Its debug representation contains no private content.
+        let revision = format!("{:x}", Sha256::digest(format!("{evidence:?}").as_bytes()));
+        let operation = PageOperation::retryable_lifecycle(
+            operation_id,
+            &revision,
+            PageAction::Delete,
+            checkpoint,
+        )
+        .map_err(RefreshError::from)?;
+        let prepared = self.guard.prepare_page(provider, operation, &[]).await?;
+        let diff = prepared.metrics();
+        let notion = self.notion.clone();
+        let scope = self.scope.clone();
+        let outcome = self
+            .guard
+            .commit_page(prepared, lease, clock, move || async move {
+                notion
+                    .revalidate_lifecycle(&evidence, &scope)
+                    .await
+                    .map_err(|error| {
+                        if error.kind == BackendErrorKind::Conflict {
+                            FailureClass::Conflict
+                        } else {
+                            FailureClass::Source
+                        }
+                    })
+            })
+            .await
+            .map_err(RefreshError::from)?;
+        Ok(RefreshResult { outcome, diff })
+    }
+
     /// A single refresh for a page hinted by a webhook, manual command, or
     /// reconciliation. Callers own bounded retries and durable inbox claims.
     /// A lost SQLite fence or stale Lance version is a retryable conflict; the
@@ -118,6 +214,21 @@ impl AuthoritativePageRefresh {
         provider: &dyn EmbeddingProvider,
         lease: Lease,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Result<RefreshResult, RefreshError> {
+        self.refresh_page_inner(page, root, operation_id, provider, lease, clock, false)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn refresh_page_inner(
+        &self,
+        page: &PageId,
+        root: &PageId,
+        operation_id: &str,
+        provider: &dyn EmbeddingProvider,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+        lifecycle: bool,
     ) -> Result<RefreshResult, RefreshError> {
         if !self.scope.roots.contains(root) || operation_id.is_empty() {
             return Err(RefreshError::InvalidConfiguration);
@@ -188,8 +299,17 @@ impl AuthoritativePageRefresh {
             serde_json::to_vec(&document).map_err(|_| RefreshError::InvalidConfiguration)?;
         hasher.update(serialized);
         let revision = format!("{:x}", hasher.finalize());
-        let operation = PageOperation::retryable_refresh(operation_id, &revision, checkpoint)
-            .map_err(RefreshError::from)?;
+        let operation = if lifecycle {
+            PageOperation::retryable_lifecycle(
+                operation_id,
+                &revision,
+                PageAction::Refresh,
+                checkpoint,
+            )
+        } else {
+            PageOperation::retryable_refresh(operation_id, &revision, checkpoint)
+        }
+        .map_err(RefreshError::from)?;
         let prepared = self
             .guard
             .prepare_page(provider, operation, &chunks)
@@ -205,10 +325,19 @@ impl AuthoritativePageRefresh {
         let page = page.clone();
         let root = root.clone();
         let guarded_document = document.clone();
+        let guarded_evidence = proposal.evidence;
         let result = self
             .guard
             .commit_page(prepared, lease, clock, move || async move {
-                verify_source(&notion, &page, &root, &scope, &guarded_document).await
+                verify_source(
+                    &notion,
+                    &page,
+                    &root,
+                    &scope,
+                    &guarded_document,
+                    &guarded_evidence,
+                )
+                .await
             })
             .await
             .map_err(RefreshError::from)?;
@@ -227,16 +356,21 @@ async fn verify_source(
     root: &PageId,
     scope: &LifecycleScope,
     expected: &IndexedDocument,
+    evidence: &LifecycleEvidence,
 ) -> Result<(), FailureClass> {
-    let gate = RootScopeGate::new(Arc::new(notion.clone()), scope.clone())
-        .map_err(|_| FailureClass::Conflict)?;
-    let permit = gate
-        .authorize(page)
-        .await
-        .map_err(|_| FailureClass::Source)?;
-    if !permit.belongs_to_any(std::slice::from_ref(&root.0)) {
+    if !matches!(&evidence.status, LifecycleStatus::Allowed { roots } if roots.contains(&root.0)) {
         return Err(FailureClass::Source);
     }
+    notion
+        .revalidate_lifecycle(evidence, scope)
+        .await
+        .map_err(|error| {
+            if error.kind == BackendErrorKind::Conflict {
+                FailureClass::Conflict
+            } else {
+                FailureClass::Source
+            }
+        })?;
     let fresh = notion
         .read_content(&page.0)
         .await
@@ -251,7 +385,8 @@ async fn verify_source(
     {
         return Err(FailureClass::Conflict);
     }
-    gate.revalidate(&permit, scope)
+    notion
+        .revalidate_lifecycle(evidence, scope)
         .await
         .map_err(|_| FailureClass::Conflict)
 }

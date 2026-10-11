@@ -40,6 +40,7 @@ struct Model {
     revision: String,
     parent: String,
     archived: bool,
+    root_revision: String,
 }
 impl Default for Model {
     fn default() -> Self {
@@ -49,6 +50,7 @@ impl Default for Model {
             revision: "2026-10-10T12:00:00Z".into(),
             parent: ROOT.into(),
             archived: false,
+            root_revision: "2026-10-10T11:00:00Z".into(),
         }
     }
 }
@@ -124,7 +126,7 @@ impl HttpNotion {
                 } else if route == format!("/v1/pages/{OTHER}") {
                     page_metadata(OTHER, ROOT, "Separate", "2026-10-10T11:00:00Z", false)
                 } else if route == format!("/v1/pages/{ROOT}") {
-                    page_metadata(ROOT, "workspace", "Root", "2026-10-10T11:00:00Z", false)
+                    page_metadata(ROOT, "workspace", "Root", &snapshot.root_revision, false)
                 } else if route == format!("/v1/pages/{FOREIGN}") {
                     page_metadata(
                         FOREIGN,
@@ -134,11 +136,17 @@ impl HttpNotion {
                         false,
                     )
                 } else {
-                    panic!("unexpected fetch route; related pages must not be fetched: {route}")
+                    json!({"object":"error", "code":"object_not_found"})
                 };
                 let bad = fail.swap(false, Ordering::SeqCst);
+                let status = if bad {
+                    503
+                } else if response.get("code").is_some() {
+                    404
+                } else {
+                    200
+                };
                 let body = if bad { json!({}) } else { response }.to_string();
-                let status = if bad { 503 } else { 200 };
                 stream.write_all(format!("HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
             }
         });
@@ -959,4 +967,867 @@ async fn successful_later_event_does_not_leave_original_retry_receipt_unresolved
             .status,
         notion_knowledge_retrieval::commit::ReceiptStatus::Applied
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lifecycle_current_authority_removes_restores_and_preserves_unrelated_page() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let handler = index.handler(source.client());
+    let provider = CountingProvider::new(index.embed.clone());
+    let page = PageId(PAGE.into());
+    source.change(|m| m.archived = true);
+    assert_eq!(
+        handler
+            .apply_lifecycle(
+                &page,
+                "unowned-delete",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap_err(),
+        RefreshError::OutOfScope
+    );
+    assert!(
+        index
+            .coordinator
+            .state()
+            .page_state(PAGE)
+            .unwrap()
+            .is_none()
+    );
+    source.change(|m| m.archived = false);
+    handler
+        .apply_lifecycle(
+            &PageId(OTHER.into()),
+            "other",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    handler
+        .apply_lifecycle(
+            &page,
+            "delete-hint-but-active",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let unaffected = index.guarded().page_chunks(OTHER).await.unwrap();
+    let embeddings = provider.embeddings();
+    index
+        .guarded()
+        .ensure_vector_index(
+            VectorIndexConfig {
+                num_partitions: Some(1),
+                sample_rate: 8,
+                max_iterations: 20,
+                ..VectorIndexConfig::default()
+            },
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    for (id, inactive) in [("inactive", true), ("outside", false)] {
+        source.change(|m| {
+            m.archived = inactive;
+            m.parent = FOREIGN.into();
+        });
+        handler
+            .apply_lifecycle(&page, id, &provider, index.lease.clone(), clock())
+            .await
+            .unwrap();
+        assert!(
+            index
+                .coordinator
+                .state()
+                .page_state(PAGE)
+                .unwrap()
+                .unwrap()
+                .is_tombstone()
+        );
+        assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+        assert!(
+            index
+                .table()
+                .await
+                .fts_query("text", "Saffron", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            index
+                .table()
+                .await
+                .vector_query(&[30.0, 1.0, 0.0], 10, 1)
+                .await
+                .unwrap()
+                .iter()
+                .all(|hit| hit.page_id != PAGE)
+        );
+        assert_eq!(
+            index.guarded().page_chunks(OTHER).await.unwrap(),
+            unaffected
+        );
+        assert_eq!(provider.embeddings(), embeddings);
+    }
+    source.change(|m| {
+        m.archived = false;
+        m.parent = ROOT.into();
+    });
+    handler
+        .apply_lifecycle(
+            &page,
+            "move-into-or-restored",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !index
+            .coordinator
+            .state()
+            .page_state(PAGE)
+            .unwrap()
+            .unwrap()
+            .is_tombstone()
+    );
+    assert_eq!(
+        index
+            .table()
+            .await
+            .fts_query("text", "Saffron", 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    // Old acknowledged delete is harmless even after restore; a new hint owns
+    // any subsequent transition.
+    source.change(|m| m.archived = true);
+    assert_eq!(
+        handler
+            .apply_lifecycle(&page, "inactive", &provider, index.lease.clone(), clock())
+            .await
+            .unwrap()
+            .outcome,
+        CommitOutcome::AlreadyApplied
+    );
+    assert!(!index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lifecycle_move_between_allowed_roots_preserves_ids_and_vectors() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let provider = CountingProvider::new(index.embed.clone());
+    let mut scope = authority();
+    scope.roots.push(PageId(FOREIGN.into()));
+    let handler = AuthoritativePageRefresh::new(
+        source.client(),
+        index.guarded(),
+        index.coordinator.clone(),
+        scope,
+        &index.journal_scope,
+        chunk_config(),
+    )
+    .unwrap();
+    let page = PageId(PAGE.into());
+    handler
+        .apply_lifecycle(&page, "initial", &provider, index.lease.clone(), clock())
+        .await
+        .unwrap();
+    let old = index.guarded().page_chunks(PAGE).await.unwrap();
+    let count = provider.embeddings();
+    source.change(|m| {
+        m.parent = FOREIGN.into();
+        m.title = "Moved title".into();
+        m.revision = "2026-10-10T12:00:02Z".into();
+    });
+    handler
+        .apply_lifecycle(
+            &page,
+            "allowed-move",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let moved = index.guarded().page_chunks(PAGE).await.unwrap();
+    assert_eq!(provider.embeddings(), count);
+    assert_eq!(
+        old.iter().map(|c| &c.chunk_id).collect::<Vec<_>>(),
+        moved.iter().map(|c| &c.chunk_id).collect::<Vec<_>>()
+    );
+    assert!(
+        moved
+            .iter()
+            .all(|c| c.metadata.source.root_page_id == FOREIGN
+                && c.metadata.source.workspace_id == WORKSPACE
+                && c.metadata.title == "Moved title")
+    );
+    assert_eq!(
+        index
+            .table()
+            .await
+            .fts_query("text", "Saffron", 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lifecycle_reopen_recomputes_unacknowledged_action_in_both_directions() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let provider = CountingProvider::new(index.embed.clone());
+    let page = PageId(PAGE.into());
+    let sql = rusqlite::Connection::open(&index.db).unwrap();
+    let fail = "CREATE TRIGGER fail_checkpoint BEFORE UPDATE OF status ON index_commit_receipts WHEN NEW.status=1 BEGIN SELECT RAISE(ABORT,'injected ack failure');END;";
+    sql.execute_batch(fail).unwrap();
+    assert_eq!(
+        index
+            .handler(source.client())
+            .apply_lifecycle(
+                &page,
+                "refresh-interrupted",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap_err(),
+        RefreshError::Unavailable
+    );
+    assert!(!index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+    source.change(|m| m.archived = true);
+    // A second interruption removes every chunk before the first checkpoint
+    // exists. The page-bound pending receipt must survive as ownership evidence.
+    assert_eq!(
+        index
+            .handler(source.client())
+            .apply_lifecycle(
+                &page,
+                "refresh-interrupted",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap_err(),
+        RefreshError::Unavailable
+    );
+    assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+    assert!(
+        index
+            .coordinator
+            .state()
+            .page_state(PAGE)
+            .unwrap()
+            .is_none()
+    );
+    sql.execute_batch("DROP TRIGGER fail_checkpoint;").unwrap();
+    source.change(|m| m.archived = true);
+    let reopened =
+        IndexCommitCoordinator::open(&index.index, &index.db, index.coordinator.binding().clone())
+            .unwrap();
+    let handler = AuthoritativePageRefresh::new(
+        source.client(),
+        GuardedChunkTable::bind(
+            &index.index,
+            "chunks",
+            index.embed.clone(),
+            reopened.clone(),
+        )
+        .unwrap(),
+        reopened.clone(),
+        authority(),
+        &index.journal_scope,
+        chunk_config(),
+    )
+    .unwrap();
+    handler
+        .apply_lifecycle(
+            &page,
+            "refresh-interrupted",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        reopened
+            .state()
+            .page_state(PAGE)
+            .unwrap()
+            .unwrap()
+            .is_tombstone()
+    );
+    source.change(|m| m.archived = false);
+    handler
+        .apply_lifecycle(&page, "restore", &provider, index.lease.clone(), clock())
+        .await
+        .unwrap();
+    source.change(|m| m.archived = true);
+    sql.execute_batch(fail).unwrap();
+    assert_eq!(
+        handler
+            .apply_lifecycle(
+                &page,
+                "delete-interrupted",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap_err(),
+        RefreshError::Unavailable
+    );
+    assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+    assert!(
+        !reopened
+            .state()
+            .page_state(PAGE)
+            .unwrap()
+            .unwrap()
+            .is_tombstone()
+    );
+    sql.execute_batch("DROP TRIGGER fail_checkpoint;").unwrap();
+    source.change(|m| m.archived = false);
+    let reopened_again =
+        IndexCommitCoordinator::open(&index.index, &index.db, index.coordinator.binding().clone())
+            .unwrap();
+    let handler = AuthoritativePageRefresh::new(
+        source.client(),
+        GuardedChunkTable::bind(
+            &index.index,
+            "chunks",
+            index.embed.clone(),
+            reopened_again.clone(),
+        )
+        .unwrap(),
+        reopened_again.clone(),
+        authority(),
+        &index.journal_scope,
+        chunk_config(),
+    )
+    .unwrap();
+    handler
+        .apply_lifecycle(
+            &page,
+            "delete-interrupted",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        index
+            .table()
+            .await
+            .fts_query("text", "Saffron", 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        !reopened_again
+            .state()
+            .page_state(PAGE)
+            .unwrap()
+            .unwrap()
+            .is_tombstone()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lifecycle_failures_never_authorize_removal_or_acknowledgement() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let handler = index.handler(source.client());
+    let provider = CountingProvider::new(index.embed.clone());
+    let page = PageId(PAGE.into());
+    handler
+        .apply_lifecycle(&page, "seed", &provider, index.lease.clone(), clock())
+        .await
+        .unwrap();
+    let original = index.guarded().page_chunks(PAGE).await.unwrap();
+    source.change(|m| m.parent = "66666666-6666-6666-6666-666666666666".into());
+    assert_eq!(
+        handler
+            .apply_lifecycle(
+                &page,
+                "inaccessible-ancestor",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap_err(),
+        RefreshError::Source
+    );
+    assert!(
+        index
+            .coordinator
+            .receipt("inaccessible-ancestor")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(index.guarded().page_chunks(PAGE).await.unwrap(), original);
+    source.change(|m| m.parent = "invalid-parent-id".into());
+    assert_eq!(
+        handler
+            .apply_lifecycle(
+                &page,
+                "incomplete-ancestor",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap_err(),
+        RefreshError::Source
+    );
+    assert_eq!(index.guarded().page_chunks(PAGE).await.unwrap(), original);
+    source.change(|m| m.parent = ROOT.into());
+    source.fail_once.store(true, Ordering::SeqCst);
+    assert_eq!(
+        handler
+            .apply_lifecycle(
+                &page,
+                "source-unavailable",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap_err(),
+        RefreshError::Source
+    );
+    assert!(
+        index
+            .coordinator
+            .receipt("source-unavailable")
+            .unwrap()
+            .is_none()
+    );
+    let table_path = index.index.join("chunks.lance");
+    let held_path = index.index.join("held.lance");
+    fs::rename(&table_path, &held_path).unwrap();
+    assert_eq!(
+        handler
+            .apply_lifecycle(
+                &page,
+                "index-unavailable",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap_err(),
+        RefreshError::Index
+    );
+    fs::rename(&held_path, &table_path).unwrap();
+    assert_eq!(index.guarded().page_chunks(PAGE).await.unwrap(), original);
+    source.change(|m| {
+        m.parent = ROOT.into();
+        m.archived = true;
+    });
+    let incompatible = CountingProvider::new(
+        EmbeddingMetadata::new("foreign".into(), "fixture".into(), "v1".into(), 3).unwrap(),
+    );
+    assert_eq!(
+        handler
+            .apply_lifecycle(
+                &page,
+                "wrong-provider",
+                &incompatible,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap_err(),
+        RefreshError::Index
+    );
+    assert_eq!(index.guarded().page_chunks(PAGE).await.unwrap(), original);
+    let newer = index.coordinator.state().acquire_lease(111, 100).unwrap();
+    assert_eq!(
+        handler
+            .apply_lifecycle(
+                &page,
+                "stale-owner-delete",
+                &provider,
+                index.lease.clone(),
+                Arc::new(|| 111)
+            )
+            .await
+            .unwrap_err(),
+        RefreshError::Conflict
+    );
+    assert_eq!(index.guarded().page_chunks(PAGE).await.unwrap(), original);
+    // A source restore after removal preparation but inside the owned commit
+    // must reject the obsolete delete before touching either index family.
+    let state = source.state.clone();
+    let fired = Arc::new(AtomicBool::new(false));
+    let race_clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || {
+        if !fired.swap(true, Ordering::SeqCst) {
+            state.lock().unwrap().archived = false;
+        }
+        111
+    });
+    assert_eq!(
+        handler
+            .apply_lifecycle(&page, "raced-delete", &provider, newer.clone(), race_clock)
+            .await
+            .unwrap_err(),
+        RefreshError::Conflict
+    );
+    assert_eq!(index.guarded().page_chunks(PAGE).await.unwrap(), original);
+    assert_eq!(
+        index
+            .coordinator
+            .receipt("raced-delete")
+            .unwrap()
+            .unwrap()
+            .failure,
+        Some(notion_knowledge_core::reconciliation::FailureClass::Conflict)
+    );
+    source.change(|m| m.archived = true);
+    handler
+        .apply_lifecycle(
+            &page,
+            "raced-delete",
+            &provider,
+            newer.clone(),
+            Arc::new(|| 111),
+        )
+        .await
+        .unwrap();
+    assert!(
+        index
+            .coordinator
+            .state()
+            .page_state(PAGE)
+            .unwrap()
+            .unwrap()
+            .is_tombstone()
+    );
+}
+
+struct PausedProvider {
+    metadata: EmbeddingMetadata,
+    started: tokio::sync::Notify,
+    proceed: tokio::sync::Notify,
+}
+impl EmbeddingProvider for PausedProvider {
+    fn metadata(&self) -> &EmbeddingMetadata {
+        &self.metadata
+    }
+    fn embed_batch<'a>(&'a self, texts: &'a [String]) -> EmbeddingFuture<'a> {
+        Box::pin(async move {
+            self.started.notify_one();
+            self.proceed.notified().await;
+            Ok(texts
+                .iter()
+                .map(|text| vec![text.len() as f32, 1.0, 0.0])
+                .collect())
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_canonical_refresh_cannot_resurrect_authoritatively_removed_page() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let handler = index.handler(source.client());
+    let provider = CountingProvider::new(index.embed.clone());
+    let page = PageId(PAGE.into());
+    handler
+        .apply_lifecycle(&page, "seed", &provider, index.lease.clone(), clock())
+        .await
+        .unwrap();
+    source.change(|m| {
+        m.markdown = "# Changed\n\nStale resurrection content.\n".into();
+        m.revision = "2026-10-10T12:00:08Z".into();
+    });
+    let paused = Arc::new(PausedProvider {
+        metadata: index.embed.clone(),
+        started: tokio::sync::Notify::new(),
+        proceed: tokio::sync::Notify::new(),
+    });
+    let refresh_handler = handler.clone();
+    let refresh_provider = paused.clone();
+    let lease = index.lease.clone();
+    let competing_refresh = tokio::spawn(async move {
+        refresh_handler
+            .refresh_page(
+                &PageId(PAGE.into()),
+                &PageId(ROOT.into()),
+                "competing-refresh",
+                refresh_provider.as_ref(),
+                lease,
+                clock(),
+            )
+            .await
+    });
+    paused.started.notified().await;
+    source.change(|m| m.archived = true);
+    handler
+        .apply_lifecycle(
+            &page,
+            "concurrent-delete",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    paused.proceed.notify_one();
+    assert_eq!(
+        competing_refresh.await.unwrap().unwrap_err(),
+        RefreshError::Conflict
+    );
+    assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+    assert!(
+        index
+            .coordinator
+            .state()
+            .page_state(PAGE)
+            .unwrap()
+            .unwrap()
+            .is_tombstone()
+    );
+    assert!(
+        index
+            .table()
+            .await
+            .fts_query("text", "resurrection", 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lifecycle_excluded_ancestry_removes_and_changed_scope_generation_fences_old_handler() {
+    use notion_knowledge_core::lifecycle::{LifecycleStatus, PageLifecycle};
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let provider = CountingProvider::new(index.embed.clone());
+    let mut scope = authority();
+    scope.exclusions.descendants_of.insert(FOREIGN.into());
+    let client = source.client();
+    let handler = AuthoritativePageRefresh::new(
+        client.clone(),
+        index.guarded(),
+        index.coordinator.clone(),
+        scope.clone(),
+        &index.journal_scope,
+        chunk_config(),
+    )
+    .unwrap();
+    let page = PageId(PAGE.into());
+    handler
+        .apply_lifecycle(&page, "seed", &provider, index.lease.clone(), clock())
+        .await
+        .unwrap();
+    source.change(|m| m.parent = FOREIGN.into());
+    assert!(matches!(
+        client.lifecycle(&page, &scope).await.unwrap().status,
+        LifecycleStatus::Excluded { .. }
+    ));
+    handler
+        .apply_lifecycle(
+            &page,
+            "excluded-move",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        index
+            .coordinator
+            .state()
+            .page_state(PAGE)
+            .unwrap()
+            .unwrap()
+            .is_tombstone()
+    );
+    assert!(
+        index
+            .table()
+            .await
+            .fts_query("text", "Saffron", 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    source.change(|m| m.parent = ROOT.into());
+    handler
+        .apply_lifecycle(&page, "restore", &provider, index.lease.clone(), clock())
+        .await
+        .unwrap();
+    let next_scope = ReconciliationScope::new(vec![ROOT.into()], vec![], "phase3", "2").unwrap();
+    index
+        .coordinator
+        .change_scope(
+            CommitBinding::new("chunks", WORKSPACE, &next_scope, "2", 2).unwrap(),
+            &index.lease,
+            10,
+        )
+        .unwrap();
+    source.change(|m| m.archived = true);
+    assert_eq!(
+        handler
+            .apply_lifecycle(
+                &page,
+                "stale-generation-delete",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap_err(),
+        RefreshError::Conflict
+    );
+    assert!(!index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+    assert!(
+        !index
+            .coordinator
+            .state()
+            .page_state(PAGE)
+            .unwrap()
+            .unwrap()
+            .is_tombstone()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lifecycle_refresh_rejects_same_root_ancestry_change_at_commit() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let handler = index.handler(source.client());
+    let provider = CountingProvider::new(index.embed.clone());
+    let page = PageId(PAGE.into());
+    let state = source.state.clone();
+    let fired = Arc::new(AtomicBool::new(false));
+    let race_clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || {
+        if !fired.swap(true, Ordering::SeqCst) {
+            state.lock().unwrap().root_revision = "2026-10-10T12:00:09Z".into();
+        }
+        10
+    });
+    assert_eq!(
+        handler
+            .apply_lifecycle(
+                &page,
+                "ancestor-changed",
+                &provider,
+                index.lease.clone(),
+                race_clock
+            )
+            .await
+            .unwrap_err(),
+        RefreshError::Conflict
+    );
+    assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+    assert!(
+        index
+            .coordinator
+            .state()
+            .page_state(PAGE)
+            .unwrap()
+            .is_none()
+    );
+    handler
+        .apply_lifecycle(
+            &page,
+            "ancestor-changed",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        index
+            .table()
+            .await
+            .fts_query("text", "Saffron", 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_empty_page_can_be_tombstoned_without_chunks_or_embeddings() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    source.change(|m| m.markdown = String::new());
+    let handler = index.handler(source.client());
+    let provider = CountingProvider::new(index.embed.clone());
+    let page = PageId(PAGE.into());
+    handler
+        .apply_lifecycle(&page, "empty-page", &provider, index.lease.clone(), clock())
+        .await
+        .unwrap();
+    assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+    assert!(
+        !index
+            .coordinator
+            .state()
+            .page_state(PAGE)
+            .unwrap()
+            .unwrap()
+            .is_tombstone()
+    );
+    source.change(|m| m.archived = true);
+    handler
+        .apply_lifecycle(
+            &page,
+            "empty-delete",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        index
+            .coordinator
+            .state()
+            .page_state(PAGE)
+            .unwrap()
+            .unwrap()
+            .is_tombstone()
+    );
+    assert_eq!(provider.embeddings(), 0);
 }

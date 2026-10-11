@@ -82,8 +82,8 @@ snapshot: a move/edit can occur immediately after the final read, and revisions
 may not encode every concurrent ancestor change. A SQLite lease alone cannot
 fence a later LanceDB mutation. Downstream production workflows must retain their
 commit guard, reject observed stale evidence and reconcile subsequent changes.
-The searchable lifecycle behavior, including deletion and restoration effects,
-remains #252 under open parent #56.
+The [searchable lifecycle effects](phase3-lifecycle-effects.md) reuse this
+evidence and the guarded canonical refresh pipeline for deletion, moves and restoration.
 
 ## Verification and protocol sources
 

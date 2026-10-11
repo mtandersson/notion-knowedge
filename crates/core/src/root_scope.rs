@@ -76,6 +76,11 @@ pub struct AuthorizedPage {
 }
 
 impl AuthorizedPage {
+    /// Preserve the exact authorized physical chain for guarded later effects.
+    pub fn lifecycle_evidence(&self) -> &LifecycleEvidence {
+        &self.evidence
+    }
+
     /// Container IDs derived solely from the already-verified physical
     /// ancestry, never from index metadata, relations, or caller hints.
     pub fn physical_containers(&self) -> (Option<&str>, Option<&str>) {
