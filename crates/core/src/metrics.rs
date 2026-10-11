@@ -89,7 +89,9 @@ pub fn observe_event(operation: Operation, outcome: Outcome, elapsed: Duration) 
                     .duration_since(UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                metrics.last_index_commit_seconds.store(now, Ordering::Relaxed);
+                metrics
+                    .last_index_commit_seconds
+                    .store(now, Ordering::Relaxed);
             }
         }
         Operation::McpTool => {}
@@ -209,7 +211,12 @@ pub fn render() -> String {
     }
     out.push_str("# HELP nk_http_request_duration_seconds HTTP request latency.\n");
     out.push_str("# TYPE nk_http_request_duration_seconds histogram\n");
-    histogram(&mut out, "nk_http_request_duration_seconds", &m.http_latency, None);
+    histogram(
+        &mut out,
+        "nk_http_request_duration_seconds",
+        &m.http_latency,
+        None,
+    );
     out.push_str("# HELP nk_notion_requests_total Notion API calls by outcome.\n");
     out.push_str("# TYPE nk_notion_requests_total counter\n");
     for (i, label) in OUTCOMES.iter().enumerate() {
@@ -296,8 +303,6 @@ mod tests {
     fn aborted_search_is_recorded_as_failure() {
         let before = metrics().search_counts[2][1].load(Ordering::Relaxed);
         drop(SearchTimer::start(SearchKind::Hybrid));
-        assert!(
-            metrics().search_counts[2][1].load(Ordering::Relaxed) >= before + 1
-        );
+        assert!(metrics().search_counts[2][1].load(Ordering::Relaxed) > before);
     }
 }

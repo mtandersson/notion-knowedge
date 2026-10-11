@@ -428,9 +428,7 @@ async fn health_response(State(diagnostics): State<crate::diagnostics::Diagnosti
 }
 
 /// Prometheus metrics share the health endpoint's host/origin and optional bearer gates.
-async fn metrics_response(
-    State(diagnostics): State<crate::diagnostics::Diagnostics>,
-) -> Response {
+async fn metrics_response(State(diagnostics): State<crate::diagnostics::Diagnostics>) -> Response {
     let mut output = notion_knowledge_core::metrics::render();
     if let Some(store) = diagnostics.operational_store() {
         let now = std::time::SystemTime::now()
@@ -439,11 +437,19 @@ async fn metrics_response(
             .unwrap_or(0);
         let snapshot = tokio::task::spawn_blocking(move || store.operational_metrics(now)).await;
         let Ok(Ok(snapshot)) = snapshot else {
-            return (StatusCode::SERVICE_UNAVAILABLE, "Operational state unavailable").into_response();
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Operational state unavailable",
+            )
+                .into_response();
         };
         use std::fmt::Write as _;
         output.push_str("# TYPE nk_webhook_queue_outstanding gauge\n");
-        let _ = writeln!(output, "nk_webhook_queue_outstanding {}", snapshot.webhook_outstanding);
+        let _ = writeln!(
+            output,
+            "nk_webhook_queue_outstanding {}",
+            snapshot.webhook_outstanding
+        );
         if let Some(age) = snapshot.oldest_webhook_age_seconds {
             output.push_str("# TYPE nk_webhook_oldest_outstanding_age_seconds gauge\n");
             let _ = writeln!(output, "nk_webhook_oldest_outstanding_age_seconds {age}");
