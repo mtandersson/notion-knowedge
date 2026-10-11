@@ -40,5 +40,9 @@ pub mod file_validation;
 pub use file_validation::{FileValidationError, FileValidationPolicy, ValidatedFile};
 pub mod file_download;
 
+/// Authenticated, server-only single-part file upload. Attachment requires later scoped flow.
+pub mod file_upload;
+pub use file_upload::{UploadStatus, UploadedFile};
+
 /// One-page, read-only canonical refresh preparation under live physical scope.
 pub mod prepare;

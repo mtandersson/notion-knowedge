@@ -164,13 +164,20 @@ impl NotionClient {
         operation: &'static str,
     ) -> Result<Response, BackendError> {
         let mut retry = 0;
+        // Multipart streams cannot be cloned; consume them exactly once while
+        // retaining admission, logging and rate-limit accounting.
+        let replayable = request.try_clone().is_some();
+        let mut request = Some(request);
         loop {
             tokio::time::timeout(MAX_WAIT, self.transport.admit(operation))
                 .await
                 .map_err(|_| error(operation, BackendErrorKind::RateLimited, Some(MAX_WAIT)))??;
-            let attempt = request
-                .try_clone()
-                .ok_or_else(|| error(operation, BackendErrorKind::Internal, None))?;
+            let attempt = if replayable {
+                request.as_ref().and_then(|req| req.try_clone())
+            } else {
+                request.take()
+            }
+            .ok_or_else(|| error(operation, BackendErrorKind::Internal, None))?;
             self.transport.attempts.fetch_add(1, Ordering::Relaxed);
             if retry > 0 {
                 self.transport.retries.fetch_add(1, Ordering::Relaxed);
@@ -213,13 +220,14 @@ impl NotionClient {
                     return Err(error(operation, BackendErrorKind::RateLimited, None));
                 }
                 let delay = effective_delay;
-                if retry >= self.transport.max_retries || delay > MAX_WAIT {
+                if !replayable || retry >= self.transport.max_retries || delay > MAX_WAIT {
                     return Err(error(operation, BackendErrorKind::RateLimited, Some(delay)));
                 }
                 // Notion documents 429 as rejected by request admission; unlike ambiguous
                 // transport/5xx failures, this response is safe to resubmit for writes too.
             } else {
                 let transient = replay_safe
+                    && replayable
                     && match &result {
                         Err(_) => true,
                         Ok(response) => matches!(response.status().as_u16(), 500 | 502 | 503 | 504),

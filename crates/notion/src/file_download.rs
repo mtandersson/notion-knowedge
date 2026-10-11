@@ -176,6 +176,21 @@ impl DownloadedFile {
     pub fn file(&self) -> &std::fs::File {
         self.file.as_file()
     }
+    /// A separately opened handle with its own cursor for a streaming upload.
+    pub(crate) fn reopen(&self) -> std::io::Result<std::fs::File> {
+        self.file.reopen()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_fixture(bytes: &[u8]) -> Self {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().expect("test tempfile");
+        file.write_all(bytes).expect("fixture bytes");
+        Self {
+            file,
+            size_bytes: bytes.len(),
+        }
+    }
 }
 
 fn request_error(error: reqwest::Error) -> DownloadError {
