@@ -52,6 +52,10 @@ pub use image_attachment::AttachedImage;
 pub mod file_attachment;
 pub use file_attachment::AttachedFile;
 
+/// Bounded sequential native attachment with per-item results.
+pub mod batch_attachment;
+pub use batch_attachment::{BatchAttachmentOutcome, BatchAttachmentStatus};
+
 /// Fail-closed attachment audit facts, explicitly excluding signed source URLs.
 pub mod file_ingest_audit;
 
