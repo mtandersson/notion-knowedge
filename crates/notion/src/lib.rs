@@ -48,5 +48,9 @@ pub use file_upload::{UploadStatus, UploadedFile};
 pub mod image_attachment;
 pub use image_attachment::AttachedImage;
 
+/// Server-only, root-scoped native Notion document file attachment.
+pub mod file_attachment;
+pub use file_attachment::AttachedFile;
+
 /// One-page, read-only canonical refresh preparation under live physical scope.
 pub mod prepare;
