@@ -74,7 +74,7 @@ It distinguishes key selection from Cargo's actual fingerprint decisions.
 
 ## CI test debug information
 
-The three test suites use `CARGO_PROFILE_TEST_DEBUG=line-tables-only` in CI.
+The four test suites (workspace, local Qwen, local LanceDB and production webhook worker) use `CARGO_PROFILE_TEST_DEBUG=line-tables-only` in CI.
 This retains filename/line backtraces without full type/variable debug data in
 compiled dependencies and test binaries. Local developer and release settings
 remain unchanged. This setting is part of the existing profile-flag cache hash,
