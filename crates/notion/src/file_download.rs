@@ -575,7 +575,8 @@ mod tests {
             assert!(!path.exists());
             server.abort();
         }
-    }    #[test]
+    }
+    #[test]
     fn unwinding_the_request_unlinks_owned_temporary_bytes() {
         let directory = tempfile::tempdir().unwrap();
         let temporary = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
