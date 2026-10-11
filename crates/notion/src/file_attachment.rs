@@ -578,6 +578,4 @@ mod tests {
         item.filename = "notes.pdf".into();
         item.status = UploadStatus::Uploaded;
         assert!(valid_upload(&item));
-    }
-
-}
+    }}
