@@ -29,7 +29,14 @@ pub fn successful_attachment_event(
     if !verified || uploaded_size_bytes == 0 {
         return Err(AuditError::InvalidInput);
     }
-    attachment_event_success(target, kind, uploaded_size_bytes, occurred_at_unix, actor, correlation_id)
+    attachment_event_success(
+        target,
+        kind,
+        uploaded_size_bytes,
+        occurred_at_unix,
+        actor,
+        correlation_id,
+    )
 }
 
 /// Record denied/failed/ambiguous outcomes without ever accepting a success
@@ -93,9 +100,13 @@ mod tests {
             verified: true,
         };
         let record = successful_attachment_event(
-            VerifiedAttachment::Image(&image), 1234, 1_800_000_000,
-            AuditActor::ApprovedUser, "request_0123456789abcdef".into()
-        ).unwrap();
+            VerifiedAttachment::Image(&image),
+            1234,
+            1_800_000_000,
+            AuditActor::ApprovedUser,
+            "request_0123456789abcdef".into(),
+        )
+        .unwrap();
         assert_eq!(record.target_page_id(), Some(PAGE));
         assert_eq!(record.outcome(), AuditOutcome::Succeeded);
         let file = record.file().unwrap();
@@ -116,15 +127,22 @@ mod tests {
         };
         assert_eq!(
             successful_attachment_event(
-                VerifiedAttachment::Document(&file), 100, 1_800_000_000,
-                AuditActor::Server, "request_0123456789abcdef".into()
+                VerifiedAttachment::Document(&file),
+                100,
+                1_800_000_000,
+                AuditActor::Server,
+                "request_0123456789abcdef".into()
             ),
             Err(AuditError::InvalidInput)
         );
         assert_eq!(
             attachment_event(
-                &file.page_id, FileKind::Other, 100, AuditOutcome::Succeeded,
-                1_800_000_000, AuditActor::Server,
+                &file.page_id,
+                FileKind::Other,
+                100,
+                AuditOutcome::Succeeded,
+                1_800_000_000,
+                AuditActor::Server,
                 "request_0123456789abcdef".into()
             ),
             Err(AuditError::InvalidInput)
@@ -135,15 +153,28 @@ mod tests {
     fn failed_or_indeterminate_outcomes_redact_and_validate_inputs() {
         let page = PageId(PAGE.into());
         let record = attachment_event(
-            &page, FileKind::Other, 100, AuditOutcome::Indeterminate,
-            1_800_000_000, AuditActor::Server,
-            "request_0123456789abcdef".into()
-        ).unwrap();
+            &page,
+            FileKind::Other,
+            100,
+            AuditOutcome::Indeterminate,
+            1_800_000_000,
+            AuditActor::Server,
+            "request_0123456789abcdef".into(),
+        )
+        .unwrap();
         assert_eq!(record.outcome(), AuditOutcome::Indeterminate);
         assert_eq!(record.file().unwrap().kind(), FileKind::Other);
-        assert!(attachment_event(
-            &page, FileKind::Other, 100, AuditOutcome::Failed,
-            1_800_000_000, AuditActor::Server, "https://secret.example/?token=x".into()
-        ).is_err());
+        assert!(
+            attachment_event(
+                &page,
+                FileKind::Other,
+                100,
+                AuditOutcome::Failed,
+                1_800_000_000,
+                AuditActor::Server,
+                "https://secret.example/?token=x".into()
+            )
+            .is_err()
+        );
     }
 }
