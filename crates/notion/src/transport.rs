@@ -176,7 +176,8 @@ impl NotionClient {
                 request.as_ref().and_then(|req| req.try_clone())
             } else {
                 request.take()
-            }.ok_or_else(|| error(operation, BackendErrorKind::Internal, None))?;
+            }
+            .ok_or_else(|| error(operation, BackendErrorKind::Internal, None))?;
             self.transport.attempts.fetch_add(1, Ordering::Relaxed);
             if retry > 0 {
                 self.transport.retries.fetch_add(1, Ordering::Relaxed);
