@@ -179,8 +179,10 @@ impl NotionClient {
             }
             .ok_or_else(|| error(operation, BackendErrorKind::Internal, None))?;
             self.transport.attempts.fetch_add(1, Ordering::Relaxed);
+            notion_knowledge_core::metrics::notion_attempt();
             if retry > 0 {
                 self.transport.retries.fetch_add(1, Ordering::Relaxed);
+                notion_knowledge_core::metrics::notion_retry();
             }
             let mut result = attempt.send().await;
             let rate_delay = result
@@ -196,6 +198,7 @@ impl NotionClient {
                 });
             if let Some(delay) = rate_delay {
                 self.transport.rate_limits.fetch_add(1, Ordering::Relaxed);
+                notion_knowledge_core::metrics::notion_rate_limited();
                 let effective_delay = delay.unwrap_or_default().max(self.transport.backoff(retry));
                 self.transport.defer(effective_delay).await;
                 // The documented permanent workspace request block is not retryable.

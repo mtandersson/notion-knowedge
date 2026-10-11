@@ -58,6 +58,16 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     ),
 ];
 
+/// A read-only snapshot of durable, identity-free operational state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OperationalMetrics {
+    /// Pending and running inbox events, including leased work.
+    pub webhook_outstanding: u64,
+    pub oldest_webhook_age_seconds: Option<u64>,
+    /// Age of the newest successfully persisted page/index-version update.
+    pub index_change_age_seconds: Option<u64>,
+}
+
 /// One process-local connection guarded by a mutex. SQLite transactions provide
 /// the durable atomicity boundary; the mutex prevents concurrent use of one
 /// connection object while still allowing callers to share the adapter.
@@ -93,6 +103,39 @@ impl SqliteSyncStateStore {
         migrate(&mut connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
+        })
+    }
+
+    /// Read durable queue backlog and index state; never expose event/page identities.
+    /// Missing index state is None rather than a misleading zero-age sample.
+    pub fn operational_metrics(&self, now_unix: i64) -> Result<OperationalMetrics, SyncStateError> {
+        if now_unix < 0 {
+            return Err(SyncStateError::Unavailable);
+        }
+        let db = self.lock_connection()?;
+        let (count, oldest): (i64, Option<i64>) = db
+            .query_row(
+                "SELECT COUNT(*), MIN(received_at_unix) FROM webhook_inbox WHERE state IN (0, 1)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(map_sqlite_error)?;
+        let updated: Option<i64> = db
+            .query_row(
+                "SELECT MAX(stamp) FROM (
+                    SELECT updated_at_unix AS stamp FROM page_sync_state
+                    UNION ALL
+                    SELECT updated_at_unix AS stamp FROM index_versions
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(map_sqlite_error)?;
+        let age = |stamp: i64| u64::try_from(now_unix.saturating_sub(stamp).max(0)).unwrap_or(0);
+        Ok(OperationalMetrics {
+            webhook_outstanding: u64::try_from(count).map_err(|_| SyncStateError::CorruptState)?,
+            oldest_webhook_age_seconds: oldest.map(age),
+            index_change_age_seconds: updated.map(age),
         })
     }
 
@@ -321,4 +364,49 @@ fn migrate(connection: &mut Connection) -> Result<(), SyncStateError> {
 
 fn map_sqlite_error(_: rusqlite::Error) -> SyncStateError {
     SyncStateError::Unavailable
+}
+
+#[cfg(test)]
+mod operational_metrics_tests {
+    use super::*;
+
+    #[test]
+    fn empty_state_omits_unavailable_age_and_never_leaks_ids() {
+        let store = SqliteSyncStateStore::open_in_memory().unwrap();
+        assert_eq!(
+            store.operational_metrics(1_000).unwrap(),
+            OperationalMetrics {
+                webhook_outstanding: 0,
+                oldest_webhook_age_seconds: None,
+                index_change_age_seconds: None,
+            }
+        );
+        assert!(store.operational_metrics(-1).is_err());
+    }
+
+    #[test]
+    fn queue_counts_running_work_and_latest_index_update() {
+        let store = SqliteSyncStateStore::open_in_memory().unwrap();
+        {
+            let db = store.lock_connection().unwrap();
+            db.execute(
+                "INSERT INTO webhook_inbox
+                 (workspace_id, subscription_id, event_id, integration_id, event_timestamp,
+                  event_type, entity_id, entity_type, attempt_number, received_at_unix)
+                 VALUES ('a', 'b', 'c', 'd', '2026-01-01', 'page.created', 'e', 'page', 1, 80)",
+                [],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO index_versions(index_name, version, updated_at_unix)
+                 VALUES ('index', 'v1', 90)",
+                [],
+            )
+            .unwrap();
+        }
+        let snapshot = store.operational_metrics(100).unwrap();
+        assert_eq!(snapshot.webhook_outstanding, 1);
+        assert_eq!(snapshot.oldest_webhook_age_seconds, Some(20));
+        assert_eq!(snapshot.index_change_age_seconds, Some(10));
+    }
 }
