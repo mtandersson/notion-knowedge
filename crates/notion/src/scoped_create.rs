@@ -52,7 +52,7 @@ fn valid(req: &ScopedPageCreateInput) -> bool {
         && req.title.chars().count()<=200
         && safe_text(&req.title)
         && req.markdown.len()<=250*1024
-        && safe_text(&req.markdown)
+        && req.markdown.chars().all(|ch| (!ch.is_control() || matches!(ch, '\r' | '\n' | '\t')) && !matches!(ch, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
         && req.icon_emoji.as_deref().is_none_or(|s|
             !s.is_empty() && s.chars().count()<=8 && safe_text(s) && !s.chars().any(char::is_whitespace))
 }
@@ -167,6 +167,7 @@ mod tests {
         q=input();q.title="".into();assert!(!valid(&q));
         q=input();q.icon_emoji=Some("secret\n".into());assert!(!valid(&q));
         q=input();q.markdown="unsafe\u{202e}suffix".into();assert!(!valid(&q));
+        q=input();q.markdown="Title\n\nBody".into();assert!(valid(&q));
         q=input();q.markdown="X".repeat(250*1024+1);assert!(!valid(&q));
     }
 
