@@ -313,9 +313,6 @@ impl ServerHandler for KnowledgeServer {
                     serde_json::from_value(serde_json::Value::Object(arguments)).map_err(|_| {
                         rmcp::ErrorData::invalid_params("invalid knowledge_search arguments", None)
                     })?;
-                input
-                    .validate()
-                    .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
                 let mut search_metric =
                     notion_knowledge_core::metrics::SearchTimer::start(match &input.mode {
                         search::SearchMode::Semantic => {
@@ -328,6 +325,9 @@ impl ServerHandler for KnowledgeServer {
                             notion_knowledge_core::metrics::SearchKind::Hybrid
                         }
                     });
+                input
+                    .validate()
+                    .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
                 if self.search.is_none()
                     && self.lexical_search.is_none()
                     && self.hybrid_search.is_none()

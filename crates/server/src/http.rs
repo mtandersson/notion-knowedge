@@ -610,6 +610,21 @@ mod tests {
                 }
             );
         }
+        let metrics = client
+            .get(format!("http://{bind}/metrics"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(metrics.status(), StatusCode::OK);
+        assert_eq!(metrics.headers()["cache-control"], "no-store");
+        assert_eq!(
+            metrics.headers()["content-type"],
+            "text/plain; version=0.0.4; charset=utf-8"
+        );
+        let text = metrics.text().await.unwrap();
+        assert!(text.contains("nk_http_requests_total{outcome=\"success\"}"));
+        assert!(text.contains("nk_search_requests_total{mode=\"hybrid\""));
+        assert!(!text.contains("page_id"));
         server.abort();
     }
 
