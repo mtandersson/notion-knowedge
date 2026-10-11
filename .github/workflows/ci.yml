@@ -202,6 +202,10 @@ jobs:
             args: -p notion-knowledge-retrieval --features local-lancedb
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Retain file/line backtraces without full dependency type/variable DWARF.
+      # This setting is included in Cargo snapshot compatibility keys.
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -223,6 +227,11 @@ jobs:
 
       - name: Run ${{ matrix.suite }} tests
         run: nix develop .#${{ matrix.shell }} --command cargo test ${{ matrix.args }} --locked
+
+      - name: Report compiled test cache footprint
+        run: |
+          du -h --max-depth=2 target/debug
+          find target/debug -type f -printf '%s %p\n' | sort -nr | sed -n '1,20p'
 
       - name: Save successful refreshed Cargo caches
         if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
