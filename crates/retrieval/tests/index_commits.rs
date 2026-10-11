@@ -804,3 +804,31 @@ async fn concurrent_refresh_retries_wait_for_owned_effect_and_keep_acknowledged_
         );
     }
 }
+
+#[tokio::test]
+async fn page_work_ownership_requires_current_generation_page_and_non_superseded_receipt() {
+    let f = Fixture::new();
+    let c = f.coordinator();
+    let lease = c.state().acquire_lease(10, 100).unwrap();
+    assert!(!c.owns_page_work("page").unwrap());
+    assert_eq!(
+        c.submit(operation("pending"), lease.clone(), clock(10), |_| async {
+            Err(FailureClass::Index)
+        })
+        .await,
+        Err(CommitError::Operation(FailureClass::Index))
+    );
+    assert!(c.owns_page_work("page").unwrap());
+    assert!(!c.owns_page_work("different-page").unwrap());
+    let next = c
+        .supersede_scope(binding("v2", 2), &lease, 10, &["pending".into()])
+        .unwrap();
+    assert!(!next.owns_page_work("page").unwrap());
+    // Even an old binding must not treat a superseded receipt as ownership.
+    assert_eq!(c.owns_page_work("page"), Err(CommitError::BindingMismatch));
+    next.submit(operation("current"), lease, clock(10), |_| async { Ok(()) })
+        .await
+        .unwrap();
+    assert!(next.owns_page_work("page").unwrap());
+    assert_eq!(c.owns_page_work("page"), Err(CommitError::BindingMismatch));
+}
