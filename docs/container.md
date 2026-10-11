@@ -79,8 +79,11 @@ The default command still builds both images for local development.
 
 Successful main runs warm `nk-container-v1-Linux-X64-main` and its `-builder`
 companion. Each same-repository PR has the equivalent numbered pair. For each
-root, the read-only local action selects the exact available own-ref index,
-otherwise the trusted main index, otherwise no remote import. It never configures
+builder export, the read-only local action selects the available own builder
+index, otherwise the trusted main builder index, otherwise no remote import.
+The final-image solve selects own final, own builder, trusted main final,
+trusted main builder, then no remote import. A builder index can retain the
+compiler result even when its final-image index is evicted. It never configures
 overlapping logical cache sources in one solve. Lookup errors and eviction can cause a
 local rebuild; they never skip production checks. Forks can restore authorized
 main caches but never export. GitHub isolates PR writes to their merge ref.
