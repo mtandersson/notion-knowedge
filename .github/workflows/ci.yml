@@ -186,7 +186,20 @@ jobs:
   test:
     needs: changes
     if: needs.changes.outputs.test == 'true'
-    name: Unit tests
+    name: Unit tests (${{ matrix.suite }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: workspace
+            shell: default
+            args: --workspace
+          - suite: local-qwen
+            shell: spike
+            args: -p notion-knowledge-retrieval --features local-qwen
+          - suite: local-lancedb
+            shell: spike
+            args: -p notion-knowledge-retrieval --features local-lancedb
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -205,17 +218,11 @@ jobs:
         id: cargo-cache
         uses: ./.github/actions/cargo-cache-restore
         with:
-          job: ${{ github.job }}
+          job: test-${{ matrix.suite }}
           profile: debug
 
-      - name: Run unit tests
-        run: nix develop --command cargo test --workspace --locked
-
-      - name: Test optional local Qwen provider without model assets
-        run: nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-qwen --locked
-      - name: Test optional local LanceDB adapter
-        run: nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --locked
-
+      - name: Run ${{ matrix.suite }} tests
+        run: nix develop .#${{ matrix.shell }} --command cargo test ${{ matrix.args }} --locked
 
       - name: Save successful refreshed Cargo caches
         if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)

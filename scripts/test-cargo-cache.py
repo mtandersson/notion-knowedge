@@ -71,6 +71,15 @@ class CargoSnapshots(unittest.TestCase):
             with self.subTest(variation=variation):
                 self.assertNotEqual(before, self.key(**variation)['prefix'])
 
+    def test_test_suites_have_isolated_builds_and_shared_downloads(self):
+        snapshots = [self.key(job=job) for job in
+                     ('test', 'test-workspace', 'test-local-qwen', 'test-local-lancedb')]
+        self.assertEqual(len({entry['prefix'] for entry in snapshots}), 4)
+        self.assertEqual(len({entry['downloads-key'] for entry in snapshots}), 1)
+        for job in ('test-workspace', 'test-local-qwen', 'test-local-lancedb'):
+            with self.subTest(job=job), self.assertRaises(ValueError):
+                self.key(job=job, profile='release')
+
     def test_credentials_do_not_enter_keys_or_output(self):
         sentinel = 'never-print-this-value'
         result = self.key(environment={'NOTION_TOKEN': sentinel, 'CARGO_REGISTRIES_OTHER_TOKEN': sentinel})
