@@ -548,4 +548,50 @@ mod tests {
         item.status = UploadStatus::Uploaded;
         assert!(valid_upload(&item));
     }
+    #[tokio::test]
+    async fn file_block_eventually_appears_after_initial_not_found() {
+        let mut steps = chain(ROOT);
+        steps.extend(chain(ROOT));
+        steps.push(append());
+        steps.push((format!("GET /v1/blocks/{BLOCK}"), 404, json!({"code":"not_found"})));
+        steps.push(readback(PAGE));
+        let (client, server) = fixture(steps).await;
+        let attached = client
+            .attach_uploaded_file(
+                &PageId(PAGE.into()),
+                &upload("application/pdf"),
+                Some("Dokument från Hans"),
+                &policy(),
+            )
+            .await
+            .unwrap();
+        assert!(attached.verified);
+        assert_eq!(server.await.unwrap().len(), 11);
+    }
+
+    #[tokio::test]
+    async fn file_block_never_appears_returns_error_without_second_append() {
+        let mut steps = chain(ROOT);
+        steps.extend(chain(ROOT));
+        steps.push(append());
+        for _ in 0..3 {
+            steps.push((format!("GET /v1/blocks/{BLOCK}"), 404, json!({"code":"not_found"})));
+        }
+        let (client, server) = fixture(steps).await;
+        let failure = client
+            .attach_uploaded_file(
+                &PageId(PAGE.into()),
+                &upload("application/pdf"),
+                None,
+                &policy(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(failure.kind, BackendErrorKind::Conflict);
+        assert_eq!(failure.operation, VERIFY);
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 12);
+        assert_eq!(requests.iter().filter(|(method, _)| method.starts_with("PATCH")).count(), 1);
+    }
+
 }
