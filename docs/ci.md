@@ -43,7 +43,7 @@ coverage. Main and manual dispatch always select all nine jobs.
 
 ## Stable check and failure contract
 
-All existing nine check display names remain unchanged. Narrow PR jobs now
+The nine logical checks remain; Unit tests displays one check per matrix suite. Narrow PR jobs now
 report intentional skips. Configure **CI gate** as the required check instead of
 requiring each optional job individually. Keep **CI input selection** visible
 for diagnosis; CI gate requires it to succeed and validates every selection
@@ -146,3 +146,23 @@ separate coordinator audits.
 The [development sharing experiment](ci-dev-sharing-evidence.md) retains separate
 Type check, Clippy and Unit tests jobs: measured work/storage savings did not
 improve complete development PR feedback in either cold or warm samples.
+
+## Parallel test suites
+
+The `test` job runs workspace, `local-qwen`, and `local-lancedb` suites in
+parallel with `fail-fast: false`, preserving every previous Cargo test command.
+All suites use the same conservative test input selection. The final CI gate
+requires the aggregated matrix result to succeed, so any failed, cancelled, or
+missing suite blocks delivery. Other suites continue after a failure to retain
+complete diagnostics.
+
+Each suite has a separate `test-SUITE` compiled Cargo snapshot; dependency
+downloads remain shared. Workspace tests no longer restore the optional
+LanceDB/Qwen build outputs. New namespaces need an initial cold build before
+warm comparisons are meaningful; splitting adds runner and cache storage cost.
+
+The motivating [PR #323 job](https://github.com/mtandersson/notion-knowedge/actions/runs/38114458194/job/114396504011)
+spent 181 seconds restoring caches, 150 seconds running workspace tests, and
+33 seconds running Qwen tests before starting LanceDB tests (observed while
+that step was still running). This change removes serial suite dependencies;
+these baseline timings alone do not prove a hosted speedup.
