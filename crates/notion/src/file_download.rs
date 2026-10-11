@@ -570,7 +570,10 @@ mod tests {
         for rejected in ["invalid mime", "scope denied", "audit storage failed"] {
             let temporary = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
             let path = temporary.path().to_owned();
-            let file = DownloadedFile { file: temporary, size_bytes: 10 };
+            let file = DownloadedFile {
+                file: temporary,
+                size_bytes: 10,
+            };
             let result: Result<(), &'static str> = {
                 let _request_file = file;
                 Err(rejected)
