@@ -44,5 +44,9 @@ pub mod file_download;
 pub mod file_upload;
 pub use file_upload::{UploadStatus, UploadedFile};
 
+/// Operator-scoped attachment of verified native Notion image blocks.
+pub mod image_attachment;
+pub use image_attachment::AttachedImage;
+
 /// One-page, read-only canonical refresh preparation under live physical scope.
 pub mod prepare;
