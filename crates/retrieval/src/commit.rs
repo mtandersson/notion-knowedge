@@ -120,6 +120,7 @@ pub struct PageOperation {
     revision: String,
     action: PageAction,
     checkpoint: PageSyncState,
+    metadata_identity: Option<String>,
     retry_latest_refresh: bool,
     retry_latest_lifecycle: bool,
 }
@@ -148,6 +149,7 @@ impl PageOperation {
             revision: revision.into(),
             action,
             checkpoint,
+            metadata_identity: None,
             retry_latest_refresh: false,
             retry_latest_lifecycle: false,
         })
@@ -177,6 +179,16 @@ impl PageOperation {
         let mut operation = Self::new(id, revision, action, checkpoint)?;
         operation.retry_latest_lifecycle = true;
         Ok(operation)
+    }
+    pub fn with_metadata_identity(mut self, identity: String) -> Result<Self, CommitError> {
+        if self.action == PageAction::Delete
+            || identity.len() != 64
+            || !identity.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(CommitError::InvalidInput);
+        }
+        self.metadata_identity = Some(identity);
+        Ok(self)
     }
     pub fn id(&self) -> &str {
         &self.id
@@ -601,6 +613,36 @@ impl IndexCommitCoordinator {
     /// Durable evidence of page ownership even after external effects removed
     /// all chunks and the checkpoint transaction was interrupted. Scope is the
     /// current trusted generation; an unrelated event ID is never sufficient.
+    /// Only receipts belonging to the current binding establish sync ownership.
+    pub fn owned_page_ids(&self) -> Result<Vec<String>, CommitError> {
+        self.identities()?;
+        let db = self
+            .state
+            .lock_connection()
+            .map_err(|_| CommitError::Unavailable)?;
+        self.validate_binding(&db)?;
+        let mut statement = db.prepare("SELECT DISTINCT page_id FROM index_commit_receipts WHERE generation=?1 AND status IN(0,1,2) ORDER BY page_id").map_err(sql)?;
+        statement
+            .query_map([&self.binding.generation], |r| r.get(0))
+            .map_err(sql)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql)
+    }
+    pub fn metadata_identity(&self, page_id: &str) -> Result<Option<String>, CommitError> {
+        self.identities()?;
+        let db = self
+            .state
+            .lock_connection()
+            .map_err(|_| CommitError::Unavailable)?;
+        self.validate_binding(&db)?;
+        db.query_row(
+            "SELECT identity FROM page_metadata_identity WHERE page_id=?1 AND generation=?2",
+            params![page_id, self.binding.generation],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql)
+    }
     pub fn owns_page_work(&self, page_id: &str) -> Result<bool, CommitError> {
         validate(page_id).map_err(|_| CommitError::InvalidInput)?;
         let db = self
@@ -723,6 +765,18 @@ impl IndexCommitCoordinator {
         self.validate_fence(&tx, lease, now)?;
         let checkpoint = &operation.checkpoint;
         tx.execute("INSERT INTO page_sync_state VALUES(?1,?2,?3,?4,unixepoch()) ON CONFLICT(page_id) DO UPDATE SET content_hash=excluded.content_hash,last_edited_time=excluded.last_edited_time,tombstoned=excluded.tombstoned,updated_at_unix=excluded.updated_at_unix",params![checkpoint.page_id(),checkpoint.content_hash(),checkpoint.last_edited_time(),i64::from(checkpoint.is_tombstone())]).map_err(sql)?;
+        tx.execute(
+            "DELETE FROM page_metadata_identity WHERE page_id=?1",
+            [checkpoint.page_id()],
+        )
+        .map_err(sql)?;
+        if let Some(identity) = &operation.metadata_identity {
+            tx.execute(
+                "INSERT INTO page_metadata_identity VALUES(?1,?2,?3)",
+                params![checkpoint.page_id(), self.binding.generation, identity],
+            )
+            .map_err(sql)?;
+        }
         let count=tx.execute("UPDATE index_commit_receipts SET status=1,failure=NULL WHERE operation_id=?1 AND status=0",[&operation.id]).map_err(sql)?;
         if count != 1 {
             return Err(CommitError::Conflict);

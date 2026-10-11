@@ -245,34 +245,8 @@ pub mod runtime {
         scope: &LifecycleScope,
         state_file: std::path::PathBuf,
     ) -> Result<(Arc<IndexCommitCoordinator>, ReconciliationScope), &'static str> {
-        // Include each exclusion category in the persisted authority identity.
-        let exclusions = scope
-            .exclusions
-            .page_ids
-            .iter()
-            .map(|id| format!("page:{id}"))
-            .chain(
-                scope
-                    .exclusions
-                    .descendants_of
-                    .iter()
-                    .map(|id| format!("descendant:{id}")),
-            )
-            .chain(
-                scope
-                    .exclusions
-                    .source_types
-                    .iter()
-                    .map(|kind| format!("type:{kind:?}")),
-            )
-            .collect();
-        let journal = ReconciliationScope::new(
-            scope.roots.iter().map(|r| r.0.clone()).collect(),
-            exclusions,
-            "webhook-v1",
-            &scope.generation.to_string(),
-        )
-        .map_err(|_| "invalid index scope")?;
+        let journal = notion_knowledge_retrieval::planner::production_scope(scope)
+            .map_err(|_| "invalid index scope")?;
         let binding = CommitBinding::new(
             "chunks",
             &scope.workspace_id,

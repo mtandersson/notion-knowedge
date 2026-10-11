@@ -267,6 +267,16 @@ impl AuthoritativePageRefresh {
 
         let document = proposal.document;
         let chunks = proposal.chunks;
+        let metadata_page = notion_knowledge_core::backend::Page {
+            id: page.clone(),
+            url: document.metadata.url.clone(),
+            title: document.metadata.title.clone(),
+            last_edited_time: document.metadata.last_edited_time.clone(),
+            archived: false,
+            properties: document.metadata.properties.clone(),
+        };
+        let metadata_identity =
+            crate::planner::metadata_identity(&metadata_page, &proposal.evidence);
         let checkpoint = PageSyncState::present(
             page.0.clone(),
             document.content_hash.clone(),
@@ -284,6 +294,12 @@ impl AuthoritativePageRefresh {
         // A genuinely unchanged page is a no-op, including durable state.
         // Metadata/links are compared too, so citations are still refreshed.
         if !has_receipt
+            && self
+                .coordinator
+                .metadata_identity(&page.0)
+                .map_err(RefreshError::from)?
+                .as_ref()
+                == Some(&metadata_identity)
             && self
                 .coordinator
                 .state()
@@ -314,6 +330,7 @@ impl AuthoritativePageRefresh {
         let serialized =
             serde_json::to_vec(&document).map_err(|_| RefreshError::InvalidConfiguration)?;
         hasher.update(serialized);
+        hasher.update(&metadata_identity);
         let revision = format!("{:x}", hasher.finalize());
         let operation = if lifecycle {
             PageOperation::retryable_lifecycle(
@@ -325,6 +342,8 @@ impl AuthoritativePageRefresh {
         } else {
             PageOperation::retryable_refresh(operation_id, &revision, checkpoint)
         }
+        .map_err(RefreshError::from)?
+        .with_metadata_identity(metadata_identity)
         .map_err(RefreshError::from)?;
         let prepared = self
             .guard
