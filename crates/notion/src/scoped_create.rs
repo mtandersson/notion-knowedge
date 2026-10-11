@@ -185,4 +185,116 @@ mod tests {
         assert!(!verified_page(&p,&PageId(CHILD.into()),&PageId(PARENT.into()),
             &format!("https://www.notion.so/{CHILD}"),"A new page"));
     }
+    fn scope()->LifecycleScope {
+        use notion_knowledge_core::discovery::ExclusionRules;
+        LifecycleScope {
+            workspace_id:"44444444-4444-4444-4444-444444444444".into(),
+            generation:1,
+            roots:vec![PageId("33333333-3333-3333-3333-333333333333".into())],
+            exclusions:ExclusionRules::default(),
+        }
+    }
+    fn node(id:&str,parent:Option<&str>)->Value {
+        json!({"object":"page","id":id,"last_edited_time":"2026-10-11T10:00:00Z",
+            "in_trash":false,"parent":match parent {
+                Some(parent)=>json!({"type":"page_id","page_id":parent}),
+                None=>json!({"type":"workspace","workspace":true})
+            }})
+    }
+    fn chain(parent:&str)->Vec<(String,u16,Value)> {
+        let page=node(PARENT,Some(parent));
+        let root=node(parent,None);
+        vec![
+            (format!("GET /v1/pages/{PARENT}"),200,page.clone()),
+            (format!("GET /v1/pages/{parent}"),200,root.clone()),
+            (format!("GET /v1/pages/{parent}"),200,root),
+            (format!("GET /v1/pages/{PARENT}"),200,page),
+        ]
+    }
+    async fn fixture(
+        expected:Vec<(String,u16,Value)>
+    )->(NotionClient,tokio::task::JoinHandle<Vec<(String,Value)>>) {
+        use tokio::io::{AsyncReadExt,AsyncWriteExt};
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client=NotionClient::integration("fixture-secret").unwrap().without_retries();
+        client.api_root=format!("http://{}/v1",listener.local_addr().unwrap());
+        let task=tokio::spawn(async move {
+            let mut requests=Vec::new();
+            for (path,status,value) in expected {
+                let (mut socket,_)=tokio::time::timeout(Duration::from_secs(10),listener.accept()).await.unwrap().unwrap();
+                let mut bytes=Vec::new();
+                let (end,length)=loop {
+                    let mut b=[0u8;4096];let n=socket.read(&mut b).await.unwrap();assert!(n>0);
+                    bytes.extend_from_slice(&b[..n]);
+                    if let Some(k)=bytes.windows(4).position(|a|a==b"\r\n\r\n"){
+                        let headers=String::from_utf8_lossy(&bytes[..k]).to_lowercase();
+                        assert!(headers.starts_with(&path.to_lowercase()),"expected {path}");
+                        assert!(headers.contains("authorization: bearer fixture-secret"));
+                        let length=headers.lines().find_map(|line|line.strip_prefix("content-length: ")
+                            .and_then(|n|n.parse::<usize>().ok())).unwrap_or(0);
+                        break(k+4,length);
+                    }
+                };
+                while bytes.len()<end+length {
+                    let mut b=[0u8;4096];let n=socket.read(&mut b).await.unwrap();assert!(n>0);
+                    bytes.extend_from_slice(&b[..n]);
+                }
+                let body=if length>0 {serde_json::from_slice(&bytes[end..end+length]).unwrap()}else{Value::Null};
+                requests.push((path,body));
+                let json=value.to_string();
+                socket.write_all(format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",json.len()).as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        (client,task)
+    }
+
+    #[tokio::test]
+    async fn scoped_create_verifies_explicit_parent_and_title_after_mutation(){
+        const ROOT:&str="33333333-3333-3333-3333-333333333333";
+        let mut steps=chain(ROOT);
+        steps.extend(chain(ROOT));
+        steps.push(("POST /v1/pages".into(),200,receipt()));
+        let mut read=receipt();
+        read["properties"]=json!({"title":{"title":[{"plain_text":"A new page"}]}});
+        steps.push((format!("GET /v1/pages/{CHILD}"),200,read));
+        let (client,task)=fixture(steps).await;
+        let created=client.create_scoped_page(&input(),&scope()).await.unwrap();
+        assert!(created.verified);
+        assert_eq!(created.page_id.0,CHILD);
+        assert_eq!(created.parent_page_id.0,PARENT);
+        let calls=task.await.unwrap();
+        assert_eq!(calls.len(),10);
+        assert_eq!(calls[8].1["icon"]["emoji"],"📄");
+        assert_eq!(calls[8].1["markdown"],"Body");
+    }
+
+    #[tokio::test]
+    async fn failed_parent_scope_never_calls_post(){
+        const OUTSIDE:&str="55555555-5555-5555-5555-555555555555";
+        let (client,task)=fixture(chain(OUTSIDE)).await;
+        assert_eq!(client.create_scoped_page(&input(),&scope()).await.unwrap_err().kind,
+            BackendErrorKind::PermissionDenied);
+        let calls=task.await.unwrap();
+        assert_eq!(calls.len(),4);
+        assert!(calls.iter().all(|(path,_)|path.starts_with("GET")));
+    }
+
+    #[tokio::test]
+    async fn missing_created_page_retries_reads_but_never_replays_post(){
+        const ROOT:&str="33333333-3333-3333-3333-333333333333";
+        let mut steps=chain(ROOT);
+        steps.extend(chain(ROOT));
+        steps.push(("POST /v1/pages".into(),200,receipt()));
+        for _ in 0..3 {
+            steps.push((format!("GET /v1/pages/{CHILD}"),404,json!({"code":"not_found"})));
+        }
+        let (client,task)=fixture(steps).await;
+        let err=client.create_scoped_page(&input(),&scope()).await.unwrap_err();
+        assert_eq!(err.kind,BackendErrorKind::Conflict);
+        let calls=task.await.unwrap();
+        assert_eq!(calls.iter().filter(|(path,_)|path.starts_with("POST")).count(),1);
+        assert_eq!(calls.len(),12);
+    }
+
 }
