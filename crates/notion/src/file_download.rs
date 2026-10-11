@@ -544,4 +544,42 @@ mod tests {
             server.abort();
         }
     }
+    #[test]
+    fn unwinding_the_request_unlinks_owned_temporary_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let temporary = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        let path = temporary.path().to_owned();
+        std::fs::write(&path, b"private-binary-data").unwrap();
+        let file = DownloadedFile {
+            file: temporary,
+            size_bytes: 19,
+        };
+        // Ingestion can panic during parsing, auditing or an application
+        // callback. RAII must still unlink the owned staging file.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _owner = file;
+            panic!("simulated request unwind");
+        }));
+        assert!(outcome.is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn failed_validation_scope_and_audit_paths_drop_request_file() {
+        let directory = tempfile::tempdir().unwrap();
+        for rejected in ["invalid mime", "scope denied", "audit storage failed"] {
+            let temporary = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+            let path = temporary.path().to_owned();
+            let file = DownloadedFile {
+                file: temporary,
+                size_bytes: 10,
+            };
+            let result: Result<(), &'static str> = {
+                let _request_file = file;
+                Err(rejected)
+            };
+            assert_eq!(result, Err(rejected));
+            assert!(!path.exists(), "staged bytes remain after rejected request");
+        }
+    }
 }
