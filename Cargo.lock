@@ -5803,9 +5803,9 @@ dependencies = [
  "tower-http 0.6.11",
  "tower-service",
  "url",
- "wasm-streams",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
 ]
 
