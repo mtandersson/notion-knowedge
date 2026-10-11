@@ -4,15 +4,16 @@
 //! The caller must hold a request-scoped, bounded temporary download; every
 //! upload is revalidated before any network effect and is never replayed.
 use crate::{
-    NotionClient,
-    file_download::DownloadedFile,
-    file_validation::FileValidationPolicy,
-    pages,
+    NotionClient, file_download::DownloadedFile, file_validation::FileValidationPolicy, pages,
     writes::MARKDOWN_VERSION,
 };
 use notion_knowledge_core::backend::{BackendError, BackendErrorKind};
-use reqwest::{header::AUTHORIZATION, multipart::{Form, Part}, Method};
-use serde_json::{json, Value};
+use reqwest::{
+    Method,
+    header::AUTHORIZATION,
+    multipart::{Form, Part},
+};
+use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 use tokio_util::io::ReaderStream;
 
@@ -21,7 +22,12 @@ const SEND: &str = "notion.file_upload.send";
 const MAX_RECEIPT_BYTES: usize = 64 * 1024;
 
 fn error(operation: &'static str, kind: BackendErrorKind) -> BackendError {
-    BackendError { kind, operation, retry_after: None, committed_page_id: None }
+    BackendError {
+        kind,
+        operation,
+        retry_after: None,
+        committed_page_id: None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,8 +45,15 @@ pub struct UploadedFile {
     pub size_bytes: usize,
 }
 
-fn upload_id(value: &Value, expected_status: &str, operation: &'static str) -> Result<String, BackendError> {
-    if value["object"] != "file_upload" || value["status"] != expected_status || value["in_trash"] == true {
+fn upload_id(
+    value: &Value,
+    expected_status: &str,
+    operation: &'static str,
+) -> Result<String, BackendError> {
+    if value["object"] != "file_upload"
+        || value["status"] != expected_status
+        || value["in_trash"] == true
+    {
         return Err(error(operation, BackendErrorKind::Internal));
     }
     value["id"]
@@ -79,7 +92,8 @@ impl NotionClient {
             return Err(error(CREATE, BackendErrorKind::InvalidInput));
         }
         let mut reader = tokio::fs::File::from_std(
-            file.reopen().map_err(|_| error(CREATE, BackendErrorKind::Unavailable))?,
+            file.reopen()
+                .map_err(|_| error(CREATE, BackendErrorKind::Unavailable))?,
         );
         let mut bytes = Vec::new();
         reader
@@ -106,7 +120,8 @@ impl NotionClient {
         // Reopen independently: a previous validator or concurrent reader must
         // not share the transfer's file offset. The body is streamed, not buffered.
         let stream = tokio::fs::File::from_std(
-            file.reopen().map_err(|_| error(SEND, BackendErrorKind::Unavailable))?,
+            file.reopen()
+                .map_err(|_| error(SEND, BackendErrorKind::Unavailable))?,
         );
         let part = Part::stream_with_length(
             reqwest::Body::wrap_stream(ReaderStream::new(stream)),
@@ -115,7 +130,8 @@ impl NotionClient {
         .file_name(valid.filename.clone())
         .mime_str(valid.mime_type)
         .map_err(|_| error(SEND, BackendErrorKind::InvalidInput))?;
-        let request = self.http
+        let request = self
+            .http
             .post(format!("{}/file_uploads/{id}/send", self.api_root))
             .header(AUTHORIZATION, self.authorization.clone())
             .header("Notion-Version", MARKDOWN_VERSION)
@@ -127,7 +143,9 @@ impl NotionClient {
             return Err(error(SEND, classify(response.status().as_u16())));
         }
         let mut receipt = Vec::new();
-        while let Some(chunk) = response.chunk().await
+        while let Some(chunk) = response
+            .chunk()
+            .await
             .map_err(|_| error(SEND, BackendErrorKind::Unavailable))?
         {
             if receipt.len().saturating_add(chunk.len()) > MAX_RECEIPT_BYTES {
@@ -163,14 +181,20 @@ mod tests {
     const ID: &str = "12345678-1234-1234-1234-123456789abc";
     const FIXTURE: &[u8] = b"small fixture";
     fn receipt(status: &str) -> String {
-        json!({"object":"file_upload","id":ID,"status":status,"content_length":FIXTURE.len()}).to_string()
+        json!({"object":"file_upload","id":ID,"status":status,"content_length":FIXTURE.len()})
+            .to_string()
     }
 
     async fn upstream(
         steps: Vec<(u16, String)>,
-    ) -> (NotionClient, tokio::task::JoinHandle<Vec<(String, Vec<u8>)>>) {
+    ) -> (
+        NotionClient,
+        tokio::task::JoinHandle<Vec<(String, Vec<u8>)>>,
+    ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut client = NotionClient::integration("fixture-secret").unwrap().without_retries();
+        let mut client = NotionClient::integration("fixture-secret")
+            .unwrap()
+            .without_retries();
         client.api_root = format!("http://{}/v1", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
             let mut seen = Vec::new();
@@ -185,9 +209,9 @@ mod tests {
                     if let Some(end) = wire.windows(4).position(|v| v == b"\r\n\r\n") {
                         let headers = String::from_utf8(wire[..end].to_vec()).unwrap();
                         let lower = headers.to_ascii_lowercase();
-                        let length = lower.lines().find_map(|line|
+                        let length = lower.lines().find_map(|line| {
                             line.strip_prefix("content-length: ")?.parse::<usize>().ok()
-                        );
+                        });
                         let chunked = lower.contains("transfer-encoding: chunked");
                         break (headers, end + 4, length, chunked);
                     }
@@ -222,39 +246,73 @@ mod tests {
 
     #[tokio::test]
     async fn creates_then_streams_small_fixture_with_same_credential_and_no_attachment() {
-        let (client, task) = upstream(vec![(200, receipt("pending")), (200, receipt("uploaded"))]).await;
+        let (client, task) =
+            upstream(vec![(200, receipt("pending")), (200, receipt("uploaded"))]).await;
         let file = DownloadedFile::test_fixture(FIXTURE);
-        let uploaded = client.upload_single_part(
-            &file, "notes.txt", "text/plain", FileValidationPolicy::default(),
-        ).await.unwrap();
+        let uploaded = client
+            .upload_single_part(
+                &file,
+                "notes.txt",
+                "text/plain",
+                FileValidationPolicy::default(),
+            )
+            .await
+            .unwrap();
         assert_eq!(uploaded.id, ID);
         assert_eq!(uploaded.status, UploadStatus::Uploaded);
         assert_eq!(uploaded.size_bytes, FIXTURE.len());
         let requests = task.await.unwrap();
         assert_eq!(requests.len(), 2);
         assert!(requests[0].0.starts_with("POST /v1/file_uploads HTTP/1.1"));
-        assert_eq!(serde_json::from_slice::<Value>(&requests[0].1).unwrap(), json!({
-            "mode":"single_part", "filename":"notes.txt", "content_type":"text/plain"
-        }));
-        assert!(requests[1].0.starts_with(&format!("POST /v1/file_uploads/{ID}/send HTTP/1.1")));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&requests[0].1).unwrap(),
+            json!({
+                "mode":"single_part", "filename":"notes.txt", "content_type":"text/plain"
+            })
+        );
+        assert!(
+            requests[1]
+                .0
+                .starts_with(&format!("POST /v1/file_uploads/{ID}/send HTTP/1.1"))
+        );
         for (headers, _) in &requests {
             let lower = headers.to_ascii_lowercase();
             assert!(lower.contains("authorization: bearer fixture-secret"));
             assert!(lower.contains(&format!("notion-version: {MARKDOWN_VERSION}")));
         }
-        assert!(requests[1].0.to_ascii_lowercase().contains("multipart/form-data; boundary="));
+        assert!(
+            requests[1]
+                .0
+                .to_ascii_lowercase()
+                .contains("multipart/form-data; boundary=")
+        );
         assert!(requests[1].1.windows(FIXTURE.len()).any(|v| v == FIXTURE));
-        assert!(requests[1].1.windows(b"name=\"file\"".len()).any(|v| v == b"name=\"file\""));
-        assert!(!requests.iter().any(|(headers, _)| headers.contains("/blocks/")));
+        assert!(
+            requests[1]
+                .1
+                .windows(b"name=\"file\"".len())
+                .any(|v| v == b"name=\"file\"")
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|(headers, _)| headers.contains("/blocks/"))
+        );
     }
 
     #[tokio::test]
     async fn rejects_bad_bytes_before_create() {
         let client = NotionClient::integration("fixture-secret").unwrap();
         let file = DownloadedFile::test_fixture(b"not a PNG");
-        let err = client.upload_single_part(
-            &file, "image.png", "image/png", FileValidationPolicy::default(),
-        ).await.unwrap_err();
+        let err = client
+            .upload_single_part(
+                &file,
+                "image.png",
+                "image/png",
+                FileValidationPolicy::default(),
+            )
+            .await
+            .unwrap_err();
         assert_eq!(err.kind, BackendErrorKind::InvalidInput);
         assert_eq!(err.operation, CREATE);
     }
@@ -262,14 +320,36 @@ mod tests {
     #[tokio::test]
     async fn failed_create_and_send_do_not_report_uploaded() {
         for (steps, operation, kind) in [
-            (vec![(403, "{}".into())], CREATE, BackendErrorKind::PermissionDenied),
-            (vec![(200, receipt("pending")), (503, "private sentinelsecret".into())], SEND, BackendErrorKind::Unavailable),
-            (vec![(200, receipt("pending")), (200, receipt("pending"))], SEND, BackendErrorKind::Internal),
+            (
+                vec![(403, "{}".into())],
+                CREATE,
+                BackendErrorKind::PermissionDenied,
+            ),
+            (
+                vec![
+                    (200, receipt("pending")),
+                    (503, "private sentinelsecret".into()),
+                ],
+                SEND,
+                BackendErrorKind::Unavailable,
+            ),
+            (
+                vec![(200, receipt("pending")), (200, receipt("pending"))],
+                SEND,
+                BackendErrorKind::Internal,
+            ),
         ] {
             let (client, task) = upstream(steps).await;
             let file = DownloadedFile::test_fixture(FIXTURE);
-            let err = client.upload_single_part(&file, "notes.txt", "text/plain",
-                FileValidationPolicy::default()).await.unwrap_err();
+            let err = client
+                .upload_single_part(
+                    &file,
+                    "notes.txt",
+                    "text/plain",
+                    FileValidationPolicy::default(),
+                )
+                .await
+                .unwrap_err();
             assert_eq!(err.operation, operation);
             assert_eq!(err.kind, kind);
             assert!(!format!("{err:?} {err}").contains("sentinelsecret"));
@@ -279,12 +359,28 @@ mod tests {
 
     #[tokio::test]
     async fn refuses_invalid_create_receipt_without_sending_bytes() {
-        let (client, task) = upstream(vec![(200, json!({
-            "object":"file_upload", "id":"not-an-id", "status":"pending"
-        }).to_string())]).await;
+        let (client, task) = upstream(vec![(
+            200,
+            json!({
+                "object":"file_upload", "id":"not-an-id", "status":"pending"
+            })
+            .to_string(),
+        )])
+        .await;
         let file = DownloadedFile::test_fixture(FIXTURE);
-        assert_eq!(client.upload_single_part(&file, "notes.txt", "text/plain",
-            FileValidationPolicy::default()).await.unwrap_err().kind, BackendErrorKind::Internal);
+        assert_eq!(
+            client
+                .upload_single_part(
+                    &file,
+                    "notes.txt",
+                    "text/plain",
+                    FileValidationPolicy::default()
+                )
+                .await
+                .unwrap_err()
+                .kind,
+            BackendErrorKind::Internal
+        );
         assert_eq!(task.await.unwrap().len(), 1);
     }
 }
