@@ -47,6 +47,14 @@ fn failure(kind: BackendErrorKind) -> BackendError {
 }
 
 impl NotionClient {
+    /// Loopback-only fixture endpoint. Compiled only for integration tests.
+    /// Never accepts a user-supplied remote URL or a production transport.
+    #[cfg(feature = "test-fixtures")]
+    pub fn with_loopback_fixture(mut self, port: u16) -> Self {
+        self.api_root = format!("http://127.0.0.1:{port}/v1");
+        self.without_retries()
+    }
+
     /// The composition root supplies a validated credential from secret configuration.
     /// No token discovery, file loading or logging occurs in the adapter.
     pub fn integration(token: &str) -> Result<Self, BackendError> {

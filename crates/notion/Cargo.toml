@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 repository.workspace = true
 
+[features]
+# Only for credential-free integration testing; never enabled in production.
+test-fixtures = []
+
 [dependencies]
 notion-knowledge-core = { path = "../core" }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }

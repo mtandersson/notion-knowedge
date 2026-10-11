@@ -10,7 +10,7 @@ use notion_knowledge_core::{
     fingerprint::{content_hash, identify_chunks},
     indexed::{IndexedChunk, IndexedDocument, IndexedMetadata, SchemaVersion, SourceMetadata},
     lifecycle::LifecycleScope,
-    root_scope::RootScopeGate,
+    root_scope::{RootScopeGate, ScopeError},
 };
 
 /// A prepared *proposal*, never an authorization token for later index commits.
@@ -72,7 +72,12 @@ impl NotionClient {
         let permit = gate
             .authorize(selected)
             .await
-            .map_err(|_| failure(BackendErrorKind::PermissionDenied))?;
+            .map_err(|error| match error {
+                ScopeError::Denied => failure(BackendErrorKind::PermissionDenied),
+                ScopeError::Unverifiable => failure(BackendErrorKind::Unavailable),
+                ScopeError::Changed => failure(BackendErrorKind::Conflict),
+                ScopeError::InvalidConfiguration => failure(BackendErrorKind::InvalidInput),
+            })?;
         if !permit.belongs_to_any(std::slice::from_ref(&root.0)) {
             return Err(failure(BackendErrorKind::PermissionDenied));
         }
