@@ -91,7 +91,7 @@ impl NotionClient {
         if file.size_bytes() == 0 || file.size_bytes() > policy.max_bytes() {
             return Err(error(CREATE, BackendErrorKind::InvalidInput));
         }
-        let mut reader = tokio::fs::File::from_std(
+        let reader = tokio::fs::File::from_std(
             file.reopen()
                 .map_err(|_| error(CREATE, BackendErrorKind::Unavailable))?,
         );
@@ -158,10 +158,10 @@ impl NotionClient {
         if upload_id(&result, "uploaded", SEND)? != id {
             return Err(error(SEND, BackendErrorKind::Internal));
         }
-        if let Some(length) = result["content_length"].as_u64() {
-            if length != valid.size_bytes as u64 {
-                return Err(error(SEND, BackendErrorKind::Internal));
-            }
+        if let Some(length) = result["content_length"].as_u64()
+            && length != valid.size_bytes as u64
+        {
+            return Err(error(SEND, BackendErrorKind::Internal));
         }
         Ok(UploadedFile {
             id,
