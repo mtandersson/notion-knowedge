@@ -415,7 +415,9 @@ mod tests {
                 ));
             } else {
                 steps.push(append());
-                steps.push(readback(OUTSIDE));
+                for _ in 0..3 {
+                    steps.push(readback(OUTSIDE));
+                }
             }
             let (client, server) = fixture(steps).await;
             let err = client
