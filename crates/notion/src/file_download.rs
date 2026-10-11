@@ -186,7 +186,10 @@ impl DownloadedFile {
         use std::io::Write;
         let mut file = tempfile::NamedTempFile::new().expect("test tempfile");
         file.write_all(bytes).expect("fixture bytes");
-        Self { file, size_bytes: bytes.len() }
+        Self {
+            file,
+            size_bytes: bytes.len(),
+        }
     }
 }
 
