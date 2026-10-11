@@ -110,7 +110,10 @@ async fn stdio_exchange(read_only: bool) {
             .iter()
             .find(|tool| tool["name"] == "knowledge_upload_file")
             .unwrap();
-        assert_eq!(upload["_meta"]["openai/fileParams"], json!(["file", "files"]));
+        assert_eq!(
+            upload["_meta"]["openai/fileParams"],
+            json!(["file", "files"])
+        );
         let reads = Value::Array(
             tools
                 .iter()
