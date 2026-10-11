@@ -9,7 +9,7 @@ use notion_knowledge_core::{
     chunking::{ChunkConfig, chunk_document},
     fingerprint::{content_hash, identify_chunks},
     indexed::{IndexedChunk, IndexedDocument, IndexedMetadata, SchemaVersion, SourceMetadata},
-    lifecycle::LifecycleScope,
+    lifecycle::{LifecycleEvidence, LifecycleScope},
     root_scope::{RootScopeGate, ScopeError},
 };
 
@@ -18,6 +18,7 @@ use notion_knowledge_core::{
 pub struct ScopedPageSnapshot {
     pub document: IndexedDocument,
     pub chunks: Vec<IndexedChunk>,
+    pub evidence: LifecycleEvidence,
 }
 
 fn failure(kind: BackendErrorKind) -> BackendError {
@@ -29,18 +30,16 @@ fn failure(kind: BackendErrorKind) -> BackendError {
     }
 }
 
-fn valid_previous(
-    selected: &PageId,
-    root: &PageId,
-    scope: &LifecycleScope,
-    previous: &[IndexedChunk],
-) -> bool {
+fn valid_previous(selected: &PageId, scope: &LifecycleScope, previous: &[IndexedChunk]) -> bool {
     previous.len() <= 100_000
         && previous.iter().all(|chunk| {
             chunk.schema_version == SchemaVersion::V1
                 && chunk.metadata.page_id == selected.0
                 && chunk.metadata.source.workspace_id == scope.workspace_id
-                && chunk.metadata.source.root_page_id == root.0
+                && scope
+                    .roots
+                    .iter()
+                    .any(|root| root.0 == chunk.metadata.source.root_page_id)
         })
 }
 
@@ -63,7 +62,7 @@ impl NotionClient {
         if !scope.roots.contains(root)
             || config.target_chars == 0
             || config.overlap_chars >= config.target_chars
-            || !valid_previous(selected, root, scope, previous)
+            || !valid_previous(selected, scope, previous)
         {
             return Err(failure(BackendErrorKind::InvalidInput));
         }
@@ -131,7 +130,11 @@ impl NotionClient {
         gate.revalidate(&permit, scope)
             .await
             .map_err(|_| failure(BackendErrorKind::Conflict))?;
-        Ok(ScopedPageSnapshot { document, chunks })
+        Ok(ScopedPageSnapshot {
+            document,
+            chunks,
+            evidence: permit.lifecycle_evidence().clone(),
+        })
     }
 }
 
@@ -410,6 +413,25 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind, BackendErrorKind::InvalidInput);
         wrong[0].metadata.page_id = PAGE.into();
+        for field in ["workspace", "root"] {
+            let mut foreign = wrong.clone();
+            if field == "workspace" {
+                foreign[0].metadata.source.workspace_id = OTHER.into();
+            } else {
+                foreign[0].metadata.source.root_page_id = OTHER.into();
+            }
+            let err = client
+                .prepare_scoped_page(
+                    &PageId(PAGE.into()),
+                    &PageId(ROOT.into()),
+                    &scope(),
+                    &foreign,
+                    ChunkConfig::default(),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.kind, BackendErrorKind::InvalidInput);
+        }
         wrong[0].content_hash = "forged".into();
         let (client, server) =
             fixture(full("Simple text", "Current").into_iter().take(6).collect()).await;
