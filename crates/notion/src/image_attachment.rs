@@ -177,7 +177,8 @@ impl NotionClient {
 
         self.verify_attached_block(&block, VERIFY, |value| {
             readback_ok(value, target, &block, &upload.id, &caption)
-        }).await?;
+        })
+        .await?;
         Ok(AttachedImage {
             page_id: target.clone(),
             block_id: block,
@@ -488,7 +489,11 @@ mod tests {
         let mut steps = chain(ROOT);
         steps.extend(chain(ROOT));
         steps.push(append());
-        steps.push((format!("GET /v1/blocks/{BLOCK}"), 404, json!({"code":"not_found"})));
+        steps.push((
+            format!("GET /v1/blocks/{BLOCK}"),
+            404,
+            json!({"code":"not_found"}),
+        ));
         steps.push(readback(PAGE));
         let (client, server) = fixture(steps).await;
         let attached = client
@@ -510,23 +515,27 @@ mod tests {
         steps.extend(chain(ROOT));
         steps.push(append());
         for _ in 0..3 {
-            steps.push((format!("GET /v1/blocks/{BLOCK}"), 404, json!({"code":"not_found"})));
+            steps.push((
+                format!("GET /v1/blocks/{BLOCK}"),
+                404,
+                json!({"code":"not_found"}),
+            ));
         }
         let (client, server) = fixture(steps).await;
         let failure = client
-            .attach_uploaded_image(
-                &PageId(PAGE.into()),
-                &upload("image/png"),
-                None,
-                &policy(),
-            )
+            .attach_uploaded_image(&PageId(PAGE.into()), &upload("image/png"), None, &policy())
             .await
             .unwrap_err();
         assert_eq!(failure.kind, BackendErrorKind::Conflict);
         assert_eq!(failure.operation, VERIFY);
         let requests = server.await.unwrap();
         assert_eq!(requests.len(), 12);
-        assert_eq!(requests.iter().filter(|(method, _)| method.starts_with("PATCH")).count(), 1);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(method, _)| method.starts_with("PATCH"))
+                .count(),
+            1
+        );
     }
-
 }
