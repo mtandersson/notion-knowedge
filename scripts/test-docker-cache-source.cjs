@@ -114,3 +114,38 @@ test('A cache outage leaves both imports empty and keeps private errors out of l
     fs.rmSync(directory, {recursive: true});
   }
 });
+
+
+test('Final solve selects one authorized graph through partial cache eviction', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nk-cache-fallback-'));
+  const output = path.join(directory, 'output');
+  const main = 'nk-container-v1-Linux-X64-main';
+  const claims = {ac: JSON.stringify([{Scope: ref}, {Scope: 'refs/heads/main'}])};
+  const token = `test-only.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.test-only`;
+  const roots = [scope, `${scope}-builder`, main, `${main}-builder`];
+  try {
+    for (const available of [roots, roots.slice(1), roots.slice(2), roots.slice(3), []]) {
+      fs.writeFileSync(output, '');
+      await run({DOCKER_CACHE_SCOPE: scope, GITHUB_REF: ref, RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64',
+        ACTIONS_RESULTS_URL: args.serviceURL, ACTIONS_RUNTIME_TOKEN: token, GITHUB_OUTPUT: output},
+      async (url, options) => {
+        if (url === 'https://cache.invalid/download') {
+          assert.equal(options.headers, undefined);
+          return {ok: true, arrayBuffer: async () => graph};
+        }
+        const key = JSON.parse(options.body).key;
+        const root = roots.find(root => key === indexKey(root, root.startsWith(scope) ? ref : 'refs/heads/main'));
+        assert.ok(root, 'Only authorized own/main roots may be queried');
+        return available.includes(root) ? entry(key + '#1') :
+          {ok: true, json: async () => ({ok: false})};
+      }, () => {});
+      const selected = available[0] ? `type=gha,scope=${available[0]}` : '';
+      const builder = available.includes(`${scope}-builder`) ? `${scope}-builder` :
+        available.includes(`${main}-builder`) ? `${main}-builder` : null;
+      assert.equal(fs.readFileSync(output, 'utf8'),
+        `final-cache-from=${selected}\nbuilder-cache-from=${builder ? `type=gha,scope=${builder}` : ''}\n`);
+    }
+  } finally {
+    fs.rmSync(directory, {recursive: true});
+  }
+});

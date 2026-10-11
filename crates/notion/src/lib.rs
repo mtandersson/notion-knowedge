@@ -15,6 +15,10 @@ pub use client::{IntegrationIdentity, NotionClient};
 pub mod writes;
 pub use writes::CreatedPage;
 
+/// Server-owned scoped Notion page creation with canonical authoritative readback.
+pub mod scoped_create;
+pub use scoped_create::{ScopedPageCreateInput, ScopedPageCreated};
+
 pub mod pages;
 
 pub mod crawl;
@@ -55,6 +59,13 @@ pub use image_attachment::AttachedImage;
 /// Server-only, root-scoped native Notion document file attachment.
 pub mod file_attachment;
 pub use file_attachment::AttachedFile;
+
+/// Bounded sequential native attachment with per-item results.
+pub mod batch_attachment;
+pub use batch_attachment::{BatchAttachmentOutcome, BatchAttachmentStatus};
+
+/// Fail-closed attachment audit facts, explicitly excluding signed source URLs.
+pub mod file_ingest_audit;
 
 // Only the validated adapter flows may invoke the shared bounded read-back.
 mod attachment_readback;
