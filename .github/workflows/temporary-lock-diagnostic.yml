@@ -1,0 +1,19 @@
+name: Temporary Cargo lock diagnostic
+on:
+  push:
+    branches:
+      - feat/69-notion-single-part-upload
+jobs:
+  lock-diff:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refresh only lock resolution and show precise changes
+        shell: bash
+        run: |
+          cargo metadata --format-version 1 --no-deps > /dev/null
+          git diff --no-ext-diff -- Cargo.lock
+          echo '=== delta summary ==='
+          git status --short
