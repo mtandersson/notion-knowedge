@@ -202,4 +202,99 @@ mod tests {
             assert!(!check_upload(&change,ID,"uploaded",3));
         }
     }
+    async fn server(
+        replies:Vec<(String,u16,Value)>
+    )->(NotionClient,tokio::task::JoinHandle<Vec<String>>){
+        use tokio::io::{AsyncReadExt,AsyncWriteExt};
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client=NotionClient::integration("fixture-secret").unwrap().without_retries();
+        client.api_root=format!("http://{}/v1",listener.local_addr().unwrap());
+        let task=tokio::spawn(async move {
+            let mut paths=Vec::new();
+            for (expected,status,body) in replies {
+                let (mut stream,_)=tokio::time::timeout(
+                    std::time::Duration::from_secs(20),listener.accept()
+                ).await.unwrap().unwrap();
+                let mut received=Vec::new();
+                let (header_end,len,chunked)=loop {
+                    let mut b=[0u8;65536];let n=stream.read(&mut b).await.unwrap();assert!(n>0);
+                    received.extend_from_slice(&b[..n]);
+                    if let Some(end)=received.windows(4).position(|v|v==b"\r\n\r\n"){
+                        let headers=String::from_utf8_lossy(&received[..end]).to_lowercase();
+                        assert!(headers.starts_with(&expected.to_lowercase()),"expected {expected}");
+                        assert!(headers.contains("authorization: bearer fixture-secret"));
+                        let len=headers.lines().find_map(|line|line.strip_prefix("content-length: ")
+                            .and_then(|v|v.parse::<usize>().ok())).unwrap_or(0);
+                        break(end+4,len,headers.contains("transfer-encoding: chunked"));
+                    }
+                };
+                if chunked {
+                    while !received[header_end..].ends_with(b"\r\n0\r\n\r\n") {
+                        let mut b=[0u8;65536];let n=stream.read(&mut b).await.unwrap();assert!(n>0);
+                        received.extend_from_slice(&b[..n]);
+                    }
+                } else {
+                    while received.len()<header_end+len {
+                        let mut b=[0u8;65536];let n=stream.read(&mut b).await.unwrap();assert!(n>0);
+                        received.extend_from_slice(&b[..n]);
+                    }
+                }
+                paths.push(expected);
+                let json=body.to_string();
+                stream.write_all(format!(
+                    "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",json.len()
+                ).as_bytes()).await.unwrap();
+            }
+            paths
+        });
+        (client,task)
+    }
+
+    fn source()->DownloadedFile {
+        let mut bytes=vec![b'x';21*MIB];
+        bytes[..5].copy_from_slice(b"%PDF-");
+        DownloadedFile::test_fixture(&bytes)
+    }
+    fn receipt_state(state:&str,sent:u64)->Value{
+        json!({"object":"file_upload","id":ID,"status":state,
+            "number_of_parts":{"total":3,"sent":sent},"in_trash":false})
+    }
+
+    #[tokio::test]
+    async fn multipart_sends_in_order_and_checks_authoritative_uploaded_status(){
+        let steps=vec![
+            ("POST /v1/file_uploads".into(),200,receipt_state("pending",0)),
+            (format!("POST /v1/file_uploads/{ID}/send"),200,receipt_state("pending",1)),
+            (format!("POST /v1/file_uploads/{ID}/send"),200,receipt_state("pending",2)),
+            (format!("POST /v1/file_uploads/{ID}/send"),200,receipt_state("pending",3)),
+            (format!("POST /v1/file_uploads/{ID}/complete"),200,receipt_state("uploaded",3)),
+            (format!("GET /v1/file_uploads/{ID}"),200,receipt_state("uploaded",3)),
+        ];
+        let (client,handle)=server(steps).await;
+        let result=client.upload_multipart(
+            &source(),"big.pdf","application/pdf",
+            MultipartPolicy::new(40*MIB,20*MIB,10*MIB).unwrap()
+        ).await.unwrap();
+        assert_eq!(result.status,UploadStatus::Uploaded);
+        assert_eq!(result.size_bytes,21*MIB);
+        assert_eq!(result.id,ID);
+        assert_eq!(handle.await.unwrap().len(),6);
+    }
+
+    #[tokio::test]
+    async fn failed_part_does_not_complete_or_replay_upload(){
+        let (client,handle)=server(vec![
+            ("POST /v1/file_uploads".into(),200,receipt_state("pending",0)),
+            (format!("POST /v1/file_uploads/{ID}/send"),503,json!({"private":"secret"})),
+        ]).await;
+        let error=client.upload_multipart(
+            &source(),"big.pdf","application/pdf",
+            MultipartPolicy::new(40*MIB,20*MIB,10*MIB).unwrap()
+        ).await.unwrap_err();
+        assert_eq!(error.kind,BackendErrorKind::Unavailable);
+        let calls=handle.await.unwrap();
+        assert_eq!(calls.len(),2);
+        assert!(!calls.iter().any(|v|v.contains("/complete")));
+    }
+
 }
