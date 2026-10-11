@@ -21,10 +21,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     chunks::{ChunkDiffMetrics, ChunkTableError, GuardedChunkTable},
-    commit::{
-        CommitBinding, CommitError, CommitOutcome, IndexCommitCoordinator, PageAction,
-        PageOperation,
-    },
+    commit::{CommitBinding, CommitError, CommitOutcome, IndexCommitCoordinator, PageOperation},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,15 +146,24 @@ impl AuthoritativePageRefresh {
             Some(document.metadata.last_edited_time.clone()),
         )
         .map_err(|_| RefreshError::InvalidConfiguration)?;
+        // Every existing receipt must pass guarded identity/generation checks.
+        // Pending/failed work completes even if another event indexed the
+        // snapshot; terminal receipts cannot bypass scope checks via a no-op.
+        let has_receipt = self
+            .coordinator
+            .receipt(operation_id)
+            .map_err(RefreshError::from)?
+            .is_some();
         // A genuinely unchanged page is a no-op, including durable state.
         // Metadata/links are compared too, so citations are still refreshed.
-        if self
-            .coordinator
-            .state()
-            .page_state(&page.0)
-            .map_err(|_| RefreshError::Unavailable)?
-            .as_ref()
-            == Some(&checkpoint)
+        if !has_receipt
+            && self
+                .coordinator
+                .state()
+                .page_state(&page.0)
+                .map_err(|_| RefreshError::Unavailable)?
+                .as_ref()
+                == Some(&checkpoint)
         {
             let mut old = previous;
             let mut new = chunks.clone();
@@ -175,16 +181,15 @@ impl AuthoritativePageRefresh {
         }
 
         // Revision includes canonical metadata and content, not just body text.
-        // A reused event ID for a changed proposal conflicts in the SQLite
-        // receipt store instead of overwriting an earlier acknowledged effect.
+        // Unacknowledged durable refresh work can retry a changed proposal.
+        // Applied receipts remain immutable in the SQLite store.
         let mut hasher = Sha256::new();
         let serialized =
             serde_json::to_vec(&document).map_err(|_| RefreshError::InvalidConfiguration)?;
         hasher.update(serialized);
         let revision = format!("{:x}", hasher.finalize());
-        let operation =
-            PageOperation::new(operation_id, &revision, PageAction::Refresh, checkpoint)
-                .map_err(RefreshError::from)?;
+        let operation = PageOperation::retryable_refresh(operation_id, &revision, checkpoint)
+            .map_err(RefreshError::from)?;
         let prepared = self
             .guard
             .prepare_page(provider, operation, &chunks)

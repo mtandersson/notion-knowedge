@@ -120,6 +120,7 @@ pub struct PageOperation {
     revision: String,
     action: PageAction,
     checkpoint: PageSyncState,
+    retry_latest_refresh: bool,
 }
 impl PageOperation {
     pub fn new(
@@ -146,7 +147,22 @@ impl PageOperation {
             revision: revision.into(),
             action,
             checkpoint,
+            retry_latest_refresh: false,
         })
+    }
+    /// Retry durable page-refresh work using freshly authorized current content.
+    /// Only unacknowledged receipts for the same page/action/generation may
+    /// replace their proposal, under the external commit guard. An Applied or
+    /// Superseded receipt remains immutable. Callers must supply a complete
+    /// idempotent page replacement and revalidate source before its effects.
+    pub fn retryable_refresh(
+        id: &str,
+        revision: &str,
+        checkpoint: PageSyncState,
+    ) -> Result<Self, CommitError> {
+        let mut operation = Self::new(id, revision, PageAction::Refresh, checkpoint)?;
+        operation.retry_latest_refresh = true;
+        Ok(operation)
     }
     pub fn id(&self) -> &str {
         &self.id
@@ -592,9 +608,17 @@ impl IndexCommitCoordinator {
         self.validate_binding(&tx)?;
         self.validate_fence(&tx, lease, now)?;
         let checkpoint = &operation.checkpoint;
-        let existing: Option<(bool,i64)> = tx.query_row("SELECT generation=?2 AND page_id=?3 AND revision=?4 AND action=?5 AND content_hash IS ?6 AND last_edited_time IS ?7,status FROM index_commit_receipts WHERE operation_id=?1",params![operation.id,self.binding.generation,checkpoint.page_id(),operation.revision,operation.action.number(),checkpoint.content_hash(),checkpoint.last_edited_time()],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(sql)?;
-        if let Some((matches, status)) = existing {
-            if !matches {
+        let existing: Option<(bool, i64, bool)> = tx.query_row("SELECT generation=?2 AND page_id=?3 AND revision=?4 AND action=?5 AND content_hash IS ?6 AND last_edited_time IS ?7,status,generation=?2 AND page_id=?3 AND action=?5 FROM index_commit_receipts WHERE operation_id=?1",params![operation.id,self.binding.generation,checkpoint.page_id(),operation.revision,operation.action.number(),checkpoint.content_hash(),checkpoint.last_edited_time()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(sql)?;
+        if let Some((matches, status, same_authority)) = existing {
+            // An acknowledged hint stays acknowledged even if the source
+            // changed before redelivery. A distinct event refreshes that edit.
+            if operation.retry_latest_refresh && same_authority && status == 1 {
+                tx.commit().map_err(sql)?;
+                return Ok(false);
+            }
+            if !matches
+                && !(operation.retry_latest_refresh && same_authority && matches!(status, 0 | 2))
+            {
                 return Err(CommitError::Conflict);
             }
             if status == 3 {
@@ -604,7 +628,7 @@ impl IndexCommitCoordinator {
                 tx.commit().map_err(sql)?;
                 return Ok(false);
             }
-            tx.execute("UPDATE index_commit_receipts SET status=0,failure=NULL,attempts=attempts+1 WHERE operation_id=?1",[&operation.id]).map_err(sql)?;
+            tx.execute("UPDATE index_commit_receipts SET status=0,failure=NULL,attempts=attempts+1,revision=?2,content_hash=?3,last_edited_time=?4 WHERE operation_id=?1",params![operation.id,operation.revision,checkpoint.content_hash(),checkpoint.last_edited_time()]).map_err(sql)?;
         } else {
             tx.execute(
                 "INSERT INTO index_commit_receipts VALUES(?1,?2,?3,?4,?5,?6,?7,0,NULL,1)",
