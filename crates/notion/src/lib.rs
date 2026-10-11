@@ -56,6 +56,9 @@ pub use file_attachment::AttachedFile;
 pub mod batch_attachment;
 pub use batch_attachment::{BatchAttachmentOutcome, BatchAttachmentStatus};
 
+/// Fail-closed attachment audit facts, explicitly excluding signed source URLs.
+pub mod file_ingest_audit;
+
 // Only the validated adapter flows may invoke the shared bounded read-back.
 mod attachment_readback;
 

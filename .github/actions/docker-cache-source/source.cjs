@@ -58,7 +58,10 @@ async function run(env = process.env, fetcher = fetch, log = console.log) {
     for (const result of [ownFinal, mainFinal, ownBuilder, mainBuilder]) {
       log(`DOCKER_CACHE_ROOT ${JSON.stringify(result)}`);
     }
-    finalSource = choose(ownFinal, mainFinal);
+    // A builder graph can supply the compiler RUN when its final-image index
+    // was evicted. Never combine managers: overlapping imports can suppress
+    // usable results in the pinned BuildKit version.
+    finalSource = choose(ownFinal, ownBuilder) || choose(mainFinal, mainBuilder);
     builderSource = choose(ownBuilder, mainBuilder);
   } catch {
     log('Docker cache preflight unavailable; building without remote cache imports.');

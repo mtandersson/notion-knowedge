@@ -67,6 +67,7 @@ class CargoSnapshots(unittest.TestCase):
                           dict(environment={'CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER': '/new/wrapper'}),
                           dict(environment={'CARGO_BUILD_INCREMENTAL': '0'}),
                           dict(environment={'CARGO_PROFILE_DEV_DEBUG': '0'}),
+                          dict(environment={'CARGO_PROFILE_TEST_DEBUG': 'line-tables-only'}),
                           dict(environment={'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER': '/new/linker'})]:
             with self.subTest(variation=variation):
                 self.assertNotEqual(before, self.key(**variation)['prefix'])
