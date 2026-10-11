@@ -672,6 +672,18 @@ async fn serving_lifecycle_processes_signed_http_admission_and_stops_idle_and_de
     assert!(runtime.searchable("Saffron").await > 0);
     assert!(runtime.source.attempts.load(Ordering::SeqCst) > 0);
     assert!(runtime.source.body_reads.load(Ordering::SeqCst) > 0);
+    // Hold the shared writer fence while creating delayed work so the running
+    // serving worker cannot race the fixture's explicit claim/completion.
+    let fixture_lease = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Ok(lease) = runtime.worker.state.acquire_lease(now_ms() / 1000, 60) {
+                break lease;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
     // A future retry remains durable across graceful stop; no idle spin.
     let delayed = event(OTHER, "page.created");
     runtime.worker.state.receive(&delayed).unwrap();
@@ -688,6 +700,11 @@ async fn serving_lifecycle_processes_signed_http_admission_and_stops_idle_and_de
         ProcessingOutcome::Retryable(EventFailure::Source),
     )
     .unwrap();
+    runtime
+        .worker
+        .state
+        .release_lease(&fixture_lease, now_ms() / 1000)
+        .unwrap();
     let pending = inspect(&runtime.worker, &delayed);
     assert!(pending.retry_at.unwrap() > now_ms() / 1000);
     tokio::time::sleep(Duration::from_millis(100)).await;
