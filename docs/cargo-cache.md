@@ -71,3 +71,19 @@ than credential/flag values. [Hosted evidence](cargo-cache-evidence.md) records
 baseline creation, a genuine source edit with compatible fallback and refreshed
 save, exact reuse, dependency/flake invalidation, and per-profile storage/timings.
 It distinguishes key selection from Cargo's actual fingerprint decisions.
+
+## CI test debug information
+
+The three test suites use `CARGO_PROFILE_TEST_DEBUG=line-tables-only` in CI.
+This retains filename/line backtraces without full type/variable debug data in
+compiled dependencies and test binaries. Local developer and release settings
+remain unchanged. This setting is part of the existing profile-flag cache hash,
+so reduced-debug snapshots cannot restore a full-debug compiled fallback.
+One initial fresh build is required when switching profiles.
+
+Test jobs report directory sizes and the twenty largest compiled files before
+saving. This report includes incremental scratch; snapshot saving removes that
+scratch as before. Saved compressed archive sizes and actual warm restore/Cargo
+timings are the acceptance evidence, rather than the directory report alone.
+Smaller snapshots reduce storage pressure but do not guarantee retention under
+GitHub's repository quota or make snapshots accessible across sibling PR refs.
