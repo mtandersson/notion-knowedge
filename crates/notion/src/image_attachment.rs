@@ -78,7 +78,7 @@ fn block_id(value: &Value, parent: &PageId) -> Option<String> {
     let id = pages::uuid(value["id"].as_str()?)?;
     if value["object"] != "block"
         || value["type"] != "image"
-        || value["in_trash"] == true
+        || value["in_trash"] != false
         || value["archived"] == true
         || value["parent"]["type"] != "page_id"
         || pages::uuid(value["parent"]["page_id"].as_str()?).as_deref() != Some(parent.0.as_str())
@@ -455,4 +455,57 @@ mod tests {
             server.await.unwrap();
         }
     }
+    #[tokio::test]
+    async fn empty_caption_and_exact_upload_readback_are_supported() {
+        let mut steps = chain(ROOT);
+        steps.extend(chain(ROOT));
+        steps.push(append());
+        steps.push((
+            format!("GET /v1/blocks/{BLOCK}"),
+            200,
+            block(
+                "image",
+                PAGE,
+                json!({
+                    "type":"file_upload",
+                    "file_upload":{"id":UPLOAD},
+                    "caption":[]
+                }),
+            ),
+        ));
+        let (client, server) = fixture(steps).await;
+        let attached = client
+            .attach_uploaded_image(&PageId(PAGE.into()), &upload("image/webp"), None, &policy())
+            .await
+            .unwrap();
+        assert!(attached.verified);
+        let requests = server.await.unwrap();
+        assert_eq!(requests[8].1["children"][0]["image"]["caption"], json!([]));
+    }
+
+    #[test]
+    fn readback_rejects_missing_active_status_and_wrong_upload() {
+        let mut returned = block(
+            "image",
+            PAGE,
+            json!({"type":"file_upload","file_upload":{"id":OUTSIDE},"caption":[]}),
+        );
+        assert!(!readback_ok(
+            &returned,
+            &PageId(PAGE.into()),
+            BLOCK,
+            UPLOAD,
+            &[]
+        ));
+        returned["image"]["file_upload"]["id"] = json!(UPLOAD);
+        returned.as_object_mut().unwrap().remove("in_trash");
+        assert!(!readback_ok(
+            &returned,
+            &PageId(PAGE.into()),
+            BLOCK,
+            UPLOAD,
+            &[]
+        ));
+    }
+
 }
