@@ -46,8 +46,14 @@ pub fn validate_file(file: &ChatGptFile) -> Result<(), &'static str> {
         || file.file_id.trim().is_empty()
         || file.file_id.len() > 256
         || file.file_id.chars().any(char::is_control)
-        || file.mime_type.as_ref().is_some_and(|s| s.len() > 256 || s.chars().any(char::is_control))
-        || file.file_name.as_ref().is_some_and(|s| s.len() > 512 || s.chars().any(char::is_control))
+        || file
+            .mime_type
+            .as_ref()
+            .is_some_and(|s| s.len() > 256 || s.chars().any(char::is_control))
+        || file
+            .file_name
+            .as_ref()
+            .is_some_and(|s| s.len() > 512 || s.chars().any(char::is_control))
     {
         return Err("invalid knowledge_upload_file metadata");
     }
@@ -140,26 +146,41 @@ mod tests {
     #[test]
     fn schema_preserves_legacy_input_and_adds_bounded_file_array() {
         let schema = serde_json::to_value(tool()).unwrap();
-        assert_eq!(schema["_meta"]["openai/fileParams"], json!(["file", "files"]));
+        assert_eq!(
+            schema["_meta"]["openai/fileParams"],
+            json!(["file", "files"])
+        );
         let input = &schema["inputSchema"];
-        assert_eq!(input["oneOf"], json!([{"required":["file"]},{"required":["files"]}]));
-        assert_eq!(input["properties"]["files"]["minItems"],1);
+        assert_eq!(
+            input["oneOf"],
+            json!([{"required":["file"]},{"required":["files"]}])
+        );
+        assert_eq!(input["properties"]["files"]["minItems"], 1);
         assert_eq!(input["properties"]["files"]["maxItems"], HARD_MAX_FILES);
-        assert_eq!(input["properties"]["files"]["items"]["required"],json!(["download_url","file_id"]));
-        assert_eq!(schema["annotations"]["readOnlyHint"],false);
+        assert_eq!(
+            input["properties"]["files"]["items"]["required"],
+            json!(["download_url", "file_id"])
+        );
+        assert_eq!(schema["annotations"]["readOnlyHint"], false);
     }
 
     #[test]
     fn ordered_inputs_and_configurable_limit_are_enforced() {
         let request: UploadFileRequest = serde_json::from_value(json!({
             "files":[item("first"),item("second"),item("third")]
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(request.validate_with_limit(3).is_ok());
         assert!(request.validate_with_limit(2).is_err());
-        let ids: Vec<&str> = request.ordered_files().iter().map(|file| file.file_id.as_str()).collect();
-        assert_eq!(ids,vec!["first","second","third"]);
-        let legacy: UploadFileRequest = serde_json::from_value(json!({"file":item("old")})).unwrap();
-        assert_eq!(legacy.ordered_files()[0].file_id,"old");
+        let ids: Vec<&str> = request
+            .ordered_files()
+            .iter()
+            .map(|file| file.file_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["first", "second", "third"]);
+        let legacy: UploadFileRequest =
+            serde_json::from_value(json!({"file":item("old")})).unwrap();
+        assert_eq!(legacy.ordered_files()[0].file_id, "old");
         assert!(legacy.validate_with_limit(1).is_ok());
     }
 
@@ -170,20 +191,25 @@ mod tests {
             json!({"file":item("a"),"files":[item("b")]}),
             json!({"files":[]}),
             json!({"files":[item("a"),item("b")]}),
-            json!({"files":[{"file_id":"missing-url"}]}),
+            json!({"files":[{"file_id":"missing-url","download_url":""}]}),
         ];
         for value in invalid {
-            let request: UploadFileRequest=serde_json::from_value(value).unwrap();
+            let request: UploadFileRequest = serde_json::from_value(value).unwrap();
             assert!(request.validate_with_limit(1).is_err());
         }
         let mut too_many = Vec::new();
-        for _ in 0..HARD_MAX_FILES + 1 { too_many.push(item("file")); }
-        let request: UploadFileRequest=serde_json::from_value(json!({"files":too_many})).unwrap();
+        for _ in 0..HARD_MAX_FILES + 1 {
+            too_many.push(item("file"));
+        }
+        let request: UploadFileRequest = serde_json::from_value(json!({"files":too_many})).unwrap();
         assert!(request.validate_with_limit(HARD_MAX_FILES).is_err());
         let error = request.validate_with_limit(HARD_MAX_FILES).unwrap_err();
         assert!(!error.contains("https://"));
-        assert!(serde_json::from_value::<UploadFileRequest>(
-            json!({"files":[item("a")],"target":"unauthorized-page"})
-        ).is_err());
+        assert!(
+            serde_json::from_value::<UploadFileRequest>(
+                json!({"files":[item("a")],"target":"unauthorized-page"})
+            )
+            .is_err()
+        );
     }
 }
