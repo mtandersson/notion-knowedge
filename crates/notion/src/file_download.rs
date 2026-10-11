@@ -568,10 +568,10 @@ mod tests {
             let temporary = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
             let path = temporary.path().to_owned();
             let file = DownloadedFile { file: temporary, size_bytes: 10 };
-            let result: Result<(), &'static str> = (|| {
+            let result: Result<(), &'static str> = {
                 let _request_file = file;
                 Err(rejected)
-            })();
+            };
             assert_eq!(result, Err(rejected));
             assert!(!path.exists(), "staged bytes remain after rejected request");
         }
