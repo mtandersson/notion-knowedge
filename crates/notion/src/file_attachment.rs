@@ -291,7 +291,7 @@ mod tests {
         (
             "PATCH /v1/blocks/11111111-1111-1111-1111-111111111111/children".into(),
             200,
-            json!({"object":"list","results":[block("file",PAGE,json!({}))]}),
+            json!({"object":"list","results":[block("image",PAGE,json!({}))]}),
         )
     }
     fn readback(parent: &str) -> (String, u16, Value) {
@@ -415,7 +415,7 @@ mod tests {
         let client = NotionClient::integration("fixture-secret").unwrap();
         for (target, uploaded, text) in [
             (PageId("../notion".into()), upload("application/pdf"), None),
-            (PageId(PAGE.into()), upload("application/pdf"), None),
+            (PageId(PAGE.into()), upload("image/png"), None),
             (
                 PageId(PAGE.into()),
                 upload("application/pdf"),
@@ -459,7 +459,7 @@ mod tests {
                     append().0,
                     200,
                     json!({"object":"list","results":[
-                    block("file",PAGE,json!({}))]}),
+                    block("image",PAGE,json!({}))]}),
                 ));
             } else {
                 steps.push(append());
@@ -521,7 +521,8 @@ mod tests {
             &PageId(PAGE.into()),
             BLOCK,
             UPLOAD,
-            &[]
+            &[],
+            "notes.pdf"
         ));
         returned["file"]["file_upload"]["id"] = json!(UPLOAD);
         returned.as_object_mut().unwrap().remove("in_trash");
@@ -530,7 +531,8 @@ mod tests {
             &PageId(PAGE.into()),
             BLOCK,
             UPLOAD,
-            &[]
+            &[],
+            "notes.pdf"
         ));
     }
 }
