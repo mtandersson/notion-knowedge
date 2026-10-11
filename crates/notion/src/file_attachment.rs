@@ -7,19 +7,17 @@ use std::sync::Arc;
 use crate::{
     NotionClient,
     file_upload::{UploadStatus, UploadedFile},
-    pages::{self, PAGE_VERSION},
+    pages,
 };
 use notion_knowledge_core::{
     backend::{BackendError, BackendErrorKind, PageId},
     lifecycle::LifecycleScope,
     root_scope::{RootScopeGate, ScopeError},
 };
-use reqwest::header::AUTHORIZATION;
 use serde_json::{Value, json};
 
 const ATTACH: &str = "notion.file.attach";
 const VERIFY: &str = "notion.file.verify";
-const MAX_READBACK: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachedFile {
@@ -196,38 +194,17 @@ impl NotionClient {
         let block = block_id(&results[0], target)
             .ok_or_else(|| error(ATTACH, BackendErrorKind::Conflict))?;
 
-        let request = self
-            .http
-            .get(format!("{}/blocks/{block}", self.api_root))
-            .header(AUTHORIZATION, self.authorization.clone())
-            .header("Notion-Version", PAGE_VERSION);
-        let mut response = self.send(request, true, VERIFY).await?;
-        if response.status().as_u16() != 200 {
-            return Err(error(VERIFY, BackendErrorKind::Conflict));
-        }
-        let mut body = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| error(VERIFY, BackendErrorKind::Unavailable))?
-        {
-            if body.len().saturating_add(chunk.len()) > MAX_READBACK {
-                return Err(error(VERIFY, BackendErrorKind::Internal));
-            }
-            body.extend_from_slice(&chunk);
-        }
-        let value: Value =
-            serde_json::from_slice(&body).map_err(|_| error(VERIFY, BackendErrorKind::Internal))?;
-        if !readback_ok(
-            &value,
-            target,
-            &block,
-            &upload.id,
-            &caption,
-            &upload.filename,
-        ) {
-            return Err(error(VERIFY, BackendErrorKind::Conflict));
-        }
+        self.verify_attached_block(&block, VERIFY, |value| {
+            readback_ok(
+                value,
+                target,
+                &block,
+                &upload.id,
+                &caption,
+                &upload.filename,
+            )
+        })
+        .await?;
         Ok(AttachedFile {
             page_id: target.clone(),
             block_id: block,
@@ -482,7 +459,9 @@ mod tests {
                 ));
             } else {
                 steps.push(append());
-                steps.push(readback(OUTSIDE));
+                for _ in 0..3 {
+                    steps.push(readback(OUTSIDE));
+                }
             }
             let (client, server) = fixture(steps).await;
             let err = client
@@ -578,5 +557,64 @@ mod tests {
         item.filename = "notes.pdf".into();
         item.status = UploadStatus::Uploaded;
         assert!(valid_upload(&item));
+    }
+    #[tokio::test]
+    async fn file_block_eventually_appears_after_initial_not_found() {
+        let mut steps = chain(ROOT);
+        steps.extend(chain(ROOT));
+        steps.push(append());
+        steps.push((
+            format!("GET /v1/blocks/{BLOCK}"),
+            404,
+            json!({"code":"not_found"}),
+        ));
+        steps.push(readback(PAGE));
+        let (client, server) = fixture(steps).await;
+        let attached = client
+            .attach_uploaded_file(
+                &PageId(PAGE.into()),
+                &upload("application/pdf"),
+                Some("Dokument från Hans"),
+                &policy(),
+            )
+            .await
+            .unwrap();
+        assert!(attached.verified);
+        assert_eq!(server.await.unwrap().len(), 11);
+    }
+
+    #[tokio::test]
+    async fn file_block_never_appears_returns_error_without_second_append() {
+        let mut steps = chain(ROOT);
+        steps.extend(chain(ROOT));
+        steps.push(append());
+        for _ in 0..3 {
+            steps.push((
+                format!("GET /v1/blocks/{BLOCK}"),
+                404,
+                json!({"code":"not_found"}),
+            ));
+        }
+        let (client, server) = fixture(steps).await;
+        let failure = client
+            .attach_uploaded_file(
+                &PageId(PAGE.into()),
+                &upload("application/pdf"),
+                None,
+                &policy(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(failure.kind, BackendErrorKind::Conflict);
+        assert_eq!(failure.operation, VERIFY);
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 12);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(method, _)| method.starts_with("PATCH"))
+                .count(),
+            1
+        );
     }
 }
