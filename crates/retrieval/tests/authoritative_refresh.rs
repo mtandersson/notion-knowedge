@@ -2264,3 +2264,47 @@ async fn planner_rejects_foreign_binding_unowned_index_and_refreshes_legacy_iden
         PlanError::Ownership
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_read_only_planner_plan_roundtrips_without_apply_acknowledgments() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let plan = planner(&index, &source).plan().await.unwrap();
+    assert_eq!(plan.inspected_ids.len(), plan.scanned);
+    assert_eq!(
+        plan.inspected_ids,
+        std::collections::BTreeSet::from([PAGE.into(), OTHER.into(), ROOT.into()])
+    );
+    // Dry-run did not persist operational plan metadata or suppress the real run.
+    assert!(index.coordinator.reconciliation_plan("run").is_err());
+    assert_eq!(source.body_reads.load(Ordering::SeqCst), 0);
+    index
+        .coordinator
+        .state()
+        .start_or_resume(&index.lease, 10, "run", &index.journal_scope)
+        .unwrap();
+    index
+        .coordinator
+        .record_reconciliation_plan(&index.lease, 10, "run", &plan)
+        .unwrap();
+    let durable = index.coordinator.reconciliation_plan("run").unwrap();
+    let reopened =
+        IndexCommitCoordinator::open(&index.index, &index.db, index.coordinator.binding().clone())
+            .unwrap();
+    assert_eq!(reopened.reconciliation_plan("run").unwrap(), durable);
+    let counts = reopened.reconciliation_progress("run").unwrap();
+    assert_eq!(
+        (
+            counts.scanned,
+            counts.planned_refresh,
+            counts.changed,
+            counts.deleted
+        ),
+        (3, 3, 0, 0)
+    );
+    assert_eq!(counts.pending.len(), 3);
+    assert!(reopened.state().page_state(PAGE).unwrap().is_none());
+    assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+    assert_eq!(source.body_reads.load(Ordering::SeqCst), 0);
+}

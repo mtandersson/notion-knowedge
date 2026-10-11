@@ -119,6 +119,8 @@ pub struct ReconciliationPlan {
     pub errors: BTreeMap<String, PlanError>,
     pub run_errors: Vec<PlanError>,
     pub scanned: usize,
+    /// Distinct successful inspections, including pages requiring no work.
+    pub inspected_ids: BTreeSet<String>,
     pub traversal_complete: bool,
 }
 impl ReconciliationPlan {
@@ -256,6 +258,7 @@ impl AuthoritativeReconciliationPlanner {
             errors: BTreeMap::new(),
             run_errors: vec![],
             scanned: 0,
+            inspected_ids: BTreeSet::new(),
             traversal_complete: false,
         };
         let mut discovered = BTreeSet::new();
@@ -300,10 +303,12 @@ impl AuthoritativeReconciliationPlanner {
                 .await
             {
                 Ok(Some(page)) => {
+                    plan.inspected_ids.insert(id.clone());
                     plan.scanned += 1;
                     plan.pages.push(page);
                 }
                 Ok(None) => {
+                    plan.inspected_ids.insert(id.clone());
                     plan.scanned += 1;
                 }
                 Err(error) => {

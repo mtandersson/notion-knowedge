@@ -44,3 +44,6 @@ pub mod refresh;
 
 #[cfg(all(unix, feature = "local-lancedb"))]
 pub mod planner;
+
+#[cfg(all(unix, feature = "local-lancedb"))]
+pub mod durable_plan;
