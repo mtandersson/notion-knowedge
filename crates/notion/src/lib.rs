@@ -52,5 +52,8 @@ pub use image_attachment::AttachedImage;
 pub mod file_attachment;
 pub use file_attachment::AttachedFile;
 
+// Only the validated adapter flows may invoke the shared bounded read-back.
+mod attachment_readback;
+
 /// One-page, read-only canonical refresh preparation under live physical scope.
 pub mod prepare;
