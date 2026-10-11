@@ -174,6 +174,7 @@ pub fn emit(
     status: Option<u16>,
     level: Level,
 ) {
+    crate::metrics::observe_event(operation, outcome, elapsed);
     if level != Level::Off && level as u8 <= LOG_LEVEL.load(Ordering::Relaxed) {
         // Logging must never abort request processing if a supervisor closes
         // stderr (or a test stops consuming its pipe).

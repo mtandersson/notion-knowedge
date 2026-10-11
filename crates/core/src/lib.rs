@@ -19,6 +19,9 @@ pub mod redaction;
 /// Payload-free structured operations and task-scoped correlation IDs.
 pub mod logging;
 
+/// Low-cardinality process operational metrics, never indexed by user data.
+pub mod metrics;
+
 /// Canonical, provider-independent indexed content contracts.
 pub mod indexed;
 

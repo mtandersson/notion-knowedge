@@ -41,7 +41,7 @@ pub async fn serve_with_handler(
     let _notion_oauth = crate::notion_oauth_runtime::NotionOAuthRuntime::from_config(&settings)
         .map_err(|_| io::Error::other("Notion OAuth credential runtime unavailable"))?;
     let bind = settings.http_bind;
-    let diagnostics = crate::diagnostics::bootstrap(&settings);
+    let mut diagnostics = crate::diagnostics::bootstrap(&settings);
     let handler = crate::root_scope::attach_root_scope(handler, &settings)
         .map_err(io::Error::other)?
         .with_read_only(settings.read_only)
@@ -62,6 +62,24 @@ pub async fn serve_with_handler(
         config,
     );
     let bearer = settings.bearer_fallback.map(Arc::new);
+    let admission = match settings.webhook_state_file {
+        Some(path) => {
+            let store = tokio::task::spawn_blocking(move || {
+                notion_knowledge_retrieval::sync_state::SqliteSyncStateStore::open(path)
+            })
+            .await
+            .map_err(|_| io::Error::other("webhook inbox unavailable"))?
+            .map_err(|_| io::Error::other("webhook inbox unavailable"))?;
+            let store = Arc::new(store);
+            diagnostics = diagnostics.with_operational_store(store.clone());
+            Some(Arc::new(crate::webhook::DurableAdmission(
+                store,
+                settings.webhook_debounce,
+            ))
+                as Arc<dyn notion_knowledge_core::webhook::WebhookAdmission>)
+        }
+        None => None,
+    };
     let diagnostics = diagnostics_router(bind, diagnostics);
     let diagnostics = if settings.health_requires_bearer {
         // The health policy is independent of the MCP auth policy.
@@ -71,22 +89,6 @@ pub async fn serve_with_handler(
         ))
     } else {
         diagnostics
-    };
-    let admission = match settings.webhook_state_file {
-        Some(path) => {
-            let store = tokio::task::spawn_blocking(move || {
-                notion_knowledge_retrieval::sync_state::SqliteSyncStateStore::open(path)
-            })
-            .await
-            .map_err(|_| io::Error::other("webhook inbox unavailable"))?
-            .map_err(|_| io::Error::other("webhook inbox unavailable"))?;
-            Some(Arc::new(crate::webhook::DurableAdmission(
-                Arc::new(store),
-                settings.webhook_debounce,
-            ))
-                as Arc<dyn notion_knowledge_core::webhook::WebhookAdmission>)
-        }
-        None => None,
     };
     let webhooks = crate::webhook::router(settings.webhook, admission);
     // Discovery alone does not authenticate anyone. In that explicitly opted-in
@@ -360,6 +362,7 @@ fn diagnostics_router(
         .route("/livez", get(liveness_response))
         .route("/readyz", get(readiness_response))
         .route("/health", get(health_response))
+        .route("/metrics", get(metrics_response))
         .with_state(diagnostics)
         .layer(middleware::from_fn_with_state(bind, guard_diagnostics))
 }
@@ -420,6 +423,43 @@ async fn health_response(State(diagnostics): State<crate::diagnostics::Diagnosti
             "http",
             diagnostics.read_only(),
         )),
+    )
+        .into_response()
+}
+
+/// Prometheus metrics share the health endpoint's host/origin and optional bearer gates.
+async fn metrics_response(
+    State(diagnostics): State<crate::diagnostics::Diagnostics>,
+) -> Response {
+    let mut output = notion_knowledge_core::metrics::render();
+    if let Some(store) = diagnostics.operational_store() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| i64::try_from(value.as_secs()).unwrap_or(i64::MAX))
+            .unwrap_or(0);
+        let snapshot = tokio::task::spawn_blocking(move || store.operational_metrics(now)).await;
+        let Ok(Ok(snapshot)) = snapshot else {
+            return (StatusCode::SERVICE_UNAVAILABLE, "Operational state unavailable").into_response();
+        };
+        use std::fmt::Write as _;
+        output.push_str("# TYPE nk_webhook_queue_outstanding gauge\n");
+        let _ = writeln!(output, "nk_webhook_queue_outstanding {}", snapshot.webhook_outstanding);
+        if let Some(age) = snapshot.oldest_webhook_age_seconds {
+            output.push_str("# TYPE nk_webhook_oldest_outstanding_age_seconds gauge\n");
+            let _ = writeln!(output, "nk_webhook_oldest_outstanding_age_seconds {age}");
+        }
+        if let Some(age) = snapshot.index_change_age_seconds {
+            output.push_str("# TYPE nk_index_last_change_age_seconds gauge\n");
+            let _ = writeln!(output, "nk_index_last_change_age_seconds {age}");
+        }
+    }
+    (
+        StatusCode::OK,
+        [
+            ("cache-control", "no-store"),
+            ("content-type", "text/plain; version=0.0.4; charset=utf-8"),
+        ],
+        output,
     )
         .into_response()
 }

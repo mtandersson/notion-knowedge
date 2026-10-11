@@ -22,6 +22,7 @@ impl HealthProbe for BootstrapProbe {
 pub struct Diagnostics {
     notion: Arc<dyn HealthProbe>,
     index: Arc<dyn HealthProbe>,
+    operational_store: Option<Arc<notion_knowledge_retrieval::sync_state::SqliteSyncStateStore>>,
     read_only: bool,
 }
 
@@ -30,8 +31,23 @@ impl Diagnostics {
         Self {
             notion,
             index,
+            operational_store: None,
             read_only: true,
         }
+    }
+
+    pub fn with_operational_store(
+        mut self,
+        store: Arc<notion_knowledge_retrieval::sync_state::SqliteSyncStateStore>,
+    ) -> Self {
+        self.operational_store = Some(store);
+        self
+    }
+
+    pub fn operational_store(
+        &self,
+    ) -> Option<Arc<notion_knowledge_retrieval::sync_state::SqliteSyncStateStore>> {
+        self.operational_store.clone()
     }
 
     pub fn with_read_only(mut self, read_only: bool) -> Self {
