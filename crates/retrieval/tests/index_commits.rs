@@ -649,3 +649,158 @@ fn process_death_releases_directory_guard_and_keeps_operation_pending_for_replay
     );
     assert_eq!(c.receipt("crashed").unwrap().unwrap().attempts, 2);
 }
+
+fn refresh_retry(id: &str, page: &str, revision: &str) -> PageOperation {
+    PageOperation::retryable_refresh(
+        id,
+        revision,
+        PageSyncState::present(page.into(), revision.into(), None).unwrap(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn retryable_refresh_preserves_page_action_generation_and_terminal_receipts() {
+    let f = Fixture::new();
+    let c = f.coordinator();
+    let lease = c.state().acquire_lease(10, 100).unwrap();
+    c.submit(operation("retry"), lease.clone(), clock(10), |_| async {
+        Err(FailureClass::Source)
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(
+        c.submit(
+            refresh_retry("retry", "other-page", "v2"),
+            lease.clone(),
+            clock(10),
+            |_| async { panic!("foreign page must not run") }
+        )
+        .await,
+        Err(CommitError::Conflict)
+    );
+    c.submit(
+        PageOperation::new(
+            "delete",
+            "v1",
+            PageAction::Delete,
+            PageSyncState::tombstone("page".into(), None).unwrap(),
+        )
+        .unwrap(),
+        lease.clone(),
+        clock(10),
+        |_| async { Err(FailureClass::Source) },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        c.submit(
+            refresh_retry("delete", "page", "v2"),
+            lease.clone(),
+            clock(10),
+            |_| async { panic!("different action must not run") }
+        )
+        .await,
+        Err(CommitError::Conflict)
+    );
+    assert_eq!(
+        c.submit(
+            refresh_retry("retry", "page", "v2"),
+            lease.clone(),
+            clock(10),
+            |_| async { Ok(()) }
+        )
+        .await,
+        Ok(CommitOutcome::Applied)
+    );
+    assert_eq!(
+        c.submit(
+            refresh_retry("retry", "page", "v3"),
+            lease.clone(),
+            clock(10),
+            |_| async { panic!("applied receipt must not run") }
+        )
+        .await,
+        Ok(CommitOutcome::AlreadyApplied)
+    );
+    assert_eq!(
+        c.state()
+            .page_state("page")
+            .unwrap()
+            .unwrap()
+            .content_hash(),
+        Some("v2")
+    );
+    // Preserve an Applied receipt across a real scope-generation transition,
+    // and a Superseded unresolved receipt: neither ID may run in the new scope.
+    let next = c
+        .supersede_scope(binding("v2", 2), &lease, 10, &["delete".into()])
+        .unwrap();
+    for id in ["retry", "delete"] {
+        assert_eq!(
+            next.submit(
+                refresh_retry(id, "page", "v4"),
+                lease.clone(),
+                clock(10),
+                |_| async { panic!("old generation must not run") }
+            )
+            .await,
+            Err(CommitError::Conflict)
+        );
+    }
+}
+
+#[tokio::test]
+async fn concurrent_refresh_retries_wait_for_owned_effect_and_keep_acknowledged_revision() {
+    for succeeds in [false, true] {
+        let f = Fixture::new();
+        let c = f.coordinator();
+        let lease = c.state().acquire_lease(10, 100).unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let first = c.submit(
+            refresh_retry("same-event", "page", "v1"),
+            lease.clone(),
+            clock(10),
+            move |_| async move {
+                started_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+                if succeeds {
+                    Ok(())
+                } else {
+                    Err(FailureClass::Source)
+                }
+            },
+        );
+        started_rx.await.unwrap();
+        let second = c.submit(
+            refresh_retry("same-event", "page", "v2"),
+            lease,
+            clock(10),
+            move |_| async move {
+                assert!(!succeeds, "acknowledged effect must never be replaced");
+                Ok(())
+            },
+        );
+        release_tx.send(()).unwrap();
+        let expected = if succeeds {
+            CommitOutcome::AlreadyApplied
+        } else {
+            CommitOutcome::Applied
+        };
+        assert_eq!(second.await.unwrap(), expected);
+        assert_eq!(first.await.is_ok(), succeeds);
+        assert_eq!(
+            c.receipt("same-event").unwrap().unwrap().status,
+            ReceiptStatus::Applied
+        );
+        assert_eq!(
+            c.state()
+                .page_state("page")
+                .unwrap()
+                .unwrap()
+                .content_hash(),
+            Some(if succeeds { "v1" } else { "v2" })
+        );
+    }
+}
