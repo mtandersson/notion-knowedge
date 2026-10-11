@@ -81,7 +81,9 @@ fn valid_upload(upload: &UploadedFile) -> bool {
         && match upload.mime_type.as_str() {
             "application/pdf" => upload.filename.ends_with(".pdf"),
             "text/plain" => upload.filename.ends_with(".txt"),
-            "text/markdown" => upload.filename.ends_with(".md") || upload.filename.ends_with(".markdown"),
+            "text/markdown" => {
+                upload.filename.ends_with(".md") || upload.filename.ends_with(".markdown")
+            }
             "text/csv" => upload.filename.ends_with(".csv"),
             _ => false,
         }
@@ -217,7 +219,14 @@ impl NotionClient {
         }
         let value: Value =
             serde_json::from_slice(&body).map_err(|_| error(VERIFY, BackendErrorKind::Internal))?;
-        if !readback_ok(&value, target, &block, &upload.id, &caption, &upload.filename) {
+        if !readback_ok(
+            &value,
+            target,
+            &block,
+            &upload.id,
+            &caption,
+            &upload.filename,
+        ) {
             return Err(error(VERIFY, BackendErrorKind::Conflict));
         }
         Ok(AttachedFile {
@@ -260,7 +269,8 @@ mod tests {
                 "text/markdown" => "notes.md",
                 "text/csv" => "notes.csv",
                 _ => "notes.pdf",
-            }.into(),
+            }
+            .into(),
             mime_type: mime.into(),
             size_bytes: 16,
         }
@@ -403,7 +413,12 @@ mod tests {
     async fn outside_root_never_attaches() {
         let (client, server) = fixture(chain(OUTSIDE)).await;
         let err = client
-            .attach_uploaded_file(&PageId(PAGE.into()), &upload("application/pdf"), None, &policy())
+            .attach_uploaded_file(
+                &PageId(PAGE.into()),
+                &upload("application/pdf"),
+                None,
+                &policy(),
+            )
             .await
             .unwrap_err();
         assert_eq!(err.kind, BackendErrorKind::PermissionDenied);
@@ -440,7 +455,12 @@ mod tests {
         let (client, server) = fixture(steps).await;
         assert_eq!(
             client
-                .attach_uploaded_file(&PageId(PAGE.into()), &upload("application/pdf"), None, &policy())
+                .attach_uploaded_file(
+                    &PageId(PAGE.into()),
+                    &upload("application/pdf"),
+                    None,
+                    &policy()
+                )
                 .await
                 .unwrap_err()
                 .kind,
@@ -501,7 +521,12 @@ mod tests {
         ));
         let (client, server) = fixture(steps).await;
         let attached = client
-            .attach_uploaded_file(&PageId(PAGE.into()), &upload("text/markdown"), None, &policy())
+            .attach_uploaded_file(
+                &PageId(PAGE.into()),
+                &upload("text/markdown"),
+                None,
+                &policy(),
+            )
             .await
             .unwrap();
         assert!(attached.verified);
