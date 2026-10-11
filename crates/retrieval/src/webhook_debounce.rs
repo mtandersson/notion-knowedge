@@ -273,3 +273,18 @@ fn reset_pending(db: &Connection, k: &PageWorkKey) -> Result<(), InboxError> {
     }
     Ok(())
 }
+
+impl SqliteSyncStateStore {
+    /// Read-only commit-boundary ownership check, including millisecond page
+    /// lease expiry. Event leases use rounded seconds and are insufficient alone.
+    pub fn page_claim_is_current(
+        &self,
+        claim: &PageWorkClaim,
+        now_ms: i64,
+    ) -> Result<bool, InboxError> {
+        let db = self
+            .lock_connection()
+            .map_err(|_| InboxError::Unavailable)?;
+        db.query_row("SELECT EXISTS(SELECT 1 FROM webhook_page_work WHERE workspace_id=?1 AND subscription_id=?2 AND page_id=?3 AND generation=?4 AND lease_until_ms>?5)", params![claim.key.scope.workspace_id,claim.key.scope.subscription_id,claim.key.page_id,claim.generation,now_ms], |r|r.get(0)).map_err(sql)
+    }
+}

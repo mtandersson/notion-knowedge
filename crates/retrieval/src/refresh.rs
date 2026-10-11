@@ -32,6 +32,8 @@ pub enum RefreshError {
     InvalidConfiguration,
     OutOfScope,
     Source,
+    /// A sanitized source contract/authentication failure; automatic retry cannot repair it.
+    PermanentSource,
     Index,
     Conflict,
     Unavailable,
@@ -127,6 +129,9 @@ impl AuthoritativePageRefresh {
                 .await
                 .map_err(|error| match error.kind {
                     BackendErrorKind::Conflict => RefreshError::Conflict,
+                    BackendErrorKind::Unauthenticated
+                    | BackendErrorKind::InvalidInput
+                    | BackendErrorKind::UnsupportedContent => RefreshError::PermanentSource,
                     _ => RefreshError::Source,
                 })?;
         if let LifecycleStatus::Allowed { roots } = &evidence.status {
@@ -183,19 +188,28 @@ impl AuthoritativePageRefresh {
         let diff = prepared.metrics();
         let notion = self.notion.clone();
         let scope = self.scope.clone();
+        let owned_clock = clock.clone();
+        let expires_at = lease.expires_at;
         let outcome = self
             .guard
             .commit_page(prepared, lease, clock, move || async move {
-                notion
-                    .revalidate_lifecycle(&evidence, &scope)
-                    .await
-                    .map_err(|error| {
-                        if error.kind == BackendErrorKind::Conflict {
-                            FailureClass::Conflict
-                        } else {
-                            FailureClass::Source
-                        }
-                    })
+                owned_revalidation(
+                    async {
+                        notion
+                            .revalidate_lifecycle(&evidence, &scope)
+                            .await
+                            .map_err(|error| {
+                                if error.kind == BackendErrorKind::Conflict {
+                                    FailureClass::Conflict
+                                } else {
+                                    FailureClass::Source
+                                }
+                            })
+                    },
+                    owned_clock,
+                    expires_at,
+                )
+                .await
             })
             .await
             .map_err(RefreshError::from)?;
@@ -245,7 +259,9 @@ impl AuthoritativePageRefresh {
             .map_err(|e| match e.kind {
                 BackendErrorKind::PermissionDenied => RefreshError::OutOfScope,
                 BackendErrorKind::Conflict => RefreshError::Conflict,
-                BackendErrorKind::InvalidInput => RefreshError::InvalidConfiguration,
+                BackendErrorKind::InvalidInput
+                | BackendErrorKind::UnsupportedContent
+                | BackendErrorKind::Unauthenticated => RefreshError::PermanentSource,
                 _ => RefreshError::Source,
             })?;
 
@@ -326,16 +342,22 @@ impl AuthoritativePageRefresh {
         let root = root.clone();
         let guarded_document = document.clone();
         let guarded_evidence = proposal.evidence;
+        let owned_clock = clock.clone();
+        let expires_at = lease.expires_at;
         let result = self
             .guard
             .commit_page(prepared, lease, clock, move || async move {
-                verify_source(
-                    &notion,
-                    &page,
-                    &root,
-                    &scope,
-                    &guarded_document,
-                    &guarded_evidence,
+                owned_revalidation(
+                    verify_source(
+                        &notion,
+                        &page,
+                        &root,
+                        &scope,
+                        &guarded_document,
+                        &guarded_evidence,
+                    ),
+                    owned_clock,
+                    expires_at,
                 )
                 .await
             })
@@ -389,4 +411,24 @@ async fn verify_source(
         .revalidate_lifecycle(evidence, scope)
         .await
         .map_err(|_| FailureClass::Conflict)
+}
+
+/// Cancel source revalidation inside the operation-owned commit runtime when
+/// the caller loses ownership. Dropping its observer alone cannot release that
+/// runtime's index directory guard. All messages remain sanitized enum classes.
+async fn owned_revalidation(
+    source: impl std::future::Future<Output = Result<(), FailureClass>>,
+    clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    expires_at: i64,
+) -> Result<(), FailureClass> {
+    tokio::pin!(source);
+    loop {
+        if clock() >= expires_at {
+            return Err(FailureClass::Conflict);
+        }
+        tokio::select! {
+            result = &mut source => return result,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {},
+        }
+    }
 }

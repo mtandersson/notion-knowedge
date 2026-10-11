@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -74,12 +75,22 @@ class CargoSnapshots(unittest.TestCase):
 
     def test_test_suites_have_isolated_builds_and_shared_downloads(self):
         snapshots = [self.key(job=job) for job in
-                     ('test', 'test-workspace', 'test-local-qwen', 'test-local-lancedb')]
-        self.assertEqual(len({entry['prefix'] for entry in snapshots}), 4)
+                     ('test', 'test-workspace', 'test-local-qwen', 'test-local-lancedb',
+                      'test-webhook-worker')]
+        self.assertEqual(len({entry['prefix'] for entry in snapshots}), 5)
         self.assertEqual(len({entry['downloads-key'] for entry in snapshots}), 1)
-        for job in ('test-workspace', 'test-local-qwen', 'test-local-lancedb'):
+        for job in ('test-workspace', 'test-local-qwen', 'test-local-lancedb',
+                    'test-webhook-worker'):
             with self.subTest(job=job), self.assertRaises(ValueError):
                 self.key(job=job, profile='release')
+
+    def test_every_configured_ci_suite_can_restore_an_isolated_snapshot(self):
+        workflow = Path(cache.__file__).resolve().parents[1] / '.github/workflows/ci.yml'
+        suites = re.findall(r'- suite: ([A-Za-z0-9_-]+)', workflow.read_text())
+        self.assertTrue(suites)
+        snapshots = [self.key(job=f'test-{suite}') for suite in suites]
+        self.assertEqual(len({entry['prefix'] for entry in snapshots}), len(suites))
+        self.assertEqual(len({entry['downloads-key'] for entry in snapshots}), 1)
 
     def test_credentials_do_not_enter_keys_or_output(self):
         sentinel = 'never-print-this-value'

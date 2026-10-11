@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+webhook-worker = ["notion-knowledge-retrieval/local-lancedb", "notion-knowledge-retrieval/local-qwen"]
+
 [dependencies]
 notion-knowledge-core = { path = "../core" }
 notion-knowledge-mcp = { path = "../mcp" }
@@ -12,7 +16,8 @@ notion-knowledge-retrieval = { path = "../retrieval" }
 rmcp = { workspace = true, features = ["transport-io", "transport-streamable-http-server"] }
 serde_json = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
-tokio = { workspace = true, features = ["net", "signal", "sync"] }
+tokio = { workspace = true, features = ["net", "signal", "sync", "time"] }
+tokio-util = "0.7"
 
 serde = { version = "1", features = ["derive"] }
 hmac = "0.12"
@@ -23,4 +28,6 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [dev-dependencies]
+notion-knowledge-notion = { path = "../notion", features = ["test-fixtures"] }
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 tokio = { workspace = true, features = ["process", "io-util", "time"] }

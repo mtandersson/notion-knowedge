@@ -35,6 +35,32 @@ pub async fn serve_with_handler(
     settings: crate::config::Config,
     handler: notion_knowledge_mcp::KnowledgeServer,
 ) -> io::Result<()> {
+    #[cfg(all(unix, feature = "webhook-worker"))]
+    let worker = crate::webhook_worker::runtime::configured(&settings)
+        .await
+        .map_err(io::Error::other)?;
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    serve_composed(
+        settings,
+        handler,
+        #[cfg(all(unix, feature = "webhook-worker"))]
+        worker.map(Arc::new),
+        shutdown,
+    )
+    .await
+}
+
+/// Trusted composition seam for normal production serving and credential-free
+/// integration fixtures. The same router, admission, cancellation and fatal
+/// worker supervision run in both cases; no fixture endpoint is configurable.
+pub async fn serve_composed(
+    settings: crate::config::Config,
+    handler: notion_knowledge_mcp::KnowledgeServer,
+    #[cfg(all(unix, feature = "webhook-worker"))] worker: Option<
+        Arc<crate::webhook_worker::runtime::Worker>,
+    >,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> io::Result<()> {
     logging::set_level(settings.log_level);
     // Construct ONE shared refresh coordinator per HTTP server. OAuth discovery
     // remains fail-closed; no MCP bearer or callback routes are enabled here.
@@ -55,6 +81,7 @@ pub async fn serve_with_handler(
         format!("http://{bind}"),
         format!("http://localhost:{}", bind.port()),
     ];
+    config.cancellation_token = shutdown;
     let cancellation = config.cancellation_token.clone();
     let service = StreamableHttpService::new(
         move || Ok(handler.clone()),
@@ -119,12 +146,35 @@ pub async fn serve_with_handler(
         .merge(webhooks)
         .layer(middleware::from_fn(correlate_request));
     eprintln!("Serving MCP over Streamable HTTP at http://{bind}/mcp.");
-    axum::serve(listener, router)
+    #[cfg(all(unix, feature = "webhook-worker"))]
+    let worker_task = worker.map(|worker| {
+        let stop = cancellation.clone();
+        tokio::spawn(async move {
+            // Cancellation also propagates if the worker panics.
+            let _cancel_on_exit = stop.clone().drop_guard();
+            let result = worker.run(stop.clone()).await;
+            stop.cancel();
+            result
+        })
+    });
+    let shutdown = cancellation.clone();
+    let result = axum::serve(listener, router)
         .with_graceful_shutdown(async move {
-            let _ = tokio::signal::ctrl_c().await;
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = cancellation.cancelled() => {},
+            }
             cancellation.cancel();
         })
-        .await
+        .await;
+    shutdown.cancel();
+    #[cfg(all(unix, feature = "webhook-worker"))]
+    if let Some(task) = worker_task {
+        task.await
+            .map_err(|_| io::Error::other("webhook worker terminated"))?
+            .map_err(io::Error::other)?;
+    }
+    result
 }
 
 /// Generated server-side IDs cannot be spoofed using client-supplied headers.

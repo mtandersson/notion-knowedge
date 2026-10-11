@@ -30,6 +30,7 @@ pub struct Config {
     pub webhook: crate::webhook::WebhookConfig,
     pub webhook_debounce: notion_knowledge_core::webhook::DebounceWindow,
     pub webhook_state_file: Option<std::path::PathBuf>,
+    pub webhook_worker: Option<crate::webhook_worker::WorkerSettings>,
 }
 
 /// Secrets are excluded from Debug; allowed identifiers are provisioned,
@@ -119,7 +120,8 @@ impl Config {
         Self::from_lookup(|key| env::var_os(key))
     }
 
-    pub(crate) fn from_lookup(
+    /// Parse a trusted startup configuration source; never pass webhook hints.
+    pub fn from_lookup(
         mut lookup: impl FnMut(&str) -> Option<OsString>,
     ) -> Result<Self, ConfigError> {
         let log_level = notion_knowledge_core::logging::Level::parse(&optional(
@@ -468,11 +470,33 @@ impl Config {
                     .ok_or_else(|| {
                         invalid("NK_NOTION_SCOPE_GENERATION", "must be a positive integer")
                     })?;
+                let mut exclusions = notion_knowledge_core::discovery::ExclusionRules::default();
+                for (name, target) in [
+                    ("NK_NOTION_SCOPE_EXCLUDED_PAGES", &mut exclusions.page_ids),
+                    (
+                        "NK_NOTION_SCOPE_EXCLUDED_DESCENDANTS",
+                        &mut exclusions.descendants_of,
+                    ),
+                ] {
+                    if let Some(value) = lookup(name) {
+                        let value = text(value, name)?;
+                        let ids: Option<Vec<_>> = value.split(',').map(parse).collect();
+                        let ids = ids
+                            .filter(|ids| !ids.is_empty() && ids.len() <= 100)
+                            .ok_or_else(|| {
+                                invalid(
+                                    name,
+                                    "must contain 1 to 100 comma-separated canonical UUIDs",
+                                )
+                            })?;
+                        target.extend(ids);
+                    }
+                }
                 Some(notion_knowledge_core::lifecycle::LifecycleScope {
                     workspace_id,
                     generation,
                     roots: root_ids,
-                    exclusions: notion_knowledge_core::discovery::ExclusionRules::default(),
+                    exclusions,
                 })
             }
             _ => {
@@ -590,7 +614,13 @@ impl Config {
                 "must be at least NK_WEBHOOK_DEBOUNCE_MS",
             )
         })?;
+        let webhook_worker = crate::webhook_worker::WorkerSettings::parse(
+            &mut lookup,
+            &webhook,
+            notion_scope.as_ref(),
+        )?;
         Ok(Self {
+            webhook_worker,
             webhook_state_file,
             webhook_debounce,
             http_bind: SocketAddr::new(host, port),
@@ -1077,7 +1107,10 @@ mod tests {
     #[test]
     fn bootstrap_defaults_need_no_credentials() {
         let config = parse(&[]).unwrap();
-        assert_eq!(config.http_bind, "127.0.0.1:3000".parse().unwrap());
+        assert_eq!(
+            config.http_bind,
+            "127.0.0.1:3000".parse::<SocketAddr>().unwrap()
+        );
         assert!(matches!(config.notion_auth, NotionAuth::None));
     }
 

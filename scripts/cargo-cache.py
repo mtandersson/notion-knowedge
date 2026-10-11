@@ -13,7 +13,8 @@ import time
 VERSION = 1
 STATE = Path('target/.nk-cache-source-times.json')
 PROFILES = {'clippy': 'debug', 'check': 'debug', 'test': 'debug', 'test-workspace': 'debug',
-            'test-local-qwen': 'debug', 'test-local-lancedb': 'debug', 'build': 'release'}
+            'test-local-qwen': 'debug', 'test-local-lancedb': 'debug',
+            'test-webhook-worker': 'debug', 'build': 'release'}
 FLAG_NAMES = {'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'RUSTDOCFLAGS',
               'CARGO_ENCODED_RUSTDOCFLAGS', 'CARGO_BUILD_TARGET', 'CARGO_BUILD_RUSTFLAGS',
               'CARGO_INCREMENTAL', 'CARGO_TARGET_DIR', 'RUSTC_BOOTSTRAP',
