@@ -41,3 +41,6 @@ pub mod idempotency;
 /// Real authoritative selected-page refresh through guarded SQLite/LanceDB.
 #[cfg(all(unix, feature = "local-lancedb"))]
 pub mod refresh;
+
+#[cfg(all(unix, feature = "local-lancedb"))]
+pub mod planner;

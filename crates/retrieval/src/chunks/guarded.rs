@@ -198,6 +198,35 @@ impl GuardedChunkTable {
     /// Read persisted canonical chunks for one selected page, preserving
     /// metadata, stable identities and the old verified content fingerprints.
     /// This is local preparation input only, never source scope evidence.
+    /// Read the union input from a pinned Lance snapshot, with no startup repair.
+    pub async fn inventory_version(&self) -> Result<u64, ChunkTableError> {
+        Ok(
+            open_current(&self.index_directory, &self.table_name, &self.embedding)
+                .await?
+                .table
+                .version()
+                .await?,
+        )
+    }
+    pub async fn indexed_page_ids(&self) -> Result<Vec<String>, ChunkTableError> {
+        let current = open_current(&self.index_directory, &self.table_name, &self.embedding)
+            .await?
+            .read_snapshot()
+            .await?;
+        let rows = current.rows_matching("true".into()).await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| row.page_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect())
+    }
+    pub(crate) fn is_bound_to(&self, coordinator: &Arc<IndexCommitCoordinator>) -> bool {
+        Arc::ptr_eq(&self.coordinator, coordinator)
+    }
+    pub fn binding(&self) -> &crate::commit::CommitBinding {
+        self.coordinator.binding()
+    }
     pub async fn page_chunks(&self, page_id: &str) -> Result<Vec<IndexedChunk>, ChunkTableError> {
         open_current(&self.index_directory, &self.table_name, &self.embedding)
             .await?

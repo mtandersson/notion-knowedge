@@ -180,3 +180,29 @@ fn newer_unknown_schema_is_rejected_instead_of_reinterpreted() {
         Err(SyncStateError::UnsupportedSchema)
     ));
 }
+
+#[test]
+fn metadata_identity_migration_preserves_checkpoints_without_fabricating_identity() {
+    let db = TestDb::new("metadata-migration");
+    let store = SqliteSyncStateStore::open(db.path()).unwrap();
+    let page = PageSyncState::present("legacy-page".into(), "legacy-hash".into(), None).unwrap();
+    store.put_page_state(&page).unwrap();
+    drop(store);
+    let connection = Connection::open(db.path()).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE page_metadata_identity; DELETE FROM schema_migrations WHERE version=9;",
+        )
+        .unwrap();
+    drop(connection);
+    let reopened = SqliteSyncStateStore::open(db.path()).unwrap();
+    assert_eq!(reopened.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    assert_eq!(reopened.page_state("legacy-page").unwrap(), Some(page));
+    let connection = Connection::open(db.path()).unwrap();
+    let identities: i64 = connection
+        .query_row("SELECT COUNT(*) FROM page_metadata_identity", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(identities, 0);
+}

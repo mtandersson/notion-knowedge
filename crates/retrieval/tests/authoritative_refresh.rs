@@ -41,6 +41,13 @@ struct Model {
     parent: String,
     archived: bool,
     root_revision: String,
+    hide_page: bool,
+    inaccessible_other: bool,
+    inaccessible_root: bool,
+    inaccessible_page: bool,
+    race_metadata: bool,
+    race_move: bool,
+    level: u64,
 }
 impl Default for Model {
     fn default() -> Self {
@@ -51,6 +58,13 @@ impl Default for Model {
             parent: ROOT.into(),
             archived: false,
             root_revision: "2026-10-10T11:00:00Z".into(),
+            hide_page: false,
+            inaccessible_other: false,
+            inaccessible_root: false,
+            inaccessible_page: false,
+            race_metadata: false,
+            race_move: false,
+            level: 3,
         }
     }
 }
@@ -102,7 +116,33 @@ impl HttpNotion {
                     .nth(1)
                     .unwrap();
                 let snapshot = values.lock().unwrap().clone();
-                let response = if route == format!("/v1/pages/{PAGE}/markdown") {
+                if snapshot.race_metadata && route == format!("/v1/pages/{PAGE}") {
+                    values.lock().unwrap().title.push('!');
+                }
+                if snapshot.race_move && route == format!("/v1/pages/{PAGE}") {
+                    values.lock().unwrap().parent = if snapshot.parent == ROOT {
+                        FOREIGN.into()
+                    } else {
+                        ROOT.into()
+                    };
+                }
+                let response = if (snapshot.inaccessible_root
+                    && route == format!("/v1/pages/{ROOT}"))
+                    || (snapshot.inaccessible_other && route == format!("/v1/pages/{OTHER}"))
+                    || (snapshot.inaccessible_page && route == format!("/v1/pages/{PAGE}"))
+                {
+                    json!({"object":"error", "code":"object_not_found"})
+                } else if route == format!("/v1/blocks/{ROOT}/children?page_size=100") {
+                    let mut children = vec![
+                        json!({"object":"block","id":OTHER,"type":"child_page","archived":false,"has_children":false,"parent":{"type":"page_id","page_id":ROOT},"child_page":{"title":"Separate"}}),
+                    ];
+                    if !snapshot.hide_page {
+                        children.push(json!({"object":"block","id":PAGE,"type":"child_page","archived":false,"has_children":false,"parent":{"type":"page_id","page_id":ROOT},"child_page":{"title":"First"}}));
+                    }
+                    json!({"object":"list","results":children,"has_more":false,"next_cursor":null})
+                } else if route.starts_with("/v1/blocks/") && route.contains("/children") {
+                    json!({"object":"list","results":[],"has_more":false,"next_cursor":null})
+                } else if route == format!("/v1/pages/{PAGE}/markdown") {
                     bodies.fetch_add(1, Ordering::SeqCst);
                     json!({
                         "object": "page_markdown",
@@ -112,13 +152,15 @@ impl HttpNotion {
                         "unknown_block_ids": []
                     })
                 } else if route == format!("/v1/pages/{PAGE}") {
-                    page_metadata(
+                    let mut page = page_metadata(
                         PAGE,
                         &snapshot.parent,
                         &snapshot.title,
                         &snapshot.revision,
                         snapshot.archived,
-                    )
+                    );
+                    page["properties"]["level"]["number"] = json!(snapshot.level);
+                    page
                 } else if route == format!("/v1/pages/{OTHER}/markdown") {
                     json!({"object":"page_markdown", "id":OTHER,
                         "markdown":"# Separate\n\nUntouched cinnamon.\n", "truncated":false,
@@ -275,7 +317,7 @@ impl Fixture {
         let db = root.join("state.sqlite");
         fs::create_dir_all(&index).unwrap();
         let journal_scope =
-            ReconciliationScope::new(vec![ROOT.into()], vec![], "phase3", "1").unwrap();
+            ReconciliationScope::new(vec![ROOT.into()], vec![], "webhook-v1", "1").unwrap();
         let binding = CommitBinding::new("chunks", WORKSPACE, &journal_scope, "1", 1).unwrap();
         let coordinator = IndexCommitCoordinator::initialize(&index, &db, binding).unwrap();
         let lease = coordinator.state().acquire_lease(10, 100).unwrap();
@@ -781,6 +823,7 @@ async fn original_event_recovers_after_index_apply_before_ack_and_changed_source
             .unwrap()
             .is_none()
     );
+    assert!(index.coordinator.metadata_identity(PAGE).unwrap().is_none());
     assert_eq!(
         index
             .table()
@@ -892,6 +935,7 @@ async fn original_event_recovers_after_index_apply_before_ack_and_changed_source
             .unwrap_err(),
         RefreshError::Conflict
     );
+    // New generation establishes its own atomic metadata identity/ownership.
     assert_eq!(
         next_handler
             .refresh_page(
@@ -905,7 +949,7 @@ async fn original_event_recovers_after_index_apply_before_ack_and_changed_source
             .await
             .unwrap()
             .outcome,
-        CommitOutcome::AlreadyApplied
+        CommitOutcome::Applied
     );
 }
 
@@ -1830,4 +1874,393 @@ async fn owned_empty_page_can_be_tombstoned_without_chunks_or_embeddings() {
             .is_tombstone()
     );
     assert_eq!(provider.embeddings(), 0);
+}
+
+fn planner(
+    index: &Fixture,
+    source: &HttpNotion,
+) -> notion_knowledge_retrieval::planner::AuthoritativeReconciliationPlanner {
+    notion_knowledge_retrieval::planner::AuthoritativeReconciliationPlanner::new(
+        source.client(),
+        index.guarded(),
+        index.coordinator.clone(),
+        authority(),
+    )
+    .unwrap()
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn planner_dry_run_missing_metadata_stale_unchanged_restored_and_empty_pages() {
+    use notion_knowledge_retrieval::planner::Difference;
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let provider = CountingProvider::new(index.embed.clone());
+    let handler = index.handler(source.client());
+    let initial = planner(&index, &source).plan().await.unwrap();
+    assert!(initial.errors.is_empty(), "{initial:?}");
+    assert_eq!(initial.scanned, 3);
+    assert_eq!(initial.planned_refresh(), 3);
+    assert_eq!(initial.changed(), 0);
+    assert_eq!(source.body_reads.load(Ordering::SeqCst), 0);
+    handler
+        .apply_lifecycle(
+            &PageId(PAGE.into()),
+            "initial",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let before = index.guarded().page_chunks(PAGE).await.unwrap();
+    let before_state = index.coordinator.state().page_state(PAGE).unwrap();
+    let reads = source.body_reads.load(Ordering::SeqCst);
+    let embeddings = provider.embeddings();
+    let unchanged = planner(&index, &source).plan().await.unwrap();
+    assert_eq!(
+        unchanged
+            .pages
+            .iter()
+            .find(|p| p.page_id == PAGE)
+            .unwrap()
+            .difference,
+        Difference::Unchanged
+    );
+    assert_eq!(source.body_reads.load(Ordering::SeqCst), reads);
+    assert_eq!(provider.embeddings(), embeddings);
+    assert_eq!(index.guarded().page_chunks(PAGE).await.unwrap(), before);
+    assert_eq!(
+        index.coordinator.state().page_state(PAGE).unwrap(),
+        before_state
+    );
+    source.change(|m| m.level = 9);
+    let properties = planner(&index, &source).plan().await.unwrap();
+    assert_eq!(
+        properties
+            .pages
+            .iter()
+            .find(|p| p.page_id == PAGE)
+            .unwrap()
+            .difference,
+        Difference::Stale
+    );
+    source.change(|m| {
+        m.level = 3;
+        m.root_revision = "2026-10-10T11:01:00Z".into();
+    });
+    let ancestry = planner(&index, &source).plan().await.unwrap();
+    assert_eq!(
+        ancestry
+            .pages
+            .iter()
+            .find(|p| p.page_id == PAGE)
+            .unwrap()
+            .difference,
+        Difference::Stale
+    );
+    source.change(|m| m.title = "Metadata only".into());
+    let stale = planner(&index, &source).plan().await.unwrap();
+    assert_eq!(
+        stale
+            .pages
+            .iter()
+            .find(|p| p.page_id == PAGE)
+            .unwrap()
+            .difference,
+        Difference::Stale
+    );
+    // Dry-run leaves no terminal receipt that suppresses the subsequent refresh.
+    handler
+        .apply_lifecycle(
+            &PageId(PAGE.into()),
+            "metadata",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        index
+            .guarded()
+            .page_chunks(PAGE)
+            .await
+            .unwrap()
+            .iter()
+            .all(|c| c.metadata.title == "Metadata only")
+    );
+    source.change(|m| {
+        m.archived = true;
+        m.hide_page = true;
+    });
+    let deleted = planner(&index, &source).plan().await.unwrap();
+    assert_eq!(deleted.planned_delete(), 1);
+    assert_eq!(deleted.deleted(), 0);
+    handler
+        .apply_lifecycle(
+            &PageId(PAGE.into()),
+            "deleted",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let tombstone = planner(&index, &source).plan().await.unwrap();
+    assert!(
+        tombstone
+            .local
+            .get(PAGE)
+            .unwrap()
+            .checkpoint
+            .as_ref()
+            .unwrap()
+            .is_tombstone()
+    );
+    assert_eq!(tombstone.planned_delete(), 0);
+    source.change(|m| {
+        m.archived = false;
+        m.hide_page = false;
+        m.markdown.clear();
+    });
+    let restored = planner(&index, &source).plan().await.unwrap();
+    assert_eq!(
+        restored
+            .pages
+            .iter()
+            .find(|p| p.page_id == PAGE)
+            .unwrap()
+            .difference,
+        Difference::Restored
+    );
+    handler
+        .apply_lifecycle(
+            &PageId(PAGE.into()),
+            "empty-restored",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+    let empty = planner(&index, &source).plan().await.unwrap();
+    assert!(empty.local.contains_key(PAGE));
+    assert_eq!(
+        empty
+            .pages
+            .iter()
+            .find(|p| p.page_id == PAGE)
+            .unwrap()
+            .difference,
+        Difference::Unchanged
+    );
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn planner_absence_access_failures_and_races_never_authorize_deletion() {
+    use notion_knowledge_retrieval::planner::{Difference, PlanError};
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let provider = CountingProvider::new(index.embed.clone());
+    index
+        .handler(source.client())
+        .apply_lifecycle(
+            &PageId(PAGE.into()),
+            "seed",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let before = index.guarded().page_chunks(PAGE).await.unwrap();
+    source.change(|m| m.hide_page = true);
+    let absent = planner(&index, &source).plan().await.unwrap();
+    assert_eq!(absent.planned_delete(), 0);
+    assert_eq!(
+        absent
+            .pages
+            .iter()
+            .find(|p| p.page_id == PAGE)
+            .unwrap()
+            .difference,
+        Difference::Unchanged
+    );
+    source.change(|m| {
+        m.archived = true;
+        m.inaccessible_other = true;
+    });
+    let inaccessible = planner(&index, &source).plan().await.unwrap();
+    assert!(!inaccessible.traversal_complete);
+    assert_eq!(inaccessible.planned_delete(), 0);
+    source.change(|m| {
+        m.inaccessible_other = false;
+        m.inaccessible_root = true;
+    });
+    let failed = planner(&index, &source).plan().await.unwrap();
+    assert_eq!(failed.planned_delete(), 0);
+    assert_eq!(
+        failed.run_errors,
+        vec![PlanError::Traversal(
+            notion_knowledge_core::backend::BackendErrorKind::NotFound
+        )]
+    );
+    source.change(|m| {
+        m.archived = false;
+        m.hide_page = false;
+        m.inaccessible_root = false;
+        m.inaccessible_page = true;
+    });
+    let bad = planner(&index, &source).plan().await.unwrap();
+    assert!(bad.errors.contains_key(PAGE));
+    assert!(bad.pages.iter().any(|p| p.page_id == OTHER));
+    source.change(|m| {
+        m.inaccessible_page = false;
+        m.race_metadata = true;
+    });
+    let race = planner(&index, &source).plan().await.unwrap();
+    assert_eq!(race.errors.get(PAGE), Some(&PlanError::Conflict));
+    assert_eq!(index.guarded().page_chunks(PAGE).await.unwrap(), before);
+    source.change(|m| {
+        m.race_metadata = false;
+        m.race_move = true;
+    });
+    let move_race = planner(&index, &source).plan().await.unwrap();
+    assert_eq!(move_race.planned_delete(), 0);
+    assert_eq!(move_race.errors.get(PAGE), Some(&PlanError::Conflict));
+    source.change(|m| {
+        m.race_move = false;
+        m.hide_page = true;
+        m.parent = FOREIGN.into();
+    });
+    let moved = planner(&index, &source).plan().await.unwrap();
+    assert_eq!(moved.planned_delete(), 1);
+    assert_eq!(index.guarded().page_chunks(PAGE).await.unwrap(), before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn planner_rejects_foreign_binding_unowned_index_and_refreshes_legacy_identity() {
+    use notion_knowledge_retrieval::planner::{
+        AuthoritativeReconciliationPlanner, Difference, PlanError,
+    };
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let provider = CountingProvider::new(index.embed.clone());
+    index
+        .handler(source.client())
+        .apply_lifecycle(
+            &PageId(PAGE.into()),
+            "owned",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let different_directory = Fixture::new();
+    assert!(matches!(
+        AuthoritativeReconciliationPlanner::new(
+            source.client(),
+            different_directory.guarded(),
+            index.coordinator.clone(),
+            authority()
+        ),
+        Err(PlanError::Ownership)
+    ));
+    for scope in [
+        LifecycleScope {
+            workspace_id: FOREIGN.into(),
+            ..authority()
+        },
+        LifecycleScope {
+            generation: 2,
+            ..authority()
+        },
+        LifecycleScope {
+            exclusions: ExclusionRules {
+                page_ids: [PAGE.into()].into_iter().collect(),
+                ..ExclusionRules::default()
+            },
+            ..authority()
+        },
+    ] {
+        assert!(matches!(
+            AuthoritativeReconciliationPlanner::new(
+                source.client(),
+                index.guarded(),
+                index.coordinator.clone(),
+                scope
+            ),
+            Err(PlanError::Ownership)
+        ));
+    }
+    let sqlite = rusqlite::Connection::open(&index.db).unwrap();
+    sqlite
+        .execute(
+            "DELETE FROM page_metadata_identity WHERE page_id=?1",
+            [PAGE],
+        )
+        .unwrap();
+    let legacy = planner(&index, &source).plan().await.unwrap();
+    assert_eq!(
+        legacy
+            .pages
+            .iter()
+            .find(|p| p.page_id == PAGE)
+            .unwrap()
+            .difference,
+        Difference::Stale
+    );
+    let chunks = index.guarded().page_chunks(PAGE).await.unwrap();
+    let mut foreign = chunks.clone();
+    for chunk in &mut foreign {
+        chunk.metadata.source.workspace_id = FOREIGN.into();
+    }
+    index
+        .table()
+        .await
+        .upsert(
+            &index.embed,
+            &foreign
+                .into_iter()
+                .map(|c| {
+                    notion_knowledge_retrieval::chunks::EmbeddedChunk::new(c, vec![1.0, 1.0, 0.0])
+                })
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        planner(&index, &source)
+            .local_inventory()
+            .await
+            .unwrap_err(),
+        PlanError::Ownership
+    );
+    index
+        .table()
+        .await
+        .upsert(
+            &index.embed,
+            &chunks
+                .into_iter()
+                .map(|c| {
+                    notion_knowledge_retrieval::chunks::EmbeddedChunk::new(c, vec![1.0, 1.0, 0.0])
+                })
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
+    sqlite
+        .execute("DELETE FROM index_commit_receipts WHERE page_id=?1", [PAGE])
+        .unwrap();
+    assert_eq!(
+        planner(&index, &source)
+            .local_inventory()
+            .await
+            .unwrap_err(),
+        PlanError::Ownership
+    );
 }
