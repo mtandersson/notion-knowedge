@@ -19,6 +19,9 @@ pub mod redaction;
 /// Payload-free structured operations and task-scoped correlation IDs.
 pub mod logging;
 
+/// In-memory Prometheus-style instrumentation with a fixed label vocabulary.
+pub mod metrics;
+
 /// Canonical, provider-independent indexed content contracts.
 pub mod indexed;
 
