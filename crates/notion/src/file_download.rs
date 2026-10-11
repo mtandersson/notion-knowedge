@@ -416,7 +416,10 @@ mod tests {
             validated_addresses(vec![ip("2606:4700:4700::1111"), ip("::ffff:10.0.0.1")]),
             Err(DownloadError::AddressDenied)
         );
-        assert_eq!(validated_addresses(vec![]), Err(DownloadError::AddressDenied));
+        assert_eq!(
+            validated_addresses(vec![]),
+            Err(DownloadError::AddressDenied)
+        );
         assert!(validated_addresses(vec![ip("1.1.1.1"), ip("8.8.8.8")]).is_ok());
     }
 
