@@ -57,3 +57,9 @@ responses, status classification, timeouts, cancellation and private-file
 cleanup. Tests alone override HTTPS and public-IP admission for the local
 fixture; production URL and address policy have separate negative tests.
 No real signed URL, private Notion data, credentials or provider request is used.
+
+## SSRF defense-in-depth verification (#88)
+
+All A and AAAA records returned by the request-local DNS lookup must pass the same public-address gate; any mixed public/private answer rejects the **entire** request. The request-local pinned resolver then prevents fresh DNS rebinding during the HTTPS connection. Redirects are **never followed**, including cross-host 302/307 redirects to private, loopback or link-local destinations; this is deliberately stricter than redirect target revalidation. URL source allowlist, HTTPS-only port 443, per-connect timeout and bounded full-body deadline remain mandatory. No proxy, source credential propagation, Referer, or automatic retries are enabled.
+
+Security tests explicitly exercise mixed A/AAAA public-private answers, empty RRsets, redacted error messages, redirect targets into cloud metadata addresses, private-IP/IPv6-mapped ranges, truncated responses and streaming/read timeout/cancellation. URLs containing temporary signature/query parameters never appear in safe errors.

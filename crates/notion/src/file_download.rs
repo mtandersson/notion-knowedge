@@ -135,13 +135,9 @@ impl DownloadPolicy {
                 .await
                 .map_err(|_| DownloadError::SourceUnavailable)?
                 .collect();
-            if addresses.is_empty()
-                || addresses
-                    .iter()
-                    .any(|address| !public_address(address.ip()))
-            {
-                return Err(DownloadError::AddressDenied);
-            }
+            // Reject any private/special answer, including mixed public+private
+            // RRsets. This also handles fresh DNS rebinding at request time.
+            let addresses = validated_addresses(addresses)?;
             let client = client_builder(self.deadline)
                 .resolve_to_addrs(host, &addresses)
                 .build()
@@ -288,6 +284,15 @@ async fn stream_file(
     })
 }
 
+/// All DNS answers are evaluated as one unit; selecting just the first
+/// public result would let a mixed address set leak requests to private IPs.
+fn validated_addresses(addresses: Vec<SocketAddr>) -> Result<Vec<SocketAddr>, DownloadError> {
+    if addresses.is_empty() || addresses.iter().any(|addr| !public_address(addr.ip())) {
+        return Err(DownloadError::AddressDenied);
+    }
+    Ok(addresses)
+}
+
 fn public_address(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => {
@@ -400,6 +405,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn dns_resolution_must_reject_mixed_public_and_private_answers() {
+        let ip = |input: &str| SocketAddr::new(input.parse().unwrap(), 443);
+        assert_eq!(
+            validated_addresses(vec![ip("8.8.8.8"), ip("169.254.169.254")]),
+            Err(DownloadError::AddressDenied)
+        );
+        assert_eq!(
+            validated_addresses(vec![ip("2606:4700:4700::1111"), ip("::ffff:10.0.0.1")]),
+            Err(DownloadError::AddressDenied)
+        );
+        assert_eq!(
+            validated_addresses(vec![]),
+            Err(DownloadError::AddressDenied)
+        );
+        assert!(validated_addresses(vec![ip("1.1.1.1"), ip("8.8.8.8")]).is_ok());
+    }
+
+    #[test]
+    fn private_address_errors_contain_no_dns_or_signed_url_data() {
+        let err = validated_addresses(vec!["127.0.0.1:443".parse().unwrap()]).unwrap_err();
+        let output = format!("{err:?} {err}");
+        assert!(!output.contains("127.0.0.1"));
+        assert!(!output.contains("token"));
+    }
+
     // Exercise the production client configuration and streaming path with a
     // local HTTP fixture. Only the test overrides HTTPS and public-IP admission;
     // production origin/DNS guards are independently tested above.
@@ -483,6 +514,7 @@ mod tests {
     async fn rejects_redirects_sizes_partial_or_encoded_files_and_classifies_retry() {
         for (wire, expected) in [
             (&b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1/private?token=sentinel\r\nContent-Length: 0\r\n\r\n"[..], DownloadError::RedirectDenied),
+            (&b"HTTP/1.1 307 Temporary Redirect\r\nLocation: https://169.254.169.254/latest/meta-data/?token=sentinel\r\nContent-Length: 0\r\n\r\n"[..], DownloadError::RedirectDenied),
             (&b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\n123456789"[..], DownloadError::TooLarge),
             (&b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n9\r\n123456789\r\n0\r\n\r\n"[..], DownloadError::TooLarge),
             (&b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"[..], DownloadError::EmptyFile),
