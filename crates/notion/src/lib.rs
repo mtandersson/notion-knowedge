@@ -40,5 +40,20 @@ pub mod file_validation;
 pub use file_validation::{FileValidationError, FileValidationPolicy, ValidatedFile};
 pub mod file_download;
 
+/// Authenticated, server-only single-part file upload. Attachment requires later scoped flow.
+pub mod file_upload;
+pub use file_upload::{UploadStatus, UploadedFile};
+
+/// Operator-scoped attachment of verified native Notion image blocks.
+pub mod image_attachment;
+pub use image_attachment::AttachedImage;
+
+/// Server-only, root-scoped native Notion document file attachment.
+pub mod file_attachment;
+pub use file_attachment::AttachedFile;
+
+// Only the validated adapter flows may invoke the shared bounded read-back.
+mod attachment_readback;
+
 /// One-page, read-only canonical refresh preparation under live physical scope.
 pub mod prepare;
