@@ -40,7 +40,11 @@ fn validate_batch_count(count: usize, maximum: usize) -> Result<(), BackendError
     Ok(())
 }
 
-fn outcome(index: usize, upload_id: &str, result: Result<String, BackendError>) -> BatchAttachmentOutcome {
+fn outcome(
+    index: usize,
+    upload_id: &str,
+    result: Result<String, BackendError>,
+) -> BatchAttachmentOutcome {
     BatchAttachmentOutcome {
         index,
         upload_id: upload_id.into(),
@@ -72,13 +76,16 @@ impl NotionClient {
         let mut outcomes = Vec::with_capacity(uploads.len());
         for (index, (upload, text)) in uploads.iter().zip(captions).enumerate() {
             let result = if matches!(
-                upload.mime_type.as_str(), "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+                upload.mime_type.as_str(),
+                "image/png" | "image/jpeg" | "image/gif" | "image/webp"
             ) {
                 self.attach_uploaded_image(target, upload, text.as_deref(), scope)
-                    .await.map(|value| value.block_id)
+                    .await
+                    .map(|value| value.block_id)
             } else {
                 self.attach_uploaded_file(target, upload, text.as_deref(), scope)
-                    .await.map(|value| value.block_id)
+                    .await
+                    .map(|value| value.block_id)
             };
             outcomes.push(outcome(index, &upload.id, result));
         }
@@ -101,10 +108,13 @@ mod tests {
 
     #[test]
     fn rejects_invalid_counts_and_configuration_before_any_effects() {
-        for (count, maximum) in [(0,1),(1,0),(2,1),(1,17),(17,16)] {
-            assert_eq!(validate_batch_count(count, maximum).unwrap_err().kind, BackendErrorKind::InvalidInput);
+        for (count, maximum) in [(0, 1), (1, 0), (2, 1), (1, 17), (17, 16)] {
+            assert_eq!(
+                validate_batch_count(count, maximum).unwrap_err().kind,
+                BackendErrorKind::InvalidInput
+            );
         }
-        assert!(validate_batch_count(4,4).is_ok());
+        assert!(validate_batch_count(4, 4).is_ok());
     }
 
     #[test]
@@ -114,9 +124,22 @@ mod tests {
             outcome(1, "second", Err(failure(BackendErrorKind::Conflict))),
             outcome(2, "third", Ok("block3".into())),
         ];
-        assert_eq!(statuses.iter().map(|r| r.index).collect::<Vec<_>>(),vec![0,1,2]);
-        assert_eq!(statuses[1].status,BatchAttachmentStatus::Failed { kind: BackendErrorKind::Conflict });
-        assert_eq!(statuses[2].status,BatchAttachmentStatus::Verified { block_id:"block3".into() });
+        assert_eq!(
+            statuses.iter().map(|r| r.index).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            statuses[1].status,
+            BatchAttachmentStatus::Failed {
+                kind: BackendErrorKind::Conflict
+            }
+        );
+        assert_eq!(
+            statuses[2].status,
+            BatchAttachmentStatus::Verified {
+                block_id: "block3".into()
+            }
+        );
         assert!(!format!("{statuses:?}").contains("https://"));
     }
 }
