@@ -416,7 +416,7 @@ impl IndexCommitCoordinator {
         }
         Ok(())
     }
-    fn identities(&self) -> Result<(), CommitError> {
+    pub(crate) fn identities(&self) -> Result<(), CommitError> {
         if Identity::read(&self.index_path)? != self.index_identity
             || Identity::read(&self.state_path)? != self.state_identity
             || fs::metadata(&self.state_path).map_err(io)?.nlink() != 1
@@ -460,7 +460,7 @@ impl IndexCommitCoordinator {
         self.identities()?;
         Ok(guard)
     }
-    fn validate_binding(&self, db: &Connection) -> Result<(), CommitError> {
+    pub(crate) fn validate_binding(&self, db: &Connection) -> Result<(), CommitError> {
         let token: String = db
             .query_row(
                 "SELECT identity FROM index_commit_state_identity WHERE singleton=1",
