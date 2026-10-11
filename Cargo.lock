@@ -4745,11 +4745,13 @@ dependencies = [
  "reqwest 0.13.5",
  "ring",
  "rmcp",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

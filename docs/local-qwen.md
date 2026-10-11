@@ -4,8 +4,7 @@
 `EmbeddingProvider` port behind the explicit `local-qwen` Cargo feature. It
 loads Qwen3-Embedding-0.6B from caller-provided local assets, without Notion,
 OpenAI, Hugging Face or any other credentials. Loading and inference never
-download anything. The server bootstrap is not wired to this provider yet;
-index integration and server composition remain separate work.
+download anything. The opt-in [production webhook worker](notion-webhooks.md#production-serving-worker) loads this provider for real authoritative index effects. Production MCP retrieval composition remains separate work.
 
 ## Assets and identity
 

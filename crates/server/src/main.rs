@@ -167,6 +167,10 @@ async fn main() -> ExitCode {
     }
     let check_only = env::args().skip(1).any(|arg| arg == "--check");
 
+    if config.webhook_worker.is_some() && !check_only && !args.iter().any(|arg| arg == "--http") {
+        eprintln!("Webhook worker requires --http.");
+        return ExitCode::from(2);
+    }
     eprintln!(
         "notion-knowledge bootstrap ready ({}) version {}",
         components().join(", "),

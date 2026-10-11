@@ -76,7 +76,7 @@ claims do not grant an indexing lock: workers must separately acquire the shared
 index-writer fence before effects. Effects and SQLite completion are not atomic;
 recovered work may execute again, so downstream writes must be idempotent.
 Page debounce and bounded recovery are described below; authoritative refresh and
-production dispatch remain #55/#56 and #248.
+production dispatch is opt-in as described below.
 
 Legacy identity-only `webhook_events` rows are preserved, but cannot reconstruct
 pending hints or prove matching payloads. Their IDs conservatively reject new
@@ -129,8 +129,7 @@ Upgrade preserves v3 hints, receipts, page and reconciliation state. Existing ro
 retain lifetime generation as the best available prior-claim count; rows previously
 claimed begin with one consumed cycle attempt. Existing failed rows stay inert until
 an explicit operator retry, and existing running leases remain valid with their
-original generation. These commands do not dispatch source/index processing; #248
-adds that composition after its dependencies. Inbox ownership does not fence an
+original generation. These commands operate on the same state consumed by the opt-in serving worker. Inbox ownership does not fence an
 in-flight index write: processors still require shared index serialization and
 idempotent apply-before-ack.
 
@@ -171,10 +170,108 @@ under the same bounded policy as ordinary inbox recovery. Cancellation needs no
 memory-only timer: another process recovers the persisted lease. Clock values for
 page work are Unix milliseconds; event retry counters/deadlines retain Unix seconds.
 
-This delivers real production admission and the durable batch lifecycle. It does
-not yet execute source refresh or index writes: #55/#56 implement effects and #248
-composes the worker. A page lease is not an index-writer fence; effects still need
+This delivers real production admission and the durable batch lifecycle. The opt-in worker below consumes these batches through the authoritative refresh/lifecycle handler. A page lease is not an index-writer fence; effects still need
 shared index serialization and idempotent apply-before-ack. Real binary HTTP tests
 verify signed mixed bursts, two pages and restart retention against the SQLite
 adapter, and deterministic SQLite tests cover deadlines, offsets, successor batches,
 expiry boundaries, retry budgets and crash recovery without live Notion credentials.
+
+
+## Production serving worker
+
+Build the Unix production binary with the matched toolchain:
+
+```sh
+nix develop .#spike --command cargo build -p notion-knowledge-server --features webhook-worker --locked
+```
+
+The ordinary binary remains model-free. Explicit `NK_WEBHOOK_WORKER=true` requires
+this feature, `--http`, verified webhook configuration, integration credentials,
+and matching `NK_NOTION_SCOPE_WORKSPACE_ID` and webhook workspace. Configure
+`NK_NOTION_SCOPE_ROOTS` with trusted comma-separated canonical page UUIDs and
+`NK_NOTION_SCOPE_GENERATION` with a positive generation (default 1). Optional
+`NK_NOTION_SCOPE_EXCLUDED_PAGES` and `NK_NOTION_SCOPE_EXCLUDED_DESCENDANTS` take
+1–100 canonical UUIDs each. Root/exclusion authority comes from this operator
+configuration and live Notion ancestry, never event names or stored index links.
+The credential must belong to that intended workspace; webhook IDs alone cannot
+prove credential identity.
+
+Set `NK_WEBHOOK_INDEX_DIR` to an existing absolute local directory and
+`NK_WEBHOOK_QWEN_ASSETS` to the absolute directory containing the exact pinned
+[offline Qwen assets](local-qwen.md). Startup loads and validates the real model,
+binds the index to the same `NK_WEBHOOK_STATE_FILE`, and creates a new empty
+`chunks` table only when absent. Existing tables must match the production vector
+identity; missing/corrupt assets, incompatible tables, foreign bindings or a busy
+startup index writer stop serving with a sanitized error. No download, destructive
+rebuild, credential fallback or success placeholder is used. `--check` validates
+configuration syntax; serving startup additionally validates assets/storage.
+Existing experimental/spike vector identities are incompatible and require an
+explicit separate rebuild. This worker binding uses policy `webhook-v1`, a scoped
+root/exclusion digest, and the configured generation/epoch; all future indexing
+consumers must open the same binding and acquire the same SQLite writer lease.
+
+`NK_WEBHOOK_POLL_MS` is 10–60000 (default 1000); `NK_WEBHOOK_TIMEOUT_SECONDS` is
+1–300 (default 60). One processor alternates ordinary event and due-page selection,
+sleeping once between dispatches. Empty/delayed queues and busy index writers do
+not spin or consume claim budgets. Source/index processing has a bounded deadline;
+claims and the shared writer lease last that deadline plus 30 seconds. Startup
+and restart claim durable due work, including expired leases. A crash retains the
+original processing-cycle budget. Retry policy and operator commands above remain
+unchanged; changing worker poll/deadline settings does not reset event budgets.
+
+Supported page hints are `page.created`, `page.content_updated`,
+`page.properties_updated`, `page.deleted`, `page.undeleted` and `page.moved`.
+Every batch member must have the trusted integration and page identity. Other
+hints become permanent sanitized `Source` failures. Supported hints all use the
+same authoritative lifecycle read: present/allowed pages refresh canonical
+metadata/content/chunks; positively inactive or moved/excluded owned pages remove
+local chunks. Inaccessible/ambiguous source responses never authorize deletion.
+Unknown or out-of-scope pages and invalid/unsupported source contracts fail
+permanently; ordinary source availability, index, conflict and storage failures
+consume the persisted retry budget and backoff. Exhaustion is durable dead letter.
+Notion's HTTP retry policy remains bounded independently of the inbox policy.
+
+Processing acquires the database-wide indexing fence before claiming/effects.
+Stable hashed member IDs bind operation receipts across restart. Actual commit
+checks both the writer fence and inbox generation/expiry, including the page
+lease's millisecond deadline. Source revalidation under the real directory guard
+polls that ownership/cancellation clock at most every 20 milliseconds. Directory
+lock waits also poll the clock; timed-out observers cannot accumulate detached
+unbounded lock waiters. On shutdown no new claims start, source preparation is
+cancelled, and any operation-owned source revalidation loses authority and releases
+its lock. An already authorized filesystem write may finish; its cross-process
+lock remains held through completion, and an incomplete receipt is reconciled
+idempotently after restart. Filesystem/SQLite IO and an already running CPU model
+forward pass are not forcibly interrupted; Qwen retains its bounded permit until
+that call completes. The deadline bounds async scheduling and source/lock waits,
+not a hard wall-clock promise for a stalled kernel or CPU forward pass.
+
+Effects and inbox acknowledgement remain separate commits. Replay may run the
+handler again after effects-before-ack; durable receipts and canonical unchanged
+checks prevent duplicate chunks/embeddings while current authority is rechecked.
+Completion uses the immutable batch snapshot, so newer arrivals and delayed older
+members retain independent work/budgets. Losing an inbox claim leaves completion
+to its current/recovered owner. Unexpected worker storage failure cancels HTTP
+serving and returns failure for the service manager to restart.
+
+At info/debug level the running worker emits payload-free JSON summaries containing
+`operation=webhook_worker`, state, cycle/lifetime attempt counts, retry deadline and
+sanitized last failure enum. IDs, payloads, exception text, content and credentials
+are absent. `NK_LOG_LEVEL=off` suppresses these summaries. The local operator
+inspect/failed commands expose retained retry/dead-letter state including counters.
+
+Credential-free verification uses a fixture Notion HTTP transport, real webhook
+HTTP signature admission, actual worker lifecycle, SQLite and the guarded Lance
+adapter with a deterministic embedding provider:
+
+```sh
+nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --locked
+```
+
+Tests cover healthy searchable canonical content alongside isolated dead letters,
+transient retry, permanent unknown hints, exhausted budgets, operator recovery,
+debounce, restart/effects-before-ack, shared-writer/inbox fencing and shutdown during
+owned source revalidation. Searchability is verified through actual Lance FTS;
+production MCP retrieval composition remains separate work. The fixture provider
+is not a live-model quality test or live Notion smoke. No external credentials are
+required. Optional real-Qwen smoke remains documented separately.

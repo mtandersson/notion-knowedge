@@ -33,3 +33,5 @@ pub mod root_scope;
 
 /// Single shared HTTP-process Notion OAuth credential composition (#299).
 pub mod notion_oauth_runtime;
+
+pub mod webhook_worker;

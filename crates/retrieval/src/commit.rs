@@ -422,6 +422,32 @@ impl IndexCommitCoordinator {
         self.identities()?;
         Ok(guard)
     }
+    /// Owned callers must not leave an unbounded detached thread waiting on a
+    /// directory lock after their lease or cancellation clock loses authority.
+    fn acquire_owned(
+        &self,
+        lease: &Lease,
+        clock: &Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Result<File, CommitError> {
+        let guard = File::open(&self.index_path).map_err(io)?;
+        loop {
+            if clock() >= lease.expires_at {
+                return Err(CommitError::LeaseLost);
+            }
+            match guard.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(io(error)),
+            }
+        }
+        if Identity::file(&guard)? != self.index_identity {
+            return Err(CommitError::BindingMismatch);
+        }
+        self.identities()?;
+        Ok(guard)
+    }
     fn validate_binding(&self, db: &Connection) -> Result<(), CommitError> {
         let token: String = db
             .query_row(
@@ -733,7 +759,7 @@ impl IndexCommitCoordinator {
             .spawn(move || {
                 let mut log = EventGuard::with_id(Operation::IndexCommit, correlation);
                 let result = (|| {
-                    let _guard = coordinator.acquire()?;
+                    let _guard = coordinator.acquire_owned(&lease, &clock)?;
                     coordinator.revalidate(&lease, clock())?;
                     if !coordinator.begin(&operation, &lease, clock())? {
                         return Ok(CommitOutcome::AlreadyApplied);
@@ -789,7 +815,7 @@ impl IndexCommitCoordinator {
             .name("nk-index-maintenance".into())
             .spawn(move || {
                 let result = (|| {
-                    let _guard = coordinator.acquire()?;
+                    let _guard = coordinator.acquire_owned(&lease, &clock)?;
                     coordinator.revalidate(&lease, clock())?;
                     let runtime = tokio::runtime::Builder::new_current_thread()
                         .enable_all()

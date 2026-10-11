@@ -429,7 +429,7 @@ files out of Git and never put secrets in `.envrc`.
 
 Verified Notion webhooks use a durable SQLite inbox configured with
 `NK_WEBHOOK_STATE_FILE`; page content/property bursts use configurable
-`NK_WEBHOOK_DEBOUNCE_MS` and `NK_WEBHOOK_MAX_DELAY_MS`. See [setup and delivery semantics](docs/notion-webhooks.md).
+`NK_WEBHOOK_DEBOUNCE_MS` and `NK_WEBHOOK_MAX_DELAY_MS`. See [setup, serving worker and delivery semantics](docs/notion-webhooks.md).
 
 ## Workspace
 
@@ -522,7 +522,7 @@ question behavior and production follow-up decisions.
 The [local Qwen embedding provider](docs/local-qwen.md) implements the production
 embedding port with pinned offline assets and bounded CPU batches. Enable the
 optional `local-qwen` retrieval feature and use the matched `.#spike` toolchain;
-the bootstrap server is not yet wired to load the model.
+the opt-in [production webhook worker](docs/notion-webhooks.md#production-serving-worker) loads the model for authoritative index updates. Production MCP retrieval composition remains separate.
 
 The [production semantic vector adapter](docs/semantic-search.md) binds a configured
 embedding provider to the indexed LanceDB table and filters before top-k selection.

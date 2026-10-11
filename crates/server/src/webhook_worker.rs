@@ -1,0 +1,527 @@
+//! Opt-in production composition. Inbox hints never supply index authority.
+use crate::{config::ConfigError, webhook::WebhookConfig};
+use std::{ffi::OsString, path::PathBuf};
+
+#[derive(Debug, Clone)]
+pub struct WorkerSettings {
+    pub index: PathBuf,
+    pub assets: PathBuf,
+    pub poll_ms: u64,
+    pub timeout_seconds: u64,
+}
+impl WorkerSettings {
+    pub(crate) fn parse(
+        lookup: &mut impl FnMut(&str) -> Option<OsString>,
+        webhook: &WebhookConfig,
+        scope: Option<&notion_knowledge_core::lifecycle::LifecycleScope>,
+    ) -> Result<Option<Self>, ConfigError> {
+        let error = |setting, reason| ConfigError { setting, reason };
+        let enabled = match lookup("NK_WEBHOOK_WORKER").as_deref() {
+            None => false,
+            Some(value) if value == "false" => false,
+            Some(value) if value == "true" => true,
+            _ => return Err(error("NK_WEBHOOK_WORKER", "must be true or false")),
+        };
+        if !enabled {
+            return Ok(None);
+        }
+        if !cfg!(all(unix, feature = "webhook-worker")) {
+            return Err(error(
+                "NK_WEBHOOK_WORKER",
+                "requires Unix binary built with webhook-worker feature",
+            ));
+        }
+        let WebhookConfig::Verified { workspace_id, .. } = webhook else {
+            return Err(error("NK_WEBHOOK_WORKER", "requires verified webhook mode"));
+        };
+        if scope.is_none_or(|s| s.workspace_id != *workspace_id) {
+            return Err(error(
+                "NK_WEBHOOK_WORKER",
+                "requires matching trusted Notion root scope",
+            ));
+        }
+        let mut path = |name| {
+            let value = lookup(name)
+                .and_then(|v| v.into_string().ok())
+                .ok_or_else(|| error(name, "requires an absolute local directory"))?;
+            let path = PathBuf::from(&value);
+            if !path.is_absolute() || value.chars().any(char::is_control) {
+                return Err(error(name, "requires an absolute local directory"));
+            }
+            Ok(path)
+        };
+        let index = path("NK_WEBHOOK_INDEX_DIR")?;
+        let assets = path("NK_WEBHOOK_QWEN_ASSETS")?;
+        let mut number = |name, default, min, max| {
+            let value = lookup(name)
+                .map(|v| v.into_string().ok().and_then(|s| s.parse::<u64>().ok()))
+                .unwrap_or(Some(default));
+            value
+                .filter(|v| (min..=max).contains(v))
+                .ok_or_else(|| error(name, "outside documented integer range"))
+        };
+        Ok(Some(Self {
+            index,
+            assets,
+            poll_ms: number("NK_WEBHOOK_POLL_MS", 1000, 10, 60000)?,
+            timeout_seconds: number("NK_WEBHOOK_TIMEOUT_SECONDS", 60, 1, 300)?,
+        }))
+    }
+}
+
+#[cfg(all(unix, feature = "webhook-worker"))]
+pub mod runtime {
+    use super::WorkerSettings;
+    use notion_knowledge_core::{
+        backend::PageId,
+        chunking::ChunkConfig,
+        embedding::EmbeddingProvider,
+        lifecycle::LifecycleScope,
+        reconciliation::{ReconciliationJournal, ReconciliationScope},
+        webhook::{
+            EventClaim, EventFailure, EventState, InboxScope, PageWorkClaim, ProcessingOutcome,
+            WebhookDebounce, WebhookInbox, WebhookRecovery,
+        },
+    };
+    use notion_knowledge_retrieval::{
+        chunks::GuardedChunkTable,
+        commit::{CommitBinding, IndexCommitCoordinator},
+        refresh::{AuthoritativePageRefresh, RefreshError},
+        sync_state::SqliteSyncStateStore,
+    };
+    use sha2::{Digest, Sha256};
+    use std::{
+        sync::Arc,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
+    use tokio_util::sync::CancellationToken;
+
+    pub fn now_ms() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_millis()).ok())
+            .unwrap_or(i64::MAX)
+    }
+    #[derive(Clone)]
+    enum Work {
+        Page(PageWorkClaim),
+        Event(EventClaim, notion_knowledge_core::webhook::InboxEvent),
+    }
+    impl Work {
+        fn hint(&self) -> &notion_knowledge_core::webhook::WebhookEvent {
+            match self {
+                Self::Page(p) => &p.newest,
+                Self::Event(_, e) => &e.event,
+            }
+        }
+        fn claims(&self) -> Vec<EventClaim> {
+            match self {
+                Self::Page(p) => p.events.clone(),
+                Self::Event(c, _) => vec![c.clone()],
+            }
+        }
+        fn operation(&self) -> String {
+            let mut ids: Vec<_> = self.claims().into_iter().map(|c| c.key.event_id).collect();
+            ids.sort();
+            let hint = self.hint();
+            format!(
+                "webhook-{:x}",
+                Sha256::digest(format!(
+                    "{}:{}:{ids:?}",
+                    hint.workspace_id, hint.subscription_id
+                ))
+            )
+        }
+    }
+    /// One bounded processor per server; independent processes share SQLite and
+    /// the directory commit lock. Fixture tests inject the real Notion transport
+    /// and a deterministic provider through these same production boundaries.
+    pub struct Worker {
+        pub state: Arc<SqliteSyncStateStore>,
+        pub scope: InboxScope,
+        pub integration: String,
+        pub coordinator: Arc<IndexCommitCoordinator>,
+        pub handler: AuthoritativePageRefresh,
+        pub provider: Arc<dyn EmbeddingProvider>,
+        pub poll: Duration,
+        pub timeout: Duration,
+        pub log_enabled: bool,
+    }
+    async fn blocking<T: Send + 'static>(
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, &'static str> {
+        tokio::task::spawn_blocking(f)
+            .await
+            .map_err(|_| "webhook worker storage unavailable")
+    }
+    pub async fn configured(
+        config: &crate::config::Config,
+    ) -> Result<Option<Worker>, &'static str> {
+        let Some(settings) = &config.webhook_worker else {
+            return Ok(None);
+        };
+        let crate::webhook::WebhookConfig::Verified {
+            workspace_id,
+            subscription_id,
+            integration_id,
+            ..
+        } = &config.webhook
+        else {
+            return Err("verified webhook configuration required");
+        };
+        let crate::config::NotionAuth::Integration(token) = &config.notion_auth else {
+            return Err("integration credential required");
+        };
+        let scope = config.notion_scope.clone().ok_or("Notion scope required")?;
+        let source = Arc::new(
+            notion_knowledge_notion::NotionClient::integration(token.expose_secret())
+                .map_err(|_| "Notion client unavailable")?,
+        );
+        let provider = Arc::new(
+            notion_knowledge_retrieval::qwen::QwenProvider::load(
+                notion_knowledge_retrieval::qwen::QwenConfig::cpu(&settings.assets),
+            )
+            .await
+            .map_err(|_| "Qwen assets unavailable or incompatible")?,
+        );
+        let state_file = config
+            .webhook_state_file
+            .clone()
+            .ok_or("webhook state required")?;
+        let (coordinator, journal_scope) = binding(settings, &scope, state_file).await?;
+        let guard = GuardedChunkTable::bind(
+            &settings.index,
+            "chunks",
+            provider.metadata().clone(),
+            coordinator.clone(),
+        )
+        .map_err(|_| "index binding unavailable")?;
+        let state = coordinator.state().clone();
+        let lease = state
+            .acquire_lease(now_ms() / 1000, 330)
+            .map_err(|_| "index writer busy")?;
+        let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| now_ms() / 1000);
+        let setup = if settings.index.join("chunks.lance").exists() {
+            guard.ensure_startup_indexes(lease.clone(), clock).await
+        } else {
+            guard.create_empty(lease.clone(), clock).await
+        };
+        let _ = state.release_lease(&lease, now_ms() / 1000);
+        setup.map_err(|_| "index unavailable or incompatible")?;
+        let handler = AuthoritativePageRefresh::new(
+            source,
+            guard,
+            coordinator.clone(),
+            scope,
+            &journal_scope,
+            ChunkConfig {
+                target_chars: 1000,
+                overlap_chars: 100,
+            },
+        )
+        .map_err(|_| "authoritative handler unavailable")?;
+        Ok(Some(Worker {
+            state,
+            scope: InboxScope {
+                workspace_id: workspace_id.clone(),
+                subscription_id: subscription_id.clone(),
+            },
+            integration: integration_id.clone(),
+            coordinator,
+            handler,
+            provider,
+            poll: Duration::from_millis(settings.poll_ms),
+            timeout: Duration::from_secs(settings.timeout_seconds),
+            log_enabled: matches!(
+                config.log_level,
+                notion_knowledge_core::logging::Level::Info
+                    | notion_knowledge_core::logging::Level::Debug
+            ),
+        }))
+    }
+    async fn binding(
+        settings: &WorkerSettings,
+        scope: &LifecycleScope,
+        state_file: std::path::PathBuf,
+    ) -> Result<(Arc<IndexCommitCoordinator>, ReconciliationScope), &'static str> {
+        // Include each exclusion category in the persisted authority identity.
+        let exclusions = scope
+            .exclusions
+            .page_ids
+            .iter()
+            .map(|id| format!("page:{id}"))
+            .chain(
+                scope
+                    .exclusions
+                    .descendants_of
+                    .iter()
+                    .map(|id| format!("descendant:{id}")),
+            )
+            .chain(
+                scope
+                    .exclusions
+                    .source_types
+                    .iter()
+                    .map(|kind| format!("type:{kind:?}")),
+            )
+            .collect();
+        let journal = ReconciliationScope::new(
+            scope.roots.iter().map(|r| r.0.clone()).collect(),
+            exclusions,
+            "webhook-v1",
+            &scope.generation.to_string(),
+        )
+        .map_err(|_| "invalid index scope")?;
+        let binding = CommitBinding::new(
+            "chunks",
+            &scope.workspace_id,
+            &journal,
+            &scope.generation.to_string(),
+            scope.generation,
+        )
+        .map_err(|_| "invalid index binding")?;
+        let index = settings.index.clone();
+        let coordinator =
+            blocking(move || IndexCommitCoordinator::initialize(index, state_file, binding))
+                .await?
+                .map_err(|_| "index authority binding unavailable")?;
+        Ok((coordinator, journal))
+    }
+    impl Worker {
+        pub async fn run(&self, stop: CancellationToken) -> Result<(), &'static str> {
+            let mut page_first = true;
+            loop {
+                if stop.is_cancelled() {
+                    return Ok(());
+                }
+                // Always sleep between dispatches: empty/delayed queues and a
+                // repeatedly failing page cannot cause a spin or starve shutdown.
+                self.tick(stop.clone(), page_first).await?;
+                page_first = !page_first;
+                tokio::select! { _=stop.cancelled()=>return Ok(()), _=tokio::time::sleep(self.poll)=>{} }
+            }
+        }
+        pub async fn tick(
+            &self,
+            stop: CancellationToken,
+            page_first: bool,
+        ) -> Result<bool, &'static str> {
+            if stop.is_cancelled() {
+                return Ok(false);
+            }
+            let state = self.state.clone();
+            let scope = self.scope.clone();
+            let duration = self.timeout.as_secs() as i64 + 30;
+            // Acquire the shared fence BEFORE claiming/effects. Busy writers do
+            // not consume inbox retry budgets merely by delaying dispatch.
+            let lease = match blocking(move || state.acquire_lease(now_ms() / 1000, duration))
+                .await?
+            {
+                Ok(lease) => lease,
+                Err(notion_knowledge_core::reconciliation::JournalError::Busy) => return Ok(false),
+                Err(_) => return Err("index lease unavailable"),
+            };
+            let state = self.state.clone();
+            let claim = blocking(move || {
+                let page = || {
+                    state
+                        .claim_page(&scope, now_ms(), duration)
+                        .map(|p| p.map(Work::Page))
+                };
+                let event = || {
+                    state
+                        .claim(&scope, now_ms() / 1000, duration)
+                        .map(|e| e.map(|(c, e)| Work::Event(c, e)))
+                };
+                if page_first {
+                    page()?.map_or_else(event, |p| Ok(Some(p)))
+                } else {
+                    event()?.map_or_else(page, |p| Ok(Some(p)))
+                }
+            })
+            .await?;
+            let result = match claim {
+                Ok(Some(work)) => self.process(work, lease.clone(), stop).await.map(|_| true),
+                Ok(None) => Ok(false),
+                Err(_) => Err("inbox claim unavailable"),
+            };
+            let state = self.state.clone();
+            match blocking(move || state.release_lease(&lease, now_ms() / 1000)).await? {
+                Ok(()) | Err(notion_knowledge_core::reconciliation::JournalError::LeaseLost) => {}
+                Err(_) => return Err("index lease release failed"),
+            }
+            result
+        }
+        async fn process(
+            &self,
+            work: Work,
+            lease: notion_knowledge_core::reconciliation::Lease,
+            stop: CancellationToken,
+        ) -> Result<(), &'static str> {
+            let hint = work.hint();
+            let supported_hint = |hint: &notion_knowledge_core::webhook::WebhookEvent| {
+                hint.integration_id == self.integration
+                    && hint.entity_type == "page"
+                    && matches!(
+                        hint.event_type.as_str(),
+                        "page.created"
+                            | "page.content_updated"
+                            | "page.properties_updated"
+                            | "page.deleted"
+                            | "page.undeleted"
+                            | "page.moved"
+                    )
+            };
+            let supported = supported_hint(hint) && work.claims().iter().all(|claim| matches!(self.state.event(&claim.key), Ok(Some(e)) if supported_hint(&e.event) && e.event.entity_id == hint.entity_id));
+            let processing = stop.child_token();
+            let state = self.state.clone();
+            let claims = work.claims();
+            let cancelled = processing.clone();
+            let page_claim = match &work {
+                Work::Page(p) => Some(p.clone()),
+                _ => None,
+            };
+            // The commit adapter calls this clock under its real directory
+            // guard immediately before mutation and checkpoint. Expired, taken
+            // over or cancelled inbox ownership cannot authorize a stale write.
+            let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || {
+                let now = now_ms() / 1000;
+                if cancelled.is_cancelled() || page_claim.as_ref().is_some_and(|p| !state.page_claim_is_current(p,now_ms()).unwrap_or(false)) || claims.iter().any(|c| !matches!(state.event(&c.key), Ok(Some(e)) if e.state==EventState::Running && e.generation==c.generation && e.lease_until.is_some_and(|until|until>now))) { i64::MAX } else { now }
+            });
+            let outcome = if !supported {
+                ProcessingOutcome::Permanent(EventFailure::Source)
+            } else {
+                let page = PageId(hint.entity_id.clone());
+                let operation = work.operation();
+                tokio::select! {
+                    biased;
+                    _=stop.cancelled()=>{ processing.cancel(); return Ok(()); },
+                    _=tokio::time::sleep(self.timeout)=>{ processing.cancel(); ProcessingOutcome::Retryable(EventFailure::Unavailable) },
+                    result=self.handler.apply_lifecycle(&page, &operation, self.provider.as_ref(), lease, clock)=> match result {
+                        Ok(_)=>ProcessingOutcome::Succeeded,
+                        Err(RefreshError::InvalidConfiguration | RefreshError::OutOfScope | RefreshError::PermanentSource)=>ProcessingOutcome::Permanent(EventFailure::Source),
+                        Err(RefreshError::Source)=>ProcessingOutcome::Retryable(EventFailure::Source),
+                        Err(RefreshError::Index)=>ProcessingOutcome::Retryable(EventFailure::Index),
+                        Err(RefreshError::Conflict)=>ProcessingOutcome::Retryable(EventFailure::Conflict),
+                        Err(RefreshError::Unavailable)=>ProcessingOutcome::Retryable(EventFailure::Unavailable),
+                    }
+                }
+            };
+            let state = self.state.clone();
+            let observed = work.claims();
+            let completion = blocking(move || match work {
+                Work::Page(p) => state.complete_page(&p, now_ms(), outcome),
+                Work::Event(c, _) => {
+                    WebhookRecovery::complete(state.as_ref(), &c, now_ms() / 1000, outcome)
+                }
+            })
+            .await?;
+            match completion {
+                Ok(()) => {}
+                Err(notion_knowledge_core::webhook::InboxError::ClaimLost) => return Ok(()),
+                Err(_) => return Err("inbox completion unavailable"),
+            }
+            let state = self.state.clone();
+            let report = blocking(move || {
+                observed.iter().filter_map(|c|state.event(&c.key).ok().flatten()).map(|e|serde_json::json!({"operation":"webhook_worker", "state":format!("{:?}",e.state), "attempts":e.cycle_attempts, "lifetime_attempts":e.lifetime_attempts, "retry_at":e.retry_at, "failure":e.last_failure.map(|f|format!("{f:?}"))})).collect::<Vec<_>>()
+            }).await?;
+            if self.log_enabled {
+                for item in report {
+                    eprintln!("{item}");
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::Config;
+    fn parse(extra: &[(&str, &str)]) -> Result<Config, crate::config::ConfigError> {
+        let mut values = std::collections::BTreeMap::from([
+            ("NK_WEBHOOK_MODE", "verified"),
+            ("NK_WEBHOOK_VERIFICATION_TOKEN", "fixture-signing"),
+            (
+                "NK_WEBHOOK_WORKSPACE_ID",
+                "44444444-4444-4444-4444-444444444444",
+            ),
+            (
+                "NK_WEBHOOK_INTEGRATION_ID",
+                "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            ),
+            (
+                "NK_WEBHOOK_SUBSCRIPTION_ID",
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            ),
+            ("NK_WEBHOOK_STATE_FILE", "/tmp/fixture.sqlite"),
+            ("NK_NOTION_AUTH", "integration"),
+            ("NOTION_TOKEN", "fixture-credential"),
+            (
+                "NK_NOTION_SCOPE_WORKSPACE_ID",
+                "44444444-4444-4444-4444-444444444444",
+            ),
+            (
+                "NK_NOTION_SCOPE_ROOTS",
+                "22222222-2222-2222-2222-222222222222",
+            ),
+            ("NK_WEBHOOK_WORKER", "true"),
+            ("NK_WEBHOOK_INDEX_DIR", "/tmp/index"),
+            ("NK_WEBHOOK_QWEN_ASSETS", "/tmp/assets"),
+        ]);
+        values.extend(extra.iter().copied());
+        Config::from_lookup(|name| values.get(name).map(std::ffi::OsString::from))
+    }
+    #[test]
+    fn enabled_worker_requires_its_runtime_and_trusted_configuration() {
+        if !cfg!(all(unix, feature = "webhook-worker")) {
+            assert_eq!(parse(&[]).unwrap_err().setting, "NK_WEBHOOK_WORKER");
+            return;
+        }
+        let config = parse(&[]).unwrap();
+        let worker = config.webhook_worker.unwrap();
+        assert_eq!(worker.poll_ms, 1000);
+        assert_eq!(worker.timeout_seconds, 60);
+        for (setting, value) in [
+            ("NK_WEBHOOK_INDEX_DIR", "relative"),
+            ("NK_WEBHOOK_QWEN_ASSETS", ""),
+            ("NK_WEBHOOK_POLL_MS", "0"),
+            ("NK_WEBHOOK_TIMEOUT_SECONDS", "301"),
+            ("NK_WEBHOOK_WORKER", "yes"),
+        ] {
+            assert_eq!(parse(&[(setting, value)]).unwrap_err().setting, setting);
+        }
+        assert_eq!(
+            parse(&[(
+                "NK_WEBHOOK_WORKSPACE_ID",
+                "33333333-3333-3333-3333-333333333333"
+            )])
+            .unwrap_err()
+            .setting,
+            "NK_WEBHOOK_WORKER"
+        );
+        let config = parse(&[(
+            "NK_NOTION_SCOPE_EXCLUDED_PAGES",
+            "11111111-1111-1111-1111-111111111111",
+        )])
+        .unwrap();
+        assert!(
+            config
+                .notion_scope
+                .unwrap()
+                .exclusions
+                .page_ids
+                .contains("11111111-1111-1111-1111-111111111111")
+        );
+        assert!(parse(&[("NK_NOTION_SCOPE_EXCLUDED_DESCENDANTS", "bad")]).is_err());
+    }
+    #[cfg(all(unix, feature = "webhook-worker"))]
+    #[tokio::test]
+    async fn missing_model_assets_reject_production_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let assets = dir.path().join("missing");
+        let config = parse(&[("NK_WEBHOOK_QWEN_ASSETS", assets.to_str().unwrap())]).unwrap();
+        assert!(super::runtime::configured(&config).await.is_err());
+    }
+}
