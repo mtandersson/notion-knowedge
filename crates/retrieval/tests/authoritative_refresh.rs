@@ -2100,7 +2100,12 @@ async fn planner_absence_access_failures_and_races_never_authorize_deletion() {
     });
     let failed = planner(&index, &source).plan().await.unwrap();
     assert_eq!(failed.planned_delete(), 0);
-    assert!(failed.run_errors.contains(&PlanError::IncompleteTraversal));
+    assert_eq!(
+        failed.run_errors,
+        vec![PlanError::Traversal(
+            notion_knowledge_core::backend::BackendErrorKind::NotFound
+        )]
+    );
     source.change(|m| {
         m.archived = false;
         m.hide_page = false;

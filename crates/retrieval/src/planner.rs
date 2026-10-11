@@ -74,6 +74,8 @@ pub enum PlanError {
     UnsupportedSource,
     Conflict,
     IncompleteTraversal,
+    /// One run failure with its sanitized source classification.
+    Traversal(BackendErrorKind),
 }
 fn source_error(kind: BackendErrorKind) -> PlanError {
     match kind {
@@ -280,10 +282,7 @@ impl AuthoritativeReconciliationPlanner {
                     plan.run_errors.push(PlanError::IncompleteTraversal);
                 }
             }
-            Err(error) => {
-                plan.run_errors.push(PlanError::IncompleteTraversal);
-                plan.run_errors.push(source_error(error.kind));
-            }
+            Err(error) => plan.run_errors.push(PlanError::Traversal(error.kind)),
         }
         let ids: BTreeSet<_> = discovered
             .iter()
