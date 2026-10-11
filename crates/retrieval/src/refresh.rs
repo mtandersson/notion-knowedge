@@ -21,10 +21,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     chunks::{ChunkDiffMetrics, ChunkTableError, GuardedChunkTable},
-    commit::{
-        CommitBinding, CommitError, CommitOutcome, IndexCommitCoordinator, PageOperation,
-        ReceiptStatus,
-    },
+    commit::{CommitBinding, CommitError, CommitOutcome, IndexCommitCoordinator, PageOperation},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,21 +146,17 @@ impl AuthoritativePageRefresh {
             Some(document.metadata.last_edited_time.clone()),
         )
         .map_err(|_| RefreshError::InvalidConfiguration)?;
-        // An unacknowledged receipt must be resolved under the commit guard
-        // even if another event has already indexed the current snapshot.
-        let unresolved = self
+        // Every existing receipt must pass guarded identity/generation checks.
+        // Pending/failed work completes even if another event indexed the
+        // snapshot; terminal receipts cannot bypass scope checks via a no-op.
+        let has_receipt = self
             .coordinator
             .receipt(operation_id)
             .map_err(RefreshError::from)?
-            .is_some_and(|receipt| {
-                matches!(
-                    receipt.status,
-                    ReceiptStatus::Pending | ReceiptStatus::Failed
-                )
-            });
+            .is_some();
         // A genuinely unchanged page is a no-op, including durable state.
         // Metadata/links are compared too, so citations are still refreshed.
-        if !unresolved
+        if !has_receipt
             && self
                 .coordinator
                 .state()

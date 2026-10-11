@@ -852,6 +852,53 @@ async fn original_event_recovers_after_index_apply_before_ack_and_changed_source
             .attempts,
         2
     );
+    // Unchanged content is insufficient to acknowledge an event identity
+    // owned by an older scope generation, even when its earlier effect applied.
+    let next_scope = ReconciliationScope::new(vec![ROOT.into()], vec![], "phase3", "2").unwrap();
+    let next_binding = CommitBinding::new("chunks", WORKSPACE, &next_scope, "2", 2).unwrap();
+    let next = reopened
+        .change_scope(next_binding, &index.lease, 10)
+        .unwrap();
+    let mut lifecycle_scope = authority();
+    lifecycle_scope.generation = 2;
+    let next_handler = AuthoritativePageRefresh::new(
+        source.client(),
+        GuardedChunkTable::bind(&index.index, "chunks", index.embed.clone(), next.clone()).unwrap(),
+        next,
+        lifecycle_scope,
+        &next_scope,
+        chunk_config(),
+    )
+    .unwrap();
+    assert_eq!(
+        next_handler
+            .refresh_page(
+                &page,
+                &root,
+                "interrupted-event",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap_err(),
+        RefreshError::Conflict
+    );
+    assert_eq!(
+        next_handler
+            .refresh_page(
+                &page,
+                &root,
+                "legitimate-new-scope-event",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap()
+            .outcome,
+        CommitOutcome::AlreadyApplied
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

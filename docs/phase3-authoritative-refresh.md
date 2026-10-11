@@ -40,9 +40,8 @@ reuses `identify_chunks` stable IDs and returns a canonical document/chunks.
 No relation, link or page hint is ever followed to expand authority.
 
 If the full canonical page and persisted checkpoint are unchanged and the
-event has no unresolved receipt, return a no-effect result. Unresolved receipts
-still complete through the guard even when another event already applied that
-snapshot. Otherwise, `GuardedChunkTable::prepare_page` embeds **only**
+event has no existing receipt, return a no-effect result. Existing receipts still pass guarded identity and generation checks; unresolved
+receipts complete even when another event already applied that snapshot. Otherwise, `GuardedChunkTable::prepare_page` embeds **only**
 changed/new chunk content and reuses existing vectors for identical chunks.
 Metadata, title, timestamp, URL and properties update citations without
 re-embedding, and removed chunks are excluded from the complete snapshot.
