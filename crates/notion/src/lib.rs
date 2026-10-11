@@ -15,6 +15,10 @@ pub use client::{IntegrationIdentity, NotionClient};
 pub mod writes;
 pub use writes::CreatedPage;
 
+/// Server-owned scoped Notion page creation with canonical authoritative readback.
+pub mod scoped_create;
+pub use scoped_create::{ScopedPageCreateInput, ScopedPageCreated};
+
 pub mod pages;
 
 pub mod crawl;
