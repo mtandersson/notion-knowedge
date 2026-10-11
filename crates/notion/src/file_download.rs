@@ -550,7 +550,10 @@ mod tests {
         let temporary = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
         let path = temporary.path().to_owned();
         std::fs::write(&path, b"private-binary-data").unwrap();
-        let file = DownloadedFile { file: temporary, size_bytes: 19 };
+        let file = DownloadedFile {
+            file: temporary,
+            size_bytes: 19,
+        };
         // Ingestion can panic during parsing, auditing or an application
         // callback. RAII must still unlink the owned staging file.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -576,5 +579,4 @@ mod tests {
             assert!(!path.exists(), "staged bytes remain after rejected request");
         }
     }
-
 }
