@@ -513,7 +513,7 @@ impl IndexCommitCoordinator {
         self.progress_transition(lease,now,run,|db| {
             let pending:i64=db.query_row("SELECT COUNT(*) FROM reconciliation_plan_progress WHERE run_id=?1 AND status=0",[run],|r|r.get(0)).map_err(sql)?;
             if pending!=0 {return Err(JournalError::InvalidTransition);}
-            db.execute("UPDATE reconciliation_runs SET phase=2 WHERE run_id=?1",[run]).map_err(sql)?;Ok(())
+            db.execute("UPDATE reconciliation_runs SET phase=2 WHERE run_id=?1",[run]).map_err(sql)?;crate::schedule::completed(db,now,run)?;Ok(())
         })
     }
     pub fn reconciliation_progress(&self, run: &str) -> Result<DurableProgress, JournalError> {

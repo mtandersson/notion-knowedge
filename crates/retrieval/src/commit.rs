@@ -523,6 +523,19 @@ impl IndexCommitCoordinator {
         }
         self.anchor(false)
     }
+    pub(crate) fn try_acquire(&self) -> Result<File, CommitError> {
+        let guard = File::open(&self.index_path).map_err(io)?;
+        match guard.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Err(CommitError::Conflict),
+            Err(std::fs::TryLockError::Error(error)) => return Err(io(error)),
+        }
+        if Identity::file(&guard)? != self.index_identity {
+            return Err(CommitError::BindingMismatch);
+        }
+        self.identities()?;
+        Ok(guard)
+    }
     fn acquire(&self) -> Result<File, CommitError> {
         let guard = File::open(&self.index_path).map_err(io)?;
         guard.lock().map_err(io)?;
@@ -592,7 +605,7 @@ impl IndexCommitCoordinator {
         }
         let active: Option<(String, i64)> = db
             .query_row(
-                "SELECT scope,fence FROM reconciliation_runs WHERE phase<>2",
+                "SELECT scope,fence FROM reconciliation_runs WHERE phase<>2 AND abandoned=0",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -683,7 +696,7 @@ impl IndexCommitCoordinator {
             )
             .map_err(sql)?;
         }
-        let unfinished: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM index_commit_receipts WHERE status IN(0,2)) OR EXISTS(SELECT 1 FROM reconciliation_runs WHERE phase<>2) OR EXISTS(SELECT 1 FROM index_commit_generations WHERE generation=?1)",[&next.generation],|r|r.get(0)).map_err(sql)?;
+        let unfinished: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM index_commit_receipts WHERE status IN(0,2)) OR EXISTS(SELECT 1 FROM reconciliation_runs WHERE phase<>2 AND abandoned=0) OR EXISTS(SELECT 1 FROM index_commit_generations WHERE generation=?1)",[&next.generation],|r|r.get(0)).map_err(sql)?;
         if unfinished {
             return Err(CommitError::Conflict);
         }

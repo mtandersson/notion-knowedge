@@ -437,6 +437,14 @@ fn counts(out: &Output, changed: u64, deleted: u64, unchanged: u64) {
 async fn actual_commands_apply_differences_only_and_keep_dry_run_and_status_read_only() {
     let http = HttpNotion::start().await;
     let f = Fixture::new(&http).await;
+    let db = rusqlite::Connection::open(&f.state).unwrap();
+    assert_eq!(
+        db.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        notion_knowledge_retrieval::sync_state::LATEST_SCHEMA_VERSION
+    );
+    drop(db);
     let before = f.snapshot();
     let dry = f.command(&http, &["--reconcile", "dry-run"]).await;
     assert_eq!(dry.exit, 0);
@@ -755,6 +763,29 @@ async fn read_only_commands_reject_external_wal_before_creating_sqlite_auxiliari
         assert_eq!(before, f.snapshot());
         assert!(!wal.exists());
         assert!(!shm.exists());
+    }
+    assert_eq!(http.body_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn read_only_commands_reject_previous_schema_without_migration_or_auxiliary_creation() {
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    let db = rusqlite::Connection::open(&f.state).unwrap();
+    db.execute_batch(include_str!(
+        "../../retrieval/tests/fixtures/remove_schedule_schema.sql"
+    ))
+    .unwrap();
+    drop(db);
+    let before = f.snapshot();
+    for args in [
+        ["--reconcile", "dry-run"].as_slice(),
+        ["--reconcile", "status", "unstarted"].as_slice(),
+    ] {
+        let out = f.command(&http, args).await;
+        assert_eq!(out.exit, 2);
+        assert_eq!(before, f.snapshot());
     }
     assert_eq!(http.body_reads.load(Ordering::SeqCst), 0);
     assert_eq!(f.provider.count.load(Ordering::SeqCst), 0);

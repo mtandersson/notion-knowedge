@@ -31,10 +31,13 @@ impl ReconciliationScope {
         policy: &str,
         generation: &str,
     ) -> Result<Self, JournalError> {
-        if roots.is_empty() {
+        if roots.is_empty() || roots.len() > 1000 || exclusions.len() > 1000 {
             return Err(JournalError::InvalidInput);
         }
         for value in roots.iter_mut().chain(exclusions.iter_mut()) {
+            if value.len() > 4096 {
+                return Err(JournalError::InvalidInput);
+            }
             *value = value.trim().to_owned();
         }
         for value in roots
@@ -87,6 +90,8 @@ pub enum RunPhase {
     Inventory,
     Applying,
     Completed,
+    /// Explicit terminal abandonment preserves inventory and receipts.
+    Abandoned,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkStatus {

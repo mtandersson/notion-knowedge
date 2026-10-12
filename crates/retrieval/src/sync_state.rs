@@ -13,7 +13,7 @@ use notion_knowledge_core::sync_state::{
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
-pub const LATEST_SCHEMA_VERSION: i64 = 11;
+pub const LATEST_SCHEMA_VERSION: i64 = 12;
 
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
@@ -70,6 +70,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         11,
         "reconciliation_retry",
         include_str!("../migrations/0011_reconciliation_retry.sql"),
+    ),
+    (
+        12,
+        "reconciliation_schedule",
+        include_str!("../migrations/0012_reconciliation_schedule.sql"),
     ),
 ];
 

@@ -416,6 +416,8 @@ fn schema_nine_journal_and_page_state_survive_atomic_upgrade() {
         .unwrap();
     drop(old);
     let raw = Connection::open(&f.state).unwrap();
+    raw.execute_batch(include_str!("fixtures/remove_schedule_schema.sql"))
+        .unwrap();
     raw.execute_batch("DROP TABLE reconciliation_retry_proposals; DROP TABLE reconciliation_plan_run_failures; DROP TABLE reconciliation_plan_progress; DROP TABLE reconciliation_plans; DELETE FROM schema_migrations WHERE version>=10;").unwrap();
     drop(raw);
     let new = SqliteSyncStateStore::open(&f.state).unwrap();
@@ -557,6 +559,8 @@ fn migration_failure_rolls_back_the_whole_upgrade() {
     let f = Fixture::new();
     drop(SqliteSyncStateStore::open(&f.state).unwrap());
     let raw = Connection::open(&f.state).unwrap();
+    raw.execute_batch(include_str!("fixtures/remove_schedule_schema.sql"))
+        .unwrap();
     raw.execute_batch("DROP TABLE reconciliation_retry_proposals; DROP TABLE reconciliation_plan_run_failures; DROP TABLE reconciliation_plan_progress; DROP TABLE reconciliation_plans; DELETE FROM schema_migrations WHERE version>=10; CREATE TABLE reconciliation_plan_progress(incompatible TEXT);").unwrap();
     assert!(SqliteSyncStateStore::open(&f.state).is_err());
     assert_eq!(
@@ -624,6 +628,8 @@ fn schema_ten_plan_retains_state_and_failed_retry_migration_rolls_back() {
         .unwrap();
     drop(c);
     let sql = Connection::open(&f.state).unwrap();
+    sql.execute_batch(include_str!("fixtures/remove_schedule_schema.sql"))
+        .unwrap();
     sql.execute_batch("DROP TABLE reconciliation_retry_proposals; DELETE FROM schema_migrations WHERE version=11; CREATE TABLE reconciliation_retry_proposals(incompatible TEXT);").unwrap();
     assert!(SqliteSyncStateStore::open(&f.state).is_err());
     assert_eq!(
@@ -642,9 +648,111 @@ fn schema_ten_plan_retains_state_and_failed_retry_migration_rolls_back() {
         .unwrap();
     drop(sql);
     let reopened = IndexCommitCoordinator::open(&f.index, &f.state, binding()).unwrap();
-    assert_eq!(reopened.state().schema_version().unwrap(), 11);
+    assert_eq!(
+        reopened.state().schema_version().unwrap(),
+        notion_knowledge_retrieval::sync_state::LATEST_SCHEMA_VERSION
+    );
     assert_eq!(
         reopened.reconciliation_progress("run").unwrap().failed["new"],
         DurableFailure::Index
+    );
+}
+
+#[test]
+fn authoritative_completion_advances_schedule_atomically_and_holds_planning_errors() {
+    use notion_knowledge_retrieval::schedule::{SchedulePolicy, ScheduleStatus};
+    let f = Fixture::new();
+    let c = f.coordinator();
+    let l = c.state().acquire_lease(10, 100).unwrap();
+    c.register_schedule(
+        &l,
+        10,
+        "periodic",
+        SchedulePolicy::new(60, 3, 5, 10).unwrap(),
+        10,
+    )
+    .unwrap();
+    c.claim_schedule(&l, 10, "periodic", "clean").unwrap();
+    let mut source = plan();
+    source.pages.clear();
+    source.errors.clear();
+    source.run_errors.clear();
+    c.record_reconciliation_plan(&l, 10, "clean", &source)
+        .unwrap();
+    let raw = Connection::open(&f.state).unwrap();
+    raw.execute_batch("CREATE TRIGGER fail_deadline BEFORE UPDATE ON reconciliation_schedules BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    assert_eq!(
+        c.complete_reconciliation_plan(&l, 10, "clean"),
+        Err(JournalError::Unavailable)
+    );
+    assert_eq!(
+        c.state().run("clean", &scope()).unwrap().phase,
+        RunPhase::Applying
+    );
+    assert_eq!(c.schedule("periodic").unwrap().next_deadline, 10);
+    raw.execute_batch("DROP TRIGGER fail_deadline;").unwrap();
+    c.complete_reconciliation_plan(&l, 10, "clean").unwrap();
+    assert_eq!(c.schedule("periodic").unwrap().next_deadline, 70);
+    assert_eq!(
+        c.state().run("clean", &scope()).unwrap().next_deadline,
+        Some(70)
+    );
+    c.claim_schedule(&l, 70, "periodic", "failed-plan").unwrap();
+    source
+        .errors
+        .insert("inaccessible".into(), PlanError::Permission);
+    c.record_reconciliation_plan(&l, 70, "failed-plan", &source)
+        .unwrap();
+    c.complete_reconciliation_plan(&l, 70, "failed-plan")
+        .unwrap();
+    assert_eq!(
+        c.schedule("periodic").unwrap().status,
+        ScheduleStatus::HeldPages
+    );
+    assert!(c.due_schedules(100, 100).unwrap().is_empty());
+    assert_eq!(
+        c.retry_schedule(&l, 70, "periodic", 70),
+        Err(JournalError::InvalidTransition)
+    );
+    c.abandon_schedule(&l, 70, "periodic", 70).unwrap();
+    assert_eq!(
+        c.state().run("failed-plan", &scope()).unwrap().phase,
+        RunPhase::Completed
+    );
+    assert_eq!(
+        c.reconciliation_plan("failed-plan")
+            .unwrap()
+            .planning_failures
+            .len(),
+        1
+    );
+    let l = c.state().acquire_lease(70, 100).unwrap();
+    c.claim_schedule(&l, 70, "periodic", "fresh-cycle").unwrap();
+    source.errors.clear();
+    c.record_reconciliation_plan(&l, 70, "fresh-cycle", &source)
+        .unwrap();
+    c.fail_reconciliation_run(
+        &l,
+        70,
+        "fresh-cycle",
+        "index-unavailable",
+        DurableFailure::Index,
+    )
+    .unwrap();
+    let evidence = c
+        .reconciliation_failure_evidence("fresh-cycle", 0, 100)
+        .unwrap();
+    assert_eq!(evidence.len(), 1);
+    c.complete_reconciliation_plan(&l, 70, "fresh-cycle")
+        .unwrap();
+    assert_eq!(
+        c.schedule("periodic").unwrap().status,
+        ScheduleStatus::HeldPages
+    );
+    assert!(c.due_schedules(100, 100).unwrap().is_empty());
+    assert_eq!(
+        evidence,
+        c.reconciliation_failure_evidence("fresh-cycle", 0, 100)
+            .unwrap()
     );
 }
