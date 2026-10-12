@@ -50,3 +50,7 @@ pub mod durable_plan;
 
 #[cfg(all(unix, feature = "local-lancedb"))]
 pub mod runner;
+
+/// Fenced, scoped periodic schedule authority (does not start a runtime).
+#[cfg(unix)]
+pub mod schedule;

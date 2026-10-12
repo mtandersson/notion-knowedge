@@ -36,7 +36,7 @@ pub(crate) fn phase(
 ) -> Result<(), JournalError> {
     let valid: bool = db
         .query_row(
-            "SELECT fence=?1 AND phase=?2 FROM reconciliation_runs WHERE run_id=?3",
+            "SELECT fence=?1 AND phase=?2 AND abandoned=0 FROM reconciliation_runs WHERE run_id=?3",
             params![lease.fence, expected, run],
             |r| r.get(0),
         )
@@ -80,11 +80,11 @@ fn snapshot(
     run: &str,
     scope: &ReconciliationScope,
 ) -> Result<ReconciliationRun, JournalError> {
-    let (identity, phase, checkpoint, next_deadline): (String, i64, Option<String>, Option<i64>) =
+    let (identity, phase, checkpoint, next_deadline, abandoned): (String, i64, Option<String>, Option<i64>, bool) =
         db.query_row(
-            "SELECT scope,phase,checkpoint,next_deadline FROM reconciliation_runs WHERE run_id=?1",
+            "SELECT scope,phase,checkpoint,next_deadline,abandoned FROM reconciliation_runs WHERE run_id=?1",
             [run],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()
         .map_err(sql)?
@@ -96,10 +96,11 @@ fn snapshot(
     let (refreshed_count,deleted_count,unchanged_count)=db.query_row("SELECT COALESCE(SUM(status=1 AND action=0),0),COALESCE(SUM(status=1 AND action=1),0),COALESCE(SUM(status=1 AND action=2),0) FROM reconciliation_inventory WHERE run_id=?1",[run],|r|Ok((r.get::<_,i64>(0)? as u64,r.get::<_,i64>(1)? as u64,r.get::<_,i64>(2)? as u64))).map_err(sql)?;
     Ok(ReconciliationRun {
         run_id: run.into(),
-        phase: match phase {
-            0 => RunPhase::Inventory,
-            1 => RunPhase::Applying,
-            2 => RunPhase::Completed,
+        phase: match (phase, abandoned) {
+            (_, true) => RunPhase::Abandoned,
+            (0, false) => RunPhase::Inventory,
+            (1, false) => RunPhase::Applying,
+            (2, false) => RunPhase::Completed,
             _ => return Err(JournalError::Unavailable),
         },
         checkpoint,
@@ -210,11 +211,13 @@ impl ReconciliationJournal for SqliteSyncStateStore {
         validate(run)?;
         self.journal_transaction(|db| {
             guard(db,lease,now)?;
+            let abandoned:bool=db.query_row("SELECT abandoned FROM reconciliation_runs WHERE run_id=?1",[run],|r|r.get(0)).optional().map_err(sql)?.unwrap_or(false);
+            if abandoned {return Err(JournalError::InvalidTransition);}
             let existing:Option<String>=db.query_row("SELECT scope FROM reconciliation_runs WHERE run_id=?1",[run],|r|r.get(0)).optional().map_err(sql)?;
             if existing.as_deref().is_some_and(|s|s!=scope.identity()) {return Err(JournalError::ScopeMismatch);}
-            let active:Option<String>=db.query_row("SELECT run_id FROM reconciliation_runs WHERE phase<>2",[],|r|r.get(0)).optional().map_err(sql)?;
+            let active:Option<String>=db.query_row("SELECT run_id FROM reconciliation_runs WHERE phase<>2 AND abandoned=0",[],|r|r.get(0)).optional().map_err(sql)?;
             if active.as_deref().is_some_and(|id|id!=run) {return Err(JournalError::Busy);}
-            db.execute("INSERT INTO reconciliation_runs(run_id,scope,fence,phase) VALUES(?1,?2,?3,0) ON CONFLICT(run_id) DO UPDATE SET fence=excluded.fence",params![run,scope.identity(),lease.fence]).map_err(sql)?;
+            db.execute("INSERT INTO reconciliation_runs(run_id,scope,fence,phase) VALUES(?1,?2,?3,0) ON CONFLICT(run_id) DO UPDATE SET fence=excluded.fence WHERE reconciliation_runs.phase<>2",params![run,scope.identity(),lease.fence]).map_err(sql)?;
             snapshot(db,run,scope)
         })
     }
@@ -335,7 +338,7 @@ impl ReconciliationJournal for SqliteSyncStateStore {
         }
         self.journal_transaction(|db| {guard(db,lease,now)?;
             if db.query_row("SELECT EXISTS(SELECT 1 FROM reconciliation_plans WHERE run_id=?1)", [run], |r| r.get::<_,bool>(0)).map_err(sql)? { return Err(JournalError::InvalidTransition); }
-            let count=db.execute("UPDATE reconciliation_runs SET failure=?1,next_deadline=?2 WHERE run_id=?3 AND fence=?4 AND phase<>2",params![failure_number(failure),deadline,run,lease.fence]).map_err(sql)?;
+            let count=db.execute("UPDATE reconciliation_runs SET failure=?1,next_deadline=?2 WHERE run_id=?3 AND fence=?4 AND phase<>2 AND abandoned=0",params![failure_number(failure),deadline,run,lease.fence]).map_err(sql)?;
             if count==1 {Ok(())}else{Err(JournalError::InvalidTransition)}
         })
     }
@@ -368,6 +371,8 @@ impl ReconciliationJournal for SqliteSyncStateStore {
                 params![deadline, run],
             )
             .map_err(sql)?;
+            #[cfg(unix)]
+            crate::schedule::completed(db, now, run)?;
             Ok(())
         })
     }
