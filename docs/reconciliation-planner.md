@@ -31,7 +31,7 @@ leases. Plans are proposals, never mutation permission.
 
 The planner never extracts content, calls embedding, changes the source/index,
 or stores operational metadata/acknowledgments. Dry-run cannot suppress a later
-real application. Scheduler/CLI and durable application/resume are separate work.
+real application. The [guarded durable runner](reconciliation-runner.md) consumes this exact plan; scheduler/CLI remains separate work.
 
 ## SQLite migration 9
 

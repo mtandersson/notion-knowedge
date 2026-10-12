@@ -506,7 +506,7 @@ The [durable reconciliation journal](docs/reconciliation-journal.md) supplies sc
 
 The [read-only reconciliation planner](docs/reconciliation-planner.md) compares scoped
 SQLite/LanceDB ownership with fresh authoritative metadata and lifecycle evidence.
-Dry-run writes no acknowledgments; guarded durable application remains separate.
+Dry-run writes no acknowledgments. The [guarded durable reconciliation runner](docs/reconciliation-runner.md) applies differences through the shared lifecycle pipeline and resumes actual receipts; manual/periodic execution remains separate.
 
 The [owned index commit coordinator](docs/index-commits.md) binds trusted local index authority and serializes cancellable callers through durable page checkpoints; concrete LanceDB consumers follow separately.
 
