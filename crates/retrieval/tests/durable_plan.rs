@@ -728,4 +728,31 @@ fn authoritative_completion_advances_schedule_atomically_and_holds_planning_erro
     );
     let l = c.state().acquire_lease(70, 100).unwrap();
     c.claim_schedule(&l, 70, "periodic", "fresh-cycle").unwrap();
+    source.errors.clear();
+    c.record_reconciliation_plan(&l, 70, "fresh-cycle", &source)
+        .unwrap();
+    c.fail_reconciliation_run(
+        &l,
+        70,
+        "fresh-cycle",
+        "index-unavailable",
+        DurableFailure::Index,
+    )
+    .unwrap();
+    let evidence = c
+        .reconciliation_failure_evidence("fresh-cycle", 0, 100)
+        .unwrap();
+    assert_eq!(evidence.len(), 1);
+    c.complete_reconciliation_plan(&l, 70, "fresh-cycle")
+        .unwrap();
+    assert_eq!(
+        c.schedule("periodic").unwrap().status,
+        ScheduleStatus::HeldPages
+    );
+    assert!(c.due_schedules(100, 100).unwrap().is_empty());
+    assert_eq!(
+        evidence,
+        c.reconciliation_failure_evidence("fresh-cycle", 0, 100)
+            .unwrap()
+    );
 }

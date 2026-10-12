@@ -189,7 +189,7 @@ fn event(
     Ok(())
 }
 fn page_failures(db: &Connection, run: &str) -> Result<bool, JournalError> {
-    db.query_row("SELECT EXISTS(SELECT 1 FROM reconciliation_inventory WHERE run_id=?1 AND status=2) OR EXISTS(SELECT 1 FROM reconciliation_plan_progress WHERE run_id=?1 AND status=2) OR EXISTS(SELECT 1 FROM reconciliation_plans p, json_each(p.document,'$.planning_failures') WHERE p.run_id=?1) OR EXISTS(SELECT 1 FROM reconciliation_plans p, json_each(p.document,'$.run_failures') WHERE p.run_id=?1)",[run],|r|r.get(0)).map_err(sql)
+    db.query_row("SELECT EXISTS(SELECT 1 FROM reconciliation_inventory WHERE run_id=?1 AND status=2) OR EXISTS(SELECT 1 FROM reconciliation_plan_progress WHERE run_id=?1 AND status=2) OR EXISTS(SELECT 1 FROM reconciliation_plan_run_failures WHERE run_id=?1) OR EXISTS(SELECT 1 FROM reconciliation_plans p, json_each(p.document,'$.planning_failures') WHERE p.run_id=?1) OR EXISTS(SELECT 1 FROM reconciliation_plans p, json_each(p.document,'$.run_failures') WHERE p.run_id=?1)",[run],|r|r.get(0)).map_err(sql)
 }
 
 impl IndexCommitCoordinator {

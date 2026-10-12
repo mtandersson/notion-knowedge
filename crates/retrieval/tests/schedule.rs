@@ -390,14 +390,14 @@ fn held_failed_pages_need_explicit_page_retry_or_abandonment_and_history_survive
         RunPhase::Abandoned
     );
     assert_eq!(
-        c.state().start_or_resume(&l, 90, "second", &scope("v1")),
-        Err(JournalError::InvalidTransition)
-    );
-    assert_eq!(
         c.claim_schedule(&l, 90, "periodic", "third"),
         Err(JournalError::LeaseLost)
     );
     let l = c.state().acquire_lease(90, 100).unwrap();
+    assert_eq!(
+        c.state().start_or_resume(&l, 90, "second", &scope("v1")),
+        Err(JournalError::InvalidTransition)
+    );
     c.claim_schedule(&l, 90, "periodic", "third").unwrap();
     assert_eq!(c.schedule("periodic").unwrap().cycle, 3);
     assert_eq!(
@@ -648,7 +648,7 @@ async fn abandonment_preserves_real_applied_receipts_and_refuses_unresolved_subm
     .unwrap();
     assert_eq!(
         c.submit(operation, l.clone(), Arc::new(|| 20), |ctx| async move {
-            ctx.revalidate()?;
+            ctx.revalidate().unwrap();
             Ok(())
         })
         .await

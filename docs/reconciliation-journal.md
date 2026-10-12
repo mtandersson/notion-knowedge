@@ -257,7 +257,7 @@ The failure policy is explicit:
   retry, which freshens and validates the proposal. `retry_schedule` then permits
   retry only if no failed/planning work remains and the run is still incomplete.
   It explicitly resets the budget/deadline, retains the run and records recovery.
-- Immutable planning failures, completed runs containing failures, or work the
+- Immutable planning or authoritative run failures, completed runs containing failures, or work the
   operator chooses not to retry require `abandon_schedule`. It retains all old
   inventory/plans/failure evidence/receipts, marks an incomplete run `Abandoned`,
   and sets an explicit next deadline for a fresh cycle. A completed failed run
