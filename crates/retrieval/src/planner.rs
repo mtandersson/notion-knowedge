@@ -181,6 +181,9 @@ impl AuthoritativeReconciliationPlanner {
             scope,
         })
     }
+    pub(crate) fn is_bound_to(&self, coordinator: &Arc<IndexCommitCoordinator>) -> bool {
+        Arc::ptr_eq(&self.coordinator, coordinator) && self.guard.is_bound_to(coordinator)
+    }
     /// Union of index rows and current-generation receipt-owned SQLite pages.
     /// Bare SQLite page IDs do not establish authority.
     pub async fn local_inventory(&self) -> Result<BTreeMap<String, LocalPage>, PlanError> {

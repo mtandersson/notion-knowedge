@@ -163,3 +163,14 @@ replay, explicit retry, stale lease/fence and scope/generation rejection,
 transaction rollback and real coordinator apply-before-ack receipt recovery.
 These storage tests perform no LanceDB mutation; the integrated source/index
 race and application matrix belongs to #346.
+
+## Guarded runner and persisted explicit retries (schema 11)
+
+The [authoritative runner](reconciliation-runner.md) now supplies the real shared
+source/Lance effects, owned precommit proposal validation and receipt recovery.
+`retry_reconciliation_proposal` atomically persists a fresh payload-free
+`DurablePage` proposal with Failed-to-Pending, retaining the stable operation ID.
+`reconciliation_page_proposal` returns that explicit proposal after reopen; the
+runner validates it under the actual owned guard before effects. It is evidence,
+never authorization. This closes the cancellation interval before preparation.
+Schema 11 preserves all existing journal/plans/receipts in an atomic migration.

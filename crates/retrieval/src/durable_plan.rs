@@ -424,6 +424,50 @@ impl IndexCommitCoordinator {
             Ok(())
         })
     }
+    /// Persist the explicit fresh retry proposal and clear Failed atomically.
+    /// These bytes never authorize effects: the runner rechecks all evidence
+    /// under the same owned source/lease/index boundary after every restart.
+    pub fn retry_reconciliation_proposal(
+        &self,
+        lease: &Lease,
+        now: i64,
+        run: &str,
+        proposal: &DurablePage,
+    ) -> Result<(), JournalError> {
+        self.progress_transition(lease, now, run, |db| {
+            let plan = load(db, run, self.binding())?;
+            let original = plan.pages.get(&proposal.page_id).ok_or(JournalError::InvalidInput)?;
+            if original.operation_id != proposal.operation_id {
+                return Err(JournalError::InvalidInput);
+            }
+            if db.execute("UPDATE reconciliation_plan_progress SET status=0,failure=NULL WHERE run_id=?1 AND page_id=?2 AND status=2",params![run,proposal.page_id]).map_err(sql)? != 1 {
+                return Err(JournalError::InvalidTransition);
+            }
+            db.execute("INSERT INTO reconciliation_retry_proposals VALUES(?1,?2,?3) ON CONFLICT(run_id,page_id) DO UPDATE SET proposal=excluded.proposal",params![run,proposal.page_id,encode(proposal)?]).map_err(sql)?;
+            Ok(())
+        })
+    }
+    pub fn reconciliation_page_proposal(
+        &self,
+        run: &str,
+        page: &str,
+    ) -> Result<(DurablePage, bool), JournalError> {
+        self.identities().map_err(|_| JournalError::ScopeMismatch)?;
+        self.state().journal_transaction(|db| {
+            self.validate_binding(db).map_err(|_|JournalError::ScopeMismatch)?;
+            let plan=load(db,run,self.binding())?;
+            let original=plan.pages.get(page).ok_or(JournalError::InvalidInput)?;
+            let stored: Option<String>=db.query_row("SELECT proposal FROM reconciliation_retry_proposals WHERE run_id=?1 AND page_id=?2",params![run,page],|r|r.get(0)).optional().map_err(sql)?;
+            match stored {
+                None => Ok((original.clone(),false)),
+                Some(stored) => {
+                    let proposal:DurablePage=decode(&stored)?;
+                    if proposal.page_id!=page || proposal.operation_id!=original.operation_id {return Err(JournalError::InvalidInput);}
+                    Ok((proposal,true))
+                }
+            }
+        })
+    }
     pub fn fail_reconciliation_run(
         &self,
         lease: &Lease,

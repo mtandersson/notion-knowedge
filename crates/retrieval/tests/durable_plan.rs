@@ -416,10 +416,13 @@ fn schema_nine_journal_and_page_state_survive_atomic_upgrade() {
         .unwrap();
     drop(old);
     let raw = Connection::open(&f.state).unwrap();
-    raw.execute_batch("DROP TABLE reconciliation_plan_run_failures; DROP TABLE reconciliation_plan_progress; DROP TABLE reconciliation_plans; DELETE FROM schema_migrations WHERE version=10;").unwrap();
+    raw.execute_batch("DROP TABLE reconciliation_retry_proposals; DROP TABLE reconciliation_plan_run_failures; DROP TABLE reconciliation_plan_progress; DROP TABLE reconciliation_plans; DELETE FROM schema_migrations WHERE version>=10;").unwrap();
     drop(raw);
     let new = SqliteSyncStateStore::open(&f.state).unwrap();
-    assert_eq!(new.schema_version().unwrap(), 10);
+    assert_eq!(
+        new.schema_version().unwrap(),
+        notion_knowledge_retrieval::sync_state::LATEST_SCHEMA_VERSION
+    );
     assert_eq!(new.run("legacy", &scope()).unwrap().refreshed_count, 1);
     assert_eq!(
         new.page_state("existing").unwrap().unwrap().content_hash(),
@@ -554,7 +557,7 @@ fn migration_failure_rolls_back_the_whole_upgrade() {
     let f = Fixture::new();
     drop(SqliteSyncStateStore::open(&f.state).unwrap());
     let raw = Connection::open(&f.state).unwrap();
-    raw.execute_batch("DROP TABLE reconciliation_plan_run_failures; DROP TABLE reconciliation_plan_progress; DROP TABLE reconciliation_plans; DELETE FROM schema_migrations WHERE version=10; CREATE TABLE reconciliation_plan_progress(incompatible TEXT);").unwrap();
+    raw.execute_batch("DROP TABLE reconciliation_retry_proposals; DROP TABLE reconciliation_plan_run_failures; DROP TABLE reconciliation_plan_progress; DROP TABLE reconciliation_plans; DELETE FROM schema_migrations WHERE version>=10; CREATE TABLE reconciliation_plan_progress(incompatible TEXT);").unwrap();
     assert!(SqliteSyncStateStore::open(&f.state).is_err());
     assert_eq!(
         raw.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
@@ -570,5 +573,78 @@ fn migration_failure_rolls_back_the_whole_upgrade() {
         )
         .unwrap(),
         0
+    );
+}
+
+#[test]
+fn explicit_retry_proposal_and_pending_transition_survive_reopen_and_rollback_atomically() {
+    let f = Fixture::new();
+    let c = f.coordinator();
+    let source = plan();
+    let lease = start(&c, &source);
+    c.fail_reconciliation_page(&lease, 10, "run", "new", DurableFailure::Conflict)
+        .unwrap();
+    let mut proposal = c.reconciliation_plan("run").unwrap().pages["new"].clone();
+    proposal.metadata_identity = Some("fresh-proposal".into());
+    let sql = Connection::open(&f.state).unwrap();
+    sql.execute_batch("CREATE TRIGGER deny_retry BEFORE INSERT ON reconciliation_retry_proposals BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    assert_eq!(
+        c.retry_reconciliation_proposal(&lease, 10, "run", &proposal),
+        Err(JournalError::Unavailable)
+    );
+    assert_eq!(
+        c.reconciliation_progress("run").unwrap().failed["new"],
+        DurableFailure::Conflict
+    );
+    assert!(!c.reconciliation_page_proposal("run", "new").unwrap().1);
+    sql.execute_batch("DROP TRIGGER deny_retry;").unwrap();
+    c.retry_reconciliation_proposal(&lease, 10, "run", &proposal)
+        .unwrap();
+    let reopened = IndexCommitCoordinator::open(&f.index, &f.state, binding()).unwrap();
+    assert_eq!(
+        reopened.reconciliation_page_proposal("run", "new").unwrap(),
+        (proposal, true)
+    );
+    assert!(
+        reopened
+            .reconciliation_progress("run")
+            .unwrap()
+            .pending
+            .contains("new")
+    );
+}
+
+#[test]
+fn schema_ten_plan_retains_state_and_failed_retry_migration_rolls_back() {
+    let f = Fixture::new();
+    let c = f.coordinator();
+    let source = plan();
+    let lease = start(&c, &source);
+    c.fail_reconciliation_page(&lease, 10, "run", "new", DurableFailure::Index)
+        .unwrap();
+    drop(c);
+    let sql = Connection::open(&f.state).unwrap();
+    sql.execute_batch("DROP TABLE reconciliation_retry_proposals; DELETE FROM schema_migrations WHERE version=11; CREATE TABLE reconciliation_retry_proposals(incompatible TEXT);").unwrap();
+    assert!(SqliteSyncStateStore::open(&f.state).is_err());
+    assert_eq!(
+        sql.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        10
+    );
+    assert_eq!(
+        sql.query_row("SELECT COUNT(*) FROM reconciliation_plans", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    sql.execute_batch("DROP TABLE reconciliation_retry_proposals;")
+        .unwrap();
+    drop(sql);
+    let reopened = IndexCommitCoordinator::open(&f.index, &f.state, binding()).unwrap();
+    assert_eq!(reopened.state().schema_version().unwrap(), 11);
+    assert_eq!(
+        reopened.reconciliation_progress("run").unwrap().failed["new"],
+        DurableFailure::Index
     );
 }
