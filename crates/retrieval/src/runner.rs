@@ -101,6 +101,51 @@ impl AuthoritativeReconciliationRunner {
         }
         Ok(result)
     }
+    /// One inventory or page attempt. Operators may renew the global fence only
+    /// after this returns; a submitted owned operation keeps its original bound.
+    pub async fn apply_next(
+        &self,
+        run: &str,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+        provider: &dyn EmbeddingProvider,
+    ) -> Result<DurableProgress, RunnerError> {
+        let current =
+            self.coordinator
+                .state()
+                .start_or_resume(&lease, clock(), run, &self.scope)?;
+        if current.phase == RunPhase::Inventory {
+            let plan = self.dry_run().await?;
+            self.coordinator
+                .record_reconciliation_plan(&lease, clock(), run, &plan)?;
+        } else if current.phase != RunPhase::Completed {
+            self.coordinator.reconciliation_plan(run)?;
+            let progress = self.coordinator.reconciliation_progress(run)?;
+            if let Some(id) = progress.pending.first() {
+                let (page, replan) = self.coordinator.reconciliation_page_proposal(run, id)?;
+                self.apply_one(
+                    ExpectedReconciliation {
+                        run: run.into(),
+                        page,
+                        replan,
+                    },
+                    lease.clone(),
+                    clock.clone(),
+                    provider,
+                )
+                .await?;
+            }
+        }
+        let progress = self.coordinator.reconciliation_progress(run)?;
+        if current.phase != RunPhase::Completed
+            && progress.pending.is_empty()
+            && progress.failed.is_empty()
+        {
+            self.coordinator
+                .complete_reconciliation_plan(&lease, clock(), run)?;
+        }
+        Ok(progress)
+    }
     /// Failed pages never retry implicitly. A fresh full plan supplies a new
     /// proposal and local snapshot; races still conflict at the owned boundary.
     pub async fn retry_page(

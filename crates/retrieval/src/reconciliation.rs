@@ -122,6 +122,20 @@ fn snapshot(
     })
 }
 impl SqliteSyncStateStore {
+    pub(crate) fn journal_read<T>(
+        &self,
+        action: impl FnOnce(&Transaction<'_>) -> Result<T, JournalError>,
+    ) -> Result<T, JournalError> {
+        let mut db = self
+            .lock_connection()
+            .map_err(|_| JournalError::Unavailable)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(sql)?;
+        let result = action(&tx)?;
+        tx.commit().map_err(sql)?;
+        Ok(result)
+    }
     pub(crate) fn journal_transaction<T>(
         &self,
         action: impl FnOnce(&Transaction<'_>) -> Result<T, JournalError>,
@@ -209,7 +223,7 @@ impl ReconciliationJournal for SqliteSyncStateStore {
         run: &str,
         scope: &ReconciliationScope,
     ) -> Result<ReconciliationRun, JournalError> {
-        self.journal_transaction(|db| snapshot(db, run, scope))
+        self.journal_read(|db| snapshot(db, run, scope))
     }
     fn inventory(
         &self,
@@ -251,7 +265,7 @@ impl ReconciliationJournal for SqliteSyncStateStore {
         })
     }
     fn work(&self, run: &str) -> Result<Vec<JournalWork>, JournalError> {
-        self.journal_transaction(|db| {
+        self.journal_read(|db| {
             let mut statement=db.prepare("SELECT page_id,revision,status,action,failure FROM reconciliation_inventory WHERE run_id=?1 ORDER BY page_id").map_err(sql)?;
             statement.query_map([run],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,r.get::<_,Option<i64>>(4)?))).map_err(sql)?.map(|r| {
                 let (page_id,revision,status,action,failure)=r.map_err(sql)?;

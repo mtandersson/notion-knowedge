@@ -8,7 +8,7 @@ use std::{
     io::{Read, Write},
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use notion_knowledge_core::{
@@ -254,6 +254,7 @@ pub struct IndexCommitCoordinator {
     state_identity: Identity,
     state_token: String,
     binding: CommitBinding,
+    owned_threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 const ANCHOR: &str = ".nk-operational-binding";
 impl IndexCommitCoordinator {
@@ -273,6 +274,74 @@ impl IndexCommitCoordinator {
         binding: CommitBinding,
     ) -> Result<Arc<Self>, CommitError> {
         Self::connect(index.as_ref(), state.as_ref(), binding, false)
+    }
+    /// Validate existing authority using only reads; no migrations, writer
+    /// transaction, directory guard, anchor creation or operational metadata.
+    pub fn open_read_only(
+        index: impl AsRef<Path>,
+        state: impl AsRef<Path>,
+        binding: CommitBinding,
+    ) -> Result<Arc<Self>, CommitError> {
+        Self::inspect_existing(index.as_ref(), state.as_ref(), binding, true)
+    }
+    /// Existing current-schema writer; validation itself does not lock the
+    /// index or start a writer transaction. Effects still require the shared
+    /// lease and operation-owned guard, with fresh authority checks.
+    pub fn open_existing(
+        index: impl AsRef<Path>,
+        state: impl AsRef<Path>,
+        binding: CommitBinding,
+    ) -> Result<Arc<Self>, CommitError> {
+        Self::inspect_existing(index.as_ref(), state.as_ref(), binding, false)
+    }
+    fn inspect_existing(
+        index: &Path,
+        state: &Path,
+        binding: CommitBinding,
+        read_only: bool,
+    ) -> Result<Arc<Self>, CommitError> {
+        let index_path = fs::canonicalize(index).map_err(io)?;
+        if !index_path.is_dir() || fs::metadata(state).map_err(io)?.nlink() != 1 {
+            return Err(CommitError::BindingMismatch);
+        }
+        let state_path = fs::canonicalize(state).map_err(io)?;
+        let index_identity = Identity::read(&index_path)?;
+        let state_identity = Identity::read(&state_path)?;
+        let store = Arc::new(
+            if read_only {
+                SqliteSyncStateStore::open_read_only(&state_path)
+            } else {
+                SqliteSyncStateStore::open_existing(&state_path)
+            }
+            .map_err(|_| CommitError::Unavailable)?,
+        );
+        let state_token = store
+            .lock_connection()
+            .map_err(|_| CommitError::Unavailable)?
+            .query_row(
+                "SELECT identity FROM index_commit_state_identity WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(sql)?;
+        let coordinator = Arc::new(Self {
+            state: store,
+            index_path,
+            state_path,
+            index_identity,
+            state_identity,
+            state_token,
+            binding,
+            owned_threads: Mutex::new(Vec::new()),
+        });
+        let db = coordinator
+            .state
+            .lock_connection()
+            .map_err(|_| CommitError::Unavailable)?;
+        coordinator.validate_binding(&db)?;
+        coordinator.anchor(false)?;
+        drop(db);
+        Ok(coordinator)
     }
     fn connect(
         index: &Path,
@@ -319,6 +388,7 @@ impl IndexCommitCoordinator {
             state_identity,
             state_token,
             binding,
+            owned_threads: Mutex::new(Vec::new()),
         });
         let mut db = coordinator
             .state
@@ -362,6 +432,34 @@ impl IndexCommitCoordinator {
         drop(db);
         drop(guard);
         Ok(coordinator)
+    }
+    /// Wait for an already submitted owned effect before a graceful operator
+    /// exit. Cancellation invalidates its clock, but never releases a live guard.
+    pub async fn drain_owned(self: &Arc<Self>) -> Result<(), CommitError> {
+        let coordinator = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let handles: Vec<_> = coordinator
+                .owned_threads
+                .lock()
+                .map_err(|_| CommitError::Unavailable)?
+                .drain(..)
+                .collect();
+            for handle in handles {
+                handle.join().map_err(|_| CommitError::Unavailable)?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| CommitError::Unavailable)?
+    }
+    fn track_owned(&self, handle: std::thread::JoinHandle<()>) -> Result<(), CommitError> {
+        let mut handles = self
+            .owned_threads
+            .lock()
+            .map_err(|_| CommitError::Unavailable)?;
+        handles.retain(|h| !h.is_finished());
+        handles.push(handle);
+        Ok(())
     }
     pub fn state(&self) -> &Arc<SqliteSyncStateStore> {
         &self.state
@@ -608,6 +706,7 @@ impl IndexCommitCoordinator {
             state_identity: self.state_identity,
             state_token: self.state_token.clone(),
             binding: next,
+            owned_threads: Mutex::new(Vec::new()),
         }))
     }
     /// Durable evidence of page ownership even after external effects removed
@@ -844,8 +943,11 @@ impl IndexCommitCoordinator {
                 });
                 let _ = sender.send(result);
             });
+        let tracked = spawned
+            .map_err(io)
+            .and_then(|handle| self.track_owned(handle));
         async move {
-            spawned.map_err(io)?;
+            tracked?;
             receiver.await.map_err(|_| CommitError::Unavailable)?
         }
     }
@@ -886,8 +988,11 @@ impl IndexCommitCoordinator {
                 })();
                 let _ = sender.send(result);
             });
+        let tracked = spawned
+            .map_err(io)
+            .and_then(|handle| self.track_owned(handle));
         async move {
-            spawned.map_err(io)?;
+            tracked?;
             receiver.await.map_err(|_| CommitError::Unavailable)?
         }
     }

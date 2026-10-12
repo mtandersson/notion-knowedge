@@ -40,6 +40,12 @@ impl WorkerSettings {
                 "requires matching trusted Notion root scope",
             ));
         }
+        Self::index_settings(lookup).map(Some)
+    }
+    pub(crate) fn index_settings(
+        lookup: &mut impl FnMut(&str) -> Option<OsString>,
+    ) -> Result<Self, ConfigError> {
+        let error = |setting, reason| ConfigError { setting, reason };
         let mut path = |name| {
             let value = lookup(name)
                 .and_then(|v| v.into_string().ok())
@@ -60,32 +66,28 @@ impl WorkerSettings {
                 .filter(|v| (min..=max).contains(v))
                 .ok_or_else(|| error(name, "outside documented integer range"))
         };
-        Ok(Some(Self {
+        Ok(Self {
             index,
             assets,
             poll_ms: number("NK_WEBHOOK_POLL_MS", 1000, 10, 60000)?,
             timeout_seconds: number("NK_WEBHOOK_TIMEOUT_SECONDS", 60, 1, 300)?,
-        }))
+        })
     }
 }
 
 #[cfg(all(unix, feature = "webhook-worker"))]
 pub mod runtime {
-    use super::WorkerSettings;
     use notion_knowledge_core::{
         backend::PageId,
-        chunking::ChunkConfig,
         embedding::EmbeddingProvider,
-        lifecycle::LifecycleScope,
-        reconciliation::{ReconciliationJournal, ReconciliationScope},
+        reconciliation::ReconciliationJournal,
         webhook::{
             EventClaim, EventFailure, EventState, InboxScope, PageWorkClaim, ProcessingOutcome,
             WebhookDebounce, WebhookInbox, WebhookRecovery,
         },
     };
     use notion_knowledge_retrieval::{
-        chunks::GuardedChunkTable,
-        commit::{CommitBinding, IndexCommitCoordinator},
+        commit::IndexCommitCoordinator,
         refresh::{AuthoritativePageRefresh, RefreshError},
         sync_state::SqliteSyncStateStore,
     };
@@ -189,38 +191,19 @@ pub mod runtime {
             .webhook_state_file
             .clone()
             .ok_or("webhook state required")?;
-        let (coordinator, journal_scope) = binding(settings, &scope, state_file).await?;
-        let guard = GuardedChunkTable::bind(
-            &settings.index,
-            "chunks",
-            provider.metadata().clone(),
-            coordinator.clone(),
-        )
-        .map_err(|_| "index binding unavailable")?;
-        let state = coordinator.state().clone();
-        let lease = state
-            .acquire_lease(now_ms() / 1000, 330)
-            .map_err(|_| "index writer busy")?;
-        let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| now_ms() / 1000);
-        let setup = if settings.index.join("chunks.lance").exists() {
-            guard.ensure_startup_indexes(lease.clone(), clock).await
-        } else {
-            guard.create_empty(lease.clone(), clock).await
-        };
-        let _ = state.release_lease(&lease, now_ms() / 1000);
-        setup.map_err(|_| "index unavailable or incompatible")?;
-        let handler = AuthoritativePageRefresh::new(
-            source,
-            guard,
-            coordinator.clone(),
+        let runtime = crate::index_runtime::IndexRuntime::compose(
+            settings,
+            &state_file,
             scope,
-            &journal_scope,
-            ChunkConfig {
-                target_chars: 1000,
-                overlap_chars: 100,
-            },
+            source,
+            provider,
+            crate::index_runtime::OpenMode::Initialize,
         )
-        .map_err(|_| "authoritative handler unavailable")?;
+        .await?;
+        let coordinator = runtime.coordinator;
+        let state = coordinator.state().clone();
+        let handler = runtime.handler;
+        let provider = runtime.provider;
         Ok(Some(Worker {
             state,
             scope: InboxScope {
@@ -239,28 +222,6 @@ pub mod runtime {
                     | notion_knowledge_core::logging::Level::Debug
             ),
         }))
-    }
-    async fn binding(
-        settings: &WorkerSettings,
-        scope: &LifecycleScope,
-        state_file: std::path::PathBuf,
-    ) -> Result<(Arc<IndexCommitCoordinator>, ReconciliationScope), &'static str> {
-        let journal = notion_knowledge_retrieval::planner::production_scope(scope)
-            .map_err(|_| "invalid index scope")?;
-        let binding = CommitBinding::new(
-            "chunks",
-            &scope.workspace_id,
-            &journal,
-            &scope.generation.to_string(),
-            scope.generation,
-        )
-        .map_err(|_| "invalid index binding")?;
-        let index = settings.index.clone();
-        let coordinator =
-            blocking(move || IndexCommitCoordinator::initialize(index, state_file, binding))
-                .await?
-                .map_err(|_| "index authority binding unavailable")?;
-        Ok((coordinator, journal))
     }
     impl Worker {
         pub async fn run(&self, stop: CancellationToken) -> Result<(), &'static str> {
