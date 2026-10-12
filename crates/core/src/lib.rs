@@ -86,3 +86,6 @@ pub mod append;
 
 /// Server-trusted confirmation gate for destructive operations (#82).
 pub mod destructive;
+
+/// Lossless pure unique-section planner for future bounded edits (#311).
+pub mod sections;
