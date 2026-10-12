@@ -103,6 +103,74 @@ impl SqliteSyncStateStore {
         Self::from_connection(connection)
     }
 
+    /// Inspect an existing current-schema database without creation or migration.
+    /// SQLite enforces read-only access even if a caller reaches a mutation API.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, SyncStateError> {
+        Self::open_current(path.as_ref(), true)
+    }
+    /// Open an existing current-schema writer without creation or migration.
+    pub fn open_existing(path: impl AsRef<Path>) -> Result<Self, SyncStateError> {
+        Self::open_current(path.as_ref(), false)
+    }
+    fn open_current(path: &Path, read_only: bool) -> Result<Self, SyncStateError> {
+        if read_only {
+            // A SQLite READ_ONLY query may still create WAL/SHM auxiliaries.
+            // Production uses the default rollback journal. Refuse WAL (or
+            // invalid headers) BEFORE opening SQLite; immutable mode would
+            // incorrectly hide authoritative live WAL data.
+            use std::io::Read;
+            let mut header = [0u8; 20];
+            fs::File::open(path)
+                .and_then(|mut file| file.read_exact(&mut header))
+                .map_err(|_| SyncStateError::Unavailable)?;
+            if &header[..16] != b"SQLite format 3\0" || header[18] != 1 || header[19] != 1 {
+                return Err(SyncStateError::UnsupportedSchema);
+            }
+        }
+        let connection = Connection::open_with_flags(
+            path,
+            if read_only {
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            } else {
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+            },
+        )
+        .map_err(map_sqlite_error)?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(map_sqlite_error)?;
+        connection
+            .execute_batch(if read_only {
+                "PRAGMA query_only = ON;"
+            } else {
+                "PRAGMA foreign_keys = ON;"
+            })
+            .map_err(map_sqlite_error)?;
+        let applied = {
+            let mut statement = connection
+                .prepare("SELECT version, name FROM schema_migrations ORDER BY version")
+                .map_err(map_sqlite_error)?;
+            let rows = statement
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+                .map_err(map_sqlite_error)?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(map_sqlite_error)?
+        };
+        if applied.len() != MIGRATIONS.len()
+            || applied.iter().zip(MIGRATIONS).any(
+                |((version, name), (expected_version, expected_name, _))| {
+                    version != expected_version || name != expected_name
+                },
+            )
+        {
+            return Err(SyncStateError::UnsupportedSchema);
+        }
+        let store = Self {
+            connection: Mutex::new(connection),
+        };
+        Ok(store)
+    }
+
     pub fn open_in_memory() -> Result<Self, SyncStateError> {
         let connection = Connection::open_in_memory().map_err(map_sqlite_error)?;
         Self::from_connection(connection)

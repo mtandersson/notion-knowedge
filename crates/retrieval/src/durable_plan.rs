@@ -306,7 +306,7 @@ impl IndexCommitCoordinator {
     /// from persisted plan bytes. Loaded evidence must be authoritatively revalidated.
     pub fn reconciliation_plan(&self, run: &str) -> Result<DurablePlan, JournalError> {
         self.identities().map_err(|_| JournalError::ScopeMismatch)?;
-        self.state().journal_transaction(|db| {
+        self.state().journal_read(|db| {
             self.validate_binding(db)
                 .map_err(|_| JournalError::ScopeMismatch)?;
             load(db, run, self.binding())
@@ -320,7 +320,7 @@ impl IndexCommitCoordinator {
         page: &str,
     ) -> Result<Option<PreparedOperation>, JournalError> {
         self.identities().map_err(|_| JournalError::ScopeMismatch)?;
-        self.state().journal_transaction(|db| {
+        self.state().journal_read(|db| {
             self.validate_binding(db).map_err(|_|JournalError::ScopeMismatch)?;
             load(db,run,self.binding())?;
             let prepared:Option<String>=db.query_row("SELECT prepared FROM reconciliation_plan_progress WHERE run_id=?1 AND page_id=?2",params![run,page],|r|r.get(0)).optional().map_err(sql)?.ok_or(JournalError::InvalidInput)?;
@@ -453,7 +453,7 @@ impl IndexCommitCoordinator {
         page: &str,
     ) -> Result<(DurablePage, bool), JournalError> {
         self.identities().map_err(|_| JournalError::ScopeMismatch)?;
-        self.state().journal_transaction(|db| {
+        self.state().journal_read(|db| {
             self.validate_binding(db).map_err(|_|JournalError::ScopeMismatch)?;
             let plan=load(db,run,self.binding())?;
             let original=plan.pages.get(page).ok_or(JournalError::InvalidInput)?;
@@ -518,7 +518,7 @@ impl IndexCommitCoordinator {
     }
     pub fn reconciliation_progress(&self, run: &str) -> Result<DurableProgress, JournalError> {
         self.identities().map_err(|_| JournalError::ScopeMismatch)?;
-        self.state().journal_transaction(|db| {
+        self.state().journal_read(|db| {
             self.validate_binding(db).map_err(|_|JournalError::ScopeMismatch)?;
             let p=load(db,run,self.binding())?;
             let mut result=DurableProgress {scanned:p.inspected_ids.len() as u64,planned_refresh:p.pages.values().filter(|p|matches!(p.difference,ProposedDifference::Missing|ProposedDifference::Stale|ProposedDifference::Restored)).count() as u64,planned_delete:p.pages.values().filter(|p|p.difference==ProposedDifference::Orphan).count() as u64,changed:0,deleted:0,unchanged:0,pending:BTreeSet::new(),successful:BTreeMap::new(),failed:BTreeMap::new(),planning_failures:p.planning_failures,run_failures:BTreeMap::new()};
