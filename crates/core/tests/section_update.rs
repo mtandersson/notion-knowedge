@@ -182,8 +182,9 @@ fn gate(fixture: Arc<Fixture>) -> RootScopeGate {
     .unwrap()
 }
 
-#[derive(Default)]
 type LedgerRecord = (String, u8, Option<VerifiedReceipt>);
+
+#[derive(Default)]
 struct Ledger {
     data: Mutex<HashMap<String, LedgerRecord>>,
     starts: AtomicUsize,
