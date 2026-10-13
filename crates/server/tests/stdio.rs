@@ -38,6 +38,7 @@ async fn stdio_exchange(read_only: bool) {
             json!({"jsonrpc": "2.0", "id": 3, "method": "ping"}),
             json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"knowledge_search","arguments":{"query":"find notes","limit":5,"mode":"hybrid","filters":{"page_ids":["page-1"]}}}}),
             json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"knowledge_upload_file","arguments":{"file":{"download_url":"https://files.example.test/input?token=private-sentinel","file_id":"file_test"}}}}),
+            json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"knowledge_sync_status","arguments":{}}}),
         ] {
             stdin.write_all(request.to_string().as_bytes()).await?;
             stdin.write_all(b"\n").await?;
@@ -92,6 +93,10 @@ async fn stdio_exchange(read_only: bool) {
             assert!(response.get("error").is_none(), "{response}");
         }
     }
+    assert_eq!(
+        responses[5]["result"]["structuredContent"],
+        serde_json::to_value(notion_knowledge_core::sync_status::SyncStatus::default()).unwrap()
+    );
     let initialized = &responses[0]["result"];
     assert_eq!(initialized["protocolVersion"], "2025-03-26");
     assert!(initialized["capabilities"]["tools"].is_object());
@@ -105,7 +110,7 @@ async fn stdio_exchange(read_only: bool) {
         common::assert_search_catalog(tools);
     } else {
         let tools = tools.as_array().unwrap();
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 4);
         let upload = tools
             .iter()
             .find(|tool| tool["name"] == "knowledge_upload_file")

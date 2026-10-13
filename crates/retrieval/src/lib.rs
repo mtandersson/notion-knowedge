@@ -54,3 +54,5 @@ pub mod runner;
 /// Fenced, scoped periodic schedule authority (does not start a runtime).
 #[cfg(unix)]
 pub mod schedule;
+
+pub mod sync_status;

@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 
 pub fn assert_search_catalog(tools: &Value) {
     let tools = tools.as_array().expect("tools catalog");
-    assert_eq!(tools.len(), 2);
+    assert_eq!(tools.len(), 3);
     let tool = tools
         .iter()
         .find(|tool| tool["name"] == "knowledge_search")

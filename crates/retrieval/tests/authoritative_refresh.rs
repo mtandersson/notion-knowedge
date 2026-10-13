@@ -3564,3 +3564,161 @@ async fn reconciliation_mixed_inventory_counts_missing_stale_restored_orphan_and
     assert_eq!(source.body_reads.load(Ordering::SeqCst), reads);
     assert_eq!(provider.embeddings(), embeddings);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn successful_reconciliation_is_durable_and_repeated_completion_preserves_original_time() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let provider = CountingProvider::new(index.embed.clone());
+    let service = runner(&index, &source);
+    assert_eq!(
+        index.coordinator.last_successful_reconciliation().unwrap(),
+        None
+    );
+    service
+        .apply("success", index.lease.clone(), clock(), &provider)
+        .await
+        .unwrap();
+    assert_eq!(
+        index.coordinator.last_successful_reconciliation().unwrap(),
+        Some(10)
+    );
+    service.complete("success", &index.lease, 20).unwrap();
+    assert_eq!(
+        index.coordinator.last_successful_reconciliation().unwrap(),
+        Some(10)
+    );
+    let reopened = IndexCommitCoordinator::open_read_only(
+        &index.index,
+        &index.db,
+        index.coordinator.binding().clone(),
+    )
+    .unwrap();
+    assert_eq!(reopened.last_successful_reconciliation().unwrap(), Some(10));
+    assert!(
+        IndexCommitCoordinator::open_read_only(
+            &index.index,
+            &index.db,
+            CommitBinding::new("chunks", "foreign-workspace", &index.journal_scope, "1", 1)
+                .unwrap()
+        )
+        .is_err()
+    );
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn incomplete_or_errorful_completed_reconciliation_never_claims_success() {
+    for mode in ["incomplete", "planning-error", "run-error", "failed-page"] {
+        let index = Fixture::new();
+        index.create().await;
+        let source = HttpNotion::start().await;
+        let provider = CountingProvider::new(index.embed.clone());
+        let service = runner(&index, &source);
+        let mut plan = service.dry_run().await.unwrap();
+        match mode {
+            "incomplete" => plan.traversal_complete = false,
+            "planning-error" => {
+                plan.errors.insert(
+                    "inaccessible-sentinel".into(),
+                    notion_knowledge_retrieval::planner::PlanError::Permission,
+                );
+            }
+            "run-error" => plan
+                .run_errors
+                .push(notion_knowledge_retrieval::planner::PlanError::Source),
+            _ => {}
+        }
+        record_plan(&index, mode, &plan);
+        if mode == "failed-page" {
+            source.change(|m| m.inaccessible_page = true);
+        }
+        service
+            .apply(mode, index.lease.clone(), clock(), &provider)
+            .await
+            .unwrap();
+        service.complete(mode, &index.lease, 20).unwrap();
+        assert_eq!(
+            index.coordinator.last_successful_reconciliation().unwrap(),
+            None,
+            "{mode}"
+        );
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicitly_recovered_page_failure_can_complete_successfully_with_historical_failure_retained()
+ {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let provider = CountingProvider::new(index.embed.clone());
+    let service = runner(&index, &source);
+    let plan = service.dry_run().await.unwrap();
+    record_plan(&index, "recovered", &plan);
+    source.change(|m| m.inaccessible_page = true);
+    service
+        .apply("recovered", index.lease.clone(), clock(), &provider)
+        .await
+        .unwrap();
+    assert_eq!(
+        index.coordinator.last_successful_reconciliation().unwrap(),
+        None
+    );
+    source.change(|m| m.inaccessible_page = false);
+    service
+        .retry_page("recovered", PAGE, index.lease.clone(), clock(), &provider)
+        .await
+        .unwrap();
+    service.complete("recovered", &index.lease, 20).unwrap();
+    assert_eq!(
+        index.coordinator.last_successful_reconciliation().unwrap(),
+        Some(10)
+    );
+    let raw = rusqlite::Connection::open(&index.db).unwrap();
+    assert!(
+        raw.query_row(
+            "SELECT COUNT(*) FROM reconciliation_failure_history",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap()
+            > 0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn success_receipt_failure_cannot_acknowledge_terminal_reconciliation() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let provider = CountingProvider::new(index.embed.clone());
+    let service = runner(&index, &source);
+    let raw = rusqlite::Connection::open(&index.db).unwrap();
+    raw.execute_batch("CREATE TRIGGER reject_success BEFORE INSERT ON reconciliation_success BEGIN SELECT RAISE(ABORT,'receipt unavailable'); END;").unwrap();
+    assert!(
+        service
+            .apply("atomic-success", index.lease.clone(), clock(), &provider)
+            .await
+            .is_err()
+    );
+    assert_ne!(
+        index
+            .coordinator
+            .state()
+            .run("atomic-success", &index.journal_scope)
+            .unwrap()
+            .phase,
+        notion_knowledge_core::reconciliation::RunPhase::Completed
+    );
+    assert_eq!(
+        index.coordinator.last_successful_reconciliation().unwrap(),
+        None
+    );
+    raw.execute_batch("DROP TRIGGER reject_success").unwrap();
+    service
+        .complete("atomic-success", &index.lease, 20)
+        .unwrap();
+    assert_eq!(
+        index.coordinator.last_successful_reconciliation().unwrap(),
+        Some(20)
+    );
+}

@@ -12,6 +12,7 @@ fn default_keeps_only_existing_operations_not_arbitrary_future_names() {
     for name in [
         "knowledge_search",
         "knowledge_get",
+        "knowledge_sync_status",
         "knowledge_upload_file",
         "knowledge_create_page",
         "knowledge_append",
@@ -103,6 +104,7 @@ fn catalog_and_get_tool_match_for_read_write_and_destructive_previews() {
         names,
         [
             "knowledge_search",
+            "knowledge_sync_status",
             "knowledge_append",
             "knowledge_archive_page",
         ]
@@ -120,7 +122,7 @@ fn catalog_and_get_tool_match_for_read_write_and_destructive_previews() {
         assert!(server.get_tool(name).is_some(), "{name}");
     }
     let readonly = server.with_read_only(true);
-    assert_eq!(readonly.tool_catalog().len(), 1);
+    assert_eq!(readonly.tool_catalog().len(), 2);
     assert_eq!(readonly.tool_catalog()[0].name.as_ref(), "knowledge_search");
     assert!(readonly.get_tool("knowledge_archive_page").is_none());
 }

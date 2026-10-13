@@ -139,6 +139,8 @@ async fn http_client_initializes_discovers_calls_and_receives_structured_errors(
             .send().await.unwrap()).await;
         assert_eq!(tools["id"], 2);
         common::assert_search_catalog(&tools["result"]["tools"]);
+        let sync_status = frame(post().json(&json!({"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"knowledge_sync_status","arguments":{}}})).send().await.unwrap()).await;
+        assert_eq!(sync_status["result"]["structuredContent"], serde_json::to_value(notion_knowledge_core::sync_status::SyncStatus::default()).unwrap());
         for mode in ["semantic", "lexical", "hybrid"] {
             let result = frame(post().json(&json!({"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"knowledge_search","arguments":{"query":"notes","limit":1,"mode":mode}}})).send().await.unwrap()).await;
             assert_eq!(result["result"]["isError"], true);
