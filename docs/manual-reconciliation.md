@@ -73,7 +73,7 @@ or lost lease, `5` operator cancellation. Status preserves work-failure exit
 code when the inspected run contains failures; it never implies a failed run
 was repaired merely by inspecting it.
 
-Periodic scheduling is the second child of #243 (#350) and production packaging
+Periodic scheduling is documented below; production packaging
 remains #145. This command is operational manual execution, not a scheduler.
 
 Run credential-free real-command fixtures with:
@@ -85,3 +85,73 @@ nix develop .#spike --command cargo test -p notion-knowledge-server --features w
 The fixtures invoke the real argument/service/shared-composition boundary with
 a fake HTTP Notion server, real SQLite and on-disk guarded LanceDB, and a counting
 provider. No runtime test URL, provider selector or authentication bypass exists.
+
+## Periodic serving and explicit recovery
+
+Build with `webhook-worker` and run `--http`. Set
+`NK_RECONCILIATION_INTERVAL_SECONDS=60..2592000` to opt in. It requires
+`NK_NOTION_AUTH=integration`, the local `NOTION_TOKEN`, trusted Notion root
+scope (including configured exclusions), `NK_WEBHOOK_INDEX_DIR`,
+`NK_WEBHOOK_QWEN_ASSETS` and an absolute `NK_WEBHOOK_STATE_FILE`.
+Periodic serving works with `NK_WEBHOOK_WORKER=false` and webhook mode disabled.
+When both workers are enabled, they use one composed coordinator, guarded Lance
+table, provider and authoritative pipeline. Production uses authenticated Notion
+and offline Qwen; fixture transports/providers cannot be selected by environment.
+Packaging remains #145.
+
+Optional retry settings are `NK_RECONCILIATION_MAX_ATTEMPTS` (1..16, default 4),
+`NK_RECONCILIATION_BACKOFF_SECONDS` (1..86400, default 5), and
+`NK_RECONCILIATION_MAX_BACKOFF_SECONDS` (initial backoff..604800, default 300).
+Source/inventory/page attempts use `NK_WEBHOOK_TIMEOUT_SECONDS` (1..300,
+default 60); admission polls use `NK_WEBHOOK_POLL_MS` (10..60000, default 1000).
+A new schedule is due immediately. Exact configuration replay preserves its
+persisted deadline, cycle, failure budget and active run. Completion and the next
+`completion time + interval` deadline commit in the same SQLite transaction.
+Changing configuration never silently discards existing authority or work.
+
+The lease covers one returned runner operation and is renewed between operations.
+Busy manual/webhook/external owners defer work without spending a failure attempt.
+Restart claims the stored active run and resumes its existing plan and receipts.
+Cancellation stops admission, cancels source waits, drains submitted owned effects,
+checkpoints pending work without spending retry budget and releases the lease.
+Fatal scheduled-worker errors stop the HTTP service through its shared supervisor.
+
+Inspect and recover existing compatible state through the real operator command:
+
+```sh
+notion-knowledge-server --reconcile schedule status
+notion-knowledge-server --reconcile schedule status AFTER_SEQUENCE
+notion-knowledge-server --reconcile status RUN
+notion-knowledge-server --reconcile retry RUN PAGE
+notion-knowledge-server --reconcile schedule retry DEADLINE_UNIX_SECONDS
+notion-knowledge-server --reconcile schedule abandon DEADLINE_UNIX_SECONDS
+notion-knowledge-server --reconcile schedule interval SECONDS DEADLINE_UNIX_SECONDS
+notion-knowledge-server --reconcile schedule configure INTERVAL ATTEMPTS BACKOFF MAX_BACKOFF DEADLINE_UNIX_SECONDS
+```
+
+Status is read-only and reports the durable deadline, active run, cycle, attempts,
+classified bounded history and active-run scanned/changed/deleted/unchanged/error
+counts. History pages contain at most 1000 events; `history_next` supplies the next cursor.
+Run status also reports retained classified failure evidence after successful retry. Source titles, content, URLs,
+credentials and upstream error strings are excluded. Run status retains existing
+sanitized page-failure identifiers for targeted explicit retry.
+
+Retryable run-level failures retain the active run and use exponential capped
+backoff; exhaustion stops automatic admission. Actual failed pages and planning
+failures hold the cycle after remaining independent safe pending pages are handled,
+without implicit retry or spending the transient budget. Held or exhausted runs
+reserve no webhook admission; unrelated events continue while failure evidence
+remains available for explicit recovery. Checkpointed healthy pending runs reserve
+admission until resume or explicit abandonment, without consuming inbox attempts.
+Retry failed pages explicitly; `schedule retry` rejects unresolved failed work.
+Immutable planning/run failures require explicit `schedule abandon` followed by a
+fresh cycle. Abandon preserves historical plans, receipts and failures and consumes
+the lease; a new worker must acquire a new fence. Pending submitted receipts or an
+external owner reject abandonment as busy. Recover their original run first.
+Successful later cycles preserve historical failures.
+
+Stop serving before changing the interval with `schedule interval`; it requires no
+active cycle and keeps retry bounds. Use `schedule configure` to explicitly change all four policy bounds between
+cycles. Then update the environment to match the persisted policy before restart. Root/exclusion/generation authority changes
+require recovery under the old binding before an explicit authority transition;
+automatic registration fails closed on mismatched authority.

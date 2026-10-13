@@ -140,6 +140,8 @@ pub mod runtime {
     /// the directory commit lock. Fixture tests inject the real Notion transport
     /// and a deterministic provider through these same production boundaries.
     pub struct Worker {
+        pub webhook_enabled: bool,
+        pub scheduled: Option<Arc<crate::scheduled_reconciliation::runtime::Worker>>,
         pub state: Arc<SqliteSyncStateStore>,
         pub scope: InboxScope,
         pub integration: String,
@@ -160,17 +162,35 @@ pub mod runtime {
     pub async fn configured(
         config: &crate::config::Config,
     ) -> Result<Option<Worker>, &'static str> {
-        let Some(settings) = &config.webhook_worker else {
+        let Some(settings) = config
+            .webhook_worker
+            .as_ref()
+            .or(config.reconciliation_index.as_ref())
+        else {
             return Ok(None);
         };
-        let crate::webhook::WebhookConfig::Verified {
-            workspace_id,
-            subscription_id,
-            integration_id,
-            ..
-        } = &config.webhook
-        else {
-            return Err("verified webhook configuration required");
+        let (workspace_id, subscription_id, integration_id) = match &config.webhook {
+            crate::webhook::WebhookConfig::Verified {
+                workspace_id,
+                subscription_id,
+                integration_id,
+                ..
+            } => (
+                workspace_id.clone(),
+                subscription_id.clone(),
+                integration_id.clone(),
+            ),
+            _ if config.reconciliation_schedule.is_some() => (
+                config
+                    .notion_scope
+                    .as_ref()
+                    .ok_or("Notion scope required")?
+                    .workspace_id
+                    .clone(),
+                "periodic".into(),
+                String::new(),
+            ),
+            _ => return Err("verified webhook configuration required"),
         };
         let crate::config::NotionAuth::Integration(token) = &config.notion_auth else {
             return Err("integration credential required");
@@ -200,11 +220,21 @@ pub mod runtime {
             crate::index_runtime::OpenMode::Initialize,
         )
         .await?;
-        let coordinator = runtime.coordinator;
+        let coordinator = runtime.coordinator.clone();
         let state = coordinator.state().clone();
-        let handler = runtime.handler;
-        let provider = runtime.provider;
+        let handler = runtime.handler.clone();
+        let provider = runtime.provider.clone();
+        let scheduled = config.reconciliation_schedule.clone().map(|policy| {
+            Arc::new(crate::scheduled_reconciliation::runtime::Worker {
+                index: runtime,
+                settings: policy,
+                poll: Duration::from_millis(settings.poll_ms),
+                timeout: Duration::from_secs(settings.timeout_seconds),
+            })
+        });
         Ok(Some(Worker {
+            webhook_enabled: config.webhook_worker.is_some(),
+            scheduled,
             state,
             scope: InboxScope {
                 workspace_id: workspace_id.clone(),
@@ -225,6 +255,32 @@ pub mod runtime {
     }
     impl Worker {
         pub async fn run(&self, stop: CancellationToken) -> Result<(), &'static str> {
+            if let Some(scheduled) = &self.scheduled {
+                if !self.webhook_enabled {
+                    return scheduled.run(stop).await;
+                }
+                let stop_on_exit = stop.clone();
+                let scheduled_loop = async {
+                    let _guard = stop_on_exit.drop_guard();
+                    scheduled.run(stop.clone()).await
+                };
+                let webhook_stop = stop.clone();
+                let webhook_loop = async {
+                    let _guard = webhook_stop.drop_guard();
+                    self.run_webhooks(stop.clone()).await
+                };
+                let (webhook_result, scheduled_result) = tokio::join!(webhook_loop, scheduled_loop);
+                let result = webhook_result.and(scheduled_result);
+                stop.cancel();
+                self.coordinator
+                    .drain_owned()
+                    .await
+                    .map_err(|_| "index drain failed")?;
+                return result;
+            }
+            self.run_webhooks(stop).await
+        }
+        async fn run_webhooks(&self, stop: CancellationToken) -> Result<(), &'static str> {
             let mut page_first = true;
             loop {
                 if stop.is_cancelled() {
@@ -257,6 +313,23 @@ pub mod runtime {
                 Err(notion_knowledge_core::reconciliation::JournalError::Busy) => return Ok(false),
                 Err(_) => return Err("index lease unavailable"),
             };
+            let coordinator = self.coordinator.clone();
+            let token = lease.clone();
+            let admitted = blocking(move || {
+                coordinator.ensure_no_active_reconciliation(&token, now_ms() / 1000)
+            })
+            .await?;
+            if let Err(error) = admitted {
+                let state = self.state.clone();
+                blocking(move || state.release_lease(&lease, now_ms() / 1000))
+                    .await?
+                    .map_err(|_| "index lease release failed")?;
+                return if error == notion_knowledge_core::reconciliation::JournalError::Busy {
+                    Ok(false)
+                } else {
+                    Err("index authority unavailable")
+                };
+            }
             let state = self.state.clone();
             let claim = blocking(move || {
                 let page = || {

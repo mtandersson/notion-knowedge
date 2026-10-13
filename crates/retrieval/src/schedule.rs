@@ -208,6 +208,22 @@ impl IndexCommitCoordinator {
             action(db)
         })
     }
+    /// Gate event admission under the common lease before consuming an inbox
+    /// attempt. A checkpointed reconciliation remains its logical owner until
+    /// completion or explicit recovery, even between service processes. Held
+    /// or exhausted failures reserve no live admission and must not starve events.
+    pub fn ensure_no_active_reconciliation(
+        &self,
+        lease: &Lease,
+        now: i64,
+    ) -> Result<(), JournalError> {
+        self.schedule_write(lease, now, |db| {
+            let mut statement = db.prepare("SELECT run_id FROM reconciliation_runs r WHERE phase<>2 AND abandoned=0 AND failure IS NULL AND NOT EXISTS(SELECT 1 FROM reconciliation_schedules s WHERE s.active_run=r.run_id AND s.status IN(2,3))").map_err(sql)?;
+            let runs = statement.query_map([], |r|r.get::<_,String>(0)).map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)?;
+            for run in runs { if !page_failures(db,&run)? { return Err(JournalError::Busy); } }
+            Ok(())
+        })
+    }
     /// Register once. Exact replay preserves deadlines, active identity and budgets.
     /// Different policy/authority is rejected; use explicit recovery/reconfiguration.
     pub fn register_schedule(

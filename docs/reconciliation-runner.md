@@ -5,7 +5,7 @@
 It uses the same coordinator `Arc`, guarded Lance table, SQLite state, workspace,
 complete root/exclusion `webhook-v1` scope, generation and epoch as the production
 webhook worker. Construction rejects incompatible planner/refresh ownership.
-This application service is used by the [manual operator command](manual-reconciliation.md); periodic scheduling is the second child of #243.
+This application service is used by the [manual operator command](manual-reconciliation.md); the opt-in periodic HTTP caller uses the same runner and coordinator.
 
 ## Execution and recovery
 

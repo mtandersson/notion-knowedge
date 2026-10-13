@@ -507,12 +507,14 @@ The [durable reconciliation journal](docs/reconciliation-journal.md) supplies sc
 The [manual authoritative reconciliation commands](docs/manual-reconciliation.md)
 provide apply, dry-run, resume, status and explicit failed-page retry through the
 same production composition as the webhook worker. Read-only commands inspect
-existing compatible state without initialization or migration. Periodic scheduling
-remains the second child of #243.
+existing compatible state without initialization or migration. Opt-in periodic
+reconciliation runs in the same supervised HTTP lifecycle and persists deadlines,
+active runs and bounded retry history; the same guide documents configuration and
+explicit schedule recovery.
 
 The [read-only reconciliation planner](docs/reconciliation-planner.md) compares scoped
 SQLite/LanceDB ownership with fresh authoritative metadata and lifecycle evidence.
-Dry-run writes no acknowledgments. The [guarded durable reconciliation runner](docs/reconciliation-runner.md) applies differences through the shared lifecycle pipeline and resumes actual receipts; manual execution uses the operator command; periodic scheduling remains separate.
+Dry-run writes no acknowledgments. The [guarded durable reconciliation runner](docs/reconciliation-runner.md) applies differences through the shared lifecycle pipeline and resumes actual receipts; manual and periodic execution use the same production authority and runner.
 
 The [owned index commit coordinator](docs/index-commits.md) binds trusted local index authority and serializes cancellable callers through durable page checkpoints; concrete LanceDB consumers follow separately.
 
