@@ -24,12 +24,20 @@ impl GraphEdgeStore for FixtureGraph {
         Err(SyncStateError::Unavailable)
     }
     fn edges_from(&self, page: &str) -> Result<Vec<GraphEdge>, SyncStateError> {
-        Ok(self.edges.iter().filter(|e| e.source_page_id() == page).cloned().collect())
+        Ok(self
+            .edges
+            .iter()
+            .filter(|e| e.source_page_id() == page)
+            .cloned()
+            .collect())
     }
     fn edges_to(&self, page: &str) -> Result<Vec<GraphEdge>, SyncStateError> {
-        Ok(self.edges.iter().filter(|e| {
-            matches!(e.target(), GraphTarget::Page { page_id } if page_id == page)
-        }).cloned().collect())
+        Ok(self
+            .edges
+            .iter()
+            .filter(|e| matches!(e.target(), GraphTarget::Page { page_id } if page_id == page))
+            .cloned()
+            .collect())
     }
 }
 fn hit(page: &str, chunk: &str, score: f32, dual_path: bool) -> SearchHit {
@@ -57,8 +65,10 @@ fn pos(rows: &[GraphScoredHit], id: &str) -> Option<usize> {
 }
 fn read_fixture() -> (Value, Value) {
     (
-        serde_json::from_str(include_str!("../../../eval/retrieval/personal-knowledge-v1.json"))
-            .expect("versioned fictional corpus"),
+        serde_json::from_str(include_str!(
+            "../../../eval/retrieval/personal-knowledge-v1.json"
+        ))
+        .expect("versioned fictional corpus"),
         serde_json::from_str(include_str!("../../../eval/retrieval/graph-boost-v1.json"))
             .expect("graph case manifest"),
     )
@@ -70,8 +80,12 @@ fn bilingual_graph_cases_exercise_real_reranker_without_new_candidates() {
     let mut owner = BTreeMap::<String, String>::new();
     for page in dataset["pages"].as_array().unwrap() {
         let id = page["id"].as_str().unwrap().to_owned();
-        let chunks: Vec<_> = page["chunks"].as_array().unwrap().iter()
-            .map(|chunk| chunk["id"].as_str().unwrap().to_owned()).collect();
+        let chunks: Vec<_> = page["chunks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|chunk| chunk["id"].as_str().unwrap().to_owned())
+            .collect();
         for chunk in &chunks {
             owner.insert(chunk.clone(), id.clone());
         }
@@ -83,12 +97,17 @@ fn bilingual_graph_cases_exercise_real_reranker_without_new_candidates() {
         for target in page["links"].as_array().unwrap() {
             let target_id = target.as_str().unwrap();
             assert!(pages.contains_key(target_id), "fixture edge must resolve");
-            edges.push(GraphEdge::new(
-                source.into(),
-                GraphTarget::Page { page_id: target_id.into() },
-                "link:page".into(),
-                "markdown:1".into(),
-            ).unwrap());
+            edges.push(
+                GraphEdge::new(
+                    source.into(),
+                    GraphTarget::Page {
+                        page_id: target_id.into(),
+                    },
+                    "link:page".into(),
+                    "markdown:1".into(),
+                )
+                .unwrap(),
+            );
         }
     }
     let graph = FixtureGraph { edges };
@@ -131,24 +150,37 @@ fn bilingual_graph_cases_exercise_real_reranker_without_new_candidates() {
         let baseline = rank_candidates(
             before.clone(),
             &graph,
-            GraphBoostConfig { enabled: false, ..config },
+            GraphBoostConfig {
+                enabled: false,
+                ..config
+            },
             before.len(),
             None,
-        ).unwrap();
+        )
+        .unwrap();
         let boosted = rank_candidates(before, &graph, config, baseline.len(), None).unwrap();
         assert_eq!(baseline.len(), boosted.len());
-        let baseline_ids: std::collections::BTreeSet<_> = baseline.iter()
-            .map(|r| r.hit.source.chunk_id.as_str()).collect();
-        let boosted_ids: std::collections::BTreeSet<_> = boosted.iter()
-            .map(|r| r.hit.source.chunk_id.as_str()).collect();
+        let baseline_ids: std::collections::BTreeSet<_> = baseline
+            .iter()
+            .map(|r| r.hit.source.chunk_id.as_str())
+            .collect();
+        let boosted_ids: std::collections::BTreeSet<_> = boosted
+            .iter()
+            .map(|r| r.hit.source.chunk_id.as_str())
+            .collect();
         assert_eq!(baseline_ids, boosted_ids, "graph must never add a chunk");
         for candidate in &boosted {
-            let original = baseline.iter()
-                .find(|b| b.hit.source.chunk_id == candidate.hit.source.chunk_id).unwrap();
+            let original = baseline
+                .iter()
+                .find(|b| b.hit.source.chunk_id == candidate.hit.source.chunk_id)
+                .unwrap();
             assert_eq!(candidate.hit.score, original.hit.score);
             assert_eq!(candidate.baseline_score, original.baseline_score);
         }
-        assert_eq!(boosted[0].hit.source.chunk_id, *seed, "graph may not overtake seed");
+        assert_eq!(
+            boosted[0].hit.source.chunk_id, *seed,
+            "graph may not overtake seed"
+        );
         if let Some(target) = target {
             if pos(&boosted, target) < pos(&baseline, target) {
                 improvements += 1;
@@ -159,7 +191,12 @@ fn bilingual_graph_cases_exercise_real_reranker_without_new_candidates() {
     }
     assert_eq!(linked, 6);
     assert_eq!(controls, 6);
-    assert_eq!(improvements, 6, "fixture edges ought to lift linked answers");
-    assert_eq!(controls_with_guard_promotion, 2,
-        "date-review negative controls must expose the irrelevant connected decision");
+    assert_eq!(
+        improvements, 6,
+        "fixture edges ought to lift linked answers"
+    );
+    assert_eq!(
+        controls_with_guard_promotion, 2,
+        "date-review negative controls must expose the irrelevant connected decision"
+    );
 }
