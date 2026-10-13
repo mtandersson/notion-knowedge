@@ -46,7 +46,7 @@ def load_cases(path, data):
     require(type(config["max_hops"]) is int and 1 <= config["max_hops"] <= 2,
             "invalid hop limit")
     require(type(config["weight"]) in (float, int)
-            and 0 < config["weight"] <= 1, "invalid boost weight")
+            and 0 < config["weight"] <= 0.5, "invalid boost weight")
     require(type(config["candidate_limit"]) is int
             and 1 <= config["candidate_limit"] <= 100, "invalid candidate limit")
     require(isinstance(cases.get("cases"), list) and cases["cases"],
@@ -109,7 +109,9 @@ def run_pair(data, cases, queries, chunks, adapter, timeout, top_k):
     base = {
         "schema_version": 1, "dataset_id": data["dataset_id"],
         "as_of": data["as_of"], "mode": "hybrid",
-        "top_k": top_k, "pages": data["pages"],
+        # Request the COMPLETE candidate pool to detect illegal graph-only
+        # additions, even when only top-k results are evaluated.
+        "top_k": cases["config"]["candidate_limit"], "pages": data["pages"],
         "queries": [{field: q[field] for field in ("id", "text", "language", "category")}
                     for q in selected],
     }
@@ -128,8 +130,15 @@ def run_pair(data, cases, queries, chunks, adapter, timeout, top_k):
                 json.dumps(requested_config, sort_keys=True),
                 "adapter did not acknowledge exact graph configuration")
         rankings[name] = harness.validate_response(
-            response, "hybrid", focused, set(chunks), top_k
+            response, "hybrid", focused, set(chunks), cases["config"]["candidate_limit"]
         )
+    # #65 is a reranker ONLY; introducing or losing chunk identities is an
+    # adapter contract violation, NOT a measured relevance gain or loss.
+    for qid in (q["id"] for q in selected):
+        before = rankings["baseline"][qid]
+        after = rankings["boosted"][qid]
+        require(len(before) == len(after) and set(before) == set(after),
+                "graph boost must preserve complete candidate identity set")
     return rankings
 
 
@@ -138,6 +147,7 @@ def compare(data, cases, queries, rankings, top_k):
     rows = []
     linked_rows, control_rows = [], []
     guard_regressions = []
+    guard_rank_regressions = []
     unjudged_regressions = []
     target_regressions = []
     target_improvements = 0
@@ -145,8 +155,8 @@ def compare(data, cases, queries, rankings, top_k):
         qid = case["query_id"]
         q = queries[qid]
         judged = {j["source_id"]: j["grade"] for j in q["relevant"]}
-        before = rankings["baseline"][qid]
-        after = rankings["boosted"][qid]
+        before = rankings["baseline"][qid][:top_k]
+        after = rankings["boosted"][qid][:top_k]
         metric_before = query_metrics(judged, before, top_k)
         metric_after = query_metrics(judged, after, top_k)
         target = case["target_source_id"]
@@ -156,6 +166,12 @@ def compare(data, cases, queries, rankings, top_k):
                             & set(case["guard_source_ids"]))
         if new_guards:
             guard_regressions.append(qid)
+        improved_guards = sorted(cid for cid in case["guard_source_ids"]
+                                 if cid in after
+                                 and (cid not in before or
+                                      after.index(cid) < before.index(cid)))
+        if improved_guards:
+            guard_rank_regressions.append(qid)
         new_unjudged = sorted((set(after[:K]) - set(before[:K])) - set(judged))
         if new_unjudged:
             unjudged_regressions.append(qid)
@@ -171,6 +187,7 @@ def compare(data, cases, queries, rankings, top_k):
             "boosted": {"ranked_source_ids": after, "metrics": metric_after},
             "target_rank_before": rank_before, "target_rank_after": rank_after,
             "new_guard_sources_top3": new_guards,
+            "promoted_guard_sources": improved_guards,
             "new_unjudged_sources_top3": new_unjudged,
         }
         rows.append(row)
@@ -185,7 +202,8 @@ def compare(data, cases, queries, rankings, top_k):
                 and la["ndcg_at_3"] > lb["ndcg_at_3"] + 0.001
                 and ca["ndcg_at_3"] + 0.001 >= cb["ndcg_at_3"]
                 and ca["mrr"] + 0.001 >= cb["mrr"]
-                and not guard_regressions and not unjudged_regressions
+                and not guard_regressions and not guard_rank_regressions
+                and not unjudged_regressions
                 and not target_regressions)
     return {
         "schema_version": 1, "dataset_id": data["dataset_id"],
@@ -201,6 +219,7 @@ def compare(data, cases, queries, rankings, top_k):
             "negative_controls": {"baseline": cb, "boosted": ca},
             "target_rank_improvements": target_improvements,
             "new_guard_regressions": guard_regressions,
+            "guard_rank_regressions": guard_rank_regressions,
             "new_unjudged_regressions": unjudged_regressions,
             "target_top3_regressions": target_regressions,
         }, "results": rows,
@@ -218,11 +237,14 @@ def main(argv=None):
     p.add_argument("--validate-only", action="store_true")
     args = p.parse_args(argv)
     try:
-        require(K <= args.top_k <= 100 and 0 < args.timeout <= 300,
+        require(type(args.top_k) is int and K <= args.top_k <= 100
+                and 0 < args.timeout <= 300,
                 "invalid top-k or timeout")
         harness = retrieval_module()
         data, _ = harness.load_dataset(args.dataset)
         cases, queries, chunks = load_cases(args.cases, data)
+        require(args.top_k <= cases["config"]["candidate_limit"],
+                "metric top-k cannot exceed graph candidate budget")
         if args.validate_only:
             require(not args.adapter, "validate-only cannot run adapter")
             print(f"graph cases valid: {len(cases['cases'])}")

@@ -38,3 +38,5 @@ pub mod webhook_worker;
 
 pub mod index_runtime;
 pub mod reconciliation_command;
+
+pub mod scheduled_reconciliation;

@@ -46,22 +46,32 @@ control_answer = {
     "date-review": "fixture:chunk:lighthouse-review:notes",
 }
 unrelated = "fixture:chunk:travel:list"
-other = "fixture:chunk:odling:plan"
+other = "fixture:chunk:bike-old:service"
+control_other = "fixture:chunk:reading:queue"
+control_unrelated = "fixture:chunk:odling:plan"
 results = []
 for query in payload["queries"]:
     stem = query["id"].rsplit("-", 1)[0]
     if stem in target:
-        baseline = [unrelated, guard[stem], target[stem]]
-        boosted = [target[stem], unrelated, guard[stem]]
+        baseline = [unrelated, guard[stem], target[stem], other]
+        boosted = [target[stem], unrelated, guard[stem], other]
         if fail == "no_lift": boosted = baseline
-        if fail == "lost_target": boosted = [unrelated, guard[stem], other]
+        if fail == "lost_target": boosted = [unrelated, guard[stem], other, target[stem]]
+        if fail == "guard_promoted": boosted = [guard[stem], unrelated, target[stem], other]
     else:
-        baseline = [control_answer[stem], unrelated, other]
+        baseline = [control_answer[stem], unrelated, control_unrelated,
+                    guard[stem], control_other]
         boosted = baseline[:]
         if fail == "drift":
-            boosted = [guard[stem], control_answer[stem], unrelated]
+            boosted = [guard[stem], control_answer[stem], unrelated,
+                       control_unrelated, control_other]
         if fail == "unjudged_drift":
-            boosted = ["fixture:chunk:reading:queue", control_answer[stem], unrelated]
+            boosted = [control_other, control_answer[stem], unrelated,
+                       control_unrelated, guard[stem]]
+        if fail == "graph_only":
+            boosted = [guard[stem], control_answer[stem], unrelated,
+                       control_unrelated, "fixture:chunk:project-lighthouse:decision"]
+        if fail == "lost_candidate": boosted = baseline[:-1]
     results.append({"query_id": query["id"],
                     "ranked_source_ids": boosted if payload["graph_boost"]["enabled"] else baseline})
 if fail == "duplicate":
@@ -70,6 +80,8 @@ if fail == "unknown":
     results[0]["ranked_source_ids"][0] = "private-unknown"
 if fail == "wrong_mode":
     payload["mode"] = "fts"
+if fail == "duplicate_rank":
+    results[0]["ranked_source_ids"][0] = results[0]["ranked_source_ids"][1]
 response = {
     "schema_version": 1,
     "dataset_id": payload["dataset_id"],
@@ -120,6 +132,7 @@ class GraphBoostEvaluationTests(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stderr)
         report = json.loads(first.stdout)
         self.assertEqual(report["evidence"], "adapter_measured")
+        self.assertEqual(report["config"]["candidate_limit"], 20)
         self.assertEqual(report["decision"], "candidate_for_review")
         self.assertEqual(report["summary"]["linked_queries"], 6)
         self.assertEqual(report["summary"]["control_queries"], 6)
@@ -134,7 +147,8 @@ class GraphBoostEvaluationTests(unittest.TestCase):
         )
 
     def test_zero_lift_and_false_positive_drift_leave_boost_off(self):
-        for mode in ("no_lift", "drift", "unjudged_drift", "lost_target"):
+        for mode in ("no_lift", "drift", "unjudged_drift", "lost_target",
+                     "guard_promoted"):
             with self.subTest(mode=mode):
                 run = self.invoke("--adapter", self.command, fail=mode)
                 self.assertEqual(run.returncode, 0, run.stderr)
@@ -146,10 +160,13 @@ class GraphBoostEvaluationTests(unittest.TestCase):
                     self.assertTrue(report["summary"]["new_unjudged_regressions"])
                 if mode == "lost_target":
                     self.assertTrue(report["summary"]["target_top3_regressions"])
+                if mode == "guard_promoted":
+                    self.assertEqual(len(report["summary"]["guard_rank_regressions"]), 6)
 
     def test_invalid_adapter_protocol_is_not_a_zero_quality_score(self):
         for mode in ("missing_echo", "wrong_echo", "duplicate", "unknown",
-                     "wrong_mode", "crash"):
+                     "wrong_mode", "crash", "graph_only", "lost_candidate",
+                     "duplicate_rank"):
             with self.subTest(mode=mode):
                 run = self.invoke("--adapter", self.command, fail=mode)
                 self.assertEqual(run.returncode, 2)
@@ -168,6 +185,7 @@ class GraphBoostEvaluationTests(unittest.TestCase):
 
         assert_bad(lambda m: m["config"].update({"max_hops": 4}))
         assert_bad(lambda m: m["config"].update({"weight": -0.1}))
+        assert_bad(lambda m: m["config"].update({"weight": 0.6}))
         assert_bad(lambda m: m["cases"][0].update({"guard_source_ids": [{}]}))
         assert_bad(lambda m: m["cases"][0].update({"target_source_id": "unknown"}))
         assert_bad(lambda m: m["cases"][0].update({
@@ -181,6 +199,7 @@ class GraphBoostEvaluationTests(unittest.TestCase):
     def test_missing_adapter_and_unsafe_output_paths(self):
         self.assertEqual(self.invoke().returncode, 2)
         self.assertEqual(self.invoke("--top-k", "2", "--validate-only").returncode, 2)
+        self.assertEqual(self.invoke("--top-k", "21", "--validate-only").returncode, 2)
         self.assertEqual(self.invoke("--adapter", self.command, "--output", str(DATASET)).returncode, 2)
         self.assertEqual(self.invoke("--adapter", self.command, "--output", str(CASES)).returncode, 2)
 

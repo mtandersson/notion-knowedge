@@ -31,6 +31,8 @@ pub struct Config {
     pub webhook_debounce: notion_knowledge_core::webhook::DebounceWindow,
     pub webhook_state_file: Option<std::path::PathBuf>,
     pub webhook_worker: Option<crate::webhook_worker::WorkerSettings>,
+    pub reconciliation_schedule: Option<crate::scheduled_reconciliation::Settings>,
+    pub reconciliation_index: Option<crate::webhook_worker::WorkerSettings>,
 }
 
 /// Secrets are excluded from Debug; allowed identifiers are provisioned,
@@ -564,7 +566,9 @@ impl Config {
             }
         };
         let webhook_state_file =
-            if matches!(webhook, crate::webhook::WebhookConfig::Verified { .. }) {
+            if matches!(webhook, crate::webhook::WebhookConfig::Verified { .. })
+                || lookup("NK_RECONCILIATION_INTERVAL_SECONDS").is_some()
+            {
                 let path = text(
                     lookup("NK_WEBHOOK_STATE_FILE").ok_or_else(|| {
                         invalid("NK_WEBHOOK_STATE_FILE", "required in verified mode")
@@ -619,7 +623,26 @@ impl Config {
             &webhook,
             notion_scope.as_ref(),
         )?;
+        let reconciliation_schedule = crate::scheduled_reconciliation::Settings::parse(
+            &mut lookup,
+            cfg!(all(unix, feature = "webhook-worker")) && notion_scope.is_some(),
+        )?;
+        if reconciliation_schedule.is_some() && !matches!(notion_auth, NotionAuth::Integration(_)) {
+            return Err(invalid(
+                "NK_RECONCILIATION_INTERVAL_SECONDS",
+                "requires authenticated Notion integration",
+            ));
+        }
+        let reconciliation_index = if reconciliation_schedule.is_some() {
+            Some(crate::webhook_worker::WorkerSettings::index_settings(
+                &mut lookup,
+            )?)
+        } else {
+            None
+        };
         Ok(Self {
+            reconciliation_index,
+            reconciliation_schedule,
             webhook_worker,
             webhook_state_file,
             webhook_debounce,

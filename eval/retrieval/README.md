@@ -304,7 +304,7 @@ production adapter bridge is runnable, this gate enforces the report contract
 but cannot certify an actual retrieval recall score.
 
 
-## Graph-boost evaluation protocol (#102; prerequisite #65)
+## Graph-boost evaluation protocol (#102; integrated with #65)
 
 The versioned [graph-boost-v1.json](graph-boost-v1.json) reuses the fictional
 12-page bilingual corpus and unchanged relevance judgments. Six Swedish/English
@@ -317,28 +317,45 @@ Run credential-free consistency and contract tests:
 
     python3 scripts/graph-boost-eval.py --validate-only
     python3 scripts/test-graph-boost-eval.py
+    cargo test -p notion-knowledge-core --test graph_boost_evaluation --locked
 
-Once #65 provides a real graph-aware adapter, run over an unchanged index:
+The production #65 graph reranker is now available. For a real multilingual
+model-backed evaluation, configure a trusted local adapter that calls the
+production hybrid retrieval + graph reranker over a single unchanged index:
 
     python3 scripts/graph-boost-eval.py --adapter "./path/to/real-adapter" --top-k 10 --output /tmp/graph-eval.json
 
 Both requests use mode=hybrid and the exact same corpus, model, queries, root
-scope, and top_k. Only graph_boost.enabled changes (false vs true). Both
+scope, and **candidate_limit=20** rather than only a short result prefix.
+The report's --top-k (default 10) controls the published cutoff and must be
+within that candidate limit. Only graph_boost.enabled changes (false vs true). Both
 include max_hops=1, weight=0.15 and candidate_limit=20. The adapter must
 echo the complete graph_boost configuration in its response: missing/mismatched
 echo, unsupported behavior, unknown/duplicate chunk IDs, and incomplete query
-sets are hard errors (exit 2), never zero-quality fallback. The graph-aware
+sets are hard errors (exit 2), never zero-quality fallback. The two responses
+must contain the exact same query-specific **candidate chunk ID set**; a
+new graph-only result or a missing candidate is an invalid adapter response,
+not a quality score. The graph-aware
 adapter must implement authorization and a real #65 reranker; this script
 does not create graph scores or semantic embeddings.
 
 The report compares macro Recall@K, MRR, and exponential-gain nDCG@K for
 linked and negative-control groups, including per-query target ranks and
 explicit excluded-source regressions. New excluded chunks in top 3,
+**any upward move by an excluded guard**, or an unjudged chunk newly in top 3,
 displaced previously top-3 primary targets, degraded controls, or no real
 positive gain keep graph boost disabled. Passing the checks gives only
 candidate_for_review; never enable production automatically. Root scope
 remains a prerequisite.
 
-The Python tests exercise only synthetic protocol fixtures. They do not
-measure actual graph ranking quality and must not be cited as uplift evidence.
-#65 is open, so no real adapter-backed comparison can yet be claimed.
+The Python tests exercise synthetic adapter protocol fixtures. The Rust
+`graph_boost_evaluation` integration test uses the **real #65 reranker and
+GraphEdgeStore interface** with the real fictional corpus's resolved links,
+but deliberately scripted baseline retrieval scores. Its six positive and six
+negative-control cases show deterministic linked-target lift and expose a
+promotion of an unrelated linked decision in two date-review controls. That is
+**behavioral evidence, not a real embedding/index benchmark**: it is a reason
+to keep the feature OFF rather than claim a multilingual uplift. A separately
+configured real vector/FTS adapter and a reviewed measured report are required
+before production activation. The harness can generate that report without
+changing judgments or enabling graph boost as a product default.
