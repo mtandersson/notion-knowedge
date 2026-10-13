@@ -89,3 +89,6 @@ pub mod destructive;
 
 /// Lossless pure unique-section planner for future bounded edits (#311).
 pub mod sections;
+
+/// Server-owned durable once-only scoped Markdown section update (#312).
+pub mod section_update;
