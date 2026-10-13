@@ -10,7 +10,7 @@ use serde_json::json;
 use crate::{
     notion_grant_store::{GrantStore, StoreError, StoredGrant},
     notion_oauth_redirect::{NotionOAuthConfig, NotionOAuthRedirect},
-    oauth_code::Secret,
+    oauth_code::{ApprovedNotionGrant, AuthorizationFlow, Redirect, Secret},
 };
 
 const TOKEN_ENDPOINT: &str = "https://api.notion.com/v1/oauth/token";
@@ -283,6 +283,21 @@ impl fmt::Display for PersistError {
 }
 impl std::error::Error for PersistError {}
 
+/// Fail-closed result when connecting a verified Notion callback to the
+/// process-local MCP PKCE engine. Error output never contains credentials.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApproveError {
+    Callback(CallbackError),
+    Store(StoreError),
+    Authorization(crate::oauth_code::Error),
+}
+impl fmt::Display for ApproveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Notion authorization could not be completed. Please start again.")
+    }
+}
+impl std::error::Error for ApproveError {}
+
 /// A verified provider exchange is NOT an approved MCP grant. The returned
 /// MCP correlation handle is still unapproved and must be persisted with a
 /// matching immutable Notion identity plus epoch (#123) before #120 approve().
@@ -363,6 +378,45 @@ impl<'a> NotionCallback<'a> {
         // save() atomically rechecks the immutable workspace, user and bot
         // under the storage mutex before replacing any credential pair.
         store.save(&verified.grant).map_err(PersistError::Store)
+    }
+
+    /// Persist an independently verified upstream callback *before* approving
+    /// the original ChatGPT PKCE transaction. The only binding supplied to
+    /// AuthorizationFlow comes from the sealed store, not the browser or a
+    /// caller-provided identity. A failed store write never issues a code.
+    ///
+    /// This is a server-INTERNAL boundary only: #120 still needs mounted
+    /// HTTP routes, and #127/#128 must secure MCP sessions and revocation.
+    pub async fn complete_persist_and_approve(
+        &self,
+        raw_query: &str,
+        store: &GrantStore,
+        flow: &AuthorizationFlow,
+    ) -> Result<Redirect, ApproveError> {
+        // Reject foreign app storage BEFORE consuming the one-time state or
+        // exchanging a confidential Notion authorization code.
+        if !store.matches_client(&self.exchanger.client_id) {
+            return Err(ApproveError::Store(StoreError::IdentityMismatch));
+        }
+        let verified = self
+            .complete(raw_query)
+            .await
+            .map_err(ApproveError::Callback)?;
+        let stored = store.save(&verified.grant).map_err(ApproveError::Store)?;
+        // A concurrent replacement must never mint a code from stale state.
+        // Token exchange must repeat this check using the current sealed grant.
+        if !store.still_current(&stored).map_err(ApproveError::Store)? {
+            return Err(ApproveError::Store(StoreError::IdentityMismatch));
+        }
+        let binding = ApprovedNotionGrant {
+            grant_id: stored.grant_id(),
+            epoch: stored.epoch(),
+            workspace_id: stored.workspace_id(),
+            owner_type: "user", // NotionCallback independently required owner.type=user.
+            owner_user_id: stored.owner_user_id(),
+        };
+        flow.approve(verified.mcp_transaction.expose(), &binding)
+            .map_err(ApproveError::Authorization)
     }
 }
 
@@ -746,6 +800,102 @@ mod tests {
             Err(PersistError::Callback(CallbackError::InvalidState))
         ));
         assert!(format!("{persisted:?}").contains("REDACTED"));
+    }
+
+    #[tokio::test]
+    async fn persisted_verified_callback_can_approve_exact_pkce_binding_only_once() {
+        use crate::oauth_code::{ApprovedNotionGrant, TokenRequest};
+        let (redirect, flow, registration, allowed) = setup();
+        let (_dir, _key, state_file, store) = sealed_store();
+        let started = redirect.begin(&flow, &request()).unwrap();
+        let provider_state = state(started.expose()).to_owned();
+        let (endpoint, task) =
+            token_server(grant_json("workspace-123", "user", "user-456"), 200).await;
+        let client = NotionTokenClient::new(&registration, SECRET)
+            .unwrap()
+            .for_local_fixture(&endpoint);
+        let callback = NotionCallback::new(&redirect, &client, &allowed);
+        let code = callback
+            .complete_persist_and_approve(
+                &format!("code=notion-code&state={provider_state}"),
+                &store,
+                &flow,
+            )
+            .await
+            .unwrap();
+        task.await.unwrap();
+        assert_eq!(code.state, request().state);
+        assert_eq!(code.redirect_uri, request().redirect_uri);
+        assert_ne!(code.code.expose(), "secret_access_value");
+        assert_ne!(code.code.expose(), "secret_refresh_value");
+        let stored = store.load().unwrap().unwrap();
+        let identity = ApprovedNotionGrant {
+            grant_id: stored.grant_id(),
+            epoch: stored.epoch(),
+            workspace_id: stored.workspace_id(),
+            owner_type: "user",
+            owner_user_id: stored.owner_user_id(),
+        };
+        let exchange = TokenRequest {
+            grant_type: "authorization_code",
+            code: code.code.expose(),
+            client_id: "chatgpt",
+            redirect_uri: request().redirect_uri,
+            resource: request().resource,
+            code_verifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+        };
+        let token = flow.redeem(&exchange, &identity).unwrap();
+        assert!(flow.verify(token.access_token.expose(), &identity));
+        assert!(!token.access_token.expose().contains("secret_access_value"));
+        assert!(!token.access_token.expose().contains("secret_refresh_value"));
+        assert!(matches!(
+            flow.redeem(&exchange, &identity),
+            Err(crate::oauth_code::Error::InvalidGrant)
+        ));
+        assert!(matches!(
+            callback
+                .complete_persist_and_approve(
+                    &format!("code=replay&state={provider_state}"),
+                    &store,
+                    &flow,
+                )
+                .await,
+            Err(ApproveError::Callback(CallbackError::InvalidState))
+        ));
+        let ciphertext = std::fs::read(state_file).unwrap();
+        assert!(!ciphertext.windows("secret_access_value".len())
+            .any(|part| part == b"secret_access_value"));
+    }
+
+    #[tokio::test]
+    async fn callback_approval_fails_closed_when_pkce_grant_allowlist_differs() {
+        let (redirect, _flow, registration, allowed) = setup();
+        let (_dir, _key, _state_file, store) = sealed_store();
+        let different_policy = AuthorizationFlow::new(
+            OAuthClient::new("chatgpt", request().redirect_uri, request().resource).unwrap(),
+            AllowedNotionIdentity::new("workspace-other", "user-456").unwrap(),
+        );
+        let started = redirect.begin(&different_policy, &request()).unwrap();
+        let provider_state = state(started.expose()).to_owned();
+        let (endpoint, task) =
+            token_server(grant_json("workspace-123", "user", "user-456"), 200).await;
+        let client = NotionTokenClient::new(&registration, SECRET)
+            .unwrap()
+            .for_local_fixture(&endpoint);
+        let callback = NotionCallback::new(&redirect, &client, &allowed);
+        assert!(matches!(
+            callback
+                .complete_persist_and_approve(
+                    &format!("code=notion-code&state={provider_state}"),
+                    &store,
+                    &different_policy,
+                )
+                .await,
+            Err(ApproveError::Authorization(crate::oauth_code::Error::AccessDenied))
+        ));
+        task.await.unwrap();
+        assert!(redirect.take(&provider_state).is_none());
+        assert!(store.load().unwrap().is_some());
     }
 
     #[tokio::test]
