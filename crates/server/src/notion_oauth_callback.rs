@@ -873,8 +873,11 @@ mod tests {
             Err(ApproveError::Callback(CallbackError::InvalidState))
         ));
         let ciphertext = std::fs::read(state_file).unwrap();
-        assert!(!ciphertext.windows("secret_access_value".len())
-            .any(|part| part == b"secret_access_value"));
+        assert!(
+            !ciphertext
+                .windows("secret_access_value".len())
+                .any(|part| part == b"secret_access_value")
+        );
     }
 
     #[tokio::test]
@@ -901,7 +904,9 @@ mod tests {
                     &different_policy,
                 )
                 .await,
-            Err(ApproveError::Authorization(crate::oauth_code::Error::AccessDenied))
+            Err(ApproveError::Authorization(
+                crate::oauth_code::Error::AccessDenied
+            ))
         ));
         task.await.unwrap();
         assert!(redirect.take(&provider_state).is_none());
