@@ -302,3 +302,43 @@ FTS/hybrid quality evidence; publish a real-adapter report before claiming the
 measured quality floor holds for a production index. Until the configured
 production adapter bridge is runnable, this gate enforces the report contract
 but cannot certify an actual retrieval recall score.
+
+
+## Graph-boost evaluation protocol (#102; prerequisite #65)
+
+The versioned [graph-boost-v1.json](graph-boost-v1.json) reuses the fictional
+12-page bilingual corpus and unchanged relevance judgments. Six Swedish/English
+cross-link cases demand a real resolved page edge to a directly relevant target;
+six negative controls detect archived near-name matches and unrelated graph
+neighbors. Each records an anchor, direct target when present, and excluded
+guard chunks. This is evaluation input, not measured production quality.
+
+Run credential-free consistency and contract tests:
+
+    python3 scripts/graph-boost-eval.py --validate-only
+    python3 scripts/test-graph-boost-eval.py
+
+Once #65 provides a real graph-aware adapter, run over an unchanged index:
+
+    python3 scripts/graph-boost-eval.py --adapter "./path/to/real-adapter" --top-k 10 --output /tmp/graph-eval.json
+
+Both requests use mode=hybrid and the exact same corpus, model, queries, root
+scope, and top_k. Only graph_boost.enabled changes (false vs true). Both
+include max_hops=1, weight=0.15 and candidate_limit=20. The adapter must
+echo the complete graph_boost configuration in its response: missing/mismatched
+echo, unsupported behavior, unknown/duplicate chunk IDs, and incomplete query
+sets are hard errors (exit 2), never zero-quality fallback. The graph-aware
+adapter must implement authorization and a real #65 reranker; this script
+does not create graph scores or semantic embeddings.
+
+The report compares macro Recall@K, MRR, and exponential-gain nDCG@K for
+linked and negative-control groups, including per-query target ranks and
+explicit excluded-source regressions. New excluded chunks in top 3,
+displaced previously top-3 primary targets, degraded controls, or no real
+positive gain keep graph boost disabled. Passing the checks gives only
+candidate_for_review; never enable production automatically. Root scope
+remains a prerequisite.
+
+The Python tests exercise only synthetic protocol fixtures. They do not
+measure actual graph ranking quality and must not be cited as uplift evidence.
+#65 is open, so no real adapter-backed comparison can yet be claimed.
