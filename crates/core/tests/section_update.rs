@@ -137,7 +137,7 @@ impl PageLifecycle for Fixture {
                     LifecycleNode {
                         kind: LifecycleKind::Page,
                         id: PAGE.into(),
-                        revision: REV.into(),
+                        revision: self.page().last_edited_time,
                         inactive: false,
                         parent: PhysicalParent::Object {
                             kind: LifecycleKind::Page,
@@ -157,11 +157,15 @@ impl PageLifecycle for Fixture {
     }
     fn revalidate_lifecycle<'a>(
         &'a self,
-        _: &'a LifecycleEvidence,
+        evidence: &'a LifecycleEvidence,
         _: &'a LifecycleScope,
     ) -> BackendFuture<'a, ()> {
         Box::pin(async move {
-            if self.deny.load(Ordering::SeqCst) {
+            if self.deny.load(Ordering::SeqCst)
+                || evidence.ancestry.first().is_none_or(|node| {
+                    node.revision != self.page().last_edited_time
+                })
+            {
                 Err(err())
             } else {
                 Ok(())

@@ -230,7 +230,15 @@ pub async fn update_section_once(
     {
         return Err(SectionUpdateError::OutcomeUnknown);
     }
-    gate.revalidate(&permit, gate.configured_scope())
+    // The write itself changes the selected page's last-edited revision.
+    // Never revalidate the pre-write lifecycle evidence: Notion's lifecycle
+    // adapter compares the entire chain, including the old revision.
+    // Acquire fresh physical authorization and revalidate its new evidence.
+    let post_permit = gate
+        .authorize(&request.page_id)
+        .await
+        .map_err(|_| SectionUpdateError::OutcomeUnknown)?;
+    gate.revalidate(&post_permit, gate.configured_scope())
         .await
         .map_err(|_| SectionUpdateError::OutcomeUnknown)?;
 
