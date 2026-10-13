@@ -164,6 +164,7 @@ class GraphBoostEvaluationTests(unittest.TestCase):
 
         assert_bad(lambda m: m["config"].update({"max_hops": 4}))
         assert_bad(lambda m: m["config"].update({"weight": -0.1}))
+        assert_bad(lambda m: m["cases"][0].update({"guard_source_ids": [{}]}))
         assert_bad(lambda m: m["cases"][0].update({"target_source_id": "unknown"}))
         assert_bad(lambda m: m["cases"][0].update({
             "target_source_id": "fixture:chunk:reading:queue"}))

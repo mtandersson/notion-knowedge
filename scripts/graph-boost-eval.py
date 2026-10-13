@@ -72,10 +72,11 @@ def load_cases(path, data):
         require(isinstance(anchor, str) and anchor in pages, "unknown anchor page")
         guard = case["guard_source_ids"]
         require(isinstance(guard, list) and bool(guard)
-                and len(set(guard)) == len(guard)
-                and all(isinstance(cid, str) and cid in chunks for cid in guard)
+                and all(isinstance(cid, str) and cid in chunks for cid in guard),
+                "invalid graph guard sources")
+        require(len(set(guard)) == len(guard)
                 and set(guard) <= set(queries[qid]["excluded_source_ids"]),
-                "invalid or non-excluded graph guard")
+                "duplicate or non-excluded graph guard")
         target = case["target_source_id"]
         if kind == "linked":
             require(queries[qid]["category"] == "cross_link",
