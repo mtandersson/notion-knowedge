@@ -83,14 +83,16 @@ impl HttpNotion {
         let paused = entered.clone();
         let resume = proceed.clone();
         let server = tokio::spawn(async move {
-            loop {
+            'connections: loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut bytes = Vec::new();
                 loop {
                     let mut part = [0u8; 2048];
                     let size = stream.read(&mut part).await.unwrap();
                     if size == 0 {
-                        return;
+                        // A cancelled or idle client connection must not stop
+                        // this authoritative fixture's entire HTTP listener.
+                        continue 'connections;
                     }
                     bytes.extend_from_slice(&part[..size]);
                     if bytes.windows(4).any(|v| v == b"\r\n\r\n") {
@@ -302,6 +304,8 @@ impl TestRuntime {
         .unwrap();
         let embeddings = Arc::new(AtomicUsize::new(0));
         let worker = Arc::new(Worker {
+            webhook_enabled: true,
+            scheduled: None,
             state,
             coordinator,
             handler,
@@ -543,6 +547,8 @@ async fn debounce_and_lifecycle_follow_authority_and_recover_effects_before_inbo
     };
     let journal = ReconciliationScope::new(vec![ROOT.into()], vec![], "fixture", "1").unwrap();
     let restarted = Worker {
+        webhook_enabled: true,
+        scheduled: None,
         state: reopened.state().clone(),
         coordinator: reopened.clone(),
         handler: AuthoritativePageRefresh::new(
@@ -876,6 +882,8 @@ async fn shutdown_cancels_owned_commit_source_read_releases_fence_and_restart_pr
         count: Arc::new(AtomicUsize::new(0)),
     });
     let restarted = Worker {
+        webhook_enabled: true,
+        scheduled: None,
         state: original.state.clone(),
         coordinator: original.coordinator.clone(),
         handler: original.handler.clone(),
@@ -898,8 +906,15 @@ async fn shutdown_cancels_owned_commit_source_read_releases_fence_and_restart_pr
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn deadline_cancels_owned_source_read_and_next_healthy_page_progresses() {
+async fn deadline_cancellation_retains_due_retry_and_allows_healthy_page_progress() {
     let mut runtime = TestRuntime::new().await;
+    // Exercise the actual cancelled-connection boundary before the real Notion
+    // calls, rather than treating one peer's EOF as source-service shutdown.
+    drop(
+        tokio::net::TcpStream::connect(("127.0.0.1", runtime.source.port))
+            .await
+            .unwrap(),
+    );
     let metadata = runtime.worker.provider.metadata().clone();
     let worker = Arc::get_mut(&mut runtime.worker).unwrap();
     worker.provider = Arc::new(PauseSourceProvider {
@@ -935,17 +950,39 @@ async fn deadline_cancels_owned_source_read_and_next_healthy_page_progresses() {
     worker.timeout = Duration::from_secs(10);
     let healthy = event(OTHER, "page.created");
     runtime.worker.state.receive(&healthy).unwrap();
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        runtime.worker.tick(CancellationToken::new(), false),
-    )
+    // The durable FIFO may admit the older cancelled event before the new
+    // healthy event once its backoff expires. Exercise that boundary explicitly
+    // rather than assuming local index inspection finishes within five seconds.
+    tokio::time::timeout(Duration::from_secs(6), async {
+        while now_ms() / 1000 < pending.retry_at.unwrap() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
     .await
-    .unwrap()
     .unwrap();
+    let guard = std::fs::File::open(&runtime.index).unwrap();
+    guard.try_lock().unwrap();
+    drop(guard);
+    for _ in 0..2 {
+        if inspect(&runtime.worker, &healthy).state == EventState::Succeeded {
+            break;
+        }
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            runtime.worker.tick(CancellationToken::new(), false),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+    assert_eq!(inspect(&runtime.worker, &bad).state, EventState::Succeeded);
+    assert_eq!(inspect(&runtime.worker, &bad).cycle_attempts, 2);
     assert_eq!(
         inspect(&runtime.worker, &healthy).state,
         EventState::Succeeded
     );
+    assert_eq!(inspect(&runtime.worker, &healthy).cycle_attempts, 1);
+    assert_eq!(inspect(&runtime.worker, &healthy).lifetime_attempts, 1);
     assert!(runtime.searchable("cinnamon").await > 0);
 }
 

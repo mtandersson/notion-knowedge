@@ -147,6 +147,8 @@ pub async fn serve_composed(
         .layer(middleware::from_fn(correlate_request));
     eprintln!("Serving MCP over Streamable HTTP at http://{bind}/mcp.");
     #[cfg(all(unix, feature = "webhook-worker"))]
+    let owned_coordinator = worker.as_ref().map(|worker| worker.coordinator.clone());
+    #[cfg(all(unix, feature = "webhook-worker"))]
     let worker_task = worker.map(|worker| {
         let stop = cancellation.clone();
         tokio::spawn(async move {
@@ -170,9 +172,19 @@ pub async fn serve_composed(
     shutdown.cancel();
     #[cfg(all(unix, feature = "webhook-worker"))]
     if let Some(task) = worker_task {
-        task.await
-            .map_err(|_| io::Error::other("webhook worker terminated"))?
-            .map_err(io::Error::other)?;
+        let worker_result = task
+            .await
+            .map_err(|_| io::Error::other("index worker terminated"))
+            .and_then(|result| result.map_err(io::Error::other));
+        // The supervisor also owns cleanup after panic: a dropped observer
+        // cannot release a submitted effect's guard before its thread finishes.
+        if let Some(coordinator) = owned_coordinator {
+            coordinator
+                .drain_owned()
+                .await
+                .map_err(|_| io::Error::other("index drain failed"))?;
+        }
+        worker_result?;
     }
     result
 }

@@ -1,4 +1,4 @@
-//! Shared production authority for webhook and manual reconciliation callers.
+//! Shared production authority for webhook, manual and periodic reconciliation callers.
 #![cfg(all(unix, feature = "webhook-worker"))]
 use crate::webhook_worker::{WorkerSettings, runtime::now_ms};
 use notion_knowledge_core::{

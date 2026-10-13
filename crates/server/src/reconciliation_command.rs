@@ -4,9 +4,24 @@ use notion_knowledge_notion::pages::page_id;
 pub enum Command {
     Apply(String),
     DryRun,
+    ScheduleStatus,
+    ScheduleHistory(i64),
+    ScheduleRetry(i64),
+    ScheduleAbandon(i64),
+    ScheduleConfigure {
+        settings: crate::scheduled_reconciliation::Settings,
+        deadline: i64,
+    },
+    ScheduleInterval {
+        seconds: i64,
+        deadline: i64,
+    },
     Resume(String),
     Status(String),
-    Retry { run: String, page: String },
+    Retry {
+        run: String,
+        page: String,
+    },
 }
 impl Command {
     pub fn parse(args: &[String]) -> Result<Self, &'static str> {
@@ -29,6 +44,76 @@ impl Command {
             .as_slice()
         {
             ["--reconcile", "dry-run"] => Ok(Self::DryRun),
+            [
+                "--reconcile",
+                "schedule",
+                "configure",
+                interval,
+                attempts,
+                backoff,
+                maximum,
+                deadline,
+            ] => {
+                let number =
+                    |value: &str| value.parse::<i64>().map_err(|_| "invalid schedule policy");
+                let interval = number(interval)?;
+                let attempts = number(attempts)?;
+                let backoff = number(backoff)?;
+                let maximum_backoff = number(maximum)?;
+                let deadline = number(deadline)?;
+                if !(60..=2_592_000).contains(&interval)
+                    || !(1..=16).contains(&attempts)
+                    || !(1..=86_400).contains(&backoff)
+                    || !(backoff..=604_800).contains(&maximum_backoff)
+                    || deadline < 0
+                {
+                    return Err("invalid schedule policy");
+                }
+                Ok(Self::ScheduleConfigure {
+                    settings: crate::scheduled_reconciliation::Settings {
+                        interval,
+                        attempts,
+                        backoff,
+                        maximum_backoff,
+                    },
+                    deadline,
+                })
+            }
+            ["--reconcile", "schedule", "status"] => Ok(Self::ScheduleStatus),
+            ["--reconcile", "schedule", "status", after] => Ok(Self::ScheduleHistory(
+                after
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|n| *n >= 0)
+                    .ok_or("invalid history cursor")?,
+            )),
+            ["--reconcile", "schedule", "interval", seconds, deadline] => {
+                let seconds = seconds
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|n| (60..=2_592_000).contains(n))
+                    .ok_or("invalid schedule interval")?;
+                let deadline = deadline
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|n| *n >= 0)
+                    .ok_or("invalid schedule deadline")?;
+                Ok(Self::ScheduleInterval { seconds, deadline })
+            }
+            ["--reconcile", "schedule", action, deadline]
+                if matches!(*action, "retry" | "abandon") =>
+            {
+                let deadline = deadline
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|n| *n >= 0)
+                    .ok_or("invalid schedule deadline")?;
+                Ok(if *action == "retry" {
+                    Self::ScheduleRetry(deadline)
+                } else {
+                    Self::ScheduleAbandon(deadline)
+                })
+            }
             ["--reconcile", "apply", id] => Ok(Self::Apply(run(id)?)),
             ["--reconcile", "resume", id] => Ok(Self::Resume(run(id)?)),
             ["--reconcile", "status", id] => Ok(Self::Status(run(id)?)),
@@ -44,7 +129,10 @@ impl Command {
         }
     }
     pub fn read_only(&self) -> bool {
-        matches!(self, Self::DryRun | Self::Status(_))
+        matches!(
+            self,
+            Self::DryRun | Self::Status(_) | Self::ScheduleStatus | Self::ScheduleHistory(_)
+        )
     }
 }
 #[derive(Debug)]
@@ -139,8 +227,42 @@ pub mod runtime {
             Ok(r) => r,
             Err(_) => return Output::error("index_state_configuration", 2),
         };
+        if matches!(
+            command,
+            Command::ScheduleStatus
+                | Command::ScheduleHistory(_)
+                | Command::ScheduleRetry(_)
+                | Command::ScheduleAbandon(_)
+                | Command::ScheduleInterval { .. }
+                | Command::ScheduleConfigure { .. }
+        ) {
+            if command.read_only() {
+                return schedule_command(&inspected, command);
+            }
+            drop(inspected);
+            let runtime = match IndexRuntime::compose(
+                settings,
+                state,
+                scope,
+                source,
+                provider,
+                OpenMode::ExistingWrite,
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(_) => return Output::error("index_state_configuration", 2),
+            };
+            return schedule_command(&runtime, command);
+        }
         if let Some(id) = match &command {
-            Command::DryRun => None,
+            Command::DryRun
+            | Command::ScheduleStatus
+            | Command::ScheduleHistory(_)
+            | Command::ScheduleRetry(_)
+            | Command::ScheduleAbandon(_)
+            | Command::ScheduleInterval { .. }
+            | Command::ScheduleConfigure { .. } => None,
             Command::Apply(s) | Command::Resume(s) | Command::Status(s) => Some(s),
             Command::Retry { run, .. } => Some(run),
         } {
@@ -302,6 +424,105 @@ pub mod runtime {
             .release_lease(&lease, now_ms() / 1000);
         output
     }
+    fn schedule_command(runtime: &IndexRuntime, command: Command) -> Output {
+        use crate::scheduled_reconciliation::runtime::ID;
+        let coordinator = &runtime.coordinator;
+        let after = if let Command::ScheduleHistory(after) = &command {
+            *after
+        } else {
+            0
+        };
+        if !command.read_only() {
+            let now = now_ms() / 1000;
+            let lease = match coordinator.state().acquire_lease(now, 30) {
+                Ok(l) => l,
+                Err(JournalError::Busy) => return Output::error("busy", 4),
+                Err(_) => return Output::error("state_failure", 3),
+            };
+            let result = match command {
+                Command::ScheduleRetry(deadline) => {
+                    coordinator.retry_schedule(&lease, now, ID, deadline)
+                }
+                Command::ScheduleAbandon(deadline) => {
+                    coordinator.abandon_schedule(&lease, now, ID, deadline)
+                }
+                Command::ScheduleConfigure { settings, deadline } => {
+                    notion_knowledge_retrieval::schedule::SchedulePolicy::new(
+                        settings.interval,
+                        settings.attempts,
+                        settings.backoff,
+                        settings.maximum_backoff,
+                    )
+                    .and_then(|policy| {
+                        coordinator.reconfigure_schedule(
+                            &lease,
+                            now,
+                            ID,
+                            &notion_knowledge_retrieval::schedule::ScheduleReconfiguration {
+                                previous_binding: coordinator.binding().clone(),
+                                policy,
+                                next_deadline: deadline,
+                            },
+                        )
+                    })
+                }
+                Command::ScheduleInterval { seconds, deadline } => {
+                    coordinator.schedule(ID).and_then(|s| {
+                        let policy = notion_knowledge_retrieval::schedule::SchedulePolicy::new(
+                            seconds,
+                            s.policy.max_attempts(),
+                            s.policy.backoff_seconds(),
+                            s.policy.max_backoff_seconds(),
+                        )?;
+                        coordinator.reconfigure_schedule(
+                            &lease,
+                            now,
+                            ID,
+                            &notion_knowledge_retrieval::schedule::ScheduleReconfiguration {
+                                previous_binding: coordinator.binding().clone(),
+                                policy,
+                                next_deadline: deadline,
+                            },
+                        )
+                    })
+                }
+                _ => unreachable!(),
+            };
+            let _ = coordinator.state().release_lease(&lease, now_ms() / 1000);
+            if let Err(e) = result {
+                return Output::error(
+                    if e == JournalError::Busy {
+                        "busy"
+                    } else {
+                        "recovery_rejected"
+                    },
+                    if e == JournalError::Busy { 4 } else { 3 },
+                );
+            }
+        }
+        let schedule = match coordinator.schedule(ID) {
+            Ok(s) => s,
+            Err(_) => return Output::error("schedule_unavailable", 3),
+        };
+        let events = match coordinator.schedule_events(ID, after, 1000) {
+            Ok(e) => e,
+            Err(_) => return Output::error("state_failure", 3),
+        };
+        let mut json = serde_json::json!({"operation":"reconciliation_schedule", "history_next":events.last().map(|e|e.sequence), "status":format!("{:?}",schedule.status), "next_deadline":schedule.next_deadline,"attempts":schedule.attempts,"cycle":schedule.cycle,"active_run":schedule.active_run,
+            "history":events.iter().map(|e|serde_json::json!({"sequence":e.sequence,"cycle":e.cycle,"at_seconds":e.at_seconds,"kind":format!("{:?}",e.kind),"failure":e.failure.as_ref().map(|f|format!("{f:?}")),"attempt":e.attempt,"deadline":e.deadline})).collect::<Vec<_>>()});
+        if let Some(run) = schedule.active_run {
+            json["run"] = status(runtime, &run, "inspected", None).json;
+        }
+        if let Some(run) = events
+            .iter()
+            .rev()
+            .find(|e| e.kind == notion_knowledge_retrieval::schedule::ScheduleEventKind::Completed)
+            .and_then(|e| e.run_id.as_ref())
+        {
+            json["last_completed_run"] = status(runtime, run, "inspected", None).json;
+        }
+        Output { json, exit: 0 }
+    }
     fn progress_json(p: &DurableProgress) -> serde_json::Value {
         serde_json::json!({"scanned":p.scanned,"planned_refresh":p.planned_refresh,"planned_delete":p.planned_delete,
             "changed":p.changed,"deleted":p.deleted,"unchanged":p.unchanged,"pending":p.pending.len(),
@@ -325,6 +546,14 @@ pub mod runtime {
             }
             Err(_) => return Output::error("state_failure", 3),
         };
+        let failure_history = match runtime
+            .coordinator
+            .reconciliation_failure_evidence(run, 0, 1000)
+        {
+            Ok(events) => events,
+            Err(_) => return Output::error("state_failure", 3),
+        };
+        json["failure_history"] = serde_json::json!(failure_history.iter().map(|e|serde_json::json!({"sequence":e.sequence,"page_id":e.page_id,"kind":e.kind,"class":e.class})).collect::<Vec<_>>());
         json["errors"] = errors.into();
         json["operation"] = "reconciliation".into();
         json["status"] = class.into();
