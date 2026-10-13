@@ -162,9 +162,10 @@ impl PageLifecycle for Fixture {
     ) -> BackendFuture<'a, ()> {
         Box::pin(async move {
             if self.deny.load(Ordering::SeqCst)
-                || evidence.ancestry.first().is_none_or(|node| {
-                    node.revision != self.page().last_edited_time
-                })
+                || evidence
+                    .ancestry
+                    .first()
+                    .is_none_or(|node| node.revision != self.page().last_edited_time)
             {
                 Err(err())
             } else {

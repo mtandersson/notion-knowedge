@@ -50,7 +50,6 @@ impl NotionWrite for NotionClient {
     }
 }
 
-
 impl NotionSectionWrite for NotionClient {
     fn update_section(&self, request: UpdateSectionContent) -> BackendFuture<'_, ()> {
         Box::pin(self.update_section_content(request))
