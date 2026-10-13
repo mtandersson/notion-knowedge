@@ -108,3 +108,20 @@ pub trait NotionWrite: Send + Sync {
 pub trait NotionBackend: NotionRead + NotionWrite {}
 
 impl<T: NotionRead + NotionWrite + ?Sized> NotionBackend for T {}
+
+
+/// Exact, nonempty and unique source range for the provider's bounded Markdown
+/// search-and-replace API. NEVER a whole-page replacement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateSectionContent {
+    pub page_id: PageId,
+    pub old_str: String,
+    pub new_str: String,
+}
+
+/// Kept separate from ordinary write ports so callers must opt into the
+/// targeted mutation capability. Authorization and ledger are enforced by
+/// the application workflow, not by possession of a PageId.
+pub trait NotionSectionWrite: Send + Sync {
+    fn update_section(&self, request: UpdateSectionContent) -> BackendFuture<'_, ()>;
+}
