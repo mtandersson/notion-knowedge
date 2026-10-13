@@ -109,7 +109,6 @@ pub trait NotionBackend: NotionRead + NotionWrite {}
 
 impl<T: NotionRead + NotionWrite + ?Sized> NotionBackend for T {}
 
-
 /// Exact, nonempty and unique source range for the provider's bounded Markdown
 /// search-and-replace API. NEVER a whole-page replacement.
 #[derive(Debug, Clone, PartialEq, Eq)]

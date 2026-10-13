@@ -1,8 +1,8 @@
 //! Production implementation of the provider-independent authoritative ports.
 use crate::NotionClient;
 use notion_knowledge_core::backend::{
-    AppendPageContent, BackendFuture, CreatePage, NotionRead, NotionWrite, Page, PageContent,
-    PageId, ReplacePageContent, NotionSectionWrite, UpdateSectionContent,
+    AppendPageContent, BackendFuture, CreatePage, NotionRead, NotionSectionWrite, NotionWrite,
+    Page, PageContent, PageId, ReplacePageContent, UpdateSectionContent,
 };
 
 impl NotionRead for NotionClient {

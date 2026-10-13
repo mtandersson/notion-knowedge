@@ -112,13 +112,18 @@ pub async fn update_section_once(
 ) -> Result<SectionUpdateResult, SectionUpdateError> {
     if DateTime::parse_from_rfc3339(&request.expected_last_edited_time).is_err()
         || request.expected_markdown_sha256.len() != 64
-        || !request.expected_markdown_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+        || !request
+            .expected_markdown_sha256
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit())
         || request.replacement.len() > 200_000
         || request.replacement.contains('\0')
     {
         return Err(SectionUpdateError::InvalidInput);
     }
-    let permit = gate.authorize(&request.page_id).await
+    let permit = gate
+        .authorize(&request.page_id)
+        .await
         .map_err(|_| SectionUpdateError::NotAuthorized)?;
     let claim = MutationClaim::new(
         &gate.configured_scope().workspace_id,
@@ -126,13 +131,17 @@ pub async fn update_section_once(
         MutationOperation::UpdateSection,
         &request.page_id.0,
         &fingerprint(&request),
-    ).map_err(ledger_error)?;
+    )
+    .map_err(ledger_error)?;
     match ledger.begin(&claim).map_err(ledger_error)? {
         Reservation::Replay(receipt) => {
             if receipt.page_id != request.page_id.0 {
                 return Err(SectionUpdateError::IdempotencyConflict);
             }
-            return Ok(SectionUpdateResult { receipt, replayed: true });
+            return Ok(SectionUpdateResult {
+                receipt,
+                replayed: true,
+            });
         }
         Reservation::Reconcile => return Err(SectionUpdateError::OutcomeUnknown),
         Reservation::ExecuteOnce => {}
@@ -152,19 +161,25 @@ pub async fn update_section_once(
             RevisionError::Read(_) => SectionUpdateError::Unavailable,
         })?;
 
-    let original = reader.read_content(&request.page_id).await
+    let original = reader
+        .read_content(&request.page_id)
+        .await
         .map_err(|_| SectionUpdateError::Unavailable)?;
     if !matches_revision(&request.page_id, &request, &original) {
         return Err(SectionUpdateError::RevisionConflict);
     }
 
-    let plan = plan_section(&original.markdown, request.anchor.clone(), &request.replacement)
-        .map_err(|err| match err {
-            SectionError::InvalidInput | SectionError::NoChange => SectionUpdateError::InvalidInput,
-            SectionError::NotFound | SectionError::Ambiguous | SectionError::Unsupported => {
-                SectionUpdateError::SelectionRejected
-            }
-        })?;
+    let plan = plan_section(
+        &original.markdown,
+        request.anchor.clone(),
+        &request.replacement,
+    )
+    .map_err(|err| match err {
+        SectionError::InvalidInput | SectionError::NoChange => SectionUpdateError::InvalidInput,
+        SectionError::NotFound | SectionError::Ambiguous | SectionError::Unsupported => {
+            SectionUpdateError::SelectionRejected
+        }
+    })?;
     let old = plan.original_body();
     // Upstream update_content matches textual occurrences, not our byte offsets.
     // It cannot select an empty range or distinguish identical sibling content.
@@ -172,13 +187,15 @@ pub async fn update_section_once(
         return Err(SectionUpdateError::SelectionRejected);
     }
 
-    gate.revalidate(&permit, gate.configured_scope()).await
+    gate.revalidate(&permit, gate.configured_scope())
+        .await
         .map_err(|_| SectionUpdateError::NotAuthorized)?;
     // Best-effort final immediate preflight. Not an atomic CAS.
-    let fresh = reader.read_content(&request.page_id).await
+    let fresh = reader
+        .read_content(&request.page_id)
+        .await
         .map_err(|_| SectionUpdateError::Unavailable)?;
-    if !matches_revision(&request.page_id, &request, &fresh)
-        || fresh.markdown != original.markdown
+    if !matches_revision(&request.page_id, &request, &fresh) || fresh.markdown != original.markdown
     {
         return Err(SectionUpdateError::RevisionConflict);
     }
@@ -186,28 +203,40 @@ pub async fn update_section_once(
     // MUST be persisted before any network mutation, including failed or
     // timed-out requests. No automatic replay on any outcome.
     ledger.mark_uncertain(&claim).map_err(ledger_error)?;
-    writer.update_section(UpdateSectionContent {
-        page_id: request.page_id.clone(),
-        old_str: old.to_owned(),
-        new_str: plan.replacement_body().to_owned(),
-    }).await.map_err(|_| SectionUpdateError::OutcomeUnknown)?;
-
-    let after = reader.read_content(&request.page_id).await
+    writer
+        .update_section(UpdateSectionContent {
+            page_id: request.page_id.clone(),
+            old_str: old.to_owned(),
+            new_str: plan.replacement_body().to_owned(),
+        })
+        .await
         .map_err(|_| SectionUpdateError::OutcomeUnknown)?;
-    if after.page.id != request.page_id || after.page.archived
+
+    let after = reader
+        .read_content(&request.page_id)
+        .await
+        .map_err(|_| SectionUpdateError::OutcomeUnknown)?;
+    if after.page.id != request.page_id
+        || after.page.archived
         || !plan.verify_readback(&after.markdown)
     {
         return Err(SectionUpdateError::OutcomeUnknown);
     }
-    gate.revalidate(&permit, gate.configured_scope()).await
+    gate.revalidate(&permit, gate.configured_scope())
+        .await
         .map_err(|_| SectionUpdateError::OutcomeUnknown)?;
 
     let receipt = VerifiedReceipt::from_readback(
         after.page.id.0,
         after.page.url,
         after.page.last_edited_time,
-    ).map_err(|_| SectionUpdateError::OutcomeUnknown)?;
-    ledger.record_verified(&claim, &receipt)
+    )
+    .map_err(|_| SectionUpdateError::OutcomeUnknown)?;
+    ledger
+        .record_verified(&claim, &receipt)
         .map_err(|_| SectionUpdateError::OutcomeUnknown)?;
-    Ok(SectionUpdateResult { receipt, replayed: false })
+    Ok(SectionUpdateResult {
+        receipt,
+        replayed: false,
+    })
 }
