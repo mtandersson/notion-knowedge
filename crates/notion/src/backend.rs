@@ -50,6 +50,13 @@ impl NotionWrite for NotionClient {
     }
 }
 
+
+impl NotionSectionWrite for NotionClient {
+    fn update_section(&self, request: UpdateSectionContent) -> BackendFuture<'_, ()> {
+        Box::pin(self.update_section_content(request))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,11 +278,5 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(requests[0].0.starts_with("PATCH "));
         assert!(requests[1].0.starts_with("GET "));
-    }
-}
-
-impl NotionSectionWrite for NotionClient {
-    fn update_section(&self, request: UpdateSectionContent) -> BackendFuture<'_, ()> {
-        Box::pin(self.update_section_content(request))
     }
 }
