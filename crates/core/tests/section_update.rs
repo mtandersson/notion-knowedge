@@ -402,7 +402,10 @@ async fn hash_only_stale_conflict_reports_only_current_metadata_then_explicit_re
     assert_eq!(current.last_edited_time, REV);
     assert!(!format!("{current:?}").contains("old body"));
     assert_eq!(source.writes.load(Ordering::SeqCst), 0);
-    assert_eq!(run(&source, &ledger, stale).await, Err(SectionUpdateError::OutcomeUnknown));
+    assert_eq!(
+        run(&source, &ledger, stale).await,
+        Err(SectionUpdateError::OutcomeUnknown)
+    );
     let fresh = source.read_content(&PageId(PAGE.into())).await.unwrap();
     let mut retry = request(&fresh.markdown);
     retry.idempotency_key = "fresh-user-retry-section-0002".into();
@@ -418,10 +421,16 @@ async fn time_only_precondition_and_missing_revision_behavior() {
     let mut missing = request(OLD);
     missing.expected_last_edited_time = None;
     missing.expected_markdown_sha256 = None;
-    assert_eq!(run(&source, &ledger, missing).await, Err(SectionUpdateError::InvalidInput));
+    assert_eq!(
+        run(&source, &ledger, missing).await,
+        Err(SectionUpdateError::InvalidInput)
+    );
     assert_eq!(ledger.starts.load(Ordering::SeqCst), 0);
     let mut time_only = request(OLD);
     time_only.expected_markdown_sha256 = None;
-    assert_eq!(run(&source, &ledger, time_only).await.unwrap().replayed, false);
+    assert_eq!(
+        run(&source, &ledger, time_only).await.unwrap().replayed,
+        false
+    );
     assert_eq!(source.writes.load(Ordering::SeqCst), 1);
 }

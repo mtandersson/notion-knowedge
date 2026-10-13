@@ -132,8 +132,12 @@ fn explicit_design_preview_discovery_separates_narrow_writes_and_destructive_arc
         assert_eq!(tool["inputSchema"]["anyOf"].as_array().unwrap().len(), 2);
         for field in ["expected_last_edited_time", "expected_markdown_sha256"] {
             assert!(tool["inputSchema"]["properties"].get(field).is_some());
-            assert!(!tool["inputSchema"]["required"]
-                .as_array().unwrap().contains(&json!(field)));
+            assert!(
+                !tool["inputSchema"]["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(field))
+            );
         }
         assert_eq!(
             tool["inputSchema"]["properties"]
@@ -167,7 +171,9 @@ fn explicit_design_preview_discovery_separates_narrow_writes_and_destructive_arc
     assert_eq!(archive["inputSchema"]["anyOf"].as_array().unwrap().len(), 2);
     assert!(archive["inputSchema"]["properties"]["expected_markdown_sha256"].is_object());
     assert!(
-        !archive["inputSchema"]["required"].as_array().unwrap()
+        !archive["inputSchema"]["required"]
+            .as_array()
+            .unwrap()
             .contains(&json!("expected_last_edited_time"))
     );
     assert!(

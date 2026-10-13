@@ -12,7 +12,9 @@ use crate::{
         IdempotencyError, MutationClaim, MutationOperation, Reservation, VerifiedReceipt,
         WriteIdempotencyStore,
     },
-    revision::{ExpectedRevision, RevisionError, RevisionMetadata, check_revision, compare_content_snapshot},
+    revision::{
+        ExpectedRevision, RevisionError, RevisionMetadata, check_revision, compare_content_snapshot,
+    },
     root_scope::RootScopeGate,
     sections::{SectionAnchor, SectionError, plan_section},
 };
@@ -24,7 +26,7 @@ pub struct SectionUpdateRequest {
     pub replacement: String,
     /// Caller-provided revision from a prior, authoritative Notion read.
     pub expected_last_edited_time: Option<String>,
-    /// Required hash of the complete, original UTF-8 Markdown.
+    /// Optional hash of the complete, original UTF-8 Markdown. At least one revision guard is required.
     pub expected_markdown_sha256: Option<String>,
     /// Globally unique per intent and at least 16 URL-safe characters.
     pub idempotency_key: String,
@@ -91,7 +93,6 @@ fn fingerprint(request: &SectionUpdateRequest) -> String {
     format!("{:x}", hash.finalize())
 }
 
-
 /// Authorize, reserve durably, verify full fresh revision and scope, then issue
 /// exactly one provider-side targeted search-and-replace request. Empty section
 /// bodies and repeated source bodies are unsupported: upstream requires a
@@ -109,8 +110,16 @@ pub async fn update_section_once(
     request: SectionUpdateRequest,
 ) -> Result<SectionUpdateResult, SectionUpdateError> {
     if (request.expected_last_edited_time.is_none() && request.expected_markdown_sha256.is_none())
-        || request.expected_last_edited_time.as_deref().is_some_and(|time| DateTime::parse_from_rfc3339(time).is_err())
-        || request.expected_markdown_sha256.as_deref().is_some_and(|hash| hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        || request
+            .expected_last_edited_time
+            .as_deref()
+            .is_some_and(|time| DateTime::parse_from_rfc3339(time).is_err())
+        || request
+            .expected_markdown_sha256
+            .as_deref()
+            .is_some_and(|hash| {
+                hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
         || request.replacement.len() > 200_000
         || request.replacement.contains('\0')
     {
@@ -168,8 +177,7 @@ pub async fn update_section_once(
         .read_content(&request.page_id)
         .await
         .map_err(|_| SectionUpdateError::Unavailable)?;
-    compare_content_snapshot(&request.page_id, &expected, &original)
-        .map_err(map_revision_error)?;
+    compare_content_snapshot(&request.page_id, &expected, &original).map_err(map_revision_error)?;
 
     let plan = plan_section(
         &original.markdown,

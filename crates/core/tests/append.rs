@@ -482,8 +482,14 @@ async fn optional_preconditions_conflict_metadata_and_explicit_fresh_retry() {
     stale.expected_last_edited_time = None;
     stale.expected_markdown_sha256 = Some("f".repeat(64));
     let error = append_once(
-        source.as_ref(), source.as_ref(), &gate(source.clone()), &ledger, stale.clone()
-    ).await.unwrap_err();
+        source.as_ref(),
+        source.as_ref(),
+        &gate(source.clone()),
+        &ledger,
+        stale.clone(),
+    )
+    .await
+    .unwrap_err();
     let AppendError::RevisionConflict(current) = error else {
         panic!("expected content-free revision conflict");
     };
@@ -494,7 +500,14 @@ async fn optional_preconditions_conflict_metadata_and_explicit_fresh_retry() {
 
     // Even an uncommitted stale key may not be replayed automatically.
     assert_eq!(
-        append_once(source.as_ref(), source.as_ref(), &gate(source.clone()), &ledger, stale).await,
+        append_once(
+            source.as_ref(),
+            source.as_ref(),
+            &gate(source.clone()),
+            &ledger,
+            stale
+        )
+        .await,
         Err(AppendError::OutcomeUnknown)
     );
     let fresh = source.read_content(&PageId(PAGE.into())).await.unwrap();
@@ -502,8 +515,18 @@ async fn optional_preconditions_conflict_metadata_and_explicit_fresh_retry() {
     retry.expected_last_edited_time = None;
     retry.expected_markdown_sha256 = Some(markdown_sha256(&fresh.markdown));
     retry.idempotency_key = "fresh-user-intent-retry-append-0002".into();
-    assert!(!append_once(source.as_ref(), source.as_ref(), &gate(source.clone()), &ledger, retry)
-        .await.unwrap().replayed);
+    assert!(
+        !append_once(
+            source.as_ref(),
+            source.as_ref(),
+            &gate(source.clone()),
+            &ledger,
+            retry
+        )
+        .await
+        .unwrap()
+        .replayed
+    );
     assert_eq!(source.writes.load(Ordering::SeqCst), 1);
 }
 
@@ -515,8 +538,14 @@ async fn missing_revision_is_rejected_before_ledger_or_mutation() {
     request.expected_last_edited_time = None;
     request.expected_markdown_sha256 = None;
     assert_eq!(
-        append_once(source.as_ref(), source.as_ref(), &gate(source.clone()), &ledger, request)
-            .await,
+        append_once(
+            source.as_ref(),
+            source.as_ref(),
+            &gate(source.clone()),
+            &ledger,
+            request
+        )
+        .await,
         Err(AppendError::InvalidInput)
     );
     assert_eq!(ledger.starts.load(Ordering::SeqCst), 0);

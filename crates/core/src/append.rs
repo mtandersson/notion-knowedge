@@ -13,7 +13,9 @@ use crate::{
         IdempotencyError, MutationClaim, MutationOperation, Reservation, VerifiedReceipt,
         WriteIdempotencyStore,
     },
-    revision::{ExpectedRevision, RevisionError, RevisionMetadata, check_revision, compare_content_snapshot},
+    revision::{
+        ExpectedRevision, RevisionError, RevisionMetadata, check_revision, compare_content_snapshot,
+    },
     root_scope::RootScopeGate,
 };
 
@@ -100,8 +102,12 @@ pub async fn append_once(
     if request.markdown.trim().is_empty()
         || request.markdown.len() > 200_000
         || request.markdown.contains('\0')
-        || (request.expected_last_edited_time.is_none() && request.expected_markdown_sha256.is_none())
-        || request.expected_last_edited_time.as_deref().is_some_and(|time| DateTime::parse_from_rfc3339(time).is_err())
+        || (request.expected_last_edited_time.is_none()
+            && request.expected_markdown_sha256.is_none())
+        || request
+            .expected_last_edited_time
+            .as_deref()
+            .is_some_and(|time| DateTime::parse_from_rfc3339(time).is_err())
         || request
             .expected_markdown_sha256
             .as_deref()
@@ -162,11 +168,15 @@ pub async fn append_once(
         .read_content(&request.page_id)
         .await
         .map_err(|_| AppendError::Unavailable)?;
-    let before_meta = compare_content_snapshot(&request.page_id, &expected, &before)
-        .map_err(|failure| match failure {
-            RevisionError::Conflict(meta) | RevisionError::Inactive(meta) => AppendError::RevisionConflict(meta),
-            RevisionError::InvalidPrecondition => AppendError::InvalidInput,
-            RevisionError::Read(_) => AppendError::Unavailable,
+    let before_meta =
+        compare_content_snapshot(&request.page_id, &expected, &before).map_err(|failure| {
+            match failure {
+                RevisionError::Conflict(meta) | RevisionError::Inactive(meta) => {
+                    AppendError::RevisionConflict(meta)
+                }
+                RevisionError::InvalidPrecondition => AppendError::InvalidInput,
+                RevisionError::Read(_) => AppendError::Unavailable,
+            }
         })?;
     // Detect a change between the first fresh preflight and this full read.
     if DateTime::parse_from_rfc3339(&before_meta.last_edited_time).ok()
@@ -180,12 +190,19 @@ pub async fn append_once(
         .map_err(|_| AppendError::NotAuthorized)?;
 
     // Best-effort immediate fresh preflight. This cannot be atomic CAS.
-    let fresh = reader.read_content(&request.page_id).await.map_err(|_| AppendError::Unavailable)?;
-    let final_meta = compare_content_snapshot(&request.page_id, &expected, &fresh)
-        .map_err(|failure| match failure {
-            RevisionError::Conflict(meta) | RevisionError::Inactive(meta) => AppendError::RevisionConflict(meta),
-            RevisionError::InvalidPrecondition => AppendError::InvalidInput,
-            RevisionError::Read(_) => AppendError::Unavailable,
+    let fresh = reader
+        .read_content(&request.page_id)
+        .await
+        .map_err(|_| AppendError::Unavailable)?;
+    let final_meta =
+        compare_content_snapshot(&request.page_id, &expected, &fresh).map_err(|failure| {
+            match failure {
+                RevisionError::Conflict(meta) | RevisionError::Inactive(meta) => {
+                    AppendError::RevisionConflict(meta)
+                }
+                RevisionError::InvalidPrecondition => AppendError::InvalidInput,
+                RevisionError::Read(_) => AppendError::Unavailable,
+            }
         })?;
     if fresh.markdown != before.markdown {
         return Err(AppendError::RevisionConflict(final_meta));

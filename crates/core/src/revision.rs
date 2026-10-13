@@ -124,9 +124,8 @@ pub async fn check_revision(
     Ok(metadata)
 }
 
-
 /// A second fresh read must be evaluated against the exact same user
-//// preconditions immediately before PATCH. No implicit update or replay.
+/// preconditions immediately before PATCH. No implicit update or replay.
 pub fn compare_content_snapshot(
     page_id: &PageId,
     expected: &ExpectedRevision,
@@ -135,10 +134,17 @@ pub fn compare_content_snapshot(
     if expected.last_edited_time.is_none() && expected.markdown_sha256.is_none() {
         return Err(RevisionError::InvalidPrecondition);
     }
-    let time = expected.last_edited_time.as_deref()
+    let time = expected
+        .last_edited_time
+        .as_deref()
         .map(DateTime::parse_from_rfc3339)
-        .transpose().map_err(|_| RevisionError::InvalidPrecondition)?;
-    if expected.markdown_sha256.as_deref().is_some_and(|h| !valid_hash(h)) {
+        .transpose()
+        .map_err(|_| RevisionError::InvalidPrecondition)?;
+    if expected
+        .markdown_sha256
+        .as_deref()
+        .is_some_and(|h| !valid_hash(h))
+    {
         return Err(RevisionError::InvalidPrecondition);
     }
     if &content.page.id != page_id {
@@ -154,9 +160,10 @@ pub fn compare_content_snapshot(
         return Err(RevisionError::Inactive(meta));
     }
     if time.is_some_and(|t| t != current)
-        || expected.markdown_sha256.as_deref().is_some_and(|h| {
-            !h.eq_ignore_ascii_case(&markdown_sha256(&content.markdown))
-        })
+        || expected
+            .markdown_sha256
+            .as_deref()
+            .is_some_and(|h| !h.eq_ignore_ascii_case(&markdown_sha256(&content.markdown)))
     {
         return Err(RevisionError::Conflict(meta));
     }

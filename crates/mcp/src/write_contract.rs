@@ -75,10 +75,13 @@ fn input(name: &str) -> Value {
         _ => unreachable!("only canonical proposed names enter this builder"),
     }
     if requires_revision {
-        fields.insert("expected_markdown_sha256".into(), json!({
-            "type":"string","pattern":"^[a-fA-F0-9]{64}$","minLength":64,"maxLength":64,
-            "description":"SHA-256 of exact UTF-8 authoritative Markdown, not indexed content"
-        }));
+        fields.insert(
+            "expected_markdown_sha256".into(),
+            json!({
+                "type":"string","pattern":"^[a-fA-F0-9]{64}$","minLength":64,"maxLength":64,
+                "description":"SHA-256 of exact UTF-8 authoritative Markdown, not indexed content"
+            }),
+        );
     }
     let mut schema = json!({"type":"object","additionalProperties":false,"required":required,"properties":fields});
     if requires_revision {
