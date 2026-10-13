@@ -72,3 +72,6 @@ mod attachment_readback;
 
 /// One-page, read-only canonical refresh preparation under live physical scope.
 pub mod prepare;
+
+/// Restricted section PATCH adapter; no MCP exposure.
+mod section_update;

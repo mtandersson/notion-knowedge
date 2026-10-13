@@ -2,7 +2,7 @@
 use crate::NotionClient;
 use notion_knowledge_core::backend::{
     AppendPageContent, BackendFuture, CreatePage, NotionRead, NotionWrite, Page, PageContent,
-    PageId, ReplacePageContent,
+    PageId, ReplacePageContent, NotionSectionWrite, UpdateSectionContent,
 };
 
 impl NotionRead for NotionClient {
@@ -271,5 +271,11 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(requests[0].0.starts_with("PATCH "));
         assert!(requests[1].0.starts_with("GET "));
+    }
+}
+
+impl NotionSectionWrite for NotionClient {
+    fn update_section(&self, request: UpdateSectionContent) -> BackendFuture<'_, ()> {
+        Box::pin(self.update_section_content(request))
     }
 }
