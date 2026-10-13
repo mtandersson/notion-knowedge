@@ -30,8 +30,9 @@ Call update_section_once with:
 - a root-scoped RootScopeGate constructed from trusted server configuration
 - the existing cross-process durable WriteIdempotencyStore (#78)
 - a canonical target PageId, explicit literal ATX SectionAnchor (level + heading)
-- replacement body, expected RFC3339 page revision and exact full UTF-8
-  Markdown SHA-256, and a unique idempotency key.
+- replacement body, at least one optional revision precondition (RFC3339
+  last-edited time and/or SHA-256 of exact full UTF-8 Markdown), and a unique
+  idempotency key. Both supplied preconditions must match.
 
 Order: authorize physical ancestry -> reserve in durable ledger -> verify
 caller revision against complete authoritative content -> select exact unique
@@ -70,3 +71,16 @@ No new MCP tool, tool description, route or permission is added. Any future
 production exposure must explicitly wire authenticated root scope, durable
 shared ledger, confirmation policy, audit, rate and ownership checks, and a
 fresh caller revision. Keep #302 for subsequent concurrency integration.
+
+## Structured conflicts and retry (#302)
+
+`SectionUpdateError::RevisionConflict(RevisionMetadata)` carries only the
+current page ID and last-edited timestamp; no selected section body, full
+Markdown or credentials. The workflow rechecks the revision after selecting
+the exact unique old-string and immediately before marking the ledger uncertain.
+A mismatch prevents PATCH; it never automatically retries even if the first
+attempt failed before dispatch. To retry, the caller fetches current content,
+reviews potential concurrent changes, constructs a fresh expected revision and
+uses a new idempotency key. Ambiguous **post-dispatch** outcomes still demand
+separate reconciliation and must never be blindly resent. Notion's targeted
+PATCH has no assumed atomic compare-and-swap support. MCP mutations stay off.

@@ -35,6 +35,7 @@ fn input(name: &str) -> Value {
     fields.insert("root_page_id".into(), short_id());
     fields.insert("idempotency_key".into(), short_id());
     let mut required = vec!["root_page_id", "idempotency_key"];
+    let mut requires_revision = false;
 
     match name {
         "knowledge_create_page" => {
@@ -53,7 +54,8 @@ fn input(name: &str) -> Value {
                 "expected_last_edited_time".into(),
                 json!({"type":"string","minLength":1,"maxLength":128,"format":"date-time"}),
             );
-            required.extend(["page_id", "markdown", "expected_last_edited_time"]);
+            required.extend(["page_id", "markdown"]);
+            requires_revision = true;
             if name == "knowledge_update_section" {
                 fields.insert("section_anchor".into(), short_id());
                 fields.insert("confirmation_id".into(), short_id());
@@ -67,11 +69,25 @@ fn input(name: &str) -> Value {
                 json!({"type":"string","minLength":1,"maxLength":128,"format":"date-time"}),
             );
             fields.insert("confirmation_id".into(), short_id());
-            required.extend(["page_id", "expected_last_edited_time", "confirmation_id"]);
+            required.extend(["page_id", "confirmation_id"]);
+            requires_revision = true;
         }
         _ => unreachable!("only canonical proposed names enter this builder"),
     }
-    json!({"type":"object","additionalProperties":false,"required":required,"properties":fields})
+    if requires_revision {
+        fields.insert("expected_markdown_sha256".into(), json!({
+            "type":"string","pattern":"^[a-fA-F0-9]{64}$","minLength":64,"maxLength":64,
+            "description":"SHA-256 of exact UTF-8 authoritative Markdown, not indexed content"
+        }));
+    }
+    let mut schema = json!({"type":"object","additionalProperties":false,"required":required,"properties":fields});
+    if requires_revision {
+        schema["anyOf"] = json!([
+            {"required":["expected_last_edited_time"]},
+            {"required":["expected_markdown_sha256"]}
+        ]);
+    }
+    schema
 }
 
 fn output() -> Value {

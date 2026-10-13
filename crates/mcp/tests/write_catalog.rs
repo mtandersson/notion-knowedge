@@ -121,13 +121,19 @@ fn explicit_design_preview_discovery_separates_narrow_writes_and_destructive_arc
     let append = serialized(server.get_tool("knowledge_append").unwrap());
     let update = serialized(server.get_tool("knowledge_update_section").unwrap());
     for tool in [&append, &update] {
-        for required in ["page_id", "expected_last_edited_time", "markdown"] {
+        for required in ["page_id", "markdown"] {
             assert!(
                 tool["inputSchema"]["required"]
                     .as_array()
                     .unwrap()
                     .contains(&json!(required))
             );
+        }
+        assert_eq!(tool["inputSchema"]["anyOf"].as_array().unwrap().len(), 2);
+        for field in ["expected_last_edited_time", "expected_markdown_sha256"] {
+            assert!(tool["inputSchema"]["properties"].get(field).is_some());
+            assert!(!tool["inputSchema"]["required"]
+                .as_array().unwrap().contains(&json!(field)));
         }
         assert_eq!(
             tool["inputSchema"]["properties"]
@@ -150,7 +156,7 @@ fn explicit_design_preview_discovery_separates_narrow_writes_and_destructive_arc
             .contains(&json!("section_anchor"))
     );
     let archive = serialized(server.get_tool("knowledge_archive_page").unwrap());
-    for key in ["page_id", "expected_last_edited_time", "confirmation_id"] {
+    for key in ["page_id", "confirmation_id"] {
         assert!(
             archive["inputSchema"]["required"]
                 .as_array()
@@ -158,6 +164,12 @@ fn explicit_design_preview_discovery_separates_narrow_writes_and_destructive_arc
                 .contains(&json!(key))
         );
     }
+    assert_eq!(archive["inputSchema"]["anyOf"].as_array().unwrap().len(), 2);
+    assert!(archive["inputSchema"]["properties"]["expected_markdown_sha256"].is_object());
+    assert!(
+        !archive["inputSchema"]["required"].as_array().unwrap()
+            .contains(&json!("expected_last_edited_time"))
+    );
     assert!(
         archive["inputSchema"]["properties"]
             .get("markdown")

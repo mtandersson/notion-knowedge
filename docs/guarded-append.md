@@ -13,8 +13,10 @@ revision preflight, and the **durable**, separate `WriteIdempotencyStore`.
   `insert_content` operation. The service does not replace, delete, or reorder
   earlier content, or choose a section based on textual matching. The caller
   explicitly supplies desired leading/trailing newlines.
-- `expected_last_edited_time` is required, with an optional exact UTF-8
-  Markdown SHA-256 precondition.
+- At least one revision precondition is required: optional RFC3339
+  `expected_last_edited_time` and/or exact UTF-8 Markdown SHA-256. When
+  both are supplied, both must match. Conflicts return page ID and current
+  last-edited time, never current Markdown.
 - `idempotency_key` is required even for the first attempt; there is **no**
   unkeyed best-effort write path.
 
@@ -73,3 +75,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Full CI also exercises release builds, container smoke, and security scanning.
+
+## Conflict and explicit retry (#302)
+
+`AppendError::RevisionConflict(RevisionMetadata)` exposes only the canonical page ID
+and authoritative current edit time. On stale expected time/hash or a changed
+pre-PATCH snapshot, **no PATCH** occurs. The failed first reservation is not
+implicitly released or retried. Explicitly fetch the current page, review and
+reconcile the intended append, then use a **new** unique idempotency key and
+fresh expected time/hash. Retrying the old key returns `OutcomeUnknown` until
+separate reconciliation. Fresh checks are only best-effort optimistic checks,
+not upstream atomic CAS. Production MCP write discovery remains disabled.
