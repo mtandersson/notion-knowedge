@@ -121,6 +121,14 @@ pub async fn update_section_once(
     {
         return Err(SectionUpdateError::InvalidInput);
     }
+    // Enhanced Notion structural blocks are not safe to synthesize through
+    // a Markdown search-and-replace, even if the old range is ordinary text.
+    if ["<unknown", "<page ", "<database ", "<data-source "]
+        .iter()
+        .any(|marker| request.replacement.contains(marker))
+    {
+        return Err(SectionUpdateError::SelectionRejected);
+    }
     let permit = gate
         .authorize(&request.page_id)
         .await

@@ -363,4 +363,10 @@ async fn replacement_that_creates_sibling_heading_is_rejected() {
         Err(SectionUpdateError::SelectionRejected)
     );
     assert_eq!(src.writes.load(Ordering::SeqCst), 0);
+    let mut markup = request(OLD);
+    markup.replacement = "<page url=\"https://notion.so/child\"/>\n".into();
+    assert_eq!(
+        run(&src, &Ledger::default(), markup).await,
+        Err(SectionUpdateError::SelectionRejected)
+    );
 }
