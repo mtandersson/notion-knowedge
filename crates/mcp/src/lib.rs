@@ -61,6 +61,7 @@ pub struct KnowledgeServer {
     capability_policy: capabilities::CapabilityPolicy,
     fresh_source: Option<Arc<dyn notion_knowledge_core::backend::NotionRead>>,
     write_design_preview: bool,
+    sync_status: Option<Arc<dyn notion_knowledge_core::sync_status::SyncStatusSource>>,
 }
 
 impl Default for KnowledgeServer {
@@ -72,6 +73,7 @@ impl Default for KnowledgeServer {
             capability_policy: capabilities::CapabilityPolicy::default(),
             fresh_source: None,
             write_design_preview: false,
+            sync_status: None,
             search: None,
             hybrid_search: None,
             lexical_search: None,
@@ -86,9 +88,21 @@ impl KnowledgeServer {
     /// Enforce the configured access mode before exposing or dispatching MCP tools.
     /// Only explicitly audited read tools are permitted in read-only mode.
     fn tool_permitted(&self, name: &str) -> bool {
-        (!self.read_only || matches!(name, "knowledge_search" | "knowledge_get"))
+        (!self.read_only
+            || matches!(
+                name,
+                "knowledge_search" | "knowledge_get" | "knowledge_sync_status"
+            ))
             && (self.destructive_writes_enabled || !write_contract::is_destructive_write(name))
             && self.capability_policy.permits(name)
+    }
+
+    pub fn and_sync_status(
+        mut self,
+        source: Arc<dyn notion_knowledge_core::sync_status::SyncStatusSource>,
+    ) -> Self {
+        self.sync_status = Some(source);
+        self
     }
 
     pub fn with_read_only(mut self, read_only: bool) -> Self {
@@ -115,7 +129,12 @@ impl KnowledgeServer {
 
     /// Shared discovery catalog for both MCP transport implementations.
     pub fn tool_catalog(&self) -> Vec<rmcp::model::Tool> {
-        let mut catalog = vec![search::tool(), get::tool(), upload::tool()];
+        let mut catalog = vec![
+            search::tool(),
+            get::tool(),
+            sync_status::tool(),
+            upload::tool(),
+        ];
         if self.write_design_preview {
             catalog.extend(write_contract::tools());
         }
@@ -267,6 +286,7 @@ impl KnowledgeServer {
 pub mod capabilities;
 pub mod get;
 pub mod search;
+pub mod sync_status;
 pub mod upload;
 pub mod write_contract;
 
@@ -290,6 +310,7 @@ impl ServerHandler for KnowledgeServer {
         match name {
             "knowledge_search" => Some(search::tool()),
             "knowledge_get" => Some(get::tool()),
+            "knowledge_sync_status" => Some(sync_status::tool()),
             "knowledge_upload_file" => Some(upload::tool()),
             name if self.write_design_preview => write_contract::tool(name),
             _ => None,
@@ -317,6 +338,22 @@ impl ServerHandler for KnowledgeServer {
         };
 
         match request.name.as_ref() {
+            "knowledge_sync_status" => {
+                if !arguments.is_empty() {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "knowledge_sync_status accepts no arguments",
+                        None,
+                    ));
+                }
+                let output = match &self.sync_status {
+                    Some(source) => source.status().await,
+                    None => Default::default(),
+                };
+                let value = serde_json::to_value(output)
+                    .map_err(|_| rmcp::ErrorData::internal_error("status unavailable", None))?;
+                Ok(rmcp::model::CallToolResult::structured(value).into())
+            }
+
             "knowledge_upload_file" => {
                 let input: upload::UploadFileRequest =
                     serde_json::from_value(serde_json::Value::Object(arguments)).map_err(|_| {

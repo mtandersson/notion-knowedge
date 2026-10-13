@@ -11,6 +11,7 @@ pub fn attach_root_scope(
     handler: KnowledgeServer,
     config: &Config,
 ) -> Result<KnowledgeServer, &'static str> {
+    let handler = crate::sync_status::attach(handler, config);
     let Some(scope) = &config.notion_scope else {
         // The MCP handler itself refuses content-bearing calls without the gate.
         return Ok(handler);

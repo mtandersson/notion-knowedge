@@ -54,8 +54,8 @@ cargo run -p notion-knowledge-server
 
 The server accepts newline-delimited MCP JSON-RPC on stdin and writes protocol
 responses to stdout. Startup diagnostics and errors go to stderr. It completes
-MCP initialization and supports tool discovery for both `knowledge_search` and
-`knowledge_get`; calls return explicit unavailable errors until the corresponding
+MCP initialization and supports tool discovery for `knowledge_search`, `knowledge_get` and
+[`knowledge_sync_status`](docs/knowledge-sync-status.md); calls return explicit unavailable errors until the corresponding
 retrieval adapters are configured. The process exits when
 the connected client closes stdin after initialization. Use `--http` to serve
 the same MCP handler over Streamable HTTP at `/mcp`:
@@ -374,7 +374,7 @@ Run the same check locally with:
 ### MCP read-only access
 
 `NK_READ_ONLY=true` is the default for both stdio and Streamable HTTP. Only
-explicitly audited read tools (`knowledge_search` and `knowledge_get`) can be
+explicitly audited read tools (`knowledge_search`, `knowledge_get` and `knowledge_sync_status`) can be
 advertised or dispatched in this mode. Unknown tools, Notion mutations and
 file uploads cannot be invoked through the MCP handler; the access check runs
 before any tool adapter. Set `NK_READ_ONLY=false` **explicitly** only when an

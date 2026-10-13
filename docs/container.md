@@ -1,9 +1,11 @@
 # Current server container
 
 This image packages the real `notion-knowledge-server` composition root and its
-current MCP transports. The tool catalog is empty. Notion requests, retrieval,
-model loading, and index processing are not implemented yet. Reserved data
-locations below are not consumed by this bootstrap. Parent issue #104 remains
+current MCP transports. The default image advertises the read-only tools
+`knowledge_search`, `knowledge_get` and `knowledge_sync_status`. Retrieval
+and authoritative scope are unconfigured: search/get report unavailable, and
+status reports null local-state fields. This bootstrap does not load models or
+process indexes; reserved data locations below are not consumed. Parent issue #104 remains
 open until follow-on #145 integrates and verifies those adapters in the image.
 There is no separate indexing worker executable today.
 

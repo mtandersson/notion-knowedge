@@ -31,13 +31,25 @@ def search_catalog(value):
     require(len(names) == len(set(names)), "Duplicate MCP tool names")
     search = next((tool for tool in tools if tool.get("name") == "knowledge_search"), None)
     get = next((tool for tool in tools if tool.get("name") == "knowledge_get"), None)
-    require(set(names) == {"knowledge_search", "knowledge_get"},
+    sync = next((tool for tool in tools if tool.get("name") == "knowledge_sync_status"), None)
+    require(set(names) == {"knowledge_search", "knowledge_get", "knowledge_sync_status"},
             "Read-only catalog must hide all mutation and upload tools")
-    require(search is not None and get is not None, "Expected read tools missing")
+    require(search is not None and get is not None and sync is not None, "Expected read tools missing")
     require(search["inputSchema"]["properties"]["mode"]["enum"] == ["semantic", "lexical", "hybrid"], "Search modes missing")
     require("score" in search["outputSchema"]["properties"]["results"]["items"]["properties"], "Search scores missing")
     require(get["inputSchema"]["required"] == ["refs", "max_chars"], "knowledge_get inputs missing")
     require(get["annotations"]["readOnlyHint"] is True, "knowledge_get must be read-only")
+    require(sync["annotations"]["readOnlyHint"] is True, "knowledge_sync_status must be read-only")
+    require(sync["inputSchema"]["additionalProperties"] is False, "Status scope must be server-owned")
+
+
+def sync_status(result):
+    require(result.get("isError") is not True, "Local status must remain available without adapters")
+    require(result.get("structuredContent") == {
+        "last_successful_crawl_unix_seconds": None,
+        "last_successful_reconciliation_unix_seconds": None,
+        "webhooks": None, "operational_schema_version": None, "index": None,
+    }, "Unconfigured image must report honest unavailable synchronization state")
 
 
 def cleanup(name):
@@ -160,6 +172,8 @@ def stdio(image):
                 child.stdin.flush()
                 tools = exchange({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
                 search_catalog(tools)
+                sync_status(exchange({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                                      "params": {"name": "knowledge_sync_status", "arguments": {}}}))
                 healthcheck = subprocess.run(
                     ["docker", "exec", name, "/usr/local/bin/notion-knowledge-server", "--healthcheck"],
                     capture_output=True, text=True, timeout=10)
@@ -254,6 +268,10 @@ def http_smoke(image):
         status, _, value = post({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, session)
         require(status == 200, "HTTP discovery failed")
         search_catalog(response(value, 2))
+        status, _, value = post({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                                 "params": {"name": "knowledge_sync_status", "arguments": {}}}, session)
+        require(status == 200, "HTTP synchronization status failed")
+        sync_status(response(value, 4))
         for headers in [{"Host": "untrusted.example"}, {"Origin": "https://untrusted.example"}]:
             status, _, _ = post({"jsonrpc": "2.0", "id": 3, "method": "ping"}, session, headers)
             require(status == 403, "Untrusted Host/Origin was accepted")

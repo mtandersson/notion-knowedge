@@ -95,3 +95,5 @@ pub mod sections;
 
 /// Server-owned durable once-only scoped Markdown section update (#312).
 pub mod section_update;
+
+pub mod sync_status;

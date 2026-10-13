@@ -10,10 +10,10 @@ local index/operational-state compatibility. `TBD` is a **draft**, not a publish
 - Release checklist and machine-checkable changelog/version guard.
 
 ### MCP tool-schema changes
-- No new schema change in this release-process change.
+- Added read-only `knowledge_sync_status` with scoped webhook counts, persisted index/model/schema identity and durable successful reconciliation time.
 
 ### Index/state migrations
-- No storage migration is introduced by the release-process change.
+- Additive SQLite schema 13 stores scoped authoritative reconciliation success receipts. Earlier completions remain unknown; status inspection never migrates state. Back up durable state before a writer upgrades it.
 
 ## [0.1.0] - TBD
 

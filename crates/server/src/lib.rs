@@ -40,3 +40,5 @@ pub mod index_runtime;
 pub mod reconciliation_command;
 
 pub mod scheduled_reconciliation;
+
+pub mod sync_status;

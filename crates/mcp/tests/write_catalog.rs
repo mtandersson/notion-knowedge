@@ -14,7 +14,7 @@ fn writable_discovery_preserves_read_and_unavailable_upload_contracts() {
     let tools = server.tool_catalog();
     assert_eq!(
         tools.len(),
-        3,
+        4,
         "unimplemented writes must not be advertised"
     );
     for tool in tools {
@@ -23,7 +23,10 @@ fn writable_discovery_preserves_read_and_unavailable_upload_contracts() {
             assert_eq!(wire["annotations"]["readOnlyHint"], false);
             continue;
         }
-        assert!(["knowledge_search", "knowledge_get"].contains(&wire["name"].as_str().unwrap()));
+        assert!(
+            ["knowledge_search", "knowledge_get", "knowledge_sync_status"]
+                .contains(&wire["name"].as_str().unwrap())
+        );
         assert_eq!(wire["annotations"]["readOnlyHint"], true);
         assert_eq!(wire["annotations"]["destructiveHint"], false);
     }
@@ -47,7 +50,7 @@ fn explicit_design_preview_discovery_separates_narrow_writes_and_destructive_arc
         .with_destructive_writes_enabled(true)
         .with_write_design_preview();
     let tools = server.tool_catalog();
-    assert_eq!(tools.len(), 7);
+    assert_eq!(tools.len(), 8);
     let names: BTreeSet<String> = tools
         .iter()
         .map(|tool| {
@@ -62,6 +65,7 @@ fn explicit_design_preview_discovery_separates_narrow_writes_and_destructive_arc
         [
             "knowledge_search",
             "knowledge_get",
+            "knowledge_sync_status",
             "knowledge_upload_file",
             "knowledge_create_page",
             "knowledge_append",
@@ -193,7 +197,10 @@ fn read_only_catalog_hides_all_mutation_schemas_even_with_preview_enabled() {
         .into_iter()
         .map(|tool| tool.name.into_owned())
         .collect();
-    assert_eq!(names, ["knowledge_search", "knowledge_get"]);
+    assert_eq!(
+        names,
+        ["knowledge_search", "knowledge_get", "knowledge_sync_status"]
+    );
     for name in [
         "knowledge_upload_file",
         "knowledge_create_page",
@@ -210,7 +217,7 @@ fn default_destructive_gate_hides_preview_schemas_without_disabling_safe_writes(
     let server = KnowledgeServer::default()
         .with_read_only(false)
         .with_write_design_preview();
-    assert_eq!(server.tool_catalog().len(), 5);
+    assert_eq!(server.tool_catalog().len(), 6);
     for name in ["knowledge_update_section", "knowledge_archive_page"] {
         assert!(server.get_tool(name).is_none());
     }
