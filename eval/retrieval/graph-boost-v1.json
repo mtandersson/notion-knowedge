@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "dataset_id": "personal-knowledge-fixtures-v1",
+  "provenance": "Fictional bilingual graph linked-source and disconnected/stale-hub controls. All judgments reused from personal-knowledge-v1; no private user content.",
+  "config": {
+    "max_hops": 1,
+    "weight": 0.15,
+    "candidate_limit": 20
+  },
+  "cases": [
+    {
+      "query_id": "link-energy-en",
+      "kind": "linked",
+      "anchor_page_id": "fixture:page:project-lighthouse",
+      "target_source_id": "fixture:chunk:energy-decision:decision",
+      "guard_source_ids": [
+        "fixture:chunk:project-lighthouse-old:overview"
+      ]
+    },
+    {
+      "query_id": "link-garden-en",
+      "kind": "linked",
+      "anchor_page_id": "fixture:page:odling",
+      "target_source_id": "fixture:chunk:odling-review:notes",
+      "guard_source_ids": [
+        "fixture:chunk:garden-old:plan"
+      ]
+    },
+    {
+      "query_id": "link-study-en",
+      "kind": "linked",
+      "anchor_page_id": "fixture:page:study",
+      "target_source_id": "fixture:chunk:reading:queue",
+      "guard_source_ids": [
+        "fixture:chunk:study:routine"
+      ]
+    },
+    {
+      "query_id": "semantic-energy-en",
+      "kind": "negative_control",
+      "anchor_page_id": "fixture:page:project-lighthouse",
+      "target_source_id": null,
+      "guard_source_ids": [
+        "fixture:chunk:project-lighthouse-old:overview"
+      ]
+    },
+    {
+      "query_id": "exact-bike-en",
+      "kind": "negative_control",
+      "anchor_page_id": "fixture:page:bike",
+      "target_source_id": null,
+      "guard_source_ids": [
+        "fixture:chunk:bike-old:service"
+      ]
+    },
+    {
+      "query_id": "date-review-en",
+      "kind": "negative_control",
+      "anchor_page_id": "fixture:page:lighthouse-review",
+      "target_source_id": null,
+      "guard_source_ids": [
+        "fixture:chunk:energy-decision:decision"
+      ]
+    },
+    {
+      "query_id": "link-energy-sv",
+      "kind": "linked",
+      "anchor_page_id": "fixture:page:project-lighthouse",
+      "target_source_id": "fixture:chunk:energy-decision:decision",
+      "guard_source_ids": [
+        "fixture:chunk:project-lighthouse-old:overview"
+      ]
+    },
+    {
+      "query_id": "link-garden-sv",
+      "kind": "linked",
+      "anchor_page_id": "fixture:page:odling",
+      "target_source_id": "fixture:chunk:odling-review:notes",
+      "guard_source_ids": [
+        "fixture:chunk:garden-old:plan"
+      ]
+    },
+    {
+      "query_id": "link-study-sv",
+      "kind": "linked",
+      "anchor_page_id": "fixture:page:study",
+      "target_source_id": "fixture:chunk:reading:queue",
+      "guard_source_ids": [
+        "fixture:chunk:study:routine"
+      ]
+    },
+    {
+      "query_id": "semantic-energy-sv",
+      "kind": "negative_control",
+      "anchor_page_id": "fixture:page:project-lighthouse",
+      "target_source_id": null,
+      "guard_source_ids": [
+        "fixture:chunk:project-lighthouse-old:overview"
+      ]
+    },
+    {
+      "query_id": "exact-bike-sv",
+      "kind": "negative_control",
+      "anchor_page_id": "fixture:page:bike",
+      "target_source_id": null,
+      "guard_source_ids": [
+        "fixture:chunk:bike-old:service"
+      ]
+    },
+    {
+      "query_id": "date-review-sv",
+      "kind": "negative_control",
+      "anchor_page_id": "fixture:page:lighthouse-review",
+      "target_source_id": null,
+      "guard_source_ids": [
+        "fixture:chunk:energy-decision:decision"
+      ]
+    }
+  ]
+}
