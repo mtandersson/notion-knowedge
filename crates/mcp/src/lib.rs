@@ -215,7 +215,8 @@ impl KnowledgeServer {
         let boosted =
             notion_knowledge_core::graph_boost::GraphBoostedHybrid::new(ranker, graph, config)
                 .map_err(|_| "invalid graph boost configuration")?;
-        self.hybrid_search = Some(Arc::new(boosted));
+        let gate = self.root_gate.clone().ok_or("root scope unavailable")?;
+        self.hybrid_search = Some(Arc::new(boosted.with_root_gate(gate)));
         Ok(self)
     }
 

@@ -4,7 +4,9 @@
 //! SearchHit.score always stays the original hybrid/RRF baseline score.
 
 use crate::{
+    backend::PageId,
     graph::{GraphEdgeStore, GraphTarget},
+    root_scope::RootScopeGate,
     search::{
         HybridSearch, RetrievalPath, SearchFuture, SearchHit, SearchUnavailable, SemanticQuery,
     },
@@ -61,6 +63,7 @@ pub struct GraphBoostedHybrid {
     inner: Arc<dyn HybridSearch>,
     graph: Arc<dyn GraphEdgeStore>,
     config: GraphBoostConfig,
+    scope: Option<RootScopeGate>,
 }
 impl GraphBoostedHybrid {
     pub fn new(
@@ -72,11 +75,19 @@ impl GraphBoostedHybrid {
             inner,
             graph,
             config: config.validate()?,
+            scope: None,
         })
     }
 
     pub fn config(&self) -> GraphBoostConfig {
         self.config
+    }
+
+    /// All hybrid candidates must be authorized BEFORE graph traversal.
+    /// Otherwise an excluded intermediate could change visible result order.
+    pub fn with_root_gate(mut self, gate: RootScopeGate) -> Self {
+        self.scope = Some(gate);
+        self
     }
 }
 impl HybridSearch for GraphBoostedHybrid {
@@ -90,6 +101,7 @@ impl HybridSearch for GraphBoostedHybrid {
             }
             let limit = query.limit;
             let allowed_page_ids = query.page_ids.clone();
+            let requested_roots = query.root_page_ids.clone();
             let candidates = self
                 .inner
                 .search(SemanticQuery {
@@ -97,6 +109,21 @@ impl HybridSearch for GraphBoostedHybrid {
                     ..query
                 })
                 .await?;
+            if let Some(scope) = &self.scope {
+                let roots = requested_roots.unwrap_or_else(|| {
+                    scope.configured_scope().roots.iter().map(|root| root.0.clone()).collect()
+                });
+                for candidate in &candidates {
+                    let permit = scope
+                        .authorize(&PageId(candidate.source.page_id.clone()))
+                        .await.map_err(|_| SearchUnavailable)?;
+                    if !permit.belongs_to_any(&roots)
+                        || scope.revalidate(&permit, scope.configured_scope()).await.is_err()
+                    {
+                        return Err(SearchUnavailable);
+                    }
+                }
+            }
             let reranked = rank_candidates(
                 candidates,
                 self.graph.as_ref(),
