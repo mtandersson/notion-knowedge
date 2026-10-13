@@ -111,14 +111,23 @@ impl HybridSearch for GraphBoostedHybrid {
                 .await?;
             if let Some(scope) = &self.scope {
                 let roots = requested_roots.unwrap_or_else(|| {
-                    scope.configured_scope().roots.iter().map(|root| root.0.clone()).collect()
+                    scope
+                        .configured_scope()
+                        .roots
+                        .iter()
+                        .map(|root| root.0.clone())
+                        .collect()
                 });
                 for candidate in &candidates {
                     let permit = scope
                         .authorize(&PageId(candidate.source.page_id.clone()))
-                        .await.map_err(|_| SearchUnavailable)?;
+                        .await
+                        .map_err(|_| SearchUnavailable)?;
                     if !permit.belongs_to_any(&roots)
-                        || scope.revalidate(&permit, scope.configured_scope()).await.is_err()
+                        || scope
+                            .revalidate(&permit, scope.configured_scope())
+                            .await
+                            .is_err()
                     {
                         return Err(SearchUnavailable);
                     }
