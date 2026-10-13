@@ -138,6 +138,7 @@ def compare(data, cases, queries, rankings, top_k):
     rows = []
     linked_rows, control_rows = [], []
     guard_regressions = []
+    unjudged_regressions = []
     target_regressions = []
     target_improvements = 0
     for case in cases["cases"]:
@@ -155,6 +156,9 @@ def compare(data, cases, queries, rankings, top_k):
                             & set(case["guard_source_ids"]))
         if new_guards:
             guard_regressions.append(qid)
+        new_unjudged = sorted((set(after[:K]) - set(before[:K])) - set(judged))
+        if new_unjudged:
+            unjudged_regressions.append(qid)
         if target is not None and rank_before is not None and rank_before <= K:
             if rank_after is None or rank_after > K:
                 target_regressions.append(qid)
@@ -167,6 +171,7 @@ def compare(data, cases, queries, rankings, top_k):
             "boosted": {"ranked_source_ids": after, "metrics": metric_after},
             "target_rank_before": rank_before, "target_rank_after": rank_after,
             "new_guard_sources_top3": new_guards,
+            "new_unjudged_sources_top3": new_unjudged,
         }
         rows.append(row)
         (linked_rows if case["kind"] == "linked" else control_rows).append(row)
@@ -180,7 +185,8 @@ def compare(data, cases, queries, rankings, top_k):
                 and la["ndcg_at_3"] > lb["ndcg_at_3"] + 0.001
                 and ca["ndcg_at_3"] + 0.001 >= cb["ndcg_at_3"]
                 and ca["mrr"] + 0.001 >= cb["mrr"]
-                and not guard_regressions and not target_regressions)
+                and not guard_regressions and not unjudged_regressions
+                and not target_regressions)
     return {
         "schema_version": 1, "dataset_id": data["dataset_id"],
         "as_of": data["as_of"], "config": cases["config"], "top_k": top_k,
@@ -195,6 +201,7 @@ def compare(data, cases, queries, rankings, top_k):
             "negative_controls": {"baseline": cb, "boosted": ca},
             "target_rank_improvements": target_improvements,
             "new_guard_regressions": guard_regressions,
+            "new_unjudged_regressions": unjudged_regressions,
             "target_top3_regressions": target_regressions,
         }, "results": rows,
     }

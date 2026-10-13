@@ -60,6 +60,8 @@ for query in payload["queries"]:
         boosted = baseline[:]
         if fail == "drift":
             boosted = [guard[stem], control_answer[stem], unrelated]
+        if fail == "unjudged_drift":
+            boosted = ["fixture:chunk:reading:queue", control_answer[stem], unrelated]
     results.append({"query_id": query["id"],
                     "ranked_source_ids": boosted if payload["graph_boost"]["enabled"] else baseline})
 if fail == "duplicate":
@@ -132,7 +134,7 @@ class GraphBoostEvaluationTests(unittest.TestCase):
         )
 
     def test_zero_lift_and_false_positive_drift_leave_boost_off(self):
-        for mode in ("no_lift", "drift", "lost_target"):
+        for mode in ("no_lift", "drift", "unjudged_drift", "lost_target"):
             with self.subTest(mode=mode):
                 run = self.invoke("--adapter", self.command, fail=mode)
                 self.assertEqual(run.returncode, 0, run.stderr)
@@ -140,6 +142,8 @@ class GraphBoostEvaluationTests(unittest.TestCase):
                 self.assertEqual(report["decision"], "keep_disabled")
                 if mode == "drift":
                     self.assertEqual(len(report["summary"]["new_guard_regressions"]), 6)
+                if mode == "unjudged_drift":
+                    self.assertTrue(report["summary"]["new_unjudged_regressions"])
                 if mode == "lost_target":
                     self.assertTrue(report["summary"]["target_top3_regressions"])
 
