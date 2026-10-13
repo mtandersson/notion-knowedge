@@ -299,6 +299,8 @@ payload-free agent-mutation record and a separate durable SQLite store with
 bounded retention. It is an available component, not yet wired to production
 MCP writes; future mutation workflows must enforce its failure policy.
 
+The [audited single-file ingestion application](docs/single-file-ingestion.md) joins secure request-scoped download, validation, native Notion attachment and durable audit behind a reusable core service. Installed MCP/server activation remains a separate integration step.
+
 ## ChatGPT file input
 
 The [request-scoped temporary file downloader](docs/temporary-file-download.md)
@@ -308,8 +310,8 @@ DNS pinning and private temporary-file ownership for future authenticated ingest
 The staged [`knowledge_upload_file` single-file input contract](docs/chatgpt-file-parameters.md)
 advertises `_meta["openai/fileParams"]` and accepts ChatGPT file references without
 Drive staging. It is hidden by default read-only mode; explicit `NK_READ_ONLY=false` exposes
-the schema and returns `file_upload_unavailable` until secure
-download, scope authorization and native Notion attachment are implemented.
+the schema and returns `file_upload_unavailable` until the audited ingestion
+application is wired into the installed MCP runtime.
 
 ## Continuous integration
 

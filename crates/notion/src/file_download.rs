@@ -52,6 +52,14 @@ impl std::fmt::Display for DownloadError {
 }
 impl std::error::Error for DownloadError {}
 
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct TlsFixture {
+    address: SocketAddr,
+    certificate: reqwest::Certificate,
+    paths: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
+}
+
 /// Operator-owned exact hostname allowlist, never derived from tool arguments.
 /// This policy authorizes a network destination, not a Notion mutation or root.
 #[derive(Debug, Clone)]
@@ -59,6 +67,8 @@ pub struct DownloadPolicy {
     hosts: BTreeSet<String>,
     max_bytes: usize,
     deadline: Duration,
+    #[cfg(test)]
+    fixture: Option<TlsFixture>,
 }
 
 impl DownloadPolicy {
@@ -100,7 +110,25 @@ impl DownloadPolicy {
             hosts: allowed,
             max_bytes,
             deadline,
+            #[cfg(test)]
+            fixture: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_tls_fixture(
+        mut self,
+        address: SocketAddr,
+        certificate: reqwest::Certificate,
+        paths: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
+    ) -> Self {
+        assert!(address.ip().is_loopback());
+        self.fixture = Some(TlsFixture {
+            address,
+            certificate,
+            paths,
+        });
+        self
     }
 
     fn url(&self, input: &str) -> Result<Url, DownloadError> {
@@ -131,6 +159,23 @@ impl DownloadPolicy {
         let url = self.url(temporary_url)?;
         tokio::time::timeout(self.deadline, async {
             let host = url.host_str().ok_or(DownloadError::InvalidUrl)?;
+            #[cfg(test)]
+            if let Some(TlsFixture {
+                address,
+                certificate,
+                paths,
+            }) = &self.fixture
+            {
+                let client = client_builder(self.deadline)
+                    .resolve_to_addrs(host, &[*address])
+                    .add_root_certificate(certificate.clone())
+                    .build()
+                    .map_err(|_| DownloadError::SourceUnavailable)?;
+                let temporary = tempfile::NamedTempFile::new()
+                    .map_err(|_| DownloadError::StorageUnavailable)?;
+                paths.lock().unwrap().push(temporary.path().to_owned());
+                return stream_file(&client, url, self.max_bytes, temporary).await;
+            }
             let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host, 443))
                 .await
                 .map_err(|_| DownloadError::SourceUnavailable)?

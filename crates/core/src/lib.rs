@@ -97,3 +97,6 @@ pub mod sections;
 pub mod section_update;
 
 pub mod sync_status;
+
+/// Audited request-scoped single native file ingestion.
+pub mod file_ingest;

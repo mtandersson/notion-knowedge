@@ -75,3 +75,6 @@ pub mod prepare;
 
 /// Restricted section PATCH adapter; no MCP exposure.
 mod section_update;
+
+/// Adapter for the core audited single-file ingestion application.
+pub mod file_ingest;

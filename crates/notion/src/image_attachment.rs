@@ -139,52 +139,82 @@ impl NotionClient {
         text: Option<&str>,
         scope: &LifecycleScope,
     ) -> Result<AttachedImage, BackendError> {
-        if pages::uuid(&target.0).as_deref() != Some(target.0.as_str()) || !valid_upload(upload) {
-            return Err(error(ATTACH, BackendErrorKind::InvalidInput));
-        }
-        let caption = caption(text)?;
-        let gate =
-            RootScopeGate::new(Arc::new(self.clone()), scope.clone()).map_err(scope_error)?;
-        let permit = gate.authorize(target).await.map_err(scope_error)?;
-        // Pre-mutation revalidation deliberately repeats fresh parent/source
-        // ancestry; a stale index root or forged target cannot authorize it.
-        gate.revalidate(&permit, scope).await.map_err(scope_error)?;
+        self.attach_uploaded_image_detailed(target, upload, text, scope)
+            .await
+            .map_err(|failure| error(failure.operation, failure.kind))
+    }
 
-        let added = self
-            .write(
-                reqwest::Method::PATCH,
-                &format!("/blocks/{}/children", target.0),
-                json!({"children":[{
-                    "object":"block",
-                    "type":"image",
-                    "image":{
-                        "type":"file_upload",
-                        "file_upload":{"id":upload.id},
-                        "caption":caption
-                    }
-                }]}),
-                ATTACH,
-            )
+    pub async fn attach_uploaded_image_detailed(
+        &self,
+        target: &PageId,
+        upload: &UploadedFile,
+        text: Option<&str>,
+        scope: &LifecycleScope,
+    ) -> Result<AttachedImage, notion_knowledge_core::file_ingest::FileEffectFailure> {
+        let mut known_block = None;
+        let mut effect_possible = false;
+        let result: Result<AttachedImage, BackendError> = async {
+            if pages::uuid(&target.0).as_deref() != Some(target.0.as_str()) || !valid_upload(upload)
+            {
+                return Err(error(ATTACH, BackendErrorKind::InvalidInput));
+            }
+            let caption = caption(text)?;
+            let gate =
+                RootScopeGate::new(Arc::new(self.clone()), scope.clone()).map_err(scope_error)?;
+            let permit = gate.authorize(target).await.map_err(scope_error)?;
+            // Pre-mutation revalidation deliberately repeats fresh parent/source
+            // ancestry; a stale index root or forged target cannot authorize it.
+            gate.revalidate(&permit, scope).await.map_err(scope_error)?;
+
+            effect_possible = true;
+            let added = self
+                .write(
+                    reqwest::Method::PATCH,
+                    &format!("/blocks/{}/children", target.0),
+                    json!({"children":[{
+                        "object":"block",
+                        "type":"image",
+                        "image":{
+                            "type":"file_upload",
+                            "file_upload":{"id":upload.id},
+                            "caption":caption
+                        }
+                    }]}),
+                    ATTACH,
+                )
+                .await?;
+            // A successful HTTP status is not a confirmed attachment: inspect the
+            // created block receipt, then read the actual block from Notion.
+            let results = added["results"]
+                .as_array()
+                .filter(|r| added["object"] == "list" && r.len() == 1)
+                .ok_or_else(|| error(ATTACH, BackendErrorKind::Conflict))?;
+            known_block = results[0]["id"].as_str().and_then(pages::uuid);
+            let block = block_id(&results[0], target)
+                .ok_or_else(|| error(ATTACH, BackendErrorKind::Conflict))?;
+            known_block = Some(block.clone());
+
+            self.verify_attached_block(&block, VERIFY, |value| {
+                readback_ok(value, target, &block, &upload.id, &caption)
+            })
             .await?;
-        // A successful HTTP status is not a confirmed attachment: inspect the
-        // created block receipt, then read the actual block from Notion.
-        let results = added["results"]
-            .as_array()
-            .filter(|r| added["object"] == "list" && r.len() == 1)
-            .ok_or_else(|| error(ATTACH, BackendErrorKind::Conflict))?;
-        let block = block_id(&results[0], target)
-            .ok_or_else(|| error(ATTACH, BackendErrorKind::Conflict))?;
-
-        self.verify_attached_block(&block, VERIFY, |value| {
-            readback_ok(value, target, &block, &upload.id, &caption)
-        })
-        .await?;
-        Ok(AttachedImage {
-            page_id: target.clone(),
-            block_id: block,
-            upload_id: upload.id.clone(),
-            verified: true,
-        })
+            Ok(AttachedImage {
+                page_id: target.clone(),
+                block_id: block,
+                upload_id: upload.id.clone(),
+                verified: true,
+            })
+        }
+        .await;
+        result.map_err(
+            |failure| notion_knowledge_core::file_ingest::FileEffectFailure {
+                operation: failure.operation,
+                kind: failure.kind,
+                upload_id: Some(upload.id.clone()),
+                block_id: known_block,
+                effect_possible,
+            },
+        )
     }
 }
 
