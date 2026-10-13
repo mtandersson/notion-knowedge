@@ -54,6 +54,25 @@ aborts issuing secrets. Pending transactions and codes are capacity-bounded
 (512 each), tokens are capped at 2048, and expired records are removed at
 writes. Restart intentionally invalidates the process-local records.
 
+## Internal verified callback-to-code composition (staged)
+
+`NotionCallback::complete_persist_and_approve` now connects a single-use,
+validated Notion OAuth callback to the in-memory PKCE engine **only after**
+writing the authoritative callback grant to the versioned encrypted store.
+The client cannot supply the approved grant ID, epoch, workspace or user;
+those are read from the returned sealed-store snapshot. The store and the
+PKCE engine independently apply the immutable owner/workspace allowlist.
+A foreign Notion app is rejected before consuming state or contacting the
+provider, storage errors never issue a code, and replayed callback state
+fails before reaching the grant store. A replaced grant makes any code
+invalid when the token endpoint rechecks the current store generation.
+
+This is a **server-internal seam**, not an HTTP login endpoint. No callback,
+`/authorize` or `/token` endpoint is activated, and the OAuth `/mcp`
+endpoint remains denied. The caller is responsible for using the current,
+unexpired sealed grant on every code exchange and MCP token verification;
+#127/#128 still own the session authorization and revocation boundary.
+
 ## Trust boundaries and remaining work
 
 - #121/#122 must implement the separate Notion OAuth redirect/callback

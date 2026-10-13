@@ -230,6 +230,12 @@ pub struct AuthorizationFlow {
     records: Mutex<Records>,
 }
 impl AuthorizationFlow {
+    /// Preflight immutable provider identity before a callback can replace the
+    /// sealed grant. Final approval still checks the same policy under lock.
+    pub(crate) fn allows_verified_identity(&self, workspace: &str, user: &str) -> bool {
+        self.allowed.workspace_id == workspace && self.allowed.owner_user_id == user
+    }
+
     pub fn new(client: Client, allowed: AllowedNotionIdentity) -> Self {
         Self {
             client,
