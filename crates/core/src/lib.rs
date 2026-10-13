@@ -61,6 +61,9 @@ pub mod aliases;
 /// Configurable reciprocal-rank fusion of independent retrieval paths.
 pub mod hybrid;
 
+/// Optional graph-neighborhood reranker over preauthorized hybrid candidates (#65).
+pub mod graph_boost;
+
 pub mod search_filters;
 
 pub mod reconciliation;
