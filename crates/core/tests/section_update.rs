@@ -428,9 +428,6 @@ async fn time_only_precondition_and_missing_revision_behavior() {
     assert_eq!(ledger.starts.load(Ordering::SeqCst), 0);
     let mut time_only = request(OLD);
     time_only.expected_markdown_sha256 = None;
-    assert_eq!(
-        run(&source, &ledger, time_only).await.unwrap().replayed,
-        false
-    );
+    assert!(!run(&source, &ledger, time_only).await.unwrap().replayed);
     assert_eq!(source.writes.load(Ordering::SeqCst), 1);
 }

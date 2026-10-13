@@ -105,7 +105,10 @@ impl NotionRead for Fixture {
             if matches!(self.mode, Mode::ConcurrentEditBeforePatch) && nth == 2 {
                 // A human edits the page after the first authorized full read.
                 // Deliberately keep the same timestamp to exercise snapshot diff.
-                self.markdown.lock().unwrap().push_str("human concurrent edit\n");
+                self.markdown
+                    .lock()
+                    .unwrap()
+                    .push_str("human concurrent edit\n");
             }
             if self.writes.load(Ordering::SeqCst) > 0
                 && matches!(self.mode, Mode::ReadbackUnavailable)
@@ -562,16 +565,37 @@ async fn missing_revision_is_rejected_before_ledger_or_mutation() {
 async fn same_timestamp_human_edit_between_preflight_and_patch_denies_append() {
     let source = Fixture::new(Mode::ConcurrentEditBeforePatch);
     let ledger = Ledger::default();
-    let error = append_once(source.as_ref(), source.as_ref(),
-        &gate(source.clone()), &ledger, request()).await.unwrap_err();
+    let error = append_once(
+        source.as_ref(),
+        source.as_ref(),
+        &gate(source.clone()),
+        &ledger,
+        request(),
+    )
+    .await
+    .unwrap_err();
     let AppendError::RevisionConflict(meta) = error else {
         panic!("concurrent Markdown change must be a conflict");
     };
     assert_eq!(meta.page_id.0, PAGE);
     assert_eq!(meta.last_edited_time, REVISION);
     assert_eq!(source.writes.load(Ordering::SeqCst), 0);
-    assert!(source.markdown.lock().unwrap().contains("human concurrent edit"));
-    assert_eq!(append_once(source.as_ref(), source.as_ref(),
-        &gate(source.clone()), &ledger, request()).await,
-        Err(AppendError::OutcomeUnknown));
+    assert!(
+        source
+            .markdown
+            .lock()
+            .unwrap()
+            .contains("human concurrent edit")
+    );
+    assert_eq!(
+        append_once(
+            source.as_ref(),
+            source.as_ref(),
+            &gate(source.clone()),
+            &ledger,
+            request()
+        )
+        .await,
+        Err(AppendError::OutcomeUnknown)
+    );
 }
