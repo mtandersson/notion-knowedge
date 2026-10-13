@@ -5,7 +5,9 @@
 
 use crate::{
     graph::{GraphEdgeStore, GraphTarget},
-    search::{HybridSearch, RetrievalPath, SearchFuture, SearchHit, SearchUnavailable, SemanticQuery},
+    search::{
+        HybridSearch, RetrievalPath, SearchFuture, SearchHit, SearchUnavailable, SemanticQuery,
+    },
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -22,14 +24,20 @@ pub struct GraphBoostConfig {
 }
 impl Default for GraphBoostConfig {
     fn default() -> Self {
-        Self { enabled: false, max_hops: 1, weight: 0.15, candidate_limit: 20 }
+        Self {
+            enabled: false,
+            max_hops: 1,
+            weight: 0.15,
+            candidate_limit: 20,
+        }
     }
 }
 impl GraphBoostConfig {
     pub fn validate(self) -> Result<Self, SearchUnavailable> {
         if !(1..=2).contains(&self.max_hops)
             || !self.weight.is_finite()
-            || self.weight <= 0.0 || self.weight > 0.5
+            || self.weight <= 0.0
+            || self.weight > 0.5
             || !(1..=100).contains(&self.candidate_limit)
         {
             return Err(SearchUnavailable);
@@ -60,7 +68,11 @@ impl GraphBoostedHybrid {
         graph: Arc<dyn GraphEdgeStore>,
         config: GraphBoostConfig,
     ) -> Result<Self, SearchUnavailable> {
-        Ok(Self { inner, graph, config: config.validate()? })
+        Ok(Self {
+            inner,
+            graph,
+            config: config.validate()?,
+        })
     }
 
     pub fn config(&self) -> GraphBoostConfig {
@@ -73,19 +85,23 @@ impl HybridSearch for GraphBoostedHybrid {
             if !self.config.enabled {
                 return self.inner.search(query).await;
             }
-            if !(1..=100).contains(&query.limit)
-                || self.config.candidate_limit < query.limit
-            {
+            if !(1..=100).contains(&query.limit) || self.config.candidate_limit < query.limit {
                 return Err(SearchUnavailable);
             }
             let limit = query.limit;
             let allowed_page_ids = query.page_ids.clone();
-            let candidates = self.inner.search(SemanticQuery {
-                limit: self.config.candidate_limit,
-                ..query
-            }).await?;
+            let candidates = self
+                .inner
+                .search(SemanticQuery {
+                    limit: self.config.candidate_limit,
+                    ..query
+                })
+                .await?;
             let reranked = rank_candidates(
-                candidates, self.graph.as_ref(), self.config, limit,
+                candidates,
+                self.graph.as_ref(),
+                self.config,
+                limit,
                 allowed_page_ids.as_deref(),
             )?;
             Ok(reranked.into_iter().map(|entry| entry.hit).collect())
@@ -104,9 +120,7 @@ pub fn rank_candidates(
     explicit_page_ids: Option<&[String]>,
 ) -> Result<Vec<GraphScoredHit>, SearchUnavailable> {
     config.validate()?;
-    if !(1..=config.candidate_limit).contains(&limit)
-        || hits.len() > config.candidate_limit
-    {
+    if !(1..=config.candidate_limit).contains(&limit) || hits.len() > config.candidate_limit {
         return Err(SearchUnavailable);
     }
     let mut unique = BTreeSet::new();
@@ -122,13 +136,17 @@ pub fn rank_candidates(
         }
     }
     if !config.enabled {
-        return Ok(hits.into_iter().take(limit).map(|hit| GraphScoredHit {
-            baseline_score: hit.score,
-            rank_score: hit.score,
-            graph_bonus: 0.0,
-            hops: None,
-            hit,
-        }).collect());
+        return Ok(hits
+            .into_iter()
+            .take(limit)
+            .map(|hit| GraphScoredHit {
+                baseline_score: hit.score,
+                rank_score: hit.score,
+                graph_bonus: 0.0,
+                hops: None,
+                hit,
+            })
+            .collect());
     }
     // Require high-confidence overlap of two independent retrieval paths
     // among the first three hits. Single-path hits never seed expansion.
@@ -138,17 +156,20 @@ pub fn rank_candidates(
             && hit.matched_paths.contains(&RetrievalPath::Lexical)
     });
     let Some(seed) = seed else {
-        return Ok(hits.into_iter().take(limit).map(|hit| GraphScoredHit {
-            baseline_score: hit.score,
-            rank_score: hit.score,
-            graph_bonus: 0.0,
-            hops: None,
-            hit,
-        }).collect());
+        return Ok(hits
+            .into_iter()
+            .take(limit)
+            .map(|hit| GraphScoredHit {
+                baseline_score: hit.score,
+                rank_score: hit.score,
+                graph_bonus: 0.0,
+                hops: None,
+                hit,
+            })
+            .collect());
     };
     let seed_page = seed.source.page_id.clone();
-    let eligible_pages: BTreeSet<_> =
-        hits.iter().map(|hit| hit.source.page_id.clone()).collect();
+    let eligible_pages: BTreeSet<_> = hits.iter().map(|hit| hit.source.page_id.clone()).collect();
     let mut distance = BTreeMap::from([(seed_page.clone(), 0_usize)]);
     let mut queue = VecDeque::from([seed_page]);
     // The candidate budget bounds the BFS graph reads. Unresolved references
@@ -181,24 +202,30 @@ pub fn rank_candidates(
         }
     }
     let seed_score = f64::from(seed.score);
-    let mut scored: Vec<_> = hits.into_iter().map(|hit| {
-        let baseline_score = hit.score;
-        let hops = distance.get(&hit.source.page_id).copied().filter(|hop| *hop > 0);
-        // Never promote a graph neighbor above the trusted dual-path seed.
-        let graph_bonus = hops.map_or(0.0, |hop| {
-            let raw = seed_score * config.weight / hop as f64;
-            let seed_gap = (seed_score - f64::from(baseline_score)).max(0.0);
-            raw.min(seed_gap * 0.95)
-        });
-        let rank_score = f64::from(baseline_score) + graph_bonus;
-        GraphScoredHit {
-            baseline_score,
-            graph_bonus: graph_bonus as f32,
-            rank_score: rank_score as f32,
-            hops,
-            hit,
-        }
-    }).collect();
+    let mut scored: Vec<_> = hits
+        .into_iter()
+        .map(|hit| {
+            let baseline_score = hit.score;
+            let hops = distance
+                .get(&hit.source.page_id)
+                .copied()
+                .filter(|hop| *hop > 0);
+            // Never promote a graph neighbor above the trusted dual-path seed.
+            let graph_bonus = hops.map_or(0.0, |hop| {
+                let raw = seed_score * config.weight / hop as f64;
+                let seed_gap = (seed_score - f64::from(baseline_score)).max(0.0);
+                raw.min(seed_gap * 0.95)
+            });
+            let rank_score = f64::from(baseline_score) + graph_bonus;
+            GraphScoredHit {
+                baseline_score,
+                graph_bonus: graph_bonus as f32,
+                rank_score: rank_score as f32,
+                hops,
+                hit,
+            }
+        })
+        .collect();
     scored.sort_by(|a, b| {
         b.rank_score.total_cmp(&a.rank_score).then_with(|| {
             (&a.hit.source.page_id, &a.hit.source.chunk_id)

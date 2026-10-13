@@ -208,10 +208,13 @@ impl KnowledgeServer {
         if self.root_gate.is_none() {
             return Err("graph boost requires trusted root authorization");
         }
-        let ranker = self.hybrid_search.take().ok_or("graph boost requires hybrid search")?;
-        let boosted = notion_knowledge_core::graph_boost::GraphBoostedHybrid::new(
-            ranker, graph, config,
-        ).map_err(|_| "invalid graph boost configuration")?;
+        let ranker = self
+            .hybrid_search
+            .take()
+            .ok_or("graph boost requires hybrid search")?;
+        let boosted =
+            notion_knowledge_core::graph_boost::GraphBoostedHybrid::new(ranker, graph, config)
+                .map_err(|_| "invalid graph boost configuration")?;
         self.hybrid_search = Some(Arc::new(boosted));
         Ok(self)
     }
