@@ -402,6 +402,16 @@ impl<'a> NotionCallback<'a> {
             .complete(raw_query)
             .await
             .map_err(ApproveError::Callback)?;
+        // Refuse an inconsistent MCP owner policy BEFORE changing the sealed
+        // upstream grant (and possibly invalidating an existing session).
+        if !flow.allows_verified_identity(
+            verified.grant.workspace_id(),
+            verified.grant.owner_user_id(),
+        ) {
+            return Err(ApproveError::Authorization(
+                crate::oauth_code::Error::AccessDenied,
+            ));
+        }
         let stored = store.save(&verified.grant).map_err(ApproveError::Store)?;
         // A concurrent replacement must never mint a code from stale state.
         // Token exchange must repeat this check using the current sealed grant.
@@ -895,7 +905,8 @@ mod tests {
         ));
         task.await.unwrap();
         assert!(redirect.take(&provider_state).is_none());
-        assert!(store.load().unwrap().is_some());
+        // Refusing a foreign MCP policy must not mutate the sealed grant.
+        assert!(store.load().unwrap().is_none());
     }
 
     #[tokio::test]
