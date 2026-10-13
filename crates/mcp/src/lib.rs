@@ -196,6 +196,26 @@ impl KnowledgeServer {
         self
     }
 
+    /// Explicitly wrap an installed hybrid ranker with bounded graph scoring.
+    /// Requires the physical root gate to be configured first. Disabled by
+    /// default; no graph lookups occur in the disabled configuration. Every
+    /// returned page is reauthorized in the shared knowledge_search handler.
+    pub fn and_graph_boost(
+        mut self,
+        graph: Arc<dyn notion_knowledge_core::graph::GraphEdgeStore>,
+        config: notion_knowledge_core::graph_boost::GraphBoostConfig,
+    ) -> Result<Self, &'static str> {
+        if self.root_gate.is_none() {
+            return Err("graph boost requires trusted root authorization");
+        }
+        let ranker = self.hybrid_search.take().ok_or("graph boost requires hybrid search")?;
+        let boosted = notion_knowledge_core::graph_boost::GraphBoostedHybrid::new(
+            ranker, graph, config,
+        ).map_err(|_| "invalid graph boost configuration")?;
+        self.hybrid_search = Some(Arc::new(boosted));
+        Ok(self)
+    }
+
     pub fn with_source_expansion(
         source_expansion: Arc<dyn notion_knowledge_core::source::SourceExpansion>,
         root_page_ids: Vec<String>,
