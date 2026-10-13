@@ -12,7 +12,9 @@ use crate::{
         IdempotencyError, MutationClaim, MutationOperation, Reservation, VerifiedReceipt,
         WriteIdempotencyStore,
     },
-    revision::{ExpectedRevision, RevisionError, check_revision, markdown_sha256},
+    revision::{
+        ExpectedRevision, RevisionError, RevisionMetadata, check_revision, compare_content_snapshot,
+    },
     root_scope::RootScopeGate,
     sections::{SectionAnchor, SectionError, plan_section},
 };
@@ -23,9 +25,9 @@ pub struct SectionUpdateRequest {
     pub anchor: SectionAnchor,
     pub replacement: String,
     /// Caller-provided revision from a prior, authoritative Notion read.
-    pub expected_last_edited_time: String,
-    /// Required hash of the complete, original UTF-8 Markdown.
-    pub expected_markdown_sha256: String,
+    pub expected_last_edited_time: Option<String>,
+    /// Optional hash of the complete, original UTF-8 Markdown. At least one revision guard is required.
+    pub expected_markdown_sha256: Option<String>,
     /// Globally unique per intent and at least 16 URL-safe characters.
     pub idempotency_key: String,
 }
@@ -36,11 +38,11 @@ pub struct SectionUpdateResult {
     pub replayed: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SectionUpdateError {
     InvalidInput,
     NotAuthorized,
-    RevisionConflict,
+    RevisionConflict(RevisionMetadata),
     SelectionRejected,
     IdempotencyConflict,
     Unavailable,
@@ -65,6 +67,16 @@ fn ledger_error(error: IdempotencyError) -> SectionUpdateError {
     }
 }
 
+fn map_revision_error(err: RevisionError) -> SectionUpdateError {
+    match err {
+        RevisionError::Conflict(meta) | RevisionError::Inactive(meta) => {
+            SectionUpdateError::RevisionConflict(meta)
+        }
+        RevisionError::InvalidPrecondition => SectionUpdateError::InvalidInput,
+        RevisionError::Read(_) => SectionUpdateError::Unavailable,
+    }
+}
+
 fn fingerprint(request: &SectionUpdateRequest) -> String {
     let mut hash = Sha256::new();
     for part in [
@@ -72,26 +84,13 @@ fn fingerprint(request: &SectionUpdateRequest) -> String {
         &request.anchor.level.to_string(),
         request.anchor.heading.as_str(),
         request.replacement.as_str(),
-        request.expected_last_edited_time.as_str(),
-        request.expected_markdown_sha256.as_str(),
+        request.expected_last_edited_time.as_deref().unwrap_or(""),
+        request.expected_markdown_sha256.as_deref().unwrap_or(""),
     ] {
         hash.update((part.len() as u64).to_be_bytes());
         hash.update(part.as_bytes());
     }
     format!("{:x}", hash.finalize())
-}
-
-fn matches_revision(
-    page_id: &PageId,
-    request: &SectionUpdateRequest,
-    content: &crate::backend::PageContent,
-) -> bool {
-    content.page.id == *page_id
-        && !content.page.archived
-        && DateTime::parse_from_rfc3339(&content.page.last_edited_time).ok()
-            == DateTime::parse_from_rfc3339(&request.expected_last_edited_time).ok()
-        && markdown_sha256(&content.markdown)
-            .eq_ignore_ascii_case(&request.expected_markdown_sha256)
 }
 
 /// Authorize, reserve durably, verify full fresh revision and scope, then issue
@@ -110,12 +109,17 @@ pub async fn update_section_once(
     ledger: &dyn WriteIdempotencyStore,
     request: SectionUpdateRequest,
 ) -> Result<SectionUpdateResult, SectionUpdateError> {
-    if DateTime::parse_from_rfc3339(&request.expected_last_edited_time).is_err()
-        || request.expected_markdown_sha256.len() != 64
-        || !request
+    if (request.expected_last_edited_time.is_none() && request.expected_markdown_sha256.is_none())
+        || request
+            .expected_last_edited_time
+            .as_deref()
+            .is_some_and(|time| DateTime::parse_from_rfc3339(time).is_err())
+        || request
             .expected_markdown_sha256
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit())
+            .as_deref()
+            .is_some_and(|hash| {
+                hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
         || request.replacement.len() > 200_000
         || request.replacement.contains('\0')
     {
@@ -156,14 +160,14 @@ pub async fn update_section_once(
     }
 
     let expected = ExpectedRevision {
-        last_edited_time: Some(request.expected_last_edited_time.clone()),
-        markdown_sha256: Some(request.expected_markdown_sha256.clone()),
+        last_edited_time: request.expected_last_edited_time.clone(),
+        markdown_sha256: request.expected_markdown_sha256.clone(),
     };
     check_revision(reader, &request.page_id, &expected)
         .await
         .map_err(|err| match err {
-            RevisionError::Conflict(_) | RevisionError::Inactive(_) => {
-                SectionUpdateError::RevisionConflict
+            RevisionError::Conflict(meta) | RevisionError::Inactive(meta) => {
+                SectionUpdateError::RevisionConflict(meta)
             }
             RevisionError::InvalidPrecondition => SectionUpdateError::InvalidInput,
             RevisionError::Read(_) => SectionUpdateError::Unavailable,
@@ -173,9 +177,7 @@ pub async fn update_section_once(
         .read_content(&request.page_id)
         .await
         .map_err(|_| SectionUpdateError::Unavailable)?;
-    if !matches_revision(&request.page_id, &request, &original) {
-        return Err(SectionUpdateError::RevisionConflict);
-    }
+    compare_content_snapshot(&request.page_id, &expected, &original).map_err(map_revision_error)?;
 
     let plan = plan_section(
         &original.markdown,
@@ -203,9 +205,10 @@ pub async fn update_section_once(
         .read_content(&request.page_id)
         .await
         .map_err(|_| SectionUpdateError::Unavailable)?;
-    if !matches_revision(&request.page_id, &request, &fresh) || fresh.markdown != original.markdown
-    {
-        return Err(SectionUpdateError::RevisionConflict);
+    let fresh_meta = compare_content_snapshot(&request.page_id, &expected, &fresh)
+        .map_err(map_revision_error)?;
+    if fresh.markdown != original.markdown {
+        return Err(SectionUpdateError::RevisionConflict(fresh_meta));
     }
 
     // MUST be persisted before any network mutation, including failed or

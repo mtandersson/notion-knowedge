@@ -123,3 +123,49 @@ pub async fn check_revision(
     }
     Ok(metadata)
 }
+
+/// A second fresh read must be evaluated against the exact same user
+/// preconditions immediately before PATCH. No implicit update or replay.
+pub fn compare_content_snapshot(
+    page_id: &PageId,
+    expected: &ExpectedRevision,
+    content: &crate::backend::PageContent,
+) -> Result<RevisionMetadata, RevisionError> {
+    if expected.last_edited_time.is_none() && expected.markdown_sha256.is_none() {
+        return Err(RevisionError::InvalidPrecondition);
+    }
+    let time = expected
+        .last_edited_time
+        .as_deref()
+        .map(DateTime::parse_from_rfc3339)
+        .transpose()
+        .map_err(|_| RevisionError::InvalidPrecondition)?;
+    if expected
+        .markdown_sha256
+        .as_deref()
+        .is_some_and(|h| !valid_hash(h))
+    {
+        return Err(RevisionError::InvalidPrecondition);
+    }
+    if &content.page.id != page_id {
+        return Err(internal_error());
+    }
+    let current = DateTime::parse_from_rfc3339(&content.page.last_edited_time)
+        .map_err(|_| internal_error())?;
+    let meta = RevisionMetadata {
+        page_id: content.page.id.clone(),
+        last_edited_time: content.page.last_edited_time.clone(),
+    };
+    if content.page.archived {
+        return Err(RevisionError::Inactive(meta));
+    }
+    if time.is_some_and(|t| t != current)
+        || expected
+            .markdown_sha256
+            .as_deref()
+            .is_some_and(|h| !h.eq_ignore_ascii_case(&markdown_sha256(&content.markdown)))
+    {
+        return Err(RevisionError::Conflict(meta));
+    }
+    Ok(meta)
+}

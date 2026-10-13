@@ -13,7 +13,9 @@ use crate::{
         IdempotencyError, MutationClaim, MutationOperation, Reservation, VerifiedReceipt,
         WriteIdempotencyStore,
     },
-    revision::{ExpectedRevision, RevisionError, check_revision, markdown_sha256},
+    revision::{
+        ExpectedRevision, RevisionError, RevisionMetadata, check_revision, compare_content_snapshot,
+    },
     root_scope::RootScopeGate,
 };
 
@@ -22,7 +24,7 @@ use crate::{
 pub struct AppendRequest {
     pub page_id: PageId,
     pub markdown: String,
-    pub expected_last_edited_time: String,
+    pub expected_last_edited_time: Option<String>,
     pub expected_markdown_sha256: Option<String>,
     /// Required, at least 16 URL-safe ASCII characters.
     pub idempotency_key: String,
@@ -37,11 +39,11 @@ pub struct AppendResult {
 
 /// Public errors intentionally contain no page data, revision values, or
 /// Notion response bodies. Unknown means *do not retry* this mutation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppendError {
     InvalidInput,
     NotAuthorized,
-    RevisionConflict,
+    RevisionConflict(RevisionMetadata),
     IdempotencyConflict,
     Unavailable,
     OutcomeUnknown,
@@ -68,7 +70,7 @@ fn fingerprint(request: &AppendRequest) -> String {
     let mut hash = Sha256::new();
     for part in [
         request.markdown.as_str(),
-        request.expected_last_edited_time.as_str(),
+        request.expected_last_edited_time.as_deref().unwrap_or(""),
         request.expected_markdown_sha256.as_deref().unwrap_or(""),
         "end",
     ] {
@@ -100,8 +102,12 @@ pub async fn append_once(
     if request.markdown.trim().is_empty()
         || request.markdown.len() > 200_000
         || request.markdown.contains('\0')
-        || request.expected_last_edited_time.is_empty()
-        || DateTime::parse_from_rfc3339(&request.expected_last_edited_time).is_err()
+        || (request.expected_last_edited_time.is_none()
+            && request.expected_markdown_sha256.is_none())
+        || request
+            .expected_last_edited_time
+            .as_deref()
+            .is_some_and(|time| DateTime::parse_from_rfc3339(time).is_err())
         || request
             .expected_markdown_sha256
             .as_deref()
@@ -145,14 +151,14 @@ pub async fn append_once(
     // Revision preflight never uses indexed Markdown. Once a reservation
     // exists, any failure leaves it non-retryable until explicit reconciliation.
     let expected = ExpectedRevision {
-        last_edited_time: Some(request.expected_last_edited_time.clone()),
+        last_edited_time: request.expected_last_edited_time.clone(),
         markdown_sha256: request.expected_markdown_sha256.clone(),
     };
     let revision = check_revision(reader, &request.page_id, &expected)
         .await
         .map_err(|failure| match failure {
-            RevisionError::Conflict(_) | RevisionError::Inactive(_) => {
-                AppendError::RevisionConflict
+            RevisionError::Conflict(meta) | RevisionError::Inactive(meta) => {
+                AppendError::RevisionConflict(meta)
             }
             RevisionError::InvalidPrecondition => AppendError::InvalidInput,
             RevisionError::Read(_) => AppendError::Unavailable,
@@ -162,22 +168,45 @@ pub async fn append_once(
         .read_content(&request.page_id)
         .await
         .map_err(|_| AppendError::Unavailable)?;
-    if before.page.id != request.page_id
-        || before.page.archived
-        || before.page.last_edited_time != revision.last_edited_time
-        || request
-            .expected_markdown_sha256
-            .as_ref()
-            .is_some_and(|expected| {
-                !expected.eq_ignore_ascii_case(&markdown_sha256(&before.markdown))
-            })
+    let before_meta =
+        compare_content_snapshot(&request.page_id, &expected, &before).map_err(|failure| {
+            match failure {
+                RevisionError::Conflict(meta) | RevisionError::Inactive(meta) => {
+                    AppendError::RevisionConflict(meta)
+                }
+                RevisionError::InvalidPrecondition => AppendError::InvalidInput,
+                RevisionError::Read(_) => AppendError::Unavailable,
+            }
+        })?;
+    // Detect a change between the first fresh preflight and this full read.
+    if DateTime::parse_from_rfc3339(&before_meta.last_edited_time).ok()
+        != DateTime::parse_from_rfc3339(&revision.last_edited_time).ok()
     {
-        return Err(AppendError::RevisionConflict);
+        return Err(AppendError::RevisionConflict(before_meta));
     }
 
     gate.revalidate(&permit, gate.configured_scope())
         .await
         .map_err(|_| AppendError::NotAuthorized)?;
+
+    // Best-effort immediate fresh preflight. This cannot be atomic CAS.
+    let fresh = reader
+        .read_content(&request.page_id)
+        .await
+        .map_err(|_| AppendError::Unavailable)?;
+    let final_meta =
+        compare_content_snapshot(&request.page_id, &expected, &fresh).map_err(|failure| {
+            match failure {
+                RevisionError::Conflict(meta) | RevisionError::Inactive(meta) => {
+                    AppendError::RevisionConflict(meta)
+                }
+                RevisionError::InvalidPrecondition => AppendError::InvalidInput,
+                RevisionError::Read(_) => AppendError::Unavailable,
+            }
+        })?;
+    if fresh.markdown != before.markdown {
+        return Err(AppendError::RevisionConflict(final_meta));
+    }
 
     // Persist the uncertain state BEFORE issuing the network mutation: after
     // any crash or timeout, repeat requests are reconciliation-only.

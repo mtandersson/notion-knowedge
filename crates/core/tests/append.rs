@@ -54,6 +54,7 @@ enum Mode {
     TimeoutAfterCommit,
     RewriteOriginal,
     ReadbackUnavailable,
+    ConcurrentEditBeforePatch,
 }
 
 struct Fixture {
@@ -100,7 +101,15 @@ impl NotionRead for Fixture {
 
     fn read_content<'a>(&'a self, _: &'a PageId) -> BackendFuture<'a, PageContent> {
         Box::pin(async move {
-            self.reads.fetch_add(1, Ordering::SeqCst);
+            let nth = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+            if matches!(self.mode, Mode::ConcurrentEditBeforePatch) && nth == 2 {
+                // A human edits the page after the first authorized full read.
+                // Deliberately keep the same timestamp to exercise snapshot diff.
+                self.markdown
+                    .lock()
+                    .unwrap()
+                    .push_str("human concurrent edit\n");
+            }
             if self.writes.load(Ordering::SeqCst) > 0
                 && matches!(self.mode, Mode::ReadbackUnavailable)
             {
@@ -245,7 +254,7 @@ fn request() -> AppendRequest {
     AppendRequest {
         page_id: PageId(PAGE.into()),
         markdown: "\n## New entry\n".into(),
-        expected_last_edited_time: REVISION.into(),
+        expected_last_edited_time: Some(REVISION.into()),
         expected_markdown_sha256: None,
         idempotency_key: KEY.into(),
     }
@@ -346,7 +355,7 @@ async fn stale_revision_denies_without_mutating_and_does_not_replay() {
     let source = Fixture::new(Mode::Normal);
     let ledger = Ledger::default();
     let mut wrong = request();
-    wrong.expected_last_edited_time = "2026-10-08T09:00:00Z".into();
+    wrong.expected_last_edited_time = Some("2026-10-08T09:00:00Z".into());
     assert_eq!(
         append_once(
             source.as_ref(),
@@ -356,7 +365,12 @@ async fn stale_revision_denies_without_mutating_and_does_not_replay() {
             wrong.clone()
         )
         .await,
-        Err(AppendError::RevisionConflict)
+        Err(AppendError::RevisionConflict(
+            notion_knowledge_core::revision::RevisionMetadata {
+                page_id: PageId(PAGE.into()),
+                last_edited_time: REVISION.into(),
+            },
+        ))
     );
     assert_eq!(source.writes.load(Ordering::SeqCst), 0);
     assert_eq!(
@@ -458,7 +472,130 @@ async fn hash_precondition_must_match_exact_fresh_markdown() {
             invalid
         )
         .await,
-        Err(AppendError::RevisionConflict)
+        Err(AppendError::RevisionConflict(
+            notion_knowledge_core::revision::RevisionMetadata {
+                page_id: PageId(PAGE.into()),
+                last_edited_time: REVISION.into(),
+            },
+        ))
     );
     assert_eq!(source.writes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn optional_preconditions_conflict_metadata_and_explicit_fresh_retry() {
+    use notion_knowledge_core::revision::markdown_sha256;
+    let source = Fixture::new(Mode::Normal);
+    let ledger = Ledger::default();
+    let mut stale = request();
+    stale.expected_last_edited_time = None;
+    stale.expected_markdown_sha256 = Some("f".repeat(64));
+    let error = append_once(
+        source.as_ref(),
+        source.as_ref(),
+        &gate(source.clone()),
+        &ledger,
+        stale.clone(),
+    )
+    .await
+    .unwrap_err();
+    let AppendError::RevisionConflict(current) = error else {
+        panic!("expected content-free revision conflict");
+    };
+    assert_eq!(current.page_id.0, PAGE);
+    assert_eq!(current.last_edited_time, REVISION);
+    assert!(!format!("{current:?}").contains("original"));
+    assert_eq!(source.writes.load(Ordering::SeqCst), 0);
+
+    // Even an uncommitted stale key may not be replayed automatically.
+    assert_eq!(
+        append_once(
+            source.as_ref(),
+            source.as_ref(),
+            &gate(source.clone()),
+            &ledger,
+            stale
+        )
+        .await,
+        Err(AppendError::OutcomeUnknown)
+    );
+    let fresh = source.read_content(&PageId(PAGE.into())).await.unwrap();
+    let mut retry = request();
+    retry.expected_last_edited_time = None;
+    retry.expected_markdown_sha256 = Some(markdown_sha256(&fresh.markdown));
+    retry.idempotency_key = "fresh-user-intent-retry-append-0002".into();
+    assert!(
+        !append_once(
+            source.as_ref(),
+            source.as_ref(),
+            &gate(source.clone()),
+            &ledger,
+            retry
+        )
+        .await
+        .unwrap()
+        .replayed
+    );
+    assert_eq!(source.writes.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn missing_revision_is_rejected_before_ledger_or_mutation() {
+    let source = Fixture::new(Mode::Normal);
+    let ledger = Ledger::default();
+    let mut request = request();
+    request.expected_last_edited_time = None;
+    request.expected_markdown_sha256 = None;
+    assert_eq!(
+        append_once(
+            source.as_ref(),
+            source.as_ref(),
+            &gate(source.clone()),
+            &ledger,
+            request
+        )
+        .await,
+        Err(AppendError::InvalidInput)
+    );
+    assert_eq!(ledger.starts.load(Ordering::SeqCst), 0);
+    assert_eq!(source.writes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn same_timestamp_human_edit_between_preflight_and_patch_denies_append() {
+    let source = Fixture::new(Mode::ConcurrentEditBeforePatch);
+    let ledger = Ledger::default();
+    let error = append_once(
+        source.as_ref(),
+        source.as_ref(),
+        &gate(source.clone()),
+        &ledger,
+        request(),
+    )
+    .await
+    .unwrap_err();
+    let AppendError::RevisionConflict(meta) = error else {
+        panic!("concurrent Markdown change must be a conflict");
+    };
+    assert_eq!(meta.page_id.0, PAGE);
+    assert_eq!(meta.last_edited_time, REVISION);
+    assert_eq!(source.writes.load(Ordering::SeqCst), 0);
+    assert!(
+        source
+            .markdown
+            .lock()
+            .unwrap()
+            .contains("human concurrent edit")
+    );
+    assert_eq!(
+        append_once(
+            source.as_ref(),
+            source.as_ref(),
+            &gate(source.clone()),
+            &ledger,
+            request()
+        )
+        .await,
+        Err(AppendError::OutcomeUnknown)
+    );
 }

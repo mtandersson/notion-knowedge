@@ -243,8 +243,8 @@ fn request(markdown: &str) -> SectionUpdateRequest {
             heading: "Target".into(),
         },
         replacement: "new body\n".into(),
-        expected_last_edited_time: REV.into(),
-        expected_markdown_sha256: markdown_sha256(markdown),
+        expected_last_edited_time: Some(REV.into()),
+        expected_markdown_sha256: Some(markdown_sha256(markdown)),
         idempotency_key: KEY.into(),
     }
 }
@@ -326,16 +326,26 @@ async fn stale_revision_scope_denial_and_concurrent_edit_do_not_patch() {
     assert_eq!(ledger.starts.load(Ordering::SeqCst), 0);
     src.deny.store(false, Ordering::SeqCst);
     let mut stale = request(OLD);
-    stale.expected_markdown_sha256 = "0".repeat(64);
+    stale.expected_markdown_sha256 = Some("0".repeat(64));
     assert_eq!(
         run(&src, &Ledger::default(), stale).await,
-        Err(SectionUpdateError::RevisionConflict)
+        Err(SectionUpdateError::RevisionConflict(
+            notion_knowledge_core::revision::RevisionMetadata {
+                page_id: PageId(PAGE.into()),
+                last_edited_time: REV.into(),
+            },
+        ))
     );
     assert_eq!(src.writes.load(Ordering::SeqCst), 0);
     let concurrent = Fixture::new(Mode::ConcurrentEdit, OLD);
     assert_eq!(
         run(&concurrent, &Ledger::default(), request(OLD)).await,
-        Err(SectionUpdateError::RevisionConflict)
+        Err(SectionUpdateError::RevisionConflict(
+            notion_knowledge_core::revision::RevisionMetadata {
+                page_id: PageId(PAGE.into()),
+                last_edited_time: REV.into(),
+            },
+        ))
     );
     assert_eq!(concurrent.writes.load(Ordering::SeqCst), 0);
 }
@@ -375,4 +385,49 @@ async fn replacement_that_creates_sibling_heading_is_rejected() {
         run(&src, &Ledger::default(), markup).await,
         Err(SectionUpdateError::SelectionRejected)
     );
+}
+
+#[tokio::test]
+async fn hash_only_stale_conflict_reports_only_current_metadata_then_explicit_retry() {
+    let source = Fixture::new(Mode::Normal, OLD);
+    let ledger = Ledger::default();
+    let mut stale = request(OLD);
+    stale.expected_last_edited_time = None;
+    stale.expected_markdown_sha256 = Some("f".repeat(64));
+    let error = run(&source, &ledger, stale.clone()).await.unwrap_err();
+    let SectionUpdateError::RevisionConflict(current) = error else {
+        panic!("stale content must yield conflict metadata");
+    };
+    assert_eq!(current.page_id.0, PAGE);
+    assert_eq!(current.last_edited_time, REV);
+    assert!(!format!("{current:?}").contains("old body"));
+    assert_eq!(source.writes.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        run(&source, &ledger, stale).await,
+        Err(SectionUpdateError::OutcomeUnknown)
+    );
+    let fresh = source.read_content(&PageId(PAGE.into())).await.unwrap();
+    let mut retry = request(&fresh.markdown);
+    retry.idempotency_key = "fresh-user-retry-section-0002".into();
+    retry.expected_last_edited_time = None;
+    assert!(!run(&source, &ledger, retry).await.unwrap().replayed);
+    assert_eq!(source.writes.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn time_only_precondition_and_missing_revision_behavior() {
+    let source = Fixture::new(Mode::Normal, OLD);
+    let ledger = Ledger::default();
+    let mut missing = request(OLD);
+    missing.expected_last_edited_time = None;
+    missing.expected_markdown_sha256 = None;
+    assert_eq!(
+        run(&source, &ledger, missing).await,
+        Err(SectionUpdateError::InvalidInput)
+    );
+    assert_eq!(ledger.starts.load(Ordering::SeqCst), 0);
+    let mut time_only = request(OLD);
+    time_only.expected_markdown_sha256 = None;
+    assert!(!run(&source, &ledger, time_only).await.unwrap().replayed);
+    assert_eq!(source.writes.load(Ordering::SeqCst), 1);
 }

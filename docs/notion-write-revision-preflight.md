@@ -38,3 +38,13 @@ alongside #78 and #79, and read-back/idempotency remain separately required.
 
 Run cargo test -p notion-knowledge-core --test revision --locked, ideally
 inside nix develop, plus the core crate's broader tests before merge.
+
+## Integrated workflows (#302)
+
+`append_once` and `update_section_once` now allow optional time/hash preconditions,
+require at least one, and return `RevisionConflict(RevisionMetadata)` for a
+stale trusted preflight or final before-dispatch recheck. The metadata contains
+only the target page ID and authoritative current edit time. The original
+idempotency reservation is left blocked after a conflict; caller must explicitly
+fetch current authoritative content, reconcile, and issue a new intent with a
+fresh revision and unique key. No production MCP write tools are enabled.
