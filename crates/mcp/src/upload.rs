@@ -159,6 +159,18 @@ pub fn tool_with_limit(max_files: usize) -> Tool {
     )
 }
 
+/// Trusted application installed by the server composition root.
+/// Requests contain untrusted file metadata; implementations retain authority.
+pub trait FileIngestion: Send + Sync {
+    fn ingest<'a>(
+        &'a self,
+        request: UploadFileRequest,
+        cancellation: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<serde_json::Value, &'static str>> + Send + 'a>,
+    >;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,16 +277,4 @@ mod tests {
             );
         }
     }
-}
-
-/// Trusted application installed by the server composition root.
-/// Requests contain untrusted file metadata; implementations retain authority.
-pub trait FileIngestion: Send + Sync {
-    fn ingest<'a>(
-        &'a self,
-        request: UploadFileRequest,
-        cancellation: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<serde_json::Value, &'static str>> + Send + 'a>,
-    >;
 }
