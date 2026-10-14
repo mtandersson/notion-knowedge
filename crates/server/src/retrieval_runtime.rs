@@ -16,13 +16,6 @@ use notion_knowledge_notion::NotionClient;
 use notion_knowledge_retrieval::chunks::{GuardedChunkTable, LanceSemanticSearch};
 use std::sync::Arc;
 
-fn permitted(config: &Config, transport: Transport) -> bool {
-    matches!(transport, Transport::Stdio)
-        || (config.bearer_fallback.is_some()
-            && config.http_bind.ip().is_loopback()
-            && config.oauth_discovery.is_none())
-}
-
 fn validate_owned(config: &Config) -> Result<(), &'static str> {
     use std::os::unix::fs::MetadataExt;
     let own = std::fs::metadata("/proc/self")
@@ -70,7 +63,7 @@ pub async fn configured(
     config: &Config,
     transport: Transport,
 ) -> Result<KnowledgeServer, &'static str> {
-    if config.retrieval.is_none() || !permitted(config, transport) {
+    if config.retrieval.is_none() || !crate::root_scope::trusted_transport(config, transport) {
         return Ok(handler);
     }
     validate_owned(config)?;
@@ -103,7 +96,7 @@ pub async fn compose(
     source: Arc<NotionClient>,
     provider: Arc<dyn EmbeddingProvider>,
 ) -> Result<KnowledgeServer, &'static str> {
-    if config.retrieval.is_none() || !permitted(config, transport) {
+    if config.retrieval.is_none() || !crate::root_scope::trusted_transport(config, transport) {
         return Ok(handler);
     }
     validate_owned(config)?;

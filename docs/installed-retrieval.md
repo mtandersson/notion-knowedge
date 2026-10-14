@@ -41,7 +41,9 @@ Trusted operator stdio may activate directly. HTTP additionally requires
 `NK_HTTP_AUTH=bearer`, `NK_HTTP_BEARER_TOKEN` and a loopback listener. The ordinary
 middleware enforces bearer authentication on initialization, session continuation,
 SSE and deletion. Unauthenticated and OAuth-discovery-only HTTP leave retrieval
-unavailable without opening the private index or model. Physical scope authorizes
+unavailable without opening the private index, model or state, including lazy
+sync-status readers. Only verified webhook activation installs writable inbox
+admission; read retrieval does not create or migrate the inbox. Physical scope authorizes
 data; it does not authenticate an HTTP caller. Private ChatGPT OAuth and container
 model packaging remain separate work.
 

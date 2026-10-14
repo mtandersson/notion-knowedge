@@ -1402,6 +1402,8 @@ async fn authenticated_http_serves_committed_hybrid_and_denies_untrusted_session
     .unwrap();
     let stop = CancellationToken::new();
     let cancelled = stop.clone();
+    let state_before_http = std::fs::read(&runtime.db).unwrap();
+    let index_before_http = storage_files(&runtime.index);
     let server = tokio::spawn(notion_knowledge_server::http::serve_installed(
         config, handler, None, cancelled,
     ));
@@ -1505,6 +1507,8 @@ async fn authenticated_http_serves_committed_hybrid_and_denies_untrusted_session
         .unwrap()
         .unwrap()
         .unwrap();
+    assert_eq!(state_before_http, std::fs::read(&runtime.db).unwrap());
+    assert_eq!(index_before_http, storage_files(&runtime.index));
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_activation_refuses_incompatible_assets_and_unsuitable_http_never_opens_them() {
@@ -1663,4 +1667,134 @@ async fn read_activation_refuses_incompatible_assets_and_unsuitable_http_never_o
         .await
         .is_err()
     );
+}
+
+fn storage_files(
+    path: &std::path::Path,
+) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    fn visit(
+        root: &std::path::Path,
+        current: &std::path::Path,
+        files: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+    ) {
+        for entry in std::fs::read_dir(current).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                visit(root, &path, files);
+            } else {
+                files.insert(
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    std::fs::read(path).unwrap(),
+                );
+            }
+        }
+    }
+    let mut files = std::collections::BTreeMap::new();
+    visit(path, path, &mut files);
+    files
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unsuitable_http_startup_keeps_private_read_state_closed_and_never_creates_missing_storage()
+{
+    let runtime = TestRuntime::with_scope_policy("webhook-v1").await;
+    for oauth in [false, true] {
+        let mut config = retrieval_config(&runtime);
+        config.bearer_fallback = None;
+        let absent = runtime._dir.path().join(if oauth {
+            "absent-oauth"
+        } else {
+            "absent-bootstrap"
+        });
+        config.webhook_state_file = Some(absent.join("state.sqlite"));
+        config.retrieval.as_mut().unwrap().index = absent.join("index");
+        config.retrieval.as_mut().unwrap().assets = absent.join("model");
+        if oauth {
+            config.oauth_discovery =
+                notion_knowledge_server::config::Config::from_lookup(|name| match name {
+                    "NK_OAUTH_ISSUER" => Some("https://auth.example.test".into()),
+                    "NK_OAUTH_RESOURCE" => Some("https://knowledge.example.test/mcp".into()),
+                    _ => None,
+                })
+                .unwrap()
+                .oauth_discovery;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        config.http_bind = listener.local_addr().unwrap();
+        let address = config.http_bind;
+        drop(listener);
+        let stop = CancellationToken::new();
+        let cancelled = stop.clone();
+        let server = tokio::spawn(notion_knowledge_server::http::serve_composed(
+            config,
+            notion_knowledge_mcp::KnowledgeServer::default(),
+            None,
+            cancelled,
+        ));
+        for _ in 0..100 {
+            if tokio::net::TcpStream::connect(address).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let client = reqwest::Client::new();
+        let url = format!("http://{address}/mcp");
+        let response = client.post(&url).header("accept", "application/json, text/event-stream").json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"unavailable-read","version":"1"}}})).send().await.unwrap();
+        if oauth {
+            assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+        } else {
+            assert!(response.status().is_success());
+            let session = response.headers()["mcp-session-id"]
+                .to_str()
+                .unwrap()
+                .to_owned();
+            http_json(response).await;
+            client
+                .post(&url)
+                .header("accept", "application/json, text/event-stream")
+                .header("mcp-session-id", &session)
+                .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+                .send()
+                .await
+                .unwrap();
+            for request in [
+                search_request(2, "hybrid", json!({})),
+                json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"knowledge_sync_status","arguments":{}}}),
+            ] {
+                let output = http_json(
+                    client
+                        .post(&url)
+                        .header("accept", "application/json, text/event-stream")
+                        .header("mcp-session-id", &session)
+                        .json(&request)
+                        .send()
+                        .await
+                        .unwrap(),
+                )
+                .await;
+                assert!(
+                    !output
+                        .to_string()
+                        .contains("operational_schema_version\":1")
+                );
+                assert!(!output.to_string().contains("Saffron"));
+                if output["id"] == 2 {
+                    assert!(output.to_string().contains("retrieval_unavailable"));
+                }
+                if output["id"] == 3 {
+                    assert!(
+                        output["result"]["structuredContent"]["operational_schema_version"]
+                            .is_null()
+                    );
+                }
+            }
+        }
+        assert!(!absent.exists());
+        stop.cancel();
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!absent.exists());
+    }
 }
