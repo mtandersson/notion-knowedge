@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::{
     NotionClient,
+    attachment_readback::AttachmentSource,
     file_upload::{UploadStatus, UploadedFile},
     pages,
 };
@@ -90,28 +91,14 @@ fn readback_ok(
     value: &Value,
     parent: &PageId,
     block: &str,
-    upload: &str,
+    source: &AttachmentSource,
     caption: &[Value],
 ) -> bool {
     if block_id(value, parent).as_deref() != Some(block) {
         return false;
     }
     let image = &value["image"];
-    // Notion may resolve uploaded IDs to temporary signed file objects on read.
-    let source_ok = match image["type"].as_str() {
-        Some("file_upload") => {
-            image["file_upload"]["id"]
-                .as_str()
-                .and_then(pages::uuid)
-                .as_deref()
-                == Some(upload)
-        }
-        Some("file") => image["file"]["url"]
-            .as_str()
-            .is_some_and(|url| url.starts_with("https://")),
-        _ => false,
-    };
-    if !source_ok {
+    if !source.matches(image) {
         return false;
     }
     let expected = caption.first().and_then(|c| c["text"]["content"].as_str());
@@ -139,52 +126,83 @@ impl NotionClient {
         text: Option<&str>,
         scope: &LifecycleScope,
     ) -> Result<AttachedImage, BackendError> {
-        if pages::uuid(&target.0).as_deref() != Some(target.0.as_str()) || !valid_upload(upload) {
-            return Err(error(ATTACH, BackendErrorKind::InvalidInput));
-        }
-        let caption = caption(text)?;
-        let gate =
-            RootScopeGate::new(Arc::new(self.clone()), scope.clone()).map_err(scope_error)?;
-        let permit = gate.authorize(target).await.map_err(scope_error)?;
-        // Pre-mutation revalidation deliberately repeats fresh parent/source
-        // ancestry; a stale index root or forged target cannot authorize it.
-        gate.revalidate(&permit, scope).await.map_err(scope_error)?;
+        self.attach_uploaded_image_detailed(target, upload, text, scope)
+            .await
+            .map_err(|failure| error(failure.operation, failure.kind))
+    }
 
-        let added = self
-            .write(
-                reqwest::Method::PATCH,
-                &format!("/blocks/{}/children", target.0),
-                json!({"children":[{
-                    "object":"block",
-                    "type":"image",
-                    "image":{
-                        "type":"file_upload",
-                        "file_upload":{"id":upload.id},
-                        "caption":caption
-                    }
-                }]}),
-                ATTACH,
-            )
+    pub async fn attach_uploaded_image_detailed(
+        &self,
+        target: &PageId,
+        upload: &UploadedFile,
+        text: Option<&str>,
+        scope: &LifecycleScope,
+    ) -> Result<AttachedImage, notion_knowledge_core::file_ingest::FileEffectFailure> {
+        let mut known_block = None;
+        let mut effect_possible = false;
+        let result: Result<AttachedImage, BackendError> = async {
+            if pages::uuid(&target.0).as_deref() != Some(target.0.as_str()) || !valid_upload(upload)
+            {
+                return Err(error(ATTACH, BackendErrorKind::InvalidInput));
+            }
+            let caption = caption(text)?;
+            let gate =
+                RootScopeGate::new(Arc::new(self.clone()), scope.clone()).map_err(scope_error)?;
+            let permit = gate.authorize(target).await.map_err(scope_error)?;
+            // Pre-mutation revalidation deliberately repeats fresh parent/source
+            // ancestry; a stale index root or forged target cannot authorize it.
+            gate.revalidate(&permit, scope).await.map_err(scope_error)?;
+
+            effect_possible = true;
+            let added = self
+                .write(
+                    reqwest::Method::PATCH,
+                    &format!("/blocks/{}/children", target.0),
+                    json!({"children":[{
+                        "object":"block",
+                        "type":"image",
+                        "image":{
+                            "type":"file_upload",
+                            "file_upload":{"id":upload.id},
+                            "caption":caption
+                        }
+                    }]}),
+                    ATTACH,
+                )
+                .await?;
+            // A successful HTTP status is not a confirmed attachment: inspect the
+            // created block receipt, then read the actual block from Notion.
+            let results = added["results"]
+                .as_array()
+                .filter(|r| added["object"] == "list" && r.len() == 1)
+                .ok_or_else(|| error(ATTACH, BackendErrorKind::Conflict))?;
+            known_block = results[0]["id"].as_str().and_then(pages::uuid);
+            let block = block_id(&results[0], target)
+                .ok_or_else(|| error(ATTACH, BackendErrorKind::Conflict))?;
+            known_block = Some(block.clone());
+            let source = AttachmentSource::from_receipt(&upload.id, &results[0]["image"]);
+
+            self.verify_attached_block(&block, VERIFY, |value| {
+                readback_ok(value, target, &block, &source, &caption)
+            })
             .await?;
-        // A successful HTTP status is not a confirmed attachment: inspect the
-        // created block receipt, then read the actual block from Notion.
-        let results = added["results"]
-            .as_array()
-            .filter(|r| added["object"] == "list" && r.len() == 1)
-            .ok_or_else(|| error(ATTACH, BackendErrorKind::Conflict))?;
-        let block = block_id(&results[0], target)
-            .ok_or_else(|| error(ATTACH, BackendErrorKind::Conflict))?;
-
-        self.verify_attached_block(&block, VERIFY, |value| {
-            readback_ok(value, target, &block, &upload.id, &caption)
-        })
-        .await?;
-        Ok(AttachedImage {
-            page_id: target.clone(),
-            block_id: block,
-            upload_id: upload.id.clone(),
-            verified: true,
-        })
+            Ok(AttachedImage {
+                page_id: target.clone(),
+                block_id: block,
+                upload_id: upload.id.clone(),
+                verified: true,
+            })
+        }
+        .await;
+        result.map_err(
+            |failure| notion_knowledge_core::file_ingest::FileEffectFailure {
+                operation: failure.operation,
+                kind: failure.kind,
+                upload_id: Some(upload.id.clone()),
+                block_id: known_block,
+                effect_possible,
+            },
+        )
     }
 }
 
@@ -244,7 +262,7 @@ mod tests {
         (
             "PATCH /v1/blocks/11111111-1111-1111-1111-111111111111/children".into(),
             200,
-            json!({"object":"list","results":[block("image",PAGE,json!({}))]}),
+            json!({"object":"list","results":[block("image",PAGE,json!({"type":"file","file":{"url":"https://files.notion.so/temporary-image"}}))]}),
         )
     }
     fn readback(parent: &str) -> (String, u16, Value) {
@@ -473,7 +491,7 @@ mod tests {
             &returned,
             &PageId(PAGE.into()),
             BLOCK,
-            UPLOAD,
+            &AttachmentSource::from_receipt(UPLOAD, &json!({})),
             &[]
         ));
         returned["image"]["file_upload"]["id"] = json!(UPLOAD);
@@ -482,7 +500,7 @@ mod tests {
             &returned,
             &PageId(PAGE.into()),
             BLOCK,
-            UPLOAD,
+            &AttachmentSource::from_receipt(UPLOAD, &json!({})),
             &[]
         ));
     }

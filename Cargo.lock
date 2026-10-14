@@ -4696,14 +4696,17 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "notion-knowledge-core",
+ "notion-knowledge-retrieval",
  "pulldown-cmark",
  "quick-xml",
  "reqwest 0.13.5",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
 ]
 

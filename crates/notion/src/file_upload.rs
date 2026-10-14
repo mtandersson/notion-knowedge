@@ -88,88 +88,117 @@ impl NotionClient {
         declared_mime: &str,
         policy: FileValidationPolicy,
     ) -> Result<UploadedFile, BackendError> {
-        if file.size_bytes() == 0 || file.size_bytes() > policy.max_bytes() {
-            return Err(error(CREATE, BackendErrorKind::InvalidInput));
-        }
-        let reader = tokio::fs::File::from_std(
-            file.reopen()
-                .map_err(|_| error(CREATE, BackendErrorKind::Unavailable))?,
-        );
-        let mut bytes = Vec::new();
-        reader
-            .take((policy.max_bytes() + 1) as u64)
-            .read_to_end(&mut bytes)
+        self.upload_single_part_detailed(file, filename, declared_mime, policy)
             .await
-            .map_err(|_| error(CREATE, BackendErrorKind::Unavailable))?;
-        if bytes.len() != file.size_bytes() {
-            return Err(error(CREATE, BackendErrorKind::InvalidInput));
-        }
-        let valid = policy
-            .validate(filename, declared_mime, &bytes)
-            .map_err(|_| error(CREATE, BackendErrorKind::InvalidInput))?;
-        drop(bytes);
+            .map_err(|failure| error(failure.operation, failure.kind))
+    }
 
-        let created = self.write(
+    pub async fn upload_single_part_detailed(
+        &self,
+        file: &DownloadedFile,
+        filename: &str,
+        declared_mime: &str,
+        policy: FileValidationPolicy,
+    ) -> Result<UploadedFile, notion_knowledge_core::file_ingest::FileEffectFailure> {
+        let mut known_upload = None;
+        let mut effect_possible = false;
+        let execution = async {
+            if file.size_bytes() == 0 || file.size_bytes() > policy.max_bytes() {
+                return Err(error(CREATE, BackendErrorKind::InvalidInput));
+            }
+            let reader = tokio::fs::File::from_std(
+                file.reopen()
+                    .map_err(|_| error(CREATE, BackendErrorKind::Unavailable))?,
+            );
+            let mut bytes = Vec::new();
+            reader
+                .take((policy.max_bytes() + 1) as u64)
+                .read_to_end(&mut bytes)
+                .await
+                .map_err(|_| error(CREATE, BackendErrorKind::Unavailable))?;
+            if bytes.len() != file.size_bytes() {
+                return Err(error(CREATE, BackendErrorKind::InvalidInput));
+            }
+            let valid = policy
+                .validate(filename, declared_mime, &bytes)
+                .map_err(|_| error(CREATE, BackendErrorKind::InvalidInput))?;
+            drop(bytes);
+
+            effect_possible = true;
+            let created = self.write(
             Method::POST,
             "/file_uploads",
             json!({"mode": "single_part", "filename": valid.filename, "content_type": valid.mime_type}),
             CREATE,
         ).await?;
-        let id = upload_id(&created, "pending", CREATE)?;
+            known_upload = created["id"].as_str().and_then(pages::uuid);
+            let id = upload_id(&created, "pending", CREATE)?;
+            known_upload = Some(id.clone());
 
-        // Reopen independently: a previous validator or concurrent reader must
-        // not share the transfer's file offset. The body is streamed, not buffered.
-        let stream = tokio::fs::File::from_std(
-            file.reopen()
-                .map_err(|_| error(SEND, BackendErrorKind::Unavailable))?,
-        );
-        let part = Part::stream_with_length(
-            reqwest::Body::wrap_stream(ReaderStream::new(stream)),
-            valid.size_bytes as u64,
-        )
-        .file_name(valid.filename.clone())
-        .mime_str(valid.mime_type)
-        .map_err(|_| error(SEND, BackendErrorKind::InvalidInput))?;
-        let request = self
-            .http
-            .post(format!("{}/file_uploads/{id}/send", self.api_root))
-            .header(AUTHORIZATION, self.authorization.clone())
-            .header("Notion-Version", MARKDOWN_VERSION)
-            .multipart(Form::new().part("file", part));
-        // One-shot streaming bodies are deliberately not retryable. The shared
-        // transport still performs admission and rate-limit accounting.
-        let mut response = self.send(request, false, SEND).await?;
-        if response.status().as_u16() != 200 {
-            return Err(error(SEND, classify(response.status().as_u16())));
-        }
-        let mut receipt = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| error(SEND, BackendErrorKind::Unavailable))?
-        {
-            if receipt.len().saturating_add(chunk.len()) > MAX_RECEIPT_BYTES {
+            // Reopen independently: a previous validator or concurrent reader must
+            // not share the transfer's file offset. The body is streamed, not buffered.
+            let stream = tokio::fs::File::from_std(
+                file.reopen()
+                    .map_err(|_| error(SEND, BackendErrorKind::Unavailable))?,
+            );
+            let part = Part::stream_with_length(
+                reqwest::Body::wrap_stream(ReaderStream::new(stream)),
+                valid.size_bytes as u64,
+            )
+            .file_name(valid.filename.clone())
+            .mime_str(valid.mime_type)
+            .map_err(|_| error(SEND, BackendErrorKind::InvalidInput))?;
+            let request = self
+                .http
+                .post(format!("{}/file_uploads/{id}/send", self.api_root))
+                .header(AUTHORIZATION, self.authorization.clone())
+                .header("Notion-Version", MARKDOWN_VERSION)
+                .multipart(Form::new().part("file", part));
+            // One-shot streaming bodies are deliberately not retryable. The shared
+            // transport still performs admission and rate-limit accounting.
+            let mut response = self.send(request, false, SEND).await?;
+            if response.status().as_u16() != 200 {
+                return Err(error(SEND, classify(response.status().as_u16())));
+            }
+            let mut receipt = Vec::new();
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|_| error(SEND, BackendErrorKind::Unavailable))?
+            {
+                if receipt.len().saturating_add(chunk.len()) > MAX_RECEIPT_BYTES {
+                    return Err(error(SEND, BackendErrorKind::Internal));
+                }
+                receipt.extend_from_slice(&chunk);
+            }
+            let result: Value = serde_json::from_slice(&receipt)
+                .map_err(|_| error(SEND, BackendErrorKind::Internal))?;
+            if upload_id(&result, "uploaded", SEND)? != id {
                 return Err(error(SEND, BackendErrorKind::Internal));
             }
-            receipt.extend_from_slice(&chunk);
-        }
-        let result: Value = serde_json::from_slice(&receipt)
-            .map_err(|_| error(SEND, BackendErrorKind::Internal))?;
-        if upload_id(&result, "uploaded", SEND)? != id {
-            return Err(error(SEND, BackendErrorKind::Internal));
-        }
-        if let Some(length) = result["content_length"].as_u64()
-            && length != valid.size_bytes as u64
-        {
-            return Err(error(SEND, BackendErrorKind::Internal));
-        }
-        Ok(UploadedFile {
-            id,
-            status: UploadStatus::Uploaded,
-            filename: valid.filename,
-            mime_type: valid.mime_type.into(),
-            size_bytes: valid.size_bytes,
-        })
+            if let Some(length) = result["content_length"].as_u64()
+                && length != valid.size_bytes as u64
+            {
+                return Err(error(SEND, BackendErrorKind::Internal));
+            }
+            Ok(UploadedFile {
+                id,
+                status: UploadStatus::Uploaded,
+                filename: valid.filename,
+                mime_type: valid.mime_type.into(),
+                size_bytes: valid.size_bytes,
+            })
+        };
+        let result: Result<UploadedFile, BackendError> = execution.await;
+        result.map_err(
+            |failure| notion_knowledge_core::file_ingest::FileEffectFailure {
+                operation: failure.operation,
+                kind: failure.kind,
+                upload_id: known_upload,
+                block_id: None,
+                effect_possible,
+            },
+        )
     }
 }
 
