@@ -5,7 +5,7 @@
 use notion_knowledge_core::{
     backend::PageId,
     graph::{GraphEdge, GraphEdgeStore, GraphTarget},
-    root_scope::RootScopeGate,
+    root_scope::{RootScopeGate, ScopeError},
 };
 use rmcp::model::{Tool, ToolAnnotations};
 use serde::{Deserialize, Serialize};
@@ -86,15 +86,23 @@ fn target_key(edge: &GraphEdge) -> &str {
     }
 }
 
-async fn authorized(gate: &RootScopeGate, id: &str, roots: &[String]) -> bool {
-    let Ok(permit) = gate.authorize(&PageId(id.to_owned())).await else {
-        return false;
+async fn authorized(
+    gate: &RootScopeGate,
+    id: &str,
+    roots: &[String],
+) -> Result<bool, RelatedError> {
+    let permit = match gate.authorize(&PageId(id.to_owned())).await {
+        Ok(permit) => permit,
+        Err(ScopeError::Denied) => return Ok(false),
+        Err(_) => return Err(RelatedError::Unavailable),
     };
-    permit.belongs_to_any(roots)
-        && gate
-            .revalidate(&permit, gate.configured_scope())
-            .await
-            .is_ok()
+    if !permit.belongs_to_any(roots) {
+        return Ok(false);
+    }
+    gate.revalidate(&permit, gate.configured_scope())
+        .await
+        .map_err(|_| RelatedError::Unavailable)?;
+    Ok(true)
 }
 
 /// Scope is supplied by the trusted MCP composition root, never tool JSON.
@@ -107,7 +115,7 @@ pub async fn navigate(
     roots: &[String],
 ) -> Result<RelatedResponse, RelatedError> {
     input.validate().map_err(|_| RelatedError::Inaccessible)?;
-    if roots.is_empty() || !authorized(gate, &input.page_id, roots).await {
+    if roots.is_empty() || !authorized(gate, &input.page_id, roots).await? {
         return Err(RelatedError::Inaccessible);
     }
 
@@ -166,7 +174,7 @@ pub async fn navigate(
                 (edge.source_page_id(), "incoming")
             };
             // Never use graph links or caller supplied IDs as permission proofs.
-            if !authorized(gate, neighbor, roots).await {
+            if !authorized(gate, neighbor, roots).await? {
                 continue;
             }
             let key = (
