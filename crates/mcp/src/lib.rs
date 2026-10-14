@@ -62,6 +62,7 @@ pub struct KnowledgeServer {
     fresh_source: Option<Arc<dyn notion_knowledge_core::backend::NotionRead>>,
     write_design_preview: bool,
     sync_status: Option<Arc<dyn notion_knowledge_core::sync_status::SyncStatusSource>>,
+    related_graph: Option<Arc<dyn notion_knowledge_core::graph::GraphEdgeStore>>,
 }
 
 impl Default for KnowledgeServer {
@@ -74,6 +75,7 @@ impl Default for KnowledgeServer {
             fresh_source: None,
             write_design_preview: false,
             sync_status: None,
+            related_graph: None,
             search: None,
             hybrid_search: None,
             lexical_search: None,
@@ -91,10 +93,25 @@ impl KnowledgeServer {
         (!self.read_only
             || matches!(
                 name,
-                "knowledge_search" | "knowledge_get" | "knowledge_sync_status"
+                "knowledge_search"
+                    | "knowledge_get"
+                    | "knowledge_sync_status"
+                    | "knowledge_related"
             ))
             && (self.destructive_writes_enabled || !write_contract::is_destructive_write(name))
             && self.capability_policy.permits(name)
+    }
+
+    /// Install derived graph reads only after the authoritative physical root gate.
+    pub fn and_related_graph(
+        mut self,
+        graph: Arc<dyn notion_knowledge_core::graph::GraphEdgeStore>,
+    ) -> Result<Self, &'static str> {
+        if self.root_gate.is_none() {
+            return Err("related graph requires trusted root authorization");
+        }
+        self.related_graph = Some(graph);
+        Ok(self)
     }
 
     pub fn and_sync_status(
@@ -135,6 +152,9 @@ impl KnowledgeServer {
             sync_status::tool(),
             upload::tool(),
         ];
+        if self.related_graph.is_some() {
+            catalog.push(related::tool());
+        }
         if self.write_design_preview {
             catalog.extend(write_contract::tools());
         }
@@ -285,6 +305,7 @@ impl KnowledgeServer {
 
 pub mod capabilities;
 pub mod get;
+pub mod related;
 pub mod search;
 pub mod sync_status;
 pub mod upload;
@@ -310,6 +331,7 @@ impl ServerHandler for KnowledgeServer {
         match name {
             "knowledge_search" => Some(search::tool()),
             "knowledge_get" => Some(get::tool()),
+            "knowledge_related" if self.related_graph.is_some() => Some(related::tool()),
             "knowledge_sync_status" => Some(sync_status::tool()),
             "knowledge_upload_file" => Some(upload::tool()),
             name if self.write_design_preview => write_contract::tool(name),
@@ -571,6 +593,53 @@ impl ServerHandler for KnowledgeServer {
                     _ => Ok(error(
                         "retrieval_unavailable: selected retrieval dependency failed; no results returned",
                     )),
+                }
+            }
+            "knowledge_related" => {
+                let input: related::RelatedRequest =
+                    serde_json::from_value(serde_json::Value::Object(arguments)).map_err(|_| {
+                        rmcp::ErrorData::invalid_params("invalid knowledge_related arguments", None)
+                    })?;
+                input
+                    .validate()
+                    .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
+                let Some(gate) = &self.root_gate else {
+                    return Ok(error(
+                        "root_scope_unavailable: trusted root authorization is not configured",
+                    ));
+                };
+                let Some(graph) = &self.related_graph else {
+                    return Ok(error(
+                        "graph_unavailable: a scoped graph adapter is not configured",
+                    ));
+                };
+                let roots: Vec<String> = if self.root_page_ids.is_empty() {
+                    gate.configured_scope()
+                        .roots
+                        .iter()
+                        .map(|root| root.0.clone())
+                        .collect()
+                } else {
+                    self.root_page_ids.iter().cloned().collect()
+                };
+                match related::navigate(&input, graph.as_ref(), gate, &roots).await {
+                    Ok(output) => {
+                        if !output_fits_budget(&output) {
+                            return Ok(error(
+                                "result_too_large: graph relations exceed output budget; request fewer relations",
+                            ));
+                        }
+                        let value = serde_json::to_value(output).map_err(|_| {
+                            rmcp::ErrorData::internal_error("graph output unavailable", None)
+                        })?;
+                        Ok(rmcp::model::CallToolResult::structured(value).into())
+                    }
+                    Err(related::RelatedError::Inaccessible) => Ok(error(
+                        "source_not_accessible: page outside configured root scope",
+                    )),
+                    Err(related::RelatedError::Unavailable) => {
+                        Ok(error("graph_unavailable: scoped graph traversal failed"))
+                    }
                 }
             }
             "knowledge_get" => {
