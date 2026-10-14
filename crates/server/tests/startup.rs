@@ -181,3 +181,30 @@ fn invalid_exclusion_options_fail_before_credentials_or_network_and_do_not_echo_
         assert!(!stderr.contains("Discovery requires"));
     }
 }
+
+#[test]
+fn ingestion_admission_fails_at_startup_without_echoing_values() {
+    for settings in [
+        vec![("NK_MAX_UPLOAD_FILES", "secret-invalid-count")],
+        vec![("NK_MAX_UPLOAD_FILES", "0")],
+        vec![("NK_MAX_UPLOAD_FILES", "17")],
+        vec![("NK_FILE_INGESTION", "true")],
+        vec![("NK_FILE_SOURCE_HOSTS", "secret-host-value")],
+        vec![("NK_FILE_INGESTION", "invalid-secret")],
+    ] {
+        for check in [false, true] {
+            let output = run(&settings, check);
+            assert_eq!(output.status.code(), Some(2));
+            let error = String::from_utf8(output.stderr).unwrap();
+            assert!(error.contains("NK_"));
+            for sentinel in [
+                "secret-invalid-count",
+                "secret-host-value",
+                "invalid-secret",
+            ] {
+                assert!(!error.contains(sentinel));
+            }
+            assert!(output.stdout.is_empty());
+        }
+    }
+}

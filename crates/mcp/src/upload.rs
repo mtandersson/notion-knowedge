@@ -6,7 +6,7 @@ use rmcp::model::{Tool, ToolAnnotations};
 use serde::Deserialize;
 use serde_json::json;
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatGptFile {
     pub download_url: String,
@@ -17,9 +17,12 @@ pub struct ChatGptFile {
     pub file_name: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UploadFileRequest {
+    pub target: String,
+    #[serde(default)]
+    pub caption: Option<String>,
     #[serde(default)]
     pub file: Option<ChatGptFile>,
     #[serde(default)]
@@ -31,12 +34,15 @@ pub struct UploadFileRequest {
 pub const DEFAULT_MAX_FILES: usize = 4;
 pub const HARD_MAX_FILES: usize = 16;
 
-pub fn configured_max_files() -> usize {
-    std::env::var("NK_MAX_UPLOAD_FILES")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| (1..=HARD_MAX_FILES).contains(value))
-        .unwrap_or(DEFAULT_MAX_FILES)
+impl std::fmt::Debug for ChatGptFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ChatGptFile([REDACTED])")
+    }
+}
+impl std::fmt::Debug for UploadFileRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("UploadFileRequest([REDACTED])")
+    }
 }
 
 pub fn validate_file(file: &ChatGptFile) -> Result<(), &'static str> {
@@ -62,12 +68,22 @@ pub fn validate_file(file: &ChatGptFile) -> Result<(), &'static str> {
 
 impl UploadFileRequest {
     pub fn validate(&self) -> Result<(), &'static str> {
-        self.validate_with_limit(configured_max_files())
+        self.validate_with_limit(DEFAULT_MAX_FILES)
     }
 
     pub fn validate_with_limit(&self, max_files: usize) -> Result<(), &'static str> {
         if !(1..=HARD_MAX_FILES).contains(&max_files) {
             return Err("invalid knowledge_upload_file batch limit");
+        }
+        let target = &self.target;
+        if target.len() != 36 || !target.bytes().enumerate().all(|(i, ch)| {
+            if matches!(i, 8 | 13 | 18 | 23) { ch == b'-' }
+            else { ch.is_ascii_digit() || (b'a'..=b'f').contains(&ch) }
+        }) || self.caption.as_deref().is_some_and(|value| {
+            value.chars().count() > 2000 || value.chars().any(|ch| ch.is_control()
+                || matches!(ch, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+        }) {
+            return Err("invalid knowledge_upload_file target or caption");
         }
         match (&self.file, &self.files) {
             (Some(file), None) => validate_file(file),
@@ -93,6 +109,11 @@ impl UploadFileRequest {
 }
 
 pub fn tool() -> Tool {
+    tool_with_limit(DEFAULT_MAX_FILES)
+}
+
+pub fn tool_with_limit(max_files: usize) -> Tool {
+    assert!((1..=HARD_MAX_FILES).contains(&max_files));
     let file = json!({
         "type": "object",
         "additionalProperties": false,
@@ -107,13 +128,16 @@ pub fn tool() -> Tool {
     let input = json!({
         "type": "object",
         "additionalProperties": false,
+        "required": ["target"],
         "oneOf": [{"required":["file"]}, {"required":["files"]}],
         "properties": {
+            "target": {"type":"string", "pattern":"^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$"},
+            "caption": {"type":"string", "maxLength":2000},
             "file": file,
             "files": {
                 "type": "array",
                 "minItems": 1,
-                "maxItems": HARD_MAX_FILES,
+                "maxItems": max_files,
                 "items": file
             }
         }
@@ -156,7 +180,7 @@ mod tests {
             json!([{"required":["file"]},{"required":["files"]}])
         );
         assert_eq!(input["properties"]["files"]["minItems"], 1);
-        assert_eq!(input["properties"]["files"]["maxItems"], HARD_MAX_FILES);
+        assert_eq!(input["properties"]["files"]["maxItems"], DEFAULT_MAX_FILES);
         assert_eq!(
             input["properties"]["files"]["items"]["required"],
             json!(["download_url", "file_id"])
@@ -167,7 +191,7 @@ mod tests {
     #[test]
     fn ordered_inputs_and_configurable_limit_are_enforced() {
         let request: UploadFileRequest = serde_json::from_value(json!({
-            "files":[item("first"),item("second"),item("third")]
+            "target":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "files":[item("first"),item("second"),item("third")]
         }))
         .unwrap();
         assert!(request.validate_with_limit(3).is_ok());
@@ -178,8 +202,10 @@ mod tests {
             .map(|file| file.file_id.as_str())
             .collect();
         assert_eq!(ids, vec!["first", "second", "third"]);
-        let legacy: UploadFileRequest =
-            serde_json::from_value(json!({"file":item("old")})).unwrap();
+        let legacy: UploadFileRequest = serde_json::from_value(
+            json!({"target":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","file":item("old")}),
+        )
+        .unwrap();
         assert_eq!(legacy.ordered_files()[0].file_id, "old");
         assert!(legacy.validate_with_limit(1).is_ok());
     }
@@ -187,11 +213,11 @@ mod tests {
     #[test]
     fn reject_both_absent_oversize_or_invalid_metadata_without_echoing_url() {
         let invalid = [
-            json!({}),
-            json!({"file":item("a"),"files":[item("b")]}),
-            json!({"files":[]}),
-            json!({"files":[item("a"),item("b")]}),
-            json!({"files":[{"file_id":"missing-url","download_url":""}]}),
+            json!({"target":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}),
+            json!({"target":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","file":item("a"),"files":[item("b")]}),
+            json!({"target":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","files":[]}),
+            json!({"target":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","files":[item("a"),item("b")]}),
+            json!({"target":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","files":[{"file_id":"missing-url","download_url":""}]}),
         ];
         for value in invalid {
             let request: UploadFileRequest = serde_json::from_value(value).unwrap();
@@ -201,15 +227,42 @@ mod tests {
         for _ in 0..HARD_MAX_FILES + 1 {
             too_many.push(item("file"));
         }
-        let request: UploadFileRequest = serde_json::from_value(json!({"files":too_many})).unwrap();
+        let request: UploadFileRequest = serde_json::from_value(
+            json!({"target":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","files":too_many}),
+        )
+        .unwrap();
         assert!(request.validate_with_limit(HARD_MAX_FILES).is_err());
         let error = request.validate_with_limit(HARD_MAX_FILES).unwrap_err();
         assert!(!error.contains("https://"));
         assert!(
             serde_json::from_value::<UploadFileRequest>(
-                json!({"files":[item("a")],"target":"unauthorized-page"})
+                json!({"target":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","files":[item("a")],"authority":"unauthorized-page"})
             )
             .is_err()
         );
+    }
+    #[test]
+    fn request_debug_and_validation_never_disclose_metadata() {
+        let mut value = json!({"target":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "caption":"private-sentinel", "file":item("private-sentinel")});
+        let request: UploadFileRequest = serde_json::from_value(value.clone()).unwrap();
+        assert!(request.validate().is_ok());
+        assert_eq!(format!("{request:?}"), "UploadFileRequest([REDACTED])");
+        assert_eq!(
+            format!("{:?}", request.file),
+            "Some(ChatGptFile([REDACTED]))"
+        );
+        for caption in [
+            "x".repeat(2001),
+            "private-sentinel\n".into(),
+            "private-sentinel\u{202e}".into(),
+        ] {
+            value["caption"] = json!(caption);
+            let request: UploadFileRequest = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(
+                request.validate().unwrap_err(),
+                "invalid knowledge_upload_file target or caption"
+            );
+        }
     }
 }

@@ -11,7 +11,8 @@ pub fn attach_root_scope(
     handler: KnowledgeServer,
     config: &Config,
 ) -> Result<KnowledgeServer, &'static str> {
-    let handler = crate::sync_status::attach(handler, config);
+    let handler = crate::sync_status::attach(handler, config)
+        .with_max_upload_files(config.max_upload_files)?;
     let Some(scope) = &config.notion_scope else {
         // The MCP handler itself refuses content-bearing calls without the gate.
         return Ok(handler);

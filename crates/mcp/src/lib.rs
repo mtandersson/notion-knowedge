@@ -54,6 +54,7 @@ pub struct KnowledgeServer {
     root_page_ids: Arc<[String]>,
     root_gate: Option<notion_knowledge_core::root_scope::RootScopeGate>,
     snippet_chars: usize,
+    max_upload_files: usize,
     /// Deny mutation-capable tools unless the operator explicitly disables read-only mode.
     read_only: bool,
     /// Additional opt-in gate for all destructive write operations.
@@ -69,6 +70,7 @@ impl Default for KnowledgeServer {
     fn default() -> Self {
         Self {
             snippet_chars: 2000,
+            max_upload_files: upload::DEFAULT_MAX_FILES,
             read_only: true,
             destructive_writes_enabled: false,
             capability_policy: capabilities::CapabilityPolicy::default(),
@@ -122,6 +124,15 @@ impl KnowledgeServer {
         self
     }
 
+    /// Immutable operator-owned upload admission, shared by discovery and calls.
+    pub fn with_max_upload_files(mut self, maximum: usize) -> Result<Self, &'static str> {
+        if !(1..=upload::HARD_MAX_FILES).contains(&maximum) {
+            return Err("invalid knowledge_upload_file batch limit");
+        }
+        self.max_upload_files = maximum;
+        Ok(self)
+    }
+
     pub fn with_read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
         self
@@ -150,7 +161,7 @@ impl KnowledgeServer {
             search::tool(),
             get::tool(),
             sync_status::tool(),
-            upload::tool(),
+            upload::tool_with_limit(self.max_upload_files),
         ];
         if self.related_graph.is_some() {
             catalog.push(related::tool());
@@ -333,7 +344,7 @@ impl ServerHandler for KnowledgeServer {
             "knowledge_get" => Some(get::tool()),
             "knowledge_related" if self.related_graph.is_some() => Some(related::tool()),
             "knowledge_sync_status" => Some(sync_status::tool()),
-            "knowledge_upload_file" => Some(upload::tool()),
+            "knowledge_upload_file" => Some(upload::tool_with_limit(self.max_upload_files)),
             name if self.write_design_preview => write_contract::tool(name),
             _ => None,
         }
@@ -385,7 +396,7 @@ impl ServerHandler for KnowledgeServer {
                         )
                     })?;
                 input
-                    .validate()
+                    .validate_with_limit(self.max_upload_files)
                     .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
                 Ok(error(
                     "file_upload_unavailable: file input accepted but Notion ingestion is not configured; no download or upload was attempted",

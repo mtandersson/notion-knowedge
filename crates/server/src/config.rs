@@ -5,6 +5,8 @@ use std::{env, ffi::OsString, fmt, net::SocketAddr};
 #[derive(Debug)]
 pub struct Config {
     pub http_bind: SocketAddr,
+    pub max_upload_files: usize,
+    pub file_ingestion: Option<crate::file_ingestion::Settings>,
     /// Highest level emitted to stderr as redacted, structured JSON.
     pub log_level: notion_knowledge_core::logging::Level,
     /// Fail-closed MCP access mode; enabled unless explicitly opted out.
@@ -640,7 +642,20 @@ impl Config {
         } else {
             None
         };
+        let max_upload_files = optional(&mut lookup, "NK_MAX_UPLOAD_FILES", "4")?
+            .parse::<usize>()
+            .ok()
+            .filter(|n| (1..=16).contains(n))
+            .ok_or_else(|| invalid("NK_MAX_UPLOAD_FILES", "must be an integer from 1 to 16"))?;
+        let file_ingestion = crate::file_ingestion::Settings::parse(
+            &mut lookup,
+            read_only,
+            matches!(notion_auth, NotionAuth::Integration(_)),
+            notion_scope.is_some(),
+        )?;
         Ok(Self {
+            max_upload_files,
+            file_ingestion,
             reconciliation_index,
             reconciliation_schedule,
             webhook_worker,
@@ -664,18 +679,18 @@ impl Config {
     }
 }
 
-fn invalid(setting: &'static str, reason: &'static str) -> ConfigError {
+pub(crate) fn invalid(setting: &'static str, reason: &'static str) -> ConfigError {
     ConfigError { setting, reason }
 }
 
-fn text(value: OsString, setting: &'static str) -> Result<String, ConfigError> {
+pub(crate) fn text(value: OsString, setting: &'static str) -> Result<String, ConfigError> {
     value
         .into_string()
         .map_err(|_| invalid(setting, "must be valid Unicode"))
 }
 
-fn optional(
-    lookup: &mut impl FnMut(&str) -> Option<OsString>,
+pub(crate) fn optional(
+    lookup: &mut (impl FnMut(&str) -> Option<OsString> + ?Sized),
     key: &'static str,
     default: &str,
 ) -> Result<String, ConfigError> {
