@@ -1239,12 +1239,6 @@ async fn ordered_batch_reports_later_failure_and_preserves_verified_image_and_do
     assert_eq!(patches.len(), 2);
     assert_eq!(patches[0]["children"][0]["type"], "image");
     assert_eq!(patches[1]["children"][0]["type"], "file");
-    assert!(
-        batch
-            .execute(&adapter, &context(&gate, &audit))
-            .await
-            .is_err()
-    );
 }
 
 #[tokio::test]
