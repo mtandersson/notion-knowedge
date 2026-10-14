@@ -61,12 +61,10 @@ pub async fn serve_composed(
     >,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> io::Result<()> {
-    let handler = crate::root_scope::attach_root_scope(
-        handler,
-        &settings,
-        crate::root_scope::Transport::Http,
-    )
-    .map_err(io::Error::other)?;
+    let handler =
+        crate::root_scope::compose(handler, &settings, crate::root_scope::Transport::Http)
+            .await
+            .map_err(io::Error::other)?;
     serve_installed(
         settings,
         handler,
@@ -77,7 +75,9 @@ pub async fn serve_composed(
     .await
 }
 
-async fn serve_installed(
+/// Serve a fully installed trusted handler through the ordinary authentication middleware.
+/// Typed integration compositions can supply adapters without environment overrides.
+pub async fn serve_installed(
     settings: crate::config::Config,
     handler: notion_knowledge_mcp::KnowledgeServer,
     #[cfg(all(unix, feature = "webhook-worker"))] worker: Option<

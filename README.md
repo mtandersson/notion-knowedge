@@ -535,7 +535,7 @@ question behavior and production follow-up decisions.
 The [local Qwen embedding provider](docs/local-qwen.md) implements the production
 embedding port with pinned offline assets and bounded CPU batches. Enable the
 optional `local-qwen` retrieval feature and use the matched `.#spike` toolchain;
-the opt-in [production webhook worker](docs/notion-webhooks.md#production-serving-worker) loads the model for authoritative index updates. Production MCP retrieval composition remains separate.
+the opt-in [production webhook worker](docs/notion-webhooks.md#production-serving-worker) loads the model for authoritative index updates. The [installed retrieval runtime](docs/installed-retrieval.md) can explicitly open compatible existing state for trusted stdio and authenticated loopback HTTP hybrid search.
 
 The [production semantic vector adapter](docs/semantic-search.md) binds a configured
 embedding provider to the indexed LanceDB table and filters before top-k selection.

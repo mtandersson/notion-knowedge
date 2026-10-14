@@ -224,11 +224,13 @@ async fn main() -> ExitCode {
     }
 
     eprintln!("Serving MCP over stdio.");
-    let handler = match notion_knowledge_server::root_scope::attach_root_scope(
+    let handler = match notion_knowledge_server::root_scope::compose(
         notion_knowledge_mcp::KnowledgeServer::default(),
         &config,
         notion_knowledge_server::root_scope::Transport::Stdio,
-    ) {
+    )
+    .await
+    {
         Ok(handler) => handler
             .with_read_only(config.read_only)
             .with_destructive_writes_enabled(config.destructive_writes_enabled)
