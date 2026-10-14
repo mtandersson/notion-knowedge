@@ -61,6 +61,30 @@ pub async fn serve_composed(
     >,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> io::Result<()> {
+    let handler = crate::root_scope::attach_root_scope(
+        handler,
+        &settings,
+        crate::root_scope::Transport::Http,
+    )
+    .map_err(io::Error::other)?;
+    serve_installed(
+        settings,
+        handler,
+        #[cfg(all(unix, feature = "webhook-worker"))]
+        worker,
+        shutdown,
+    )
+    .await
+}
+
+async fn serve_installed(
+    settings: crate::config::Config,
+    handler: notion_knowledge_mcp::KnowledgeServer,
+    #[cfg(all(unix, feature = "webhook-worker"))] worker: Option<
+        Arc<crate::webhook_worker::runtime::Worker>,
+    >,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> io::Result<()> {
     logging::set_level(settings.log_level);
     // Construct ONE shared refresh coordinator per HTTP server. OAuth discovery
     // remains fail-closed; no MCP bearer or callback routes are enabled here.
@@ -68,8 +92,7 @@ pub async fn serve_composed(
         .map_err(|_| io::Error::other("Notion OAuth credential runtime unavailable"))?;
     let bind = settings.http_bind;
     let mut diagnostics = crate::diagnostics::bootstrap(&settings);
-    let handler = crate::root_scope::attach_root_scope(handler, &settings)
-        .map_err(io::Error::other)?
+    let handler = handler
         .with_read_only(settings.read_only)
         .with_destructive_writes_enabled(settings.destructive_writes_enabled)
         .with_capability_policy(settings.capability_policy.clone());
@@ -786,3 +809,6 @@ mod tests {
         server.abort();
     }
 }
+
+#[cfg(test)]
+mod ingestion_tests;

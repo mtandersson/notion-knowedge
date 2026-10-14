@@ -4756,6 +4756,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "tokio-rustls",
 ]
 
 [[package]]

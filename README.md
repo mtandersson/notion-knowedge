@@ -288,7 +288,7 @@ evidence that the current server is ready to replace the official connector.
 The official connector
 remains the default for private/authoritative workflows: the custom production
 bootstrap does not yet provide working private ChatGPT authentication or
-configured retrieval, and its staged write/file primitives are not MCP tools.
+configured retrieval. Local file ingestion is explicitly operator-enabled; private ChatGPT OAuth remains gated.
 The playbook includes a documented **non-sensitive** operational smoke checklist
 and distinguishes pilot targets from demonstrated results.
 
@@ -296,10 +296,9 @@ and distinguishes pilot targets from demonstrated results.
 
 The [privacy-aware audit event contract](docs/audit-events.md) defines a
 payload-free agent-mutation record and a separate durable SQLite store with
-bounded retention. It is an available component, not yet wired to production
-MCP writes; future mutation workflows must enforce its failure policy.
+bounded retention. It is installed for opt-in MCP file ingestion; other future mutation workflows must enforce its failure policy.
 
-The [audited single-file ingestion application](docs/single-file-ingestion.md) joins secure request-scoped download, validation, native Notion attachment and durable audit behind a reusable core service. [Plan-aware multipart and ordered batches](docs/multipart-batch-ingestion.md) extend the same service with explicit trusted limits and per-file outcomes. Installed MCP/server activation remains a separate integration step.
+The [audited single-file ingestion application](docs/single-file-ingestion.md) joins secure request-scoped download, validation, native Notion attachment and durable audit behind a reusable core service. [Plan-aware multipart and ordered batches](docs/multipart-batch-ingestion.md) extend the same service with explicit trusted limits and per-file outcomes. The [installed ingestion runtime](docs/installed-file-ingestion.md) composes these services for trusted stdio and authenticated loopback bearer HTTP.
 
 ## ChatGPT file input
 
@@ -307,13 +306,12 @@ The [request-scoped temporary file downloader](docs/temporary-file-download.md)
 provides bounded streaming, exact HTTPS source-host admission, public-address
 DNS pinning and private temporary-file ownership for future authenticated ingestion.
 
-The [startup-owned file ingestion settings](docs/file-ingestion-settings.md) validate explicit operator admission without enabling ingestion runtime.
+The [startup-owned file ingestion settings](docs/file-ingestion-settings.md) validate explicit operator admission for the opt-in ingestion runtime.
 
-The staged [`knowledge_upload_file` single-file input contract](docs/chatgpt-file-parameters.md)
+The [`knowledge_upload_file` input contract](docs/chatgpt-file-parameters.md)
 advertises `_meta["openai/fileParams"]` and accepts ChatGPT file references without
 Drive staging. It is hidden by default read-only mode; explicit `NK_READ_ONLY=false` exposes
-the schema and returns `file_upload_unavailable` until the audited ingestion
-application is wired into the installed MCP runtime.
+the schema; configured `NK_FILE_INGESTION=true` installs the audited application. Missing settings or an unsuitable HTTP transport returns `file_upload_unavailable` before effects.
 
 ## Continuous integration
 
@@ -382,8 +380,7 @@ explicitly audited read tools (`knowledge_search`, `knowledge_get` and `knowledg
 advertised or dispatched in this mode. Unknown tools, Notion mutations and
 file uploads cannot be invoked through the MCP handler; the access check runs
 before any tool adapter. Set `NK_READ_ONLY=false` **explicitly** only when an
-operator intends to permit implemented mutation tools. This flag does not
-implement or activate writing: the current bootstrap exposes read tools by default, with only the unavailable upload schema in explicit writable mode.
+operator intends to permit implemented mutation tools. File ingestion additionally requires the validated operator settings and trusted transport described in [installed ingestion](docs/installed-file-ingestion.md). Other mutation tools remain unavailable.
 Invalid values fail startup instead of enabling writes. `--diagnostics` and
 `GET /health` expose the effective `access.read_only` boolean without
 revealing secrets. This setting controls MCP tool access, not the independent

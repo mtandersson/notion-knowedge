@@ -15,7 +15,7 @@ For example, `MultipartPolicy::new(80 * MIB, 20 * MIB, 10 * MIB)` keeps files
 through 20 MiB single-part; `MultipartPolicy::new(30 * MIB, 5 * MIB, 5 * MIB)`
 switches sooner. Invalid zero/oversized parts, gaps above the single-part ceiling,
 and incompatible maxima are rejected during construction. Policy fields are
-private. There is no public environment selector or automatic paid-plan inference.
+private. The installed server validates explicit operator plan/part settings at startup; request inputs cannot select a plan. See [installed runtime](installed-file-ingestion.md).
 
 Notion's [larger-file guide](https://developers.notion.com/guides/data-apis/sending-larger-files)
 requires nonfinal parts of 5–20 binary MiB, completion after every part is sent,

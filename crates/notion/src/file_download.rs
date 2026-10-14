@@ -52,7 +52,7 @@ impl std::fmt::Display for DownloadError {
 }
 impl std::error::Error for DownloadError {}
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-fixtures"))]
 #[derive(Debug, Clone)]
 struct TlsFixture {
     address: SocketAddr,
@@ -67,7 +67,7 @@ pub struct DownloadPolicy {
     hosts: BTreeSet<String>,
     max_bytes: usize,
     deadline: Duration,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-fixtures"))]
     fixture: Option<TlsFixture>,
 }
 
@@ -110,13 +110,13 @@ impl DownloadPolicy {
             hosts: allowed,
             max_bytes,
             deadline,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-fixtures"))]
             fixture: None,
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_tls_fixture(
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn with_tls_fixture(
         mut self,
         address: SocketAddr,
         certificate: reqwest::Certificate,
@@ -159,7 +159,7 @@ impl DownloadPolicy {
         let url = self.url(temporary_url)?;
         tokio::time::timeout(self.deadline, async {
             let host = url.host_str().ok_or(DownloadError::InvalidUrl)?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-fixtures"))]
             if let Some(TlsFixture {
                 address,
                 certificate,

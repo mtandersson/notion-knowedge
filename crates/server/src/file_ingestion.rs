@@ -1,4 +1,4 @@
-//! Validated operator-owned admission settings; runtime activation is separate.
+//! Validated operator-owned admission settings and installed audited ingestion.
 use crate::config::{ConfigError, invalid, optional, text};
 use notion_knowledge_core::audit::AuditRetention;
 use notion_knowledge_notion::{file_download::DownloadPolicy, file_multipart::MultipartPolicy};
@@ -285,5 +285,145 @@ mod tests {
         assert!(validate_audit_path(&file).is_err());
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(validate_audit_path(&file).is_ok());
+    }
+}
+
+/// The real installed application: one immutable operator policy and durable
+/// audit store, with request-owned one-shot batches and private temporary files.
+pub(crate) struct Runtime {
+    adapter: notion_knowledge_notion::file_ingest::NotionFileIngestAdapter,
+    gate: notion_knowledge_core::root_scope::RootScopeGate,
+    audit: notion_knowledge_retrieval::audit::SqliteAuditStore,
+    policy: notion_knowledge_core::file_ingest::FileBatchPolicy,
+}
+impl Runtime {
+    pub(crate) fn new(
+        config: &crate::config::Config,
+        settings: &Settings,
+        client: notion_knowledge_notion::NotionClient,
+    ) -> Result<Self, &'static str> {
+        validate_audit_path(&settings.audit_file)
+            .map_err(|_| "file ingestion audit path unavailable")?;
+        let scope = config
+            .notion_scope
+            .as_ref()
+            .ok_or("file ingestion scope unavailable")?;
+        let validation =
+            notion_knowledge_notion::file_validation::FileValidationPolicy::for_single_part(
+                settings
+                    .multipart
+                    .map_or(settings.maximum_bytes, |p| p.threshold_bytes()),
+            )
+            .map_err(|_| "file validation policy unavailable")?;
+        let mut adapter = notion_knowledge_notion::file_ingest::NotionFileIngestAdapter::new(
+            client.clone(),
+            settings.download.clone(),
+            validation,
+            scope.clone(),
+        );
+        if let Some(policy) = settings.multipart {
+            adapter = adapter.with_multipart(policy);
+        }
+        Ok(Self {
+            adapter,
+            gate: notion_knowledge_core::root_scope::RootScopeGate::new(
+                std::sync::Arc::new(client),
+                scope.clone(),
+            )
+            .map_err(|_| "file ingestion scope unavailable")?,
+            audit: notion_knowledge_retrieval::audit::SqliteAuditStore::open(
+                &settings.audit_file,
+                settings.retention,
+            )
+            .map_err(|_| "file ingestion audit unavailable")?,
+            policy: notion_knowledge_core::file_ingest::FileBatchPolicy::new(
+                config.max_upload_files,
+            )
+            .map_err(|_| "file batch policy unavailable")?,
+        })
+    }
+}
+impl notion_knowledge_mcp::upload::FileIngestion for Runtime {
+    fn ingest(
+        &self,
+        input: notion_knowledge_mcp::upload::UploadFileRequest,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<serde_json::Value, &'static str>> + Send + '_>,
+    > {
+        Box::pin(async move {
+            use notion_knowledge_core::file_ingest::{
+                FileIngestBatch, FileIngestContext, FileIngestRequest, IngestFailure, IngestStatus,
+            };
+            // The MCP handler already applied its effective operation policy.
+            // Only trusted stdio or authenticated local HTTP installs this runtime.
+            let requests = input
+                .ordered_files()
+                .into_iter()
+                .map(|file| FileIngestRequest {
+                    target: notion_knowledge_core::backend::PageId(input.target.clone()),
+                    temporary_url: file.download_url.clone(),
+                    filename: file.file_name.clone(),
+                    declared_mime: file.mime_type.clone(),
+                    caption: input.caption.clone(),
+                })
+                .collect();
+            let mut batch = FileIngestBatch::new(requests, self.policy)
+                .map_err(|_| "file_upload_invalid_input")?;
+            let correlation = notion_knowledge_core::logging::CorrelationId::new();
+            let correlation = correlation.as_str();
+            let context = FileIngestContext {
+                gate: &self.gate,
+                audit: &self.audit,
+                actor: notion_knowledge_core::audit::AuditActor::Server,
+                correlation_id: correlation,
+                permitted: true,
+            };
+            let failure = batch.execute(&self.adapter, &context).await.err();
+            let failure_name = |failure: IngestFailure| match failure {
+                IngestFailure::Denied => "denied",
+                IngestFailure::InvalidInput => "invalid_input",
+                IngestFailure::SourceExpired => "source_expired",
+                IngestFailure::DownloadUnavailable => "download_unavailable",
+                IngestFailure::AuditUnavailable => "audit_unavailable",
+                IngestFailure::Upstream(kind) => match kind {
+                    notion_knowledge_core::backend::BackendErrorKind::Unauthenticated => {
+                        "upstream_unauthenticated"
+                    }
+                    notion_knowledge_core::backend::BackendErrorKind::PermissionDenied => {
+                        "upstream_permission_denied"
+                    }
+                    notion_knowledge_core::backend::BackendErrorKind::NotFound => {
+                        "upstream_not_found"
+                    }
+                    notion_knowledge_core::backend::BackendErrorKind::InvalidInput => {
+                        "upstream_invalid_input"
+                    }
+                    notion_knowledge_core::backend::BackendErrorKind::UnsupportedContent => {
+                        "upstream_unsupported_content"
+                    }
+                    notion_knowledge_core::backend::BackendErrorKind::Conflict => {
+                        "upstream_conflict"
+                    }
+                    notion_knowledge_core::backend::BackendErrorKind::RateLimited => {
+                        "upstream_rate_limited"
+                    }
+                    notion_knowledge_core::backend::BackendErrorKind::Unavailable => {
+                        "upstream_unavailable"
+                    }
+                    notion_knowledge_core::backend::BackendErrorKind::Internal => {
+                        "upstream_internal"
+                    }
+                },
+            };
+            let results: Vec<_> = batch.results().iter().map(|item| match &item.outcome {
+                None => serde_json::json!({"index":item.index,"status":"unattempted","terminal_audited":false}),
+                Some(outcome) => serde_json::json!({"index":item.index,"status":match outcome.status {
+                    IngestStatus::Failed => "failed", IngestStatus::Denied => "denied", IngestStatus::Indeterminate => "indeterminate", IngestStatus::Verified => "verified", IngestStatus::VerifiedAuditFailed => "verified_audit_failed",
+                },"target":outcome.references.target.as_ref().map(|p| &p.0),"upload_id":outcome.references.upload_id,"block_id":outcome.references.block_id,"terminal_audited":outcome.terminal_audited,"failure":outcome.failure.map(failure_name)}),
+            }).collect();
+            Ok(
+                serde_json::json!({"files":results,"partial_success":batch.partial_success(),"failure":failure.map(failure_name)}),
+            )
+        })
     }
 }

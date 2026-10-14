@@ -55,6 +55,7 @@ pub struct KnowledgeServer {
     root_gate: Option<notion_knowledge_core::root_scope::RootScopeGate>,
     snippet_chars: usize,
     max_upload_files: usize,
+    file_ingestion: Option<Arc<dyn upload::FileIngestion>>,
     /// Deny mutation-capable tools unless the operator explicitly disables read-only mode.
     read_only: bool,
     /// Additional opt-in gate for all destructive write operations.
@@ -71,6 +72,7 @@ impl Default for KnowledgeServer {
         Self {
             snippet_chars: 2000,
             max_upload_files: upload::DEFAULT_MAX_FILES,
+            file_ingestion: None,
             read_only: true,
             destructive_writes_enabled: false,
             capability_policy: capabilities::CapabilityPolicy::default(),
@@ -130,6 +132,17 @@ impl KnowledgeServer {
             return Err("invalid knowledge_upload_file batch limit");
         }
         self.max_upload_files = maximum;
+        Ok(self)
+    }
+
+    pub fn and_file_ingestion(
+        mut self,
+        service: Arc<dyn upload::FileIngestion>,
+    ) -> Result<Self, &'static str> {
+        if self.root_gate.is_none() {
+            return Err("file ingestion requires authoritative scope");
+        }
+        self.file_ingestion = Some(service);
         Ok(self)
     }
 
@@ -353,7 +366,7 @@ impl ServerHandler for KnowledgeServer {
     async fn call_tool(
         &self,
         request: rmcp::model::CallToolRequestParams,
-        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
         let _log = EventGuard::new(Operation::McpTool);
         // Check before argument handling or invoking any adapter; the same
@@ -398,6 +411,20 @@ impl ServerHandler for KnowledgeServer {
                 input
                     .validate_with_limit(self.max_upload_files)
                     .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
+                if let Some(service) = &self.file_ingestion {
+                    let outcome = tokio::select! {
+                        biased;
+                        _ = context.ct.cancelled() => return Ok(error("file_upload_cancelled: effects may have occurred; inspect audit before retrying")),
+                        outcome = service.ingest(input) => outcome,
+                    };
+                    return match outcome {
+                        Ok(output) if output_fits_budget(&output) => {
+                            Ok(rmcp::model::CallToolResult::structured(output).into())
+                        }
+                        Ok(_) => Ok(error("file_upload_output_limit")),
+                        Err(message) => Ok(error(message)),
+                    };
+                }
                 Ok(error(
                     "file_upload_unavailable: file input accepted but Notion ingestion is not configured; no download or upload was attempted",
                 ))

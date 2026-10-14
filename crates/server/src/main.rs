@@ -227,6 +227,7 @@ async fn main() -> ExitCode {
     let handler = match notion_knowledge_server::root_scope::attach_root_scope(
         notion_knowledge_mcp::KnowledgeServer::default(),
         &config,
+        notion_knowledge_server::root_scope::Transport::Stdio,
     ) {
         Ok(handler) => handler
             .with_read_only(config.read_only)
