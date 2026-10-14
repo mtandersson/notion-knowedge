@@ -412,11 +412,11 @@ impl ServerHandler for KnowledgeServer {
                     .validate_with_limit(self.max_upload_files)
                     .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
                 if let Some(service) = &self.file_ingestion {
-                    let outcome = tokio::select! {
-                        biased;
-                        _ = context.ct.cancelled() => return Ok(error("file_upload_cancelled: effects may have occurred; inspect audit before retrying")),
-                        outcome = service.ingest(input) => outcome,
-                    };
+                    // The application owns its batch outside the canceled execution
+                    // future and returns the retained receipt snapshot after cancellation.
+                    let outcome = service
+                        .ingest(input, Box::pin(context.ct.cancelled_owned()))
+                        .await;
                     return match outcome {
                         Ok(output) if output_fits_budget(&output) => {
                             Ok(rmcp::model::CallToolResult::structured(output).into())

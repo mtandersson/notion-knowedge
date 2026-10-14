@@ -39,8 +39,11 @@ Earlier verified attachments remain after ordinary later failures. Authority,
 authentication or audit loss stops remaining work. References are returned only
 when receipts are known; no rollback or atomic batch guarantee is claimed.
 
-MCP cancellation is observed using the SDK request token. Dropping the active
-batch stops further effects, unlinks request-owned temporary files, and records
+MCP cancellation is observed using the SDK request token. The application keeps
+the request-owned batch outside its cancellable execution future, retaining known
+upload/block receipts and earlier indexed results in a safe result snapshot with
+`cancelled=true`. Dropping execution stops further effects, unlinks request-owned
+temporary files, and records
 failed or indeterminate audit according to whether an effect might have occurred.
 A canceled caller may receive no response. Inspect authoritative Notion and the
 audit before manually supplying fresh input; no replay or recovery queue is run.

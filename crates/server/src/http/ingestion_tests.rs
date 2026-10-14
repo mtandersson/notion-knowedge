@@ -20,6 +20,7 @@ use tokio_rustls::{
         pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
     },
 };
+type Requests = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 const PAGE: &str = "11111111-1111-1111-1111-111111111111";
 const ROOT: &str = "22222222-2222-2222-2222-222222222222";
 const OUTSIDE: &str = "33333333-3333-3333-3333-333333333333";
@@ -158,13 +159,7 @@ async fn source_many(
     });
     (policy, count, handle, paths)
 }
-async fn notion(
-    steps: Vec<(u16, Value)>,
-) -> (
-    NotionClient,
-    Arc<Mutex<Vec<(String, Vec<u8>)>>>,
-    tokio::task::JoinHandle<()>,
-) {
+async fn notion(steps: Vec<(u16, Value)>) -> (NotionClient, Requests, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut client = NotionClient::integration("fixture-secret").unwrap();
     client = client.with_loopback_fixture(listener.local_addr().unwrap().port());
@@ -264,7 +259,7 @@ async fn fixture(
     Config,
     notion_knowledge_mcp::KnowledgeServer,
     tempfile::TempDir,
-    Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+    Requests,
     tokio::task::JoinHandle<()>,
     tokio::task::JoinHandle<()>,
     Arc<Mutex<Vec<std::path::PathBuf>>>,
@@ -308,7 +303,7 @@ fn initialize() -> Value {
 fn assert_result(
     result: &Value,
     image: bool,
-    requests: &Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+    requests: &Requests,
     dir: &tempfile::TempDir,
     paths: &Arc<Mutex<Vec<std::path::PathBuf>>>,
 ) {
@@ -883,7 +878,7 @@ async fn installed_transport_scope_and_effective_policy_deny_before_source_or_wr
 async fn installed_stdio_cancellation_during_multipart_send_or_readback_cleans_and_audits_ambiguity()
  {
     const MIB: usize = 1024 * 1024;
-    for during_send in [true, false] {
+    for (wire, during_send) in [(true, true), (true, false), (false, true), (false, false)] {
         let dir = private_dir();
         let mut cfg = config(&dir.path().join("audit.sqlite"), false);
         let bytes = if during_send {
@@ -917,6 +912,72 @@ async fn installed_stdio_cancellation_during_multipart_send_or_readback_cleans_a
             steps.last_mut().unwrap().0 = 0;
         }
         let (client, requests, notion) = notion(steps).await;
+        if !wire {
+            use notion_knowledge_mcp::upload::FileIngestion;
+            let runtime = crate::file_ingestion::Runtime::new(
+                &cfg,
+                cfg.file_ingestion.as_ref().unwrap(),
+                client,
+            )
+            .unwrap();
+            let mut input = upload(false)["params"]["arguments"].clone();
+            let file = input["file"].take();
+            input.as_object_mut().unwrap().remove("file");
+            input["files"] = json!([file.clone(), file]);
+            let input = serde_json::from_value(input).unwrap();
+            let cancellation = tokio_util::sync::CancellationToken::new();
+            let cancel = cancellation.clone();
+            let task = tokio::spawn(async move {
+                runtime
+                    .ingest(input, Box::pin(cancellation.cancelled_owned()))
+                    .await
+                    .unwrap()
+            });
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    if requests.lock().unwrap().iter().any(|(h, _)| {
+                        if during_send {
+                            h.contains("/send ")
+                        } else {
+                            h.starts_with(&format!("GET /v1/blocks/{BLOCK} "))
+                        }
+                    }) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            cancel.cancel();
+            let result = task.await.unwrap();
+            assert_eq!(result["cancelled"], true);
+            assert_eq!(result["failure"], "cancelled");
+            assert_eq!(result["files"][0]["status"], "indeterminate");
+            assert_eq!(result["files"][0]["upload_id"], UPLOAD);
+            assert_eq!(
+                result["files"][0]["block_id"],
+                if during_send {
+                    Value::Null
+                } else {
+                    json!(BLOCK)
+                }
+            );
+            assert_eq!(result["files"][1]["status"], "unattempted");
+            assert!(paths.lock().unwrap().iter().all(|p| !p.exists()));
+            let db = rusqlite::Connection::open(dir.path().join("audit.sqlite")).unwrap();
+            let n: i64 = db
+                .query_row(
+                    "SELECT count(*) FROM agent_audit_events WHERE outcome='indeterminate'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1);
+            source.await.unwrap();
+            notion.abort();
+            continue;
+        }
         let handler = root_scope::attach_client(
             notion_knowledge_mcp::KnowledgeServer::default().with_read_only(false),
             &cfg,
