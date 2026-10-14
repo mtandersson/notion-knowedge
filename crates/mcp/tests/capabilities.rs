@@ -12,6 +12,7 @@ fn default_keeps_only_existing_operations_not_arbitrary_future_names() {
     for name in [
         "knowledge_search",
         "knowledge_get",
+        "knowledge_related",
         "knowledge_sync_status",
         "knowledge_upload_file",
         "knowledge_create_page",
@@ -30,6 +31,7 @@ fn default_keeps_only_existing_operations_not_arbitrary_future_names() {
 fn exact_and_category_rules_have_deterministic_block_precedence() {
     let config = policy(Some("read,knowledge_append"), Some("knowledge_get"));
     assert!(config.permits("knowledge_search"));
+    assert!(config.permits("knowledge_related"));
     assert!(!config.permits("knowledge_get"));
     assert!(config.permits("knowledge_append"));
     assert!(!config.permits("knowledge_upload_file"));
