@@ -35,8 +35,9 @@ ordered and deduplicated by source, target, relation type and provenance.
 1. The seed must pass a fresh physical-ancestry authorization/revalidation
    against server-configured roots. No graph read happens before this.
 2. Every resolved neighbor is freshly checked and revalidated *before*
-   disclosure or use as an intermediate node. Inaccessible and unresolved
-   references are silently excluded, including from the second-hop frontier.
+   disclosure or use as an intermediate node. Explicitly out-of-scope and
+   unresolved references are excluded, including from the second-hop frontier.
+   Unverifiable lifecycle metadata fails the entire call without partial data.
 3. Each node's incoming + outgoing read is capped at 256 graph entries to
    avoid unbounded local traversal, with at most two hops and 100 emitted edges.
    Database failure or invalid graph direction fails the request without
