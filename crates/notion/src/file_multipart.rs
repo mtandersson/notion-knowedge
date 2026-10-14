@@ -6,7 +6,7 @@ use crate::{
     NotionClient,
     file_download::DownloadedFile,
     file_upload::{UploadStatus, UploadedFile},
-    file_validation::FileValidationPolicy,
+    file_validation::validate_downloaded,
     pages,
     writes::MARKDOWN_VERSION,
 };
@@ -31,9 +31,9 @@ const RECEIPT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MultipartPolicy {
-    pub maximum_bytes: usize,
-    pub threshold_bytes: usize,
-    pub part_bytes: usize,
+    maximum_bytes: usize,
+    threshold_bytes: usize,
+    part_bytes: usize,
 }
 
 impl MultipartPolicy {
@@ -44,7 +44,8 @@ impl MultipartPolicy {
         threshold_bytes: usize,
         part_bytes: usize,
     ) -> Result<Self, BackendError> {
-        if threshold_bytes < 20 * MIB
+        if !(5 * MIB..=20 * MIB).contains(&threshold_bytes)
+            || part_bytes > threshold_bytes
             || maximum_bytes <= threshold_bytes
             || maximum_bytes > MAX_BYTES
             || !(5 * MIB..=20 * MIB).contains(&part_bytes)
@@ -56,6 +57,12 @@ impl MultipartPolicy {
             threshold_bytes,
             part_bytes,
         })
+    }
+    pub fn maximum_bytes(self) -> usize {
+        self.maximum_bytes
+    }
+    pub fn threshold_bytes(self) -> usize {
+        self.threshold_bytes
     }
     pub fn parts(self, bytes: usize) -> Result<usize, BackendError> {
         if bytes <= self.threshold_bytes || bytes > self.maximum_bytes {
@@ -84,6 +91,7 @@ fn check_upload(value: &Value, id: &str, status: &str, parts: usize) -> bool {
         && value["in_trash"] != true
         && value["id"].as_str().and_then(pages::uuid).as_deref() == Some(id)
         && value["number_of_parts"]["total"].as_u64() == Some(parts as u64)
+        && (status != "uploaded" || value["number_of_parts"]["sent"].as_u64() == Some(parts as u64))
 }
 fn status_kind(status: u16) -> BackendErrorKind {
     match status {
@@ -127,119 +135,141 @@ impl NotionClient {
         declared_mime: &str,
         policy: MultipartPolicy,
     ) -> Result<UploadedFile, BackendError> {
-        let size = file.size_bytes();
-        let parts = policy.parts(size)?;
-        // Large binary signatures can be validated from a bounded prefix.
-        // Text/CSV/Markdown are intentionally excluded: validating their entire
-        // UTF-8 content would need a separate streaming content validator.
-        if !matches!(
-            declared_mime,
-            "application/pdf" | "image/png" | "image/jpeg"
-        ) {
-            return Err(err(CREATE, BackendErrorKind::InvalidInput));
-        }
-        let mut handle = tokio::fs::File::from_std(
-            file.reopen()
-                .map_err(|_| err(CREATE, BackendErrorKind::Unavailable))?,
-        );
-        let mut prefix = vec![0u8; 64 * 1024];
-        let len = handle
-            .read(&mut prefix)
+        self.upload_multipart_detailed(file, filename, declared_mime, policy)
             .await
-            .map_err(|_| err(CREATE, BackendErrorKind::Unavailable))?;
-        prefix.truncate(len);
-        let valid = FileValidationPolicy::for_single_part(64 * 1024)
-            .map_err(|_| err(CREATE, BackendErrorKind::InvalidInput))?
-            .validate(filename, declared_mime, &prefix)
+            .map_err(|failure| err(failure.operation, failure.kind))
+    }
+    pub async fn upload_multipart_detailed(
+        &self,
+        file: &DownloadedFile,
+        filename: &str,
+        declared_mime: &str,
+        policy: MultipartPolicy,
+    ) -> Result<UploadedFile, notion_knowledge_core::file_ingest::FileEffectFailure> {
+        let mut known_upload = None;
+        self.upload_multipart_tracked(file, filename, declared_mime, policy, &mut known_upload)
+            .await
+    }
+
+    pub(crate) async fn upload_multipart_tracked(
+        &self,
+        file: &DownloadedFile,
+        filename: &str,
+        declared_mime: &str,
+        policy: MultipartPolicy,
+        known_upload: &mut Option<String>,
+    ) -> Result<UploadedFile, notion_knowledge_core::file_ingest::FileEffectFailure> {
+        let mut effect_possible = false;
+        let execution = async {
+            let size = file.size_bytes();
+            let parts = policy.parts(size)?;
+            let valid = validate_downloaded(
+                file,
+                policy.maximum_bytes,
+                Some(filename),
+                Some(declared_mime),
+            )
+            .await
             .map_err(|_| err(CREATE, BackendErrorKind::InvalidInput))?;
-        drop(handle);
+            effect_possible = true;
+            let created = self
+                .write(
+                    reqwest::Method::POST,
+                    "/file_uploads",
+                    json!({
+                        "mode":"multi_part","filename":valid.filename,
+                        "content_type":valid.mime_type,"number_of_parts":parts
+                    }),
+                    CREATE,
+                )
+                .await?;
+            *known_upload = created["id"].as_str().and_then(pages::uuid);
+            let id = created["id"]
+                .as_str()
+                .and_then(pages::uuid)
+                .ok_or_else(|| err(CREATE, BackendErrorKind::Conflict))?;
+            if !check_upload(&created, &id, "pending", parts) {
+                return Err(err(CREATE, BackendErrorKind::Conflict));
+            }
 
-        let created = self
-            .write(
-                reqwest::Method::POST,
-                "/file_uploads",
-                json!({
-                    "mode":"multi_part","filename":valid.filename,
-                    "content_type":valid.mime_type,"number_of_parts":parts
-                }),
-                CREATE,
-            )
-            .await?;
-        let id = created["id"]
-            .as_str()
-            .and_then(pages::uuid)
-            .ok_or_else(|| err(CREATE, BackendErrorKind::Conflict))?;
-        if !check_upload(&created, &id, "pending", parts) {
-            return Err(err(CREATE, BackendErrorKind::Conflict));
-        }
+            for index in 0..parts {
+                let offset = index * policy.part_bytes;
+                let count = (size - offset).min(policy.part_bytes);
+                let mut source = tokio::fs::File::from_std(
+                    file.reopen()
+                        .map_err(|_| err(SEND, BackendErrorKind::Unavailable))?,
+                );
+                source
+                    .seek(SeekFrom::Start(offset as u64))
+                    .await
+                    .map_err(|_| err(SEND, BackendErrorKind::Unavailable))?;
+                let bounded = source.take(count as u64);
+                let part = Part::stream_with_length(
+                    reqwest::Body::wrap_stream(ReaderStream::new(bounded)),
+                    count as u64,
+                )
+                .file_name(valid.filename.clone())
+                .mime_str(valid.mime_type)
+                .map_err(|_| err(SEND, BackendErrorKind::InvalidInput))?;
+                let request = self
+                    .http
+                    .post(format!("{}/file_uploads/{id}/send", self.api_root))
+                    .header(AUTHORIZATION, self.authorization.clone())
+                    .header("Notion-Version", MARKDOWN_VERSION)
+                    .multipart(
+                        Form::new()
+                            .part("file", part)
+                            .text("part_number", (index + 1).to_string()),
+                    );
+                let response = self.send(request, false, SEND).await?;
+                let sent = receipt(response, SEND).await?;
+                if !check_upload(&sent, &id, "pending", parts)
+                    || sent["number_of_parts"]["sent"]
+                        .as_u64()
+                        .is_none_or(|count| count != (index as u64 + 1))
+                {
+                    return Err(err(SEND, BackendErrorKind::Conflict));
+                }
+            }
 
-        for index in 0..parts {
-            let offset = index * policy.part_bytes;
-            let count = (size - offset).min(policy.part_bytes);
-            let mut source = tokio::fs::File::from_std(
-                file.reopen()
-                    .map_err(|_| err(SEND, BackendErrorKind::Unavailable))?,
-            );
-            source
-                .seek(SeekFrom::Start(offset as u64))
-                .await
-                .map_err(|_| err(SEND, BackendErrorKind::Unavailable))?;
-            let bounded = source.take(count as u64);
-            let part = Part::stream_with_length(
-                reqwest::Body::wrap_stream(ReaderStream::new(bounded)),
-                count as u64,
-            )
-            .file_name(valid.filename.clone())
-            .mime_str(valid.mime_type)
-            .map_err(|_| err(SEND, BackendErrorKind::InvalidInput))?;
+            let completed = self
+                .write(
+                    reqwest::Method::POST,
+                    &format!("/file_uploads/{id}/complete"),
+                    json!({}),
+                    COMPLETE,
+                )
+                .await?;
+            if !check_upload(&completed, &id, "uploaded", parts) {
+                return Err(err(COMPLETE, BackendErrorKind::Conflict));
+            }
             let request = self
                 .http
-                .post(format!("{}/file_uploads/{id}/send", self.api_root))
+                .get(format!("{}/file_uploads/{id}", self.api_root))
                 .header(AUTHORIZATION, self.authorization.clone())
-                .header("Notion-Version", MARKDOWN_VERSION)
-                .multipart(
-                    Form::new()
-                        .part("file", part)
-                        .text("part_number", (index + 1).to_string()),
-                );
-            let response = self.send(request, false, SEND).await?;
-            let sent = receipt(response, SEND).await?;
-            if !check_upload(&sent, &id, "pending", parts)
-                || sent["number_of_parts"]["sent"]
-                    .as_u64()
-                    .is_none_or(|count| count <= (index as u64))
-            {
-                return Err(err(SEND, BackendErrorKind::Conflict));
+                .header("Notion-Version", MARKDOWN_VERSION);
+            let returned = receipt(self.send(request, true, VERIFY).await?, VERIFY).await?;
+            if !check_upload(&returned, &id, "uploaded", parts) {
+                return Err(err(VERIFY, BackendErrorKind::Conflict));
             }
-        }
-
-        let completed = self
-            .write(
-                reqwest::Method::POST,
-                &format!("/file_uploads/{id}/complete"),
-                json!({}),
-                COMPLETE,
-            )
-            .await?;
-        if !check_upload(&completed, &id, "uploaded", parts) {
-            return Err(err(COMPLETE, BackendErrorKind::Conflict));
-        }
-        let request = self
-            .http
-            .get(format!("{}/file_uploads/{id}", self.api_root))
-            .header(AUTHORIZATION, self.authorization.clone())
-            .header("Notion-Version", MARKDOWN_VERSION);
-        let returned = receipt(self.send(request, true, VERIFY).await?, VERIFY).await?;
-        if !check_upload(&returned, &id, "uploaded", parts) {
-            return Err(err(VERIFY, BackendErrorKind::Conflict));
-        }
-        Ok(UploadedFile {
-            id,
-            status: UploadStatus::Uploaded,
-            filename: valid.filename,
-            mime_type: valid.mime_type.into(),
-            size_bytes: size,
-        })
+            Ok(UploadedFile {
+                id,
+                status: UploadStatus::Uploaded,
+                filename: valid.filename,
+                mime_type: valid.mime_type.into(),
+                size_bytes: size,
+            })
+        };
+        let result: Result<UploadedFile, BackendError> = execution.await;
+        result.map_err(
+            |failure| notion_knowledge_core::file_ingest::FileEffectFailure {
+                operation: failure.operation,
+                kind: failure.kind,
+                upload_id: known_upload.clone(),
+                block_id: None,
+                effect_possible,
+            },
+        )
     }
 }
 
@@ -253,6 +283,11 @@ mod tests {
         assert!(MultipartPolicy::new(5 * MIB, 20 * MIB, 5 * MIB).is_err());
         assert!(MultipartPolicy::new(101 * MIB, 20 * MIB, 5 * MIB).is_err());
         assert!(MultipartPolicy::new(100 * MIB, 20 * MIB, 4 * MIB).is_err());
+        assert!(MultipartPolicy::new(100 * MIB, 21 * MIB, 10 * MIB).is_err());
+        assert!(MultipartPolicy::new(100 * MIB, 5 * MIB, 10 * MIB).is_err());
+        assert!(MultipartPolicy::new(100 * MIB, 20 * MIB, 0).is_err());
+        let early = MultipartPolicy::new(10 * MIB, 5 * MIB, 5 * MIB).unwrap();
+        assert_eq!(early.parts(5 * MIB + 1), Ok(2));
         let p = MultipartPolicy::new(80 * MIB, 20 * MIB, 10 * MIB).unwrap();
         assert_eq!(p.parts(25 * MIB), Ok(3));
         assert!(p.parts(10 * MIB).is_err());
@@ -414,7 +449,7 @@ mod tests {
         ])
         .await;
         let error = client
-            .upload_multipart(
+            .upload_multipart_detailed(
                 &source(),
                 "big.pdf",
                 "application/pdf",
@@ -423,6 +458,8 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind, BackendErrorKind::Unavailable);
+        assert_eq!(error.upload_id.as_deref(), Some(ID));
+        assert!(error.effect_possible);
         let calls = handle.await.unwrap();
         assert_eq!(calls.len(), 2);
         assert!(!calls.iter().any(|v| v.contains("/complete")));

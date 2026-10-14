@@ -157,6 +157,18 @@ impl NotionClient {
         scope: &LifecycleScope,
     ) -> Result<AttachedFile, notion_knowledge_core::file_ingest::FileEffectFailure> {
         let mut known_block = None;
+        self.attach_uploaded_file_tracked(target, upload, text, scope, &mut known_block)
+            .await
+    }
+
+    pub(crate) async fn attach_uploaded_file_tracked(
+        &self,
+        target: &PageId,
+        upload: &UploadedFile,
+        text: Option<&str>,
+        scope: &LifecycleScope,
+        known_block: &mut Option<String>,
+    ) -> Result<AttachedFile, notion_knowledge_core::file_ingest::FileEffectFailure> {
         let mut effect_possible = false;
         let result: Result<AttachedFile, BackendError> = async {
             if pages::uuid(&target.0).as_deref() != Some(target.0.as_str()) || !valid_upload(upload)
@@ -195,10 +207,10 @@ impl NotionClient {
                 .as_array()
                 .filter(|r| added["object"] == "list" && r.len() == 1)
                 .ok_or_else(|| error(ATTACH, BackendErrorKind::Conflict))?;
-            known_block = results[0]["id"].as_str().and_then(pages::uuid);
+            *known_block = results[0]["id"].as_str().and_then(pages::uuid);
             let block = block_id(&results[0], target)
                 .ok_or_else(|| error(ATTACH, BackendErrorKind::Conflict))?;
-            known_block = Some(block.clone());
+            *known_block = Some(block.clone());
             let source = AttachmentSource::from_receipt(&upload.id, &results[0]["file"]);
 
             self.verify_attached_block(&block, VERIFY, |value| {
@@ -218,7 +230,7 @@ impl NotionClient {
                 operation: failure.operation,
                 kind: failure.kind,
                 upload_id: Some(upload.id.clone()),
-                block_id: known_block,
+                block_id: known_block.clone(),
                 effect_possible,
             },
         )

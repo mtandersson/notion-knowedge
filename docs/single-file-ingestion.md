@@ -4,7 +4,9 @@
 small supported image or document. `notion::file_ingest::NotionFileIngestAdapter`
 joins the request-scoped HTTPS downloader, byte-signature/UTF-8 validator,
 configured integration's single-part upload and scoped native attachment with
-bounded authoritative block readback. This application API is available to
+bounded authoritative block readback.
+[Plan-aware multipart and ordered batches](multipart-batch-ingestion.md) extend
+this same application without activating an installed MCP upload tool. This application API is available to
 trusted composition; installed MCP/server activation follows separately.
 
 The composition supplies `FileIngestContext` from trusted authentication and
@@ -39,10 +41,9 @@ allowed signature or inspectable UTF-8; absent names use `uploaded` plus a
 supported extension. Every declaration and name still passes the existing
 validator against those same bounded bytes. Text without a MIME hint uses a supported text filename extension when
 present and otherwise defaults to plain text. HTTP source
-Content-Type is untrusted and is not proof of observed media. Validation buffers
-at most the trusted single-part cap plus one byte; download and send stream.
+Content-Type is untrusted and is not proof of observed media. Validation scans to EOF with a bounded 64 KiB working buffer; download and send stream.
 The conservative default plan limit is 5 MiB and the single-part validator
-cannot exceed 20 MiB. Multipart/batches have a separate application extension.
+cannot exceed 20 MiB. Multipart/batches use the documented application extension.
 
 Native readback supports both an exact `file_upload.id` and Notion's hosted
 `file` form. For a hosted GET, the HTTPS origin/path and any non-signing query
