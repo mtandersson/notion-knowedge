@@ -15,6 +15,97 @@ const MAX_ATTEMPTS: usize = 3;
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const DELAYS_MS: [u64; MAX_ATTEMPTS - 1] = [150, 300];
 
+/// Ephemeral identity of the provider's native append receipt. No Debug or
+/// serialization: hosted resource paths and signed parameters are private.
+pub(crate) struct AttachmentSource {
+    upload_id: String,
+    hosted: Option<HostedResource>,
+}
+
+#[derive(PartialEq, Eq)]
+struct HostedResource {
+    origin: String,
+    path: String,
+    resource_query: Vec<(String, String)>,
+}
+
+impl HostedResource {
+    fn parse(value: &Value) -> Option<Self> {
+        if value["type"] != "file" {
+            return None;
+        }
+        let input = value["file"]["url"].as_str()?;
+        if input.len() > 8192 || input.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            return None;
+        }
+        let url = reqwest::Url::parse(input).ok()?;
+        if url.scheme() != "https"
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+        {
+            return None;
+        }
+        // Signing/expiry parameters rotate; other query fields may identify an
+        // object version and must remain equal. Unknown fields fail closed.
+        let mut resource_query: Vec<_> = url
+            .query_pairs()
+            .filter(|(key, _)| {
+                !matches!(
+                    key.to_ascii_lowercase().as_str(),
+                    "x-amz-algorithm"
+                        | "x-amz-credential"
+                        | "x-amz-date"
+                        | "x-amz-expires"
+                        | "x-amz-signedheaders"
+                        | "x-amz-signature"
+                        | "x-amz-security-token"
+                        | "awsaccesskeyid"
+                        | "signature"
+                        | "expires"
+                )
+            })
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        let mut distinct = std::collections::BTreeSet::new();
+        if resource_query.iter().any(|(key, _)| !distinct.insert(key)) {
+            return None;
+        }
+        resource_query.sort();
+        Some(Self {
+            origin: url.origin().ascii_serialization(),
+            path: url.path().to_owned(),
+            resource_query,
+        })
+    }
+}
+
+impl AttachmentSource {
+    pub(crate) fn from_receipt(upload_id: &str, value: &Value) -> Self {
+        Self {
+            upload_id: upload_id.to_owned(),
+            hosted: HostedResource::parse(value),
+        }
+    }
+    pub(crate) fn matches(&self, value: &Value) -> bool {
+        match value["type"].as_str() {
+            Some("file_upload") => {
+                value["file_upload"]["id"]
+                    .as_str()
+                    .and_then(pages::uuid)
+                    .as_deref()
+                    == Some(self.upload_id.as_str())
+            }
+            Some("file") => match (&self.hosted, HostedResource::parse(value)) {
+                (Some(expected), Some(observed)) => *expected == observed,
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+}
+
 fn failure(operation: &'static str, kind: BackendErrorKind) -> BackendError {
     BackendError {
         operation,
@@ -227,5 +318,61 @@ mod tests {
                 .kind,
             BackendErrorKind::InvalidInput
         );
+    }
+}
+
+#[cfg(test)]
+mod source_identity_tests {
+    use super::*;
+    use serde_json::json;
+    const UPLOAD: &str = "12345678-1234-1234-1234-123456789abc";
+    fn hosted(url: &str) -> Value {
+        json!({"type":"file","file":{"url":url}})
+    }
+
+    #[test]
+    fn hosted_signature_rotation_keeps_the_same_canonical_resource() {
+        let receipt = hosted(
+            "https://FILES.notion.so:443/object?versionId=original&X-Amz-Signature=old&X-Amz-Date=old",
+        );
+        let expected = AttachmentSource::from_receipt(UPLOAD, &receipt);
+        assert!(expected.matches(&hosted(
+            "https://files.notion.so/object?X-Amz-Date=new&X-Amz-Signature=new&versionId=original"
+        )));
+        for changed in [
+            "https://different.notion.so/object?versionId=original",
+            "https://files.notion.so/replacement?versionId=original",
+            "https://files.notion.so/object?versionId=replacement",
+            "https://files.notion.so:444/object?versionId=original",
+        ] {
+            assert!(!expected.matches(&hosted(changed)));
+        }
+    }
+    #[test]
+    fn mixed_readback_forms_require_a_provable_source_identity() {
+        let hosted_receipt =
+            AttachmentSource::from_receipt(UPLOAD, &hosted("https://files.notion.so/object"));
+        assert!(hosted_receipt.matches(&json!({"type":"file_upload","file_upload":{"id":UPLOAD}})));
+        let upload_receipt = AttachmentSource::from_receipt(
+            UPLOAD,
+            &json!({"type":"file_upload","file_upload":{"id":UPLOAD}}),
+        );
+        assert!(upload_receipt.matches(&json!({"type":"file_upload","file_upload":{"id":UPLOAD}})));
+        assert!(!upload_receipt.matches(&hosted("https://files.notion.so/object")));
+        assert!(!hosted_receipt.matches(&json!({"type":"file_upload","file_upload":{"id":"12345678-1234-1234-1234-123456789abd"}})));
+    }
+    #[test]
+    fn malformed_hosted_urls_cannot_be_an_identity_anchor() {
+        for url in [
+            "http://files.notion.so/object",
+            "https://",
+            "https://user:password@files.notion.so/object",
+            "https://files.notion.so/object#fragment",
+            "https://files.notion.so/with whitespace",
+        ] {
+            let receipt = hosted(url);
+            let expected = AttachmentSource::from_receipt(UPLOAD, &receipt);
+            assert!(!expected.matches(&receipt));
+        }
     }
 }

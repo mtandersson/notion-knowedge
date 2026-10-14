@@ -44,6 +44,26 @@ at most the trusted single-part cap plus one byte; download and send stream.
 The conservative default plan limit is 5 MiB and the single-part validator
 cannot exceed 20 MiB. Multipart/batches have a separate application extension.
 
+Native readback supports both an exact `file_upload.id` and Notion's hosted
+`file` form. For a hosted GET, the HTTPS origin/path and any non-signing query
+fields must match the authoritative append receipt's hosted resource. Recognized
+AWS signature/expiry fields may rotate; an object `versionId` remains part of
+the identity. Neither signed URL is persisted, returned or debug formatted.
+Malformed URLs, duplicate resource parameters and unknown rotating query fields
+cannot prove identity. A hosted append receipt followed by an exact upload-ID
+GET can verify that stronger identity. If the append receipt contains only an
+upload ID (or omits its source) and GET resolves to an opaque hosted URL, there
+is no proven link between that URL and the upload: bounded readback returns
+`Indeterminate` with known references rather than claiming verification or
+replaying the append. This explicit ambiguity also applies to hosted origin,
+path or resource-version changes.
+
+Notion's official [file retrieval guide](https://developers.notion.com/guides/data-apis/retrieving-files)
+describes API-uploaded files becoming hosted `file` objects after attachment;
+its [file-object reference](https://developers.notion.com/reference/file-object)
+documents ephemeral signed URLs. The hosted fixtures model this response form
+without using private workspace credentials.
+
 `Verified` **and** `terminal_audited` mean the whole workflow completed.
 `VerifiedAuditFailed` retains a confirmed external target/upload/block receipt
 but represents failure of durable terminal audit. `Indeterminate` means an
@@ -70,7 +90,7 @@ receipts/readback, and file-backed SQLite audit. Test-only TLS credentials
 identify only `fixture.example` and authenticate no deployed service. The seam
 has no production environment selector. Tests cover image/document success,
 optional hints, initial and changed scope, MIME/size/expiry, upload/readback
-ambiguity, audit failure, timeout/cancellation and temporary cleanup, including
+ambiguity and receipt-bound hosted resource changes, audit failure, timeout/cancellation and temporary cleanup, including
 persisted metadata secret/payload exclusion.
 
 ```sh

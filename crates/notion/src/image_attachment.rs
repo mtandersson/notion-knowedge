@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::{
     NotionClient,
+    attachment_readback::AttachmentSource,
     file_upload::{UploadStatus, UploadedFile},
     pages,
 };
@@ -90,28 +91,14 @@ fn readback_ok(
     value: &Value,
     parent: &PageId,
     block: &str,
-    upload: &str,
+    source: &AttachmentSource,
     caption: &[Value],
 ) -> bool {
     if block_id(value, parent).as_deref() != Some(block) {
         return false;
     }
     let image = &value["image"];
-    // Notion may resolve uploaded IDs to temporary signed file objects on read.
-    let source_ok = match image["type"].as_str() {
-        Some("file_upload") => {
-            image["file_upload"]["id"]
-                .as_str()
-                .and_then(pages::uuid)
-                .as_deref()
-                == Some(upload)
-        }
-        Some("file") => image["file"]["url"]
-            .as_str()
-            .is_some_and(|url| url.starts_with("https://")),
-        _ => false,
-    };
-    if !source_ok {
+    if !source.matches(image) {
         return false;
     }
     let expected = caption.first().and_then(|c| c["text"]["content"].as_str());
@@ -193,9 +180,10 @@ impl NotionClient {
             let block = block_id(&results[0], target)
                 .ok_or_else(|| error(ATTACH, BackendErrorKind::Conflict))?;
             known_block = Some(block.clone());
+            let source = AttachmentSource::from_receipt(&upload.id, &results[0]["image"]);
 
             self.verify_attached_block(&block, VERIFY, |value| {
-                readback_ok(value, target, &block, &upload.id, &caption)
+                readback_ok(value, target, &block, &source, &caption)
             })
             .await?;
             Ok(AttachedImage {
@@ -274,7 +262,7 @@ mod tests {
         (
             "PATCH /v1/blocks/11111111-1111-1111-1111-111111111111/children".into(),
             200,
-            json!({"object":"list","results":[block("image",PAGE,json!({}))]}),
+            json!({"object":"list","results":[block("image",PAGE,json!({"type":"file","file":{"url":"https://files.notion.so/temporary-image"}}))]}),
         )
     }
     fn readback(parent: &str) -> (String, u16, Value) {
@@ -503,7 +491,7 @@ mod tests {
             &returned,
             &PageId(PAGE.into()),
             BLOCK,
-            UPLOAD,
+            &AttachmentSource::from_receipt(UPLOAD, &json!({})),
             &[]
         ));
         returned["image"]["file_upload"]["id"] = json!(UPLOAD);
@@ -512,7 +500,7 @@ mod tests {
             &returned,
             &PageId(PAGE.into()),
             BLOCK,
-            UPLOAD,
+            &AttachmentSource::from_receipt(UPLOAD, &json!({})),
             &[]
         ));
     }

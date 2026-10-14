@@ -797,3 +797,226 @@ async fn optional_hints_preserve_supported_text_extensions_without_overriding_bi
         Err(IngestFailure::InvalidInput)
     );
 }
+
+fn hosted_steps(image: bool, mismatch: Option<&str>, mixed: bool) -> Vec<(u16, Value)> {
+    let kind = if image { "image" } else { "file" };
+    let hosted = |url: &str| json!({"type":"file","file":{"url":url,"expiry_time":"2026-10-14T12:00:00Z"},"caption":[{"type":"text","plain_text":"Safe caption"}],"name":"document.txt"});
+    let mut steps = full_steps(image, mismatch.is_some() || mixed, false);
+    for (status, value) in &mut steps {
+        if value["object"] == "list" {
+            value["results"][0][kind] = if mixed {
+                json!({"type":"file_upload","file_upload":{"id":UPLOAD}})
+            } else {
+                hosted(
+                    "https://files.notion.so/private-resource?versionId=original&X-Amz-Signature=append-signature&X-Amz-Expires=3600",
+                )
+            };
+        } else if value["object"] == "block" {
+            *status = 200;
+            value[kind]=hosted(mismatch.unwrap_or("https://files.notion.so/private-resource?X-Amz-Signature=rotated-signature&versionId=original&X-Amz-Expires=1800"));
+        }
+    }
+    steps
+}
+
+#[tokio::test]
+async fn hosted_image_and_document_readback_match_append_resource_with_rotated_signature() {
+    for image in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit");
+        let audit = audit(&path, None);
+        let bytes = if image {
+            b"\x89PNG\r\n\x1a\nfixture".to_vec()
+        } else {
+            b"document fixture".to_vec()
+        };
+        let (download, _, source_task, paths) = source(bytes, 200, false).await;
+        let (client, requests, notion_task) = notion(hosted_steps(image, None, false)).await;
+        let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+        let adapter = NotionFileIngestAdapter::new(
+            client,
+            download,
+            FileValidationPolicy::for_single_part(64).unwrap(),
+            scope(),
+        );
+        let result = ingest_file(&adapter, &context(&gate, &audit), request(image)).await;
+        assert_eq!(result.status, IngestStatus::Verified, "{result:?}");
+        assert!(result.terminal_audited);
+        assert_eq!(result.references.block_id.as_deref(), Some(BLOCK));
+        assert_eq!(result.references.upload_id.as_deref(), Some(UPLOAD));
+        assert_clean(&paths);
+        source_task.await.unwrap();
+        notion_task.await.unwrap();
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(h, _)| h.starts_with("PATCH"))
+                .count(),
+            1
+        );
+        let result_debug = format!("{result:?}");
+        drop(audit);
+        let persisted = std::fs::read(path).unwrap();
+        for secret in [
+            "private-resource",
+            "append-signature",
+            "rotated-signature",
+            "files.notion.so",
+        ] {
+            assert!(!result_debug.contains(secret));
+            assert!(
+                !persisted
+                    .windows(secret.len())
+                    .any(|v| v == secret.as_bytes())
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn different_hosted_file_at_same_block_remains_indeterminate_with_known_refs_and_no_replay() {
+    for image in [true, false] {
+        for different in [
+            "https://files.notion.so/replacement?versionId=original&X-Amz-Signature=rotated",
+            "https://different.notion.so/private-resource?versionId=original&X-Amz-Signature=rotated",
+            "https://files.notion.so/private-resource?versionId=replacement&X-Amz-Signature=rotated",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("audit");
+            let audit = audit(&path, None);
+            let bytes = if image {
+                b"\x89PNG\r\n\x1a\nfixture".to_vec()
+            } else {
+                b"document fixture".to_vec()
+            };
+            let (download, _, source_task, paths) = source(bytes, 200, false).await;
+            let (client, requests, notion_task) =
+                notion(hosted_steps(image, Some(different), false)).await;
+            let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+            let adapter = NotionFileIngestAdapter::new(
+                client,
+                download,
+                FileValidationPolicy::for_single_part(64).unwrap(),
+                scope(),
+            );
+            let result = ingest_file(&adapter, &context(&gate, &audit), request(image)).await;
+            assert_eq!(result.status, IngestStatus::Indeterminate);
+            assert!(result.terminal_audited);
+            assert_eq!(result.references.upload_id.as_deref(), Some(UPLOAD));
+            assert_eq!(result.references.block_id.as_deref(), Some(BLOCK));
+            assert_clean(&paths);
+            source_task.await.unwrap();
+            notion_task.await.unwrap();
+            let requests = requests.lock().unwrap();
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|(h, _)| h.starts_with("PATCH"))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|(h, _)| h.starts_with(&format!("GET /v1/blocks/{BLOCK}")))
+                    .count(),
+                3
+            );
+            let db = rusqlite::Connection::open(path).unwrap();
+            let terminal: String = db
+                .query_row(
+                    "SELECT outcome FROM agent_audit_events ORDER BY id DESC LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(terminal, "indeterminate");
+        }
+    }
+}
+
+#[tokio::test]
+async fn hosted_readback_without_append_resource_anchor_is_honestly_unverified() {
+    for image in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let audit = audit(&dir.path().join("audit"), None);
+        let bytes = if image {
+            b"\x89PNG\r\n\x1a\nfixture".to_vec()
+        } else {
+            b"document fixture".to_vec()
+        };
+        let (download, _, source_task, paths) = source(bytes, 200, false).await;
+        let (client, requests, notion_task) = notion(hosted_steps(image, None, true)).await;
+        let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+        let adapter = NotionFileIngestAdapter::new(
+            client,
+            download,
+            FileValidationPolicy::for_single_part(64).unwrap(),
+            scope(),
+        );
+        let result = ingest_file(&adapter, &context(&gate, &audit), request(image)).await;
+        assert_eq!(result.status, IngestStatus::Indeterminate);
+        assert_eq!(result.references.block_id.as_deref(), Some(BLOCK));
+        assert!(result.terminal_audited);
+        assert_clean(&paths);
+        source_task.await.unwrap();
+        notion_task.await.unwrap();
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(h, _)| h.starts_with("PATCH"))
+                .count(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn hosted_receipt_followed_by_exact_upload_id_readback_verifies_the_same_native_file() {
+    for image in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let audit = audit(&dir.path().join("audit"), None);
+        let bytes = if image {
+            b"\x89PNG\r\n\x1a\nfixture".to_vec()
+        } else {
+            b"document fixture".to_vec()
+        };
+        let (download, _, source_task, paths) = source(bytes, 200, false).await;
+        let mut steps = hosted_steps(image, None, false);
+        let kind = if image { "image" } else { "file" };
+        for (_, value) in &mut steps {
+            if value["object"] == "block" {
+                value[kind] = json!({"type":"file_upload","file_upload":{"id":UPLOAD},"caption":[{"type":"text","plain_text":"Safe caption"}],"name":"document.txt"});
+            }
+        }
+        let (client, requests, notion_task) = notion(steps).await;
+        let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+        let adapter = NotionFileIngestAdapter::new(
+            client,
+            download,
+            FileValidationPolicy::for_single_part(64).unwrap(),
+            scope(),
+        );
+        let result = ingest_file(&adapter, &context(&gate, &audit), request(image)).await;
+        assert_eq!(result.status, IngestStatus::Verified);
+        assert!(result.terminal_audited);
+        assert_eq!(result.references.upload_id.as_deref(), Some(UPLOAD));
+        assert_eq!(result.references.block_id.as_deref(), Some(BLOCK));
+        assert_clean(&paths);
+        source_task.await.unwrap();
+        notion_task.await.unwrap();
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(h, _)| h.starts_with("PATCH"))
+                .count(),
+            1
+        );
+    }
+}
