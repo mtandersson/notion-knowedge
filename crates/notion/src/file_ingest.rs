@@ -1,4 +1,5 @@
 //! Concrete secure downloader/Notion integration for the core ingestion service.
+use crate::file_multipart::MultipartPolicy;
 use crate::{
     NotionClient, UploadedFile,
     file_download::{DownloadError, DownloadPolicy, DownloadedFile},
@@ -7,10 +8,9 @@ use crate::{
 use notion_knowledge_core::{
     audit::{FileKind, SafeFileFacts},
     backend::PageId,
-    file_ingest::{FileEffectFailure, FileIngestAdapter, IngestFailure},
+    file_ingest::{FileEffectFailure, FileIngestAdapter, FileReferences, IngestFailure},
     lifecycle::LifecycleScope,
 };
-use tokio::io::AsyncReadExt;
 
 /// Policies and integration are trusted composition inputs, never tool arguments.
 pub struct NotionFileIngestAdapter {
@@ -18,6 +18,7 @@ pub struct NotionFileIngestAdapter {
     download: DownloadPolicy,
     validation: FileValidationPolicy,
     scope: LifecycleScope,
+    multipart: Option<MultipartPolicy>,
 }
 impl NotionFileIngestAdapter {
     pub fn new(
@@ -31,7 +32,16 @@ impl NotionFileIngestAdapter {
             download,
             validation,
             scope,
+            multipart: None,
         }
+    }
+    /// Explicit trusted paid-plan opt-in. Single-part covers through
+    /// the validated threshold, without a gap below multipart selection.
+    pub fn with_multipart(mut self, policy: MultipartPolicy) -> Self {
+        self.validation = FileValidationPolicy::for_single_part(policy.threshold_bytes())
+            .expect("validated multipart threshold");
+        self.multipart = Some(policy);
+        self
     }
 }
 impl FileIngestAdapter for NotionFileIngestAdapter {
@@ -77,6 +87,20 @@ impl FileIngestAdapter for NotionFileIngestAdapter {
         name: Option<&str>,
         mime: Option<&str>,
     ) -> Result<UploadedFile, FileEffectFailure> {
+        let mut references = FileReferences {
+            target: None,
+            upload_id: None,
+            block_id: None,
+        };
+        self.upload_tracked(file, name, mime, &mut references).await
+    }
+    async fn upload_tracked(
+        &self,
+        file: &DownloadedFile,
+        name: Option<&str>,
+        mime: Option<&str>,
+        references: &mut FileReferences,
+    ) -> Result<UploadedFile, FileEffectFailure> {
         let valid = self
             .validated(file, name, mime)
             .await
@@ -86,10 +110,31 @@ impl FileIngestAdapter for NotionFileIngestAdapter {
                 upload_id: None,
                 block_id: None,
                 effect_possible: false,
+                authority_lost: false,
             })?;
-        self.client
-            .upload_single_part_detailed(file, &valid.filename, valid.mime_type, self.validation)
-            .await
+        if let Some(policy) = self.multipart
+            && file.size_bytes() > policy.threshold_bytes()
+        {
+            self.client
+                .upload_multipart_tracked(
+                    file,
+                    &valid.filename,
+                    valid.mime_type,
+                    policy,
+                    &mut references.upload_id,
+                )
+                .await
+        } else {
+            self.client
+                .upload_single_part_tracked(
+                    file,
+                    &valid.filename,
+                    valid.mime_type,
+                    self.validation,
+                    &mut references.upload_id,
+                )
+                .await
+        }
     }
     fn upload_id<'a>(&self, upload: &'a UploadedFile) -> &'a str {
         &upload.id
@@ -101,15 +146,43 @@ impl FileIngestAdapter for NotionFileIngestAdapter {
         caption: Option<&str>,
         kind: FileKind,
     ) -> Result<String, FileEffectFailure> {
+        let mut references = FileReferences {
+            target: Some(target.clone()),
+            upload_id: Some(upload.id.clone()),
+            block_id: None,
+        };
+        self.attach_tracked(target, upload, caption, kind, &mut references)
+            .await
+    }
+    async fn attach_tracked(
+        &self,
+        target: &PageId,
+        upload: &UploadedFile,
+        caption: Option<&str>,
+        kind: FileKind,
+        references: &mut FileReferences,
+    ) -> Result<String, FileEffectFailure> {
         match kind {
             FileKind::Image => self
                 .client
-                .attach_uploaded_image_detailed(target, upload, caption, &self.scope)
+                .attach_uploaded_image_tracked(
+                    target,
+                    upload,
+                    caption,
+                    &self.scope,
+                    &mut references.block_id,
+                )
                 .await
                 .map(|value| value.block_id),
             FileKind::Other => self
                 .client
-                .attach_uploaded_file_detailed(target, upload, caption, &self.scope)
+                .attach_uploaded_file_tracked(
+                    target,
+                    upload,
+                    caption,
+                    &self.scope,
+                    &mut references.block_id,
+                )
                 .await
                 .map(|value| value.block_id),
         }
@@ -123,67 +196,15 @@ impl NotionFileIngestAdapter {
         name: Option<&str>,
         mime: Option<&str>,
     ) -> Result<crate::ValidatedFile, IngestFailure> {
-        let mut bytes = Vec::new();
-        tokio::fs::File::from_std(
-            file.reopen()
-                .map_err(|_| IngestFailure::DownloadUnavailable)?,
+        crate::file_validation::validate_downloaded(
+            file,
+            self.multipart
+                .map_or(self.validation.max_bytes(), MultipartPolicy::maximum_bytes),
+            name,
+            mime,
         )
-        .take((self.validation.max_bytes() + 1) as u64)
-        .read_to_end(&mut bytes)
         .await
-        .map_err(|_| IngestFailure::DownloadUnavailable)?;
-        if bytes.len() != file.size_bytes() {
-            return Err(IngestFailure::InvalidInput);
-        }
-        // Optional hints never override observed signature/UTF-8 validation.
-        let inferred = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-            "image/png"
-        } else if bytes.starts_with(b"\xff\xd8\xff") {
-            "image/jpeg"
-        } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-            "image/gif"
-        } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-            "image/webp"
-        } else if bytes.starts_with(b"%PDF-") {
-            "application/pdf"
-        } else {
-            "text/plain"
-        };
-        let inferred = if inferred == "text/plain" {
-            match name
-                .and_then(|value| value.rsplit('.').next())
-                .map(str::to_ascii_lowercase)
-                .as_deref()
-            {
-                Some("md" | "markdown") => "text/markdown",
-                Some("csv") => "text/csv",
-                _ => inferred,
-            }
-        } else {
-            inferred
-        };
-        let mime = mime.unwrap_or(inferred);
-        let fallback = match mime
-            .trim()
-            .split(';')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "image/png" => "uploaded.png",
-            "image/jpeg" => "uploaded.jpg",
-            "image/gif" => "uploaded.gif",
-            "image/webp" => "uploaded.webp",
-            "application/pdf" => "uploaded.pdf",
-            "text/markdown" => "uploaded.md",
-            "text/csv" => "uploaded.csv",
-            _ => "uploaded.txt",
-        };
-        self.validation
-            .validate(name.unwrap_or(fallback), mime, &bytes)
-            .map_err(|_| IngestFailure::InvalidInput)
+        .map_err(|_| IngestFailure::InvalidInput)
     }
 }
 

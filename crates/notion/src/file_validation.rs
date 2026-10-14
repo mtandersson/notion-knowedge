@@ -293,6 +293,115 @@ impl FileValidationPolicy {
     }
 }
 
+/// Validate a request-owned file using a fixed 64 KiB working buffer. Text is
+/// checked to EOF, carrying at most three incomplete UTF-8 bytes between reads.
+pub(crate) async fn validate_downloaded(
+    file: &crate::file_download::DownloadedFile,
+    maximum: usize,
+    name: Option<&str>,
+    mime: Option<&str>,
+) -> Result<ValidatedFile, FileValidationError> {
+    use tokio::io::AsyncReadExt;
+    if file.size_bytes() == 0 {
+        return Err(FileValidationError::EmptyFile);
+    }
+    if file.size_bytes() > maximum {
+        return Err(FileValidationError::FileTooLarge);
+    }
+    let mut reader = tokio::fs::File::from_std(
+        file.reopen()
+            .map_err(|_| FileValidationError::ContentTypeMismatch)?,
+    );
+    let mut prefix = vec![0; 65536.min(file.size_bytes())];
+    reader
+        .read_exact(&mut prefix)
+        .await
+        .map_err(|_| FileValidationError::ContentTypeMismatch)?;
+    let inferred = if prefix.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if prefix.starts_with(b"\xff\xd8\xff") {
+        "image/jpeg"
+    } else if prefix.starts_with(b"GIF87a") || prefix.starts_with(b"GIF89a") {
+        "image/gif"
+    } else if prefix.len() >= 12 && prefix.starts_with(b"RIFF") && &prefix[8..12] == b"WEBP" {
+        "image/webp"
+    } else if prefix.starts_with(b"%PDF-") {
+        "application/pdf"
+    } else {
+        match name
+            .and_then(|v| v.rsplit('.').next())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("md" | "markdown") => "text/markdown",
+            Some("csv") => "text/csv",
+            _ => "text/plain",
+        }
+    };
+    let kind = parse_mime(mime.unwrap_or(inferred))?;
+    let fallback = match kind {
+        Kind::Png => "uploaded.png",
+        Kind::Jpeg => "uploaded.jpg",
+        Kind::Gif => "uploaded.gif",
+        Kind::Webp => "uploaded.webp",
+        Kind::Pdf => "uploaded.pdf",
+        Kind::Markdown => "uploaded.md",
+        Kind::Csv => "uploaded.csv",
+        Kind::Text => "uploaded.txt",
+    };
+    let filename = sanitize_filename(name.unwrap_or(fallback))?;
+    if !kind.accepts_extension(filename.rsplit('.').next().unwrap_or("")) {
+        return Err(FileValidationError::MimeExtensionMismatch);
+    }
+    let text = matches!(kind, Kind::Text | Kind::Markdown | Kind::Csv);
+    if (text && looks_binary(&prefix)) || (!text && !kind.accepts_content(&prefix)) {
+        return Err(FileValidationError::ContentTypeMismatch);
+    }
+    let mut total = 0usize;
+    let mut pending = Vec::with_capacity(65539);
+    let mut chunk = prefix;
+    loop {
+        total = total
+            .checked_add(chunk.len())
+            .filter(|v| *v <= maximum)
+            .ok_or(FileValidationError::FileTooLarge)?;
+        if text {
+            pending.extend_from_slice(&chunk);
+            let valid_len = match std::str::from_utf8(&pending) {
+                Ok(_) => pending.len(),
+                Err(e) if e.error_len().is_none() => e.valid_up_to(),
+                Err(_) => return Err(FileValidationError::ContentTypeMismatch),
+            };
+            let valid = std::str::from_utf8(&pending[..valid_len])
+                .map_err(|_| FileValidationError::ContentTypeMismatch)?;
+            if valid
+                .chars()
+                .any(|ch| ch.is_control() && !matches!(ch, '\r' | '\n' | '\t'))
+            {
+                return Err(FileValidationError::ContentTypeMismatch);
+            }
+            pending.drain(..valid_len);
+        }
+        chunk.resize(65536, 0);
+        let count = reader
+            .read(&mut chunk)
+            .await
+            .map_err(|_| FileValidationError::ContentTypeMismatch)?;
+        chunk.truncate(count);
+        if count == 0 {
+            break;
+        }
+    }
+    if total != file.size_bytes() || !pending.is_empty() {
+        return Err(FileValidationError::ContentTypeMismatch);
+    }
+    Ok(ValidatedFile {
+        filename,
+        mime_type: kind.mime(),
+        size_bytes: total,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,5 +642,30 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, FileValidationError::MimeExtensionMismatch);
         assert!(!format!("{error:?} {error}").contains("private.pdf"));
+    }
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+    #[tokio::test]
+    async fn full_text_validation_accepts_split_unicode_and_rejects_invalid_tail() {
+        for suffix in ["å".as_bytes(), b"\xff", b"\xc3", b"\x00"] {
+            let mut bytes = vec![b'a'; 65535];
+            bytes.extend_from_slice(suffix);
+            let file = crate::file_download::DownloadedFile::test_fixture(&bytes);
+            let result = validate_downloaded(&file, 100000, Some("notes.md"), None).await;
+            assert_eq!(result.is_ok(), suffix == "å".as_bytes());
+        }
+        for suffix in [b"\xff".as_slice(), b"\xc3", b"\x00"] {
+            let mut bytes = vec![b'a'; 2 * 65536 + 17];
+            bytes.extend_from_slice(suffix);
+            let file = crate::file_download::DownloadedFile::test_fixture(&bytes);
+            assert!(
+                validate_downloaded(&file, 200000, Some("notes.csv"), None)
+                    .await
+                    .is_err()
+            );
+        }
     }
 }

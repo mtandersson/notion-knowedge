@@ -299,7 +299,7 @@ payload-free agent-mutation record and a separate durable SQLite store with
 bounded retention. It is an available component, not yet wired to production
 MCP writes; future mutation workflows must enforce its failure policy.
 
-The [audited single-file ingestion application](docs/single-file-ingestion.md) joins secure request-scoped download, validation, native Notion attachment and durable audit behind a reusable core service. Installed MCP/server activation remains a separate integration step.
+The [audited single-file ingestion application](docs/single-file-ingestion.md) joins secure request-scoped download, validation, native Notion attachment and durable audit behind a reusable core service. [Plan-aware multipart and ordered batches](docs/multipart-batch-ingestion.md) extend the same service with explicit trusted limits and per-file outcomes. Installed MCP/server activation remains a separate integration step.
 
 ## ChatGPT file input
 

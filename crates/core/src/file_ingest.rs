@@ -57,6 +57,8 @@ pub struct FileEffectFailure {
     pub upload_id: Option<String>,
     pub block_id: Option<String>,
     pub effect_possible: bool,
+    /// A trusted authoritative guard failed; remaining batch work must stop.
+    pub authority_lost: bool,
 }
 
 /// Adapter-owned local files must unlink on drop, including dropped futures.
@@ -89,6 +91,33 @@ pub trait FileIngestAdapter: Send + Sync {
         caption: Option<&str>,
         kind: FileKind,
     ) -> impl Future<Output = Result<String, FileEffectFailure>> + Send;
+    fn upload_tracked(
+        &self,
+        file: &Self::LocalFile,
+        name: Option<&str>,
+        mime: Option<&str>,
+        references: &mut FileReferences,
+    ) -> impl Future<Output = Result<Self::Upload, FileEffectFailure>> + Send {
+        async move {
+            let upload = self.upload(file, name, mime).await?;
+            references.upload_id = Some(self.upload_id(&upload).to_owned());
+            Ok(upload)
+        }
+    }
+    fn attach_tracked(
+        &self,
+        target: &PageId,
+        upload: &Self::Upload,
+        caption: Option<&str>,
+        kind: FileKind,
+        references: &mut FileReferences,
+    ) -> impl Future<Output = Result<String, FileEffectFailure>> + Send {
+        async move {
+            let block = self.attach(target, upload, caption, kind).await?;
+            references.block_id = Some(block.clone());
+            Ok(block)
+        }
+    }
 }
 
 /// Construct from trusted transport authentication and operator policy only.
@@ -166,24 +195,32 @@ pub async fn ingest_file<A: FileIngestAdapter>(
     context: &FileIngestContext<'_>,
     request: FileIngestRequest,
 ) -> FileIngestResult {
-    let canonical_target = request.target.0.len() == 36
-        && request.target.0.bytes().enumerate().all(|(i, b)| match i {
-            8 | 13 | 18 | 23 => b == b'-',
-            _ => b.is_ascii_hexdigit() && !b.is_ascii_uppercase(),
-        });
-    let mut result = FileIngestResult {
+    let mut result = empty_result(&request.target);
+    ingest_file_into(adapter, context, request, &mut result).await;
+    result
+}
+fn empty_result(target: &PageId) -> FileIngestResult {
+    FileIngestResult {
         references: FileReferences {
-            target: canonical_target.then(|| request.target.clone()),
+            target: canonical_target(target).then(|| target.clone()),
             upload_id: None,
             block_id: None,
         },
         status: IngestStatus::Failed,
         failure: None,
         terminal_audited: false,
-    };
+    }
+}
+async fn ingest_file_into<A: FileIngestAdapter>(
+    adapter: &A,
+    context: &FileIngestContext<'_>,
+    request: FileIngestRequest,
+    result: &mut FileIngestResult,
+) {
+    let canonical_target = canonical_target(&request.target);
     if !canonical_target {
         result.failure = Some(IngestFailure::InvalidInput);
-        return result;
+        return;
     }
     let mut attempt = AuditAttempt {
         context,
@@ -195,7 +232,7 @@ pub async fn ingest_file<A: FileIngestAdapter>(
     // Validate metadata needed for durable admission before any adapter effect.
     if !attempt.record(AuditOutcome::Attempted) {
         result.failure = Some(IngestFailure::AuditUnavailable);
-        return result;
+        return;
     }
     attempt.finished = false;
     let execution = async {
@@ -227,11 +264,13 @@ pub async fn ingest_file<A: FileIngestAdapter>(
             .await
             .map_err(|_| IngestFailure::Denied)?;
         attempt.effect = true;
+        result.status = IngestStatus::Indeterminate;
         let uploaded = adapter
-            .upload(
+            .upload_tracked(
                 &file,
                 request.filename.as_deref(),
                 request.declared_mime.as_deref(),
+                &mut result.references,
             )
             .await
             .map_err(|failure| {
@@ -242,7 +281,11 @@ pub async fn ingest_file<A: FileIngestAdapter>(
                 } else {
                     IngestStatus::Failed
                 };
-                IngestFailure::Upstream(failure.kind)
+                if failure.authority_lost {
+                    IngestFailure::Denied
+                } else {
+                    IngestFailure::Upstream(failure.kind)
+                }
             })?;
         result.references.upload_id = Some(adapter.upload_id(&uploaded).to_owned());
         context
@@ -251,11 +294,12 @@ pub async fn ingest_file<A: FileIngestAdapter>(
             .await
             .map_err(|_| IngestFailure::Denied)?;
         let block = adapter
-            .attach(
+            .attach_tracked(
                 &request.target,
                 &uploaded,
                 request.caption.as_deref().map(str::trim),
                 facts.kind(),
+                &mut result.references,
             )
             .await
             .map_err(|failure| {
@@ -265,7 +309,11 @@ pub async fn ingest_file<A: FileIngestAdapter>(
                 } else {
                     IngestStatus::Failed
                 };
-                IngestFailure::Upstream(failure.kind)
+                if failure.authority_lost {
+                    IngestFailure::Denied
+                } else {
+                    IngestFailure::Upstream(failure.kind)
+                }
             })?;
         result.references.block_id = Some(block);
         result.status = IngestStatus::Verified;
@@ -278,6 +326,139 @@ pub async fn ingest_file<A: FileIngestAdapter>(
         }
         result.failure = Some(failure);
     }
-    attempt.finish(&mut result);
-    result
+    attempt.finish(result);
+}
+
+/// Trusted server-owned request count; callers cannot construct an unchecked cap.
+#[derive(Clone, Copy, Debug)]
+pub struct FileBatchPolicy {
+    maximum_files: usize,
+}
+impl FileBatchPolicy {
+    pub const HARD_CAP: usize = 20;
+    pub fn new(maximum_files: usize) -> Result<Self, IngestFailure> {
+        if !(1..=Self::HARD_CAP).contains(&maximum_files) {
+            return Err(IngestFailure::InvalidInput);
+        }
+        Ok(Self { maximum_files })
+    }
+}
+impl Default for FileBatchPolicy {
+    fn default() -> Self {
+        Self { maximum_files: 5 }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexedFileResult {
+    pub index: usize,
+    /// None means unattempted. Results never contain temporary source URLs.
+    pub outcome: Option<FileIngestResult>,
+}
+
+/// Request-owned ordered work and observable progress. Keep this object outside
+/// the execution future: canceling a later item preserves earlier receipts.
+/// Execution is one-shot, including after cancellation; it cannot replay URLs.
+pub struct FileIngestBatch {
+    requests: Option<Vec<FileIngestRequest>>,
+    results: Vec<IndexedFileResult>,
+}
+impl FileIngestBatch {
+    pub fn new(
+        requests: Vec<FileIngestRequest>,
+        policy: FileBatchPolicy,
+    ) -> Result<Self, IngestFailure> {
+        if requests.is_empty() || requests.len() > policy.maximum_files {
+            return Err(IngestFailure::InvalidInput);
+        }
+        let target = &requests[0].target;
+        if requests.iter().any(|r| {
+            &r.target != target
+                || !canonical_target(&r.target)
+                || r.temporary_url.is_empty()
+                || r.temporary_url.len() > 8192
+                || r.filename.as_ref().is_some_and(|v| v.len() > 4096)
+                || r.declared_mime.as_ref().is_some_and(|v| v.len() > 128)
+                || !valid_caption(r.caption.as_deref())
+        }) {
+            return Err(IngestFailure::InvalidInput);
+        }
+        let results = (0..requests.len())
+            .map(|index| IndexedFileResult {
+                index,
+                outcome: None,
+            })
+            .collect();
+        Ok(Self {
+            requests: Some(requests),
+            results,
+        })
+    }
+    pub fn results(&self) -> &[IndexedFileResult] {
+        &self.results
+    }
+    pub fn partial_success(&self) -> bool {
+        let verified = self
+            .results
+            .iter()
+            .filter(|r| {
+                r.outcome.as_ref().is_some_and(|r| {
+                    matches!(
+                        r.status,
+                        IngestStatus::Verified | IngestStatus::VerifiedAuditFailed
+                    )
+                })
+            })
+            .count();
+        verified > 0 && verified < self.results.len()
+    }
+    pub async fn execute<A: FileIngestAdapter>(
+        &mut self,
+        adapter: &A,
+        context: &FileIngestContext<'_>,
+    ) -> Result<(), IngestFailure> {
+        let requests = self.requests.take().ok_or(IngestFailure::InvalidInput)?;
+        // Common authority is checked before any item admission/download.
+        if !context.permitted
+            || adapter.configured_scope() != context.gate.configured_scope()
+            || context.gate.authorize(&requests[0].target).await.is_err()
+        {
+            return Err(IngestFailure::Denied);
+        }
+        for (index, request) in requests.into_iter().enumerate() {
+            self.results[index].outcome = Some(empty_result(&request.target));
+            let outcome = self.results[index]
+                .outcome
+                .as_mut()
+                .expect("initialized item");
+            ingest_file_into(adapter, context, request, outcome).await;
+            let stop = !outcome.terminal_audited
+                || matches!(
+                    outcome.failure,
+                    Some(
+                        IngestFailure::Denied
+                            | IngestFailure::AuditUnavailable
+                            | IngestFailure::Upstream(
+                                BackendErrorKind::Unauthenticated
+                                    | BackendErrorKind::PermissionDenied
+                            )
+                    )
+                );
+            if stop {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+fn canonical_target(target: &PageId) -> bool {
+    target.0.len() == 36
+        && target.0.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit() && !b.is_ascii_uppercase(),
+        })
+}
+fn valid_caption(value: Option<&str>) -> bool {
+    value.is_none_or(|v| v.chars().count() <= 2000 && !v.chars().any(|ch| ch.is_control()
+        || matches!(ch, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')))
 }
