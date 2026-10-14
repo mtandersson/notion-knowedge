@@ -2,8 +2,10 @@
 
 Issue [#60](https://github.com/mtandersson/notion-knowedge/issues/60) introduces the
 derived graph foundation for follow-up extraction (#61–#62) and graph reads
-(#63–#65). This is **not** an exposed MCP tool and does not authorize Notion
-page reads or writes.
+(#63–#65). The derived edge schema itself grants **no** access to Notion pages or content.
+Bounded read-only MCP traversal is documented separately in
+[knowledge-related.md](knowledge-related.md) (#63), and must be configured with
+a trusted physical root-scope gate.
 
 ## Contract
 
