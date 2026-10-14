@@ -12,6 +12,7 @@ async fn stdio_exchange(read_only: bool) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_notion-knowledge-server"))
         .env_clear()
         .env("NK_READ_ONLY", if read_only { "true" } else { "false" })
+        .env("NK_MAX_UPLOAD_FILES", "1")
         .env("NK_NOTION_AUTH", "integration")
         .env("NOTION_TOKEN", "secret-sentinel")
         .stdin(Stdio::piped())
@@ -37,8 +38,10 @@ async fn stdio_exchange(read_only: bool) {
             json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
             json!({"jsonrpc": "2.0", "id": 3, "method": "ping"}),
             json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"knowledge_search","arguments":{"query":"find notes","limit":5,"mode":"hybrid","filters":{"page_ids":["page-1"]}}}}),
-            json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"knowledge_upload_file","arguments":{"file":{"download_url":"https://files.example.test/input?token=private-sentinel","file_id":"file_test"}}}}),
+            json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"knowledge_upload_file","arguments":{"target":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","file":{"download_url":"https://files.example.test/input?token=private-sentinel","file_id":"file_test"}}}}),
             json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"knowledge_sync_status","arguments":{}}}),
+            json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"knowledge_upload_file","arguments":{"target":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","caption":"safe caption","files":[{"download_url":"https://files.example.test/?secret=private-sentinel","file_id":"first"},{"download_url":"https://files.example.test/?secret=private-sentinel","file_id":"second"}]}}}),
+            json!({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"knowledge_upload_file","arguments":{"target":"private-sentinel","caption":"private-sentinel","file":{"download_url":"https://files.example.test/?secret=private-sentinel","file_id":"private-sentinel"}}}}),
         ] {
             stdin.write_all(request.to_string().as_bytes()).await?;
             stdin.write_all(b"\n").await?;
@@ -89,7 +92,7 @@ async fn stdio_exchange(read_only: bool) {
     for (index, response) in responses.iter().enumerate() {
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], index + 1);
-        if index < 4 || !read_only {
+        if index < 4 || (!read_only && index < 6) {
             assert!(response.get("error").is_none(), "{response}");
         }
     }
@@ -119,6 +122,8 @@ async fn stdio_exchange(read_only: bool) {
             upload["_meta"]["openai/fileParams"],
             json!(["file", "files"])
         );
+        assert_eq!(upload["inputSchema"]["properties"]["files"]["maxItems"], 1);
+        assert_eq!(upload["inputSchema"]["required"], json!(["target"]));
         let reads = Value::Array(
             tools
                 .iter()
@@ -151,6 +156,10 @@ async fn stdio_exchange(read_only: bool) {
                 .unwrap()
                 .starts_with("file_upload_unavailable:")
         );
+    }
+    for response in &responses[6..8] {
+        assert_eq!(response["error"]["code"], -32602);
+        assert!(!response.to_string().contains("private-sentinel"));
     }
     assert!(!frames.join("").contains("private-sentinel"));
     assert!(!diagnostics.contains("private-sentinel"));

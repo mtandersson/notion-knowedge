@@ -307,6 +307,8 @@ The [request-scoped temporary file downloader](docs/temporary-file-download.md)
 provides bounded streaming, exact HTTPS source-host admission, public-address
 DNS pinning and private temporary-file ownership for future authenticated ingestion.
 
+The [startup-owned file ingestion settings](docs/file-ingestion-settings.md) validate explicit operator admission without enabling ingestion runtime.
+
 The staged [`knowledge_upload_file` single-file input contract](docs/chatgpt-file-parameters.md)
 advertises `_meta["openai/fileParams"]` and accepts ChatGPT file references without
 Drive staging. It is hidden by default read-only mode; explicit `NK_READ_ONLY=false` exposes

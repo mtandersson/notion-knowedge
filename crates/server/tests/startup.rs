@@ -181,3 +181,91 @@ fn invalid_exclusion_options_fail_before_credentials_or_network_and_do_not_echo_
         assert!(!stderr.contains("Discovery requires"));
     }
 }
+
+#[test]
+fn ingestion_admission_fails_at_startup_without_echoing_values() {
+    for settings in [
+        vec![("NK_MAX_UPLOAD_FILES", "secret-invalid-count")],
+        vec![("NK_MAX_UPLOAD_FILES", "0")],
+        vec![("NK_MAX_UPLOAD_FILES", "17")],
+        vec![("NK_FILE_INGESTION", "true")],
+        vec![("NK_FILE_SOURCE_HOSTS", "secret-host-value")],
+        vec![("NK_FILE_INGESTION", "invalid-secret")],
+    ] {
+        for check in [false, true] {
+            let output = run(&settings, check);
+            assert_eq!(output.status.code(), Some(2));
+            let error = String::from_utf8(output.stderr).unwrap();
+            assert!(error.contains("NK_"));
+            for sentinel in [
+                "secret-invalid-count",
+                "secret-host-value",
+                "invalid-secret",
+            ] {
+                assert!(!error.contains(sentinel));
+            }
+            assert!(output.stdout.is_empty());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn check_validates_enabled_ingestion_bounds_and_private_audit_path_before_serving() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = dir.path().join("audit.sqlite");
+    let settings = vec![
+        ("NK_FILE_INGESTION", "true"),
+        ("NK_READ_ONLY", "false"),
+        ("NK_NOTION_AUTH", "integration"),
+        ("NOTION_TOKEN", "secret-sentinel"),
+        (
+            "NK_NOTION_SCOPE_ROOTS",
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        ),
+        (
+            "NK_NOTION_SCOPE_WORKSPACE_ID",
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        ),
+        ("NK_FILE_SOURCE_HOSTS", "files.example.test"),
+        ("NK_FILE_AUDIT_FILE", path.to_str().unwrap()),
+    ];
+    let output = run(&settings, true);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !path.exists(),
+        "check must not initialize durable runtime storage"
+    );
+    for (key, value) in [
+        ("NK_FILE_TIMEOUT_SECONDS", "0"),
+        ("NK_FILE_PLAN", "secret-invalid-plan"),
+        ("NK_FILE_MAX_BYTES", "5242881"),
+        ("NK_FILE_AUDIT_RETENTION_DAYS", "3651"),
+        (
+            "NK_FILE_SOURCE_HOSTS",
+            "https://private-sentinel.test/?token=secret-sentinel",
+        ),
+        ("NK_FILE_AUDIT_FILE", "/tmp/private-sentinel.sqlite"),
+        ("NK_FILE_MULTIPART_THRESHOLD_BYTES", "5242880"),
+    ] {
+        let mut invalid = settings.clone();
+        invalid.retain(|(name, _)| *name != key);
+        invalid.push((key, value));
+        for check in [false, true] {
+            let output = run(&invalid, check);
+            assert_eq!(output.status.code(), Some(2), "{key}");
+            assert!(output.stdout.is_empty());
+            let diagnostic = String::from_utf8(output.stderr).unwrap();
+            assert!(diagnostic.contains(key));
+            for secret in ["private-sentinel", "secret-sentinel", "secret-invalid-plan"] {
+                assert!(!diagnostic.contains(secret));
+            }
+        }
+    }
+}
