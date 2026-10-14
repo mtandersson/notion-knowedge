@@ -151,7 +151,7 @@ pub async fn navigate(
         });
 
         for (outgoing, edge) in edges {
-            let (target, direction) = if outgoing {
+            let (neighbor, direction) = if outgoing {
                 if edge.source_page_id() != current {
                     return Err(RelatedError::Unavailable);
                 }
@@ -166,12 +166,15 @@ pub async fn navigate(
                 (edge.source_page_id(), "incoming")
             };
             // Never use graph links or caller supplied IDs as permission proofs.
-            if !authorized(gate, target, roots).await {
+            if !authorized(gate, neighbor, roots).await {
                 continue;
             }
             let key = (
                 edge.source_page_id().to_owned(),
-                target.to_owned(),
+                match edge.target() {
+                    GraphTarget::Page { page_id } => page_id.clone(),
+                    GraphTarget::Unresolved { .. } => return Err(RelatedError::Unavailable),
+                },
                 edge.relation_type().to_owned(),
                 edge.provenance().to_owned(),
             );
@@ -193,8 +196,8 @@ pub async fn navigate(
                     limit_reached: true,
                 });
             }
-            if hops + 1 < input.depth && visited.insert(target.to_owned()) {
-                queue.push_back((target.to_owned(), hops + 1));
+            if hops + 1 < input.depth && visited.insert(neighbor.to_owned()) {
+                queue.push_back((neighbor.to_owned(), hops + 1));
             }
         }
     }
