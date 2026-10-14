@@ -57,6 +57,8 @@ pub struct FileEffectFailure {
     pub upload_id: Option<String>,
     pub block_id: Option<String>,
     pub effect_possible: bool,
+    /// A trusted authoritative guard failed; remaining batch work must stop.
+    pub authority_lost: bool,
 }
 
 /// Adapter-owned local files must unlink on drop, including dropped futures.
@@ -279,7 +281,11 @@ async fn ingest_file_into<A: FileIngestAdapter>(
                 } else {
                     IngestStatus::Failed
                 };
-                IngestFailure::Upstream(failure.kind)
+                if failure.authority_lost {
+                    IngestFailure::Denied
+                } else {
+                    IngestFailure::Upstream(failure.kind)
+                }
             })?;
         result.references.upload_id = Some(adapter.upload_id(&uploaded).to_owned());
         context
@@ -303,7 +309,11 @@ async fn ingest_file_into<A: FileIngestAdapter>(
                 } else {
                     IngestStatus::Failed
                 };
-                IngestFailure::Upstream(failure.kind)
+                if failure.authority_lost {
+                    IngestFailure::Denied
+                } else {
+                    IngestFailure::Upstream(failure.kind)
+                }
             })?;
         result.references.block_id = Some(block);
         result.status = IngestStatus::Verified;

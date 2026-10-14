@@ -4,7 +4,10 @@
 //! The caller must hold a request-scoped, bounded temporary download; every
 //! upload is revalidated before any network effect and is never replayed.
 use crate::{
-    NotionClient, file_download::DownloadedFile, file_validation::FileValidationPolicy, pages,
+    NotionClient,
+    file_download::DownloadedFile,
+    file_validation::{FileValidationPolicy, validate_downloaded},
+    pages,
     writes::MARKDOWN_VERSION,
 };
 use notion_knowledge_core::backend::{BackendError, BackendErrorKind};
@@ -14,7 +17,6 @@ use reqwest::{
     multipart::{Form, Part},
 };
 use serde_json::{Value, json};
-use tokio::io::AsyncReadExt;
 use tokio_util::io::ReaderStream;
 
 const CREATE: &str = "notion.file_upload.create";
@@ -118,23 +120,14 @@ impl NotionClient {
             if file.size_bytes() == 0 || file.size_bytes() > policy.max_bytes() {
                 return Err(error(CREATE, BackendErrorKind::InvalidInput));
             }
-            let reader = tokio::fs::File::from_std(
-                file.reopen()
-                    .map_err(|_| error(CREATE, BackendErrorKind::Unavailable))?,
-            );
-            let mut bytes = Vec::new();
-            reader
-                .take((policy.max_bytes() + 1) as u64)
-                .read_to_end(&mut bytes)
-                .await
-                .map_err(|_| error(CREATE, BackendErrorKind::Unavailable))?;
-            if bytes.len() != file.size_bytes() {
-                return Err(error(CREATE, BackendErrorKind::InvalidInput));
-            }
-            let valid = policy
-                .validate(filename, declared_mime, &bytes)
-                .map_err(|_| error(CREATE, BackendErrorKind::InvalidInput))?;
-            drop(bytes);
+            let valid = validate_downloaded(
+                file,
+                policy.max_bytes(),
+                Some(filename),
+                Some(declared_mime),
+            )
+            .await
+            .map_err(|_| error(CREATE, BackendErrorKind::InvalidInput))?;
 
             effect_possible = true;
             let created = self.write(
@@ -209,6 +202,7 @@ impl NotionClient {
                 upload_id: known_upload.clone(),
                 block_id: None,
                 effect_possible,
+                authority_lost: false,
             },
         )
     }

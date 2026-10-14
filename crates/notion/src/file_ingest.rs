@@ -110,6 +110,7 @@ impl FileIngestAdapter for NotionFileIngestAdapter {
                 upload_id: None,
                 block_id: None,
                 effect_possible: false,
+                authority_lost: false,
             })?;
         if let Some(policy) = self.multipart
             && file.size_bytes() > policy.threshold_bytes()

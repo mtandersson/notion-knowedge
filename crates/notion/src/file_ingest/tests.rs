@@ -1040,7 +1040,9 @@ async fn joined_paid_plan_selects_exact_threshold_and_verifies_multipart_bytes_i
     for size in [20 * MIB, 20 * MIB + 1] {
         let dir = tempfile::tempdir().unwrap();
         let audit = audit(&dir.path().join("audit"), None);
-        let bytes = vec![b'x'; size];
+        let bytes: Vec<u8> = (0..size)
+            .map(|i| b'a' + ((i / (1024 * 1024)) % 26) as u8)
+            .collect();
         let (download, count, source_task, paths) =
             source_many(vec![(bytes.clone(), 200, false)], 30 * MIB).await;
         let mut steps = full_steps(false, false, false);
@@ -1222,6 +1224,12 @@ async fn ordered_batch_reports_later_failure_and_preserves_verified_image_and_do
     source_task.await.unwrap();
     notion_task.await.unwrap();
     assert_eq!(count.load(Ordering::SeqCst), 3);
+    assert!(
+        batch
+            .execute(&adapter, &context(&gate, &audit))
+            .await
+            .is_err()
+    );
     let requests = requests.lock().unwrap();
     let patches: Vec<Value> = requests
         .iter()
@@ -1502,4 +1510,138 @@ async fn joined_multipart_interruptions_and_completion_failures_retain_upload_wi
             if failure_stage == 0 { 1 } else { 2 }
         );
     }
+}
+
+#[tokio::test]
+async fn batch_inner_attachment_authority_loss_stops_remaining_effects_with_known_upload() {
+    use notion_knowledge_core::file_ingest::{FileBatchPolicy, FileIngestBatch};
+    for changed in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let audit = audit(&dir.path().join("audit"), None);
+        let (download, count, source_task, paths) = source_many(
+            vec![
+                (b"document".to_vec(), 200, false),
+                (b"later document".to_vec(), 200, false),
+            ],
+            64,
+        )
+        .await;
+        let mut steps: Vec<_> = chain(ROOT).into_iter().map(|v| (200, v)).collect();
+        steps.extend(full_steps(false, false, false));
+        let mut later = full_steps(false, false, false);
+        if changed {
+            // Inner attachment authorize succeeded; its revalidation now sees
+            // a changed authoritative edit receipt without leaving the root.
+            later.truncate(22);
+            for (_, value) in &mut later[18..22] {
+                value["last_edited_time"] = json!("2026-10-14T00:00:00Z");
+            }
+        } else {
+            // Inner attachment authorize itself becomes unverifiable. The
+            // fixture serves no further item, even if authority could recover.
+            later.truncate(15);
+            later[14] = (503, json!({}));
+        }
+        steps.extend(later);
+        let (client, requests, notion_task) = notion(steps).await;
+        let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+        let adapter = NotionFileIngestAdapter::new(
+            client,
+            download,
+            FileValidationPolicy::default(),
+            scope(),
+        );
+        let mut batch = FileIngestBatch::new(
+            vec![request(false), request(false), request(false)],
+            FileBatchPolicy::default(),
+        )
+        .unwrap();
+        batch
+            .execute(&adapter, &context(&gate, &audit))
+            .await
+            .unwrap();
+        assert_eq!(
+            batch.results()[0].outcome.as_ref().unwrap().status,
+            IngestStatus::Verified
+        );
+        let lost = batch.results()[1].outcome.as_ref().unwrap();
+        assert_eq!(lost.status, IngestStatus::Denied, "{lost:?}");
+        assert_eq!(lost.failure, Some(IngestFailure::Denied));
+        assert_eq!(lost.references.upload_id.as_deref(), Some(UPLOAD));
+        assert!(lost.references.block_id.is_none());
+        assert!(batch.results()[2].outcome.is_none());
+        assert!(batch.partial_success());
+        source_task.await.unwrap();
+        notion_task.await.unwrap();
+        assert_clean(&paths);
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(h, _)| h.starts_with("PATCH"))
+                .count(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn ordinary_upstream_failure_can_continue_to_next_verified_item_without_replay() {
+    use notion_knowledge_core::file_ingest::{FileBatchPolicy, FileIngestBatch};
+    let dir = tempfile::tempdir().unwrap();
+    let audit = audit(&dir.path().join("audit"), None);
+    let (download, count, source_task, paths) = source_many(
+        vec![
+            (b"first".to_vec(), 200, false),
+            (b"second".to_vec(), 200, false),
+        ],
+        64,
+    )
+    .await;
+    let mut steps: Vec<_> = chain(ROOT).into_iter().map(|v| (200, v)).collect();
+    steps.extend(full_steps(false, false, true));
+    steps.extend(full_steps(false, false, false));
+    let (client, requests, notion_task) = notion(steps).await;
+    let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+    let adapter =
+        NotionFileIngestAdapter::new(client, download, FileValidationPolicy::default(), scope());
+    let mut batch = FileIngestBatch::new(
+        vec![request(false), request(false)],
+        FileBatchPolicy::default(),
+    )
+    .unwrap();
+    batch
+        .execute(&adapter, &context(&gate, &audit))
+        .await
+        .unwrap();
+    assert_eq!(
+        batch.results()[0].outcome.as_ref().unwrap().status,
+        IngestStatus::Indeterminate
+    );
+    assert_eq!(
+        batch.results()[1].outcome.as_ref().unwrap().status,
+        IngestStatus::Verified
+    );
+    assert!(batch.partial_success());
+    source_task.await.unwrap();
+    notion_task.await.unwrap();
+    assert_clean(&paths);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|(h, _)| h.contains("/send "))
+            .count(),
+        2
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|(h, _)| h.starts_with("PATCH"))
+            .count(),
+        1
+    );
 }

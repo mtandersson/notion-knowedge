@@ -268,6 +268,7 @@ impl NotionClient {
                 upload_id: known_upload.clone(),
                 block_id: None,
                 effect_possible,
+                authority_lost: false,
             },
         )
     }

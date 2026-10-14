@@ -657,5 +657,15 @@ mod streaming_tests {
             let result = validate_downloaded(&file, 100000, Some("notes.md"), None).await;
             assert_eq!(result.is_ok(), suffix == "å".as_bytes());
         }
+        for suffix in [b"\xff".as_slice(), b"\xc3", b"\x00"] {
+            let mut bytes = vec![b'a'; 2 * 65536 + 17];
+            bytes.extend_from_slice(suffix);
+            let file = crate::file_download::DownloadedFile::test_fixture(&bytes);
+            assert!(
+                validate_downloaded(&file, 200000, Some("notes.csv"), None)
+                    .await
+                    .is_err()
+            );
+        }
     }
 }
