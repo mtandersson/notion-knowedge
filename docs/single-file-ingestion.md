@@ -7,7 +7,7 @@ configured integration's single-part upload and scoped native attachment with
 bounded authoritative block readback.
 [Plan-aware multipart and ordered batches](multipart-batch-ingestion.md) extend
 this same application without activating an installed MCP upload tool. This application API is available to
-trusted composition; installed MCP/server activation follows separately.
+trusted composition, including the [installed MCP/server runtime](installed-file-ingestion.md).
 
 The composition supplies `FileIngestContext` from trusted authentication and
 operator operation policy, a fresh `RootScopeGate`, and a durable `AuditStore`.

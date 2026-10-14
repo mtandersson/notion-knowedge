@@ -285,3 +285,17 @@ acknowledgement. Duplicate and abrupt-restart tests cover retained pending work;
 claim generations fence completion after recovery. Queue retention/concurrency
 limits and authoritative scoped refresh remain release gates. Deleting SQLite
 state loses pending hints even though authoritative Notion content survives.
+
+## Installed file ingestion boundary (2026-10-14)
+
+Explicit validated ingestion settings compose native file uploads for trusted
+stdio and authenticated loopback bearer HTTP. The server actor represents
+operator execution, never an authenticated Notion/ChatGPT user. Anonymous HTTP
+and OAuth discovery do not install ingestion. Effective read-only and operation
+policy are enforced before adapters; full physical roots/exclusions are freshly
+checked before effects. Private durable audit storage must open successfully.
+MCP request cancellation drops active ingestion and records possible effects
+truthfully while removing owned temporary files. There is no background signed
+URL retry or blind mutation replay. See [installed runtime and integrated
+acceptance evidence](installed-file-ingestion.md). This local boundary does not
+complete private ChatGPT OAuth (#117) or the live-root operational smoke.

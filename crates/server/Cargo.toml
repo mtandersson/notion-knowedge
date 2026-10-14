@@ -31,3 +31,5 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 notion-knowledge-notion = { path = "../notion", features = ["test-fixtures"] }
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 tokio = { workspace = true, features = ["process", "io-util", "time"] }
+
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }

@@ -1,6 +1,6 @@
 # ChatGPT bounded file parameter input (#66, #73)
 
-The staged `knowledge_upload_file` descriptor supports either legacy top-level `file` (one object) **or** top-level `files` (ordered array), but never both. The OpenAI file parameter metadata names both input fields: `_meta["openai/fileParams"] = ["file", "files"]`.
+The `knowledge_upload_file` descriptor supports either legacy top-level `file` (one object) **or** top-level `files` (ordered array), but never both. The OpenAI file parameter metadata names both input fields: `_meta["openai/fileParams"] = ["file", "files"]`.
 
 Each reference must contain `download_url` and `file_id`, with optional untrusted `mime_type` and `file_name`. No URL, ID or filename can grant Notion write permission. The schema rejects unknown properties, requires at least one file in `files`, and caps it at the immutable configured maximum. The server's tighter, operator-controlled `NK_MAX_UPLOAD_FILES` sets the admissible per-request count (1–16, default 4). Invalid configurations fail startup; callers cannot relax it through tool arguments.
 
@@ -8,6 +8,6 @@ A required top-level `target` is a canonical lowercase page UUID; optional `capt
 
 The internal Notion adapter method `attach_uploaded_batch` takes already **verified upstream upload receipts**, a validated explicit target, server-owned lifecycle root scope, optional captions, and an operator-owned maximum. It appends one native image/file block at a time in the original request order and performs authoritative read-back of each one. The result contains an ordered list of per-item index, confirmed upstream upload ID, and either `Verified {block_id}` or `Failed {kind}`. Earlier confirmed attachments are **never rolled back**, and a later failure does not erase them or silently reattempt ambiguous writes. Oversize/empty batch or misaligned captions fail before any mutation. Callers must reconcile failed/indeterminate items before a manual retry.
 
-**Important rollout boundary:** This addition exposes and validates a bounded input contract; it does not activate downloading/attaching ChatGPT files in the public MCP server. Even with `NK_READ_ONLY=false`, `knowledge_upload_file` currently returns the safe `file_upload_unavailable` tool error. Wiring request URLs to the authorized downloader, validation and batch adapter is a separate opt-in orchestration with user/workspace auth, audit, signed-URL lifecycle and consent checks. Default `NK_READ_ONLY=true` still hides this mutation tool.
+**Runtime boundary:** Default `NK_READ_ONLY=true` hides and rejects this mutation. Explicit validated ingestion settings install the audited application for trusted stdio or authenticated loopback bearer HTTP. Missing configuration or unauthenticated HTTP remains `file_upload_unavailable` before downloads or Notion writes. [Installed runtime](installed-file-ingestion.md) documents results, cancellation, and the separate private ChatGPT OAuth gate.
 
 Tests include descriptor shape, single and multiple decoding, stable ordering, malformed/oversize input, per-item results, failure and default limits; no private URL, token or file bytes are transmitted.

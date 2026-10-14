@@ -1,6 +1,6 @@
-//! ChatGPT bounded multi-file and legacy single-file parameter schemas for the staged Notion upload tool.
+//! ChatGPT bounded multi-file and legacy single-file parameter schemas.
 //! A file reference is input metadata, NOT authorization to fetch its URL.
-//! Download/SSRF protection and Notion attachment are owned by #67 onward.
+//! The trusted installed application owns download/SSRF protection and native attachment.
 
 use rmcp::model::{Tool, ToolAnnotations};
 use serde::Deserialize;
@@ -97,7 +97,7 @@ impl UploadFileRequest {
         }
     }
 
-    /// Input-order file references for a future isolated attachment adapter.
+    /// Input-order file references for the trusted isolated attachment application.
     /// This parser never opens any URL and never authorizes a Notion write.
     pub fn ordered_files(&self) -> Vec<&ChatGptFile> {
         if let Some(files) = &self.files {
@@ -144,7 +144,7 @@ pub fn tool_with_limit(max_files: usize) -> Tool {
     });
     Tool::new(
         "knowledge_upload_file",
-        "Accept one or a bounded ordered array of ChatGPT file references for a future scoped Notion attachment. This stage validates the file parameter only: it never downloads, stores or uploads the file and reports file_upload_unavailable until the authenticated ingestion pipeline is implemented. Never treat the temporary URL as authorization.",
+        "Attach one or a bounded ordered array of ChatGPT file references to the explicit allowed Notion target as native image/file blocks. Requires configured trusted ingestion; otherwise returns file_upload_unavailable before effects. Reports verified, failed, indeterminate and unattempted per-file outcomes and partial success. Never treat the temporary URL as authorization.",
         input.as_object().expect("static upload schema").clone(),
     )
     .with_annotations(
@@ -157,6 +157,18 @@ pub fn tool_with_limit(max_files: usize) -> Tool {
         serde_json::from_value(json!({"openai/fileParams": ["file","files"]}))
             .expect("static ChatGPT file metadata"),
     )
+}
+
+/// Trusted application installed by the server composition root.
+/// Requests contain untrusted file metadata; implementations retain authority.
+pub trait FileIngestion: Send + Sync {
+    fn ingest<'a>(
+        &'a self,
+        request: UploadFileRequest,
+        cancellation: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<serde_json::Value, &'static str>> + Send + 'a>,
+    >;
 }
 
 #[cfg(test)]

@@ -3,14 +3,15 @@
 The installed upload contract accepts a required canonical lowercase UUID `target`
 and optional caption (at most 2,000 Unicode characters, no controls or directional
 formatting characters), separately from the legacy `file` or ordered `files` input.
-Input references confer no authority. Runtime download/attachment remains unavailable
-until the audited ingestion composition ships; `--check` validates settings only.
+Input references confer no authority. Runtime download/attachment is explicitly installed for trusted transports;
+[installed runtime](installed-file-ingestion.md) describes admission and results.
+`--check` validates settings only; runtime startup also opens protected audit storage.
 
 `NK_MAX_UPLOAD_FILES` is parsed once at startup, accepts 1–16 (default 4), and
 sets both discovery `maxItems` and request admission. Invalid values fail startup.
 Standalone MCP handlers have the same deterministic default. The narrower MCP
-4/16 policy is compatible with the reusable core's 5/20 policy; future composition
-must explicitly pass the admitted MCP maximum to the core batch policy.
+4/16 policy is compatible with the reusable core's 5/20 policy; installed composition
+passes the admitted MCP maximum to the core batch policy.
 
 Ingestion settings require explicit `NK_FILE_INGESTION=true`, `NK_READ_ONLY=false`,
 `NK_NOTION_AUTH=integration`, a token and the existing full authoritative physical

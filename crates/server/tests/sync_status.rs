@@ -38,6 +38,7 @@ async fn wire(config: &Config) -> Vec<Value> {
     let handler = notion_knowledge_server::root_scope::attach_root_scope(
         notion_knowledge_mcp::KnowledgeServer::default(),
         config,
+        notion_knowledge_server::root_scope::Transport::Stdio,
     )
     .unwrap()
     .with_capability_policy(config.capability_policy.clone());
