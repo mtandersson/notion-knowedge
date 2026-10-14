@@ -93,7 +93,10 @@ impl KnowledgeServer {
         (!self.read_only
             || matches!(
                 name,
-                "knowledge_search" | "knowledge_get" | "knowledge_sync_status" | "knowledge_related"
+                "knowledge_search"
+                    | "knowledge_get"
+                    | "knowledge_sync_status"
+                    | "knowledge_related"
             ))
             && (self.destructive_writes_enabled || !write_contract::is_destructive_write(name))
             && self.capability_policy.permits(name)
@@ -597,31 +600,43 @@ impl ServerHandler for KnowledgeServer {
                     serde_json::from_value(serde_json::Value::Object(arguments)).map_err(|_| {
                         rmcp::ErrorData::invalid_params("invalid knowledge_related arguments", None)
                     })?;
-                input.validate().map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
+                input
+                    .validate()
+                    .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
                 let Some(gate) = &self.root_gate else {
-                    return Ok(error("root_scope_unavailable: trusted root authorization is not configured"));
+                    return Ok(error(
+                        "root_scope_unavailable: trusted root authorization is not configured",
+                    ));
                 };
                 let Some(graph) = &self.related_graph else {
-                    return Ok(error("graph_unavailable: a scoped graph adapter is not configured"));
+                    return Ok(error(
+                        "graph_unavailable: a scoped graph adapter is not configured",
+                    ));
                 };
                 let roots: Vec<String> = if self.root_page_ids.is_empty() {
-                    gate.configured_scope().roots.iter().map(|root| root.0.clone()).collect()
+                    gate.configured_scope()
+                        .roots
+                        .iter()
+                        .map(|root| root.0.clone())
+                        .collect()
                 } else {
                     self.root_page_ids.iter().cloned().collect()
                 };
                 match related::navigate(&input, graph.as_ref(), gate, &roots).await {
                     Ok(output) => {
                         if !output_fits_budget(&output) {
-                            return Ok(error("result_too_large: graph relations exceed output budget; request fewer relations"));
+                            return Ok(error(
+                                "result_too_large: graph relations exceed output budget; request fewer relations",
+                            ));
                         }
                         let value = serde_json::to_value(output).map_err(|_| {
                             rmcp::ErrorData::internal_error("graph output unavailable", None)
                         })?;
                         Ok(rmcp::model::CallToolResult::structured(value).into())
                     }
-                    Err(related::RelatedError::Inaccessible) => {
-                        Ok(error("source_not_accessible: page outside configured root scope"))
-                    }
+                    Err(related::RelatedError::Inaccessible) => Ok(error(
+                        "source_not_accessible: page outside configured root scope",
+                    )),
                     Err(related::RelatedError::Unavailable) => {
                         Ok(error("graph_unavailable: scoped graph traversal failed"))
                     }
