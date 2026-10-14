@@ -205,8 +205,10 @@ fn request_defaults_and_validates_bounds() {
         serde_json::from_value::<RelatedRequest>(json!({"page_id":ROOT,"root_page_id":BLOCKED}))
             .is_err()
     );
-    let uppercase: RelatedRequest =
-        serde_json::from_value(json!({"page_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_ascii_uppercase()})).unwrap();
+    let uppercase: RelatedRequest = serde_json::from_value(
+        json!({"page_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_ascii_uppercase()}),
+    )
+    .unwrap();
     assert!(uppercase.validate().is_err());
 }
 #[tokio::test]
