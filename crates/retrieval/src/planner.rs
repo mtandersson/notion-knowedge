@@ -1,7 +1,7 @@
 //! Read-only reconciliation planning against the production worker's ownership.
 use crate::{
     chunks::GuardedChunkTable,
-    commit::{CommitBinding, IndexCommitCoordinator},
+    commit::{CommitBinding, IndexCommitCoordinator, RelationProjection},
 };
 use notion_knowledge_core::{
     backend::{BackendErrorKind, Page, PageId},
@@ -11,7 +11,7 @@ use notion_knowledge_core::{
     reconciliation::ReconciliationScope,
     sync_state::{PageSyncState, SyncStateStore},
 };
-use notion_knowledge_notion::NotionClient;
+use notion_knowledge_notion::{NotionClient, relation_proposal::RelationProposalAdapter};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -155,6 +155,7 @@ pub struct AuthoritativeReconciliationPlanner {
     guard: GuardedChunkTable,
     coordinator: Arc<IndexCommitCoordinator>,
     scope: LifecycleScope,
+    relations: RelationProposalAdapter,
 }
 impl AuthoritativeReconciliationPlanner {
     pub fn new(
@@ -174,7 +175,10 @@ impl AuthoritativeReconciliationPlanner {
         {
             return Err(PlanError::Ownership);
         }
+        let relations = RelationProposalAdapter::new((*notion).clone(), scope.clone())
+            .map_err(|_| PlanError::Ownership)?;
         Ok(Self {
+            relations,
             notion,
             guard,
             coordinator,
@@ -363,6 +367,17 @@ impl AuthoritativeReconciliationPlanner {
                 .await
                 .map_err(|error| source_error(error.kind))?;
             let identity = metadata_identity(&page, &evidence);
+            let edges = self
+                .relations
+                .inspect_metadata(&page, &evidence)
+                .await
+                .map_err(|error| source_error(error.kind))?;
+            let projection = RelationProjection::new(self.coordinator.binding(), id, false, edges)
+                .map_err(|_| PlanError::Index)?;
+            let relation_complete = self
+                .coordinator
+                .relation_projection_complete(&projection)
+                .map_err(|_| PlanError::Index)?;
             let difference = match local {
                 None => Difference::Missing,
                 Some(local) if local.checkpoint.as_ref().is_some_and(|c| c.is_tombstone()) => {
@@ -372,7 +387,8 @@ impl AuthoritativeReconciliationPlanner {
                     if local.checkpoint.as_ref().is_some_and(|c| {
                         !c.is_tombstone()
                             && c.last_edited_time() == Some(page.last_edited_time.as_str())
-                    }) && local.metadata_identity.as_ref() == Some(&identity) =>
+                    }) && local.metadata_identity.as_ref() == Some(&identity)
+                        && relation_complete =>
                 {
                     Difference::Unchanged
                 }
@@ -398,7 +414,14 @@ impl AuthoritativeReconciliationPlanner {
             }
             if local.is_some_and(|l| {
                 l.checkpoint.as_ref().is_some_and(|c| c.is_tombstone()) && l.chunks.is_empty()
-            }) {
+            }) && self
+                .coordinator
+                .relation_projection_complete(
+                    &RelationProjection::new(self.coordinator.binding(), id, true, vec![])
+                        .map_err(|_| PlanError::Index)?,
+                )
+                .map_err(|_| PlanError::Index)?
+            {
                 return Ok(None);
             }
             (Difference::Orphan, None)

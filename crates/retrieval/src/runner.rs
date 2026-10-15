@@ -1,6 +1,6 @@
 //! Authoritative differences-only durable application. CLI/scheduling are separate.
 use crate::{
-    commit::{IndexCommitCoordinator, ReceiptStatus},
+    commit::{CommitError, IndexCommitCoordinator, ReceiptStatus},
     durable_plan::{DurableFailure, DurablePlan, DurableProgress, ProposedDifference},
     planner::{AuthoritativeReconciliationPlanner, PlanError, ReconciliationPlan},
     refresh::{AuthoritativePageRefresh, ExpectedReconciliation, RefreshError},
@@ -51,6 +51,31 @@ impl AuthoritativeReconciliationRunner {
             scope,
         })
     }
+    /// Start explicit derived-relation rebuild under the existing writer lease.
+    /// Inventory and invalidation persist atomically; resume then plans repairs.
+    /// Only a run still in inventory can request this operation.
+    pub async fn begin_relation_rebuild(
+        &self,
+        run: &str,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Result<(), RunnerError> {
+        self.coordinator
+            .begin_relation_rebuild(run.into(), self.scope.clone(), lease, clock)
+            .await
+            .map_err(|error| match error {
+                CommitError::LeaseLost => RunnerError::Journal(JournalError::LeaseLost),
+                CommitError::BindingMismatch | CommitError::InvalidInput => {
+                    RunnerError::InvalidConfiguration
+                }
+                CommitError::Conflict
+                | CommitError::Operation(
+                    notion_knowledge_core::reconciliation::FailureClass::Conflict,
+                ) => RunnerError::Planning(PlanError::Conflict),
+                _ => RunnerError::Journal(JournalError::Unavailable),
+            })
+    }
+
     /// No journal, checkpoint, content extraction or embedding writes.
     pub async fn dry_run(&self) -> Result<ReconciliationPlan, RunnerError> {
         self.planner.plan().await.map_err(RunnerError::Planning)

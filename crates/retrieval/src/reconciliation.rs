@@ -122,6 +122,52 @@ fn snapshot(
         )?,
     })
 }
+pub(crate) fn start_run(
+    db: &Connection,
+    lease: &Lease,
+    now: i64,
+    run: &str,
+    scope: &ReconciliationScope,
+) -> Result<ReconciliationRun, JournalError> {
+    validate(run)?;
+    guard(db, lease, now)?;
+    let abandoned: bool = db
+        .query_row(
+            "SELECT abandoned FROM reconciliation_runs WHERE run_id=?1",
+            [run],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql)?
+        .unwrap_or(false);
+    if abandoned {
+        return Err(JournalError::InvalidTransition);
+    }
+    let existing: Option<String> = db
+        .query_row(
+            "SELECT scope FROM reconciliation_runs WHERE run_id=?1",
+            [run],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql)?;
+    if existing.as_deref().is_some_and(|s| s != scope.identity()) {
+        return Err(JournalError::ScopeMismatch);
+    }
+    let active: Option<String> = db
+        .query_row(
+            "SELECT run_id FROM reconciliation_runs WHERE phase<>2 AND abandoned=0",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql)?;
+    if active.as_deref().is_some_and(|id| id != run) {
+        return Err(JournalError::Busy);
+    }
+    db.execute("INSERT INTO reconciliation_runs(run_id,scope,fence,phase) VALUES(?1,?2,?3,0) ON CONFLICT(run_id) DO UPDATE SET fence=excluded.fence WHERE reconciliation_runs.phase<>2",params![run,scope.identity(),lease.fence]).map_err(sql)?;
+    snapshot(db, run, scope)
+}
 impl SqliteSyncStateStore {
     pub(crate) fn journal_read<T>(
         &self,
@@ -208,19 +254,9 @@ impl ReconciliationJournal for SqliteSyncStateStore {
         run: &str,
         scope: &ReconciliationScope,
     ) -> Result<ReconciliationRun, JournalError> {
-        validate(run)?;
-        self.journal_transaction(|db| {
-            guard(db,lease,now)?;
-            let abandoned:bool=db.query_row("SELECT abandoned FROM reconciliation_runs WHERE run_id=?1",[run],|r|r.get(0)).optional().map_err(sql)?.unwrap_or(false);
-            if abandoned {return Err(JournalError::InvalidTransition);}
-            let existing:Option<String>=db.query_row("SELECT scope FROM reconciliation_runs WHERE run_id=?1",[run],|r|r.get(0)).optional().map_err(sql)?;
-            if existing.as_deref().is_some_and(|s|s!=scope.identity()) {return Err(JournalError::ScopeMismatch);}
-            let active:Option<String>=db.query_row("SELECT run_id FROM reconciliation_runs WHERE phase<>2 AND abandoned=0",[],|r|r.get(0)).optional().map_err(sql)?;
-            if active.as_deref().is_some_and(|id|id!=run) {return Err(JournalError::Busy);}
-            db.execute("INSERT INTO reconciliation_runs(run_id,scope,fence,phase) VALUES(?1,?2,?3,0) ON CONFLICT(run_id) DO UPDATE SET fence=excluded.fence WHERE reconciliation_runs.phase<>2",params![run,scope.identity(),lease.fence]).map_err(sql)?;
-            snapshot(db,run,scope)
-        })
+        self.journal_transaction(|db| start_run(db, lease, now, run, scope))
     }
+
     fn run(
         &self,
         run: &str,

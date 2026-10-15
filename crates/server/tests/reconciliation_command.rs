@@ -1481,12 +1481,13 @@ async fn actual_scheduled_http_manual_periodic_and_webhook_contention_preserves_
     );
     assert_eq!(worker.coordinator.schedule("periodic").unwrap().attempts, 0);
     http.change(|m| m.relation_name = Some("Manual relations".into()));
+    // A label-only edit requires a relation projection refresh, despite unchanged content.
     counts(
         &f.command(&http, &["--reconcile", "apply", "manual-relations"])
             .await,
+        1,
         0,
-        0,
-        3,
+        2,
     );
     assert!(
         worker
@@ -1524,4 +1525,103 @@ async fn fatal_scheduled_storage_failure_terminates_actual_http_and_both_serving
     let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
     let lease = worker.state.acquire_lease(now, 30).unwrap();
     worker.state.release_lease(&lease, now).unwrap();
+}
+
+#[tokio::test]
+async fn explicit_relation_rebuild_uses_shared_runtime_and_preserves_operational_history() {
+    use notion_knowledge_core::{
+        graph::{GraphEdge, GraphEdgeStore, GraphTarget},
+        sync_state::SyncStateStore,
+    };
+    let http = HttpNotion::start().await;
+    http.change(|m| m.relation_name = Some("Ingredients".into()));
+    let f = Fixture::new(&http).await;
+    counts(
+        &f.command(&http, &["--reconcile", "apply", "seed"]).await,
+        3,
+        0,
+        0,
+    );
+    let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+    let operation = runtime
+        .coordinator
+        .reconciliation_plan("seed")
+        .unwrap()
+        .pages[PAGE]
+        .operation_id
+        .clone();
+    let receipt = runtime.coordinator.receipt(&operation).unwrap().unwrap();
+    let checkpoint = runtime.coordinator.state().page_state(PAGE).unwrap();
+    let link = GraphEdge::new(
+        PAGE.into(),
+        GraphTarget::Page {
+            page_id: ROOT.into(),
+        },
+        "link:page".into(),
+        "markdown:0".into(),
+    )
+    .unwrap();
+    runtime
+        .coordinator
+        .state()
+        .replace_page_link_edges(PAGE, std::slice::from_ref(&link))
+        .unwrap();
+    let before = runtime.coordinator.state().edges_from(PAGE).unwrap();
+    drop(runtime);
+    let embeddings = f.provider.count.load(Ordering::SeqCst);
+    counts(
+        &f.command(
+            &http,
+            &["--reconcile", "rebuild-relations", "operator-rebuild"],
+        )
+        .await,
+        3,
+        0,
+        0,
+    );
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), embeddings);
+    let runtime = f.open(&http, OpenMode::ReadOnly).await;
+    assert!(
+        runtime
+            .coordinator
+            .current_relation_projection_complete(PAGE)
+            .unwrap()
+    );
+    assert!(
+        runtime
+            .coordinator
+            .current_relation_projection_complete(OTHER)
+            .unwrap()
+    );
+    assert_eq!(
+        runtime.coordinator.state().edges_from(PAGE).unwrap(),
+        before
+    );
+    assert_eq!(
+        runtime.coordinator.receipt(&operation).unwrap().unwrap(),
+        receipt
+    );
+    assert_eq!(
+        runtime.coordinator.state().page_state(PAGE).unwrap(),
+        checkpoint
+    );
+    drop(runtime);
+    let before = f.snapshot();
+    assert_eq!(
+        f.command(
+            &http,
+            &["--reconcile", "rebuild-relations", "operator-rebuild"]
+        )
+        .await
+        .exit,
+        2
+    );
+    assert_eq!(f.snapshot(), before);
+    counts(
+        &f.command(&http, &["--reconcile", "resume", "operator-rebuild"])
+            .await,
+        3,
+        0,
+        0,
+    );
 }
