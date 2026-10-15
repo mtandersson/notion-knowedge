@@ -78,3 +78,6 @@ mod section_update;
 
 /// Adapter for the core audited single-file ingestion application.
 pub mod file_ingest;
+
+/// Standalone authoritative relation proposals; production activation is separate.
+pub mod relation_proposal;
