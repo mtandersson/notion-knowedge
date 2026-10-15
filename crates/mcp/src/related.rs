@@ -60,6 +60,9 @@ pub struct RelatedEdge {
     pub target_page_id: String,
     pub relation_type: String,
     pub provenance: String,
+    /// Authoritative property label; absent for legacy snapshots and links.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     /// Distance from the requested page to this edge via authorized nodes.
     pub depth: u8,
     /// Direction relative to the node at which this edge was discovered.
@@ -194,6 +197,7 @@ pub async fn navigate(
                 target_page_id: key.1,
                 relation_type: key.2,
                 provenance: key.3,
+                display_name: edge.display_name().map(str::to_owned),
                 depth: hops + 1,
                 direction,
             });

@@ -39,3 +39,30 @@ Tests verify multi-relations, stable property provenance, scoped unresolved
 targets, idempotent upserts, stale deletion, preservation of unrelated link
 edges and fail-closed malformed input. The graph continues to be a derived
 local metadata index with no authority over page reads.
+
+## Authoritative labels and compatibility (#382)
+
+Fresh Notion metadata retains relation membership as `PropertyValue::PageIds`,
+keyed by its stable property ID, and carries authoritative names in an optional
+`relation_names` map on the authoritative page.
+`relation_edges_with_names` accepts this map as an explicit projection sidecar. The name comes from the
+Notion page property map key. Projection carries it as `GraphEdge::display_name`,
+separately from `relation:<ID>` and `property:<ID>`. Both identity strings stay
+stable across a rename. Equal labels on distinct properties cannot merge their
+identities. Existing graph navigation returns the optional `display_name`;
+links and legacy snapshots omit that field. Relation filters retain their
+existing membership and equality behavior on IDs.
+
+SQLite migration 14 adds a nullable display-name column without changing edge
+uniqueness or operational tables. An explicit writer open migrates old state;
+read-only open requires the current schema and never migrates or repairs it.
+Existing edges keep their stable type/provenance and have no label until a fresh
+projection. Canonical indexed document/chunk schemas and LanceDB tables are unchanged;
+labels are retained in the authoritative page/projection input, not round-tripped
+through chunk rows. Existing `relation_edges` and stored snapshots continue to
+project without labels; no name is invented from an ID. Callers of the named
+projection must retain membership and names from the same verified page.
+Production refresh proposals, graph freshness and reconciliation/rebuild wiring
+remain the responsibility of #383 and #384.
+This component change does not install graph refresh, reconciliation or a new
+MCP tool; those remain separate delivery work.

@@ -328,6 +328,7 @@ impl AuthoritativePageRefresh {
         let document = proposal.document;
         let chunks = proposal.chunks;
         let metadata_page = notion_knowledge_core::backend::Page {
+            relation_names: Default::default(),
             id: page.clone(),
             url: document.metadata.url.clone(),
             title: document.metadata.title.clone(),

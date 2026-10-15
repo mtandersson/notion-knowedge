@@ -219,17 +219,21 @@ fn metadata(value: &Value, expected: &PageId) -> Result<Page, BackendError> {
     }
     let archived = inactive(value).ok_or_else(|| error(BackendErrorKind::Internal))?;
     let mut properties = BTreeMap::new();
+    let mut relation_names = BTreeMap::new();
     let mut title = None;
-    for value in value["properties"]
+    for (name, value) in value["properties"]
         .as_object()
         .ok_or_else(|| error(BackendErrorKind::Internal))?
-        .values()
+        .iter()
     {
         let key = string(&value["id"])?;
         if key.is_empty() {
             return Err(error(BackendErrorKind::Internal));
         }
         let normalized = property(value)?;
+        if value["type"] == "relation" {
+            relation_names.insert(key.clone(), name.clone());
+        }
         if value["type"] == "title" {
             let PropertyValue::Text(text) = &normalized else {
                 return Err(error(BackendErrorKind::Internal));
@@ -243,6 +247,7 @@ fn metadata(value: &Value, expected: &PageId) -> Result<Page, BackendError> {
         }
     }
     Ok(Page {
+        relation_names,
         id: PageId(id),
         url,
         title: title.ok_or_else(|| error(BackendErrorKind::Internal))?,

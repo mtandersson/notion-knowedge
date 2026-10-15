@@ -1,7 +1,7 @@
 //! Scope-aware derivation of Notion relation-property graph edges (#61).
 //! A link or relation cannot authorize its own destination page.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     graph::{GraphEdge, GraphTarget},
@@ -17,6 +17,18 @@ use crate::{
 /// are retained as unresolved metadata only; no target content is fetched.
 pub fn relation_edges(
     metadata: &IndexedMetadata,
+    discovered_page_ids: &BTreeSet<String>,
+) -> Result<Vec<GraphEdge>, SyncStateError> {
+    relation_edges_with_names(metadata, &BTreeMap::new(), discovered_page_ids)
+}
+
+/// Project fresh authoritative names alongside canonical membership metadata.
+/// The sidecar is keyed by stable property ID and does not change indexed
+/// document/chunk schemas. Callers must obtain both inputs from the same
+/// verified authoritative page; names never authorize destination pages.
+pub fn relation_edges_with_names(
+    metadata: &IndexedMetadata,
+    relation_names: &BTreeMap<String, String>,
     discovered_page_ids: &BTreeSet<String>,
 ) -> Result<Vec<GraphEdge>, SyncStateError> {
     for id in [
@@ -35,6 +47,10 @@ pub fn relation_edges(
         let PropertyValue::PageIds(targets) = value else {
             continue;
         };
+        let name = relation_names.get(property_id);
+        if name.is_some_and(|name| name.chars().count() > 4096) {
+            return Err(SyncStateError::InvalidInput);
+        }
         validate_identifier(property_id)?;
         if property_id.len() > 128 {
             return Err(SyncStateError::InvalidInput);
@@ -44,7 +60,7 @@ pub fn relation_edges(
             if target.len() > 128 {
                 return Err(SyncStateError::InvalidInput);
             }
-            distinct.insert((property_id.clone(), target.clone()));
+            distinct.insert((property_id.clone(), target.clone(), name.cloned()));
             if distinct.len() > 10_000 {
                 return Err(SyncStateError::InvalidInput);
             }
@@ -52,7 +68,7 @@ pub fn relation_edges(
     }
     distinct
         .into_iter()
-        .map(|(property_id, target_id)| {
+        .map(|(property_id, target_id, name)| {
             let target = if discovered_page_ids.contains(&target_id) {
                 GraphTarget::Page { page_id: target_id }
             } else {
@@ -60,12 +76,16 @@ pub fn relation_edges(
                     reference: target_id,
                 }
             };
-            GraphEdge::new(
+            let edge = GraphEdge::new(
                 metadata.page_id.clone(),
                 target,
                 format!("relation:{property_id}"),
                 format!("property:{property_id}"),
-            )
+            )?;
+            match name {
+                Some(name) => edge.with_display_name(name),
+                None => Ok(edge),
+            }
         })
         .collect()
 }

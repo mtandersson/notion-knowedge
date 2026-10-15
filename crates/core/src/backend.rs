@@ -24,6 +24,8 @@ pub struct Page {
     pub last_edited_time: String,
     pub archived: bool,
     pub properties: BTreeMap<String, PropertyValue>,
+    /// Authoritative relation labels keyed by stable property ID.
+    pub relation_names: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

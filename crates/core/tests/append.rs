@@ -79,6 +79,7 @@ impl Fixture {
 
     fn page(&self) -> Page {
         Page {
+            relation_names: Default::default(),
             id: PageId(PAGE.into()),
             url: format!("https://www.notion.so/{PAGE}"),
             title: "Untouched title".into(),

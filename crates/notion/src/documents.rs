@@ -59,6 +59,7 @@ impl DocumentSnapshot {
 
             let content = PageContent {
                 page: Page {
+                    relation_names: Default::default(),
                     id: PageId(doc.metadata.page_id.clone()),
                     url: doc.metadata.url.clone(),
                     title: doc.metadata.title.clone(),

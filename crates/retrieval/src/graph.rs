@@ -41,8 +41,8 @@ impl GraphEdgeStore for SqliteSyncStateStore {
                 .prepare(
                     "INSERT INTO graph_edges (
                         source_page_id, target_page_id, unresolved_reference,
-                        relation_type, provenance
-                     ) VALUES (?1, ?2, ?3, ?4, ?5)
+                        relation_type, provenance, display_name
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                      ON CONFLICT DO NOTHING",
                 )
                 .map_err(sqlite_failure)?;
@@ -58,6 +58,7 @@ impl GraphEdgeStore for SqliteSyncStateStore {
                         unresolved,
                         edge.relation_type(),
                         edge.provenance(),
+                        edge.display_name(),
                     ])
                     .map_err(sqlite_failure)?;
             }
@@ -99,8 +100,8 @@ impl GraphEdgeStore for SqliteSyncStateStore {
                 .prepare(
                     "INSERT INTO graph_edges (
                         source_page_id, target_page_id, unresolved_reference,
-                        relation_type, provenance
-                     ) VALUES (?1, ?2, ?3, ?4, ?5)
+                        relation_type, provenance, display_name
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                      ON CONFLICT DO NOTHING",
                 )
                 .map_err(sqlite_failure)?;
@@ -116,6 +117,7 @@ impl GraphEdgeStore for SqliteSyncStateStore {
                         unresolved,
                         edge.relation_type(),
                         edge.provenance(),
+                        edge.display_name(),
                     ])
                     .map_err(sqlite_failure)?;
             }
@@ -160,8 +162,8 @@ impl GraphEdgeStore for SqliteSyncStateStore {
                 .prepare(
                     "INSERT INTO graph_edges (
                         source_page_id, target_page_id, unresolved_reference,
-                        relation_type, provenance
-                     ) VALUES (?1, ?2, ?3, ?4, ?5)
+                        relation_type, provenance, display_name
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                      ON CONFLICT DO NOTHING",
                 )
                 .map_err(sqlite_failure)?;
@@ -176,7 +178,8 @@ impl GraphEdgeStore for SqliteSyncStateStore {
                         page_id,
                         unresolved,
                         edge.relation_type(),
-                        edge.provenance()
+                        edge.provenance(),
+                        edge.display_name()
                     ])
                     .map_err(sqlite_failure)?;
             }
@@ -190,7 +193,7 @@ impl GraphEdgeStore for SqliteSyncStateStore {
         read_edges(
             &connection,
             "SELECT source_page_id, target_page_id, unresolved_reference,
-                    relation_type, provenance
+                    relation_type, provenance, display_name
              FROM graph_edges WHERE source_page_id = ?1
              ORDER BY relation_type, provenance, target_page_id, unresolved_reference",
             source_page_id,
@@ -203,7 +206,7 @@ impl GraphEdgeStore for SqliteSyncStateStore {
         read_edges(
             &connection,
             "SELECT source_page_id, target_page_id, unresolved_reference,
-                    relation_type, provenance
+                    relation_type, provenance, display_name
              FROM graph_edges WHERE target_page_id = ?1
              ORDER BY source_page_id, relation_type, provenance",
             target_page_id,
@@ -225,6 +228,7 @@ fn read_edges(
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         })
         .map_err(sqlite_failure)?;
@@ -234,15 +238,23 @@ fn read_edges(
 
     stored
         .into_iter()
-        .map(|(source, page, unresolved, relation_type, provenance)| {
-            let target = match (page, unresolved) {
-                (Some(page_id), None) => GraphTarget::Page { page_id },
-                (None, Some(reference)) => GraphTarget::Unresolved { reference },
-                _ => return Err(SyncStateError::CorruptState),
-            };
-            GraphEdge::new(source, target, relation_type, provenance)
-                .map_err(|_| SyncStateError::CorruptState)
-        })
+        .map(
+            |(source, page, unresolved, relation_type, provenance, display_name)| {
+                let target = match (page, unresolved) {
+                    (Some(page_id), None) => GraphTarget::Page { page_id },
+                    (None, Some(reference)) => GraphTarget::Unresolved { reference },
+                    _ => return Err(SyncStateError::CorruptState),
+                };
+                let edge = GraphEdge::new(source, target, relation_type, provenance)
+                    .map_err(|_| SyncStateError::CorruptState)?;
+                match display_name {
+                    Some(name) => edge
+                        .with_display_name(name)
+                        .map_err(|_| SyncStateError::CorruptState),
+                    None => Ok(edge),
+                }
+            },
+        )
         .collect()
 }
 

@@ -75,6 +75,7 @@ fn mock() -> MockBackend {
     MockBackend {
         content: Mutex::new(PageContent {
             page: Page {
+                relation_names: Default::default(),
                 id: PageId("page-1".into()),
                 url: "https://notion.so/page-1".into(),
                 title: "Title".into(),
