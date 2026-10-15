@@ -390,6 +390,8 @@ impl IndexCommitCoordinator {
             let receipt:Option<ReceiptRow>=db.query_row("SELECT revision,action,content_hash,last_edited_time FROM index_commit_receipts WHERE operation_id=?1 AND page_id=?2 AND generation=?3 AND status=1",params![p.operation_id,page,self.binding().generation()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(sql)?;
             let (revision,action,content_hash,edited)=receipt.ok_or(JournalError::InvalidTransition)?;
             if prepared!= (PreparedOperation{revision,action,content_hash,edited}) {return Err(JournalError::InvalidTransition);}
+            let projected:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM relation_operation_proposals WHERE operation_id=?1)",[&p.operation_id],|r|r.get(0)).map_err(sql)?;
+            if projected && !crate::commit::projection::current_complete(db,self.binding(),page).map_err(|_|JournalError::Unavailable)? {return Err(JournalError::InvalidTransition);}
             let outcome=outcome(action)?;
             if old.is_some_and(|old|old!=action) {return Err(JournalError::InvalidTransition);}
             db.execute("UPDATE reconciliation_plan_progress SET status=1,outcome=?1,failure=NULL WHERE run_id=?2 AND page_id=?3",params![action,run,page]).map_err(sql)?;

@@ -205,6 +205,30 @@ async fn current_journal_fence_scope_and_expiry_are_checked_without_holding_call
         .await,
         Err(CommitError::Conflict)
     );
+    // An inactive lease cannot release a still-live logical reconciliation owner.
+    let active = Fixture::new();
+    let owner = active.coordinator();
+    let old = owner.state().acquire_lease(10, 1).unwrap();
+    owner
+        .state()
+        .start_or_resume(&old, 10, "active-run", &scope("v1"))
+        .unwrap();
+    let contender = owner.state().acquire_lease(11, 100).unwrap();
+    assert_eq!(
+        owner.ensure_no_active_reconciliation(&contender, 11),
+        Err(notion_knowledge_core::reconciliation::JournalError::Busy)
+    );
+    assert_eq!(
+        owner
+            .submit(
+                operation("active-owner-blocks"),
+                contender,
+                clock(11),
+                |_| async { panic!("live reconciliation owner must block unrelated effects") }
+            )
+            .await,
+        Err(CommitError::Conflict)
+    );
     // A separate database verifies the matching active-run fence and callback SQL.
     let g = Fixture::new();
     let d = g.coordinator();

@@ -10,20 +10,19 @@ use notion_knowledge_core::{
     backend::{BackendErrorKind, PageId},
     chunking::ChunkConfig,
     embedding::EmbeddingProvider,
-    indexed::IndexedDocument,
     lifecycle::{LifecycleEvidence, LifecycleScope, LifecycleStatus, PageLifecycle},
     reconciliation::{FailureClass, Lease, ReconciliationScope},
     root_scope::RootScopeGate,
     sync_state::{PageSyncState, SyncStateStore},
 };
-use notion_knowledge_notion::NotionClient;
+use notion_knowledge_notion::{NotionClient, relation_proposal::RelationProposalAdapter};
 use sha2::{Digest, Sha256};
 
 use crate::{
     chunks::{ChunkDiffMetrics, ChunkTableError, GuardedChunkTable},
     commit::{
         CommitBinding, CommitError, CommitOutcome, IndexCommitCoordinator, PageAction,
-        PageOperation,
+        PageOperation, ReceiptStatus, RelationProjection,
     },
 };
 
@@ -83,6 +82,7 @@ pub(crate) struct ExpectedReconciliation {
 #[derive(Clone)]
 pub struct AuthoritativePageRefresh {
     notion: Arc<NotionClient>,
+    relations: RelationProposalAdapter,
     guard: GuardedChunkTable,
     coordinator: Arc<IndexCommitCoordinator>,
     scope: LifecycleScope,
@@ -111,7 +111,10 @@ impl AuthoritativePageRefresh {
         }
         RootScopeGate::new(notion.clone(), scope.clone())
             .map_err(|_| RefreshError::InvalidConfiguration)?;
+        let relations = RelationProposalAdapter::new((*notion).clone(), scope.clone())
+            .map_err(|_| RefreshError::InvalidConfiguration)?;
         Ok(Self {
+            relations,
             notion,
             guard,
             coordinator,
@@ -210,25 +213,121 @@ impl AuthoritativePageRefresh {
         // Evidence includes the physical chain and policy, not merely a source
         // timestamp. Its debug representation contains no private content.
         let revision = format!("{:x}", Sha256::digest(format!("{evidence:?}").as_bytes()));
+        self.coordinator
+            .validate_page_receipt_authority(operation_id, &page.0)?;
+        // Replaying an old acknowledged delete cannot delete a later restored
+        // snapshot. Its current projection must still be durably complete.
+        if self
+            .coordinator
+            .receipt(operation_id)?
+            .is_some_and(|r| r.status == ReceiptStatus::Applied)
+            && self
+                .coordinator
+                .state()
+                .page_state(&page.0)
+                .map_err(|_| RefreshError::Index)?
+                .is_some_and(|state| !state.is_tombstone())
+        {
+            if self
+                .coordinator
+                .unfinished_relation_repair_id(operation_id)?
+                .is_some()
+            {
+                return Err(RefreshError::Conflict);
+            }
+            let handler = self.clone();
+            let page = page.clone();
+            self.check_owned_snapshot(lease, clock, move |context| async move {
+                let _authority = handler
+                    .relations
+                    .revalidate_removal(&evidence)
+                    .await
+                    .map_err(|_| FailureClass::Conflict)?;
+                context.revalidate().map_err(|_| FailureClass::Conflict)?;
+                if !handler
+                    .coordinator
+                    .current_relation_projection_complete(&page.0)
+                    .map_err(|_| FailureClass::Index)?
+                {
+                    return Err(FailureClass::Conflict);
+                }
+                Ok(())
+            })
+            .await?;
+            return Ok(RefreshResult {
+                outcome: CommitOutcome::AlreadyApplied,
+                diff: Default::default(),
+            });
+        }
+        let projection =
+            RelationProjection::new(self.coordinator.binding(), &page.0, true, vec![])?;
+        if self
+            .coordinator
+            .receipt(operation_id)?
+            .is_some_and(|r| r.status == ReceiptStatus::Applied)
+            && self.coordinator.relation_projection_complete(&projection)?
+            && self
+                .coordinator
+                .unfinished_relation_repair_id(operation_id)?
+                .is_none()
+        {
+            let handler = self.clone();
+            self.check_owned_snapshot(lease, clock, move |context| async move {
+                let _authority = handler
+                    .relations
+                    .revalidate_removal(&evidence)
+                    .await
+                    .map_err(|_| FailureClass::Conflict)?;
+                context.revalidate().map_err(|_| FailureClass::Conflict)?;
+                if !handler
+                    .coordinator
+                    .relation_projection_complete(&projection)
+                    .map_err(|_| FailureClass::Index)?
+                {
+                    return Err(FailureClass::Conflict);
+                }
+                Ok(())
+            })
+            .await?;
+            return Ok(RefreshResult {
+                outcome: CommitOutcome::AlreadyApplied,
+                diff: Default::default(),
+            });
+        }
+        let repair_id;
+        let operation_id = if self
+            .coordinator
+            .receipt(operation_id)?
+            .is_some_and(|r| r.status == ReceiptStatus::Applied)
+            && (!self.coordinator.relation_projection_complete(&projection)?
+                || self
+                    .coordinator
+                    .unfinished_relation_repair_id(operation_id)?
+                    .is_some())
+        {
+            repair_id = self.coordinator.relation_repair_id(operation_id)?;
+            &repair_id
+        } else {
+            operation_id
+        };
         let operation = PageOperation::retryable_lifecycle(
             operation_id,
             &revision,
             PageAction::Delete,
             checkpoint,
         )
-        .map_err(RefreshError::from)?;
+        .map_err(RefreshError::from)?
+        .with_relation_projection(projection)?;
         let expected_operation = operation.clone();
         let prepared = self.guard.prepare_page(provider, operation, &[]).await?;
         let diff = prepared.metrics();
-        let notion = self.notion.clone();
-        let scope = self.scope.clone();
         let owned_clock = clock.clone();
         let expires_at = lease.expires_at;
         let expected_lease = lease.clone();
         let handler = self.clone();
         let outcome = self
             .guard
-            .commit_page(prepared, lease, clock, move || async move {
+            .commit_page_with_authority(prepared, lease, clock, move || async move {
                 owned_revalidation(
                     async {
                         if let Some(expected) = &expected {
@@ -245,8 +344,9 @@ impl AuthoritativePageRefresh {
                                 )
                                 .map_err(|_| FailureClass::Conflict)?;
                         }
-                        notion
-                            .revalidate_lifecycle(&evidence, &scope)
+                        handler
+                            .relations
+                            .revalidate_removal(&evidence)
                             .await
                             .map_err(|error| {
                                 if error.kind == BackendErrorKind::Conflict {
@@ -308,13 +408,16 @@ impl AuthoritativePageRefresh {
             return Err(RefreshError::InvalidConfiguration);
         }
 
+        self.coordinator
+            .validate_page_receipt_authority(operation_id, &page.0)?;
+
         // This is trusted local indexed state, NOT a physical scope decision.
         // The notion adapter validates its previous-page provenance/IDs/hash
         // after live Notion ancestry authorization.
         let previous = self.guard.page_chunks(&page.0).await?;
-        let proposal = self
-            .notion
-            .prepare_scoped_page(page, root, &self.scope, &previous, self.chunk_config)
+        let relation_proposal = self
+            .relations
+            .prepare(page, root, &previous, self.chunk_config)
             .await
             .map_err(|e| match e.kind {
                 BackendErrorKind::PermissionDenied => RefreshError::OutOfScope,
@@ -325,6 +428,14 @@ impl AuthoritativePageRefresh {
                 _ => RefreshError::Source,
             })?;
 
+        let proposal = relation_proposal.snapshot().clone();
+        let projection = RelationProjection::new(
+            self.coordinator.binding(),
+            &page.0,
+            false,
+            relation_proposal.edges().to_vec(),
+        )?;
+        let complete = self.coordinator.relation_projection_complete(&projection)?;
         let document = proposal.document;
         let chunks = proposal.chunks;
         let metadata_page = notion_knowledge_core::backend::Page {
@@ -354,7 +465,8 @@ impl AuthoritativePageRefresh {
             .is_some();
         // A genuinely unchanged page is a no-op, including durable state.
         // Metadata/links are compared too, so citations are still refreshed.
-        if expected.is_none()
+        if complete
+            && expected.is_none()
             && !has_receipt
             && self
                 .coordinator
@@ -375,6 +487,52 @@ impl AuthoritativePageRefresh {
             old.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
             new.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
             if old == new {
+                let handler = self.clone();
+                let expected_projection = projection.clone();
+                let proposal = relation_proposal;
+                let expected_checkpoint = checkpoint.clone();
+                let expected_metadata = metadata_identity.clone();
+                let expected_chunks = new.clone();
+                self.check_owned_snapshot(lease, clock, move |context| async move {
+                    let _authority = handler
+                        .relations
+                        .revalidate(&proposal)
+                        .await
+                        .map_err(|_| FailureClass::Conflict)?;
+                    context.revalidate().map_err(|_| FailureClass::Conflict)?;
+                    let mut current = handler
+                        .guard
+                        .page_chunks(expected_projection.page_id())
+                        .await
+                        .map_err(|_| FailureClass::Index)?;
+                    current.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
+                    if current != expected_chunks
+                        || handler
+                            .coordinator
+                            .state()
+                            .page_state(expected_projection.page_id())
+                            .map_err(|_| FailureClass::Index)?
+                            .as_ref()
+                            != Some(&expected_checkpoint)
+                        || handler
+                            .coordinator
+                            .metadata_identity(expected_projection.page_id())
+                            .map_err(|_| FailureClass::Index)?
+                            .as_ref()
+                            != Some(&expected_metadata)
+                    {
+                        return Err(FailureClass::Conflict);
+                    }
+                    if !handler
+                        .coordinator
+                        .relation_projection_complete(&expected_projection)
+                        .map_err(|_| FailureClass::Index)?
+                    {
+                        return Err(FailureClass::Conflict);
+                    }
+                    Ok(())
+                })
+                .await?;
                 return Ok(RefreshResult {
                     outcome: CommitOutcome::AlreadyApplied,
                     diff: ChunkDiffMetrics {
@@ -383,6 +541,43 @@ impl AuthoritativePageRefresh {
                     },
                 });
             }
+        }
+
+        if complete
+            && self
+                .coordinator
+                .unfinished_relation_repair_id(operation_id)?
+                .is_none()
+            && self
+                .coordinator
+                .receipt(operation_id)?
+                .is_some_and(|r| r.status == ReceiptStatus::Applied)
+        {
+            let handler = self.clone();
+            self.check_owned_snapshot(lease, clock, move |context| async move {
+                let _authority = handler
+                    .relations
+                    .revalidate(&relation_proposal)
+                    .await
+                    .map_err(|_| FailureClass::Conflict)?;
+                context.revalidate().map_err(|_| FailureClass::Conflict)?;
+                if !handler
+                    .coordinator
+                    .relation_projection_complete(&projection)
+                    .map_err(|_| FailureClass::Index)?
+                {
+                    return Err(FailureClass::Conflict);
+                }
+                Ok(())
+            })
+            .await?;
+            return Ok(RefreshResult {
+                outcome: CommitOutcome::AlreadyApplied,
+                diff: ChunkDiffMetrics {
+                    skipped: chunks.len(),
+                    ..Default::default()
+                },
+            });
         }
 
         // Revision includes canonical metadata and content, not just body text.
@@ -394,6 +589,22 @@ impl AuthoritativePageRefresh {
         hasher.update(serialized);
         hasher.update(&metadata_identity);
         let revision = format!("{:x}", hasher.finalize());
+        let repair_id;
+        let operation_id = if self
+            .coordinator
+            .receipt(operation_id)?
+            .is_some_and(|r| r.status == ReceiptStatus::Applied)
+            && (!complete
+                || self
+                    .coordinator
+                    .unfinished_relation_repair_id(operation_id)?
+                    .is_some())
+        {
+            repair_id = self.coordinator.relation_repair_id(operation_id)?;
+            &repair_id
+        } else {
+            operation_id
+        };
         let operation = if lifecycle {
             PageOperation::retryable_lifecycle(
                 operation_id,
@@ -406,6 +617,8 @@ impl AuthoritativePageRefresh {
         }
         .map_err(RefreshError::from)?
         .with_metadata_identity(metadata_identity)
+        .map_err(RefreshError::from)?
+        .with_relation_projection(projection)
         .map_err(RefreshError::from)?;
         let expected_operation = operation.clone();
         let prepared = self
@@ -418,11 +631,6 @@ impl AuthoritativePageRefresh {
         // after its cross-process Lance directory guard and SQLite fencing.
         // Reject every changed source field or physical ancestry; no event
         // name, cached root, index URL, or revision hint grants authority.
-        let notion = self.notion.clone();
-        let scope = self.scope.clone();
-        let page = page.clone();
-        let root = root.clone();
-        let guarded_document = document.clone();
         let guarded_evidence = proposal.evidence;
         let owned_clock = clock.clone();
         let expires_at = lease.expires_at;
@@ -430,7 +638,7 @@ impl AuthoritativePageRefresh {
         let handler = self.clone();
         let result = self
             .guard
-            .commit_page(prepared, lease, clock, move || async move {
+            .commit_page_with_authority(prepared, lease, clock, move || async move {
                 owned_revalidation(
                     async {
                         if let Some(expected) = &expected {
@@ -447,15 +655,17 @@ impl AuthoritativePageRefresh {
                                 )
                                 .map_err(|_| FailureClass::Conflict)?;
                         }
-                        verify_source(
-                            &notion,
-                            &page,
-                            &root,
-                            &scope,
-                            &guarded_document,
-                            &guarded_evidence,
-                        )
-                        .await
+                        handler
+                            .relations
+                            .revalidate(&relation_proposal)
+                            .await
+                            .map_err(|error| {
+                                if error.kind == BackendErrorKind::Conflict {
+                                    FailureClass::Conflict
+                                } else {
+                                    FailureClass::Source
+                                }
+                            })
                     },
                     owned_clock.clone(),
                     expires_at,
@@ -469,6 +679,26 @@ impl AuthoritativePageRefresh {
             diff,
         })
     }
+    /// A no-op still owns its validation after observer cancellation. Poll its
+    /// lease while source I/O is pending so losing ownership releases the guard.
+    fn check_owned_snapshot<F, Fut>(
+        &self,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+        check: F,
+    ) -> impl std::future::Future<Output = Result<(), CommitError>> + Send + 'static
+    where
+        F: FnOnce(crate::commit::CommitContext) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), FailureClass>> + Send + 'static,
+    {
+        let owned_clock = clock.clone();
+        let expires_at = lease.expires_at;
+        self.coordinator
+            .maintain(lease, clock, move |context| async move {
+                owned_revalidation(check(context), owned_clock, expires_at).await
+            })
+    }
+
     pub(crate) fn is_bound_to(&self, coordinator: &Arc<IndexCommitCoordinator>) -> bool {
         Arc::ptr_eq(&self.coordinator, coordinator)
             && self.guard.is_bound_to(coordinator)
@@ -529,8 +759,9 @@ impl AuthoritativePageRefresh {
             })
     }
 
-    /// An unchanged plan validates metadata/lifecycle/local state without reading
-    /// Markdown or running embeddings. The actual no-op receipt is durable.
+    /// An unchanged canonical page still verifies the full source/relation
+    /// snapshot. Its derived graph may change; embeddings and Lance membership
+    /// do not. The exact projection and Unchanged receipt commit atomically.
     pub(crate) async fn apply_unchanged(
         &self,
         expected: ExpectedReconciliation,
@@ -548,6 +779,38 @@ impl AuthoritativePageRefresh {
             .page_state(&expected.page.page_id)
             .map_err(|_| RefreshError::Index)?
             .ok_or(RefreshError::Conflict)?;
+        let root = match &evidence.status {
+            LifecycleStatus::Allowed { roots } => {
+                PageId(roots.first().ok_or(RefreshError::Conflict)?.clone())
+            }
+            _ => return Err(RefreshError::Conflict),
+        };
+        let previous = self.guard.page_chunks(&expected.page.page_id).await?;
+        let proposal = self
+            .relations
+            .prepare(
+                &PageId(expected.page.page_id.clone()),
+                &root,
+                &previous,
+                self.chunk_config,
+            )
+            .await
+            .map_err(|_| RefreshError::Source)?;
+        let mut prepared_chunks = proposal.snapshot().chunks.clone();
+        let mut previous_chunks = previous;
+        prepared_chunks.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
+        previous_chunks.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
+        if prepared_chunks != previous_chunks
+            || checkpoint.content_hash() != Some(proposal.snapshot().document.content_hash.as_str())
+        {
+            return Err(RefreshError::Conflict);
+        }
+        let projection = RelationProjection::new(
+            self.coordinator.binding(),
+            &expected.page.page_id,
+            false,
+            proposal.edges().to_vec(),
+        )?;
         let operation = PageOperation::retryable_lifecycle(
             &expected.page.operation_id,
             &expected.page.lifecycle_digest,
@@ -562,13 +825,14 @@ impl AuthoritativePageRefresh {
                 .clone()
                 .ok_or(RefreshError::Conflict)?,
         )
-        .map_err(RefreshError::from)?;
+        .map_err(RefreshError::from)?
+        .with_relation_projection(projection)?;
         let handler = self.clone();
         let prepared = operation.clone();
         let owned_lease = lease.clone();
         let owned_clock = clock.clone();
         self.coordinator
-            .submit(operation, lease, clock, move |context| async move {
+            .submit_with_authority(operation, lease, clock, move |context| async move {
                 owned_revalidation(
                     async {
                         handler.check_expected(&expected, &evidence).await?;
@@ -583,6 +847,11 @@ impl AuthoritativePageRefresh {
                                 &evidence,
                                 expected.replan,
                             )
+                            .map_err(|_| FailureClass::Conflict)?;
+                        handler
+                            .relations
+                            .revalidate(&proposal)
+                            .await
                             .map_err(|_| FailureClass::Conflict)
                     },
                     owned_clock.clone(),
@@ -599,11 +868,50 @@ impl AuthoritativePageRefresh {
     /// Ownership, lease and source accessibility are still checked under the guard.
     pub(crate) async fn recover_reconciliation(
         &self,
+        provider: &dyn EmbeddingProvider,
         run: String,
         page: String,
         lease: Lease,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Result<(), RefreshError> {
+        let operation = self
+            .coordinator
+            .reconciliation_plan(&run)
+            .map_err(|_| RefreshError::Conflict)?
+            .pages
+            .get(&page)
+            .ok_or(RefreshError::Conflict)?
+            .operation_id
+            .clone();
+        self.apply_lifecycle(
+            &PageId(page.clone()),
+            &operation,
+            provider,
+            lease.clone(),
+            clock.clone(),
+        )
+        .await?;
+        let evidence = self
+            .notion
+            .lifecycle(&PageId(page.clone()), &self.scope)
+            .await
+            .map_err(|_| RefreshError::Source)?;
+        let proposal = if let LifecycleStatus::Allowed { roots } = &evidence.status {
+            let previous = self.guard.page_chunks(&page).await?;
+            Some(
+                self.relations
+                    .prepare(
+                        &PageId(page.clone()),
+                        &PageId(roots.first().ok_or(RefreshError::Conflict)?.clone()),
+                        &previous,
+                        self.chunk_config,
+                    )
+                    .await
+                    .map_err(|_| RefreshError::Source)?,
+            )
+        } else {
+            None
+        };
         let handler = self.clone();
         let owned_lease = lease.clone();
         let owned_clock = clock.clone();
@@ -611,12 +919,42 @@ impl AuthoritativePageRefresh {
             .maintain(lease, clock, move |context| async move {
                 owned_revalidation(
                     async {
-                        handler
-                            .notion
-                            .lifecycle(&PageId(page.clone()), &handler.scope)
-                            .await
-                            .map_err(|_| FailureClass::Source)?;
+                        let _authority = if let Some(proposal) = &proposal {
+                            let authority = handler
+                                .relations
+                                .revalidate(proposal)
+                                .await
+                                .map_err(|_| FailureClass::Conflict)?;
+                            let exact = RelationProjection::new(
+                                handler.coordinator.binding(),
+                                &page,
+                                false,
+                                proposal.edges().to_vec(),
+                            )
+                            .map_err(|_| FailureClass::Index)?;
+                            if !handler
+                                .coordinator
+                                .relation_projection_complete(&exact)
+                                .map_err(|_| FailureClass::Index)?
+                            {
+                                return Err(FailureClass::Conflict);
+                            }
+                            authority
+                        } else {
+                            handler
+                                .relations
+                                .revalidate_removal(&evidence)
+                                .await
+                                .map_err(|_| FailureClass::Conflict)?
+                        };
                         context.revalidate().map_err(|_| FailureClass::Conflict)?;
+                        if !handler
+                            .coordinator
+                            .current_relation_projection_complete(&page)
+                            .map_err(|_| FailureClass::Index)?
+                        {
+                            return Err(FailureClass::Index);
+                        }
                         handler
                             .coordinator
                             .acknowledge_reconciliation_receipt(
@@ -638,63 +976,14 @@ impl AuthoritativePageRefresh {
     }
 }
 
-/// Recheck the *entire* source document inside the real SQLite/Lance commit
-/// guard. Timestamp equality alone is insufficient for property/URL changes.
-async fn verify_source(
-    notion: &NotionClient,
-    page: &PageId,
-    root: &PageId,
-    scope: &LifecycleScope,
-    expected: &IndexedDocument,
-    evidence: &LifecycleEvidence,
-) -> Result<(), FailureClass> {
-    if !matches!(&evidence.status, LifecycleStatus::Allowed { roots } if roots.contains(&root.0)) {
-        return Err(FailureClass::Source);
-    }
-    notion
-        .revalidate_lifecycle(evidence, scope)
-        .await
-        .map_err(|error| {
-            if error.kind == BackendErrorKind::Conflict {
-                FailureClass::Conflict
-            } else {
-                FailureClass::Source
-            }
-        })?;
-    let fresh = notion
-        .read_content(&page.0)
-        .await
-        .map_err(|_| FailureClass::Source)?;
-    if fresh.page.archived
-        || fresh.page.id != *page
-        || fresh.page.url != expected.metadata.url
-        || fresh.page.title != expected.metadata.title
-        || fresh.page.last_edited_time != expected.metadata.last_edited_time
-        || fresh.page.properties != expected.metadata.properties
-        || fresh.markdown != expected.text
-    {
-        return Err(FailureClass::Conflict);
-    }
-    notion
-        .revalidate_lifecycle(evidence, scope)
-        .await
-        .map_err(|error| {
-            if error.kind == BackendErrorKind::Conflict {
-                FailureClass::Conflict
-            } else {
-                FailureClass::Source
-            }
-        })
-}
-
 /// Cancel source revalidation inside the operation-owned commit runtime when
 /// the caller loses ownership. Dropping its observer alone cannot release that
 /// runtime's index directory guard. All messages remain sanitized enum classes.
-async fn owned_revalidation(
-    source: impl std::future::Future<Output = Result<(), FailureClass>>,
+async fn owned_revalidation<Authority>(
+    source: impl std::future::Future<Output = Result<Authority, FailureClass>>,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     expires_at: i64,
-) -> Result<(), FailureClass> {
+) -> Result<Authority, FailureClass> {
     tokio::pin!(source);
     loop {
         if clock() >= expires_at {

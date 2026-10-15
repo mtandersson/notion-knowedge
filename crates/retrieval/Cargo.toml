@@ -6,8 +6,8 @@ repository.workspace = true
 
 [features]
 default = []
-local-qwen = ["dep:candle-core", "dep:candle-nn", "dep:fastembed", "dep:tokenizers", "dep:sha2", "dep:serde_json"]
-local-lancedb = ["dep:arrow-array", "dep:arrow-schema", "dep:futures", "dep:lancedb", "dep:lance", "dep:object_store", "dep:serde_json", "dep:notion-knowledge-notion", "dep:sha2"]
+local-qwen = ["dep:candle-core", "dep:candle-nn", "dep:fastembed", "dep:tokenizers", "dep:serde_json"]
+local-lancedb = ["dep:arrow-array", "dep:arrow-schema", "dep:futures", "dep:lancedb", "dep:lance", "dep:object_store", "dep:serde_json", "dep:notion-knowledge-notion"]
 
 [dependencies]
 notion-knowledge-core = { path = "../core" }
@@ -27,13 +27,14 @@ candle-core = { version = "=0.11.0", optional = true }
 candle-nn = { version = "=0.11.0", optional = true }
 fastembed = { version = "=7.1.0", default-features = false, features = ["qwen3", "ort-load-dynamic"], optional = true }
 tokenizers = { version = "=0.23.2", default-features = false, features = ["onig"], optional = true }
-sha2 = { version = "0.10", optional = true }
+sha2 = "0.10"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 serde_json = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"] }
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 
 [dev-dependencies]
+notion-knowledge-mcp = { path = "../mcp" }
 notion-knowledge-notion = { path = "../notion", features = ["test-fixtures"] }
 bytes = "1"
 async-trait = "0.1"

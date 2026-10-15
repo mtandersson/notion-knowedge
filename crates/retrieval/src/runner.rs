@@ -220,7 +220,13 @@ impl AuthoritativeReconciliationRunner {
             .is_some_and(|r| r.status == ReceiptStatus::Applied);
         let result = if applied {
             self.refresh
-                .recover_reconciliation(run.clone(), page.clone(), lease.clone(), clock.clone())
+                .recover_reconciliation(
+                    provider,
+                    run.clone(),
+                    page.clone(),
+                    lease.clone(),
+                    clock.clone(),
+                )
                 .await
         } else if expected.page.difference == ProposedDifference::Unchanged {
             self.refresh
