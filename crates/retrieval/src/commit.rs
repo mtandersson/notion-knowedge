@@ -850,10 +850,10 @@ impl IndexCommitCoordinator {
         self.validate_binding(&tx)?;
         self.validate_fence(&tx, lease, now)?;
         let checkpoint = &operation.checkpoint;
-        if let Some(projection) = &operation.relation_projection {
-            if !projection.matches_operation(&self.binding, operation) {
-                return Err(CommitError::BindingMismatch);
-            }
+        if let Some(projection) = &operation.relation_projection
+            && !projection.matches_operation(&self.binding, operation)
+        {
+            return Err(CommitError::BindingMismatch);
         }
         let existing: Option<(bool, i64, bool)> = tx.query_row("SELECT generation=?2 AND page_id=?3 AND revision=?4 AND action=?5 AND content_hash IS ?6 AND last_edited_time IS ?7,status,generation=?2 AND page_id=?3 AND (action=?5 OR ?8) FROM index_commit_receipts WHERE operation_id=?1",params![operation.id,self.binding.generation,checkpoint.page_id(),operation.revision,operation.action.number(),checkpoint.content_hash(),checkpoint.last_edited_time(),operation.retry_latest_lifecycle],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(sql)?;
         if let Some((matches, status, same_authority)) = existing {
