@@ -272,3 +272,47 @@ operations may replace their unacknowledged proposal under the same guard.
 This capability does not activate Notion relation projection in production refresh,
 webhook, manual or periodic composition. Source/target proposals and installation
 are subsequent issues; planner-wide convergence is separate work.
+
+### Standalone Notion relation proposals
+
+`notion::relation_proposal::RelationProposalAdapter` prepares one selected page
+under trusted operator scope. Its `ScopedPageSnapshot` retains stable-ID relation
+membership and `Page.relation_names` from the same fully bracketed source read.
+Names are a projection sidecar: canonical indexed metadata, `PageIds`, chunk and
+Lance schemas remain unchanged. Duplicate targets collapse per property; distinct
+properties retain their own `property:<ID>` provenance and labels. Empty or removed
+properties yield a complete zero-edge proposal.
+
+Only candidate relation IDs receive fresh physical metadata authorization through
+`RootScopeGate`. Every target retains its exact lifecycle observation or sanitized backend failure
+class, including denied chains. Denied or unverifiable targets remain unresolved
+with per-ID `ScopeError` diagnostics. A denied-to-denied move or changed failure
+class also invalidates the proposal.
+The adapter never crawls, searches, reads target Markdown or indexes a target.
+A relation label or membership cannot expand workspace, roots or exclusions.
+
+The composition root must retain one adapter/policy owner for its runtime, and
+route operator changes through `replace_policy` with an increasing generation.
+Clones share that owner; another independently constructed adapter cannot validate
+its proposals. Restoring an old configuration still requires a newer generation.
+This prevents a copied old scope from passing as the current policy. Replacement
+is serialized with operation authority; callers must not await policy replacement
+while holding a guard from the same owner.
+
+The integration must construct retrieval's generation/index-bound
+`RelationProjection` from the proposal's exact edges and attach it to the owning
+page operation. **Inside the operation-owned commit**, before vector/graph effects
+or acknowledgment, call `adapter.revalidate(&proposal)` and retain its returned
+`RelationAuthority` through effects and final acknowledgment. Revalidation brackets
+candidate metadata reads with full source membership/label/content comparisons and
+physical source checks, compares exact target observations, and checks the
+current policy owner. A changed source, target or policy requires fresh preparation.
+The policy guard does not replace the SQLite generation/lease fence or directory
+guard. Upstream Notion reads remain sequential observations, without atomic CAS;
+subsequent upstream changes require another authoritative refresh.
+
+This is a standalone Notion capability (#387), with no production dependency on
+retrieval and no graph writes. #388 owns installing it into all shared production
+refresh/removal/repair paths and the original integrated #383 acceptance. Existing
+production refresh does not yet consume these proposals. Planner-wide convergence
+and rebuild scheduling remain #384.

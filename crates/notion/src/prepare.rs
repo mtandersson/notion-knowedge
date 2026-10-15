@@ -19,6 +19,9 @@ pub struct ScopedPageSnapshot {
     pub document: IndexedDocument,
     pub chunks: Vec<IndexedChunk>,
     pub evidence: LifecycleEvidence,
+    /// Authoritative names from the same fully bracketed read as membership.
+    pub relation_names: std::collections::BTreeMap<String, String>,
+    pub(crate) source: PageContent,
 }
 
 fn failure(kind: BackendErrorKind) -> BackendError {
@@ -134,6 +137,8 @@ impl NotionClient {
             document,
             chunks,
             evidence: permit.lifecycle_evidence().clone(),
+            relation_names: before.page.relation_names.clone(),
+            source: before,
         })
     }
 }
@@ -230,6 +235,12 @@ mod tests {
     }
 
     async fn fixture(routes: Vec<Route>) -> (NotionClient, tokio::task::JoinHandle<Vec<String>>) {
+        fixture_status(routes.into_iter().map(|(p, v)| (p, 200, v)).collect()).await
+    }
+
+    async fn fixture_status(
+        routes: Vec<(String, u16, Value)>,
+    ) -> (NotionClient, tokio::task::JoinHandle<Vec<String>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut client = NotionClient::integration("fixture-credential")
             .unwrap()
@@ -237,7 +248,7 @@ mod tests {
         client.api_root = format!("http://{}/v1", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
             let mut requests = Vec::new();
-            for (path, value) in routes {
+            for (path, status, value) in routes {
                 let (mut stream, _) =
                     tokio::time::timeout(std::time::Duration::from_secs(10), listener.accept())
                         .await
@@ -260,7 +271,7 @@ mod tests {
                 requests.push(path);
                 let body = value.to_string();
                 stream.write_all(format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 ).as_bytes()).await.unwrap();
             }
@@ -485,5 +496,356 @@ mod tests {
             .unwrap_err();
         assert_eq!(failure.kind, BackendErrorKind::Conflict);
         assert_eq!(server.await.unwrap().len(), 12);
+    }
+    fn relations(mut routes: Vec<Route>, name: &str, targets: &[&str], second: bool) -> Vec<Route> {
+        for (path, value) in &mut routes {
+            if path == &format!("pages/{PAGE}") {
+                value["properties"][name] = json!({"id":"rel%3A1","type":"relation","relation":targets.iter().map(|id| json!({"id":id})).collect::<Vec<_>>(),"has_more":false});
+                if second {
+                    value["properties"]["Other relation"] = json!({"id":"rel2","type":"relation","relation":[{"id":OTHER}],"has_more":false});
+                }
+            }
+        }
+        routes
+    }
+    fn target_chain(parent: &str) -> Vec<Route> {
+        vec![
+            (
+                format!("pages/{OTHER}"),
+                metadata(OTHER, parent, "Target", REVISION),
+            ),
+            (
+                format!("pages/{parent}"),
+                metadata(parent, "workspace", "Ancestor", REVISION),
+            ),
+            (
+                format!("pages/{parent}"),
+                metadata(parent, "workspace", "Ancestor", REVISION),
+            ),
+            (
+                format!("pages/{OTHER}"),
+                metadata(OTHER, parent, "Target", REVISION),
+            ),
+        ]
+    }
+    fn source_read(name: &str, targets: &[&str]) -> Vec<Route> {
+        relations(
+            vec![
+                (
+                    format!("pages/{PAGE}"),
+                    metadata(PAGE, ROOT, "Current", REVISION),
+                ),
+                (format!("pages/{PAGE}/markdown"), markdown("Body")),
+            ],
+            name,
+            targets,
+            false,
+        )
+    }
+    fn validation(name: &str, targets: &[&str], target: Vec<Route>) -> Vec<Route> {
+        let mut routes = chain(ROOT);
+        routes.extend(source_read(name, targets));
+        routes.extend(target);
+        routes.extend(source_read(name, targets));
+        routes.extend(chain(ROOT));
+        routes
+    }
+    async fn proposal(
+        adapter: &crate::relation_proposal::RelationProposalAdapter,
+    ) -> Result<crate::relation_proposal::RelationProposal, BackendError> {
+        adapter
+            .prepare(
+                &PageId(PAGE.into()),
+                &PageId(ROOT.into()),
+                &[],
+                ChunkConfig::default(),
+            )
+            .await
+    }
+    #[tokio::test]
+    async fn relation_proposals_keep_names_membership_duplicates_and_zero_edges_together() {
+        use crate::relation_proposal::RelationProposalAdapter;
+        use notion_knowledge_core::graph::GraphTarget;
+        for (name, targets, second, expected) in [
+            ("Related", vec![OTHER, OTHER], true, 2),
+            ("Renamed", vec![OTHER], false, 1),
+            ("Empty", vec![], false, 0),
+        ] {
+            let mut routes = relations(full("Body", "Current"), name, &targets, second);
+            if !targets.is_empty() || second {
+                routes.extend(target_chain(ROOT));
+            }
+            let (client, server) = fixture(routes).await;
+            let adapter = RelationProposalAdapter::new(client, scope()).unwrap();
+            let result = proposal(&adapter).await.unwrap();
+            assert_eq!(result.edges().len(), expected);
+            // The standalone sidecar feeds the merged typed owned-commit API,
+            // without introducing a production Notion -> retrieval dependency.
+            let bound_scope = notion_knowledge_core::reconciliation::ReconciliationScope::new(
+                vec![ROOT.into()],
+                vec![],
+                "policy",
+                "generation-1",
+            )
+            .unwrap();
+            let binding = notion_knowledge_retrieval::commit::CommitBinding::new(
+                "chunks",
+                WORKSPACE,
+                &bound_scope,
+                "generation-1",
+                1,
+            )
+            .unwrap();
+            let projection = notion_knowledge_retrieval::commit::RelationProjection::new(
+                &binding,
+                PAGE,
+                false,
+                result.edges().to_vec(),
+            )
+            .unwrap();
+            assert_eq!(projection.edges().len(), result.edges().len());
+            assert!(
+                result
+                    .edges()
+                    .iter()
+                    .all(|edge| projection.edges().contains(edge))
+            );
+            assert_eq!(result.snapshot().relation_names["rel%3A1"], name);
+            for edge in result.edges() {
+                assert_eq!(
+                    edge.target(),
+                    &GraphTarget::Page {
+                        page_id: OTHER.into()
+                    }
+                );
+                assert_eq!(
+                    edge.provenance(),
+                    format!("property:{}", &edge.relation_type()[9..])
+                );
+            }
+            if expected > 0 {
+                assert_eq!(result.edges()[0].display_name(), Some(name));
+            }
+            let requests = server.await.unwrap();
+            assert!(
+                requests
+                    .iter()
+                    .all(|p| !p.ends_with("/markdown") || p == &format!("pages/{PAGE}/markdown"))
+            );
+        }
+        // Removed properties produce a complete empty replacement too.
+        let (client, server) = fixture(full("Body", "Current")).await;
+        let result = proposal(&RelationProposalAdapter::new(client, scope()).unwrap())
+            .await
+            .unwrap();
+        assert!(result.edges().is_empty());
+        server.await.unwrap();
+    }
+    #[tokio::test]
+    async fn relation_labels_never_authorize_outside_excluded_broken_or_inaccessible_targets() {
+        use crate::relation_proposal::RelationProposalAdapter;
+        use notion_knowledge_core::graph::GraphTarget;
+        for variant in 0..5 {
+            let mut config = scope();
+            let mut routes: Vec<_> =
+                relations(full("Body", "Current"), "Authorized root", &[OTHER], false)
+                    .into_iter()
+                    .map(|(p, v)| (p, 200, v))
+                    .collect();
+            if variant < 2 {
+                let ancestor = if variant == 0 { WORKSPACE } else { ROOT };
+                if variant == 1 {
+                    config.exclusions.page_ids.insert(OTHER.into());
+                }
+                routes.extend(target_chain(ancestor).into_iter().map(|(p, v)| (p, 200, v)));
+            } else {
+                routes.push((
+                    format!("pages/{OTHER}"),
+                    if variant == 2 {
+                        404
+                    } else if variant == 3 {
+                        403
+                    } else {
+                        200
+                    },
+                    json!({"private":"never expose"}),
+                ));
+            }
+            let (client, server) = fixture_status(routes).await;
+            let result = proposal(&RelationProposalAdapter::new(client, config).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                result.edges()[0].target(),
+                &GraphTarget::Unresolved {
+                    reference: OTHER.into()
+                }
+            );
+            assert!(result.targets()[OTHER].is_err());
+            server.await.unwrap(); // Exact routes exclude target content/discovery.
+        }
+    }
+    #[tokio::test]
+    async fn owned_relation_revalidation_rejects_source_and_target_changes_without_timestamp_help()
+    {
+        use crate::relation_proposal::RelationProposalAdapter;
+        for variant in 0..4 {
+            let mut routes = relations(full("Body", "Current"), "Related", &[OTHER], false);
+            routes.extend(target_chain(ROOT));
+            if variant < 2 {
+                routes.extend(chain(ROOT));
+                routes.extend(source_read(
+                    if variant == 0 { "Renamed" } else { "Related" },
+                    if variant == 0 { &[OTHER] } else { &[] },
+                ));
+            } else {
+                let mut target = target_chain(if variant == 2 { WORKSPACE } else { ROOT });
+                if variant == 3 {
+                    for (_, v) in &mut target {
+                        v["last_edited_time"] = json!("2026-10-10T11:11:00Z");
+                    }
+                }
+                // Failure is detected immediately after the target pass.
+                routes.extend(chain(ROOT));
+                routes.extend(source_read("Related", &[OTHER]));
+                routes.extend(target);
+            }
+            let (client, server) = fixture(routes).await;
+            let adapter = RelationProposalAdapter::new(client, scope()).unwrap();
+            let result = proposal(&adapter).await.unwrap();
+            assert!(adapter.revalidate(&result).await.is_err());
+            server.await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn current_policy_owner_fences_old_proposals_and_waits_for_acknowledgment_guard() {
+        use crate::relation_proposal::RelationProposalAdapter;
+        for variant in 0..4 {
+            let (client, server) = fixture(full("Body", "Current")).await;
+            let adapter = RelationProposalAdapter::new(client, scope()).unwrap();
+            let result = proposal(&adapter).await.unwrap();
+            let mut changed = scope();
+            changed.generation += 1;
+            match variant {
+                0 => changed.workspace_id = OTHER.into(),
+                1 => changed.roots = vec![PageId(OTHER.into())],
+                2 => {
+                    changed.exclusions.page_ids.insert(OTHER.into());
+                }
+                _ => {}
+            }
+            adapter.replace_policy(changed).await.unwrap();
+            assert!(adapter.revalidate(&result).await.is_err());
+            assert!(adapter.replace_policy(scope()).await.is_err()); // No ABA policy reuse.
+            server.await.unwrap();
+        }
+        let mut routes = relations(full("Body", "Current"), "Related", &[OTHER], false);
+        routes.extend(target_chain(ROOT));
+        routes.extend(validation("Related", &[OTHER], target_chain(ROOT)));
+        let (client, server) = fixture(routes).await;
+        let adapter = RelationProposalAdapter::new(client.clone(), scope()).unwrap();
+        let result = proposal(&adapter).await.unwrap();
+        let other_owner = RelationProposalAdapter::new(client, scope()).unwrap();
+        assert!(other_owner.revalidate(&result).await.is_err());
+        let authority = adapter.revalidate(&result).await.unwrap();
+        let mut next = scope();
+        next.generation += 1;
+        let update = adapter.replace_policy(next);
+        tokio::pin!(update);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut update)
+                .await
+                .is_err()
+        );
+        drop(authority);
+        update.await.unwrap();
+        server.await.unwrap();
+    }
+    #[tokio::test]
+    async fn relation_preparation_rejects_policy_replacement_during_authoritative_reads() {
+        use crate::relation_proposal::RelationProposalAdapter;
+        let (client, server) = fixture(full("Body", "Current")).await;
+        let observer = client.clone();
+        let adapter = RelationProposalAdapter::new(client, scope()).unwrap();
+        let worker = adapter.clone();
+        let preparing = tokio::spawn(async move { proposal(&worker).await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while observer.request_metrics().attempts == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut next = scope();
+        next.generation += 1;
+        adapter.replace_policy(next).await.unwrap();
+        assert!(preparing.await.unwrap().is_err());
+        server.await.unwrap();
+    }
+    #[tokio::test]
+    async fn relation_commit_rejects_source_physical_move_after_preparation() {
+        use crate::relation_proposal::RelationProposalAdapter;
+        let mut routes = full("Body", "Current");
+        routes.extend(chain(OTHER));
+        let (client, server) = fixture(routes).await;
+        let adapter = RelationProposalAdapter::new(client, scope()).unwrap();
+        let result = proposal(&adapter).await.unwrap();
+        assert!(adapter.revalidate(&result).await.is_err());
+        server.await.unwrap();
+    }
+    #[tokio::test]
+    async fn denied_relation_target_changes_require_fresh_preparation() {
+        use crate::relation_proposal::RelationProposalAdapter;
+        const OUTSIDE: &str = "55555555-5555-5555-5555-555555555555";
+        for excluded in [false, true] {
+            let mut config = scope();
+            if excluded {
+                config.exclusions.page_ids.insert(OTHER.into());
+            }
+            let initial_parent = if excluded { ROOT } else { WORKSPACE };
+            let mut routes = relations(full("Body", "Current"), "Related", &[OTHER], false);
+            routes.extend(target_chain(initial_parent));
+            routes.extend(chain(ROOT));
+            routes.extend(source_read("Related", &[OTHER]));
+            routes.extend(target_chain(OUTSIDE));
+            let (client, server) = fixture(routes).await;
+            let adapter = RelationProposalAdapter::new(client, config).unwrap();
+            let result = proposal(&adapter).await.unwrap();
+            assert!(result.targets()[OTHER].is_err());
+            assert_eq!(
+                adapter.revalidate(&result).await.err().unwrap().kind,
+                BackendErrorKind::Conflict
+            );
+            server.await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn unresolved_relation_failure_class_changes_require_fresh_preparation() {
+        use crate::relation_proposal::RelationProposalAdapter;
+        let mut routes: Vec<_> = relations(full("Body", "Current"), "Related", &[OTHER], false)
+            .into_iter()
+            .map(|(p, v)| (p, 200, v))
+            .collect();
+        routes.push((
+            format!("pages/{OTHER}"),
+            403,
+            json!({"private":"unavailable"}),
+        ));
+        routes.extend(chain(ROOT).into_iter().map(|(p, v)| (p, 200, v)));
+        routes.extend(
+            source_read("Related", &[OTHER])
+                .into_iter()
+                .map(|(p, v)| (p, 200, v)),
+        );
+        routes.push((format!("pages/{OTHER}"), 404, json!({"private":"missing"})));
+        let (client, server) = fixture_status(routes).await;
+        let adapter = RelationProposalAdapter::new(client, scope()).unwrap();
+        let result = proposal(&adapter).await.unwrap();
+        assert!(result.targets()[OTHER].is_err());
+        assert_eq!(
+            adapter.revalidate(&result).await.err().unwrap().kind,
+            BackendErrorKind::Conflict
+        );
+        server.await.unwrap();
     }
 }
