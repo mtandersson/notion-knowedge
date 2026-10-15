@@ -194,7 +194,7 @@ fn metadata_identity_migration_preserves_checkpoints_without_fabricating_identit
         .unwrap();
     connection
         .execute_batch(
-            "DROP TABLE relation_operation_proposals; DROP TABLE page_relation_projections; DROP TABLE reconciliation_retry_proposals; DROP TABLE reconciliation_plan_run_failures; DROP TABLE reconciliation_plan_progress; DROP TABLE reconciliation_plans; DROP TABLE page_metadata_identity; DELETE FROM schema_migrations WHERE version>=9;",
+            "DROP TABLE reconciliation_retry_proposals; DROP TABLE reconciliation_plan_run_failures; DROP TABLE reconciliation_plan_progress; DROP TABLE reconciliation_plans; DROP TABLE page_metadata_identity; DELETE FROM schema_migrations WHERE version>=9;",
         )
         .unwrap();
     drop(connection);
