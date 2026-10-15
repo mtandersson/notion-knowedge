@@ -192,6 +192,33 @@ fn page_failures(db: &Connection, run: &str) -> Result<bool, JournalError> {
     db.query_row("SELECT EXISTS(SELECT 1 FROM reconciliation_inventory WHERE run_id=?1 AND status=2) OR EXISTS(SELECT 1 FROM reconciliation_plan_progress WHERE run_id=?1 AND status=2) OR EXISTS(SELECT 1 FROM reconciliation_plan_run_failures WHERE run_id=?1) OR EXISTS(SELECT 1 FROM reconciliation_plans p, json_each(p.document,'$.planning_failures') WHERE p.run_id=?1) OR EXISTS(SELECT 1 FROM reconciliation_plans p, json_each(p.document,'$.run_failures') WHERE p.run_id=?1)",[run],|r|r.get(0)).map_err(sql)
 }
 
+/// One definition of logical live ownership for admission and owned commits.
+/// Held/exhausted/failed work retains history, not a live admission reservation.
+/// Every writer must still validate its current SQLite lease and index binding.
+pub(crate) fn live_reconciliation_owners(
+    db: &Connection,
+) -> Result<Vec<(String, i64)>, JournalError> {
+    let mut statement=db.prepare("SELECT run_id,scope,fence FROM reconciliation_runs r WHERE phase<>2 AND abandoned=0 AND failure IS NULL AND NOT EXISTS(SELECT 1 FROM reconciliation_schedules s WHERE s.active_run=r.run_id AND s.status IN(2,3))").map_err(sql)?;
+    let rows = statement
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(sql)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql)?;
+    let mut owners = Vec::new();
+    for (run, scope, fence) in rows {
+        if !page_failures(db, &run)? {
+            owners.push((scope, fence));
+        }
+    }
+    Ok(owners)
+}
+
 impl IndexCommitCoordinator {
     fn schedule_write<T>(
         &self,
@@ -218,9 +245,9 @@ impl IndexCommitCoordinator {
         now: i64,
     ) -> Result<(), JournalError> {
         self.schedule_write(lease, now, |db| {
-            let mut statement = db.prepare("SELECT run_id FROM reconciliation_runs r WHERE phase<>2 AND abandoned=0 AND failure IS NULL AND NOT EXISTS(SELECT 1 FROM reconciliation_schedules s WHERE s.active_run=r.run_id AND s.status IN(2,3))").map_err(sql)?;
-            let runs = statement.query_map([], |r|r.get::<_,String>(0)).map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)?;
-            for run in runs { if !page_failures(db,&run)? { return Err(JournalError::Busy); } }
+            if !live_reconciliation_owners(db)?.is_empty() {
+                return Err(JournalError::Busy);
+            }
             Ok(())
         })
     }

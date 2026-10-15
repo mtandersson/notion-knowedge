@@ -396,18 +396,34 @@ impl GuardedChunkTable {
         prepared: PreparedPageMutation,
         lease: Lease,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
-        precommit_source_check: F,
+        source: F,
     ) -> impl Future<Output = Result<CommitOutcome, CommitError>> + Send + 'static
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = Result<(), FailureClass>> + Send + 'static,
+    {
+        self.commit_page_with_authority(prepared, lease, clock, source)
+    }
+
+    /// Retain source and policy authority through all effects and final acknowledgment.
+    pub fn commit_page_with_authority<F, Fut, Authority>(
+        &self,
+        prepared: PreparedPageMutation,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+        precommit_source_check: F,
+    ) -> impl Future<Output = Result<CommitOutcome, CommitError>> + Send + 'static
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Authority, FailureClass>> + Send + 'static,
+        Authority: Send + 'static,
     {
         let directory = self.index_directory.clone();
         let table_name = self.table_name.clone();
         let embedding = self.embedding.clone();
         let operation = prepared.operation.clone();
         self.coordinator
-            .submit(operation, lease, clock, move |context| async move {
+            .submit_with_authority(operation, lease, clock, move |context| async move {
                 if prepared.embedding != embedding || context.binding().table() != table_name {
                     return Err(FailureClass::Conflict);
                 }
@@ -442,7 +458,7 @@ impl GuardedChunkTable {
                     }
                 }
                 context.revalidate().map_err(fence_failure)?;
-                precommit_source_check().await?;
+                let authority = precommit_source_check().await?;
                 context.revalidate().map_err(fence_failure)?;
                 let predicate = format!(
                     "page_id = {}",
@@ -499,7 +515,7 @@ impl GuardedChunkTable {
                         .await
                         .map_err(|_| FailureClass::Index)?;
                 }
-                Ok(())
+                Ok(authority)
             })
     }
 }

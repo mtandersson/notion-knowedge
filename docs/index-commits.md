@@ -269,9 +269,10 @@ had no projection continues to require this explicit repair path. Pending strict
 operations cannot change the proposed effect; existing retryable refresh/lifecycle
 operations may replace their unacknowledged proposal under the same guard.
 
-This capability does not activate Notion relation projection in production refresh,
-webhook, manual or periodic composition. Source/target proposals and installation
-are subsequent issues; planner-wide convergence is separate work.
+The shared production refresh installs this capability for webhook, manual and
+periodic callers. See [installed authoritative relations](authoritative-relations.md)
+for its source authority, no-op repair and recovery contract. Planner-wide
+convergence and rebuild scheduling remain separate work.
 
 ### Standalone Notion relation proposals
 
@@ -311,8 +312,10 @@ The policy guard does not replace the SQLite generation/lease fence or directory
 guard. Upstream Notion reads remain sequential observations, without atomic CAS;
 subsequent upstream changes require another authoritative refresh.
 
-This is a standalone Notion capability (#387), with no production dependency on
-retrieval and no graph writes. #388 owns installing it into all shared production
-refresh/removal/repair paths and the original integrated #383 acceptance. Existing
-production refresh does not yet consume these proposals. Planner-wide convergence
-and rebuild scheduling remain #384.
+The Notion adapter remains independent of retrieval and performs no graph writes.
+The shared `AuthoritativePageRefresh` now owns one adapter, constructs exact
+`RelationProjection` proposals, and calls `commit_page_with_authority`. That API
+returns the policy authority from its precommit callback to
+`submit_with_authority`, which retains it until the final SQLite transaction
+returns. Cloned runtime handlers and their reconciliation runner share this owner.
+Planner-wide convergence and rebuild scheduling remain #384.

@@ -22,8 +22,11 @@ Missing/stale/restored candidates use the shared canonical refresh pipeline.
 Orphans use shared authoritative lifecycle removal. Deletion requires a complete
 traversal recorded in the original run and fresh affirmative negative evidence;
 absence, permissions or failed reads never authorize it. Unchanged candidates
-perform metadata/lifecycle/local validation and record an actual guarded no-op
-receipt, without extracting Markdown, embedding or changing Lance membership.
+perform full bracketed source/relation, lifecycle and local validation and record
+an actual guarded no-op receipt, without embedding or changing Lance membership.
+Fresh relation membership and labels require authoritative Markdown/page reads
+even when the planner classified a page as unchanged. Its exact relation
+projection is installed in the same SQLite transaction as the no-op receipt.
 
 Every application proposal carries complete lifecycle/local snapshot digests and
 exact metadata identity. These are comparison targets, never authority. The shared
@@ -86,7 +89,7 @@ uses production adapters rather than an application callback double.
 | Original criterion | Concrete contract and evidence |
 | --- | --- |
 | #242 inventory/provenance; #343 concrete plan and shared ownership | `AuthoritativeReconciliationPlanner::{plan,local_inventory}`, `production_scope`, runner construction and `AuthoritativePageRefresh::is_bound_to`; `planner_rejects_foreign_binding_unowned_index_and_refreshes_legacy_identity`, `reconciliation_generation_policy_and_expired_fence_reject_pending_plan_without_effects`, `reconciliation_binding_change_during_owned_precommit_rejects_effect_and_preserves_resume` |
-| #242/#343 differences-only refresh/removal; unchanged avoids extraction/embedding | Runner `apply_one`, shared `apply_lifecycle_expected`, `apply_unchanged`; `reconciliation_dry_run_real_apply_and_unchanged_resume_have_exact_receipts_and_counts`, `reconciliation_stale_archive_move_restore_and_incomplete_traversal_apply_only_safe_differences` |
+| #242/#343 differences-only refresh/removal; unchanged avoids embedding/Lance mutations | Runner `apply_one`, shared `apply_lifecycle_expected`, `apply_unchanged`; `reconciliation_dry_run_real_apply_and_unchanged_resume_have_exact_receipts_and_counts`, `reconciliation_stale_archive_move_restore_and_incomplete_traversal_apply_only_safe_differences` |
 | #242/#343 complete traversal plus affirmative negative authority; fail closed on access/interruption/policy/races | Planner rejects incomplete traversal deletion; expected checks plus `verify_source` run under `GuardedChunkTable::commit_page`; `planner_absence_access_failures_and_races_never_authorize_deletion`, lifecycle interruption/expiry tests, `reconciliation_stale_archive_move_restore_and_incomplete_traversal_apply_only_safe_differences`, `reconciliation_generation_policy_and_expired_fence_reject_pending_plan_without_effects`, `reconciliation_binding_change_during_owned_precommit_rejects_effect_and_preserves_resume` |
 | #343 planned deletion becomes Allowed; #242 concurrent edits/webhook writes/generation | Expected action/lifecycle/metadata/local contract rejects implicit action changes; explicit persisted replan; `reconciliation_planned_delete_restoration_and_webhook_write_conflict_require_explicit_replan`, `reconciliation_inflight_webhook_and_authoritative_move_cannot_overwrite_new_local_state`, `reconciliation_bad_page_isolated_source_and_embedding_races_are_durable_explicit_failures`, authority-change test above |
 | #242/#343 apply before ack, crash/restart, immutable real receipts | Durable preparation inside owned callback, actual commit then journal ack; `reconciliation_applied_before_journal_ack_reopens_with_new_fence_and_preserves_historical_target`, existing `original_event_recovers_after_index_apply_before_ack_and_changed_source`, durable receipt identity tests |
@@ -109,3 +112,13 @@ checkpoints, failure classes and legacy journal state. Retry proposals store onl
 IDs, digests and action classification. Tests inject migration/transaction failure
 and reopen with independent coordinators; failed migration retains the prior
 schema and operational rows.
+
+
+Relation-aware Applied recovery first runs the shared refresh using the original
+receipt identity. Missing or incompatible effects execute a separate stable-ID
+repair, preserving the historical Applied receipt. Recovery then reacquires the
+full source/target policy authority under the directory guard and checks the exact
+current projection before acknowledging historical journal work. A graph failure
+cannot acknowledge that work. The historical outcome still describes its original
+operation; the repair's own receipt attests current projection completeness.
+See [installed authoritative relations](authoritative-relations.md).

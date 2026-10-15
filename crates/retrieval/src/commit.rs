@@ -20,7 +20,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use tokio::sync::oneshot;
 
 use crate::sync_state::SqliteSyncStateStore;
-mod projection;
+pub(crate) mod projection;
 pub use projection::RelationProjection;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -638,15 +638,11 @@ impl IndexCommitCoordinator {
         if !valid {
             return Err(CommitError::LeaseLost);
         }
-        let active: Option<(String, i64)> = db
-            .query_row(
-                "SELECT scope,fence FROM reconciliation_runs WHERE phase<>2 AND abandoned=0",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()
-            .map_err(sql)?;
-        if active.is_some_and(|(scope, fence)| scope != self.binding.scope || fence != lease.fence)
+        let active = crate::schedule::live_reconciliation_owners(db)
+            .map_err(|_| CommitError::Unavailable)?;
+        if active
+            .iter()
+            .any(|(scope, fence)| scope != &self.binding.scope || *fence != lease.fence)
         {
             return Err(CommitError::Conflict);
         }
@@ -1027,6 +1023,22 @@ impl IndexCommitCoordinator {
         F: FnOnce(CommitContext) -> Fut + Send + 'static,
         Fut: Future<Output = Result<(), FailureClass>> + Send + 'static,
     {
+        self.submit_with_authority(operation, lease, clock, effect)
+    }
+
+    /// Retain the callback's authority until final acknowledgment completes.
+    pub fn submit_with_authority<F, Fut, Authority>(
+        self: &Arc<Self>,
+        operation: PageOperation,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+        effect: F,
+    ) -> impl Future<Output = Result<CommitOutcome, CommitError>> + Send + 'static
+    where
+        F: FnOnce(CommitContext) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Authority, FailureClass>> + Send + 'static,
+        Authority: Send + 'static,
+    {
         let coordinator = self.clone();
         let correlation = logging::current_id();
         let (sender, receiver) = oneshot::channel();
@@ -1050,9 +1062,13 @@ impl IndexCommitCoordinator {
                         clock: clock.clone(),
                     };
                     match runtime.block_on(effect(context)) {
-                        Ok(()) => coordinator
-                            .finish(&operation, &lease, clock())
-                            .map(|()| CommitOutcome::Applied),
+                        Ok(authority) => {
+                            let result = coordinator
+                                .finish(&operation, &lease, clock())
+                                .map(|()| CommitOutcome::Applied);
+                            drop(authority);
+                            result
+                        }
                         Err(failure) => {
                             coordinator.fail(&operation, failure.clone())?;
                             Err(CommitError::Operation(failure))

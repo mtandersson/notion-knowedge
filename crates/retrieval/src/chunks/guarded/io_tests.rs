@@ -1308,3 +1308,45 @@ async fn projection_binding_and_generation_never_convey_write_authority() {
     assert!(next.receipt("wrong-generation").unwrap().is_none());
     assert!(!next.relation_projection_complete(&new).unwrap());
 }
+
+#[tokio::test]
+async fn returned_commit_authority_is_held_until_final_sqlite_acknowledgment() {
+    struct Authority {
+        coordinator: Arc<IndexCommitCoordinator>,
+        observed: Arc<std::sync::Mutex<Option<ReceiptStatus>>>,
+    }
+    impl Drop for Authority {
+        fn drop(&mut self) {
+            *self.observed.lock().unwrap() = self
+                .coordinator
+                .receipt("retained-authority")
+                .unwrap()
+                .map(|r| r.status);
+        }
+    }
+    let f = Fixture::new();
+    f.create().await;
+    let observed = Arc::new(std::sync::Mutex::new(None));
+    let prepared = f
+        .guarded()
+        .prepare_page(
+            &CountingProvider::new(f.embedding.clone()),
+            operation("retained-authority", "body", false)
+                .with_relation_projection(relation_projection(&f, Some("Label"), false))
+                .unwrap(),
+            &[chunk("one", "body", "body")],
+        )
+        .await
+        .unwrap();
+    let authority = Authority {
+        coordinator: f.coordinator.clone(),
+        observed: observed.clone(),
+    };
+    f.guarded()
+        .commit_page_with_authority(prepared, f.lease.clone(), clock(), move || async move {
+            Ok(authority)
+        })
+        .await
+        .unwrap();
+    assert_eq!(*observed.lock().unwrap(), Some(ReceiptStatus::Applied));
+}

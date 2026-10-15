@@ -194,6 +194,24 @@ impl RelationProposalAdapter {
             owner: self.policy.clone(),
         })
     }
+    /// Retain the same current policy owner for an authoritative removal.
+    pub async fn revalidate_removal(
+        &self,
+        evidence: &LifecycleEvidence,
+    ) -> Result<RelationAuthority, BackendError> {
+        let scope = self.policy.clone().read_owned().await;
+        if *scope != evidence.scope
+            || matches!(
+                evidence.status,
+                notion_knowledge_core::lifecycle::LifecycleStatus::Allowed { .. }
+            )
+        {
+            return Err(conflict());
+        }
+        self.client.revalidate_lifecycle(evidence, &scope).await?;
+        Ok(RelationAuthority { _policy: scope })
+    }
+
     /// Invoke INSIDE the operation-owned commit, before any effects or receipt.
     /// Freshly check source content/membership/names, physical chains and current
     /// policy; keep the returned guard alive through acknowledgment. Notion has

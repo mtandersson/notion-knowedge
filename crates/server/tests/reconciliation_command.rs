@@ -52,6 +52,7 @@ struct Model {
     race_metadata: bool,
     race_move: bool,
     level: u64,
+    relation_name: Option<String>,
     extra: std::collections::BTreeMap<String, ExtraPage>,
 }
 impl Default for Model {
@@ -70,6 +71,7 @@ impl Default for Model {
             race_metadata: false,
             race_move: false,
             level: 3,
+            relation_name: None,
             extra: Default::default(),
         }
     }
@@ -189,6 +191,9 @@ impl HttpNotion {
                         snapshot.archived,
                     );
                     page["properties"]["level"]["number"] = json!(snapshot.level);
+                    if let Some(name) = snapshot.relation_name {
+                        page["properties"][name] = json!({"id":"shared-relation","type":"relation","relation":[{"id":OTHER}],"has_more":false});
+                    }
                     page
                 } else if route == format!("/v1/pages/{OTHER}/markdown") {
                     json!({"object":"page_markdown", "id":OTHER,
@@ -350,6 +355,7 @@ fn authority() -> LifecycleScope {
 }
 impl Fixture {
     async fn new(http: &HttpNotion) -> Self {
+        notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Off);
         let dir = tempfile::tempdir().unwrap();
         let settings = WorkerSettings {
             index: dir.path().join("index"),
@@ -475,7 +481,7 @@ async fn actual_commands_apply_differences_only_and_keep_dry_run_and_status_read
         0,
         3,
     );
-    assert_eq!(http.body_reads.load(Ordering::SeqCst), bodies);
+    assert!(http.body_reads.load(Ordering::SeqCst) > bodies);
     assert_eq!(f.provider.count.load(Ordering::SeqCst), embeds);
     http.change(|m| {
         m.title = "New metadata".into();
@@ -983,7 +989,8 @@ async fn actual_scheduled_http_preserves_deadline_restart_and_unchanged_next_cyc
         .unwrap();
     worker.state.release_lease(&lease, now).unwrap();
     await_schedule(&worker, |s| s.cycle == 2 && s.active_run.is_none()).await;
-    assert_eq!(http.body_reads.load(Ordering::SeqCst), bodies);
+    // The unchanged cycle still revalidates authoritative relation membership.
+    assert!(http.body_reads.load(Ordering::SeqCst) > bodies);
     assert_eq!(f.provider.count.load(Ordering::SeqCst), embeddings);
     let status = f
         .command(&http, &["--reconcile", "schedule", "status"])
@@ -1101,7 +1108,12 @@ async fn actual_scheduled_http_holds_failed_pages_until_explicit_manual_recovery
         }
     })
     .await
-    .unwrap();
+    .unwrap_or_else(|error| {
+        panic!(
+            "webhook did not finish while failed pages were held: {error:?}; event={:?}",
+            worker.state.event(&event.key()).unwrap()
+        )
+    });
     assert_eq!(
         worker.coordinator.schedule("periodic").unwrap().status,
         ScheduleStatus::HeldPages
@@ -1386,6 +1398,7 @@ async fn actual_scheduled_http_transient_source_attempts_back_off_then_exhaust_w
 async fn actual_scheduled_http_manual_periodic_and_webhook_contention_preserves_retry_budgets() {
     use notion_knowledge_core::webhook::{EventState, WebhookEvent, WebhookInbox};
     let http = HttpNotion::start().await;
+    http.change(|m| m.relation_name = Some("Scheduled relations".into()));
     let f = Fixture::new(&http).await;
     f.provider.pause.store(true, Ordering::SeqCst);
     let (worker, stop, server) =
@@ -1437,14 +1450,54 @@ async fn actual_scheduled_http_manual_periodic_and_webhook_contention_preserves_
     let (scheduled, resumed_stop, resumed_server) =
         scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
     await_schedule(&scheduled, |s| s.cycle == 1 && s.active_run.is_none()).await;
+    assert!(
+        scheduled
+            .coordinator
+            .current_relation_projection_complete(PAGE)
+            .unwrap()
+    );
+    use notion_knowledge_core::graph::GraphEdgeStore;
+    assert_eq!(
+        scheduled.coordinator.state().edges_from(PAGE).unwrap()[0].display_name(),
+        Some("Scheduled relations")
+    );
     resumed_stop.cancel();
     resumed_server.await.unwrap().unwrap();
+    http.change(|m| m.relation_name = Some("Webhook relations".into()));
     assert!(worker.tick(CancellationToken::new(), true).await.unwrap());
+    assert!(
+        worker
+            .coordinator
+            .current_relation_projection_complete(PAGE)
+            .unwrap()
+    );
+    assert_eq!(
+        worker.coordinator.state().edges_from(PAGE).unwrap()[0].display_name(),
+        Some("Webhook relations")
+    );
     assert_eq!(
         worker.state.event(&event.key()).unwrap().unwrap().state,
         EventState::Succeeded
     );
     assert_eq!(worker.coordinator.schedule("periodic").unwrap().attempts, 0);
+    http.change(|m| m.relation_name = Some("Manual relations".into()));
+    counts(
+        &f.command(&http, &["--reconcile", "apply", "manual-relations"])
+            .await,
+        0,
+        0,
+        3,
+    );
+    assert!(
+        worker
+            .coordinator
+            .current_relation_projection_complete(PAGE)
+            .unwrap()
+    );
+    assert_eq!(
+        worker.coordinator.state().edges_from(PAGE).unwrap()[0].display_name(),
+        Some("Manual relations")
+    );
 }
 
 #[tokio::test]

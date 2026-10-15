@@ -54,6 +54,8 @@ struct Model {
     race_metadata: bool,
     race_move: bool,
     level: u64,
+    relation_name: Option<String>,
+    relation_targets: Vec<String>,
     extra: std::collections::BTreeMap<String, ExtraPage>,
 }
 impl Default for Model {
@@ -72,20 +74,40 @@ impl Default for Model {
             race_metadata: false,
             race_move: false,
             level: 3,
+            relation_name: None,
+            relation_targets: vec![],
             extra: Default::default(),
         }
     }
 }
 #[derive(Default)]
 struct RequestPause {
+    owned_directory: Mutex<Option<PathBuf>>,
     armed: AtomicBool,
     started: tokio::sync::Notify,
     proceed: tokio::sync::Notify,
+}
+impl RequestPause {
+    fn ready(&self) -> bool {
+        if !self.armed.load(Ordering::SeqCst) {
+            return false;
+        }
+        if let Some(directory) = self.owned_directory.lock().unwrap().as_ref() {
+            let guard = fs::File::open(directory).unwrap();
+            match guard.try_lock() {
+                Ok(()) => return false,
+                Err(fs::TryLockError::WouldBlock) => {}
+                Err(error) => panic!("fixture cannot observe directory guard: {error:?}"),
+            }
+        }
+        self.armed.swap(false, Ordering::SeqCst)
+    }
 }
 struct HttpNotion {
     state: Arc<Mutex<Model>>,
     attempts: Arc<AtomicUsize>,
     body_reads: Arc<AtomicUsize>,
+    target_body_reads: Arc<AtomicUsize>,
     fail_once: Arc<AtomicBool>,
     server: tokio::task::JoinHandle<()>,
     port: u16,
@@ -96,12 +118,14 @@ impl HttpNotion {
         let state = Arc::new(Mutex::new(Model::default()));
         let attempts = Arc::new(AtomicUsize::new(0));
         let body_reads = Arc::new(AtomicUsize::new(0));
+        let target_body_reads = Arc::new(AtomicUsize::new(0));
         let fail_once = Arc::new(AtomicBool::new(false));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let values = state.clone();
         let counts = attempts.clone();
         let bodies = body_reads.clone();
+        let target_bodies = target_body_reads.clone();
         let fail = fail_once.clone();
         let pause = Arc::new(RequestPause::default());
         let boundary = pause.clone();
@@ -135,11 +159,12 @@ impl HttpNotion {
                     .split_whitespace()
                     .nth(1)
                     .unwrap();
-                if route == format!("/v1/pages/{PAGE}")
-                    && boundary.armed.swap(false, Ordering::SeqCst)
-                {
+                if route == format!("/v1/pages/{PAGE}") && boundary.ready() {
                     boundary.started.notify_one();
                     boundary.proceed.notified().await;
+                }
+                if route == format!("/v1/pages/{OTHER}/markdown") {
+                    target_bodies.fetch_add(1, Ordering::SeqCst);
                 }
                 if route.ends_with("/markdown") {
                     bodies.fetch_add(1, Ordering::SeqCst);
@@ -193,6 +218,9 @@ impl HttpNotion {
                         snapshot.archived,
                     );
                     page["properties"]["level"]["number"] = json!(snapshot.level);
+                    if let Some(name) = &snapshot.relation_name {
+                        page["properties"][name] = json!({"id":"related-stable", "type":"relation", "relation": snapshot.relation_targets.iter().map(|id|json!({"id":id})).collect::<Vec<_>>(),"has_more":false});
+                    }
                     page
                 } else if route == format!("/v1/pages/{OTHER}/markdown") {
                     json!({"object":"page_markdown", "id":OTHER,
@@ -247,6 +275,7 @@ impl HttpNotion {
             state,
             attempts,
             body_reads,
+            target_body_reads,
             fail_once,
             server,
             port,
@@ -297,6 +326,7 @@ struct CountingProvider {
     metadata: EmbeddingMetadata,
     count: AtomicUsize,
     race: Mutex<Option<Arc<Mutex<Model>>>>,
+    target_race: Mutex<Option<Arc<Mutex<Model>>>>,
     boundary_pause: Mutex<Option<Arc<RequestPause>>>,
 }
 impl CountingProvider {
@@ -305,6 +335,7 @@ impl CountingProvider {
             metadata,
             count: AtomicUsize::new(0),
             race: Mutex::new(None),
+            target_race: Mutex::new(None),
             boundary_pause: Mutex::new(None),
         }
     }
@@ -323,6 +354,9 @@ impl EmbeddingProvider for CountingProvider {
         self.count.fetch_add(texts.len(), Ordering::SeqCst);
         if let Some(pause) = self.boundary_pause.lock().unwrap().take() {
             pause.armed.store(true, Ordering::SeqCst);
+        }
+        if let Some(state) = self.target_race.lock().unwrap().take() {
+            state.lock().unwrap().inaccessible_other = true;
         }
         if let Some(state) = self.race.lock().unwrap().take() {
             let mut model = state.lock().unwrap();
@@ -365,6 +399,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Off);
         let root = std::env::temp_dir().join(format!(
             "nk-refresh-{}-{}",
             std::process::id(),
@@ -2310,6 +2345,7 @@ async fn planner_rejects_foreign_binding_unowned_index_and_refreshes_legacy_iden
         )
         .await
         .unwrap();
+    sqlite.execute("DELETE FROM relation_operation_proposals WHERE operation_id IN (SELECT operation_id FROM index_commit_receipts WHERE page_id=?1)",[PAGE]).unwrap();
     sqlite
         .execute("DELETE FROM index_commit_receipts WHERE page_id=?1", [PAGE])
         .unwrap();
@@ -2445,7 +2481,8 @@ async fn reconciliation_dry_run_real_apply_and_unchanged_resume_have_exact_recei
         ),
         (0, 3, 0)
     );
-    assert_eq!(source.body_reads.load(Ordering::SeqCst), body);
+    // Unchanged content still needs a fully bracketed authoritative relation snapshot.
+    assert!(source.body_reads.load(Ordering::SeqCst) > body);
     assert_eq!(provider.embeddings(), embeddings);
     service.complete("first", &index.lease, 10).unwrap();
     assert_eq!(
@@ -2934,6 +2971,12 @@ async fn reconciliation_cancelled_observer_retains_owned_commit_then_recovers_re
             .contains(PAGE)
     );
     assert!(!index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+    assert!(
+        index
+            .coordinator
+            .current_relation_projection_complete(PAGE)
+            .unwrap()
+    );
     let progress = service
         .apply("cancelled", index.lease.clone(), clock(), provider.as_ref())
         .await
@@ -3721,4 +3764,882 @@ async fn success_receipt_failure_cannot_acknowledge_terminal_reconciliation() {
         index.coordinator.last_successful_reconciliation().unwrap(),
         Some(20)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn installed_relations_replace_only_their_family_and_repair_both_noop_paths() {
+    use notion_knowledge_core::graph::{GraphEdge, GraphEdgeStore, GraphTarget};
+    use notion_knowledge_retrieval::commit::{ReceiptStatus, RelationProjection};
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    source.change(|m| {
+        m.relation_name = Some("Ingredients".into());
+        m.relation_targets = vec![OTHER.into(), FOREIGN.into()];
+    });
+    let handler = index.handler(source.client());
+    let provider = CountingProvider::new(index.embed.clone());
+    let page = PageId(PAGE.into());
+    let root = PageId(ROOT.into());
+    let link = GraphEdge::new(
+        PAGE.into(),
+        GraphTarget::Page {
+            page_id: ROOT.into(),
+        },
+        "link:page".into(),
+        "markdown:0".into(),
+    )
+    .unwrap();
+    index
+        .coordinator
+        .state()
+        .replace_page_link_edges(PAGE, std::slice::from_ref(&link))
+        .unwrap();
+    handler
+        .refresh_page(
+            &page,
+            &root,
+            "relation-initial",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let first = index
+        .coordinator
+        .receipt("relation-initial")
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.status, ReceiptStatus::Applied);
+    let edges = index.coordinator.state().edges_from(PAGE).unwrap();
+    assert!(edges.contains(&link));
+    let relations = edges
+        .iter()
+        .filter(|e| e.relation_type().starts_with("relation:"))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(relations.len(), 2);
+    assert!(
+        relations
+            .iter()
+            .all(|e| e.display_name() == Some("Ingredients")
+                && e.provenance() == "property:related-stable")
+    );
+    assert!(
+        relations
+            .iter()
+            .any(|e| matches!(e.target(),GraphTarget::Unresolved{reference} if reference==FOREIGN))
+    );
+    assert!(index.guarded().page_chunks(OTHER).await.unwrap().is_empty());
+    assert!(
+        index
+            .guarded()
+            .page_chunks(FOREIGN)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let projection =
+        RelationProjection::new(index.coordinator.binding(), PAGE, false, relations).unwrap();
+    assert!(
+        index
+            .coordinator
+            .relation_projection_complete(&projection)
+            .unwrap()
+    );
+    assert_eq!(
+        handler
+            .refresh_page(
+                &page,
+                &root,
+                "relation-repeat",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap()
+            .outcome,
+        CommitOutcome::AlreadyApplied
+    );
+    assert!(
+        index
+            .coordinator
+            .receipt("relation-repeat")
+            .unwrap()
+            .is_none()
+    );
+    let embeds = provider.embeddings();
+    let sql = rusqlite::Connection::open(&index.db).unwrap();
+    // Missing graph rows despite a compatible marker repairs the unchanged shortcut.
+    sql.execute(
+        "DELETE FROM graph_edges WHERE source_page_id=?1 AND substr(relation_type,1,9)='relation:'",
+        [PAGE],
+    )
+    .unwrap();
+    assert_eq!(
+        handler
+            .refresh_page(
+                &page,
+                &root,
+                "relation-repair",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap()
+            .outcome,
+        CommitOutcome::Applied
+    );
+    assert!(
+        index
+            .coordinator
+            .relation_projection_complete(&projection)
+            .unwrap()
+    );
+    // An immutable applied receipt gets a NEW repair operation after explicit invalidation.
+    sql.execute(
+        "DELETE FROM page_relation_projections WHERE page_id=?1",
+        [PAGE],
+    )
+    .unwrap();
+    handler
+        .refresh_page(
+            &page,
+            &root,
+            "relation-initial",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        index
+            .coordinator
+            .receipt("relation-initial")
+            .unwrap()
+            .unwrap(),
+        first
+    );
+    assert!(
+        index
+            .coordinator
+            .relation_projection_complete(&projection)
+            .unwrap()
+    );
+    sql.execute("UPDATE graph_edges SET display_name='stale label' WHERE source_page_id=?1 AND substr(relation_type,1,9)='relation:'",[PAGE]).unwrap();
+    let (left, right) = tokio::join!(
+        handler.refresh_page(
+            &page,
+            &root,
+            "relation-initial",
+            &provider,
+            index.lease.clone(),
+            clock()
+        ),
+        handler.refresh_page(
+            &page,
+            &root,
+            "relation-initial",
+            &provider,
+            index.lease.clone(),
+            clock()
+        )
+    );
+    assert!(left.is_ok() || right.is_ok());
+    for result in [left, right] {
+        if let Err(error) = result {
+            assert_eq!(error, RefreshError::Conflict);
+        }
+    }
+    handler
+        .refresh_page(
+            &page,
+            &root,
+            "relation-initial",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        index
+            .coordinator
+            .relation_projection_complete(&projection)
+            .unwrap()
+    );
+    assert_eq!(
+        index
+            .coordinator
+            .receipt("relation-initial")
+            .unwrap()
+            .unwrap(),
+        first
+    );
+    assert_eq!(provider.embeddings(), embeds);
+    source.change(|m| m.relation_name = Some("Renamed ingredients".into()));
+    handler
+        .refresh_page(
+            &page,
+            &root,
+            "relation-rename",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let renamed = index.coordinator.state().edges_from(PAGE).unwrap();
+    assert!(
+        renamed
+            .iter()
+            .filter(|e| e.relation_type().starts_with("relation:"))
+            .all(|e| e.display_name() == Some("Renamed ingredients"))
+    );
+    let gate = notion_knowledge_core::root_scope::RootScopeGate::new(source.client(), authority())
+        .unwrap();
+    let navigation = notion_knowledge_mcp::related::navigate(
+        &notion_knowledge_mcp::related::RelatedRequest {
+            page_id: PAGE.into(),
+            depth: 1,
+            limit: 20,
+        },
+        index.coordinator.state().as_ref(),
+        &gate,
+        &[ROOT.into()],
+    )
+    .await
+    .unwrap();
+    let navigated = navigation
+        .relations
+        .iter()
+        .filter(|edge| edge.relation_type == "relation:related-stable")
+        .collect::<Vec<_>>();
+    assert_eq!(navigated.len(), 1);
+    assert_eq!(navigated[0].target_page_id, OTHER);
+    assert_eq!(
+        navigated[0].display_name.as_deref(),
+        Some("Renamed ingredients")
+    );
+    source.change(|m| m.inaccessible_other = true);
+    handler
+        .refresh_page(
+            &page,
+            &root,
+            "relation-inaccessible",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        index
+            .coordinator
+            .state()
+            .edges_from(PAGE)
+            .unwrap()
+            .iter()
+            .filter(|e| e.relation_type().starts_with("relation:"))
+            .all(|e| matches!(e.target(), GraphTarget::Unresolved { .. }))
+    );
+    assert!(index.guarded().page_chunks(OTHER).await.unwrap().is_empty());
+    source.change(|m| m.inaccessible_other = false);
+    source.change(|m| m.relation_name = None);
+    handler
+        .refresh_page(
+            &page,
+            &root,
+            "relation-remove",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let zero = RelationProjection::new(index.coordinator.binding(), PAGE, false, vec![]).unwrap();
+    assert!(
+        index
+            .coordinator
+            .relation_projection_complete(&zero)
+            .unwrap()
+    );
+    assert_eq!(
+        index.coordinator.state().edges_from(PAGE).unwrap(),
+        vec![link.clone()]
+    );
+    assert_eq!(
+        handler
+            .refresh_page(
+                &page,
+                &root,
+                "valid-zero-repeat",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap()
+            .outcome,
+        CommitOutcome::AlreadyApplied
+    );
+    assert!(
+        index
+            .coordinator
+            .receipt("valid-zero-repeat")
+            .unwrap()
+            .is_none()
+    );
+    sql.execute(
+        "DELETE FROM page_relation_projections WHERE page_id=?1",
+        [PAGE],
+    )
+    .unwrap();
+    handler
+        .refresh_page(
+            &page,
+            &root,
+            "zero-repair",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        index
+            .coordinator
+            .relation_projection_complete(&zero)
+            .unwrap()
+    );
+    source.change(|m| m.archived = true);
+    handler
+        .apply_lifecycle(
+            &page,
+            "relation-delete",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let tombstone =
+        RelationProjection::new(index.coordinator.binding(), PAGE, true, vec![]).unwrap();
+    assert!(
+        index
+            .coordinator
+            .relation_projection_complete(&tombstone)
+            .unwrap()
+    );
+    assert_eq!(
+        index.coordinator.state().edges_from(PAGE).unwrap(),
+        vec![link]
+    );
+    assert!(
+        index
+            .coordinator
+            .state()
+            .page_state(PAGE)
+            .unwrap()
+            .unwrap()
+            .is_tombstone()
+    );
+    source.change(|m| {
+        m.archived = false;
+        m.relation_name = Some("Restored".into());
+        m.relation_targets = vec![OTHER.into()];
+    });
+    handler
+        .apply_lifecycle(
+            &page,
+            "relation-restored",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    source.change(|m| m.parent = FOREIGN.into());
+    handler
+        .apply_lifecycle(
+            &page,
+            "relation-scope-removal",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        index
+            .coordinator
+            .relation_projection_complete(&tombstone)
+            .unwrap()
+    );
+    assert!(
+        index
+            .coordinator
+            .state()
+            .edges_from(PAGE)
+            .unwrap()
+            .iter()
+            .all(|e| e.relation_type().starts_with("link:"))
+    );
+    assert_eq!(source.target_body_reads.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relation_graph_and_final_ack_failures_preserve_checkpoint_and_replay_after_restart() {
+    use notion_knowledge_core::graph::GraphEdgeStore;
+    use notion_knowledge_retrieval::commit::ReceiptStatus;
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    source.change(|m| {
+        m.relation_name = Some("Before".into());
+        m.relation_targets = vec![OTHER.into()];
+    });
+    let provider = CountingProvider::new(index.embed.clone());
+    let page = PageId(PAGE.into());
+    let root = PageId(ROOT.into());
+    index
+        .handler(source.client())
+        .refresh_page(
+            &page,
+            &root,
+            "baseline",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let checkpoint = index.coordinator.state().page_state(PAGE).unwrap().unwrap();
+    let edges = index.coordinator.state().edges_from(PAGE).unwrap();
+    for (id, trigger) in [
+        (
+            "graph-interruption",
+            "CREATE TRIGGER reject_effect BEFORE INSERT ON graph_edges BEGIN SELECT RAISE(ABORT,'graph unavailable'); END;",
+        ),
+        (
+            "ack-interruption",
+            "CREATE TRIGGER reject_effect BEFORE UPDATE OF status ON index_commit_receipts WHEN NEW.status=1 BEGIN SELECT RAISE(ABORT,'ack unavailable'); END;",
+        ),
+    ] {
+        source.change(|m| {
+            m.relation_name = Some(id.into());
+            m.markdown.push_str("\nA new authoritative paragraph.\n");
+        });
+        let before = index.coordinator.state().page_state(PAGE).unwrap().unwrap();
+        let old_edges = index.coordinator.state().edges_from(PAGE).unwrap();
+        let sql = rusqlite::Connection::open(&index.db).unwrap();
+        sql.execute_batch(trigger).unwrap();
+        assert!(
+            index
+                .handler(source.client())
+                .refresh_page(&page, &root, id, &provider, index.lease.clone(), clock())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            index.coordinator.state().page_state(PAGE).unwrap().unwrap(),
+            before
+        );
+        assert_eq!(
+            index.coordinator.state().edges_from(PAGE).unwrap(),
+            old_edges
+        );
+        assert_ne!(
+            index.coordinator.receipt(id).unwrap().unwrap().status,
+            ReceiptStatus::Applied
+        );
+        sql.execute_batch("DROP TRIGGER reject_effect").unwrap();
+        drop(sql);
+        let reopened = IndexCommitCoordinator::open(
+            &index.index,
+            &index.db,
+            index.coordinator.binding().clone(),
+        )
+        .unwrap();
+        let handler = AuthoritativePageRefresh::new(
+            source.client(),
+            GuardedChunkTable::bind(
+                &index.index,
+                "chunks",
+                index.embed.clone(),
+                reopened.clone(),
+            )
+            .unwrap(),
+            reopened.clone(),
+            authority(),
+            &index.journal_scope,
+            chunk_config(),
+        )
+        .unwrap();
+        handler
+            .refresh_page(&page, &root, id, &provider, index.lease.clone(), clock())
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.receipt(id).unwrap().unwrap().status,
+            ReceiptStatus::Applied
+        );
+        assert!(reopened.current_relation_projection_complete(PAGE).unwrap());
+        assert!(
+            reopened
+                .state()
+                .edges_from(PAGE)
+                .unwrap()
+                .iter()
+                .all(|e| e.display_name() == Some(id))
+        );
+    }
+    assert_ne!(
+        index.coordinator.state().page_state(PAGE).unwrap().unwrap(),
+        checkpoint
+    );
+    assert_ne!(index.coordinator.state().edges_from(PAGE).unwrap(), edges);
+    // A source revert can make the previous graph complete while partial Lance
+    // work and its repair receipt still need replay. Never hide that work.
+    let snapshot = source.state.lock().unwrap().clone();
+    let sql = rusqlite::Connection::open(&index.db).unwrap();
+    sql.execute_batch("CREATE TRIGGER reject_repair BEFORE INSERT ON graph_edges BEGIN SELECT RAISE(ABORT,'repair interrupted'); END;").unwrap();
+    source.change(|m| {
+        m.relation_name = Some("Transient".into());
+        m.markdown.push_str("\nTransient content.\n");
+    });
+    assert!(
+        index
+            .handler(source.client())
+            .refresh_page(
+                &page,
+                &root,
+                "baseline",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .is_err()
+    );
+    let pending = index
+        .coordinator
+        .unfinished_relation_repair_id("baseline")
+        .unwrap()
+        .unwrap();
+    sql.execute_batch("DROP TRIGGER reject_repair").unwrap();
+    source.change(|m| *m = snapshot);
+    assert!(
+        index
+            .coordinator
+            .current_relation_projection_complete(PAGE)
+            .unwrap()
+    );
+    index
+        .handler(source.client())
+        .refresh_page(
+            &page,
+            &root,
+            "baseline",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        index.coordinator.receipt(&pending).unwrap().unwrap().status,
+        ReceiptStatus::Applied
+    );
+    assert!(
+        index
+            .coordinator
+            .unfinished_relation_repair_id("baseline")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        index
+            .guarded()
+            .page_chunks(PAGE)
+            .await
+            .unwrap()
+            .iter()
+            .all(|chunk| !chunk.text.contains("Transient content"))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn installed_target_authority_race_rejects_effects_and_excluded_targets_stay_unresolved() {
+    use notion_knowledge_core::graph::{GraphEdgeStore, GraphTarget};
+    let mut index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    source.change(|m| {
+        m.relation_name = Some("Targets".into());
+        m.relation_targets = vec![OTHER.into()];
+    });
+    let provider = CountingProvider::new(index.embed.clone());
+    *provider.target_race.lock().unwrap() = Some(source.state.clone());
+    let page = PageId(PAGE.into());
+    let root = PageId(ROOT.into());
+    assert_eq!(
+        index
+            .handler(source.client())
+            .refresh_page(
+                &page,
+                &root,
+                "target-race",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .unwrap_err(),
+        RefreshError::Conflict
+    );
+    assert!(
+        index
+            .coordinator
+            .state()
+            .page_state(PAGE)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        index
+            .coordinator
+            .state()
+            .edges_from(PAGE)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(index.table().await.count_rows().await.unwrap(), 0);
+    index
+        .handler(source.client())
+        .refresh_page(
+            &page,
+            &root,
+            "target-race",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        index.coordinator.state().edges_from(PAGE).unwrap()[0].target(),
+        GraphTarget::Unresolved { .. }
+    ));
+    source.change(|m| m.inaccessible_other = false);
+    let mut scope = authority();
+    scope.generation = 2;
+    scope.exclusions.page_ids.insert(OTHER.into());
+    index.journal_scope = notion_knowledge_retrieval::planner::production_scope(&scope).unwrap();
+    let binding = CommitBinding::new("chunks", WORKSPACE, &index.journal_scope, "2", 2).unwrap();
+    index.coordinator = index
+        .coordinator
+        .change_scope(binding, &index.lease, 10)
+        .unwrap();
+    let handler = AuthoritativePageRefresh::new(
+        source.client(),
+        index.guarded(),
+        index.coordinator.clone(),
+        scope,
+        &index.journal_scope,
+        chunk_config(),
+    )
+    .unwrap();
+    handler
+        .refresh_page(
+            &page,
+            &root,
+            "excluded-target",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        index.coordinator.state().edges_from(PAGE).unwrap()[0].target(),
+        GraphTarget::Unresolved { .. }
+    ));
+    assert!(index.guarded().page_chunks(OTHER).await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconciliation_recovers_missing_applied_projection_with_durable_repair_before_ack() {
+    use notion_knowledge_core::graph::GraphEdgeStore;
+    use notion_knowledge_retrieval::commit::ReceiptStatus;
+    let mut index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    source.change(|m| {
+        m.relation_name = Some("Recovered".into());
+        m.relation_targets = vec![OTHER.into()];
+    });
+    let provider = CountingProvider::new(index.embed.clone());
+    let service = runner(&index, &source);
+    let plan = service.dry_run().await.unwrap();
+    record_plan(&index, "relation-recovery", &plan);
+    let original = index
+        .coordinator
+        .reconciliation_plan("relation-recovery")
+        .unwrap()
+        .pages[PAGE]
+        .operation_id
+        .clone();
+    let sql = rusqlite::Connection::open(&index.db).unwrap();
+    sql.execute_batch("CREATE TRIGGER interrupt_ack BEFORE UPDATE OF status ON reconciliation_plan_progress WHEN NEW.status=1 BEGIN SELECT RAISE(ABORT,'crash before reconciliation ack'); END;").unwrap();
+    assert!(
+        service
+            .apply("relation-recovery", index.lease.clone(), clock(), &provider)
+            .await
+            .is_err()
+    );
+    let receipt = index.coordinator.receipt(&original).unwrap().unwrap();
+    assert_eq!(receipt.status, ReceiptStatus::Applied);
+    let checkpoint = index.coordinator.state().page_state(PAGE).unwrap();
+    sql.execute_batch("DROP TRIGGER interrupt_ack; DELETE FROM page_relation_projections; DELETE FROM graph_edges; CREATE TRIGGER reject_graph BEFORE INSERT ON graph_edges BEGIN SELECT RAISE(ABORT,'repair graph failure'); END;").unwrap();
+    let failed = service
+        .apply("relation-recovery", index.lease.clone(), clock(), &provider)
+        .await
+        .unwrap();
+    assert!(failed.failed.contains_key(PAGE));
+    assert_eq!(
+        index.coordinator.state().page_state(PAGE).unwrap(),
+        checkpoint
+    );
+    assert_eq!(
+        index.coordinator.receipt(&original).unwrap().unwrap(),
+        receipt
+    );
+    let repair = index.coordinator.relation_repair_id(&original).unwrap();
+    assert_ne!(repair, original);
+    assert_eq!(
+        index.coordinator.receipt(&repair).unwrap().unwrap().status,
+        ReceiptStatus::Pending
+    );
+    sql.execute_batch("DROP TRIGGER reject_graph").unwrap();
+    drop(sql);
+    index.coordinator =
+        IndexCommitCoordinator::open(&index.index, &index.db, index.coordinator.binding().clone())
+            .unwrap();
+    assert_eq!(
+        index.coordinator.relation_repair_id(&original).unwrap(),
+        repair
+    );
+    let resumed = runner(&index, &source)
+        .retry_page(
+            "relation-recovery",
+            PAGE,
+            index.lease.clone(),
+            clock(),
+            &provider,
+        )
+        .await
+        .unwrap();
+    assert!(!resumed.failed.contains_key(PAGE));
+    assert!(!resumed.pending.contains(PAGE));
+    assert_eq!(
+        index.coordinator.receipt(&original).unwrap().unwrap(),
+        receipt
+    );
+    let repaired = index.coordinator.receipt(&repair).unwrap().unwrap();
+    assert_eq!(
+        (repaired.status, repaired.attempts),
+        (ReceiptStatus::Applied, 2)
+    );
+    assert!(
+        index
+            .coordinator
+            .current_relation_projection_complete(PAGE)
+            .unwrap()
+    );
+    assert_eq!(
+        index.coordinator.state().edges_from(PAGE).unwrap()[0].display_name(),
+        Some("Recovered")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unchanged_owned_source_poll_releases_guard_after_cancelled_observer_and_lease_loss() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let provider = Arc::new(CountingProvider::new(index.embed.clone()));
+    let handler = index.handler(source.client());
+    handler
+        .refresh_page(
+            &PageId(PAGE.into()),
+            &PageId(ROOT.into()),
+            "noop-seed",
+            provider.as_ref(),
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let checkpoint = index.coordinator.state().page_state(PAGE).unwrap();
+    *source.pause.owned_directory.lock().unwrap() = Some(index.index.clone());
+    source.pause.armed.store(true, Ordering::SeqCst);
+    let now = Arc::new(std::sync::atomic::AtomicI64::new(10));
+    let owned_now = now.clone();
+    let clock: Arc<dyn Fn() -> i64 + Send + Sync> =
+        Arc::new(move || owned_now.load(Ordering::SeqCst));
+    let lease = index.lease.clone();
+    let owned_provider = provider.clone();
+    let task = tokio::spawn(async move {
+        handler
+            .refresh_page(
+                &PageId(PAGE.into()),
+                &PageId(ROOT.into()),
+                "unchanged-cancelled",
+                owned_provider.as_ref(),
+                lease,
+                clock,
+            )
+            .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        source.pause.started.notified(),
+    )
+    .await
+    .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    now.store(110, Ordering::SeqCst);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        index.coordinator.drain_owned(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let probe = fs::File::open(&index.index).unwrap();
+    probe.try_lock().unwrap();
+    assert_eq!(
+        index.coordinator.state().page_state(PAGE).unwrap(),
+        checkpoint
+    );
+    assert!(
+        index
+            .coordinator
+            .current_relation_projection_complete(PAGE)
+            .unwrap()
+    );
+    assert!(
+        index
+            .coordinator
+            .receipt("unchanged-cancelled")
+            .unwrap()
+            .is_none()
+    );
+    source.pause.proceed.notify_one();
 }
