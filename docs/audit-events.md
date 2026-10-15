@@ -1,10 +1,15 @@
 # Privacy-aware audit events (#90)
 
-This is the **audit event model and durable SQLite adapter** for future
-authenticated Notion mutation tools. No production MCP write tools are wired
-yet (#76–#83), so the default server does **not** emit audit records. This
-component does not authorize operations, prove a Notion write happened, or
-provide a public audit-query MCP tool.
+This is the **audit event model and durable SQLite adapter**, **installed in
+explicitly enabled MCP file ingestion** (`knowledge_upload_file`) on trusted
+stdio or authenticated loopback bearer HTTP. The default read-only server does
+not install ingestion or emit mutation audit records; other future MCP
+page-mutation tools (#76–#83) do not yet use the installed audit path. This
+component does not authorize operations, independently prove a Notion write,
+or provide a public audit-query MCP tool. See
+[installed-file-ingestion.md](installed-file-ingestion.md) for its actual
+runtime boundary and [file-ingestion-settings.md](file-ingestion-settings.md)
+for startup admission and private audit storage.
 
 ## Contract and privacy boundary
 
@@ -59,9 +64,13 @@ mutation, record `succeeded`, `denied`, `failed` or
 `indeterminate` according to authoritative evidence. If that audit write
 fails, surface an operator incident and reconcile the authoritative page;
 never assume an ambiguous external write failed or blindly replay it. A
-healthy audit log alone is not an authorization grant. This failure policy
-must be enforced when MCP mutation workflows are wired; the present adapter
-does not transparently intercept existing Notion client primitives.
+healthy audit log alone is not an authorization grant. The installed
+`FileIngestBatch` uses this before/after-effect policy and reports safe
+`verified`, `verified_audit_failed`, `failed`, `denied` and
+`indeterminate` outcomes; a cancellation may yield no reply and must not
+cause blind replay. Remaining MCP page-mutation workflows must integrate
+the same policy when activated: this adapter does not transparently
+intercept arbitrary Notion client primitives.
 
 ## Verification
 
@@ -75,6 +84,10 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 Unit tests verify strict UUID-only target fields, non-file metadata rejection,
 sanitized errors, configurable retention, rollback-safe SQLite insertion,
 reopening persistence, and the absence of body, URL, filename and token columns.
-No live Notion credentials or content are used. Integration with real
-MCP writes and end-to-end audit evidence belongs to the mutation workflow
-tickets; do not treat these component tests as that evidence.
+No live Notion credentials or content are used in those unit tests.
+Separate [installed transport integration tests](../crates/server/src/http/ingestion_tests.rs)
+join the HTTP/stdio handler, Notion adapter, source download, readback and
+durable audit, including denial, partial results and cancellation. These
+credential-free fixtures are not the live authorized Notion root smoke
+tracked in [#110](https://github.com/mtandersson/notion-knowedge/issues/110),
+nor evidence that future page mutations are already audited.

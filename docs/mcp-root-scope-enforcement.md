@@ -30,9 +30,13 @@ provisioned for that workspace. Notion's workspace parent object contains
 binding remains a prerequisite; a caller cannot supply or change this identity.
 
 The same `attach_root_scope` composition path configures HTTP and stdio.
-The current normal server bootstrap has no retrieval adapters by default; when
-future deployment composition installs search or source expansion, the handler
-itself refuses their output until the physical gate is configured.
+The normal bootstrap does not install retrieval by default. Explicit
+[`NK_RETRIEVAL=true` activation](installed-retrieval.md) installs the scoped
+semantic/lexical/hybrid adapters for trusted stdio or authenticated loopback
+bearer HTTP, and the common handler denies data without the physical gate.
+The optional [`knowledge_related` graph](knowledge-related.md) also
+authorizes each discovered page using fresh physical ancestry rather than
+treating graph edges as permission.
 
 ## Per-operation ordering
 
@@ -54,15 +58,37 @@ The multi-read preflight is not an atomic Notion transaction, so moving a page
 between the last check and disclosure is a residual time-of-check/time-of-use
 window. It narrows exposure, but must not be described as linearizable.
 
-## Planned mutation/file tools
+## Installed audited file ingestion (explicit opt-in)
 
-Production mutation tools are **still hidden/unavailable**. The upload tool
-remains explicitly unavailable and attempts no download or upload. The
-development-only write schema preview also performs no mutation. Their future
-implementations must reuse the physical gate and revalidate immediately before
-each external create/append/update/archive/file action, together with approved
-confirmation, revision, idempotency and authoritative read-back workflows.
-Do not equate schema preview or a request-supplied root claim with authority.
+`knowledge_upload_file` is **not enabled by default**. With
+`NK_READ_ONLY=false`, `NK_FILE_INGESTION=true`, the integration credential,
+configured roots/exclusions, admitted HTTPS source hosts and protected durable
+audit storage, it installs a real native Notion attachment workflow; not merely
+a schema preview. Stdio is treated as a trusted local operator transport.
+HTTP additionally requires `NK_HTTP_AUTH=bearer`, a configured strong bearer
+token and a loopback listener. Anonymous HTTP and discovery-only OAuth do not
+install private ingestion. Tool allow/block policy still applies *before*
+adapter execution.
+
+The server-owned target and its physical ancestry/exclusions are checked
+against Notion before source download, upload and append. An incoming target
+ID, file reference or claimed root never grants permission. Ingestion validates
+source URLs and actual bytes, creates a native file/image block, verifies
+Notion readback and writes minimized durable audit outcomes. Batch partial
+success, cancellation and possible indeterminate outcomes are not an atomic
+Notion transaction: see [installed ingestion](installed-file-ingestion.md)
+and [startup settings](file-ingestion-settings.md) for exact contracts and
+negative transport tests. Scope checks are intentionally repeated, but a
+page move between checks and effects remains a non-atomic TOCTOU risk.
+
+## Other write tools
+
+The remaining page-create/append/update/archive MCP operations are not
+currently installed as production mutations. Their development preview is not
+a mutation. Future implementations must reuse fresh physical root checks
+immediately before effects, plus confirmation, revision/idempotency, safe
+audit and authoritative readback. Do not equate a schema preview or a
+caller-supplied root claim with authority.
 
 ## Verification
 
@@ -70,6 +96,9 @@ Do not equate schema preview or a request-supplied root claim with authority.
 cargo test -p notion-knowledge-mcp --test scope_enforcement --locked
 cargo test -p notion-knowledge-mcp --test search_adapter --locked
 cargo test -p notion-knowledge-mcp --test get_adapter --locked
+cargo test -p notion-knowledge-mcp --test related --locked
+# Integration of authenticated transport, root/exclusion and audited file paths:
+nix develop .#spike --command cargo test -p notion-knowledge-server --lib ingestion_tests --locked
 ```
 
 See CI for whole-workspace format, Clippy, type checks, core/Notion tests,
