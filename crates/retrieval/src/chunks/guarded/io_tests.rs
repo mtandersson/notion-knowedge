@@ -1350,3 +1350,5 @@ async fn returned_commit_authority_is_held_until_final_sqlite_acknowledgment() {
         .unwrap();
     assert_eq!(*observed.lock().unwrap(), Some(ReceiptStatus::Applied));
 }
+
+mod aliases;

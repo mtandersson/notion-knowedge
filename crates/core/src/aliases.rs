@@ -90,6 +90,16 @@ impl AliasSources {
         })
     }
 
+    /// Canonical configuration identity, independent of property ordering.
+    /// Includes explicit sources even when they currently extract no names.
+    pub fn identity(&self) -> String {
+        let mut identity = format!("alias-sources-v1:{}:", u8::from(self.title));
+        for id in &self.property_ids {
+            identity.push_str(&format!("{}:{id}", id.len()));
+        }
+        identity
+    }
+
     /// Extract only text/string-valued configured properties; numeric, relation
     /// IDs, dates and people are never guessed as alternate names.
     pub fn extract(&self, metadata: &IndexedMetadata) -> Result<Vec<PageAlias>, SyncStateError> {

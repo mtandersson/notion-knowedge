@@ -1,3 +1,5 @@
+DROP TABLE alias_operation_proposals;
+DROP TABLE page_alias_projections;
 -- Restore a historical fixture before exercising the older additive migrations.
 DROP TABLE relation_operation_proposals;
 DROP TABLE page_relation_projections;

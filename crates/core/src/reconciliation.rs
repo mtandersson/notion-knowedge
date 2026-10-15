@@ -23,6 +23,7 @@ impl std::error::Error for JournalError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconciliationScope {
     identity: String,
+    roots: Vec<String>,
 }
 impl ReconciliationScope {
     pub fn new(
@@ -66,7 +67,11 @@ impl ReconciliationScope {
         }
         Ok(Self {
             identity: format!("{:x}", hash.finalize()),
+            roots,
         })
+    }
+    pub fn roots(&self) -> &[String] {
+        &self.roots
     }
     pub fn identity(&self) -> &str {
         &self.identity

@@ -218,7 +218,7 @@ fn relation_label_migration_is_explicit_and_preserves_operational_state_and_lega
     drop(store);
     let connection = Connection::open(&db.0).unwrap();
     connection.execute_batch("ALTER TABLE graph_edges DROP COLUMN display_name;
-        DROP TABLE relation_operation_proposals; DROP TABLE page_relation_projections; DELETE FROM schema_migrations WHERE version>=14;
+        DROP TABLE alias_operation_proposals; DROP TABLE page_alias_projections; DROP TABLE relation_operation_proposals; DROP TABLE page_relation_projections; DELETE FROM schema_migrations WHERE version>=14;
         INSERT INTO crawl_checkpoints(checkpoint_key,cursor) VALUES('crawl','next');
         INSERT INTO index_commit_generations VALUES('generation','scope',1);
         INSERT INTO index_commit_receipts(operation_id,generation,page_id,revision,action,content_hash,status,attempts)
