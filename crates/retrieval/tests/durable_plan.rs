@@ -418,7 +418,7 @@ fn schema_nine_journal_and_page_state_survive_atomic_upgrade() {
     let raw = Connection::open(&f.state).unwrap();
     raw.execute_batch(include_str!("fixtures/remove_schedule_schema.sql"))
         .unwrap();
-    raw.execute_batch("DROP TABLE reconciliation_retry_proposals; DROP TABLE reconciliation_plan_run_failures; DROP TABLE reconciliation_plan_progress; DROP TABLE reconciliation_plans; DELETE FROM schema_migrations WHERE version>=10;").unwrap();
+    raw.execute_batch("DROP TABLE relation_operation_proposals; DROP TABLE page_relation_projections; DROP TABLE reconciliation_retry_proposals; DROP TABLE reconciliation_plan_run_failures; DROP TABLE reconciliation_plan_progress; DROP TABLE reconciliation_plans; DELETE FROM schema_migrations WHERE version>=10;").unwrap();
     drop(raw);
     let new = SqliteSyncStateStore::open(&f.state).unwrap();
     assert_eq!(
@@ -561,7 +561,7 @@ fn migration_failure_rolls_back_the_whole_upgrade() {
     let raw = Connection::open(&f.state).unwrap();
     raw.execute_batch(include_str!("fixtures/remove_schedule_schema.sql"))
         .unwrap();
-    raw.execute_batch("DROP TABLE reconciliation_retry_proposals; DROP TABLE reconciliation_plan_run_failures; DROP TABLE reconciliation_plan_progress; DROP TABLE reconciliation_plans; DELETE FROM schema_migrations WHERE version>=10; CREATE TABLE reconciliation_plan_progress(incompatible TEXT);").unwrap();
+    raw.execute_batch("DROP TABLE relation_operation_proposals; DROP TABLE page_relation_projections; DROP TABLE reconciliation_retry_proposals; DROP TABLE reconciliation_plan_run_failures; DROP TABLE reconciliation_plan_progress; DROP TABLE reconciliation_plans; DELETE FROM schema_migrations WHERE version>=10; CREATE TABLE reconciliation_plan_progress(incompatible TEXT);").unwrap();
     assert!(SqliteSyncStateStore::open(&f.state).is_err());
     assert_eq!(
         raw.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r

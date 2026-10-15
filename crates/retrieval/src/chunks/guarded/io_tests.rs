@@ -825,3 +825,486 @@ async fn changed_scope_generation_rejects_old_proposal_without_changing_real_sea
         0
     );
 }
+
+fn relation_projection(
+    f: &Fixture,
+    label: Option<&str>,
+    tombstone: bool,
+) -> crate::commit::RelationProjection {
+    use notion_knowledge_core::graph::{GraphEdge, GraphTarget};
+    let edges = label
+        .map(|label| {
+            vec![
+                GraphEdge::new(
+                    "page".into(),
+                    GraphTarget::Page {
+                        page_id: "target".into(),
+                    },
+                    "relation:stable".into(),
+                    "property:stable".into(),
+                )
+                .unwrap()
+                .with_display_name(label.into())
+                .unwrap(),
+                GraphEdge::new(
+                    "page".into(),
+                    GraphTarget::Unresolved {
+                        reference: "denied".into(),
+                    },
+                    "relation:stable".into(),
+                    "property:stable".into(),
+                )
+                .unwrap()
+                .with_display_name(label.into())
+                .unwrap(),
+            ]
+        })
+        .unwrap_or_default();
+    crate::commit::RelationProjection::new(f.coordinator.binding(), "page", tombstone, edges)
+        .unwrap()
+}
+
+async fn projected_commit(
+    f: &Fixture,
+    id: &str,
+    hash: &str,
+    projection: crate::commit::RelationProjection,
+) -> Result<CommitOutcome, CommitError> {
+    let deleted = hash == "deleted";
+    let rows = if deleted {
+        vec![]
+    } else {
+        vec![chunk("one", hash, hash)]
+    };
+    let prepared = f
+        .guarded()
+        .prepare_page(
+            &CountingProvider::new(f.embedding.clone()),
+            operation(id, hash, deleted)
+                .with_relation_projection(projection)
+                .unwrap(),
+            &rows,
+        )
+        .await
+        .unwrap();
+    f.guarded()
+        .commit_page(prepared, f.lease.clone(), clock(), || async { Ok(()) })
+        .await
+}
+
+#[tokio::test]
+async fn projected_pages_preserve_links_and_compare_exact_durable_graph_truth() {
+    use notion_knowledge_core::graph::{GraphEdge, GraphEdgeStore, GraphTarget};
+    let f = Fixture::new();
+    f.create().await;
+    let link = GraphEdge::new(
+        "page".into(),
+        GraphTarget::Page {
+            page_id: "linked".into(),
+        },
+        "link:page".into(),
+        "markdown:0".into(),
+    )
+    .unwrap();
+    f.coordinator
+        .state()
+        .replace_page_link_edges("page", std::slice::from_ref(&link))
+        .unwrap();
+    let old = relation_projection(&f, Some("People"), false);
+    assert!(!f.coordinator.relation_projection_complete(&old).unwrap());
+    assert_eq!(
+        projected_commit(&f, "initial", "first", old.clone()).await,
+        Ok(CommitOutcome::Applied)
+    );
+    assert!(f.coordinator.relation_projection_complete(&old).unwrap());
+    let receipt = f.coordinator.receipt("initial").unwrap();
+    assert_eq!(
+        projected_commit(&f, "initial", "first", old.clone()).await,
+        Ok(CommitOutcome::AlreadyApplied)
+    );
+    let renamed = relation_projection(&f, Some("Colleagues"), false);
+    assert!(
+        !f.coordinator
+            .relation_projection_complete(&renamed)
+            .unwrap()
+    );
+    assert_eq!(
+        projected_commit(&f, "rename", "first", renamed.clone()).await,
+        Ok(CommitOutcome::Applied)
+    );
+    assert!(!f.coordinator.relation_projection_complete(&old).unwrap());
+    let edges = f.coordinator.state().edges_from("page").unwrap();
+    assert!(edges.contains(&link));
+    assert_eq!(
+        edges
+            .iter()
+            .filter(|e| e.display_name() == Some("Colleagues"))
+            .count(),
+        2
+    );
+    // Same row count and identity, modified label: a marker/count cannot prove truth.
+    let db = rusqlite::Connection::open(f.root.join("state.sqlite")).unwrap();
+    db.execute(
+        "UPDATE graph_edges SET display_name='tampered' WHERE relation_type='relation:stable'",
+        [],
+    )
+    .unwrap();
+    assert!(
+        !f.coordinator
+            .relation_projection_complete(&renamed)
+            .unwrap()
+    );
+    assert_eq!(
+        projected_commit(&f, "rename", "first", renamed.clone()).await,
+        Err(CommitError::ProjectionRepairRequired)
+    );
+    assert_eq!(
+        projected_commit(&f, "repair", "first", renamed.clone()).await,
+        Ok(CommitOutcome::Applied)
+    );
+    db.execute(
+        "DELETE FROM graph_edges WHERE unresolved_reference='denied'",
+        [],
+    )
+    .unwrap();
+    assert!(
+        !f.coordinator
+            .relation_projection_complete(&renamed)
+            .unwrap()
+    );
+    assert_eq!(
+        projected_commit(&f, "repair-missing", "first", renamed.clone()).await,
+        Ok(CommitOutcome::Applied)
+    );
+    // Intentional invalidation is durable even when all edges still match.
+    db.execute("DELETE FROM page_relation_projections", [])
+        .unwrap();
+    assert!(
+        !f.coordinator
+            .relation_projection_complete(&renamed)
+            .unwrap()
+    );
+    assert_eq!(
+        projected_commit(&f, "repair-invalidated", "first", renamed).await,
+        Ok(CommitOutcome::Applied)
+    );
+    let zero = relation_projection(&f, None, false);
+    assert_eq!(
+        projected_commit(&f, "zero", "first", zero.clone()).await,
+        Ok(CommitOutcome::Applied)
+    );
+    assert!(f.coordinator.relation_projection_complete(&zero).unwrap());
+    assert_eq!(
+        f.coordinator.state().edges_from("page").unwrap(),
+        vec![link.clone()]
+    );
+    let tombstone = relation_projection(&f, None, true);
+    assert!(
+        !f.coordinator
+            .relation_projection_complete(&tombstone)
+            .unwrap()
+    );
+    assert_eq!(
+        projected_commit(&f, "delete", "deleted", tombstone.clone()).await,
+        Ok(CommitOutcome::Applied)
+    );
+    assert!(
+        f.coordinator
+            .relation_projection_complete(&tombstone)
+            .unwrap()
+    );
+    assert!(
+        f.coordinator
+            .state()
+            .page_state("page")
+            .unwrap()
+            .unwrap()
+            .is_tombstone()
+    );
+    assert_eq!(
+        f.coordinator.state().edges_from("page").unwrap(),
+        vec![link]
+    );
+    assert_eq!(f.coordinator.receipt("initial").unwrap(), receipt);
+    let raw = rusqlite::Connection::open(f.root.join("state.sqlite")).unwrap();
+    raw.execute("UPDATE page_relation_projections SET version=999", [])
+        .unwrap();
+    assert!(
+        !f.coordinator
+            .relation_projection_complete(&tombstone)
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn graph_and_final_ack_failures_preserve_committed_history_and_replay_after_reopen() {
+    use notion_knowledge_core::graph::GraphEdgeStore;
+    let f = Fixture::new();
+    f.create().await;
+    let old = relation_projection(&f, Some("Old"), false);
+    projected_commit(&f, "seed", "old", old.clone())
+        .await
+        .unwrap();
+    let checkpoint = f.coordinator.state().page_state("page").unwrap();
+    let edges = f.coordinator.state().edges_from("page").unwrap();
+    let next = relation_projection(&f, Some("New"), false);
+    let db = rusqlite::Connection::open(f.root.join("state.sqlite")).unwrap();
+    for (id, trigger) in [
+        (
+            "graph-failure",
+            "CREATE TRIGGER injected BEFORE INSERT ON graph_edges BEGIN SELECT RAISE(ABORT,'fixture'); END;",
+        ),
+        (
+            "ack-failure",
+            "CREATE TRIGGER injected BEFORE UPDATE OF status ON index_commit_receipts WHEN NEW.status=1 BEGIN SELECT RAISE(ABORT,'fixture'); END;",
+        ),
+    ] {
+        db.execute_batch(trigger).unwrap();
+        assert_eq!(
+            projected_commit(&f, id, "new", next.clone()).await,
+            Err(CommitError::Unavailable)
+        );
+        // Real Lance effects happened before the failed graph/ack transaction.
+        assert_eq!(
+            f.guarded().page_chunks("page").await.unwrap()[0].text,
+            "new"
+        );
+        assert_eq!(
+            f.coordinator.state().page_state("page").unwrap(),
+            checkpoint
+        );
+        assert_eq!(f.coordinator.state().edges_from("page").unwrap(), edges);
+        assert!(f.coordinator.relation_projection_complete(&old).unwrap());
+        assert!(!f.coordinator.relation_projection_complete(&next).unwrap());
+        assert_eq!(
+            f.coordinator.receipt(id).unwrap().unwrap().status,
+            ReceiptStatus::Pending
+        );
+        assert!(f.guarded().search_snapshot().await.is_err());
+        db.execute_batch("DROP TRIGGER injected").unwrap();
+        let reopened = IndexCommitCoordinator::open_existing(
+            &f.index,
+            f.root.join("state.sqlite"),
+            f.coordinator.binding().clone(),
+        )
+        .unwrap();
+        let table =
+            GuardedChunkTable::bind(&f.index, "chunks", f.embedding.clone(), reopened.clone())
+                .unwrap();
+        let provider = CountingProvider::new(f.embedding.clone());
+        let prepared = table
+            .prepare_page(
+                &provider,
+                operation(id, "new", false)
+                    .with_relation_projection(next.clone())
+                    .unwrap(),
+                &[chunk("one", "new", "new")],
+            )
+            .await
+            .unwrap();
+        assert_eq!(provider.total(), 0);
+        assert_eq!(
+            table
+                .commit_page(prepared, f.lease.clone(), clock(), || async { Ok(()) })
+                .await,
+            Ok(CommitOutcome::Applied)
+        );
+        assert!(reopened.relation_projection_complete(&next).unwrap());
+        // Restore the old valid state for the independent final-ack failure.
+        projected_commit(&f, &format!("restore-{id}"), "old", old.clone())
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn legacy_applied_receipts_require_a_new_owned_operation_for_projection_repair() {
+    let f = Fixture::new();
+    f.create().await;
+    let provider = CountingProvider::new(f.embedding.clone());
+    let prepared = f
+        .guarded()
+        .prepare_page(
+            &provider,
+            operation("legacy", "same", false),
+            &[chunk("one", "same", "same")],
+        )
+        .await
+        .unwrap();
+    f.guarded()
+        .commit_page(prepared, f.lease.clone(), clock(), || async { Ok(()) })
+        .await
+        .unwrap();
+    let original = f.coordinator.receipt("legacy").unwrap();
+    let projection = relation_projection(&f, None, false);
+    assert_eq!(
+        projected_commit(&f, "legacy", "same", projection.clone()).await,
+        Err(CommitError::ProjectionRepairRequired)
+    );
+    assert_eq!(
+        projected_commit(&f, "fresh-repair", "same", projection.clone()).await,
+        Ok(CommitOutcome::Applied)
+    );
+    assert_eq!(f.coordinator.receipt("legacy").unwrap(), original);
+    assert!(
+        f.coordinator
+            .relation_projection_complete(&projection)
+            .unwrap()
+    );
+    let reader = IndexCommitCoordinator::open_read_only(
+        &f.index,
+        f.root.join("state.sqlite"),
+        f.coordinator.binding().clone(),
+    )
+    .unwrap();
+    assert!(reader.relation_projection_complete(&projection).unwrap());
+    let prepared = f
+        .guarded()
+        .prepare_page(
+            &provider,
+            operation("later-legacy", "same", false),
+            &[chunk("one", "same", "same")],
+        )
+        .await
+        .unwrap();
+    f.guarded()
+        .commit_page(prepared, f.lease.clone(), clock(), || async { Ok(()) })
+        .await
+        .unwrap();
+    assert!(!reader.relation_projection_complete(&projection).unwrap());
+}
+
+#[tokio::test]
+async fn projection_owner_survives_observer_drop_and_fails_closed_on_lease_loss() {
+    use notion_knowledge_core::graph::GraphEdgeStore;
+    let f = Fixture::new();
+    f.create().await;
+    let projection = relation_projection(&f, Some("Owned"), false);
+    let prepare = |id: &str| {
+        operation(id, "owned", false)
+            .with_relation_projection(projection.clone())
+            .unwrap()
+    };
+    let prepared = f
+        .guarded()
+        .prepare_page(
+            &CountingProvider::new(f.embedding.clone()),
+            prepare("cancelled-observer"),
+            &[chunk("one", "owned", "owned")],
+        )
+        .await
+        .unwrap();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let observer =
+        f.guarded()
+            .commit_page(prepared, f.lease.clone(), clock(), move || async move {
+                entered_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+                Ok(())
+            });
+    entered_rx.await.unwrap();
+    drop(observer);
+    assert_eq!(
+        f.coordinator
+            .receipt("cancelled-observer")
+            .unwrap()
+            .unwrap()
+            .status,
+        ReceiptStatus::Pending
+    );
+    release_tx.send(()).unwrap();
+    f.coordinator.drain_owned().await.unwrap();
+    assert_eq!(
+        f.coordinator
+            .receipt("cancelled-observer")
+            .unwrap()
+            .unwrap()
+            .status,
+        ReceiptStatus::Applied
+    );
+    assert!(
+        f.coordinator
+            .relation_projection_complete(&projection)
+            .unwrap()
+    );
+    let checkpoint = f.coordinator.state().page_state("page").unwrap();
+    let edges = f.coordinator.state().edges_from("page").unwrap();
+    let time = Arc::new(std::sync::atomic::AtomicI64::new(10));
+    let now = time.clone();
+    let prepared = f
+        .guarded()
+        .prepare_page(
+            &CountingProvider::new(f.embedding.clone()),
+            prepare("expired"),
+            &[chunk("one", "owned", "owned")],
+        )
+        .await
+        .unwrap();
+    let result = f
+        .guarded()
+        .commit_page(
+            prepared,
+            f.lease.clone(),
+            Arc::new(move || now.load(Ordering::SeqCst)),
+            move || async move {
+                time.store(110, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+    assert_eq!(result, Err(CommitError::Operation(FailureClass::Conflict)));
+    assert_eq!(
+        f.coordinator.state().page_state("page").unwrap(),
+        checkpoint
+    );
+    assert_eq!(f.coordinator.state().edges_from("page").unwrap(), edges);
+    assert_eq!(
+        f.coordinator.receipt("expired").unwrap().unwrap().status,
+        ReceiptStatus::Failed
+    );
+}
+
+#[tokio::test]
+async fn projection_binding_and_generation_never_convey_write_authority() {
+    let f = Fixture::new();
+    f.create().await;
+    let old = relation_projection(&f, None, false);
+    projected_commit(&f, "seed-generation", "same", old.clone())
+        .await
+        .unwrap();
+    let scope = ReconciliationScope::new(vec!["root".into()], vec![], "policy", "v2").unwrap();
+    let binding = CommitBinding::new("chunks", "workspace", &scope, "v2", 2).unwrap();
+    let next = f
+        .coordinator
+        .change_scope(binding.clone(), &f.lease, 10)
+        .unwrap();
+    assert_eq!(
+        next.relation_projection_complete(&old),
+        Err(CommitError::BindingMismatch)
+    );
+    let new = crate::commit::RelationProjection::new(&binding, "page", false, vec![]).unwrap();
+    assert!(!next.relation_projection_complete(&new).unwrap());
+    let table =
+        GuardedChunkTable::bind(&f.index, "chunks", f.embedding.clone(), next.clone()).unwrap();
+    let prepared = table
+        .prepare_page(
+            &CountingProvider::new(f.embedding.clone()),
+            operation("wrong-generation", "same", false)
+                .with_relation_projection(old)
+                .unwrap(),
+            &[chunk("one", "same", "same")],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        table
+            .commit_page(prepared, f.lease.clone(), clock(), || async {
+                panic!("mismatched projection must fail before source and vector effects")
+            })
+            .await,
+        Err(CommitError::BindingMismatch)
+    );
+    assert!(next.receipt("wrong-generation").unwrap().is_none());
+    assert!(!next.relation_projection_complete(&new).unwrap());
+}

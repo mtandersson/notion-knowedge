@@ -54,7 +54,7 @@ impl From<CommitError> for RefreshError {
     fn from(error: CommitError) -> Self {
         match error {
             CommitError::InvalidInput => Self::InvalidConfiguration,
-            CommitError::BindingMismatch => Self::Conflict,
+            CommitError::ProjectionRepairRequired | CommitError::BindingMismatch => Self::Conflict,
             CommitError::LeaseLost | CommitError::Conflict => Self::Conflict,
             CommitError::Unavailable | CommitError::Operation(FailureClass::Unavailable) => {
                 Self::Unavailable

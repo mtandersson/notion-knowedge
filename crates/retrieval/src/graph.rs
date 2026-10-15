@@ -214,7 +214,7 @@ impl GraphEdgeStore for SqliteSyncStateStore {
     }
 }
 
-fn read_edges(
+pub(crate) fn read_edges(
     connection: &Connection,
     sql: &str,
     page_id: &str,
