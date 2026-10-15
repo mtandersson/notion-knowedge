@@ -536,6 +536,23 @@ impl IndexCommitCoordinator {
         self.identities()?;
         Ok(guard)
     }
+    /// Fence a read snapshot against concurrent commits and unfinished effects.
+    #[cfg(feature = "local-lancedb")]
+    pub(crate) fn search_guard(&self) -> Result<File, CommitError> {
+        let guard = self.try_acquire()?;
+        let db = self
+            .state
+            .lock_connection()
+            .map_err(|_| CommitError::Unavailable)?;
+        self.validate_binding(&db)?;
+        let unfinished: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM index_commit_receipts WHERE generation=?1 AND status IN(0,2))",
+            [&self.binding.generation], |row| row.get(0)).map_err(sql)?;
+        if unfinished {
+            return Err(CommitError::Conflict);
+        }
+        Ok(guard)
+    }
     fn acquire(&self) -> Result<File, CommitError> {
         let guard = File::open(&self.index_path).map_err(io)?;
         guard.lock().map_err(io)?;

@@ -234,6 +234,14 @@ impl KnowledgeServer {
         }
     }
 
+    pub fn and_search(
+        mut self,
+        search: Arc<dyn notion_knowledge_core::search::SemanticSearch>,
+    ) -> Self {
+        self.search = Some(search);
+        self
+    }
+
     pub fn with_lexical_search(
         lexical_search: Arc<dyn notion_knowledge_core::search::LexicalSearch>,
     ) -> Self {

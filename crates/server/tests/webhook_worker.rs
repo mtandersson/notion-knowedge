@@ -264,13 +264,21 @@ struct TestRuntime {
 }
 impl TestRuntime {
     async fn new() -> Self {
+        Self::with_scope_policy("fixture").await
+    }
+    async fn with_scope_policy(policy: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let index = dir.path().join("index");
         std::fs::create_dir(&index).unwrap();
         let db = dir.path().join("state.sqlite");
-        let journal = ReconciliationScope::new(vec![ROOT.into()], vec![], "fixture", "1").unwrap();
+        let journal = ReconciliationScope::new(vec![ROOT.into()], vec![], policy, "1").unwrap();
         let binding = CommitBinding::new("chunks", WORKSPACE, &journal, "1", 1).unwrap();
         let coordinator = IndexCommitCoordinator::initialize(&index, &db, binding).unwrap();
+        if policy == "webhook-v1" {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&index, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let state = coordinator.state().clone();
         let metadata =
             EmbeddingMetadata::new("fixture".into(), "fixture".into(), "1".into(), 3).unwrap();
@@ -1092,4 +1100,701 @@ async fn unsupported_authoritative_content_and_unowned_out_of_scope_page_fail_pe
         assert_eq!(observed.failure, Some(EventFailure::Source));
     }
     assert_eq!(runtime.searchable("Saffron").await, 0);
+}
+
+fn retrieval_config(runtime: &TestRuntime) -> notion_knowledge_server::config::Config {
+    let values = std::collections::BTreeMap::from([
+        ("NK_RETRIEVAL", "true"),
+        ("NK_NOTION_AUTH", "integration"),
+        ("NOTION_TOKEN", "fixture-only"),
+        ("NK_NOTION_SCOPE_WORKSPACE_ID", WORKSPACE),
+        ("NK_NOTION_SCOPE_ROOTS", ROOT),
+        ("NK_WEBHOOK_STATE_FILE", runtime.db.to_str().unwrap()),
+        ("NK_WEBHOOK_INDEX_DIR", runtime.index.to_str().unwrap()),
+        ("NK_WEBHOOK_QWEN_ASSETS", "/tmp/unused-typed-provider"),
+        ("NK_HTTP_AUTH", "bearer"),
+        (
+            "NK_HTTP_BEARER_TOKEN",
+            "fixture-private-authentication-token",
+        ),
+    ]);
+    notion_knowledge_server::config::Config::from_lookup(|name| {
+        values.get(name).map(std::ffi::OsString::from)
+    })
+    .unwrap()
+}
+async fn installed_retrieval(
+    runtime: &TestRuntime,
+    config: &notion_knowledge_server::config::Config,
+    transport: notion_knowledge_server::root_scope::Transport,
+) -> Result<notion_knowledge_mcp::KnowledgeServer, &'static str> {
+    notion_knowledge_server::root_scope::compose_client(
+        notion_knowledge_mcp::KnowledgeServer::default(),
+        config,
+        transport,
+        runtime.source.client(),
+        runtime.worker.provider.clone(),
+    )
+    .await
+}
+async fn commit_search_fixture(runtime: &TestRuntime) {
+    for page in [PAGE, OTHER] {
+        runtime
+            .worker
+            .state
+            .receive(&event(page, "page.created"))
+            .unwrap();
+        tick(&runtime.worker, false).await;
+    }
+    assert!(runtime.searchable("Saffron").await > 0);
+    let guard = GuardedChunkTable::bind(
+        &runtime.index,
+        "chunks",
+        runtime.worker.provider.metadata().clone(),
+        runtime.worker.coordinator.clone(),
+    )
+    .unwrap();
+    let lease = runtime
+        .worker
+        .state
+        .acquire_lease(now_ms() / 1000, 60)
+        .unwrap();
+    guard
+        .ensure_vector_index(
+            notion_knowledge_retrieval::chunks::VectorIndexConfig {
+                num_partitions: Some(1),
+                sample_rate: 8,
+                max_iterations: 20,
+                ..Default::default()
+            },
+            lease.clone(),
+            Arc::new(|| now_ms() / 1000),
+        )
+        .await
+        .unwrap();
+    runtime
+        .worker
+        .state
+        .release_lease(&lease, now_ms() / 1000)
+        .unwrap();
+}
+async fn wire_stdio(
+    handler: notion_knowledge_mcp::KnowledgeServer,
+    requests: Vec<Value>,
+) -> Vec<Value> {
+    use rmcp::ServiceExt;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let (server, client) = tokio::io::duplex(65536);
+    let task = tokio::spawn(async move {
+        handler
+            .serve(server)
+            .await
+            .unwrap()
+            .waiting()
+            .await
+            .unwrap()
+    });
+    let (read, mut write) = tokio::io::split(client);
+    let mut reader = BufReader::new(read);
+    let mut responses = vec![];
+    for (i, request) in std::iter::once(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"joined-retrieval","version":"1"}}})).chain(requests).enumerate() {
+        write.write_all(format!("{request}\n").as_bytes()).await.unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(30), reader.read_line(&mut line)).await.unwrap().unwrap();
+        responses.push(serde_json::from_str(&line).unwrap());
+        if i == 0 { write.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n").await.unwrap(); }
+    }
+    drop(write);
+    drop(reader);
+    tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap();
+    responses
+}
+fn search_request(id: u64, mode: &str, filters: Value) -> Value {
+    json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"knowledge_search","arguments":{"query":"Saffron","limit":5,"mode":mode,"filters":filters}}})
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reopened_committed_index_serves_all_modes_over_stdio_and_revalidates_physical_scope() {
+    let runtime = TestRuntime::with_scope_policy("webhook-v1").await;
+    commit_search_fixture(&runtime).await;
+    let config = retrieval_config(&runtime);
+    let before = std::fs::read(&runtime.db).unwrap();
+    let version = GuardedChunkTable::bind(
+        &runtime.index,
+        "chunks",
+        runtime.worker.provider.metadata().clone(),
+        runtime.worker.coordinator.clone(),
+    )
+    .unwrap()
+    .inventory_version()
+    .await
+    .unwrap();
+    let handler = installed_retrieval(
+        &runtime,
+        &config,
+        notion_knowledge_server::root_scope::Transport::Stdio,
+    )
+    .await
+    .unwrap();
+    assert_eq!(before, std::fs::read(&runtime.db).unwrap());
+    assert_eq!(
+        version,
+        GuardedChunkTable::bind(
+            &runtime.index,
+            "chunks",
+            runtime.worker.provider.metadata().clone(),
+            runtime.worker.coordinator.clone()
+        )
+        .unwrap()
+        .inventory_version()
+        .await
+        .unwrap()
+    );
+    let output = wire_stdio(
+        handler.clone(),
+        vec![
+            search_request(2, "semantic", json!({"page_ids":[PAGE]})),
+            search_request(3, "lexical", json!({"page_ids":[PAGE]})),
+            search_request(4, "hybrid", json!({"page_ids":[PAGE]})),
+            search_request(5, "hybrid", json!({"root_page_ids":[FOREIGN]})),
+            search_request(6, "lexical", json!({"page_ids":[OTHER]})),
+            search_request(7, "hybrid", json!({"metadata":{"workspace_ids":[FOREIGN]}})),
+        ],
+    )
+    .await;
+    for (index, path) in [(1, "semantic"), (2, "lexical"), (3, "semantic")] {
+        let results = output[index]["result"]["structuredContent"]["results"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{}", output[index]));
+        assert!(!results.is_empty(), "{}", output[index]);
+        assert!(results.iter().all(|hit| hit["source"]["page_id"] == PAGE));
+        assert!(results[0]["score"].as_f64().unwrap().is_finite());
+        assert!(
+            results[0]["matched_paths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p == path)
+        );
+    }
+    assert_eq!(
+        output[4]["result"]["structuredContent"]["results"],
+        json!([])
+    );
+    assert_eq!(
+        output[5]["result"]["structuredContent"]["results"],
+        json!([])
+    );
+    assert_eq!(
+        output[6]["result"]["structuredContent"]["results"],
+        json!([])
+    );
+    runtime.source.change(|m| {
+        m.markdown = "# Intro\n\nTurmeric ravioli.\n".into();
+        m.revision = "2026-10-10T13:00:00Z".into();
+    });
+    runtime
+        .worker
+        .state
+        .receive(&event(PAGE, "page.content_updated"))
+        .unwrap();
+    tick(&runtime.worker, false).await;
+    let mut updated = search_request(3, "hybrid", json!({"page_ids":[PAGE]}));
+    updated["params"]["arguments"]["query"] = json!("Turmeric");
+    let output = wire_stdio(
+        handler.clone(),
+        vec![
+            search_request(2, "lexical", json!({"page_ids":[PAGE]})),
+            updated,
+        ],
+    )
+    .await;
+    assert_eq!(
+        output[1]["result"]["structuredContent"]["results"],
+        json!([])
+    );
+    assert!(
+        output[2].to_string().contains("Turmeric ravioli"),
+        "{}",
+        output[2]
+    );
+    runtime.source.change(|m| m.parent = FOREIGN.into());
+    let handler = installed_retrieval(
+        &runtime,
+        &config,
+        notion_knowledge_server::root_scope::Transport::Stdio,
+    )
+    .await
+    .unwrap();
+    let output = wire_stdio(handler, vec![search_request(2, "hybrid", json!({}))]).await;
+    assert!(
+        !output[1].to_string().contains("Turmeric ravioli"),
+        "{}",
+        output[1]
+    );
+    runtime.source.change(|m| m.parent = ROOT.into());
+    let handler = installed_retrieval(
+        &runtime,
+        &config,
+        notion_knowledge_server::root_scope::Transport::Stdio,
+    )
+    .await
+    .unwrap();
+    let connection = rusqlite::Connection::open(&runtime.db).unwrap();
+    connection
+        .execute(
+            "UPDATE index_commit_receipts SET status=0 WHERE status=1",
+            [],
+        )
+        .unwrap();
+    let output = wire_stdio(
+        handler.clone(),
+        vec![search_request(2, "hybrid", json!({}))],
+    )
+    .await;
+    assert!(output[1].to_string().contains("retrieval_unavailable"));
+    assert!(!output[1].to_string().contains("Turmeric ravioli"));
+    connection
+        .execute(
+            "UPDATE index_commit_receipts SET status=1 WHERE status=0",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute("UPDATE index_commit_binding SET epoch=epoch+1", [])
+        .unwrap();
+    let output = wire_stdio(handler, vec![search_request(2, "hybrid", json!({}))]).await;
+    assert!(output[1].to_string().contains("retrieval_unavailable"));
+    assert!(!output[1].to_string().contains("Turmeric ravioli"));
+}
+
+async fn http_json(response: reqwest::Response) -> Value {
+    let text = response.text().await.unwrap();
+    if let Ok(value) = serde_json::from_str(&text) {
+        return value;
+    }
+    serde_json::from_str(
+        text.lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or_else(|| panic!("unexpected HTTP response: {text}")),
+    )
+    .unwrap()
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authenticated_http_serves_committed_hybrid_and_denies_untrusted_session_requests() {
+    let runtime = TestRuntime::with_scope_policy("webhook-v1").await;
+    commit_search_fixture(&runtime).await;
+    let mut config = retrieval_config(&runtime);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    config.http_bind = listener.local_addr().unwrap();
+    let address = config.http_bind;
+    drop(listener);
+    let handler = installed_retrieval(
+        &runtime,
+        &config,
+        notion_knowledge_server::root_scope::Transport::Http,
+    )
+    .await
+    .unwrap();
+    let stop = CancellationToken::new();
+    let cancelled = stop.clone();
+    let state_before_http = std::fs::read(&runtime.db).unwrap();
+    let index_before_http = storage_files(&runtime.index);
+    let server = tokio::spawn(notion_knowledge_server::http::serve_installed(
+        config, handler, None, cancelled,
+    ));
+    let client = reqwest::Client::new();
+    let url = format!("http://{address}/mcp");
+    for _ in 0..100 {
+        if tokio::net::TcpStream::connect(address).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"joined-http","version":"1"}}});
+    let before_embeddings = runtime.embeddings.load(Ordering::SeqCst);
+    let before_source = runtime.source.attempts.load(Ordering::SeqCst);
+    for token in [None, Some("invalid-token")] {
+        let mut request = client
+            .post(&url)
+            .header("accept", "application/json, text/event-stream")
+            .json(&initialize);
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert!(!response.text().await.unwrap().contains("Saffron"));
+    }
+    let response = client
+        .post(&url)
+        .bearer_auth("fixture-private-authentication-token")
+        .header("accept", "application/json, text/event-stream")
+        .json(&initialize)
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let session = response.headers()["mcp-session-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(http_json(response).await["id"], 1);
+    let response = client
+        .post(&url)
+        .bearer_auth("fixture-private-authentication-token")
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-session-id", &session)
+        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    for token in [None, Some("invalid-token")] {
+        let mut request = client
+            .post(&url)
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-session-id", &session)
+            .json(&search_request(2, "hybrid", json!({})));
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        assert_eq!(
+            request.send().await.unwrap().status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+        let mut request = client
+            .get(&url)
+            .header("accept", "text/event-stream")
+            .header("mcp-session-id", &session);
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        assert_eq!(
+            request.send().await.unwrap().status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(runtime.embeddings.load(Ordering::SeqCst), before_embeddings);
+    assert_eq!(
+        runtime.source.attempts.load(Ordering::SeqCst),
+        before_source
+    );
+    let response = client
+        .post(&url)
+        .bearer_auth("fixture-private-authentication-token")
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-session-id", &session)
+        .json(&search_request(2, "hybrid", json!({"page_ids":[PAGE]})))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let output = http_json(response).await;
+    let results = output["result"]["structuredContent"]["results"]
+        .as_array()
+        .unwrap();
+    assert!(!results.is_empty(), "{output}");
+    assert_eq!(results[0]["source"]["page_id"], PAGE);
+    assert_eq!(results[0]["matched_paths"], json!(["semantic", "lexical"]));
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(10), server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(state_before_http, std::fs::read(&runtime.db).unwrap());
+    assert_eq!(index_before_http, storage_files(&runtime.index));
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_activation_refuses_incompatible_assets_and_unsuitable_http_never_opens_them() {
+    let runtime = TestRuntime::with_scope_policy("webhook-v1").await;
+    commit_search_fixture(&runtime).await;
+    let mut config = retrieval_config(&runtime);
+    config.retrieval.as_mut().unwrap().index = runtime._dir.path().join("missing-index");
+    assert!(
+        installed_retrieval(
+            &runtime,
+            &config,
+            notion_knowledge_server::root_scope::Transport::Stdio
+        )
+        .await
+        .is_err()
+    );
+    assert!(!config.retrieval.as_ref().unwrap().index.exists());
+    config.bearer_fallback = None;
+    let output = wire_stdio(
+        installed_retrieval(
+            &runtime,
+            &config,
+            notion_knowledge_server::root_scope::Transport::Http,
+        )
+        .await
+        .unwrap(),
+        vec![search_request(2, "hybrid", json!({}))],
+    )
+    .await;
+    assert!(output[1].to_string().contains("retrieval_unavailable"));
+    assert!(!config.retrieval.as_ref().unwrap().index.exists());
+    // Ordinary production activation also returns before loading absent models.
+    assert!(
+        notion_knowledge_server::retrieval_runtime::configured(
+            notion_knowledge_mcp::KnowledgeServer::default(),
+            &config,
+            notion_knowledge_server::root_scope::Transport::Http
+        )
+        .await
+        .is_ok()
+    );
+    config = retrieval_config(&runtime);
+    config.webhook_state_file = Some(runtime._dir.path().join("absent.sqlite"));
+    assert!(
+        installed_retrieval(
+            &runtime,
+            &config,
+            notion_knowledge_server::root_scope::Transport::Stdio
+        )
+        .await
+        .is_err()
+    );
+    assert!(!config.webhook_state_file.as_ref().unwrap().exists());
+    std::fs::write(config.webhook_state_file.as_ref().unwrap(), b"corrupt").unwrap();
+    assert!(
+        installed_retrieval(
+            &runtime,
+            &config,
+            notion_knowledge_server::root_scope::Transport::Stdio
+        )
+        .await
+        .is_err()
+    );
+    config = retrieval_config(&runtime);
+    let other_runtime = TestRuntime::with_scope_policy("webhook-v1").await;
+    config.retrieval.as_mut().unwrap().index = other_runtime.index.clone();
+    assert!(
+        installed_retrieval(
+            &runtime,
+            &config,
+            notion_knowledge_server::root_scope::Transport::Stdio
+        )
+        .await
+        .is_err()
+    );
+    config = retrieval_config(&runtime);
+    let foreign = Arc::new(Provider {
+        metadata: EmbeddingMetadata::new("other".into(), "other".into(), "1".into(), 3).unwrap(),
+        count: Arc::new(AtomicUsize::new(0)),
+    });
+    assert!(
+        notion_knowledge_server::retrieval_runtime::compose(
+            notion_knowledge_mcp::KnowledgeServer::default(),
+            &config,
+            notion_knowledge_server::root_scope::Transport::Stdio,
+            runtime.source.client(),
+            foreign
+        )
+        .await
+        .is_err()
+    );
+    config.notion_scope.as_mut().unwrap().roots = vec![PageId(FOREIGN.into())];
+    assert!(
+        installed_retrieval(
+            &runtime,
+            &config,
+            notion_knowledge_server::root_scope::Transport::Stdio
+        )
+        .await
+        .is_err()
+    );
+    config = retrieval_config(&runtime);
+    config
+        .notion_scope
+        .as_mut()
+        .unwrap()
+        .exclusions
+        .page_ids
+        .insert(PAGE.into());
+    assert!(
+        installed_retrieval(
+            &runtime,
+            &config,
+            notion_knowledge_server::root_scope::Transport::Stdio
+        )
+        .await
+        .is_err()
+    );
+    config = retrieval_config(&runtime);
+    config.http_bind = "192.0.2.1:3000".parse().unwrap();
+    config.retrieval.as_mut().unwrap().assets = runtime._dir.path().join("absent-model");
+    assert!(
+        notion_knowledge_server::retrieval_runtime::configured(
+            notion_knowledge_mcp::KnowledgeServer::default(),
+            &config,
+            notion_knowledge_server::root_scope::Transport::Http
+        )
+        .await
+        .is_ok()
+    );
+    config = retrieval_config(&runtime);
+    let discovery = notion_knowledge_server::config::Config::from_lookup(|name| match name {
+        "NK_OAUTH_ISSUER" => Some("https://auth.example.test".into()),
+        "NK_OAUTH_RESOURCE" => Some("https://knowledge.example.test/mcp".into()),
+        _ => None,
+    })
+    .unwrap();
+    config.oauth_discovery = discovery.oauth_discovery;
+    config.retrieval.as_mut().unwrap().assets = runtime._dir.path().join("absent-model");
+    assert!(
+        notion_knowledge_server::retrieval_runtime::configured(
+            notion_knowledge_mcp::KnowledgeServer::default(),
+            &config,
+            notion_knowledge_server::root_scope::Transport::Http
+        )
+        .await
+        .is_ok()
+    );
+    config = retrieval_config(&runtime);
+    assert!(
+        notion_knowledge_server::retrieval_runtime::configured(
+            notion_knowledge_mcp::KnowledgeServer::default(),
+            &config,
+            notion_knowledge_server::root_scope::Transport::Stdio
+        )
+        .await
+        .is_err()
+    );
+}
+
+fn storage_files(
+    path: &std::path::Path,
+) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    fn visit(
+        root: &std::path::Path,
+        current: &std::path::Path,
+        files: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+    ) {
+        for entry in std::fs::read_dir(current).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                visit(root, &path, files);
+            } else {
+                files.insert(
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    std::fs::read(path).unwrap(),
+                );
+            }
+        }
+    }
+    let mut files = std::collections::BTreeMap::new();
+    visit(path, path, &mut files);
+    files
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unsuitable_http_startup_keeps_private_read_state_closed_and_never_creates_missing_storage()
+{
+    let runtime = TestRuntime::with_scope_policy("webhook-v1").await;
+    for oauth in [false, true] {
+        let mut config = retrieval_config(&runtime);
+        config.bearer_fallback = None;
+        let absent = runtime._dir.path().join(if oauth {
+            "absent-oauth"
+        } else {
+            "absent-bootstrap"
+        });
+        config.webhook_state_file = Some(absent.join("state.sqlite"));
+        config.retrieval.as_mut().unwrap().index = absent.join("index");
+        config.retrieval.as_mut().unwrap().assets = absent.join("model");
+        if oauth {
+            config.oauth_discovery =
+                notion_knowledge_server::config::Config::from_lookup(|name| match name {
+                    "NK_OAUTH_ISSUER" => Some("https://auth.example.test".into()),
+                    "NK_OAUTH_RESOURCE" => Some("https://knowledge.example.test/mcp".into()),
+                    _ => None,
+                })
+                .unwrap()
+                .oauth_discovery;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        config.http_bind = listener.local_addr().unwrap();
+        let address = config.http_bind;
+        drop(listener);
+        let stop = CancellationToken::new();
+        let cancelled = stop.clone();
+        let server = tokio::spawn(notion_knowledge_server::http::serve_composed(
+            config,
+            notion_knowledge_mcp::KnowledgeServer::default(),
+            None,
+            cancelled,
+        ));
+        for _ in 0..100 {
+            if tokio::net::TcpStream::connect(address).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let client = reqwest::Client::new();
+        let url = format!("http://{address}/mcp");
+        let response = client.post(&url).header("accept", "application/json, text/event-stream").json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"unavailable-read","version":"1"}}})).send().await.unwrap();
+        if oauth {
+            assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+        } else {
+            assert!(response.status().is_success());
+            let session = response.headers()["mcp-session-id"]
+                .to_str()
+                .unwrap()
+                .to_owned();
+            http_json(response).await;
+            client
+                .post(&url)
+                .header("accept", "application/json, text/event-stream")
+                .header("mcp-session-id", &session)
+                .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+                .send()
+                .await
+                .unwrap();
+            for request in [
+                search_request(2, "hybrid", json!({})),
+                json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"knowledge_sync_status","arguments":{}}}),
+            ] {
+                let output = http_json(
+                    client
+                        .post(&url)
+                        .header("accept", "application/json, text/event-stream")
+                        .header("mcp-session-id", &session)
+                        .json(&request)
+                        .send()
+                        .await
+                        .unwrap(),
+                )
+                .await;
+                assert!(
+                    !output
+                        .to_string()
+                        .contains("operational_schema_version\":1")
+                );
+                assert!(!output.to_string().contains("Saffron"));
+                if output["id"] == 2 {
+                    assert!(output.to_string().contains("retrieval_unavailable"));
+                }
+                if output["id"] == 3 {
+                    assert!(
+                        output["result"]["structuredContent"]["operational_schema_version"]
+                            .is_null()
+                    );
+                }
+            }
+        }
+        assert!(!absent.exists());
+        stop.cancel();
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!absent.exists());
+    }
 }

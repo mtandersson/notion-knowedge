@@ -195,6 +195,43 @@ impl GuardedChunkTable {
             })
     }
 
+    /// Open the current compatible search snapshot without index repair or writes.
+    /// The operational authority is rechecked before and after opening storage.
+    pub async fn search_snapshot(&self) -> Result<LanceChunkTable, ChunkTableError> {
+        let _guard = self
+            .coordinator
+            .search_guard()
+            .map_err(|_| ChunkTableError::InvalidPath)?;
+        let current = open_current(&self.index_directory, &self.table_name, &self.embedding)
+            .await?
+            .read_snapshot()
+            .await?;
+        current.validate_vector_index_layout().await?;
+        let indexes = current.table.list_indices().await?;
+        if !indexes
+            .iter()
+            .any(|index| index.name == CHUNK_VECTOR_INDEX_NAME)
+        {
+            return Err(ChunkTableError::InvalidSchema(
+                "required vector index unavailable".into(),
+            ));
+        }
+        for (name, column) in CHUNK_FTS_INDEXES {
+            if !indexes.iter().any(|index| {
+                index.name == name
+                    && index.index_type == IndexType::FTS
+                    && index.columns == vec![column.to_string()]
+            }) {
+                return Err(ChunkTableError::InvalidSchema(
+                    "required FTS index unavailable".into(),
+                ));
+            }
+        }
+        self.coordinator
+            .identities()
+            .map_err(|_| ChunkTableError::InvalidPath)?;
+        Ok(current)
+    }
     /// Read persisted canonical chunks for one selected page, preserving
     /// metadata, stable identities and the old verified content fingerprints.
     /// This is local preparation input only, never source scope evidence.

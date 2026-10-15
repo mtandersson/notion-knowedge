@@ -61,12 +61,10 @@ pub async fn serve_composed(
     >,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> io::Result<()> {
-    let handler = crate::root_scope::attach_root_scope(
-        handler,
-        &settings,
-        crate::root_scope::Transport::Http,
-    )
-    .map_err(io::Error::other)?;
+    let handler =
+        crate::root_scope::compose(handler, &settings, crate::root_scope::Transport::Http)
+            .await
+            .map_err(io::Error::other)?;
     serve_installed(
         settings,
         handler,
@@ -77,7 +75,9 @@ pub async fn serve_composed(
     .await
 }
 
-async fn serve_installed(
+/// Serve a fully installed trusted handler through the ordinary authentication middleware.
+/// Typed integration compositions can supply adapters without environment overrides.
+pub async fn serve_installed(
     settings: crate::config::Config,
     handler: notion_knowledge_mcp::KnowledgeServer,
     #[cfg(all(unix, feature = "webhook-worker"))] worker: Option<
@@ -112,8 +112,10 @@ async fn serve_installed(
         config,
     );
     let bearer = settings.bearer_fallback.map(Arc::new);
-    let admission = match settings.webhook_state_file {
-        Some(path) => {
+    // Operational state supplied for read activation is not webhook admission.
+    // Only explicitly verified webhook mode can create or migrate its inbox.
+    let admission = match (&settings.webhook, settings.webhook_state_file) {
+        (crate::webhook::WebhookConfig::Verified { .. }, Some(path)) => {
             let store = tokio::task::spawn_blocking(move || {
                 notion_knowledge_retrieval::sync_state::SqliteSyncStateStore::open(path)
             })
@@ -128,7 +130,7 @@ async fn serve_installed(
             ))
                 as Arc<dyn notion_knowledge_core::webhook::WebhookAdmission>)
         }
-        None => None,
+        _ => None,
     };
     let diagnostics = diagnostics_router(bind, diagnostics);
     let diagnostics = if settings.health_requires_bearer {

@@ -34,6 +34,7 @@ pub struct Config {
     pub webhook_state_file: Option<std::path::PathBuf>,
     pub webhook_worker: Option<crate::webhook_worker::WorkerSettings>,
     pub reconciliation_schedule: Option<crate::scheduled_reconciliation::Settings>,
+    pub retrieval: Option<crate::webhook_worker::WorkerSettings>,
     pub reconciliation_index: Option<crate::webhook_worker::WorkerSettings>,
 }
 
@@ -567,13 +568,23 @@ impl Config {
                 ));
             }
         };
+        let retrieval_enabled = match lookup("NK_RETRIEVAL").as_deref() {
+            None => false,
+            Some(value) if value == "false" => false,
+            Some(value) if value == "true" => true,
+            _ => return Err(invalid("NK_RETRIEVAL", "must be true or false")),
+        };
         let webhook_state_file =
             if matches!(webhook, crate::webhook::WebhookConfig::Verified { .. })
                 || lookup("NK_RECONCILIATION_INTERVAL_SECONDS").is_some()
+                || retrieval_enabled
             {
                 let path = text(
                     lookup("NK_WEBHOOK_STATE_FILE").ok_or_else(|| {
-                        invalid("NK_WEBHOOK_STATE_FILE", "required in verified mode")
+                        invalid(
+                            "NK_WEBHOOK_STATE_FILE",
+                            "required for configured index state",
+                        )
                     })?,
                     "NK_WEBHOOK_STATE_FILE",
                 )?;
@@ -642,6 +653,19 @@ impl Config {
         } else {
             None
         };
+        let retrieval = if retrieval_enabled {
+            if !cfg!(all(unix, feature = "webhook-worker")) || notion_scope.is_none() {
+                return Err(invalid(
+                    "NK_RETRIEVAL",
+                    "requires Unix webhook-worker feature and trusted scope",
+                ));
+            }
+            Some(crate::webhook_worker::WorkerSettings::index_settings(
+                &mut lookup,
+            )?)
+        } else {
+            None
+        };
         let max_upload_files = optional(&mut lookup, "NK_MAX_UPLOAD_FILES", "4")?
             .parse::<usize>()
             .ok()
@@ -657,6 +681,7 @@ impl Config {
             max_upload_files,
             file_ingestion,
             reconciliation_index,
+            retrieval,
             reconciliation_schedule,
             webhook_worker,
             webhook_state_file,
