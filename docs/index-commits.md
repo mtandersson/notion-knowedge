@@ -219,3 +219,56 @@ search effects and inject an index-write failure after page merge to verify
 repair before acknowledgment. This instrumentation is excluded from production
 builds; the normal optimized local filesystem path remains covered by the
 integration suite.
+
+## Owned relation projection capability
+
+`PageOperation::with_relation_projection(RelationProjection::new(...))` opts a
+complete page proposal into version 1 relation projection. The proposal binds the
+exact index/table/workspace/scope/generation/epoch and page, resolved and unresolved
+targets, stable property provenance, optional human labels and tombstone state.
+Duplicate identical edges normalize away; conflicting labels for one edge fail
+validation. An empty live projection and an empty tombstone are distinct valid
+effects. This is derived data, never source or target authorization. Callers must
+supply freshly verified source/target evidence through the guarded precommit check.
+
+The actual `GuardedChunkTable::commit_page` still owns the cross-process directory
+guard and detached runtime: it reopens and checks the pinned Lance version,
+revalidates source and the lease, then replaces vectors and finishes FTS/vector
+maintenance. Only then does the coordinator's final fenced SQLite transaction
+replace relation-family edges, record completeness, update the page checkpoint
+and acknowledge the receipt. Link edges survive. No graph helper recursively
+locks the SQLite connection. Graph or final-ack persistence failure rolls back
+that whole SQLite transaction, preserving previous committed history; the newer
+receipt stays Pending and blocks serving. Lance may already contain the new
+vectors. Reopen, reprepare from current Lance (reusing unchanged vectors), obtain
+current source authority and lease, and replay the same pending operation. No
+successful receipt is fabricated for partial effects. Observer cancellation does
+not cancel the owned operation or release its guard.
+
+Schema 15 adds `page_relation_projections` and `relation_operation_proposals`.
+Only explicit writable initialization migrates; existing/read-only opening still
+rejects historical schemas without changing them. `relation_projection_complete`
+is read-only, including on a read-only coordinator. In one read transaction it
+checks binding, projection version and exact expected effect, then compares the
+actual relation rows including labels and target resolution. Missing rows,
+modified rows, a missing completeness record, incompatible versions or an old
+generation cannot be mistaken for valid zero-edge completeness. A legacy write
+without a projection invalidates an older completeness record but retains its
+previous graph behavior. Deleting the completeness record intentionally requests
+repair even if the graph happens to match.
+
+Applied receipts are immutable. Replaying a projected operation only returns
+AlreadyApplied if its acknowledged proposal identity and current complete graph
+both match; a legacy Applied receipt or a missing/changed effect returns
+`CommitError::ProjectionRepairRequired` before invoking external effects. Repair
+uses a **fresh operation ID**, a newly prepared complete page operation with
+`with_relation_projection`, and fresh precommit authorization. It runs through
+the same real guarded Lance/SQLite boundary and creates its own receipt; it never
+rewrites the original Applied receipt. An Applied receipt whose original proposal
+had no projection continues to require this explicit repair path. Pending strict
+operations cannot change the proposed effect; existing retryable refresh/lifecycle
+operations may replace their unacknowledged proposal under the same guard.
+
+This capability does not activate Notion relation projection in production refresh,
+webhook, manual or periodic composition. Source/target proposals and installation
+are subsequent issues; planner-wide convergence is separate work.

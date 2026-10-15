@@ -1,4 +1,6 @@
 -- Restore a historical fixture before exercising the older additive migrations.
+DROP TABLE relation_operation_proposals;
+DROP TABLE page_relation_projections;
 ALTER TABLE graph_edges DROP COLUMN display_name;
 DROP TRIGGER reconciliation_inventory_failure_history;
 DROP TRIGGER reconciliation_run_failure_history;

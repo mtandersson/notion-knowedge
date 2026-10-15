@@ -20,10 +20,13 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use tokio::sync::oneshot;
 
 use crate::sync_state::SqliteSyncStateStore;
+mod projection;
+pub use projection::RelationProjection;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommitError {
     InvalidInput,
+    ProjectionRepairRequired,
     BindingMismatch,
     LeaseLost,
     Conflict,
@@ -121,6 +124,7 @@ pub struct PageOperation {
     action: PageAction,
     checkpoint: PageSyncState,
     metadata_identity: Option<String>,
+    relation_projection: Option<RelationProjection>,
     retry_latest_refresh: bool,
     retry_latest_lifecycle: bool,
 }
@@ -150,6 +154,7 @@ impl PageOperation {
             action,
             checkpoint,
             metadata_identity: None,
+            relation_projection: None,
             retry_latest_refresh: false,
             retry_latest_lifecycle: false,
         })
@@ -188,6 +193,19 @@ impl PageOperation {
             return Err(CommitError::InvalidInput);
         }
         self.metadata_identity = Some(identity);
+        Ok(self)
+    }
+    /// Attach a complete relation effect. Replaying an immutable Applied receipt
+    /// whose effect is absent returns ProjectionRepairRequired; use a fresh
+    /// operation ID and freshly authorized complete page proposal for repair.
+    pub fn with_relation_projection(
+        mut self,
+        projection: RelationProjection,
+    ) -> Result<Self, CommitError> {
+        if projection.page_id() != self.checkpoint.page_id() {
+            return Err(CommitError::InvalidInput);
+        }
+        self.relation_projection = Some(projection);
         Ok(self)
     }
     pub fn id(&self) -> &str {
@@ -832,6 +850,11 @@ impl IndexCommitCoordinator {
         self.validate_binding(&tx)?;
         self.validate_fence(&tx, lease, now)?;
         let checkpoint = &operation.checkpoint;
+        if let Some(projection) = &operation.relation_projection
+            && !projection.matches_operation(&self.binding, operation)
+        {
+            return Err(CommitError::BindingMismatch);
+        }
         let existing: Option<(bool, i64, bool)> = tx.query_row("SELECT generation=?2 AND page_id=?3 AND revision=?4 AND action=?5 AND content_hash IS ?6 AND last_edited_time IS ?7,status,generation=?2 AND page_id=?3 AND (action=?5 OR ?8) FROM index_commit_receipts WHERE operation_id=?1",params![operation.id,self.binding.generation,checkpoint.page_id(),operation.revision,operation.action.number(),checkpoint.content_hash(),checkpoint.last_edited_time(),operation.retry_latest_lifecycle],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(sql)?;
         if let Some((matches, status, same_authority)) = existing {
             // An acknowledged hint stays acknowledged even if the source
@@ -840,6 +863,21 @@ impl IndexCommitCoordinator {
                 && same_authority
                 && status == 1
             {
+                if let Some(projection) = &operation.relation_projection {
+                    let proposed: Option<String> = tx
+                        .query_row(
+                            "SELECT effect FROM relation_operation_proposals WHERE operation_id=?1",
+                            [&operation.id],
+                            |r| r.get(0),
+                        )
+                        .optional()
+                        .map_err(sql)?;
+                    if proposed.as_deref() != Some(&projection.effect)
+                        || !projection.complete(&tx)?
+                    {
+                        return Err(CommitError::ProjectionRepairRequired);
+                    }
+                }
                 tx.commit().map_err(sql)?;
                 return Ok(false);
             }
@@ -854,6 +892,21 @@ impl IndexCommitCoordinator {
                 return Err(CommitError::Conflict);
             }
             if status == 1 {
+                if let Some(projection) = &operation.relation_projection {
+                    let proposed: Option<String> = tx
+                        .query_row(
+                            "SELECT effect FROM relation_operation_proposals WHERE operation_id=?1",
+                            [&operation.id],
+                            |r| r.get(0),
+                        )
+                        .optional()
+                        .map_err(sql)?;
+                    if proposed.as_deref() != Some(&projection.effect)
+                        || !projection.complete(&tx)?
+                    {
+                        return Err(CommitError::ProjectionRepairRequired);
+                    }
+                }
                 tx.commit().map_err(sql)?;
                 return Ok(false);
             }
@@ -870,6 +923,36 @@ impl IndexCommitCoordinator {
                     checkpoint.content_hash(),
                     checkpoint.last_edited_time()
                 ],
+            )
+            .map_err(sql)?;
+        }
+        let previous: Option<String> = tx
+            .query_row(
+                "SELECT effect FROM relation_operation_proposals WHERE operation_id=?1",
+                [&operation.id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql)?;
+        let proposed = operation
+            .relation_projection
+            .as_ref()
+            .map(|p| p.effect.as_str());
+        if previous.as_deref() != proposed
+            && !(operation.retry_latest_refresh || operation.retry_latest_lifecycle)
+            && existing.is_some()
+        {
+            return Err(CommitError::Conflict);
+        }
+        tx.execute(
+            "DELETE FROM relation_operation_proposals WHERE operation_id=?1",
+            [&operation.id],
+        )
+        .map_err(sql)?;
+        if let Some(effect) = proposed {
+            tx.execute(
+                "INSERT INTO relation_operation_proposals VALUES(?1,?2)",
+                params![operation.id, effect],
             )
             .map_err(sql)?;
         }
@@ -892,6 +975,16 @@ impl IndexCommitCoordinator {
             .map_err(sql)?;
         self.validate_binding(&tx)?;
         self.validate_fence(&tx, lease, now)?;
+        if let Some(projection) = &operation.relation_projection {
+            projection.install(&tx)?;
+        } else {
+            // A legacy write cannot attest that an earlier graph is current.
+            tx.execute(
+                "DELETE FROM page_relation_projections WHERE page_id=?1",
+                [operation.checkpoint.page_id()],
+            )
+            .map_err(sql)?;
+        }
         let checkpoint = &operation.checkpoint;
         tx.execute("INSERT INTO page_sync_state VALUES(?1,?2,?3,?4,unixepoch()) ON CONFLICT(page_id) DO UPDATE SET content_hash=excluded.content_hash,last_edited_time=excluded.last_edited_time,tombstoned=excluded.tombstoned,updated_at_unix=excluded.updated_at_unix",params![checkpoint.page_id(),checkpoint.content_hash(),checkpoint.last_edited_time(),i64::from(checkpoint.is_tombstone())]).map_err(sql)?;
         tx.execute(

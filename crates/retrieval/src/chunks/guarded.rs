@@ -63,7 +63,8 @@ fn failure(error: ChunkTableError) -> FailureClass {
 
 fn fence_failure(error: CommitError) -> FailureClass {
     match error {
-        CommitError::InvalidInput
+        CommitError::ProjectionRepairRequired
+        | CommitError::InvalidInput
         | CommitError::BindingMismatch
         | CommitError::LeaseLost
         | CommitError::Conflict => FailureClass::Conflict,
