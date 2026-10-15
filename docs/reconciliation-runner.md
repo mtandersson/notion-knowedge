@@ -122,3 +122,9 @@ current projection before acknowledging historical journal work. A graph failure
 cannot acknowledge that work. The historical outcome still describes its original
 operation; the repair's own receipt attests current projection completeness.
 See [installed authoritative relations](authoritative-relations.md).
+
+Explicit `begin_relation_rebuild` atomically creates the inventory run and
+invalidates derived relation completeness within owned maintenance, under the
+directory guard and current binding/fence. Ordinary apply/resume then plans and
+commits repairs through the same refresh; failed invalidation creates neither a
+run nor partial invalidation. See the [operator procedure](authoritative-relations.md#explicit-derived-relation-rebuild).

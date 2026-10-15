@@ -1,10 +1,10 @@
 //! Physically authorized relation proposals. No discovery, target content or writes.
 use crate::{NotionClient, prepare::ScopedPageSnapshot};
 use notion_knowledge_core::{
-    backend::{BackendError, BackendErrorKind, BackendFuture, PageId},
+    backend::{BackendError, BackendErrorKind, BackendFuture, Page, PageId},
     chunking::ChunkConfig,
     graph::GraphEdge,
-    indexed::{IndexedChunk, PropertyValue},
+    indexed::{IndexedChunk, IndexedMetadata, PropertyValue, SourceMetadata},
     lifecycle::{LifecycleEvidence, LifecycleScope, PageLifecycle},
     relations::relation_edges_with_names,
     root_scope::{RootScopeGate, ScopeError},
@@ -116,25 +116,23 @@ impl RelationProposalAdapter {
     }
     async fn targets(
         &self,
-        snapshot: &ScopedPageSnapshot,
+        metadata: &IndexedMetadata,
+        names: &BTreeMap<String, String>,
+        source: &LifecycleEvidence,
         scope: &LifecycleScope,
     ) -> Result<CandidateProjection, BackendError> {
         let mut targets = BTreeSet::new();
-        for value in snapshot.document.metadata.properties.values() {
+        for value in metadata.properties.values() {
             if let PropertyValue::PageIds(ids) = value {
                 targets.extend(ids.iter().cloned());
             }
         }
         // Validate bounds before making candidate requests.
-        relation_edges_with_names(
-            &snapshot.document.metadata,
-            &snapshot.relation_names,
-            &BTreeSet::from([snapshot.document.metadata.page_id.clone()]),
-        )
-        .map_err(|_| conflict())?;
+        relation_edges_with_names(metadata, names, &BTreeSet::from([metadata.page_id.clone()]))
+            .map_err(|_| conflict())?;
         let mut outcomes = BTreeMap::new();
         let mut evidence = BTreeMap::new();
-        let mut allowed = BTreeSet::from([snapshot.document.metadata.page_id.clone()]);
+        let mut allowed = BTreeSet::from([metadata.page_id.clone()]);
         for target in targets {
             let recording = Arc::new(RecordingLifecycle {
                 client: self.client.clone(),
@@ -151,9 +149,7 @@ impl RelationProposalAdapter {
                 .map_err(|_| conflict())?
                 .take()
                 .unwrap_or(Err(BackendErrorKind::InvalidInput));
-            if target == snapshot.document.metadata.page_id
-                && observed.as_ref().ok() != Some(&snapshot.evidence)
-            {
+            if target == metadata.page_id && observed.as_ref().ok() != Some(source) {
                 return Err(conflict());
             }
             evidence.insert(target.clone(), observed);
@@ -162,13 +158,56 @@ impl RelationProposalAdapter {
             }
             outcomes.insert(target, outcome);
         }
-        let edges = relation_edges_with_names(
-            &snapshot.document.metadata,
-            &snapshot.relation_names,
-            &allowed,
-        )
-        .map_err(|_| conflict())?;
+        let edges = relation_edges_with_names(metadata, names, &allowed).map_err(|_| conflict())?;
         Ok((edges, outcomes, evidence))
+    }
+    /// Read-only metadata proposal for reconciliation planning. It never fetches
+    /// Markdown or confers commit authority; apply must prepare and revalidate.
+    pub async fn inspect_metadata(
+        &self,
+        page: &Page,
+        evidence: &LifecycleEvidence,
+    ) -> Result<Vec<GraphEdge>, BackendError> {
+        let scope = self.policy.read().await.clone();
+        if scope != evidence.scope
+            || evidence
+                .ancestry
+                .first()
+                .is_none_or(|node| node.id != page.id.0)
+            || page.archived
+        {
+            return Err(conflict());
+        }
+        let root = match &evidence.status {
+            notion_knowledge_core::lifecycle::LifecycleStatus::Allowed { roots } => {
+                roots.first().ok_or_else(conflict)?
+            }
+            _ => return Err(conflict()),
+        };
+        let metadata = IndexedMetadata {
+            page_id: page.id.0.clone(),
+            block_id: None,
+            url: page.url.clone(),
+            title: page.title.clone(),
+            heading_path: vec![],
+            last_edited_time: page.last_edited_time.clone(),
+            source: SourceMetadata {
+                workspace_id: scope.workspace_id.clone(),
+                root_page_id: root.clone(),
+                database_id: None,
+                data_source_id: None,
+            },
+            properties: page.properties.clone(),
+        };
+        let (edges, _, _) = self
+            .targets(&metadata, &page.relation_names, evidence, &scope)
+            .await?;
+        if self.client.fetch_page(&page.id.0).await? != *page || *self.policy.read().await != scope
+        {
+            return Err(conflict());
+        }
+        self.client.revalidate_lifecycle(evidence, &scope).await?;
+        Ok(edges)
     }
     pub async fn prepare(
         &self,
@@ -182,7 +221,14 @@ impl RelationProposalAdapter {
             .client
             .prepare_scoped_page(page, root, &scope, previous, chunks)
             .await?;
-        let (edges, targets, evidence) = self.targets(&snapshot, &scope).await?;
+        let (edges, targets, evidence) = self
+            .targets(
+                &snapshot.document.metadata,
+                &snapshot.relation_names,
+                &snapshot.evidence,
+                &scope,
+            )
+            .await?;
         if *self.policy.read().await != scope {
             return Err(conflict());
         }
@@ -234,7 +280,14 @@ impl RelationProposalAdapter {
         if self.client.read_content(page).await? != proposal.snapshot.source {
             return Err(conflict());
         }
-        let (edges, targets, evidence) = self.targets(&proposal.snapshot, &scope).await?;
+        let (edges, targets, evidence) = self
+            .targets(
+                &proposal.snapshot.document.metadata,
+                &proposal.snapshot.relation_names,
+                &proposal.snapshot.evidence,
+                &scope,
+            )
+            .await?;
         if edges != proposal.edges || targets != proposal.targets || evidence != proposal.evidence {
             return Err(conflict());
         }

@@ -23,7 +23,12 @@ A failed page does not hide unrelated refresh candidates.
 Absence alone never authorizes deletion. Orphans need complete traversal and
 fresh affirmative inactive/outside-scope/exclusion evidence, followed by lifecycle
 revalidation. Inaccessible skips, failed traversal, inspection errors, or changed
-local Lance version/snapshot prevent orphan deletion. Fresh exact metadata is
+local Lance version/snapshot prevent orphan deletion. Fresh relation targets are independently inspected using physical lifecycle evidence;
+exact projection completeness includes generation/version, labels, actual rows and
+valid empty live/tombstone effects. Missing, incompatible or target-changed effects
+classify an otherwise unchanged live source as stale. Completed tombstones with
+missing projections remain removal candidates. No target becomes a discovery or
+content-read candidate through a relation. Fresh exact metadata is
 read twice to reject same-timestamp property/title races. This remains a sequential
 source observation, not an atomic Notion snapshot: the apply runner must revalidate
 all source evidence inside the existing guarded commit and use current durable

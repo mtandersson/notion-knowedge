@@ -29,18 +29,26 @@ require the explicit rebuild/recovery procedure, never an implicit migration.
 ```sh
 notion-knowledge-server --reconcile dry-run
 notion-knowledge-server --reconcile apply operator-2026-10-12
+notion-knowledge-server --reconcile rebuild-relations relations-2026-10-15
 notion-knowledge-server --reconcile status operator-2026-10-12
 notion-knowledge-server --reconcile resume operator-2026-10-12
 notion-knowledge-server --reconcile retry operator-2026-10-12 PAGE_UUID
 ```
 
-Run IDs are 1–128 ASCII letters, digits, `_` or `-`. `apply` requires a new ID;
+Run IDs are 1–128 ASCII letters, digits, `_` or `-`. `apply` and `rebuild-relations` require a new ID;
 `resume` and `status` require an existing run under the exact configured
 binding. `retry` requires a failed application page in an open run and replans
 that page explicitly. Unknown, extra or mixed transport/operator arguments fail
 before credentials or state are used. Successful pages cannot be retried, and
 resume never retries failed pages implicitly. Planning/access failures appear
 separately; use a new run after repairing discovery/permissions.
+
+`rebuild-relations` atomically starts inventory and invalidates only derived
+relation completeness through owned, fenced maintenance, then uses the same
+planner/runner as apply. It preserves graph rows until authoritative replacement,
+unrelated links, content vectors, immutable receipts and operational coordination.
+Resume/retry use the same run after interruption or graph failure. See the
+[relation rebuild and recovery procedure](authoritative-relations.md#explicit-derived-relation-rebuild).
 
 Dry-run only reads local authority and fresh Notion metadata/lifecycle/discovery;
 it extracts no Markdown and embeds nothing. Status reads only local durable

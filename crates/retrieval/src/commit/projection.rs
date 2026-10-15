@@ -202,6 +202,29 @@ impl IndexCommitCoordinator {
             .map(|_| id))
     }
 
+    /// Explicit operator invalidation of derived completeness only. The owned
+    /// maintenance guard and current writer fence serialize it with all commits.
+    /// Existing edges, immutable receipts and operational coordination survive.
+    #[cfg(feature = "local-lancedb")]
+    pub(crate) fn begin_relation_rebuild(
+        self: &Arc<Self>,
+        run: String,
+        scope: ReconciliationScope,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> impl Future<Output = Result<(), CommitError>> + Send + 'static {
+        self.maintain(lease, clock, move |context| async move {
+            context
+                .invalidate_relation_projections(&run, &scope)
+                .map_err(|error| match error {
+                    CommitError::LeaseLost
+                    | CommitError::BindingMismatch
+                    | CommitError::Conflict => FailureClass::Conflict,
+                    _ => FailureClass::Unavailable,
+                })
+        })
+    }
+
     /// Verify the current exact persisted effect without treating edges as authority.
     pub fn current_relation_projection_complete(&self, page: &str) -> Result<bool, CommitError> {
         self.identities()?;
@@ -277,4 +300,44 @@ pub(crate) fn current_complete(
     }
     let edges = crate::graph::read_edges(db,"SELECT source_page_id,target_page_id,unresolved_reference,relation_type,provenance,display_name FROM graph_edges WHERE source_page_id=?1 AND substr(relation_type,1,9)='relation:'",page).map_err(|_|CommitError::Unavailable)?;
     Ok(RelationProjection::new(binding, page, tombstone, edges)?.effect == effect)
+}
+
+#[cfg(feature = "local-lancedb")]
+impl CommitContext {
+    fn invalidate_relation_projections(
+        &self,
+        run: &str,
+        scope: &ReconciliationScope,
+    ) -> Result<(), CommitError> {
+        self.coordinator.identities()?;
+        let mut db = self
+            .coordinator
+            .state
+            .lock_connection()
+            .map_err(|_| CommitError::Unavailable)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql)?;
+        self.coordinator.validate_binding(&tx)?;
+        self.coordinator
+            .validate_fence(&tx, &self.lease, (self.clock)())?;
+        if scope.identity() != self.coordinator.binding.scope {
+            return Err(CommitError::BindingMismatch);
+        }
+        let current =
+            crate::reconciliation::start_run(&tx, &self.lease, (self.clock)(), run, scope)
+                .map_err(|_| CommitError::Conflict)?;
+        if current.phase != notion_knowledge_core::reconciliation::RunPhase::Inventory {
+            return Err(CommitError::Conflict);
+        }
+        tx.execute(
+            "DELETE FROM page_relation_projections WHERE generation=?1",
+            [&self.coordinator.binding.generation],
+        )
+        .map_err(sql)?;
+        self.coordinator
+            .validate_fence(&tx, &self.lease, (self.clock)())?;
+        tx.commit().map_err(sql)?;
+        Ok(())
+    }
 }

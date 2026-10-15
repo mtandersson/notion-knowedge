@@ -3,6 +3,7 @@ use notion_knowledge_notion::pages::page_id;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Apply(String),
+    RebuildRelations(String),
     DryRun,
     ScheduleStatus,
     ScheduleHistory(i64),
@@ -115,6 +116,7 @@ impl Command {
                 })
             }
             ["--reconcile", "apply", id] => Ok(Self::Apply(run(id)?)),
+            ["--reconcile", "rebuild-relations", id] => Ok(Self::RebuildRelations(run(id)?)),
             ["--reconcile", "resume", id] => Ok(Self::Resume(run(id)?)),
             ["--reconcile", "status", id] => Ok(Self::Status(run(id)?)),
             ["--reconcile", "retry", id, page] => Ok(Self::Retry {
@@ -124,7 +126,7 @@ impl Command {
                     .0,
             }),
             _ => Err(
-                "expected --reconcile apply RUN | dry-run | resume RUN | status RUN | retry RUN PAGE",
+                "expected --reconcile apply RUN | rebuild-relations RUN | dry-run | resume RUN | status RUN | retry RUN PAGE",
             ),
         }
     }
@@ -263,12 +265,17 @@ pub mod runtime {
             | Command::ScheduleAbandon(_)
             | Command::ScheduleInterval { .. }
             | Command::ScheduleConfigure { .. } => None,
-            Command::Apply(s) | Command::Resume(s) | Command::Status(s) => Some(s),
+            Command::Apply(s)
+            | Command::RebuildRelations(s)
+            | Command::Resume(s)
+            | Command::Status(s) => Some(s),
             Command::Retry { run, .. } => Some(run),
         } {
             let existing = inspected.coordinator.state().run(id, &inspected.scope);
             let valid = match &command {
-                Command::Apply(_) => matches!(existing, Err(JournalError::InvalidTransition)),
+                Command::Apply(_) | Command::RebuildRelations(_) => {
+                    matches!(existing, Err(JournalError::InvalidTransition))
+                }
                 Command::Retry { page, .. } => {
                     existing.is_ok_and(|r| r.phase == RunPhase::Applying)
                         && inspected
@@ -319,9 +326,10 @@ pub mod runtime {
             Ok(r) => r,
             Err(_) => return Output::error("index_state_configuration", 2),
         };
-        let fresh_run = matches!(command, Command::Apply(_));
+        let fresh_run = matches!(command, Command::Apply(_) | Command::RebuildRelations(_));
+        let mut rebuild_relations = matches!(command, Command::RebuildRelations(_));
         let (run, retry) = match command {
-            Command::Apply(id) | Command::Resume(id) => (id, None),
+            Command::Apply(id) | Command::RebuildRelations(id) | Command::Resume(id) => (id, None),
             Command::Retry { run, page } => (run, Some(page)),
             _ => unreachable!(),
         };
@@ -358,7 +366,14 @@ pub mod runtime {
                 }
             });
             let page = retry.take();
+            let rebuild = std::mem::take(&mut rebuild_relations);
             let work = async {
+                if rebuild {
+                    runtime
+                        .runner
+                        .begin_relation_rebuild(&run, lease.clone(), clock.clone())
+                        .await?;
+                }
                 if let Some(page) = &page {
                     runtime
                         .runner
