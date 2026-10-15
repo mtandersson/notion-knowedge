@@ -177,3 +177,36 @@ fn empty_or_removed_relation_property_emits_empty_replacement() {
     let no_targets = metadata(relations(&[]));
     assert!(relation_edges(&no_targets, &pages()).unwrap().is_empty());
 }
+
+#[test]
+fn equal_unicode_names_do_not_merge_distinct_stable_relation_properties() {
+    let metadata = metadata(
+        ["first-id", "second-id"]
+            .into_iter()
+            .map(|id| {
+                (
+                    id.into(),
+                    PropertyValue::PageIds(vec!["inside-a".into(), "inside-a".into()]),
+                )
+            })
+            .collect(),
+    );
+    let names = ["first-id", "second-id"]
+        .into_iter()
+        .map(|id| (id.into(), "Ägare / 所有者".into()))
+        .collect();
+    let edges =
+        notion_knowledge_core::relations::relation_edges_with_names(&metadata, &names, &pages())
+            .unwrap();
+    let store = SqliteSyncStateStore::open_in_memory().unwrap();
+    store.replace_page_relation_edges("source", &edges).unwrap();
+    let stored = store.edges_to("inside-a").unwrap();
+    assert_eq!(stored.len(), 2);
+    assert!(
+        stored
+            .iter()
+            .all(|edge| edge.display_name() == Some("Ägare / 所有者"))
+    );
+    assert_ne!(stored[0].provenance(), stored[1].provenance());
+    assert_ne!(stored[0].relation_type(), stored[1].relation_type());
+}

@@ -596,7 +596,10 @@ fn schema_eleven_upgrade_is_atomic_and_read_only_current_schema_inspection_creat
         .unwrap();
     drop(raw);
     let upgraded = SqliteSyncStateStore::open(&f.state).unwrap();
-    assert_eq!(upgraded.schema_version().unwrap(), 13);
+    assert_eq!(
+        upgraded.schema_version().unwrap(),
+        notion_knowledge_retrieval::sync_state::LATEST_SCHEMA_VERSION
+    );
     assert_eq!(
         upgraded.page_state("page").unwrap().unwrap().content_hash(),
         Some("hash")
@@ -619,7 +622,10 @@ fn schema_eleven_upgrade_is_atomic_and_read_only_current_schema_inspection_creat
         .map(|e| e.unwrap().file_name())
         .collect::<Vec<_>>();
     let ro = SqliteSyncStateStore::open_read_only(&f.state).unwrap();
-    assert_eq!(ro.schema_version().unwrap(), 13);
+    assert_eq!(
+        ro.schema_version().unwrap(),
+        notion_knowledge_retrieval::sync_state::LATEST_SCHEMA_VERSION
+    );
     assert!(ro.acquire_lease(100, 10).is_err());
     drop(ro);
     assert_eq!(before, fs::read(&f.state).unwrap());

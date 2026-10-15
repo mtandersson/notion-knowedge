@@ -24,6 +24,7 @@ pub struct GraphEdge {
     target: GraphTarget,
     relation_type: String,
     provenance: String,
+    display_name: Option<String>,
 }
 
 impl GraphEdge {
@@ -45,7 +46,25 @@ impl GraphEdge {
             target,
             relation_type,
             provenance,
+            display_name: None,
         })
+    }
+
+    /// Attach the authoritative property label without changing edge identity.
+    pub fn with_display_name(mut self, name: String) -> Result<Self, SyncStateError> {
+        if !self.relation_type.starts_with("relation:")
+            || self.provenance != format!("property:{}", &self.relation_type[9..])
+            || name.chars().count() > 4096
+        {
+            return Err(SyncStateError::InvalidInput);
+        }
+        self.display_name = Some(name);
+        Ok(self)
+    }
+
+    /// None means that no authoritative label was present in the snapshot.
+    pub fn display_name(&self) -> Option<&str> {
+        self.display_name.as_deref()
     }
 
     pub fn source_page_id(&self) -> &str {

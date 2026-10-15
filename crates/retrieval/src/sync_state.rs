@@ -13,9 +13,10 @@ use notion_knowledge_core::sync_state::{
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
-pub const LATEST_SCHEMA_VERSION: i64 = 13;
+pub const LATEST_SCHEMA_VERSION: i64 = 14;
 
 const MIGRATIONS: &[(i64, &str, &str)] = &[
+    // Entries below stay append-only and ordered.
     (
         1,
         "initial_sync_state",
@@ -80,6 +81,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         13,
         "sync_success",
         include_str!("../migrations/0013_sync_success.sql"),
+    ),
+    (
+        14,
+        "relation_display_names",
+        include_str!("../migrations/0014_relation_display_names.sql"),
     ),
 ];
 

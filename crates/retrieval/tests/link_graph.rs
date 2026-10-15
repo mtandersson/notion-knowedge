@@ -19,6 +19,7 @@ const ROOT: &str = "55555555-5555-4555-8555-555555555555";
 fn content(markdown: &str) -> PageContent {
     PageContent {
         page: Page {
+            relation_names: Default::default(),
             id: PageId(SOURCE.to_owned()),
             url: format!("https://notion.so/{SOURCE}"),
             title: "Source".into(),

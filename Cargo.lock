@@ -4684,6 +4684,8 @@ name = "notion-knowledge-mcp"
 version = "0.1.0"
 dependencies = [
  "notion-knowledge-core",
+ "notion-knowledge-notion",
+ "notion-knowledge-retrieval",
  "rmcp",
  "serde",
  "serde_json",

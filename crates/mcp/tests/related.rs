@@ -396,3 +396,141 @@ async fn mcp_exposes_scoped_graph_only_when_installed_and_checks_wire_contract()
     let response = exchange(invalid, json!({"page_id":ROOT,"depth":9})).await;
     assert!(response.get("error").is_some(), "{response}");
 }
+
+#[tokio::test]
+async fn authoritative_relation_labels_survive_sqlite_and_rename_without_changing_identity() {
+    use notion_knowledge_core::{
+        indexed::{IndexedMetadata, SourceMetadata},
+        relations::relation_edges_with_names,
+    };
+    use notion_knowledge_notion::NotionClient;
+    use notion_knowledge_retrieval::sync_state::SqliteSyncStateStore;
+    use tokio::io::AsyncReadExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = NotionClient::integration("fixture-credential")
+        .unwrap()
+        .with_loopback_fixture(listener.local_addr().unwrap().port());
+    let fixture = tokio::spawn(async move {
+        for (label, targets) in [
+            ("Projekt", vec![A, A, B, BLOCKED]),
+            ("Ägare / 所有者", vec![A, A, B, BLOCKED]),
+            ("Ägare / 所有者", vec![]),
+        ] {
+            let mut properties = serde_json::Map::new();
+            properties.insert(
+                "Title".into(),
+                json!({"id":"title","type":"title","title":[{"plain_text":"Source"}]}),
+            );
+            properties.insert(label.into(), json!({"id":"stable%3Aid","type":"relation","relation":targets.into_iter().map(|id| json!({"id":id})).collect::<Vec<_>>(),"has_more":false}));
+            let body = json!({"object":"page","id":ROOT,"url":format!("https://www.notion.so/{ROOT}"),"archived":false,"last_edited_time":"2026-10-15T00:00:00Z","properties":properties}).to_string();
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 8192];
+            let count = socket.read(&mut request).await.unwrap();
+            assert!(
+                String::from_utf8_lossy(&request[..count])
+                    .starts_with(&format!("GET /v1/pages/{ROOT} "))
+            );
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        }
+    });
+    let path = std::env::temp_dir().join(format!("nk382-navigation-{}.sqlite", std::process::id()));
+    let store = SqliteSyncStateStore::open(&path).unwrap();
+    let link = edge(ROOT, C, "link:page", "markdown:0");
+    store
+        .replace_page_link_edges(ROOT, std::slice::from_ref(&link))
+        .unwrap();
+    let request = RelatedRequest {
+        page_id: ROOT.into(),
+        depth: 1,
+        limit: 100,
+    };
+    let allowed = [ROOT, A, B, C].into_iter().map(str::to_owned).collect();
+    let mut initial_identity = None;
+    for label in ["Projekt", "Ägare / 所有者", "Ägare / 所有者"] {
+        let page = client.fetch_page(ROOT).await.unwrap();
+        assert_eq!(page.relation_names["stable%3Aid"], label);
+        let names = page.relation_names;
+        let metadata = IndexedMetadata {
+            page_id: page.id.0,
+            block_id: None,
+            url: page.url,
+            title: page.title,
+            heading_path: vec![],
+            last_edited_time: page.last_edited_time,
+            source: SourceMetadata {
+                workspace_id: WORKSPACE.into(),
+                root_page_id: ROOT.into(),
+                database_id: None,
+                data_source_id: None,
+            },
+            properties: page.properties,
+        };
+        let edges = relation_edges_with_names(&metadata, &names, &allowed).unwrap();
+        store.replace_page_relation_edges(ROOT, &edges).unwrap();
+        store.replace_page_relation_edges(ROOT, &edges).unwrap();
+        // Read a separate read-only connection: results must come from durable SQLite.
+        let reader = SqliteSyncStateStore::open_read_only(&path).unwrap();
+        let response = related::navigate(&request, &reader, &gate(), &[ROOT.into()])
+            .await
+            .unwrap();
+        if edges.is_empty() {
+            assert_eq!(reader.edges_from(ROOT).unwrap(), vec![link.clone()]);
+            assert_eq!(response.relations.len(), 1);
+        } else {
+            assert_eq!(edges.len(), 3); // repeated target deduplicated, unresolved retained
+            assert_eq!(response.relations.len(), 3); // unresolved never navigated
+            let visible = response
+                .relations
+                .iter()
+                .filter(|e| e.provenance == "property:stable%3Aid")
+                .collect::<Vec<_>>();
+            assert_eq!(visible.len(), 2);
+            assert!(
+                visible
+                    .iter()
+                    .all(|e| e.display_name.as_deref() == Some(label))
+            );
+            let identity = visible
+                .iter()
+                .map(|e| {
+                    (
+                        e.source_page_id.clone(),
+                        e.target_page_id.clone(),
+                        e.relation_type.clone(),
+                        e.provenance.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if let Some(initial) = &initial_identity {
+                assert_eq!(&identity, initial);
+            } else {
+                initial_identity = Some(identity);
+            }
+            assert!(reader.edges_to(BLOCKED).unwrap().is_empty());
+            let configured = KnowledgeServer::default()
+                .and_authoritative_scope(
+                    Arc::new(LifecycleFixture),
+                    gate().configured_scope().clone(),
+                )
+                .unwrap()
+                .and_related_graph(Arc::new(reader))
+                .unwrap();
+            let wire = exchange(configured, json!({"page_id":ROOT})).await;
+            let wire_edges = wire["result"]["structuredContent"]["relations"]
+                .as_array()
+                .unwrap();
+            assert_eq!(
+                wire_edges
+                    .iter()
+                    .filter(|edge| edge["display_name"] == label
+                        && edge["provenance"] == "property:stable%3Aid")
+                    .count(),
+                2
+            );
+        }
+    }
+    fixture.await.unwrap();
+    drop(store);
+    std::fs::remove_file(path).unwrap();
+}

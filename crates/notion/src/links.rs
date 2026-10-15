@@ -344,6 +344,7 @@ mod tests {
     fn content(markdown: String) -> PageContent {
         PageContent {
             page: Page {
+                relation_names: Default::default(),
                 id: PageId(ID.into()),
                 url: format!("https://notion.so/{ID}"),
                 title: "Source".into(),

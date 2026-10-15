@@ -27,6 +27,7 @@ fn fixture() -> Reader {
     Reader {
         current: Mutex::new(PageContent {
             page: Page {
+                relation_names: Default::default(),
                 id: PageId(ID.into()),
                 url: format!("https://www.notion.so/{ID}"),
                 title: "Private title".into(),

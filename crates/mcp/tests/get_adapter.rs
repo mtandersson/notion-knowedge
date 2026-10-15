@@ -314,6 +314,7 @@ enum FreshBehavior {
 impl FreshFixture {
     fn page(&self, id: &PageId) -> Page {
         Page {
+            relation_names: Default::default(),
             id: if matches!(self.behavior, FreshBehavior::WrongPage) {
                 PageId("wrong-page".into())
             } else {

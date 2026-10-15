@@ -206,3 +206,52 @@ fn versioned_schema_enforces_target_invariant_and_has_lookup_indexes() {
         );
     }
 }
+
+#[test]
+fn relation_label_migration_is_explicit_and_preserves_operational_state_and_legacy_edges() {
+    let db = TestDb::new();
+    let store = SqliteSyncStateStore::open(&db.0).unwrap();
+    let legacy = page("source", "target", "relation:stable", "property:stable");
+    store
+        .replace_page_relation_edges("source", std::slice::from_ref(&legacy))
+        .unwrap();
+    drop(store);
+    let connection = Connection::open(&db.0).unwrap();
+    connection.execute_batch("ALTER TABLE graph_edges DROP COLUMN display_name;
+        DELETE FROM schema_migrations WHERE version=14;
+        INSERT INTO crawl_checkpoints(checkpoint_key,cursor) VALUES('crawl','next');
+        INSERT INTO index_commit_generations VALUES('generation','scope',1);
+        INSERT INTO index_commit_receipts(operation_id,generation,page_id,revision,action,content_hash,status,attempts)
+            VALUES('operation','generation','source','revision',0,'hash',0,1);").unwrap();
+    let before = std::fs::read(&db.0).unwrap();
+    assert!(SqliteSyncStateStore::open_read_only(&db.0).is_err());
+    assert_eq!(std::fs::read(&db.0).unwrap(), before);
+    drop(connection);
+    let migrated = SqliteSyncStateStore::open(&db.0).unwrap();
+    assert_eq!(migrated.edges_from("source").unwrap(), vec![legacy]);
+    drop(migrated);
+    let connection = Connection::open(&db.0).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT cursor FROM crawl_checkpoints WHERE checkpoint_key='crawl'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "next"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT status FROM index_commit_receipts WHERE operation_id='operation'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    drop(connection);
+    let reader = SqliteSyncStateStore::open_read_only(&db.0).unwrap();
+    assert_eq!(reader.edges_from("source").unwrap()[0].display_name(), None);
+}

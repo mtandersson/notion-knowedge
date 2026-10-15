@@ -120,7 +120,10 @@ async fn installed_mcp_reports_current_scoped_states_after_restart_without_write
         result["webhooks"],
         json!({"pending":2,"running":1,"failed":1})
     );
-    assert_eq!(result["operational_schema_version"], 13);
+    assert_eq!(
+        result["operational_schema_version"],
+        notion_knowledge_retrieval::sync_state::LATEST_SCHEMA_VERSION
+    );
     assert!(result["index"].is_null());
     assert!(result["last_successful_crawl_unix_seconds"].is_null());
     assert!(result["last_successful_reconciliation_unix_seconds"].is_null());
