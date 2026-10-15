@@ -54,9 +54,11 @@ cargo run -p notion-knowledge-server
 
 The server accepts newline-delimited MCP JSON-RPC on stdin and writes protocol
 responses to stdout. Startup diagnostics and errors go to stderr. It completes
-MCP initialization and supports tool discovery for `knowledge_search`, `knowledge_get` and
-[`knowledge_sync_status`](docs/knowledge-sync-status.md); calls return explicit unavailable errors until the corresponding
-retrieval adapters are configured. The process exits when
+MCP initialization and discovers `knowledge_search`, `knowledge_get` and
+[`knowledge_sync_status`](docs/knowledge-sync-status.md), with
+[`knowledge_related`](docs/knowledge-related.md) when graph navigation is
+installed. Search/get return explicit unavailable errors until their retrieval
+adapters are configured; sync status reports only bounded operational metadata. The process exits when
 the connected client closes stdin after initialization. Use `--http` to serve
 the same MCP handler over Streamable HTTP at `/mcp`:
 
@@ -98,9 +100,14 @@ most 100 results with at most 2,000 characters of text each, while
 also reject output whose serialized JSON exceeds **512 KiB**, including
 citation/expanded-source metadata. That failure is an explicit
 `result_too_large` tool error, never a partial result. Clients should
-request fewer search hits or fewer source references. No file-upload or
-file-metadata MCP tool is exposed in the current server; future tool output
-must follow the same size-budget contract before being enabled.
+request fewer search hits or fewer source references. These common
+512 KiB output checks also apply to installed graph navigation and semantic
+tool responses. The `knowledge_upload_file` schema is hidden by the default
+read-only mode; an explicitly enabled [audited ingestion runtime](docs/installed-file-ingestion.md)
+can attach files through trusted stdio or authenticated loopback bearer HTTP.
+Ingestion has separate operator-owned file-count, size and time limits, plus
+bounded structured outcomes; it does not make remote ChatGPT OAuth available.
+[Session/concurrency resource limits remain separate work (#396)](https://github.com/mtandersson/notion-knowedge/issues/396).
 
 `knowledge_get` optionally verifies authoritative content with `freshness: "fresh"`,
 using a configured read-only Notion backend after authorizing indexed references.
@@ -296,7 +303,10 @@ and distinguishes pilot targets from demonstrated results.
 
 The [privacy-aware audit event contract](docs/audit-events.md) defines a
 payload-free agent-mutation record and a separate durable SQLite store with
-bounded retention. It is installed for opt-in MCP file ingestion; other future mutation workflows must enforce its failure policy.
+bounded retention. It is installed for opt-in MCP file ingestion; other future
+mutation workflows must enforce its failure policy. See the
+[epic #11 security acceptance matrix](docs/security-epic-11-acceptance.md)
+for current code, negative tests and remaining release gates.
 
 The [audited single-file ingestion application](docs/single-file-ingestion.md) joins secure request-scoped download, validation, native Notion attachment and durable audit behind a reusable core service. [Plan-aware multipart and ordered batches](docs/multipart-batch-ingestion.md) extend the same service with explicit trusted limits and per-file outcomes. The [installed ingestion runtime](docs/installed-file-ingestion.md) composes these services for trusted stdio and authenticated loopback bearer HTTP.
 
@@ -304,7 +314,8 @@ The [audited single-file ingestion application](docs/single-file-ingestion.md) j
 
 The [request-scoped temporary file downloader](docs/temporary-file-download.md)
 provides bounded streaming, exact HTTPS source-host admission, public-address
-DNS pinning and private temporary-file ownership for future authenticated ingestion.
+DNS pinning and private temporary-file ownership used by explicitly enabled
+[installed audited ingestion](docs/installed-file-ingestion.md).
 
 The [startup-owned file ingestion settings](docs/file-ingestion-settings.md) validate explicit operator admission for the opt-in ingestion runtime.
 
@@ -376,7 +387,8 @@ Run the same check locally with:
 ### MCP read-only access
 
 `NK_READ_ONLY=true` is the default for both stdio and Streamable HTTP. Only
-explicitly audited read tools (`knowledge_search`, `knowledge_get` and `knowledge_sync_status`) can be
+explicitly admitted read tools (`knowledge_search`, `knowledge_get`,
+`knowledge_sync_status`, and `knowledge_related` when installed) can be
 advertised or dispatched in this mode. Unknown tools, Notion mutations and
 file uploads cannot be invoked through the MCP handler; the access check runs
 before any tool adapter. Set `NK_READ_ONLY=false` **explicitly** only when an
