@@ -5,6 +5,10 @@ use std::{env, ffi::OsString, fmt, net::SocketAddr};
 #[derive(Debug)]
 pub struct Config {
     pub http_bind: SocketAddr,
+    /// Upper bound on simultaneously dispatched MCP HTTP calls (not session count).
+    pub mcp_max_in_flight: usize,
+    /// Separate ingress pool so verified Notion receipts are not starved by MCP.
+    pub webhook_max_in_flight: usize,
     pub max_upload_files: usize,
     pub file_ingestion: Option<crate::file_ingestion::Settings>,
     /// Highest level emitted to stderr as redacted, structured JSON.
@@ -143,6 +147,23 @@ impl Config {
             .ok()
             .filter(|port| *port != 0)
             .ok_or_else(|| invalid("NK_HTTP_PORT", "must be an integer from 1 to 65535"))?;
+        let concurrency = |lookup: &mut dyn FnMut(&str) -> Option<OsString>,
+                           key: &'static str,
+                           default: &str,
+                           maximum: usize| {
+            optional(lookup, key, default)?
+                .parse::<usize>()
+                .ok()
+                .filter(|limit| (1..=maximum).contains(limit))
+                .ok_or_else(|| {
+                    invalid(
+                        key,
+                        "must be a positive integer within the documented range",
+                    )
+                })
+        };
+        let mcp_max_in_flight = concurrency(&mut lookup, "NK_MCP_MAX_IN_FLIGHT", "8", 256)?;
+        let webhook_max_in_flight = concurrency(&mut lookup, "NK_WEBHOOK_MAX_IN_FLIGHT", "4", 128)?;
         let read_only = match optional(&mut lookup, "NK_READ_ONLY", "true")?.as_str() {
             "true" => true,
             "false" => false,
@@ -678,6 +699,8 @@ impl Config {
             notion_scope.is_some(),
         )?;
         Ok(Self {
+            mcp_max_in_flight,
+            webhook_max_in_flight,
             max_upload_files,
             file_ingestion,
             reconciliation_index,
@@ -736,6 +759,34 @@ mod tests {
                 .find(|(name, _)| *name == key)
                 .map(|(_, value)| OsString::from(value))
         })
+    }
+
+    #[test]
+    fn http_admission_limits_are_finite_and_validated() {
+        let defaults = parse(&[]).unwrap();
+        assert_eq!(defaults.mcp_max_in_flight, 8);
+        assert_eq!(defaults.webhook_max_in_flight, 4);
+        let tuned = parse(&[
+            ("NK_MCP_MAX_IN_FLIGHT", "2"),
+            ("NK_WEBHOOK_MAX_IN_FLIGHT", "1"),
+        ])
+        .unwrap();
+        assert_eq!(tuned.mcp_max_in_flight, 2);
+        assert_eq!(tuned.webhook_max_in_flight, 1);
+        for (name, maximum) in [
+            ("NK_MCP_MAX_IN_FLIGHT", 256),
+            ("NK_WEBHOOK_MAX_IN_FLIGHT", 128),
+        ] {
+            for bad in ["0", "-1", "hello", "9999999999999999999999"] {
+                assert_eq!(parse(&[(name, bad)]).unwrap_err().setting, name);
+            }
+            assert_eq!(
+                parse(&[(name, &(maximum + 1).to_string())])
+                    .unwrap_err()
+                    .setting,
+                name
+            );
+        }
     }
 
     #[test]
