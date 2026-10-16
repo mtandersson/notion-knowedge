@@ -23,8 +23,19 @@ pub struct IndexRuntime {
     pub handler: AuthoritativePageRefresh,
     pub runner: AuthoritativeReconciliationRunner,
     pub provider: Arc<dyn EmbeddingProvider>,
+    alias_sources: notion_knowledge_core::aliases::AliasSources,
 }
 impl IndexRuntime {
+    /// Local operator composition only; no caller may choose a workspace/root.
+    /// Candidates remain subject to authoritative content authorization.
+    pub fn lookup_alias(
+        &self,
+        alias: &str,
+    ) -> Result<Vec<String>, notion_knowledge_retrieval::commit::CommitError> {
+        self.coordinator
+            .lookup_canonical_alias(&self.alias_sources, alias)
+    }
+
     /// Trusted dependency seam: production supplies an authenticated Notion
     /// client and validated offline Qwen; fixtures inject these typed ports.
     /// There is no environment-selectable test transport or provider.
@@ -113,10 +124,12 @@ impl IndexRuntime {
                 overlap_chars: 100,
             },
         )
-        .map_err(|_| "authoritative handler incompatible")?;
+        .map_err(|_| "authoritative handler incompatible")?
+        .with_alias_sources(settings.alias_sources.clone());
         let planner =
             AuthoritativeReconciliationPlanner::new(source, guard, coordinator.clone(), scope)
-                .map_err(|_| "authoritative planner incompatible")?;
+                .map_err(|_| "authoritative planner incompatible")?
+                .with_alias_sources(settings.alias_sources.clone());
         let runner = AuthoritativeReconciliationRunner::new(
             planner,
             handler.clone(),
@@ -130,6 +143,7 @@ impl IndexRuntime {
             handler,
             runner,
             provider,
+            alias_sources: settings.alias_sources.clone(),
         })
     }
 }

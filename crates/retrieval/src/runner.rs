@@ -38,7 +38,8 @@ impl AuthoritativeReconciliationRunner {
         coordinator: Arc<IndexCommitCoordinator>,
         scope: ReconciliationScope,
     ) -> Result<Self, RunnerError> {
-        if !refresh.is_bound_to(&coordinator)
+        if refresh.alias_configuration_identity() != planner.alias_configuration_identity()
+            || !refresh.is_bound_to(&coordinator)
             || !planner.is_bound_to(&coordinator)
             || coordinator.binding().scope() != scope.identity()
         {
@@ -61,7 +62,29 @@ impl AuthoritativeReconciliationRunner {
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Result<(), RunnerError> {
         self.coordinator
-            .begin_relation_rebuild(run.into(), self.scope.clone(), lease, clock)
+            .begin_projection_rebuild(run.into(), false, self.scope.clone(), lease, clock)
+            .await
+            .map_err(|error| match error {
+                CommitError::LeaseLost => RunnerError::Journal(JournalError::LeaseLost),
+                CommitError::BindingMismatch | CommitError::InvalidInput => {
+                    RunnerError::InvalidConfiguration
+                }
+                CommitError::Conflict
+                | CommitError::Operation(
+                    notion_knowledge_core::reconciliation::FailureClass::Conflict,
+                ) => RunnerError::Planning(PlanError::Conflict),
+                _ => RunnerError::Journal(JournalError::Unavailable),
+            })
+    }
+
+    pub async fn begin_alias_rebuild(
+        &self,
+        run: &str,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Result<(), RunnerError> {
+        self.coordinator
+            .begin_projection_rebuild(run.into(), true, self.scope.clone(), lease, clock)
             .await
             .map_err(|error| match error {
                 CommitError::LeaseLost => RunnerError::Journal(JournalError::LeaseLost),

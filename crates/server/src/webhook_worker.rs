@@ -4,6 +4,7 @@ use std::{ffi::OsString, path::PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct WorkerSettings {
+    pub alias_sources: notion_knowledge_core::aliases::AliasSources,
     pub index: PathBuf,
     pub assets: PathBuf,
     pub poll_ms: u64,
@@ -58,6 +59,31 @@ impl WorkerSettings {
         };
         let index = path("NK_WEBHOOK_INDEX_DIR")?;
         let assets = path("NK_WEBHOOK_QWEN_ASSETS")?;
+        let title = match lookup("NK_ALIAS_TITLE").as_deref() {
+            None => true,
+            Some(value) if value == "true" => true,
+            Some(value) if value == "false" => false,
+            _ => return Err(error("NK_ALIAS_TITLE", "must be true or false")),
+        };
+        let property_ids = match lookup("NK_ALIAS_PROPERTY_IDS") {
+            None => vec![],
+            Some(value) => {
+                serde_json::from_str::<Vec<String>>(value.to_str().ok_or_else(|| {
+                    error(
+                        "NK_ALIAS_PROPERTY_IDS",
+                        "must be a JSON array of stable property IDs",
+                    )
+                })?)
+                .map_err(|_| {
+                    error(
+                        "NK_ALIAS_PROPERTY_IDS",
+                        "must be a JSON array of stable property IDs",
+                    )
+                })?
+            }
+        };
+        let alias_sources = notion_knowledge_core::aliases::AliasSources::new(title, property_ids)
+            .map_err(|_| error("NK_ALIAS_PROPERTY_IDS", "requires at least one source, at most 32 valid property IDs of at most 128 bytes"))?;
         let mut number = |name, default, min, max| {
             let value = lookup(name)
                 .map(|v| v.into_string().ok().and_then(|s| s.parse::<u64>().ok()))
@@ -67,6 +93,7 @@ impl WorkerSettings {
                 .ok_or_else(|| error(name, "outside documented integer range"))
         };
         Ok(Self {
+            alias_sources,
             index,
             assets,
             poll_ms: number("NK_WEBHOOK_POLL_MS", 1000, 10, 60000)?,
@@ -531,5 +558,49 @@ mod tests {
         let assets = dir.path().join("missing");
         let config = parse(&[("NK_WEBHOOK_QWEN_ASSETS", assets.to_str().unwrap())]).unwrap();
         assert!(super::runtime::configured(&config).await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod alias_settings_tests {
+    use super::*;
+
+    #[test]
+    fn alias_sources_are_explicit_bounded_and_order_independent() {
+        let parse = |values: &[(&str, &str)]| {
+            WorkerSettings::index_settings(&mut |key| match key {
+                "NK_WEBHOOK_INDEX_DIR" => Some("/tmp/index".into()),
+                "NK_WEBHOOK_QWEN_ASSETS" => Some("/tmp/assets".into()),
+                _ => values
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| OsString::from(value)),
+            })
+        };
+        let default = parse(&[]).unwrap();
+        assert_eq!(default.alias_sources.identity(), "alias-sources-v1:1:");
+        let explicit = parse(&[
+            ("NK_ALIAS_TITLE", "false"),
+            ("NK_ALIAS_PROPERTY_IDS", "[\"b\",\"a\",\"a\"]"),
+        ])
+        .unwrap();
+        assert_eq!(
+            explicit.alias_sources.identity(),
+            "alias-sources-v1:0:1:a1:b"
+        );
+        for values in [
+            vec![("NK_ALIAS_TITLE", "false")],
+            vec![("NK_ALIAS_TITLE", "")],
+            vec![("NK_ALIAS_PROPERTY_IDS", "")],
+            vec![("NK_ALIAS_PROPERTY_IDS", "names")],
+            vec![("NK_ALIAS_PROPERTY_IDS", "[\"\"]")],
+            vec![("NK_ALIAS_PROPERTY_IDS", "[\"bad\\nidentifier\"]")],
+        ] {
+            assert!(parse(&values).is_err());
+        }
+        let oversized = serde_json::to_string(&vec!["name"; 33]).unwrap();
+        assert!(parse(&[("NK_ALIAS_PROPERTY_IDS", &oversized)]).is_err());
+        let long_id = serde_json::to_string(&vec!["x".repeat(129)]).unwrap();
+        assert!(parse(&[("NK_ALIAS_PROPERTY_IDS", &long_id)]).is_err());
     }
 }

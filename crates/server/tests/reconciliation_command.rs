@@ -53,6 +53,7 @@ struct Model {
     race_move: bool,
     level: u64,
     relation_name: Option<String>,
+    alias_names: Vec<String>,
     extra: std::collections::BTreeMap<String, ExtraPage>,
 }
 impl Default for Model {
@@ -72,6 +73,7 @@ impl Default for Model {
             race_move: false,
             level: 3,
             relation_name: None,
+            alias_names: vec![],
             extra: Default::default(),
         }
     }
@@ -191,6 +193,8 @@ impl HttpNotion {
                         snapshot.archived,
                     );
                     page["properties"]["level"]["number"] = json!(snapshot.level);
+                    page["properties"]["Alternate names"] = json!({"id":"names","type":"multi_select","multi_select":snapshot.alias_names.iter().map(|name|json!({"id":"choice","name":name})).collect::<Vec<_>>()});
+                    page["properties"]["Unselected"] = json!({"id":"not-selected","type":"rich_text","rich_text":[{"type":"text","plain_text":"Never an alias","text":{"content":"Never an alias"}}]});
                     if let Some(name) = snapshot.relation_name {
                         page["properties"][name] = json!({"id":"shared-relation","type":"relation","relation":[{"id":OTHER}],"has_more":false});
                     }
@@ -358,6 +362,7 @@ impl Fixture {
         notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Off);
         let dir = tempfile::tempdir().unwrap();
         let settings = WorkerSettings {
+            alias_sources: notion_knowledge_core::aliases::AliasSources::new(true, vec![]).unwrap(),
             index: dir.path().join("index"),
             assets: dir.path().join("assets"),
             poll_ms: 1000,
@@ -1398,7 +1403,10 @@ async fn actual_scheduled_http_transient_source_attempts_back_off_then_exhaust_w
 async fn actual_scheduled_http_manual_periodic_and_webhook_contention_preserves_retry_budgets() {
     use notion_knowledge_core::webhook::{EventState, WebhookEvent, WebhookInbox};
     let http = HttpNotion::start().await;
-    http.change(|m| m.relation_name = Some("Scheduled relations".into()));
+    http.change(|m| {
+        m.relation_name = Some("Scheduled relations".into());
+        m.title = "Äpple".into();
+    });
     let f = Fixture::new(&http).await;
     f.provider.pause.store(true, Ordering::SeqCst);
     let (worker, stop, server) =
@@ -1461,9 +1469,19 @@ async fn actual_scheduled_http_manual_periodic_and_webhook_contention_preserves_
         scheduled.coordinator.state().edges_from(PAGE).unwrap()[0].display_name(),
         Some("Scheduled relations")
     );
+    assert_eq!(
+        f.open(&http, OpenMode::ReadOnly)
+            .await
+            .lookup_alias("äpple")
+            .unwrap(),
+        vec![PAGE]
+    );
     resumed_stop.cancel();
     resumed_server.await.unwrap().unwrap();
-    http.change(|m| m.relation_name = Some("Webhook relations".into()));
+    http.change(|m| {
+        m.relation_name = Some("Webhook relations".into());
+        m.title = "Apple".into();
+    });
     assert!(worker.tick(CancellationToken::new(), true).await.unwrap());
     assert!(
         worker
@@ -1480,7 +1498,14 @@ async fn actual_scheduled_http_manual_periodic_and_webhook_contention_preserves_
         EventState::Succeeded
     );
     assert_eq!(worker.coordinator.schedule("periodic").unwrap().attempts, 0);
-    http.change(|m| m.relation_name = Some("Manual relations".into()));
+    let aliases = f.open(&http, OpenMode::ReadOnly).await;
+    assert_eq!(aliases.lookup_alias("Apple").unwrap(), vec![PAGE]);
+    assert!(aliases.lookup_alias("Äpple").unwrap().is_empty());
+    drop(aliases);
+    http.change(|m| {
+        m.relation_name = Some("Manual relations".into());
+        m.title = "Pomme".into();
+    });
     // A label-only edit requires a relation projection refresh, despite unchanged content.
     counts(
         &f.command(&http, &["--reconcile", "apply", "manual-relations"])
@@ -1499,6 +1524,9 @@ async fn actual_scheduled_http_manual_periodic_and_webhook_contention_preserves_
         worker.coordinator.state().edges_from(PAGE).unwrap()[0].display_name(),
         Some("Manual relations")
     );
+    let aliases = f.open(&http, OpenMode::ReadOnly).await;
+    assert_eq!(aliases.lookup_alias("Pomme").unwrap(), vec![PAGE]);
+    assert!(aliases.lookup_alias("Apple").unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1623,5 +1651,321 @@ async fn explicit_relation_rebuild_uses_shared_runtime_and_preserves_operational
         3,
         0,
         0,
+    );
+}
+
+/// The exact installed runtime used by webhook/manual/periodic callers owns
+/// SQLite aliases and current configuration across real index commits/reopens.
+#[tokio::test]
+async fn installed_aliases_preserve_ambiguity_explicit_sources_rebuild_and_restart() {
+    use notion_knowledge_core::aliases::{AliasSources, PageAlias, PageAliasStore};
+    let http = HttpNotion::start().await;
+    http.change(|m| {
+        m.title = "Öresund".into();
+        m.alias_names = vec!["Oresund".into(), "Öresund".into(), "Oresund".into()];
+        m.extra.insert(
+            "66666666-6666-6666-6666-666666666666".into(),
+            ExtraPage {
+                title: "Öresund".into(),
+                visible: true,
+                archived: false,
+            },
+        );
+    });
+    let mut f = Fixture::new(&http).await;
+    f.settings.alias_sources = AliasSources::new(true, vec!["names".into()]).unwrap();
+    let output = f
+        .command(&http, &["--reconcile", "apply", "alias-initial"])
+        .await;
+    assert_eq!(output.exit, 0, "{}", output.json);
+    let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+    assert_eq!(
+        runtime.lookup_alias("  ÖRESUND  ").unwrap(),
+        vec![PAGE, "66666666-6666-6666-6666-666666666666"]
+    );
+    assert_eq!(runtime.lookup_alias("Oresund").unwrap(), vec![PAGE]);
+    assert!(runtime.lookup_alias("Never an alias").unwrap().is_empty());
+    assert!(runtime.lookup_alias("\n").is_err());
+    // An unrelated namespace is preserved by the owned installed effect.
+    runtime
+        .coordinator
+        .state()
+        .replace_page_aliases(
+            "outside",
+            ROOT,
+            PAGE,
+            &[PageAlias::new("Keep", "title").unwrap()],
+        )
+        .unwrap();
+    let embeddings = f.provider.count.load(Ordering::SeqCst);
+    drop(runtime);
+    // No content or edit-time change: explicit source fields still replace rows.
+    http.change(|m| m.alias_names = vec!["Sundet".into()]);
+    assert_eq!(
+        f.command(&http, &["--reconcile", "apply", "alias-edit"])
+            .await
+            .exit,
+        0
+    );
+    let runtime = f.open(&http, OpenMode::ReadOnly).await;
+    assert!(runtime.lookup_alias("Oresund").unwrap().is_empty());
+    assert_eq!(runtime.lookup_alias("Sundet").unwrap(), vec![PAGE]);
+    assert_eq!(
+        runtime
+            .coordinator
+            .state()
+            .lookup_alias("outside", ROOT, "Keep")
+            .unwrap(),
+        vec![PAGE]
+    );
+    drop(runtime);
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), embeddings);
+    // A configuration-only change with identical extracted names is incomplete.
+    f.settings.alias_sources =
+        AliasSources::new(true, vec!["names".into(), "absent".into()]).unwrap();
+    let before = f.snapshot();
+    let runtime = f.open(&http, OpenMode::ReadOnly).await;
+    assert!(runtime.lookup_alias("Sundet").is_err());
+    drop(runtime);
+    assert_eq!(f.snapshot(), before);
+    assert_eq!(f.command(&http, &["--reconcile", "dry-run"]).await.exit, 0);
+    assert_eq!(f.snapshot(), before);
+    assert_eq!(
+        f.command(&http, &["--reconcile", "rebuild-aliases", "alias-rebuild"])
+            .await
+            .exit,
+        0
+    );
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), embeddings);
+    assert_eq!(
+        f.open(&http, OpenMode::ReadOnly)
+            .await
+            .lookup_alias("Sundet")
+            .unwrap(),
+        vec![PAGE]
+    );
+    // Property removal and title opt-out remove stale names atomically.
+    f.settings.alias_sources = AliasSources::new(false, vec!["names".into()]).unwrap();
+    http.change(|m| m.alias_names.clear());
+    assert_eq!(
+        f.command(&http, &["--reconcile", "apply", "alias-empty"])
+            .await
+            .exit,
+        0
+    );
+    let runtime = f.open(&http, OpenMode::ReadOnly).await;
+    assert!(runtime.lookup_alias("Sundet").unwrap().is_empty());
+    assert!(runtime.lookup_alias("Öresund").unwrap().is_empty());
+    drop(runtime);
+    http.change(|m| {
+        m.alias_names = vec!["Äpple".into(), "Apple".into()];
+    });
+    assert_eq!(
+        f.command(&http, &["--reconcile", "apply", "alias-live"])
+            .await
+            .exit,
+        0
+    );
+    assert_eq!(
+        f.open(&http, OpenMode::ReadOnly)
+            .await
+            .lookup_alias("Apple")
+            .unwrap(),
+        vec![PAGE]
+    );
+    // Archive, restore, then physical removal exercise distinct lifecycle exits.
+    http.change(|m| {
+        m.archived = true;
+        m.hide_page = true;
+    });
+    assert_eq!(
+        f.command(&http, &["--reconcile", "apply", "alias-archive"])
+            .await
+            .exit,
+        0
+    );
+    assert!(
+        f.open(&http, OpenMode::ReadOnly)
+            .await
+            .lookup_alias("Apple")
+            .unwrap()
+            .is_empty()
+    );
+    http.change(|m| {
+        m.archived = false;
+        m.hide_page = false;
+    });
+    assert_eq!(
+        f.command(&http, &["--reconcile", "apply", "alias-restore"])
+            .await
+            .exit,
+        0
+    );
+    assert_eq!(
+        f.open(&http, OpenMode::ReadOnly)
+            .await
+            .lookup_alias("Apple")
+            .unwrap(),
+        vec![PAGE]
+    );
+    // Physical removal and tombstone use the same owned refresh/receipt lifecycle.
+    http.change(|m| {
+        m.parent = FOREIGN.into();
+        m.hide_page = true;
+    });
+    assert_eq!(
+        f.command(&http, &["--reconcile", "apply", "alias-remove"])
+            .await
+            .exit,
+        0
+    );
+    let runtime = f.open(&http, OpenMode::ReadOnly).await;
+    assert!(runtime.lookup_alias("Apple").unwrap().is_empty());
+    assert_eq!(
+        runtime
+            .coordinator
+            .state()
+            .lookup_alias("outside", ROOT, "Keep")
+            .unwrap(),
+        vec![PAGE]
+    );
+}
+
+#[tokio::test]
+async fn installed_alias_persistence_failure_replays_durable_repair_without_mutating_history() {
+    use notion_knowledge_core::aliases::AliasSources;
+    use notion_knowledge_retrieval::commit::ReceiptStatus;
+    let http = HttpNotion::start().await;
+    http.change(|m| m.alias_names = vec!["Äpple".into(), "Apple".into()]);
+    let mut f = Fixture::new(&http).await;
+    f.settings.alias_sources = AliasSources::new(false, vec!["names".into()]).unwrap();
+    let apply = |runtime: IndexRuntime, id: &'static str| async move {
+        let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
+        let lease = runtime.coordinator.state().acquire_lease(now, 120).unwrap();
+        let result = runtime
+            .handler
+            .apply_lifecycle(
+                &PageId(PAGE.into()),
+                id,
+                runtime.provider.as_ref(),
+                lease.clone(),
+                Arc::new(|| notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000),
+            )
+            .await;
+        runtime
+            .coordinator
+            .state()
+            .release_lease(
+                &lease,
+                notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000,
+            )
+            .unwrap();
+        result
+    };
+    apply(
+        f.open(&http, OpenMode::ExistingWrite).await,
+        "alias-history",
+    )
+    .await
+    .unwrap();
+    let runtime = f.open(&http, OpenMode::ReadOnly).await;
+    let history = runtime
+        .coordinator
+        .receipt("alias-history")
+        .unwrap()
+        .unwrap();
+    assert_eq!(runtime.lookup_alias("Apple").unwrap(), vec![PAGE]);
+    drop(runtime);
+    let db = rusqlite::Connection::open(&f.state).unwrap();
+    db.execute_batch("CREATE TRIGGER alias_fault BEFORE INSERT ON graph_aliases BEGIN SELECT RAISE(ABORT,'fixture alias storage unavailable'); END;").unwrap();
+    http.change(|m| m.alias_names = vec!["Päron".into()]);
+    assert!(
+        apply(
+            f.open(&http, OpenMode::ExistingWrite).await,
+            "alias-history"
+        )
+        .await
+        .is_err()
+    );
+    let runtime = f.open(&http, OpenMode::ReadOnly).await;
+    assert_eq!(
+        runtime
+            .coordinator
+            .receipt("alias-history")
+            .unwrap()
+            .unwrap(),
+        history
+    );
+    let repair = runtime
+        .coordinator
+        .unfinished_alias_repair_id("alias-history", PAGE)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        runtime
+            .coordinator
+            .receipt(&repair)
+            .unwrap()
+            .unwrap()
+            .status,
+        ReceiptStatus::Pending | ReceiptStatus::Failed
+    ));
+    assert!(runtime.lookup_alias("Apple").is_err());
+    drop(runtime);
+    // A source reversion cannot conceal partially committed vector work.
+    http.change(|m| m.alias_names = vec!["Äpple".into(), "Apple".into()]);
+    db.execute_batch("DROP TRIGGER alias_fault").unwrap();
+    drop(db);
+    apply(
+        f.open(&http, OpenMode::ExistingWrite).await,
+        "alias-history",
+    )
+    .await
+    .unwrap();
+    let runtime = f.open(&http, OpenMode::ReadOnly).await;
+    assert_eq!(
+        runtime
+            .coordinator
+            .receipt(&repair)
+            .unwrap()
+            .unwrap()
+            .status,
+        ReceiptStatus::Applied
+    );
+    assert_eq!(
+        runtime
+            .coordinator
+            .receipt("alias-history")
+            .unwrap()
+            .unwrap(),
+        history
+    );
+    assert_eq!(runtime.lookup_alias("Apple").unwrap(), vec![PAGE]);
+    assert!(runtime.lookup_alias("Päron").unwrap().is_empty());
+    drop(runtime);
+    apply(
+        f.open(&http, OpenMode::ExistingWrite).await,
+        "alias-history",
+    )
+    .await
+    .unwrap();
+    // Applied alias repair must not suppress current configuration-only repair.
+    f.settings.alias_sources =
+        AliasSources::new(false, vec!["names".into(), "absent".into()]).unwrap();
+    apply(
+        f.open(&http, OpenMode::ExistingWrite).await,
+        "alias-history",
+    )
+    .await
+    .unwrap();
+    let runtime = f.open(&http, OpenMode::ReadOnly).await;
+    assert_eq!(runtime.lookup_alias("äpple").unwrap(), vec![PAGE]);
+    assert_eq!(
+        runtime
+            .coordinator
+            .receipt("alias-history")
+            .unwrap()
+            .unwrap(),
+        history
     );
 }
