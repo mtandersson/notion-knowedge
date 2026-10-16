@@ -29,6 +29,7 @@ pub(crate) struct Transport {
     rate_limits: AtomicU64,
     jitter: AtomicU64,
     max_retries: u64,
+    interval: Duration,
 }
 impl Default for Transport {
     fn default() -> Self {
@@ -46,6 +47,7 @@ impl Default for Transport {
             rate_limits: AtomicU64::new(0),
             jitter: AtomicU64::new(seed),
             max_retries: MAX_RETRIES,
+            interval: INTERVAL,
         }
     }
 }
@@ -78,7 +80,7 @@ impl Transport {
             }
             let now = Instant::now();
             if *next <= now {
-                *next = now + INTERVAL;
+                *next = now + self.interval;
                 return Ok(());
             }
             let wait = next.saturating_duration_since(now);
@@ -119,10 +121,21 @@ impl NotionClient {
             rate_limits: self.transport.rate_limits.load(Ordering::Relaxed),
         }
     }
-    #[cfg(any(test, feature = "test-fixtures"))]
+    #[cfg(test)]
     pub(crate) fn without_retries(mut self) -> Self {
         self.transport = std::sync::Arc::new(Transport {
             max_retries: 0,
+            ..Default::default()
+        });
+        self
+    }
+    // Only the explicit loopback fixture constructor can disable admission
+    // pacing. Normal clients and transport policy tests retain INTERVAL.
+    #[cfg(feature = "test-fixtures")]
+    pub(crate) fn with_loopback_transport(mut self) -> Self {
+        self.transport = std::sync::Arc::new(Transport {
+            max_retries: 0,
+            interval: Duration::ZERO,
             ..Default::default()
         });
         self
@@ -369,6 +382,21 @@ mod tests {
         let start = Instant::now();
         client.transport.admit("test").await.unwrap();
         assert_eq!(Instant::now() - start, INTERVAL);
+    }
+    #[cfg(feature = "test-fixtures")]
+    #[tokio::test(start_paused = true)]
+    async fn loopback_fixture_admission_is_immediate_without_changing_normal_clients() {
+        let normal = NotionClient::integration("fixture").unwrap();
+        let fixture = NotionClient::integration("fixture")
+            .unwrap()
+            .with_loopback_fixture(12345);
+        let started = Instant::now();
+        fixture.transport.admit("test").await.unwrap();
+        fixture.clone().transport.admit("test").await.unwrap();
+        assert_eq!(Instant::now() - started, Duration::ZERO);
+        normal.transport.admit("test").await.unwrap();
+        normal.clone().transport.admit("test").await.unwrap();
+        assert_eq!(Instant::now() - started, INTERVAL);
     }
     #[tokio::test]
     async fn public_read_and_mutation_boundaries_use_shared_retry_policy() {

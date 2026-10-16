@@ -75,3 +75,12 @@ shared completeness marker and rebuilds both graph families; it is not needed
 for each edit. The read-only metadata planner checks combined stored completeness
 without reading bodies; actual unchanged reconciliation rechecks the full fresh
 body and target authority before its success acknowledgment.
+
+The owning-boundary integration fixtures still execute every typed HTTP request
+and real SQLite/Lance mutation. Their explicitly compiled loopback-only Notion
+client omits provider admission delays and retries: sleeping 334 ms per local
+fixture request otherwise exhausts hosted CI time after compilation. Normal
+integration clients retain the production admission interval, and dedicated
+clock-driven transport tests verify pacing, cancellation and upstream deferral.
+Authority-race and lease tests continue to use explicit barriers and injected
+clocks, rather than relying on provider sleep time.
