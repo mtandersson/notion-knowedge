@@ -88,6 +88,16 @@ response = {
     "mode": payload["mode"],
     "results": results
 }
+if fail in ("stable_revision", "scores_changed", "paths_changed", "missing_breakdown"):
+    response["index_signature"] = "unchanged"
+    if fail != "missing_breakdown":
+        for row in results:
+            row["baseline_scores"] = [{"source_id": source, "score":
+                .02 if fail == "scores_changed" and payload["graph_boost"]["enabled"] else .01,
+                "matched_paths": ["lexical"] if fail == "paths_changed" and payload["graph_boost"]["enabled"] else ["semantic"]}
+                for source in row["ranked_source_ids"]]
+if fail == "changed_revision":
+    response["index_signature"] = "changed" if payload["graph_boost"]["enabled"] else "original"
 if config is not None:
     response["graph_boost"] = config
 print(json.dumps(response))
@@ -130,6 +140,8 @@ class GraphBoostEvaluationTests(unittest.TestCase):
     def test_measured_lift_and_deterministic_report(self):
         first = self.invoke("--adapter", self.command, "--top-k", "3")
         self.assertEqual(first.returncode, 0, first.stderr)
+        verified = self.invoke("--adapter", self.command, fail="stable_revision")
+        self.assertEqual(verified.returncode, 0, verified.stderr)
         report = json.loads(first.stdout)
         self.assertEqual(report["evidence"], "adapter_measured")
         self.assertEqual(report["config"]["candidate_limit"], 20)
@@ -166,7 +178,7 @@ class GraphBoostEvaluationTests(unittest.TestCase):
     def test_invalid_adapter_protocol_is_not_a_zero_quality_score(self):
         for mode in ("missing_echo", "wrong_echo", "duplicate", "unknown",
                      "wrong_mode", "crash", "graph_only", "lost_candidate",
-                     "duplicate_rank"):
+                     "duplicate_rank", "changed_revision", "scores_changed", "paths_changed", "missing_breakdown"):
             with self.subTest(mode=mode):
                 run = self.invoke("--adapter", self.command, fail=mode)
                 self.assertEqual(run.returncode, 2)
@@ -198,6 +210,8 @@ class GraphBoostEvaluationTests(unittest.TestCase):
 
     def test_missing_adapter_and_unsafe_output_paths(self):
         self.assertEqual(self.invoke().returncode, 2)
+        self.assertEqual(self.invoke("--timeout", "3601", "--validate-only").returncode, 2)
+        self.assertEqual(self.invoke("--timeout", "1800", "--validate-only").returncode, 0)
         self.assertEqual(self.invoke("--top-k", "2", "--validate-only").returncode, 2)
         self.assertEqual(self.invoke("--top-k", "21", "--validate-only").returncode, 2)
         self.assertEqual(self.invoke("--adapter", self.command, "--output", str(DATASET)).returncode, 2)
@@ -211,6 +225,69 @@ class GraphBoostEvaluationTests(unittest.TestCase):
         report = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(report["summary"]["linked_queries"], 6)
         self.assertNotIn("PRIVATE CONTENT", path.read_text(encoding="utf-8"))
+
+
+class InstalledAdapterTests(unittest.TestCase):
+    """Protocol tests only; joined Rust tests exercise the real persisted rankers."""
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location("installed_adapter", SCRIPT.with_name("installed-graph-eval-adapter.py"))
+        self.adapter = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.adapter)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.folder = Path(tmp.name)
+        index = self.folder / "index"
+        index.mkdir()
+        state = self.folder / "state.sqlite"
+        state.write_bytes(b"protocol fixture")
+        from unittest.mock import patch
+        env = patch.dict(os.environ, {"NK_WEBHOOK_INDEX_DIR": str(index), "NK_WEBHOOK_STATE_FILE": str(state)})
+        env.start()
+        self.addCleanup(env.stop)
+        self.manifest = {"schema_version": 1, "dataset_id": "fixture", "sources": {
+            "eval:chunk": {"page_id": "canonical-page", "chunk_id": "canonical-chunk", "text": "Bilingual fyr."}}}
+        self.request = {"schema_version": 1, "dataset_id": "fixture", "mode": "hybrid", "top_k": 20,
+            "graph_boost": {"enabled": True, "max_hops": 1, "weight": .15, "candidate_limit": 20},
+            "pages": [{"id": "eval:page", "links": [], "chunks": [{"id": "eval:chunk", "text": "Bilingual fyr."}]}],
+            "queries": [{"id": "q", "text": "fyr"}]}
+        server = self.folder / "stdio.py"
+        server.write_text('''import json, os, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request: continue
+    if request["method"] == "initialize": result = {}
+    elif request["params"]["name"] == "knowledge_related":
+        result = {"structuredContent":{"relations":[],"limit_reached":False}}
+    else:
+        assert os.environ["NK_GRAPH_BOOST"] == "true"
+        assert os.environ["NK_GRAPH_BOOST_CANDIDATE_LIMIT"] == "20"
+        assert "graph_boost" not in request["params"]["arguments"]
+        result = {"structuredContent":{"results":[{"text":"Bilingual fyr.","score":.03,"matched_paths":["semantic","lexical"],"source":{"page_id":"canonical-page","chunk_id":"canonical-chunk"}}]}}
+    print(json.dumps({"jsonrpc":"2.0","id":request["id"],"result":result}),flush=True)
+''')
+        self.command = [sys.executable, str(server)]
+
+    def test_maps_verified_canonical_sources_and_echoes_complete_operator_settings(self):
+        output = self.adapter.run(self.request, self.manifest, self.command)
+        self.assertEqual(output["graph_boost"], self.request["graph_boost"])
+        self.assertEqual(output["results"][0]["ranked_source_ids"], ["eval:chunk"])
+        self.assertEqual(output["results"][0]["baseline_scores"][0]["score"], .03)
+        self.assertEqual(output["index_signature"], self.adapter.signature())
+
+    def test_unknown_or_stale_source_mapping_and_invalid_settings_fail_closed(self):
+        for field, value in [("text", "stale text"), ("chunk_id", "unknown")]:
+            with self.subTest(field=field):
+                changed = json.loads(json.dumps(self.manifest))
+                changed["sources"]["eval:chunk"][field] = value
+                with self.assertRaises((ValueError, KeyError)):
+                    self.adapter.run(self.request, changed, self.command)
+        self.request["pages"][0]["links"] = ["missing-page"]
+        with self.assertRaises(ValueError):
+            self.adapter.run(self.request, self.manifest, self.command)
+        self.request["pages"][0]["links"] = []
+        self.request["graph_boost"]["weight"] = float("nan")
+        with self.assertRaises(ValueError):
+            self.adapter.run(self.request, self.manifest, self.command)
 
 
 if __name__ == "__main__":

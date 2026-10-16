@@ -99,6 +99,11 @@ impl HybridSearch for GraphBoostedHybrid {
             if !(1..=100).contains(&query.limit) || self.config.candidate_limit < query.limit {
                 return Err(SearchUnavailable);
             }
+            // Hold one owned graph read fence across the underlying index read,
+            // graph traversal and awaited physical authorization. Persistent
+            // adapters must allow nested read snapshots but exclude all writers.
+            let snapshot = self.graph.read_snapshot().map_err(|_| SearchUnavailable)?;
+            let graph = snapshot.as_deref().unwrap_or(self.graph.as_ref());
             let limit = query.limit;
             let allowed_page_ids = query.page_ids.clone();
             let requested_roots = query.root_page_ids.clone();
@@ -135,7 +140,7 @@ impl HybridSearch for GraphBoostedHybrid {
             }
             let reranked = rank_candidates(
                 candidates,
-                self.graph.as_ref(),
+                graph,
                 self.config,
                 limit,
                 allowed_page_ids.as_deref(),

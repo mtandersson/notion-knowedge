@@ -137,7 +137,7 @@ pub async fn compose(
         &settings.index,
         "chunks",
         provider.metadata().clone(),
-        runtime.coordinator,
+        runtime.coordinator.clone(),
     )
     .map_err(|_| "retrieval binding incompatible")?;
     table
@@ -153,14 +153,27 @@ pub async fn compose(
         provider,
     });
     let lexical: Arc<dyn LexicalSearch> = Arc::new(ScopedLexical { table });
-    handler
+    let handler = handler
         .with_root_page_ids(scope.roots.iter().map(|r| r.0.clone()).collect())?
         .and_authoritative_scope(source, scope)
         .map(|h| {
             h.and_search(semantic)
                 .and_lexical_search(lexical)
                 .and_hybrid_search(Arc::new(hybrid))
-        })
+        })?;
+    if config.graph_boost.enabled {
+        if config.graph_index.as_ref() != Some(&settings.index) {
+            return Err("graph boost requires the retrieval index binding");
+        }
+        handler.and_graph_boost(
+            Arc::new(notion_knowledge_retrieval::graph::CommittedGraph::new(
+                runtime.coordinator,
+            )),
+            config.graph_boost,
+        )
+    } else {
+        Ok(handler)
+    }
 }
 struct ScopedSearch {
     table: GuardedChunkTable,

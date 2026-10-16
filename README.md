@@ -559,3 +559,6 @@ candidates with configurable reciprocal-rank fusion and per-result path provenan
 
 The [Notion webhook boundary](docs/notion-webhooks.md) documents opt-in setup,
 raw-body signature verification and the durable admission follow-up.
+
+The [installed graph boost and joined smoke](docs/installed-graph-boost.md) covers
+optional off-by-default reranking and a trusted paired evaluation adapter.

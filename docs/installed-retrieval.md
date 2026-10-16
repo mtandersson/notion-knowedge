@@ -68,3 +68,6 @@ search over stdio and authenticated HTTP:
 ```sh
 nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --locked --test webhook_worker
 ```
+
+Optional bounded graph reranking is installed over this same hybrid adapter through
+[immutable graph boost settings and paired evaluation](installed-graph-boost.md).

@@ -46,6 +46,7 @@ pub struct Config {
     pub webhook_worker: Option<crate::webhook_worker::WorkerSettings>,
     pub reconciliation_schedule: Option<crate::scheduled_reconciliation::Settings>,
     pub graph_index: Option<std::path::PathBuf>,
+    pub graph_boost: notion_knowledge_core::graph_boost::GraphBoostConfig,
     pub retrieval: Option<crate::webhook_worker::WorkerSettings>,
     pub reconciliation_index: Option<crate::webhook_worker::WorkerSettings>,
 }
@@ -638,6 +639,47 @@ impl Config {
             Some(value) if value == "true" => true,
             _ => return Err(invalid("NK_RETRIEVAL", "must be true or false")),
         };
+        let enabled = match lookup("NK_GRAPH_BOOST").as_deref() {
+            None => false,
+            Some(v) if v == "false" => false,
+            Some(v) if v == "true" => true,
+            _ => return Err(invalid("NK_GRAPH_BOOST", "must be true or false")),
+        };
+        let mut graph_boost = notion_knowledge_core::graph_boost::GraphBoostConfig {
+            enabled,
+            ..Default::default()
+        };
+        for (name, target, maximum) in [
+            ("NK_GRAPH_BOOST_MAX_HOPS", &mut graph_boost.max_hops, 2),
+            (
+                "NK_GRAPH_BOOST_CANDIDATE_LIMIT",
+                &mut graph_boost.candidate_limit,
+                100,
+            ),
+        ] {
+            if let Some(raw) = lookup(name) {
+                *target = text(raw, name)?
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| (1..=maximum).contains(n))
+                    .ok_or_else(|| invalid(name, "outside documented integer range"))?;
+            }
+        }
+        if let Some(raw) = lookup("NK_GRAPH_BOOST_WEIGHT") {
+            graph_boost.weight = text(raw, "NK_GRAPH_BOOST_WEIGHT")?
+                .parse::<f64>()
+                .ok()
+                .filter(|n| n.is_finite() && *n > 0.0 && *n <= 0.5)
+                .ok_or_else(|| {
+                    invalid("NK_GRAPH_BOOST_WEIGHT", "must be finite and in (0, 0.5]")
+                })?;
+        }
+        if graph_boost.enabled && (!graph_enabled || !retrieval_enabled) {
+            return Err(invalid(
+                "NK_GRAPH_BOOST",
+                "requires NK_GRAPH=true and NK_RETRIEVAL=true",
+            ));
+        }
         let webhook_state_file =
             if matches!(webhook, crate::webhook::WebhookConfig::Verified { .. })
                 || lookup("NK_RECONCILIATION_INTERVAL_SECONDS").is_some()
@@ -754,6 +796,7 @@ impl Config {
             file_ingestion,
             reconciliation_index,
             graph_index,
+            graph_boost,
             retrieval,
             reconciliation_schedule,
             webhook_worker,
@@ -827,6 +870,41 @@ mod tests {
                 .graph_index
                 .is_none()
         );
+    }
+    #[test]
+    fn graph_boost_is_opt_in_and_rejects_unbounded_or_unsupported_settings() {
+        let defaults = parse(&[]).unwrap();
+        assert_eq!(
+            defaults.graph_boost,
+            notion_knowledge_core::graph_boost::GraphBoostConfig::default()
+        );
+        assert_eq!(
+            parse(&[("NK_GRAPH_BOOST", "true")]).unwrap_err().setting,
+            "NK_GRAPH_BOOST"
+        );
+        for (name, invalid_values) in [
+            ("NK_GRAPH_BOOST", vec!["", "TRUE", "yes"]),
+            ("NK_GRAPH_BOOST_MAX_HOPS", vec!["0", "3", "-1", ""]),
+            ("NK_GRAPH_BOOST_CANDIDATE_LIMIT", vec!["0", "101", "-1", ""]),
+            (
+                "NK_GRAPH_BOOST_WEIGHT",
+                vec!["0", "0.51", "NaN", "inf", "-0.1", ""],
+            ),
+        ] {
+            for value in invalid_values {
+                assert_eq!(parse(&[(name, value)]).unwrap_err().setting, name);
+            }
+        }
+        let tuned = parse(&[
+            ("NK_GRAPH_BOOST_MAX_HOPS", "2"),
+            ("NK_GRAPH_BOOST_WEIGHT", "0.5"),
+            ("NK_GRAPH_BOOST_CANDIDATE_LIMIT", "100"),
+        ])
+        .unwrap();
+        assert!(!tuned.graph_boost.enabled);
+        assert_eq!(tuned.graph_boost.max_hops, 2);
+        assert_eq!(tuned.graph_boost.weight, 0.5);
+        assert_eq!(tuned.graph_boost.candidate_limit, 100);
     }
     #[test]
     fn http_admission_limits_are_finite_and_validated() {

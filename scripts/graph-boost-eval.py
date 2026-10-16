@@ -8,6 +8,7 @@ Synthetic test adapters verify protocol behavior, not actual retrieval quality.
 import argparse
 import importlib.util
 import json
+import math
 from pathlib import Path
 import shlex
 import sys
@@ -116,12 +117,16 @@ def run_pair(data, cases, queries, chunks, adapter, timeout, top_k):
                     for q in selected],
     }
     rankings = {}
+    signatures = []
+    score_breakdowns = []
     for enabled, name in ((False, "baseline"), (True, "boosted")):
         requested_config = {**cases["config"], "enabled": enabled}
         response = harness.run_adapter(
             adapter, {**base, "graph_boost": requested_config}, timeout
         )
         harness.required_object(response, {"graph_boost"}, "graph response")
+        signatures.append(response.get("index_signature"))
+        score_breakdowns.append(response.get("results"))
         # Exact config echo makes unsupported or silently ignored graph modes
         # ineligible as valid evidence. Types must match (bool != int).
         echoed = response["graph_boost"]
@@ -132,6 +137,34 @@ def run_pair(data, cases, queries, chunks, adapter, timeout, top_k):
         rankings[name] = harness.validate_response(
             response, "hybrid", focused, set(chunks), cases["config"]["candidate_limit"]
         )
+    if any(value is not None for value in signatures):
+        require(all(isinstance(value, str) and value for value in signatures)
+                and signatures[0] == signatures[1], "paired index revision changed")
+    if any(value is not None for value in signatures):
+        paired_scores = []
+        for rows, ranking in zip(score_breakdowns, rankings.values()):
+            per_query = {}
+            for row in rows:
+                scores = row.get("baseline_scores")
+                require(isinstance(scores, list), "missing installed baseline scores")
+                mapped = {}
+                for entry in scores:
+                    require(isinstance(entry, dict) and set(entry) ==
+                            {"source_id", "score", "matched_paths"}, "invalid baseline breakdown")
+                    source = entry["source_id"]
+                    require(isinstance(source, str) and source not in mapped,
+                            "duplicate baseline source")
+                    require(type(entry["score"]) in (int, float) and math.isfinite(entry["score"])
+                            and entry["score"] >= 0, "invalid baseline score")
+                    paths = entry["matched_paths"]
+                    require(isinstance(paths, list) and bool(paths)
+                            and all(path in ("semantic", "lexical") for path in paths)
+                            and len(paths) == len(set(paths)), "invalid baseline paths")
+                    mapped[source] = (entry["score"], paths)
+                require(set(mapped) == set(ranking[row["query_id"]]), "baseline candidate mismatch")
+                per_query[row["query_id"]] = mapped
+            paired_scores.append(per_query)
+        require(paired_scores[0] == paired_scores[1], "graph changed baseline scores or paths")
     # #65 is a reranker ONLY; introducing or losing chunk identities is an
     # adapter contract violation, NOT a measured relevance gain or loss.
     for qid in (q["id"] for q in selected):
@@ -238,7 +271,7 @@ def main(argv=None):
     args = p.parse_args(argv)
     try:
         require(type(args.top_k) is int and K <= args.top_k <= 100
-                and 0 < args.timeout <= 300,
+                and 0 < args.timeout <= 3600,
                 "invalid top-k or timeout")
         harness = retrieval_module()
         data, _ = harness.load_dataset(args.dataset)

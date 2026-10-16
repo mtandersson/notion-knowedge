@@ -574,7 +574,18 @@ impl IndexCommitCoordinator {
     /// Fence a read snapshot against concurrent commits and unfinished effects.
     #[cfg(feature = "local-lancedb")]
     pub(crate) fn search_guard(&self) -> Result<File, CommitError> {
-        let guard = self.try_acquire()?;
+        // Readers may nest (graph + vector/FTS) while sharing one committed
+        // revision. Writers still use exclusive try_acquire/acquire locks.
+        let guard = File::open(&self.index_path).map_err(io)?;
+        match guard.try_lock_shared() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Err(CommitError::Conflict),
+            Err(std::fs::TryLockError::Error(error)) => return Err(io(error)),
+        }
+        if Identity::file(&guard)? != self.index_identity {
+            return Err(CommitError::BindingMismatch);
+        }
+        self.identities()?;
         let db = self
             .state
             .lock_connection()
