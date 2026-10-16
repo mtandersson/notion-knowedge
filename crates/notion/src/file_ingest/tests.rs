@@ -211,6 +211,11 @@ async fn source_many(
                 }
                 tokio::task::yield_now().await;
             }
+            // Async TLS writes may retain the final encrypted record after
+            // write_all returns. Flush it and send close_notify before dropping
+            // the socket; otherwise a complete fixture body can be truncated.
+            // Cancellation/error cases may already have closed the client.
+            let _ = tls.shutdown().await;
         }
     });
     (policy, count, handle, paths)
@@ -1536,7 +1541,7 @@ async fn joined_multipart_interruptions_and_completion_failures_retain_upload_wi
         )
         .with_multipart(MultipartPolicy::new(10 * MIB, 5 * MIB, 5 * MIB).unwrap());
         let result = ingest_file(&adapter, &context(&gate, &audit), request(false)).await;
-        assert_eq!(result.status, IngestStatus::Indeterminate);
+        assert_eq!(result.status, IngestStatus::Indeterminate, "{result:?}");
         assert!(result.terminal_audited);
         assert_eq!(result.references.upload_id.as_deref(), Some(UPLOAD));
         assert!(result.references.block_id.is_none());

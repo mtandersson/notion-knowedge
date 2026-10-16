@@ -62,6 +62,38 @@ cargo clippy --workspace --all-targets -- -D warnings
 The integration fixture covers depth defaults and bounds, incoming/outgoing
 orientation, duplicate relation collapse, propagation of property provenance,
 unresolved and denied edge suppression, disallowed seed pages, fanout bounds,
-store failures, read-only MCP discovery and JSON-RPC dispatch. This is an
-application-layer activation seam: production index composition and live
-Notion credentials are intentionally not introduced by this change.
+store failures, read-only MCP discovery and JSON-RPC dispatch. The installed joined checks below additionally exercise production composition.
+
+## Installed operator activation (#377)
+
+Build with `--features webhook-worker` on Unix. `NK_GRAPH=true` explicitly
+installs graph navigation in the common stdio/HTTP composition. It defaults to
+false and is independent of `NK_RETRIEVAL`; graph-only reads load no embedding
+model. Configure `NK_NOTION_AUTH=integration`, `NOTION_TOKEN`,
+`NK_NOTION_SCOPE_WORKSPACE_ID`, `NK_NOTION_SCOPE_ROOTS`,
+`NK_WEBHOOK_INDEX_DIR` and `NK_WEBHOOK_STATE_FILE` to match the existing
+production writer. These immutable operator paths cannot be supplied by MCP.
+The index directory and SQLite state must be private and operator-owned.
+Startup opens existing state read-only and rejects missing, foreign,
+incompatible or corrupt authority; it never initializes or migrates it.
+
+Trusted operator stdio may activate directly. HTTP additionally requires
+`NK_HTTP_AUTH=bearer` and `NK_HTTP_BEARER_TOKEN` on a loopback listener.
+The ordinary middleware authenticates every request, including continued
+sessions and SSE. Physical Notion root scope is data authorization, not caller
+authentication. Bootstrap and OAuth-discovery-only HTTP do not install or open
+private graph/index/model adapters. Remote ChatGPT OAuth remains unavailable.
+
+Reads use the production coordinator's storage identity, binding and pending
+commit fence. One bounded navigation holds the read fence across incoming/outgoing
+reads and awaited neighbor authorization. Only exact current, complete combined graph projections are
+returned; unfinished effects fail closed. Each call still freshly authorizes
+the seed and discovered neighbors through the authoritative root gate.
+
+Credential-free joined smoke, using typed local Notion fixtures, actual
+production commits, reopened SQLite authority and real MCP transports:
+
+```sh
+nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test webhook_worker installed_graph --locked
+nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test webhook_worker authenticated_http_serves_committed --locked
+```

@@ -90,6 +90,13 @@ impl GraphEdge {
 /// Replacement is atomic, including replacing with an empty collection.
 /// Failed validation or persistence must leave previous edges untouched.
 pub trait GraphEdgeStore: Send + Sync {
+    /// Optional owned read view held through one bounded navigation. Acquired
+    /// only after seed authorization; persistent adapters can fence writers and
+    /// pending effects across all incoming/outgoing reads and awaited scope checks.
+    fn read_snapshot(&self) -> Result<Option<Box<dyn GraphEdgeStore>>, SyncStateError> {
+        Ok(None)
+    }
+
     fn replace_page_edges(
         &self,
         source_page_id: &str,

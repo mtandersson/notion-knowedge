@@ -262,3 +262,89 @@ fn sqlite_failure(_: rusqlite::Error) -> SyncStateError {
     // Do not leak local paths, page IDs, source content, or raw SQL errors.
     SyncStateError::Unavailable
 }
+
+/// Read-only graph view fenced by the same committed authority as retrieval.
+/// Pending effects, replaced storage and incomplete current projections fail closed.
+#[cfg(all(unix, feature = "local-lancedb"))]
+pub struct CommittedGraph {
+    coordinator: std::sync::Arc<crate::commit::IndexCommitCoordinator>,
+    guard: Option<std::fs::File>,
+}
+#[cfg(all(unix, feature = "local-lancedb"))]
+impl CommittedGraph {
+    pub fn new(coordinator: std::sync::Arc<crate::commit::IndexCommitCoordinator>) -> Self {
+        Self {
+            coordinator,
+            guard: None,
+        }
+    }
+    fn read(&self, page: &str, incoming: bool) -> Result<Vec<GraphEdge>, SyncStateError> {
+        let _guard = if self.guard.is_none() {
+            Some(
+                self.coordinator
+                    .search_guard()
+                    .map_err(|_| SyncStateError::Unavailable)?,
+            )
+        } else {
+            None
+        };
+        if self
+            .coordinator
+            .owns_page_work(page)
+            .map_err(|_| SyncStateError::Unavailable)?
+            && !self
+                .coordinator
+                .current_body_links_complete(page)
+                .map_err(|_| SyncStateError::Unavailable)?
+        {
+            return Err(SyncStateError::Unavailable);
+        }
+        let edges = if incoming {
+            self.coordinator.state().edges_to(page)?
+        } else {
+            self.coordinator.state().edges_from(page)?
+        };
+        for source in edges
+            .iter()
+            .map(GraphEdge::source_page_id)
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            if !self
+                .coordinator
+                .current_body_links_complete(source)
+                .map_err(|_| SyncStateError::Unavailable)?
+            {
+                return Err(SyncStateError::Unavailable);
+            }
+        }
+        Ok(edges)
+    }
+}
+#[cfg(all(unix, feature = "local-lancedb"))]
+impl GraphEdgeStore for CommittedGraph {
+    fn read_snapshot(&self) -> Result<Option<Box<dyn GraphEdgeStore>>, SyncStateError> {
+        let guard = self
+            .coordinator
+            .search_guard()
+            .map_err(|_| SyncStateError::Unavailable)?;
+        Ok(Some(Box::new(Self {
+            coordinator: self.coordinator.clone(),
+            guard: Some(guard),
+        })))
+    }
+    fn replace_page_edges(&self, _: &str, _: &[GraphEdge]) -> Result<(), SyncStateError> {
+        Err(SyncStateError::InvalidInput)
+    }
+    fn replace_page_relation_edges(&self, _: &str, _: &[GraphEdge]) -> Result<(), SyncStateError> {
+        Err(SyncStateError::InvalidInput)
+    }
+    fn replace_page_link_edges(&self, _: &str, _: &[GraphEdge]) -> Result<(), SyncStateError> {
+        Err(SyncStateError::InvalidInput)
+    }
+    fn edges_from(&self, page: &str) -> Result<Vec<GraphEdge>, SyncStateError> {
+        self.read(page, false)
+    }
+    fn edges_to(&self, page: &str) -> Result<Vec<GraphEdge>, SyncStateError> {
+        self.read(page, true)
+    }
+}

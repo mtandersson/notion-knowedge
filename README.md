@@ -57,7 +57,7 @@ responses to stdout. Startup diagnostics and errors go to stderr. It completes
 MCP initialization and discovers `knowledge_search`, `knowledge_get` and
 [`knowledge_sync_status`](docs/knowledge-sync-status.md), with
 [`knowledge_related`](docs/knowledge-related.md) when graph navigation is
-installed. Search/get return explicit unavailable errors until their retrieval
+installed via explicit `NK_GRAPH=true`. Search/get return explicit unavailable errors until their retrieval
 adapters are configured; sync status reports only bounded operational metadata. The process exits when
 the connected client closes stdin after initialization. Use `--http` to serve
 the same MCP handler over Streamable HTTP at `/mcp`:
