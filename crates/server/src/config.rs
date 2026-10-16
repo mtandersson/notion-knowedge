@@ -639,12 +639,15 @@ impl Config {
             Some(value) if value == "true" => true,
             _ => return Err(invalid("NK_RETRIEVAL", "must be true or false")),
         };
-        let mut graph_boost = notion_knowledge_core::graph_boost::GraphBoostConfig::default();
-        graph_boost.enabled = match lookup("NK_GRAPH_BOOST").as_deref() {
+        let enabled = match lookup("NK_GRAPH_BOOST").as_deref() {
             None => false,
             Some(v) if v == "false" => false,
             Some(v) if v == "true" => true,
             _ => return Err(invalid("NK_GRAPH_BOOST", "must be true or false")),
+        };
+        let mut graph_boost = notion_knowledge_core::graph_boost::GraphBoostConfig {
+            enabled,
+            ..Default::default()
         };
         for (name, target, maximum) in [
             ("NK_GRAPH_BOOST_MAX_HOPS", &mut graph_boost.max_hops, 2),
