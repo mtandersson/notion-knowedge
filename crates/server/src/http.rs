@@ -98,6 +98,7 @@ pub async fn serve_installed(
     let bind = settings.http_bind;
     let mut diagnostics = crate::diagnostics::bootstrap(&settings);
     let handler = handler
+        .with_tool_capacity(settings.mcp_tool_capacity)
         .with_read_only(settings.read_only)
         .with_destructive_writes_enabled(settings.destructive_writes_enabled)
         .with_capability_policy(settings.capability_policy.clone());
