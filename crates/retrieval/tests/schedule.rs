@@ -693,3 +693,51 @@ async fn abandonment_preserves_real_applied_receipts_and_refuses_unresolved_subm
     assert!(next.fence > l.fence);
     c.claim_schedule(&next, 30, "periodic", "fresh").unwrap();
 }
+
+#[test]
+fn cancellation_after_durable_completion_preserves_schedule_and_history() {
+    let f = Fixture::new();
+    let c = f.open();
+    let lease = c.state().acquire_lease(10, 100).unwrap();
+    register(&c, &lease);
+    c.claim_schedule(&lease, 20, "periodic", "completed-run")
+        .unwrap();
+    complete(&c, &lease, 20, "completed-run");
+    let before = c.schedule("periodic").unwrap();
+    let history = c.schedule_events("periodic", 0, 100).unwrap();
+    assert!(before.active_run.is_none());
+    assert!(
+        history
+            .iter()
+            .any(|event| event.kind == ScheduleEventKind::Completed)
+    );
+    // Completion can commit before cancellation wins the runner's result select.
+    // Repeating shutdown must not create a cancellation event or move a deadline.
+    for now in [21, 22] {
+        assert_eq!(
+            c.checkpoint_schedule(&lease, now, "periodic").unwrap(),
+            before
+        );
+        assert_eq!(c.schedule_events("periodic", 0, 100).unwrap(), history);
+    }
+    assert_eq!(
+        c.checkpoint_schedule(&lease, 22, "missing"),
+        Err(JournalError::InvalidTransition)
+    );
+    c.state().release_lease(&lease, 23).unwrap();
+    assert_eq!(
+        c.checkpoint_schedule(&lease, 23, "periodic"),
+        Err(JournalError::LeaseLost)
+    );
+    let lease = c.state().acquire_lease(24, 100).unwrap();
+    f.raw()
+        .execute(
+            "UPDATE reconciliation_schedules SET workspace='foreign' WHERE schedule_id='periodic'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        c.checkpoint_schedule(&lease, 24, "periodic"),
+        Err(JournalError::ScopeMismatch)
+    );
+}
