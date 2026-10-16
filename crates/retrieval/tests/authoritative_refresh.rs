@@ -3790,6 +3790,7 @@ async fn installed_relations_replace_only_their_family_and_repair_both_noop_path
     index.create().await;
     let source = HttpNotion::start().await;
     source.change(|m| {
+        m.markdown = format!("[root](https://www.notion.so/{ROOT})");
         m.relation_name = Some("Ingredients".into());
         m.relation_targets = vec![OTHER.into(), FOREIGN.into()];
     });
@@ -4151,10 +4152,7 @@ async fn installed_relations_replace_only_their_family_and_repair_both_noop_path
             .relation_projection_complete(&tombstone)
             .unwrap()
     );
-    assert_eq!(
-        index.coordinator.state().edges_from(PAGE).unwrap(),
-        vec![link]
-    );
+    assert_eq!(index.coordinator.state().edges_from(PAGE).unwrap(), vec![]);
     assert!(
         index
             .coordinator
@@ -5267,4 +5265,305 @@ async fn target_only_excluded_and_broken_ancestry_converge_without_source_change
         );
         assert_eq!(source.foreign_body_reads.load(Ordering::SeqCst), 0);
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_body_links_follow_authorized_snapshot_cleanup_and_durable_repair() {
+    use notion_knowledge_core::{
+        aliases::{AliasSources, PageAliasStore},
+        graph::{GraphEdgeStore, GraphTarget},
+    };
+    let aliases = AliasSources::new(true, vec![]).unwrap();
+    use notion_knowledge_retrieval::commit::ReceiptStatus;
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    source.change(|m| {
+        m.relation_name = Some("Related".into());
+        m.relation_targets = vec![OTHER.into()];
+        m.markdown = format!(
+            concat!(
+                "[page](https://www.notion.so/{0}) [duplicate](https://www.notion.so/{0})\n",
+                "<mention-page url=\"https://www.notion.so/{0}\"/>\n",
+                "[block](https://www.notion.so/{0}#22222222222222222222222222222222)\n",
+                "[denied](https://www.notion.so/{1})\n",
+                "[broken](https://www.notion.so/malformed?token=fixture-secret)\n",
+                "[external](https://example.org/{0}) [lookalike](https://notion.so.evil.org/{0})\n",
+                "`[code](https://www.notion.so/{2})`\n",
+                "```\n<page url=\"https://www.notion.so/{2}\"/>\n```\n",
+                "\\<page url=\"https://www.notion.so/{2}\"/>\n"
+            ),
+            OTHER, FOREIGN, ROOT
+        );
+    });
+    let provider = CountingProvider::new(index.embed.clone());
+    let page = PageId(PAGE.into());
+    let root = PageId(ROOT.into());
+    let handler = index
+        .handler(source.client())
+        .with_alias_sources(aliases.clone());
+    handler
+        .refresh_page(
+            &page,
+            &root,
+            "links-first",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let first = index.coordinator.receipt("links-first").unwrap().unwrap();
+    let edges = index.coordinator.state().edges_from(PAGE).unwrap();
+    let links: Vec<_> = edges
+        .iter()
+        .filter(|edge| edge.relation_type().starts_with("link:"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        links.len(),
+        4,
+        "page duplicate/mention collapse, block, denied, invalid"
+    );
+    assert_eq!(
+        links
+            .iter()
+            .filter(
+                |edge| matches!(edge.target(), GraphTarget::Page { page_id } if page_id == OTHER)
+            )
+            .count(),
+        2
+    );
+    assert!(links.iter().any(|edge| matches!(edge.target(), GraphTarget::Unresolved { reference } if reference == FOREIGN)));
+    assert!(links.iter().any(|edge| matches!(edge.target(), GraphTarget::Unresolved { reference } if reference.starts_with("invalid-page-link:"))));
+    assert!(!format!("{links:?}").contains("fixture-secret"));
+    assert!(
+        links
+            .iter()
+            .all(|edge| edge.provenance().starts_with("markdown:"))
+    );
+    assert_eq!(source.target_body_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(source.foreign_body_reads.load(Ordering::SeqCst), 0);
+    assert!(index.guarded().page_chunks(OTHER).await.unwrap().is_empty());
+    let sql = rusqlite::Connection::open(&index.db).unwrap();
+    sql.execute(
+        "DELETE FROM graph_edges WHERE source_page_id=?1 AND substr(relation_type,1,5)='link:'",
+        [PAGE],
+    )
+    .unwrap();
+    sql.execute_batch("CREATE TRIGGER reject_link BEFORE INSERT ON graph_edges WHEN substr(NEW.relation_type,1,5)='link:' BEGIN SELECT RAISE(ABORT,'link failure'); END;").unwrap();
+    assert!(
+        handler
+            .refresh_page(
+                &page,
+                &root,
+                "links-first",
+                &provider,
+                index.lease.clone(),
+                clock()
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        index.coordinator.receipt("links-first").unwrap().unwrap(),
+        first
+    );
+    assert!(!index.coordinator.current_body_links_complete(PAGE).unwrap());
+    let repair = index
+        .coordinator
+        .unfinished_relation_repair_id("links-first")
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        index.coordinator.receipt(&repair).unwrap().unwrap().status,
+        ReceiptStatus::Applied
+    );
+    sql.execute_batch("DROP TRIGGER reject_link").unwrap();
+    let reopened =
+        IndexCommitCoordinator::open(&index.index, &index.db, index.coordinator.binding().clone())
+            .unwrap();
+    let restarted = AuthoritativePageRefresh::new(
+        source.client(),
+        GuardedChunkTable::bind(
+            &index.index,
+            "chunks",
+            index.embed.clone(),
+            reopened.clone(),
+        )
+        .unwrap(),
+        reopened.clone(),
+        authority(),
+        &index.journal_scope,
+        chunk_config(),
+    )
+    .unwrap()
+    .with_alias_sources(aliases);
+    restarted
+        .refresh_page(
+            &page,
+            &root,
+            "links-first",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened.receipt(&repair).unwrap().unwrap().status,
+        ReceiptStatus::Applied
+    );
+    assert_eq!(reopened.state().edges_from(PAGE).unwrap(), edges);
+    // Target policy denial changes the link effect without indexing target content.
+    source.change(|m| m.inaccessible_other = true);
+    restarted
+        .refresh_page(
+            &page,
+            &root,
+            "links-denied",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        reopened
+            .state()
+            .edges_from(PAGE)
+            .unwrap()
+            .iter()
+            .all(|edge| matches!(edge.target(), GraphTarget::Unresolved { .. }))
+    );
+    source.change(|m| {
+        m.inaccessible_other = false;
+        m.markdown = format!("<page url=\"https://www.notion.so/{OTHER}\"/>");
+    });
+    restarted
+        .refresh_page(
+            &page,
+            &root,
+            "links-mention",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reopened.state().edges_from(PAGE).unwrap().len(), 2);
+    source.change(|m| m.markdown.clear());
+    restarted
+        .refresh_page(
+            &page,
+            &root,
+            "links-empty",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let remaining = reopened.state().edges_from(PAGE).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].relation_type(), "relation:related-stable");
+    assert_eq!(
+        reopened
+            .state()
+            .lookup_alias(WORKSPACE, ROOT, "First")
+            .unwrap(),
+        vec![PAGE.to_owned()]
+    );
+    source.change(|m| m.markdown = format!("[again](https://www.notion.so/{OTHER})"));
+    restarted
+        .refresh_page(
+            &page,
+            &root,
+            "links-again",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    source.change(|m| m.archived = true);
+    restarted
+        .apply_lifecycle(
+            &page,
+            "links-tombstone",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert!(reopened.state().edges_from(PAGE).unwrap().is_empty());
+    assert!(reopened.current_body_links_complete(PAGE).unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconciliation_commits_body_links_and_never_acknowledges_missing_link_rows() {
+    use notion_knowledge_core::graph::{GraphEdgeStore, GraphTarget};
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    source.change(|m| {
+        m.markdown = format!("<mention-page url=\"https://www.notion.so/{OTHER}\"/>");
+        m.relation_name = Some("Related".into());
+        m.relation_targets = vec![OTHER.into()];
+    });
+    let provider = CountingProvider::new(index.embed.clone());
+    let service = runner(&index, &source);
+    let first = service
+        .apply(
+            "body-link-inventory",
+            index.lease.clone(),
+            clock(),
+            &provider,
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.failed_pages(), 0);
+    let edges = index.coordinator.state().edges_from(PAGE).unwrap();
+    assert_eq!(edges.len(), 2);
+    assert!(edges.iter().any(|edge| edge.relation_type() == "link:page"
+        && matches!(edge.target(), GraphTarget::Page { page_id } if page_id == OTHER)));
+    let sql = rusqlite::Connection::open(&index.db).unwrap();
+    sql.execute(
+        "DELETE FROM graph_edges WHERE source_page_id=?1 AND substr(relation_type,1,5)='link:'",
+        [PAGE],
+    )
+    .unwrap();
+    sql.execute_batch("CREATE TRIGGER fail_link BEFORE INSERT ON graph_edges WHEN substr(NEW.relation_type,1,5)='link:' BEGIN SELECT RAISE(ABORT,'link persistence'); END;").unwrap();
+    let failed = service
+        .apply("body-link-repair", index.lease.clone(), clock(), &provider)
+        .await
+        .unwrap();
+    assert_eq!(failed.failed_pages(), 1);
+    assert!(!index.coordinator.current_body_links_complete(PAGE).unwrap());
+    sql.execute_batch("DROP TRIGGER fail_link").unwrap();
+    let fixed = service
+        .retry_page(
+            "body-link-repair",
+            PAGE,
+            index.lease.clone(),
+            clock(),
+            &provider,
+        )
+        .await
+        .unwrap();
+    assert!(fixed.failed.is_empty());
+    assert_eq!(index.coordinator.state().edges_from(PAGE).unwrap(), edges);
+    source.change(|m| {
+        m.markdown.clear();
+        m.revision = "2026-10-11T12:00:00Z".into();
+    });
+    let edited = service
+        .apply("body-link-edit", index.lease.clone(), clock(), &provider)
+        .await
+        .unwrap();
+    assert_eq!(edited.failed_pages(), 0);
+    let remaining = index.coordinator.state().edges_from(PAGE).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert!(remaining[0].relation_type().starts_with("relation:"));
 }

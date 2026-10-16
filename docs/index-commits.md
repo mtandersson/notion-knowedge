@@ -236,7 +236,9 @@ guard and detached runtime: it reopens and checks the pinned Lance version,
 revalidates source and the lease, then replaces vectors and finishes FTS/vector
 maintenance. Only then does the coordinator's final fenced SQLite transaction
 replace relation-family edges, record completeness, update the page checkpoint
-and acknowledge the receipt. Link edges survive. No graph helper recursively
+and acknowledge the receipt. Relation-only component callers retain link edges;
+the installed refresh also attaches `with_links` to replace the body-link family
+from the same authorized snapshot (see [installed body links](internal-page-graph-links.md)). No graph helper recursively
 locks the SQLite connection. Graph or final-ack persistence failure rolls back
 that whole SQLite transaction, preserving previous committed history; the newer
 receipt stays Pending and blocks serving. Lance may already contain the new
