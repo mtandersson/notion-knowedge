@@ -4666,6 +4666,7 @@ async fn reconciliation_converges_target_only_changes_and_rebuilds_derived_relat
     index.create().await;
     let source = HttpNotion::start().await;
     source.change(|m| {
+        m.markdown = format!("[root](https://www.notion.so/{ROOT})");
         m.relation_name = Some("Ingredients".into());
         m.relation_targets = vec![FOREIGN.into(), FOREIGN.into()];
         m.foreign_parent = ROOT.into();
@@ -4961,10 +4962,7 @@ async fn reconciliation_converges_target_only_changes_and_rebuilds_derived_relat
             .current_relation_projection_complete(PAGE)
             .unwrap()
     );
-    assert_eq!(
-        index.coordinator.state().edges_from(PAGE).unwrap(),
-        vec![link.clone()]
-    );
+    assert_eq!(index.coordinator.state().edges_from(PAGE).unwrap(), vec![]);
     assert!(
         index
             .coordinator
@@ -5005,10 +5003,7 @@ async fn reconciliation_converges_target_only_changes_and_rebuilds_derived_relat
         .await
         .unwrap();
     assert_eq!((outside.deleted, outside.failed_pages()), (1, 0));
-    assert_eq!(
-        index.coordinator.state().edges_from(PAGE).unwrap(),
-        vec![link]
-    );
+    assert_eq!(index.coordinator.state().edges_from(PAGE).unwrap(), vec![]);
     assert!(
         index
             .coordinator
@@ -5508,7 +5503,8 @@ async fn reconciliation_commits_body_links_and_never_acknowledges_missing_link_r
     index.create().await;
     let source = HttpNotion::start().await;
     source.change(|m| {
-        m.markdown = format!("<mention-page url=\"https://www.notion.so/{OTHER}\"/>");
+        m.markdown = format!("<mention-page url=\"https://www.notion.so/{FOREIGN}\"/>");
+        m.foreign_parent = ROOT.into();
         m.relation_name = Some("Related".into());
         m.relation_targets = vec![OTHER.into()];
     });
@@ -5527,7 +5523,42 @@ async fn reconciliation_commits_body_links_and_never_acknowledges_missing_link_r
     let edges = index.coordinator.state().edges_from(PAGE).unwrap();
     assert_eq!(edges.len(), 2);
     assert!(edges.iter().any(|edge| edge.relation_type() == "link:page"
-        && matches!(edge.target(), GraphTarget::Page { page_id } if page_id == OTHER)));
+        && matches!(edge.target(), GraphTarget::Page { page_id } if page_id == FOREIGN)));
+    // This target is referenced exclusively by the body: metadata-only planning
+    // selects Unchanged, whose owning application must still update the graph.
+    source.change(|m| m.inaccessible_foreign = true);
+    let denied = service
+        .apply(
+            "body-only-target-denied",
+            index.lease.clone(),
+            clock(),
+            &provider,
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.failed_pages(), 0);
+    assert!(
+        index
+            .coordinator
+            .state()
+            .edges_from(PAGE)
+            .unwrap()
+            .iter()
+            .filter(|edge| edge.relation_type().starts_with("link:"))
+            .all(|edge| matches!(edge.target(), GraphTarget::Unresolved { .. }))
+    );
+    source.change(|m| m.inaccessible_foreign = false);
+    let restored = service
+        .apply(
+            "body-only-target-restored",
+            index.lease.clone(),
+            clock(),
+            &provider,
+        )
+        .await
+        .unwrap();
+    assert_eq!(restored.failed_pages(), 0);
+    assert_eq!(index.coordinator.state().edges_from(PAGE).unwrap(), edges);
     let sql = rusqlite::Connection::open(&index.db).unwrap();
     sql.execute(
         "DELETE FROM graph_edges WHERE source_page_id=?1 AND substr(relation_type,1,5)='link:'",
