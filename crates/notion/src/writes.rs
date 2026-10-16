@@ -140,7 +140,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut client = NotionClient::integration("test-credential")
             .unwrap()
-            .without_retries();
+            .with_fast_fixture_transport();
         client.api_root = format!("http://{}/v1", listener.local_addr().unwrap());
         let body = body.to_owned();
         let server = tokio::spawn(async move {
@@ -262,7 +262,7 @@ mod tests {
     async fn invalid_inputs_are_rejected_before_network_mutation() {
         let client = NotionClient::integration("test-credential")
             .unwrap()
-            .without_retries();
+            .with_fast_fixture_transport();
         for id in ["", "../users/me", "12345678-1234-1234-1234-123456789abz"] {
             assert_eq!(
                 client

@@ -29,6 +29,53 @@ const WORKSPACE: &str = "44444444-4444-4444-4444-444444444444";
 const UPLOAD: &str = "55555555-5555-5555-5555-555555555555";
 const BLOCK: &str = "66666666-6666-6666-6666-666666666666";
 const SECRET_URL: &str = "https://fixture.example/file?token=signed-secret";
+#[derive(Default)]
+struct SourceCount {
+    value: AtomicUsize,
+    changed: tokio::sync::Notify,
+}
+impl SourceCount {
+    fn load(&self, order: Ordering) -> usize {
+        self.value.load(order)
+    }
+    fn record(&self) {
+        self.value.fetch_add(1, Ordering::SeqCst);
+        self.changed.notify_waiters();
+    }
+    async fn wait(&self) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.load(Ordering::SeqCst) > 0 {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+type RecordedRequest = (String, Vec<u8>);
+#[derive(Default)]
+struct Requests {
+    entries: Mutex<Vec<RecordedRequest>>,
+    changed: tokio::sync::Notify,
+}
+impl Requests {
+    fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, Vec<RecordedRequest>>> {
+        self.entries.lock()
+    }
+    async fn wait_for(&self, matches: impl Fn(&[RecordedRequest]) -> bool) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if matches(&self.lock().unwrap()) {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
 fn scope() -> LifecycleScope {
     LifecycleScope {
         workspace_id: WORKSPACE.into(),
@@ -96,7 +143,7 @@ async fn source(
     slow: bool,
 ) -> (
     DownloadPolicy,
-    Arc<AtomicUsize>,
+    Arc<SourceCount>,
     tokio::task::JoinHandle<()>,
     Arc<Mutex<Vec<std::path::PathBuf>>>,
 ) {
@@ -107,7 +154,7 @@ async fn source_many(
     maximum: usize,
 ) -> (
     DownloadPolicy,
-    Arc<AtomicUsize>,
+    Arc<SourceCount>,
     tokio::task::JoinHandle<()>,
     Arc<Mutex<Vec<std::path::PathBuf>>>,
 ) {
@@ -133,7 +180,7 @@ async fn source_many(
             reqwest::Certificate::from_pem(certificate).unwrap(),
             paths.clone(),
         );
-    let count = Arc::new(AtomicUsize::new(0));
+    let count = Arc::new(SourceCount::default());
     let observed = count.clone();
     let handle = tokio::spawn(async move {
         for (bytes, status, slow) in files {
@@ -145,7 +192,7 @@ async fn source_many(
             let (headers, _) = read_request(&mut tls).await;
             assert!(headers.starts_with("GET /file?token=signed-secret "));
             assert!(!headers.to_ascii_lowercase().contains("authorization:"));
-            observed.fetch_add(1, Ordering::SeqCst);
+            observed.record();
             tls.write_all(
                 format!(
                     "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -156,7 +203,7 @@ async fn source_many(
             .await
             .unwrap();
             if slow {
-                tokio::time::sleep(Duration::from_secs(30)).await;
+                std::future::pending::<()>().await;
             }
             for chunk in bytes.chunks(16384) {
                 if tls.write_all(chunk).await.is_err() {
@@ -170,17 +217,13 @@ async fn source_many(
 }
 async fn notion(
     steps: Vec<(u16, Value)>,
-) -> (
-    NotionClient,
-    Arc<Mutex<Vec<(String, Vec<u8>)>>>,
-    tokio::task::JoinHandle<()>,
-) {
+) -> (NotionClient, Arc<Requests>, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut client = NotionClient::integration("fixture-secret")
         .unwrap()
-        .without_retries();
+        .with_fast_fixture_transport();
     client.api_root = format!("http://{}/v1", listener.local_addr().unwrap());
-    let requests = Arc::new(Mutex::new(Vec::new()));
+    let requests = Arc::new(Requests::default());
     let observed = requests.clone();
     let handle = tokio::spawn(async move {
         for (status, value) in steps {
@@ -193,6 +236,7 @@ async fn notion(
                     .contains("authorization: bearer fixture-secret")
             );
             observed.lock().unwrap().push(request);
+            observed.changed.notify_waiters();
             if status == 0 {
                 std::future::pending::<()>().await;
             }
@@ -555,6 +599,7 @@ async fn changed_target_authority_after_download_prevents_upload() {
 }
 #[tokio::test]
 async fn cancelled_or_timed_out_download_removes_temporary_bytes_and_records_failed_attempt() {
+    let _clock = crate::test_clock::TestClock::new().await;
     for cancel in [true, false] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit");
@@ -571,12 +616,16 @@ async fn cancelled_or_timed_out_download_removes_temporary_bytes_and_records_fai
             scope(),
         );
         let ctx = context(&gate, &audit);
+        let mut future = Box::pin(ingest_file(&adapter, &ctx, request(false)));
+        tokio::select! {
+            result = &mut future => panic!("download should still be pending: {result:?}"),
+            _ = count.wait() => {}
+        }
         if cancel {
-            let mut future = Box::pin(ingest_file(&adapter, &ctx, request(false)));
-            tokio::select! { _= &mut future => panic!("download should still be pending"), _=async {while count.load(Ordering::SeqCst)==0 {tokio::task::yield_now().await;}}=>{} }
             drop(future);
         } else {
-            let result = ingest_file(&adapter, &ctx, request(false)).await;
+            crate::test_clock::TestClock::advance(Duration::from_secs(20)).await;
+            let result = future.await;
             assert_eq!(result.failure, Some(IngestFailure::DownloadUnavailable));
         }
         assert_clean(&paths);
@@ -675,7 +724,7 @@ async fn cancellation_during_upload_cleans_up_and_audits_indeterminate_without_r
     );
     let ctx = context(&gate, &audit);
     let mut future = Box::pin(ingest_file(&adapter, &ctx, request(false)));
-    tokio::select! { _= &mut future => panic!("upload should still be pending"), _=async {loop {if requests.lock().unwrap().iter().any(|(h,_)|h.starts_with(&format!("POST /v1/file_uploads/{UPLOAD}/send"))) {break;}tokio::task::yield_now().await;}}=>{} }
+    tokio::select! { _= &mut future => panic!("upload should still be pending"), _=requests.wait_for(|entries| entries.iter().any(|(h,_)|h.starts_with(&format!("POST /v1/file_uploads/{UPLOAD}/send"))))=>{} }
     drop(future);
     assert_clean(&paths);
     source_task.await.unwrap();
@@ -1304,7 +1353,7 @@ async fn canceled_later_readback_preserves_prior_success_and_current_known_refer
     let mut future = Box::pin(batch.execute(&adapter, &ctx));
     tokio::select! {
         result=&mut future => panic!("unexpected completion: {result:?}"),
-        _=async { loop { if requests.lock().unwrap().iter().filter(|(h,_)|h.starts_with("GET /v1/blocks/")).count()==2 { break; } tokio::time::sleep(Duration::from_millis(10)).await; } } => {}
+        _=requests.wait_for(|entries| entries.iter().filter(|(h,_)|h.starts_with("GET /v1/blocks/")).count()==2) => {}
     }
     drop(future);
     assert_eq!(
@@ -1408,7 +1457,7 @@ async fn canceled_multipart_send_retains_created_upload_and_cleans_owned_source(
     let mut future = Box::pin(batch.execute(&adapter, &ctx));
     tokio::select! {
         result=&mut future => panic!("unexpected completion: {result:?}"),
-        _=async { loop { if requests.lock().unwrap().iter().any(|(h,_)|h.contains("/send ")) {break;} tokio::time::sleep(Duration::from_millis(10)).await; } } => {}
+        _=requests.wait_for(|entries| entries.iter().any(|(h,_)|h.contains("/send "))) => {}
     }
     drop(future);
     let current = batch.results()[0].outcome.as_ref().unwrap();

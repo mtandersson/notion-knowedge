@@ -86,7 +86,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut client = NotionClient::integration("fixture-key")
             .unwrap()
-            .without_retries();
+            .with_fast_fixture_transport();
         client.api_root = format!("http://{}/v1", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -163,7 +163,7 @@ mod tests {
     async fn rejects_invalid_input_without_network() {
         let client = NotionClient::integration("fixture-key")
             .unwrap()
-            .without_retries();
+            .with_fast_fixture_transport();
         for bad in [
             UpdateSectionContent {
                 old_str: String::new(),
