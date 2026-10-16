@@ -4,6 +4,9 @@ pub mod config;
 pub mod diagnostics;
 pub mod http;
 
+/// Installed SDK session and SSE response lifetime budgets.
+pub mod session_limits;
+
 pub mod crawl_args;
 
 pub mod webhook;

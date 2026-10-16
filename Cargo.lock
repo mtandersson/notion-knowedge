@@ -4743,6 +4743,8 @@ name = "notion-knowledge-server"
 version = "0.1.0"
 dependencies = [
  "axum 0.8.9",
+ "futures",
+ "http-body",
  "chrono",
  "hmac",
  "notion-knowledge-core",
