@@ -1562,7 +1562,10 @@ async fn explicit_relation_rebuild_uses_shared_runtime_and_preserves_operational
         sync_state::SyncStateStore,
     };
     let http = HttpNotion::start().await;
-    http.change(|m| m.relation_name = Some("Ingredients".into()));
+    http.change(|m| {
+        m.markdown = format!("[root](https://www.notion.so/{ROOT})");
+        m.relation_name = Some("Ingredients".into());
+    });
     let f = Fixture::new(&http).await;
     counts(
         &f.command(&http, &["--reconcile", "apply", "seed"]).await,
