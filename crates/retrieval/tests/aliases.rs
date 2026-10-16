@@ -233,3 +233,44 @@ fn migrated_alias_store_persists_across_restart() {
     }
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn alias_projection_migration_is_explicit_and_retains_existing_namespaces() {
+    let path = std::env::temp_dir().join(format!(
+        "nk-alias-schema-{}-{}.sqlite",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let store = SqliteSyncStateStore::open(&path).unwrap();
+    store
+        .replace_page_aliases(
+            WS,
+            ROOT,
+            "page",
+            &[PageAlias::new("Öresund", "title").unwrap()],
+        )
+        .unwrap();
+    drop(store);
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    raw.execute_batch("DROP TABLE alias_operation_proposals; DROP TABLE page_alias_projections; DELETE FROM schema_migrations WHERE version=16;").unwrap();
+    drop(raw);
+    let before = fs::read(&path).unwrap();
+    assert!(SqliteSyncStateStore::open_read_only(&path).is_err());
+    assert_eq!(fs::read(&path).unwrap(), before);
+    let migrated = SqliteSyncStateStore::open(&path).unwrap();
+    assert_eq!(migrated.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    assert_eq!(
+        migrated.lookup_alias(WS, ROOT, "öresund").unwrap(),
+        vec!["page"]
+    );
+    let before = fs::read(&path).unwrap();
+    let reader = SqliteSyncStateStore::open_read_only(&path).unwrap();
+    assert_eq!(
+        reader.lookup_alias(WS, ROOT, "ÖRESUND").unwrap(),
+        vec!["page"]
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    drop(reader);
+    drop(migrated);
+    fs::remove_file(path).unwrap();
+}

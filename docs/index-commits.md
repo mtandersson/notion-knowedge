@@ -319,3 +319,58 @@ returns the policy authority from its precommit callback to
 `submit_with_authority`, which retains it until the final SQLite transaction
 returns. Cloned runtime handlers and their reconciliation runner share this owner.
 Planner-wide convergence and rebuild scheduling remain #384.
+
+### Owned canonical alias projections
+
+`AliasProjection::from_indexed(binding, metadata, sources)` reuses the existing
+`AliasSources` extractor and `PageAliasStore` row semantics. Extraction completes
+before a proposal is attached with `PageOperation::with_alias_projection`.
+Workspace and physical root must match the trusted commit binding; roots are
+retained from the already hashed `ReconciliationScope`. Configuration identity
+includes the explicit title flag and sorted stable property IDs, even if a field
+is absent or currently yields zero names. Equivalent key/provenance spellings
+retain the same first canonical display as the standalone store. Aliases convey
+no permission to read or index another page.
+
+The proposal binds workspace, root, scope, page, generation, source configuration,
+exact names/provenance and tombstone status. `AliasProjection::tombstone` represents
+an authorized removal with the same explicit namespace/configuration. Inside the
+existing owned commit, the final SQLite transaction replaces only aliases for
+that workspace/root/page, records exact completeness, installs any relation
+projection, updates the checkpoint and acknowledges the receipt. Other alias
+namespaces, link families and operational coordination survive. Do not call the
+standalone `PageAliasStore` writer after acknowledgment. Failed alias insertion,
+completeness persistence or final acknowledgment rolls back all SQLite effects;
+Lance effects may already exist, so the Pending receipt must be replayed through
+the guarded table. Source/policy authority returned by the precommit callback
+remains held through this final transaction, as for relation effects.
+
+Schema 16 adds `page_alias_projections` and `alias_operation_proposals` through
+explicit writable initialization. Compatible existing and read-only opens never
+migrate. `alias_projection_complete(&expected)` reads one snapshot and checks the
+binding, generation/version, configuration-bound effect, checkpoint tombstone and
+exact persisted alias rows (key, display and provenance). Zero aliases and a
+tombstone need their own matching completeness record. Missing/corrupt/extra rows
+or markers cannot pass. A legacy write invalidates alias completeness without
+pretending to maintain it.
+
+Applied receipts and their proposal identities remain immutable. Both Applied
+replay paths compare the alias proposal and exact current rows; dropping an
+acknowledged alias proposal also requires repair. Use
+`alias_repair_id(original_id, page_id)` to obtain a distinct durable operation ID,
+then prepare a fresh complete operation and fresh source authority. Pending and
+Failed repairs retain that ID across reopen; Applied repairs advance the chain.
+`unfinished_alias_repair_id` must be checked before a source/no-op short circuit.
+The original Applied replay also refuses to short circuit while that chain has
+unfinished work, even if SQLite still matches a reverted old source: Lance may
+contain the partial newer effect. Retryable lifecycle/refresh operations may
+replace their unacknowledged proposal with freshly authorized current content;
+strict operations must retain their exact proposal. Repair resolution rejects
+original or repair receipts from another page/generation.
+
+This is the durable capability for #393. The installation follow-up #394 must
+carry startup-owned sources through planner, all refresh/reconciliation exits,
+operator rebuild handling and scoped local lookup. It must check unfinished
+repairs before source/content no-op decisions and preserve the serving gates for
+unacknowledged work. This capability alone does not activate alias maintenance in
+Notion indexing or satisfy parent #376's installed acceptance criteria.

@@ -20,6 +20,8 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use tokio::sync::oneshot;
 
 use crate::sync_state::SqliteSyncStateStore;
+mod alias_projection;
+pub use alias_projection::AliasProjection;
 pub(crate) mod projection;
 pub use projection::RelationProjection;
 
@@ -51,6 +53,7 @@ fn io(_: std::io::Error) -> CommitError {
 pub struct CommitBinding {
     table: String,
     workspace: String,
+    roots: Vec<String>,
     scope: String,
     generation: String,
     epoch: i64,
@@ -77,6 +80,7 @@ impl CommitBinding {
         Ok(Self {
             table: table.into(),
             workspace: workspace.into(),
+            roots: scope.roots().to_vec(),
             scope: scope.identity().into(),
             generation: generation.into(),
             epoch,
@@ -125,6 +129,7 @@ pub struct PageOperation {
     checkpoint: PageSyncState,
     metadata_identity: Option<String>,
     relation_projection: Option<RelationProjection>,
+    alias_projection: Option<AliasProjection>,
     retry_latest_refresh: bool,
     retry_latest_lifecycle: bool,
 }
@@ -155,6 +160,7 @@ impl PageOperation {
             checkpoint,
             metadata_identity: None,
             relation_projection: None,
+            alias_projection: None,
             retry_latest_refresh: false,
             retry_latest_lifecycle: false,
         })
@@ -206,6 +212,17 @@ impl PageOperation {
             return Err(CommitError::InvalidInput);
         }
         self.relation_projection = Some(projection);
+        Ok(self)
+    }
+    /// Attach exact aliases extracted from trusted normalized source metadata.
+    pub fn with_alias_projection(
+        mut self,
+        projection: AliasProjection,
+    ) -> Result<Self, CommitError> {
+        if projection.page_id() != self.checkpoint.page_id() {
+            return Err(CommitError::InvalidInput);
+        }
+        self.alias_projection = Some(projection);
         Ok(self)
     }
     pub fn id(&self) -> &str {
@@ -851,6 +868,11 @@ impl IndexCommitCoordinator {
         {
             return Err(CommitError::BindingMismatch);
         }
+        if let Some(projection) = &operation.alias_projection
+            && !projection.matches_operation(&self.binding, operation)
+        {
+            return Err(CommitError::BindingMismatch);
+        }
         let existing: Option<(bool, i64, bool)> = tx.query_row("SELECT generation=?2 AND page_id=?3 AND revision=?4 AND action=?5 AND content_hash IS ?6 AND last_edited_time IS ?7,status,generation=?2 AND page_id=?3 AND (action=?5 OR ?8) FROM index_commit_receipts WHERE operation_id=?1",params![operation.id,self.binding.generation,checkpoint.page_id(),operation.revision,operation.action.number(),checkpoint.content_hash(),checkpoint.last_edited_time(),operation.retry_latest_lifecycle],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(sql)?;
         if let Some((matches, status, same_authority)) = existing {
             // An acknowledged hint stays acknowledged even if the source
@@ -874,6 +896,7 @@ impl IndexCommitCoordinator {
                         return Err(CommitError::ProjectionRepairRequired);
                     }
                 }
+                alias_projection::validate_applied(&tx, operation)?;
                 tx.commit().map_err(sql)?;
                 return Ok(false);
             }
@@ -903,6 +926,7 @@ impl IndexCommitCoordinator {
                         return Err(CommitError::ProjectionRepairRequired);
                     }
                 }
+                alias_projection::validate_applied(&tx, operation)?;
                 tx.commit().map_err(sql)?;
                 return Ok(false);
             }
@@ -952,6 +976,7 @@ impl IndexCommitCoordinator {
             )
             .map_err(sql)?;
         }
+        alias_projection::persist_proposal(&tx, operation, existing.is_some())?;
         tx.commit().map_err(sql)?;
         Ok(true)
     }
@@ -977,6 +1002,15 @@ impl IndexCommitCoordinator {
             // A legacy write cannot attest that an earlier graph is current.
             tx.execute(
                 "DELETE FROM page_relation_projections WHERE page_id=?1",
+                [operation.checkpoint.page_id()],
+            )
+            .map_err(sql)?;
+        }
+        if let Some(projection) = &operation.alias_projection {
+            projection.install(&tx)?;
+        } else {
+            tx.execute(
+                "DELETE FROM page_alias_projections WHERE page_id=?1",
                 [operation.checkpoint.page_id()],
             )
             .map_err(sql)?;

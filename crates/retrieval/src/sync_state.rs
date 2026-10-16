@@ -13,7 +13,7 @@ use notion_knowledge_core::sync_state::{
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
-pub const LATEST_SCHEMA_VERSION: i64 = 15;
+pub const LATEST_SCHEMA_VERSION: i64 = 16;
 
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     // Entries below stay append-only and ordered.
@@ -91,6 +91,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         15,
         "relation_projections",
         include_str!("../migrations/0015_relation_projections.sql"),
+    ),
+    (
+        16,
+        "alias_projections",
+        include_str!("../migrations/0016_alias_projections.sql"),
     ),
 ];
 
