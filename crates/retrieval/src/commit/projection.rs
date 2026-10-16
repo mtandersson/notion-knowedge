@@ -12,6 +12,7 @@ pub struct RelationProjection {
     page_id: String,
     tombstone: bool,
     edges: Vec<GraphEdge>,
+    links: Option<Vec<GraphEdge>>,
     pub(super) effect: String,
 }
 impl RelationProjection {
@@ -45,8 +46,49 @@ impl RelationProjection {
             page_id: page_id.into(),
             tombstone,
             edges,
+            links: None,
             effect,
         })
+    }
+    /// Bind a complete body-link family to the same owned receipt and final
+    /// SQLite transaction. An empty family deliberately removes stale links.
+    pub fn with_links(mut self, mut links: Vec<GraphEdge>) -> Result<Self, CommitError> {
+        if (self.tombstone && !links.is_empty())
+            || links.iter().any(|edge| {
+                edge.source_page_id() != self.page_id
+                    || !matches!(
+                        edge.relation_type(),
+                        "link:page" | "link:block" | "link:invalid"
+                    )
+                    || edge
+                        .provenance()
+                        .strip_prefix("markdown:")
+                        .is_none_or(|offset| offset.parse::<usize>().is_err())
+                    || edge.display_name().is_some()
+            })
+        {
+            return Err(CommitError::InvalidInput);
+        }
+        links.sort_by_key(edge_identity);
+        links.dedup();
+        self.links = Some(links);
+        self.effect = self.exact_effect();
+        Ok(self)
+    }
+    fn exact_effect(&self) -> String {
+        let mut effect = effect_identity(self.tombstone, &self.edges);
+        if let Some(links) = &self.links {
+            effect = effect.replacen("relation-v1:", "graph-v2:", 1);
+            for edge in links {
+                field(&mut effect, &edge_identity(edge));
+            }
+        }
+        effect
+    }
+    fn actual_links(&self, db: &Connection) -> Result<Vec<GraphEdge>, CommitError> {
+        let mut links = crate::graph::read_edges(db, "SELECT source_page_id,target_page_id,unresolved_reference,relation_type,provenance,display_name FROM graph_edges WHERE source_page_id=?1 AND substr(relation_type,1,5)='link:'", &self.page_id).map_err(|_| CommitError::Unavailable)?;
+        links.sort_by_key(edge_identity);
+        Ok(links)
     }
     pub fn page_id(&self) -> &str {
         &self.page_id
@@ -72,6 +114,20 @@ impl RelationProjection {
             )
             .optional()
             .map_err(sql)?;
+        // Metadata-only planners compare their relation subset while still
+        // requiring the stored combined graph to be internally complete.
+        if self.links.is_none()
+            && stored
+                .as_ref()
+                .is_some_and(|(_, _, effect)| effect.starts_with("graph-v2:"))
+        {
+            if !current_complete(db, &self.binding, &self.page_id)? {
+                return Ok(false);
+            }
+            let mut actual = crate::graph::read_edges(db, "SELECT source_page_id,target_page_id,unresolved_reference,relation_type,provenance,display_name FROM graph_edges WHERE source_page_id=?1 AND substr(relation_type,1,9)='relation:'", &self.page_id).map_err(|_| CommitError::Unavailable)?;
+            actual.sort_by_key(edge_identity);
+            return Ok(actual == self.edges);
+        }
         if stored
             != Some((
                 self.binding.generation.clone(),
@@ -83,11 +139,17 @@ impl RelationProjection {
         }
         let mut actual = crate::graph::read_edges(db, "SELECT source_page_id,target_page_id,unresolved_reference,relation_type,provenance,display_name FROM graph_edges WHERE source_page_id=?1 AND substr(relation_type,1,9)='relation:'", &self.page_id).map_err(|_| CommitError::Unavailable)?;
         actual.sort_by_key(edge_identity);
+        if let Some(links) = &self.links {
+            return Ok(actual == self.edges && self.actual_links(db)? == *links);
+        }
         Ok(actual == self.edges)
     }
     pub(super) fn install(&self, db: &Connection) -> Result<(), CommitError> {
         db.execute("DELETE FROM graph_edges WHERE source_page_id=?1 AND substr(relation_type,1,9)='relation:'", [&self.page_id]).map_err(sql)?;
-        for edge in &self.edges {
+        if self.links.is_some() {
+            db.execute("DELETE FROM graph_edges WHERE source_page_id=?1 AND substr(relation_type,1,5)='link:'", [&self.page_id]).map_err(sql)?;
+        }
+        for edge in self.edges.iter().chain(self.links.iter().flatten()) {
             let (target, unresolved): (Option<&str>, Option<&str>) = match edge.target() {
                 GraphTarget::Page { page_id } => (Some(page_id), None),
                 GraphTarget::Unresolved { reference } => (None, Some(reference)),
@@ -240,6 +302,25 @@ impl IndexCommitCoordinator {
         Ok(complete)
     }
 
+    /// A relation-only legacy receipt cannot attest body-link completeness.
+    pub fn current_body_links_complete(&self, page: &str) -> Result<bool, CommitError> {
+        if !self.current_relation_projection_complete(page)? {
+            return Ok(false);
+        }
+        let db = self
+            .state
+            .lock_connection()
+            .map_err(|_| CommitError::Unavailable)?;
+        db.query_row(
+            "SELECT effect LIKE 'graph-v2:%' FROM page_relation_projections WHERE page_id=?1",
+            [page],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql)
+        .map(|value| value.unwrap_or(false))
+    }
+
     /// Only reads compatible existing state. Does not acquire a writer lease,
     /// migrate, repair, or infer completeness from a nonzero edge count.
     pub fn relation_projection_complete(
@@ -281,9 +362,10 @@ pub(crate) fn current_complete(
     if generation != binding.generation || version != VERSION {
         return Ok(false);
     }
-    let tombstone = if effect.starts_with("relation-v1:0:") {
+    let combined = effect.starts_with("graph-v2:");
+    let tombstone = if effect.starts_with("relation-v1:0:") || effect.starts_with("graph-v2:0:") {
         false
-    } else if effect.starts_with("relation-v1:1:") {
+    } else if effect.starts_with("relation-v1:1:") || effect.starts_with("graph-v2:1:") {
         true
     } else {
         return Ok(false);
@@ -300,7 +382,13 @@ pub(crate) fn current_complete(
         return Ok(false);
     }
     let edges = crate::graph::read_edges(db,"SELECT source_page_id,target_page_id,unresolved_reference,relation_type,provenance,display_name FROM graph_edges WHERE source_page_id=?1 AND substr(relation_type,1,9)='relation:'",page).map_err(|_|CommitError::Unavailable)?;
-    Ok(RelationProjection::new(binding, page, tombstone, edges)?.effect == effect)
+    let mut projection = RelationProjection::new(binding, page, tombstone, edges)?;
+    if combined {
+        projection = projection
+            .clone()
+            .with_links(projection.actual_links(db)?)?;
+    }
+    Ok(projection.effect == effect)
 }
 
 #[cfg(feature = "local-lancedb")]

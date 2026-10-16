@@ -481,15 +481,13 @@ mod tests {
     // production origin/DNS guards are independently tested above.
     async fn source(
         wire: &'static [u8],
-        delay: Duration,
         deadline: Duration,
     ) -> (Client, Url, tokio::task::JoinHandle<()>) {
-        source_with_pause(wire, delay, deadline, false).await
+        source_with_pause(wire, deadline, false).await
     }
 
     async fn source_with_pause(
         wire: &'static [u8],
-        delay: Duration,
         deadline: Duration,
         hold_open: bool,
     ) -> (Client, Url, tokio::task::JoinHandle<()>) {
@@ -511,10 +509,9 @@ mod tests {
             let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
             assert!(!request.contains("authorization:"));
             assert!(request.contains("accept-encoding: identity"));
-            tokio::time::sleep(delay).await;
             let _ = socket.write_all(wire).await;
             if hold_open {
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                std::future::pending::<()>().await;
             }
         });
         let client = client_builder(deadline)
@@ -535,7 +532,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let temporary = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
         let path = temporary.path().to_owned();
-        let (client, url, task) = source(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\n1234\r\n4\r\n5678\r\n0\r\n\r\n", Duration::ZERO, Duration::from_secs(1)).await;
+        let (client, url, task) = source(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\n1234\r\n4\r\n5678\r\n0\r\n\r\n", Duration::from_secs(1)).await;
         let download = stream_file(&client, url, 8, temporary).await.unwrap();
         assert_eq!(download.size_bytes(), 8);
         let mut bytes = Vec::new();
@@ -575,7 +572,7 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let temporary = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
             let path = temporary.path().to_owned();
-            let (client, url, task) = source(wire, Duration::ZERO, Duration::from_secs(1)).await;
+            let (client, url, task) = source(wire, Duration::from_secs(1)).await;
             let error = stream_file(&client, url, 8, temporary).await.unwrap_err();
             assert_eq!(error, expected);
             assert!(!format!("{error:?} {error}").contains("sentinel"));
@@ -589,32 +586,41 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_and_caller_cancellation_remove_temporary_bytes() {
+        let _clock = crate::test_clock::TestClock::new().await;
         for cancel in [false, true] {
             let directory = tempfile::tempdir().unwrap();
             let temporary = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
             let path = temporary.path().to_owned();
             let (client, url, server) = source_with_pause(
                 b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\ndata",
-                Duration::ZERO,
                 Duration::from_millis(500),
                 true,
             )
             .await;
-            let task = tokio::spawn(async move { stream_file(&client, url, 8, temporary).await });
-            tokio::time::timeout(Duration::from_millis(400), async {
-                loop {
-                    if std::fs::metadata(&path).unwrap().len() == 4 {
-                        break;
-                    }
-                    tokio::task::yield_now().await;
+            let mut task =
+                tokio::spawn(async move { stream_file(&client, url, 8, temporary).await });
+            // Observe actual partial filesystem bytes before advancing the
+            // request deadline. This watchdog only bounds external I/O progress;
+            // it is not a sleep or a timing assertion about the application.
+            let progress = std::time::Instant::now();
+            loop {
+                tokio::select! {
+                    result = &mut task => panic!("stream completed before partial bytes: {result:?}"),
+                    _ = tokio::task::yield_now() => {}
                 }
-            })
-            .await
-            .unwrap();
+                if std::fs::metadata(&path).unwrap().len() == 4 {
+                    break;
+                }
+                assert!(
+                    progress.elapsed() < Duration::from_millis(400),
+                    "fixture did not produce partial bytes"
+                );
+            }
             if cancel {
                 task.abort();
                 assert!(task.await.unwrap_err().is_cancelled());
             } else {
+                crate::test_clock::TestClock::advance(Duration::from_millis(500)).await;
                 assert_eq!(task.await.unwrap().unwrap_err(), DownloadError::Timeout);
             }
             assert!(!path.exists());

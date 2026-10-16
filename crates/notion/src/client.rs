@@ -49,10 +49,12 @@ fn failure(kind: BackendErrorKind) -> BackendError {
 impl NotionClient {
     /// Loopback-only fixture endpoint. Compiled only for integration tests.
     /// Never accepts a user-supplied remote URL or a production transport.
+    /// Fixture requests retain real HTTP and metrics but omit provider pacing
+    /// and retries; production admission policy has its own clock-driven tests.
     #[cfg(feature = "test-fixtures")]
     pub fn with_loopback_fixture(mut self, port: u16) -> Self {
         self.api_root = format!("http://127.0.0.1:{port}/v1");
-        self.without_retries()
+        self.with_fast_fixture_transport()
     }
 
     /// The composition root supplies a validated credential from secret configuration.
@@ -153,7 +155,7 @@ mod tests {
         });
         let client = NotionClient::with_identity_url("test-credential", &url)
             .unwrap()
-            .without_retries();
+            .with_fast_fixture_transport();
         assert!(!format!("{client:?}").contains("test-credential"));
         (client.identity().await, server.await.unwrap())
     }
@@ -205,7 +207,7 @@ mod tests {
         });
         let client = NotionClient::with_identity_url("test-credential", &url)
             .unwrap()
-            .without_retries();
+            .with_fast_fixture_transport();
         assert_eq!(
             client.identity().await.unwrap_err().kind,
             BackendErrorKind::Unavailable

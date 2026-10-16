@@ -178,7 +178,9 @@ impl NotionClient {
                 _ => return Err(err(VERIFY, BackendErrorKind::Conflict)),
             }
             if attempt < 2 {
-                tokio::time::sleep(Duration::from_millis(150 * (attempt + 1))).await;
+                self.transport
+                    .provider_delay(Duration::from_millis(150 * (attempt + 1)))
+                    .await;
             }
         }
         Err(err(VERIFY, BackendErrorKind::Conflict))
@@ -288,7 +290,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut client = NotionClient::integration("fixture-secret")
             .unwrap()
-            .without_retries();
+            .with_fast_fixture_transport();
         client.api_root = format!("http://{}/v1", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
             let mut requests = Vec::new();

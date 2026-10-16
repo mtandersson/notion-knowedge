@@ -647,7 +647,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut client = NotionClient::integration("test-credential")
             .unwrap()
-            .without_retries();
+            .with_fast_fixture_transport();
         client.api_root = format!("http://{}/v1", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
             let mut requests = Vec::new();
@@ -1349,7 +1349,7 @@ mod tests {
     async fn empty_or_invalid_scope_is_rejected_without_upstream_requests() {
         let client = NotionClient::integration("test-credential")
             .unwrap()
-            .without_retries();
+            .with_fast_fixture_transport();
         for roots in [vec![], vec![PageId("invalid".into())]] {
             assert_eq!(
                 client.crawl_roots(&roots).await.unwrap_err().kind,
