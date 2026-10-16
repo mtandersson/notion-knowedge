@@ -403,9 +403,12 @@ impl ServerHandler for KnowledgeServer {
         // completion/cancellation. Do not add timeout/retry around writes:
         // uncertain mutation outcomes must keep their original receipts.
         let Some(_tool_permit) = self.tool_budget.try_acquire(request.name.as_ref()) else {
-            return Ok(rmcp::model::CallToolResult::error(vec![
-                rmcp::model::ContentBlock::text("tool_busy: retry later"),
-            ]).into());
+            return Ok(
+                rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(
+                    "tool_busy: retry later",
+                )])
+                .into(),
+            );
         };
         let arguments = request.arguments.unwrap_or_default();
         let error = |message: &str| {
