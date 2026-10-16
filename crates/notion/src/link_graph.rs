@@ -1,7 +1,8 @@
 //! Scoped Markdown-page and enhanced Notion mention graph projection (#62).
 //!
 //! References are parsed by the existing lossless Notion extractor. Only a
-//! completed, explicitly authorized discovery inventory may resolve a target.
+//! trusted scoped discovery inventory or current physical target authorization
+//! may resolve a target. Parsed references never supply that authority.
 use std::collections::BTreeSet;
 
 use notion_knowledge_core::{
@@ -37,8 +38,10 @@ fn notion_host(raw: &str) -> bool {
 /// target. Duplicate links to the same kind/page/block are collapsed to the
 /// earliest source byte offset. External links are not graph nodes.
 ///
-/// `discovered_page_ids` MUST come from a successful scoped crawl, never
-/// from the content being parsed. Unlisted/excluded targets stay unresolved.
+/// `discovered_page_ids` MUST come from a successful scoped crawl or trusted
+/// current physical lifecycle authorization, never from the content being
+/// parsed. Unlisted/excluded targets stay unresolved. The owning commit must
+/// revalidate current source and target evidence before effects/acknowledgment.
 pub fn page_link_edges(
     content: &PageContent,
     discovered_page_ids: &BTreeSet<String>,

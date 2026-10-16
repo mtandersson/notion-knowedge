@@ -415,6 +415,10 @@ impl AuthoritativeReconciliationPlanner {
                             && c.last_edited_time() == Some(page.last_edited_time.as_str())
                     }) && local.metadata_identity.as_ref() == Some(&identity)
                         && relation_complete
+                        && self
+                            .coordinator
+                            .current_body_links_complete(id)
+                            .map_err(|_| PlanError::Index)?
                         && alias_complete =>
                 {
                     Difference::Unchanged
@@ -453,6 +457,7 @@ impl AuthoritativeReconciliationPlanner {
                     .coordinator
                     .relation_projection_complete(
                         &RelationProjection::new(self.coordinator.binding(), id, true, vec![])
+                            .and_then(|projection| projection.with_links(vec![]))
                             .map_err(|_| PlanError::Index)?,
                     )
                     .map_err(|_| PlanError::Index)?

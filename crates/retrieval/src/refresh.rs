@@ -295,7 +295,7 @@ impl AuthoritativePageRefresh {
                     .map_err(|_| FailureClass::Index)?
                     || !handler
                         .coordinator
-                        .current_relation_projection_complete(&page.0)
+                        .current_body_links_complete(&page.0)
                         .map_err(|_| FailureClass::Index)?
                 {
                     return Err(FailureClass::Conflict);
@@ -309,7 +309,8 @@ impl AuthoritativePageRefresh {
             });
         }
         let projection =
-            RelationProjection::new(self.coordinator.binding(), &page.0, true, vec![])?;
+            RelationProjection::new(self.coordinator.binding(), &page.0, true, vec![])?
+                .with_links(vec![])?;
         let aliases = self
             .alias_sources
             .as_ref()
@@ -515,7 +516,8 @@ impl AuthoritativePageRefresh {
             &page.0,
             false,
             relation_proposal.edges().to_vec(),
-        )?;
+        )?
+        .with_links(relation_proposal.links().to_vec())?;
         let aliases = self
             .alias_sources
             .as_ref()
@@ -934,7 +936,8 @@ impl AuthoritativePageRefresh {
             &expected.page.page_id,
             false,
             proposal.edges().to_vec(),
-        )?;
+        )?
+        .with_links(proposal.links().to_vec())?;
         let operation = PageOperation::retryable_lifecycle(
             &expected.page.operation_id,
             &expected.page.lifecycle_digest,
@@ -1087,6 +1090,7 @@ impl AuthoritativePageRefresh {
                                 false,
                                 proposal.edges().to_vec(),
                             )
+                            .and_then(|projection| projection.with_links(proposal.links().to_vec()))
                             .map_err(|_| FailureClass::Index)?;
                             if !handler
                                 .coordinator
@@ -1109,7 +1113,7 @@ impl AuthoritativePageRefresh {
                             .map_err(|_| FailureClass::Index)?
                             || !handler
                                 .coordinator
-                                .current_relation_projection_complete(&page)
+                                .current_body_links_complete(&page)
                                 .map_err(|_| FailureClass::Index)?
                         {
                             return Err(FailureClass::Index);

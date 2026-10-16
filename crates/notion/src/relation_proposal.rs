@@ -1,7 +1,7 @@
 //! Physically authorized relation proposals. No discovery, target content or writes.
 use crate::{NotionClient, prepare::ScopedPageSnapshot};
 use notion_knowledge_core::{
-    backend::{BackendError, BackendErrorKind, BackendFuture, Page, PageId},
+    backend::{BackendError, BackendErrorKind, BackendFuture, Page, PageContent, PageId},
     chunking::ChunkConfig,
     graph::GraphEdge,
     indexed::{IndexedChunk, IndexedMetadata, PropertyValue, SourceMetadata},
@@ -71,6 +71,7 @@ pub struct RelationProposalAdapter {
 pub struct RelationProposal {
     snapshot: ScopedPageSnapshot,
     edges: Vec<GraphEdge>,
+    links: Vec<GraphEdge>,
     targets: TargetOutcomes,
     evidence: TargetEvidence,
     owner: Arc<RwLock<LifecycleScope>>,
@@ -81,6 +82,9 @@ impl RelationProposal {
     }
     pub fn edges(&self) -> &[GraphEdge] {
         &self.edges
+    }
+    pub fn links(&self) -> &[GraphEdge] {
+        &self.links
     }
     /// Per-candidate physical authorization outcomes; failures remain unresolved.
     pub fn targets(&self) -> &TargetOutcomes {
@@ -118,6 +122,7 @@ impl RelationProposalAdapter {
         &self,
         metadata: &IndexedMetadata,
         names: &BTreeMap<String, String>,
+        content: Option<&PageContent>,
         source: &LifecycleEvidence,
         scope: &LifecycleScope,
     ) -> Result<CandidateProjection, BackendError> {
@@ -125,6 +130,26 @@ impl RelationProposalAdapter {
         for value in metadata.properties.values() {
             if let PropertyValue::PageIds(ids) = value {
                 targets.extend(ids.iter().cloned());
+            }
+        }
+        if let Some(content) = content {
+            for edge in crate::link_graph::page_link_edges(
+                content,
+                &BTreeSet::from([metadata.page_id.clone()]),
+            )
+            .map_err(|_| conflict())?
+            {
+                match edge.target() {
+                    notion_knowledge_core::graph::GraphTarget::Page { page_id } => {
+                        targets.insert(page_id.clone());
+                    }
+                    notion_knowledge_core::graph::GraphTarget::Unresolved { reference }
+                        if !reference.starts_with("invalid-page-link:") =>
+                    {
+                        targets.insert(reference.clone());
+                    }
+                    _ => {}
+                }
             }
         }
         // Validate bounds before making candidate requests.
@@ -158,7 +183,13 @@ impl RelationProposalAdapter {
             }
             outcomes.insert(target, outcome);
         }
-        let edges = relation_edges_with_names(metadata, names, &allowed).map_err(|_| conflict())?;
+        let mut edges =
+            relation_edges_with_names(metadata, names, &allowed).map_err(|_| conflict())?;
+        if let Some(content) = content {
+            edges.extend(
+                crate::link_graph::page_link_edges(content, &allowed).map_err(|_| conflict())?,
+            );
+        }
         Ok((edges, outcomes, evidence))
     }
     /// Read-only metadata proposal for reconciliation planning. It never fetches
@@ -200,7 +231,7 @@ impl RelationProposalAdapter {
             properties: page.properties.clone(),
         };
         let (edges, _, _) = self
-            .targets(&metadata, &page.relation_names, evidence, &scope)
+            .targets(&metadata, &page.relation_names, None, evidence, &scope)
             .await?;
         if self.client.fetch_page(&page.id.0).await? != *page || *self.policy.read().await != scope
         {
@@ -225,6 +256,7 @@ impl RelationProposalAdapter {
             .targets(
                 &snapshot.document.metadata,
                 &snapshot.relation_names,
+                Some(&snapshot.source),
                 &snapshot.evidence,
                 &scope,
             )
@@ -232,9 +264,13 @@ impl RelationProposalAdapter {
         if *self.policy.read().await != scope {
             return Err(conflict());
         }
+        let (links, edges) = edges
+            .into_iter()
+            .partition(|edge| edge.relation_type().starts_with("link:"));
         Ok(RelationProposal {
             snapshot,
             edges,
+            links,
             targets,
             evidence,
             owner: self.policy.clone(),
@@ -284,11 +320,19 @@ impl RelationProposalAdapter {
             .targets(
                 &proposal.snapshot.document.metadata,
                 &proposal.snapshot.relation_names,
+                Some(&proposal.snapshot.source),
                 &proposal.snapshot.evidence,
                 &scope,
             )
             .await?;
-        if edges != proposal.edges || targets != proposal.targets || evidence != proposal.evidence {
+        let (links, edges): (Vec<_>, Vec<_>) = edges
+            .into_iter()
+            .partition(|edge| edge.relation_type().starts_with("link:"));
+        if edges != proposal.edges
+            || links != proposal.links
+            || targets != proposal.targets
+            || evidence != proposal.evidence
+        {
             return Err(conflict());
         }
         // Bracket candidate work with the full authoritative source, then its chain.
