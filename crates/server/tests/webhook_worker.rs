@@ -23,6 +23,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const PAGE: &str = "11111111-1111-1111-1111-111111111111";
 const OTHER: &str = "55555555-5555-5555-5555-555555555555";
+const THIRD: &str = "77777777-7777-7777-7777-777777777777";
 const ROOT: &str = "22222222-2222-2222-2222-222222222222";
 const FOREIGN: &str = "33333333-3333-3333-3333-333333333333";
 const WORKSPACE: &str = "44444444-4444-4444-4444-444444444444";
@@ -38,6 +39,8 @@ struct Model {
     root_revision: String,
     repair_bad: bool,
     unsupported: bool,
+    joined: bool,
+    linked: bool,
 }
 impl Default for Model {
     fn default() -> Self {
@@ -50,6 +53,8 @@ impl Default for Model {
             root_revision: "2026-10-10T11:00:00Z".into(),
             repair_bad: false,
             unsupported: false,
+            joined: false,
+            linked: true,
         }
     }
 }
@@ -112,7 +117,7 @@ impl HttpNotion {
                     .nth(1)
                     .unwrap();
                 let snapshot = values.lock().unwrap().clone();
-                let response = if route == format!("/v1/pages/{PAGE}/markdown") {
+                let mut response = if route == format!("/v1/pages/{PAGE}/markdown") {
                     bodies.fetch_add(1, Ordering::SeqCst);
                     json!({
                         "object": "page_markdown",
@@ -131,10 +136,16 @@ impl HttpNotion {
                     )
                 } else if route == format!("/v1/pages/{OTHER}/markdown") {
                     json!({"object":"page_markdown", "id":OTHER,
-                        "markdown":"# Separate\n\nUntouched cinnamon.\n", "truncated":false,
+                        "markdown": if snapshot.joined { "Saffron fyr GRANNE. CSV electricity exports. Använd CSV för hushållets eldata." } else { "# Separate\n\nUntouched cinnamon.\n" }, "truncated":false,
                         "unknown_block_ids":[]})
                 } else if route == format!("/v1/pages/{OTHER}") {
                     page_metadata(OTHER, ROOT, "Separate", "2026-10-10T11:00:00Z", false)
+                } else if snapshot.joined && route == format!("/v1/pages/{THIRD}") {
+                    page_metadata(THIRD, ROOT, "Control", "2026-10-10T11:00:00Z", false)
+                } else if snapshot.joined && route == format!("/v1/pages/{THIRD}/markdown") {
+                    json!({"object":"page_markdown", "id":THIRD,
+                        "markdown":"Saffron fyr KONTROLL. Unrelated gardening decisions. Orelaterad odlingsplan.",
+                        "truncated":false,"unknown_block_ids":[]})
                 } else if route == format!("/v1/pages/{ROOT}") {
                     page_metadata(ROOT, "workspace", "Root", &snapshot.root_revision, false)
                 } else if route == format!("/v1/pages/{FOREIGN}") {
@@ -162,6 +173,16 @@ impl HttpNotion {
                 } else {
                     json!({"object":"error", "code":"object_not_found"})
                 };
+                if snapshot.joined && response["object"] == "page" {
+                    if response["id"] == PAGE || response["id"] == OTHER {
+                        response["properties"]["Alternative"] = json!({"id":"alias", "type":"rich_text",
+                            "rich_text":[{"plain_text":"Fyren / Lighthouse"}]});
+                    }
+                    if response["id"] == PAGE {
+                        response["properties"]["Related"] = json!({"id":"related", "type":"relation",
+                            "relation":if snapshot.linked { json!([{"id":OTHER}]) } else {json!([])}, "has_more":false});
+                    }
+                }
                 let bad = fail.swap(false, Ordering::SeqCst);
                 let status = if bad {
                     503
@@ -251,7 +272,22 @@ impl EmbeddingProvider for Provider {
     }
     fn embed_batch<'a>(&'a self, texts: &'a [String]) -> EmbeddingFuture<'a> {
         self.count.fetch_add(texts.len(), Ordering::SeqCst);
-        Box::pin(async move { Ok(texts.iter().map(|t| vec![t.len() as f32, 1., 0.]).collect()) })
+        Box::pin(async move {
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    if t.contains("ANKARE") || t == "Saffron fyr" || t == "CSV electricity" {
+                        vec![1., 0., 0.]
+                    } else if t.contains("GRANNE") {
+                        vec![0.96, 0.28, 0.]
+                    } else if t.contains("KONTROLL") {
+                        vec![0.98, 0.2, 0.]
+                    } else {
+                        vec![t.len() as f32, 1., 0.]
+                    }
+                })
+                .collect())
+        })
     }
 }
 struct TestRuntime {
@@ -270,6 +306,9 @@ impl TestRuntime {
         Self::with_scope_exclusions(policy, ExclusionRules::default()).await
     }
     async fn with_scope_exclusions(policy: &str, exclusions: ExclusionRules) -> Self {
+        Self::with_joined_sources(policy, exclusions, false).await
+    }
+    async fn with_joined_sources(policy: &str, exclusions: ExclusionRules, joined: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let index = dir.path().join("index");
         std::fs::create_dir(&index).unwrap();
@@ -317,6 +356,15 @@ impl TestRuntime {
             },
         )
         .unwrap();
+        let handler = if joined {
+            source.change(|m| m.joined = true);
+            handler.with_alias_sources(
+                notion_knowledge_core::aliases::AliasSources::new(true, vec!["alias".into()])
+                    .unwrap(),
+            )
+        } else {
+            handler
+        };
         let embeddings = Arc::new(AtomicUsize::new(0));
         let worker = Arc::new(Worker {
             webhook_enabled: true,
@@ -780,7 +828,20 @@ impl EmbeddingProvider for PausedProvider {
         Box::pin(async move {
             self.entered.notify_one();
             self.proceed.notified().await;
-            Ok(texts.iter().map(|t| vec![t.len() as f32, 1., 0.]).collect())
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    if t.contains("ANKARE") || t == "Saffron fyr" || t == "CSV electricity" {
+                        vec![1., 0., 0.]
+                    } else if t.contains("GRANNE") {
+                        vec![0.96, 0.28, 0.]
+                    } else if t.contains("KONTROLL") {
+                        vec![0.98, 0.2, 0.]
+                    } else {
+                        vec![t.len() as f32, 1., 0.]
+                    }
+                })
+                .collect())
         })
     }
 }
@@ -841,7 +902,22 @@ impl EmbeddingProvider for PauseSourceProvider {
     }
     fn embed_batch<'a>(&'a self, texts: &'a [String]) -> EmbeddingFuture<'a> {
         self.pause.store(true, Ordering::SeqCst);
-        Box::pin(async move { Ok(texts.iter().map(|t| vec![t.len() as f32, 1., 0.]).collect()) })
+        Box::pin(async move {
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    if t.contains("ANKARE") || t == "Saffron fyr" || t == "CSV electricity" {
+                        vec![1., 0., 0.]
+                    } else if t.contains("GRANNE") {
+                        vec![0.96, 0.28, 0.]
+                    } else if t.contains("KONTROLL") {
+                        vec![0.98, 0.2, 0.]
+                    } else {
+                        vec![t.len() as f32, 1., 0.]
+                    }
+                })
+                .collect())
+        })
     }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2137,3 +2213,6 @@ async fn installed_graph_denies_reads_after_interrupted_owned_producer_commit() 
     assert_eq!(output[1]["result"]["isError"], true, "{:?}", output);
     assert!(output[1]["result"]["structuredContent"].is_null());
 }
+
+#[path = "support/joined_graph.rs"]
+mod joined_graph;
