@@ -1,6 +1,13 @@
 //! Streamable HTTP wiring; application behavior remains in the MCP crate.
 
-use std::{io, net::SocketAddr, sync::Arc, time::Instant};
+use std::{
+    io,
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use tokio::sync::Semaphore;
 
 use notion_knowledge_core::logging::{self, CorrelationId, Operation, Outcome};
 
@@ -13,7 +20,7 @@ use axum::{
     extract::{Request, State},
     http::{
         HeaderValue, Method, StatusCode,
-        header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, WWW_AUTHENTICATE},
+        header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, RETRY_AFTER, WWW_AUTHENTICATE},
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -142,7 +149,11 @@ pub async fn serve_installed(
     } else {
         diagnostics
     };
-    let webhooks = crate::webhook::router(settings.webhook, admission);
+    let webhooks = crate::webhook::router_with_limit(
+        settings.webhook,
+        admission,
+        settings.webhook_max_in_flight,
+    );
     // Discovery alone does not authenticate anyone. In that explicitly opted-in
     // mode the real MCP SDK service is NOT mounted. The discovery router always
     // challenges requests, including session/SSE and spurious bearer tokens.
@@ -152,7 +163,13 @@ pub async fn serve_installed(
         None => {
             let mcp = axum::Router::new()
                 .nest_service("/mcp", service)
-                .layer(middleware::from_fn(validate_json));
+                .layer(middleware::from_fn(validate_json))
+                // Try-acquire happens before JSON buffering or SDK dispatch.
+                // Authentication remains the outermost MCP middleware.
+                .layer(middleware::from_fn_with_state(
+                    Arc::new(Semaphore::new(settings.mcp_max_in_flight)),
+                    limit_mcp_requests,
+                ));
             if let Some(token) = bearer {
                 // Authentication is the outermost MCP gate, before body parsing,
                 // initialization, session lookup and all tool dispatch.
@@ -347,6 +364,34 @@ async fn require_development_bearer(
     next.run(request).await
 }
 
+/// Finite, zero-queue admission for potentially expensive MCP dispatch.
+///
+/// This permit covers request parsing/dispatch, not the lifetime of an SSE
+/// response body or a protocol session. #398 owns those separate budgets.
+async fn limit_mcp_requests(
+    State(pool): State<Arc<Semaphore>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if request.method() != Method::POST && request.method() != Method::DELETE {
+        // GET/SSE streams require a body-lifetime limit (#398).
+        return next.run(request).await;
+    }
+    let Ok(_permit) = pool.try_acquire_owned() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(CACHE_CONTROL, "no-store"), (RETRY_AFTER, "1")],
+            axum::Json(json!({
+                "jsonrpc": "2.0",
+                "id": null,
+                "error": {"code": -32000, "message": "MCP server busy"}
+            })),
+        )
+            .into_response();
+    };
+    next.run(request).await
+}
+
 // The SDK returns plain text when deserializing malformed request bodies.
 // Validate JSON at the transport boundary so these protocol failures retain
 // JSON-RPC envelopes. Bound buffering; GET/SSE responses pass through untouched.
@@ -362,9 +407,26 @@ async fn validate_json(request: Request, next: Next) -> Response {
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.starts_with("application/json"));
     let (parts, body) = request.into_parts();
-    let bytes = match to_bytes(body, MAX_MCP_REQUEST_BYTES).await {
-        Ok(bytes) => bytes,
-        Err(_) => return oversized_request(),
+    // An incomplete client body must not reserve one of the finite slots
+    // indefinitely. Do not time out an already-dispatched mutation here.
+    let bytes = match tokio::time::timeout(
+        Duration::from_secs(30),
+        to_bytes(body, MAX_MCP_REQUEST_BYTES),
+    )
+    .await
+    {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(_)) => return oversized_request(),
+        Err(_) => {
+            return (
+                StatusCode::REQUEST_TIMEOUT,
+                axum::Json(json!({
+                    "jsonrpc":"2.0", "id":null,
+                    "error":{"code":-32000, "message":"Request body timed out"}
+                })),
+            )
+                .into_response();
+        }
     };
     if !is_json {
         return next
@@ -609,6 +671,84 @@ mod tests {
                 DependencyState::Unavailable
             }
         }
+    }
+
+    #[tokio::test]
+    async fn bounded_mcp_dispatch_rejects_before_handler_and_recovers_without_blocking_health() {
+        use std::sync::atomic::AtomicUsize;
+        use tokio::sync::Notify;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bind = listener.local_addr().unwrap();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (entered, unlock, seen) = (started.clone(), release.clone(), calls.clone());
+        let router = axum::Router::new()
+            .route(
+                "/mcp",
+                axum::routing::post(move || {
+                    let (entered, unlock, seen) = (entered.clone(), unlock.clone(), seen.clone());
+                    async move {
+                        if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                            entered.notify_one();
+                            unlock.notified().await;
+                        }
+                        StatusCode::ACCEPTED
+                    }
+                }),
+            )
+            .route("/livez", get(|| async { StatusCode::OK }))
+            .layer(middleware::from_fn_with_state(
+                Arc::new(Semaphore::new(1)),
+                limit_mcp_requests,
+            ));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = format!("http://{bind}/mcp");
+        let waiting = started.notified();
+        let first_client = client.clone();
+        let first_url = url.clone();
+        let first = tokio::spawn(async move {
+            first_client
+                .post(first_url)
+                .body("first")
+                .send()
+                .await
+                .unwrap()
+        });
+        waiting.await;
+        for _ in 0..3 {
+            let response = client
+                .post(&url)
+                .body("sensitive-request-data")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers()[RETRY_AFTER], "1");
+            assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+            let error: Value = response.json().await.unwrap();
+            assert_eq!(error["error"]["message"], "MCP server busy");
+            assert!(!error.to_string().contains("sensitive-request-data"));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            client
+                .get(format!("http://{bind}/livez"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        release.notify_one();
+        assert_eq!(first.await.unwrap().status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            client.post(&url).send().await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        server.abort();
     }
 
     #[test]

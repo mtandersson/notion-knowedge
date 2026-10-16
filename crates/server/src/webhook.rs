@@ -15,6 +15,7 @@ use notion_knowledge_core::{
 use serde::Deserialize;
 use sha2::Sha256;
 use std::{io::Write, path::PathBuf, sync::Arc, time::Duration};
+use tokio::sync::Semaphore;
 
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 
@@ -86,18 +87,30 @@ impl WebhookAdmission for DurableAdmission {
 struct Endpoint {
     config: Arc<WebhookConfig>,
     admission: Option<Arc<dyn WebhookAdmission>>,
+    limit: Arc<Semaphore>,
 }
 
 /// No browser-origin middleware: Notion authenticates with a raw-body signature.
 pub fn router(config: WebhookConfig, admission: Option<Arc<dyn WebhookAdmission>>) -> Router {
+    router_with_limit(config, admission, 4)
+}
+
+/// Dedicated fail-fast admission pool, separate from MCP dispatch.
+pub fn router_with_limit(
+    config: WebhookConfig,
+    admission: Option<Arc<dyn WebhookAdmission>>,
+    max_in_flight: usize,
+) -> Router {
     if matches!(config, WebhookConfig::Disabled) {
         return Router::new();
     }
+    assert!(max_in_flight > 0, "validated webhook admission limit");
     Router::new()
         .route("/webhooks/notion", post(receive))
         .with_state(Endpoint {
             config: Arc::new(config),
             admission,
+            limit: Arc::new(Semaphore::new(max_in_flight)),
         })
 }
 
@@ -138,6 +151,12 @@ pub fn valid_id(id: &str) -> bool {
 }
 
 async fn receive(State(endpoint): State<Endpoint>, request: Request) -> StatusCode {
+    // Bound even invalid/signature-less and slow-body deliveries before buffering.
+    // This does not bound a spawned blocking commit after caller cancellation:
+    // #399 owns backend work-lifetime permits.
+    let Ok(_permit) = endpoint.limit.try_acquire() else {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    };
     let (parts, body) = request.into_parts();
     if parts.headers.contains_key("content-encoding") {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE;
