@@ -1085,11 +1085,21 @@ async fn actual_scheduled_http_holds_failed_pages_until_explicit_manual_recovery
         "the first bad page must not stop later healthy pages"
     );
     assert!(failed.pending.is_empty());
+    // The operator rejection must test held-page policy, not race a live
+    // webhook poll for the common writer lease. Quiesce before that assertion.
+    stop.cancel();
+    server.await.unwrap().unwrap();
     assert_eq!(
         f.command(&http, &["--reconcile", "schedule", "retry", "0"])
             .await
             .exit,
         3
+    );
+    let (worker, stop, server) =
+        scheduled_server_workers(&f, &http, std::time::Duration::from_secs(60), 1, true).await;
+    assert_eq!(
+        worker.coordinator.schedule("periodic").unwrap().status,
+        ScheduleStatus::HeldPages
     );
     use notion_knowledge_core::webhook::{EventState, WebhookEvent, WebhookInbox};
     let event = WebhookEvent {
