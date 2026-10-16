@@ -18,7 +18,10 @@ pub(crate) struct ToolBudget {
 impl ToolBudget {
     pub(crate) fn new(capacity: usize) -> Self {
         assert!((1..=MAX_CAPACITY).contains(&capacity));
-        Self { permits: Arc::new(Semaphore::new(capacity)), capacity: capacity as u32 }
+        Self {
+            permits: Arc::new(Semaphore::new(capacity)),
+            capacity: capacity as u32,
+        }
     }
 
     fn weight(tool: &str) -> u32 {
