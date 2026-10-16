@@ -7,6 +7,8 @@ pub struct Config {
     pub http_bind: SocketAddr,
     /// Upper bound on simultaneously dispatched MCP HTTP calls (not session count).
     pub mcp_max_in_flight: usize,
+    /// Shared weighted MCP tool admission across stdio and HTTP.
+    pub mcp_tool_capacity: usize,
     /// SDK stateful worker sessions and long-lived transport response caps.
     pub mcp_max_sessions: usize,
     pub mcp_session_idle_seconds: u64,
@@ -168,6 +170,7 @@ impl Config {
                 })
         };
         let mcp_max_in_flight = concurrency(&mut lookup, "NK_MCP_MAX_IN_FLIGHT", "8", 256)?;
+        let mcp_tool_capacity = concurrency(&mut lookup, "NK_MCP_TOOL_CAPACITY", "16", 128)?;
         let webhook_max_in_flight = concurrency(&mut lookup, "NK_WEBHOOK_MAX_IN_FLIGHT", "4", 128)?;
         let mcp_max_sessions = concurrency(&mut lookup, "NK_MCP_MAX_SESSIONS", "32", 512)?;
         let mcp_session_idle_seconds =
@@ -711,6 +714,7 @@ impl Config {
         )?;
         Ok(Self {
             mcp_max_in_flight,
+            mcp_tool_capacity,
             mcp_max_sessions,
             mcp_session_idle_seconds,
             mcp_max_streams,
@@ -780,6 +784,7 @@ mod tests {
     fn http_admission_limits_are_finite_and_validated() {
         let defaults = parse(&[]).unwrap();
         assert_eq!(defaults.mcp_max_in_flight, 8);
+        assert_eq!(defaults.mcp_tool_capacity, 16);
         assert_eq!(defaults.mcp_max_sessions, 32);
         assert_eq!(defaults.mcp_max_streams, 16);
         assert_eq!(defaults.mcp_session_idle_seconds, 300);
@@ -794,6 +799,7 @@ mod tests {
         assert_eq!(tuned.webhook_max_in_flight, 1);
         for (name, maximum) in [
             ("NK_MCP_MAX_IN_FLIGHT", 256),
+            ("NK_MCP_TOOL_CAPACITY", 128),
             ("NK_WEBHOOK_MAX_IN_FLIGHT", 128),
             ("NK_MCP_MAX_SESSIONS", 512),
             ("NK_MCP_SESSION_IDLE_SECONDS", 3600),

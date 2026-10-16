@@ -232,6 +232,7 @@ async fn main() -> ExitCode {
     .await
     {
         Ok(handler) => handler
+            .with_tool_capacity(config.mcp_tool_capacity)
             .with_read_only(config.read_only)
             .with_destructive_writes_enabled(config.destructive_writes_enabled)
             .with_capability_policy(config.capability_policy.clone()),

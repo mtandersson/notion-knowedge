@@ -13,6 +13,9 @@ use rmcp::{
 };
 use std::{io::Write, sync::Arc};
 
+mod tool_budget;
+use tool_budget::ToolBudget;
+
 /// Maximum JSON payload returned by a semantic tool, including citation metadata.
 /// Enforced for both stdio and Streamable HTTP after adapter composition.
 const MAX_TOOL_OUTPUT_BYTES: usize = 512 * 1024;
@@ -58,6 +61,8 @@ pub struct KnowledgeServer {
     file_ingestion: Option<Arc<dyn upload::FileIngestion>>,
     /// Deny mutation-capable tools unless the operator explicitly disables read-only mode.
     read_only: bool,
+    /// One capacity pool shared across cloned HTTP sessions and stdio calls.
+    tool_budget: Arc<ToolBudget>,
     /// Additional opt-in gate for all destructive write operations.
     destructive_writes_enabled: bool,
     capability_policy: capabilities::CapabilityPolicy,
@@ -74,6 +79,7 @@ impl Default for KnowledgeServer {
             max_upload_files: upload::DEFAULT_MAX_FILES,
             file_ingestion: None,
             read_only: true,
+            tool_budget: Arc::new(ToolBudget::new(tool_budget::DEFAULT_CAPACITY)),
             destructive_writes_enabled: false,
             capability_policy: capabilities::CapabilityPolicy::default(),
             fresh_source: None,
@@ -144,6 +150,13 @@ impl KnowledgeServer {
         }
         self.file_ingestion = Some(service);
         Ok(self)
+    }
+
+    /// Install a trusted, finite process-wide budget before exposing MCP.
+    /// Clones of this handler share the same capacity accounting.
+    pub fn with_tool_capacity(mut self, capacity: usize) -> Self {
+        self.tool_budget = Arc::new(ToolBudget::new(capacity));
+        self
     }
 
     pub fn with_read_only(mut self, read_only: bool) -> Self {
@@ -385,6 +398,15 @@ impl ServerHandler for KnowledgeServer {
                 None,
             ));
         }
+        // Reserve before inspecting user arguments or calling a backend.
+        // Permit is owned by this future through every await, and drops on
+        // completion/cancellation. Do not add timeout/retry around writes:
+        // uncertain mutation outcomes must keep their original receipts.
+        let Some(_tool_permit) = self.tool_budget.try_acquire(request.name.as_ref()) else {
+            return Ok(rmcp::model::CallToolResult::error(vec![
+                rmcp::model::ContentBlock::text("tool_busy: retry later"),
+            ]).into());
+        };
         let arguments = request.arguments.unwrap_or_default();
         let error = |message: &str| {
             rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(message)])
