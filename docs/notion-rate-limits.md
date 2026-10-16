@@ -44,7 +44,38 @@ and the special reconciliation requirement before retrying a write returning
 503. The conservative ordinary-plan budget applies even to higher-plan limits.
 Workspace-wide throttling can still happen and is handled by shared cooldown.
 
-Run credential-free HTTP and virtual-clock behavior tests with
-`cargo test -p notion-knowledge-notion --locked`. Existing single-response
-classification fixtures explicitly disable replay; dedicated transport/public
-boundary tests exercise the production retry policy.
+## Fixture design
+
+Use the explicit `with_fast_fixture_transport()` helper in Notion unit fixtures
+that exercise parsing, scope decisions or persistence. It is compiled only for
+unit tests or the `test-fixtures` feature. It removes admission pacing, automatic
+transport retries and provider consistency delays, while retaining every real
+HTTP request, response and metric. Cross-crate integration fixtures use the
+loopback-only `with_loopback_fixture(port)` entrypoint to this same policy.
+Do not use an ordinary production client merely to obtain a mock endpoint, and
+do not add sleeps to let a fixture reach an expected state.
+
+Timing contracts use normal production policy under `test_clock::TestClock`:
+334 ms admission, retry bounds/jitter and upstream cooldown remain unchanged.
+The controlled clock inhibits Tokio auto-advance while real socket I/O is
+pending, records admitted requests and response barriers, and advances only
+registered provider waits after responses arrive. This prevents request timeout
+or admission assertions from depending on host scheduling. The clock crosses
+Tokio's millisecond timer-wheel tick explicitly; no wall-clock wait is involved.
+`TestClock::park` establishes a pending admission before cancellation or defer,
+instead of relying on a task having run after a scheduler yield.
+
+Cancellation fixtures wait on request notifications or actual partial-file
+state before dropping work or advancing its deadline. Stalled fixture bodies
+stay pending until explicitly cancelled; they do not sleep for seconds. The
+400 ms streaming-test watchdog only bounds progress of real socket/filesystem
+I/O before the partial-byte barrier; it neither delays the test nor supplies
+its timeout behavior. Real HTTP/TLS, private temporary files and SQLite/Lance
+integration stay real. Provider admission, retry and consistency time are virtual
+or disabled in non-timing fixtures. There is no environment/runtime bypass and
+production constructors retain all configured limits.
+
+Run unit HTTP and controlled-clock contracts with
+`cargo test -p notion-knowledge-notion --features test-fixtures --lib --locked`.
+Compare the final test execution summary separately from Cargo compilation time;
+keep all existing cases and request-count assertions when improving fixtures.

@@ -30,6 +30,8 @@ pub(crate) struct Transport {
     jitter: AtomicU64,
     max_retries: u64,
     interval: Duration,
+    #[cfg(test)]
+    waits: Option<tokio::sync::mpsc::UnboundedSender<crate::test_clock::ClockEvent>>,
 }
 impl Default for Transport {
     fn default() -> Self {
@@ -48,6 +50,8 @@ impl Default for Transport {
             jitter: AtomicU64::new(seed),
             max_retries: MAX_RETRIES,
             interval: INTERVAL,
+            #[cfg(test)]
+            waits: None,
         }
     }
 }
@@ -64,6 +68,15 @@ fn error(
     }
 }
 impl Transport {
+    #[cfg(test)]
+    pub(crate) fn clocked(
+        sender: tokio::sync::mpsc::UnboundedSender<crate::test_clock::ClockEvent>,
+    ) -> Self {
+        Self {
+            waits: Some(sender),
+            ..Default::default()
+        }
+    }
     async fn admit(&self, operation: &'static str) -> Result<(), BackendError> {
         // Never hold the mutex during sleep: a 429 must extend the clock even
         // while existing waiters are queued. Re-check after waking; no reserved
@@ -89,10 +102,27 @@ impl Transport {
             }
             let until = *next;
             drop(next);
-            tokio::time::sleep_until(until).await;
+            self.wait_until(until).await;
         }
     }
 
+    async fn wait_until(&self, until: Instant) {
+        #[cfg(test)]
+        if let Some(waits) = &self.waits {
+            let _ = waits.send(crate::test_clock::ClockEvent::Sleep(until));
+        }
+        tokio::time::sleep_until(until).await;
+    }
+    /// Provider backoff/eventual-consistency delay. Ordinary local fixtures
+    /// exercise the same attempts without sleeping; timing contracts use a
+    /// normal transport with a controlled clock instead.
+    pub(crate) async fn provider_delay(&self, delay: Duration) {
+        #[cfg(any(test, feature = "test-fixtures"))]
+        if self.interval.is_zero() {
+            return;
+        }
+        self.wait_until(Instant::now() + delay).await;
+    }
     async fn defer(&self, delay: Duration) {
         let mut next = self.next.lock().await;
         if let Some(until) = Instant::now().checked_add(delay) {
@@ -121,18 +151,9 @@ impl NotionClient {
             rate_limits: self.transport.rate_limits.load(Ordering::Relaxed),
         }
     }
-    #[cfg(test)]
-    pub(crate) fn without_retries(mut self) -> Self {
-        self.transport = std::sync::Arc::new(Transport {
-            max_retries: 0,
-            ..Default::default()
-        });
-        self
-    }
-    // Only the explicit loopback fixture constructor can disable admission
-    // pacing. Normal clients and transport policy tests retain INTERVAL.
-    #[cfg(feature = "test-fixtures")]
-    pub(crate) fn with_loopback_transport(mut self) -> Self {
+    /// Explicit non-timing fixture policy; never available to production callers.
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub(crate) fn with_fast_fixture_transport(mut self) -> Self {
         self.transport = std::sync::Arc::new(Transport {
             max_retries: 0,
             interval: Duration::ZERO,
@@ -197,7 +218,15 @@ impl NotionClient {
                 self.transport.retries.fetch_add(1, Ordering::Relaxed);
                 notion_knowledge_core::metrics::notion_retry();
             }
+            #[cfg(test)]
+            if let Some(clock) = &self.transport.waits {
+                let _ = clock.send(crate::test_clock::ClockEvent::RequestStarted);
+            }
             let mut result = attempt.send().await;
+            #[cfg(test)]
+            if let Some(clock) = &self.transport.waits {
+                let _ = clock.send(crate::test_clock::ClockEvent::ResponseReady);
+            }
             let rate_delay = result
                 .as_ref()
                 .ok()
@@ -252,7 +281,9 @@ impl NotionClient {
                     return result
                         .map_err(|_| error(operation, BackendErrorKind::Unavailable, None));
                 }
-                tokio::time::sleep(self.transport.backoff(retry)).await;
+                self.transport
+                    .provider_delay(self.transport.backoff(retry))
+                    .await;
             }
             retry += 1;
         }
@@ -262,11 +293,14 @@ impl NotionClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_clock::{ClockHandle, TestClock};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     async fn mock(
+        clock: &ClockHandle,
         statuses: Vec<(u16, &'static str)>,
     ) -> (NotionClient, tokio::task::JoinHandle<Vec<Instant>>) {
         mock_steps(
+            clock,
             statuses
                 .into_iter()
                 .map(|(status, headers)| (status, headers, "{}".to_owned()))
@@ -275,11 +309,13 @@ mod tests {
         .await
     }
     async fn mock_steps(
+        clock: &ClockHandle,
         statuses: Vec<(u16, &'static str, String)>,
     ) -> (NotionClient, tokio::task::JoinHandle<Vec<Instant>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut client = NotionClient::integration("secret-fixture").unwrap();
         client.api_root = format!("http://{}", listener.local_addr().unwrap());
+        clock.track(&mut client);
         let task = tokio::spawn(async move {
             let mut times = Vec::new();
             for (status, headers, body) in statuses {
@@ -308,77 +344,102 @@ mod tests {
     }
     #[tokio::test]
     async fn rejected_requests_honor_retry_after_and_expose_only_counters() {
-        let (client, task) = mock(vec![(429, "Retry-After: 1\r\n"), (200, "")]).await;
-        assert_eq!(send(&client, false).await.unwrap().status(), 200);
-        let times = task.await.unwrap();
-        assert!(times[1].duration_since(times[0]) >= Duration::from_secs(1));
-        assert_eq!(
-            client.request_metrics(),
-            RequestMetrics {
-                attempts: 2,
-                retries: 1,
-                rate_limits: 1
-            }
-        );
-        assert!(!format!("{:?}", client.request_metrics()).contains("secret"));
+        let mut clock = TestClock::new().await;
+        let tracker = clock.handle();
+        clock
+            .run(async {
+                let (client, task) =
+                    mock(&tracker, vec![(429, "Retry-After: 1\r\n"), (200, "")]).await;
+                assert_eq!(send(&client, false).await.unwrap().status(), 200);
+                let times = task.await.unwrap();
+                assert!(times[1].duration_since(times[0]) >= Duration::from_secs(1));
+                assert_eq!(
+                    client.request_metrics(),
+                    RequestMetrics {
+                        attempts: 2,
+                        retries: 1,
+                        rate_limits: 1
+                    }
+                );
+                assert!(!format!("{:?}", client.request_metrics()).contains("secret"));
+            })
+            .await;
     }
     #[tokio::test]
     async fn read_transients_are_bounded_but_mutations_and_auth_fail_fast() {
-        for (safe, statuses, expected, retries) in [
-            (true, vec![(503, ""); 4], 503, 3),
-            (false, vec![(503, "")], 503, 0),
-            (true, vec![(401, "")], 401, 0),
-            (true, vec![(403, "")], 403, 0),
-            (true, vec![(400, "")], 400, 0),
-            (true, vec![(404, "")], 404, 0),
-            (true, vec![(409, "")], 409, 0),
-            (true, vec![(501, "")], 501, 0),
-        ] {
-            let (client, task) = mock(statuses).await;
-            assert_eq!(send(&client, safe).await.unwrap().status(), expected);
-            task.await.unwrap();
-            assert_eq!(client.request_metrics().retries, retries);
-        }
+        let mut clock = TestClock::new().await;
+        let tracker = clock.handle();
+        clock
+            .run(async {
+                for (safe, statuses, expected, retries) in [
+                    (true, vec![(503, ""); 4], 503, 3),
+                    (false, vec![(503, "")], 503, 0),
+                    (true, vec![(401, "")], 401, 0),
+                    (true, vec![(403, "")], 403, 0),
+                    (true, vec![(400, "")], 400, 0),
+                    (true, vec![(404, "")], 404, 0),
+                    (true, vec![(409, "")], 409, 0),
+                    (true, vec![(501, "")], 501, 0),
+                ] {
+                    let (client, task) = mock(&tracker, statuses).await;
+                    assert_eq!(send(&client, safe).await.unwrap().status(), expected);
+                    task.await.unwrap();
+                    assert_eq!(client.request_metrics().retries, retries);
+                }
+            })
+            .await;
     }
     #[tokio::test]
     async fn concurrent_clones_share_admission_and_retry_cooldown() {
-        let (client, task) = mock(vec![(200, ""); 3]).await;
-        let other = client.clone();
-        let third = client.clone();
-        let (a, b, c) = tokio::join!(send(&client, true), send(&other, true), send(&third, true));
-        assert!(a.is_ok() && b.is_ok() && c.is_ok());
-        let times = task.await.unwrap();
-        for pair in times.windows(2) {
-            assert!(pair[1].duration_since(pair[0]) >= Duration::from_millis(330));
-        }
-        assert_eq!(other.request_metrics().attempts, 3);
-        client.transport.defer(Duration::from_secs(31)).await;
-        assert_eq!(
-            send(&other, true).await.unwrap_err().kind,
-            BackendErrorKind::RateLimited
-        );
-        assert_eq!(client.request_metrics().attempts, 3);
+        let mut clock = TestClock::new().await;
+        let tracker = clock.handle();
+        clock
+            .run(async {
+                let (client, task) = mock(&tracker, vec![(200, ""); 3]).await;
+                let other = client.clone();
+                let third = client.clone();
+                let (a, b, c) =
+                    tokio::join!(send(&client, true), send(&other, true), send(&third, true));
+                assert!(a.is_ok() && b.is_ok() && c.is_ok());
+                let times = task.await.unwrap();
+                for pair in times.windows(2) {
+                    assert!(pair[1].duration_since(pair[0]) >= Duration::from_millis(330));
+                }
+                assert_eq!(other.request_metrics().attempts, 3);
+                client.transport.defer(Duration::from_secs(31)).await;
+                assert_eq!(
+                    send(&other, true).await.unwrap_err().kind,
+                    BackendErrorKind::RateLimited
+                );
+                assert_eq!(client.request_metrics().attempts, 3);
+            })
+            .await;
     }
     #[tokio::test]
     async fn excessive_retry_after_returns_actionable_delay_without_early_replay() {
-        let (client, task) = mock(vec![(429, "Retry-After: 120\r\n")]).await;
-        let error = send(&client, true).await.unwrap_err();
-        assert_eq!(error.retry_after, Some(Duration::from_secs(120)));
-        task.await.unwrap();
-        assert_eq!(client.request_metrics().retries, 0);
-        assert_eq!(
-            send(&client.clone(), true).await.unwrap_err().kind,
-            BackendErrorKind::RateLimited
-        );
+        let mut clock = TestClock::new().await;
+        let tracker = clock.handle();
+        clock
+            .run(async {
+                let (client, task) = mock(&tracker, vec![(429, "Retry-After: 120\r\n")]).await;
+                let error = send(&client, true).await.unwrap_err();
+                assert_eq!(error.retry_after, Some(Duration::from_secs(120)));
+                task.await.unwrap();
+                assert_eq!(client.request_metrics().retries, 0);
+                assert_eq!(
+                    send(&client.clone(), true).await.unwrap_err().kind,
+                    BackendErrorKind::RateLimited
+                );
+            })
+            .await;
     }
     #[tokio::test(start_paused = true)]
     async fn admission_cancellation_does_not_reserve_future_slots() {
         let client = NotionClient::integration("secret-fixture").unwrap();
         client.transport.admit("test").await.unwrap();
         let other = client.clone();
-        let waiting = tokio::spawn(async move { other.transport.admit("test").await });
-        tokio::task::yield_now().await;
-        waiting.abort();
+        let waiting = TestClock::park(other.transport.admit("test")).await;
+        drop(waiting);
         let start = Instant::now();
         client.transport.admit("test").await.unwrap();
         assert_eq!(Instant::now() - start, INTERVAL);
@@ -400,11 +461,14 @@ mod tests {
     }
     #[tokio::test]
     async fn public_read_and_mutation_boundaries_use_shared_retry_policy() {
+        let mut clock = TestClock::new().await;
+        let tracker = clock.handle();
+        clock.run(async {
         use notion_knowledge_core::backend::{AppendPageContent, CreatePage, PageId};
         const ID: &str = "12345678-1234-1234-1234-123456789abc";
         let page = serde_json::json!({"object":"page","id":ID,"url":format!("https://www.notion.so/{ID}"),"archived":false,"last_edited_time":"2026-10-03T12:30:00Z","properties":{"title":{"id":"title","type":"title","title":[{"plain_text":"Title"}]}}}).to_string();
         let markdown = serde_json::json!({"object":"page_markdown","id":ID,"markdown":"# Read","truncated":false,"unknown_block_ids":[]}).to_string();
-        let (client, task) = mock_steps(vec![
+        let (client, task) = mock_steps(&tracker, vec![
             (503, "", "{}".into()),
             (200, "", page.clone()),
             (200, "", page.clone()),
@@ -448,63 +512,81 @@ mod tests {
                 rate_limits: 2
             }
         );
+        }).await;
     }
     #[tokio::test]
     async fn permanent_workspace_block_and_ambiguous_create_failure_never_replay() {
-        use notion_knowledge_core::backend::{CreatePage, PageId};
-        let (client, task) = mock_steps(vec![(
-            429,
-            "Retry-After: 1\r\n",
-            r#"{"additional_data":{"rate_limit_reason":"public_api_request_blocked"}}"#.into(),
-        )])
-        .await;
-        assert_eq!(
-            send(&client, true).await.unwrap_err().kind,
-            BackendErrorKind::RateLimited
-        );
-        task.await.unwrap();
-        assert_eq!(client.request_metrics().retries, 0);
-        let (client, task) = mock(vec![(503, "")]).await;
-        assert_eq!(
-            client
-                .create_page(CreatePage {
-                    parent_page_id: PageId("12345678123412341234123456789abc".into()),
-                    title: "Title".into(),
-                    markdown: "Body".into()
-                })
-                .await
-                .unwrap_err()
-                .kind,
-            BackendErrorKind::Unavailable
-        );
-        task.await.unwrap();
-        assert_eq!(client.request_metrics().attempts, 1);
+        let mut clock = TestClock::new().await;
+        let tracker = clock.handle();
+        clock
+            .run(async {
+                use notion_knowledge_core::backend::{CreatePage, PageId};
+                let (client, task) = mock_steps(
+                    &tracker,
+                    vec![(
+                        429,
+                        "Retry-After: 1\r\n",
+                        r#"{"additional_data":{"rate_limit_reason":"public_api_request_blocked"}}"#
+                            .into(),
+                    )],
+                )
+                .await;
+                assert_eq!(
+                    send(&client, true).await.unwrap_err().kind,
+                    BackendErrorKind::RateLimited
+                );
+                task.await.unwrap();
+                assert_eq!(client.request_metrics().retries, 0);
+                let (client, task) = mock(&tracker, vec![(503, "")]).await;
+                assert_eq!(
+                    client
+                        .create_page(CreatePage {
+                            parent_page_id: PageId("12345678123412341234123456789abc".into()),
+                            title: "Title".into(),
+                            markdown: "Body".into()
+                        })
+                        .await
+                        .unwrap_err()
+                        .kind,
+                    BackendErrorKind::Unavailable
+                );
+                task.await.unwrap();
+                assert_eq!(client.request_metrics().attempts, 1);
+            })
+            .await;
     }
     #[tokio::test(start_paused = true)]
     async fn rejection_extends_already_waiting_clone_admission() {
         let client = NotionClient::integration("fixture").unwrap();
         client.transport.admit("test").await.unwrap();
         let other = client.clone();
-        let task = tokio::spawn(async move {
-            other.transport.admit("test").await.unwrap();
-            Instant::now()
-        });
-        tokio::task::yield_now().await;
+        let waiting = TestClock::park(other.transport.admit("test")).await;
         let start = Instant::now();
         client.transport.defer(Duration::from_secs(2)).await;
-        assert_eq!(task.await.unwrap() - start, Duration::from_secs(2));
+        waiting.await.unwrap();
+        assert_eq!(Instant::now() - start, Duration::from_secs(2));
     }
     #[tokio::test]
     async fn unrepresentable_upstream_deadline_never_becomes_an_early_retry() {
-        let (client, task) = mock(vec![(429, "Retry-After: 18446744073709551615\r\n")]).await;
-        let error = send(&client, true).await.unwrap_err();
-        assert_eq!(error.retry_after, Some(Duration::from_secs(u64::MAX)));
-        task.await.unwrap();
-        assert_eq!(
-            send(&client.clone(), true).await.unwrap_err().retry_after,
-            error.retry_after
-        );
-        assert_eq!(client.request_metrics().attempts, 1);
+        let mut clock = TestClock::new().await;
+        let tracker = clock.handle();
+        clock
+            .run(async {
+                let (client, task) = mock(
+                    &tracker,
+                    vec![(429, "Retry-After: 18446744073709551615\r\n")],
+                )
+                .await;
+                let error = send(&client, true).await.unwrap_err();
+                assert_eq!(error.retry_after, Some(Duration::from_secs(u64::MAX)));
+                task.await.unwrap();
+                assert_eq!(
+                    send(&client.clone(), true).await.unwrap_err().retry_after,
+                    error.retry_after
+                );
+                assert_eq!(client.request_metrics().attempts, 1);
+            })
+            .await;
     }
     #[test]
     fn exponential_backoff_has_nonzero_bounded_jitter() {

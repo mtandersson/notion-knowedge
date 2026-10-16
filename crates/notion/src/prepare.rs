@@ -244,7 +244,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut client = NotionClient::integration("fixture-credential")
             .unwrap()
-            .without_retries();
+            .with_fast_fixture_transport();
         client.api_root = format!("http://{}/v1", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
             let mut requests = Vec::new();
@@ -411,7 +411,7 @@ mod tests {
         wrong[0].metadata.page_id = OTHER.into();
         let client = NotionClient::integration("test-credential")
             .unwrap()
-            .without_retries();
+            .with_fast_fixture_transport();
         let err = client
             .prepare_scoped_page(
                 &PageId(PAGE.into()),

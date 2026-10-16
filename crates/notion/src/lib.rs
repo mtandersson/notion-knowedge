@@ -81,3 +81,6 @@ pub mod file_ingest;
 
 /// Standalone authoritative relation proposals; production activation is separate.
 pub mod relation_proposal;
+
+#[cfg(test)]
+mod test_clock;
