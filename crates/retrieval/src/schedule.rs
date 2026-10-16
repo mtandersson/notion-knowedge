@@ -406,7 +406,9 @@ impl IndexCommitCoordinator {
         self.schedule_write(lease, now, |db| {
             let s = load(db, self, id)?;
             if s.active_run.is_none() {
-                return Err(JournalError::InvalidTransition);
+                // Completion may win its transaction before shutdown observes
+                // the runner result. The durable idle state needs no new event.
+                return Ok(s);
             }
             event(db, &s, now, 7, None, None)?;
             Ok(s)
