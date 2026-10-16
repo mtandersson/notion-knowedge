@@ -206,16 +206,17 @@ impl IndexCommitCoordinator {
     /// maintenance guard and current writer fence serialize it with all commits.
     /// Existing edges, immutable receipts and operational coordination survive.
     #[cfg(feature = "local-lancedb")]
-    pub(crate) fn begin_relation_rebuild(
+    pub(crate) fn begin_projection_rebuild(
         self: &Arc<Self>,
         run: String,
+        aliases: bool,
         scope: ReconciliationScope,
         lease: Lease,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> impl Future<Output = Result<(), CommitError>> + Send + 'static {
         self.maintain(lease, clock, move |context| async move {
             context
-                .invalidate_relation_projections(&run, &scope)
+                .invalidate_projections(&run, &scope, aliases)
                 .map_err(|error| match error {
                     CommitError::LeaseLost
                     | CommitError::BindingMismatch
@@ -304,10 +305,11 @@ pub(crate) fn current_complete(
 
 #[cfg(feature = "local-lancedb")]
 impl CommitContext {
-    fn invalidate_relation_projections(
+    fn invalidate_projections(
         &self,
         run: &str,
         scope: &ReconciliationScope,
+        aliases: bool,
     ) -> Result<(), CommitError> {
         self.coordinator.identities()?;
         let mut db = self
@@ -331,7 +333,11 @@ impl CommitContext {
             return Err(CommitError::Conflict);
         }
         tx.execute(
-            "DELETE FROM page_relation_projections WHERE generation=?1",
+            if aliases {
+                "DELETE FROM page_alias_projections WHERE generation=?1"
+            } else {
+                "DELETE FROM page_relation_projections WHERE generation=?1"
+            },
             [&self.coordinator.binding.generation],
         )
         .map_err(sql)?;

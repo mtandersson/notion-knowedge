@@ -1,9 +1,10 @@
 //! Read-only reconciliation planning against the production worker's ownership.
 use crate::{
     chunks::GuardedChunkTable,
-    commit::{CommitBinding, IndexCommitCoordinator, RelationProjection},
+    commit::{AliasProjection, CommitBinding, IndexCommitCoordinator, RelationProjection},
 };
 use notion_knowledge_core::{
+    aliases::AliasSources,
     backend::{BackendErrorKind, Page, PageId},
     discovery::SkipReason,
     indexed::IndexedChunk,
@@ -156,6 +157,7 @@ pub struct AuthoritativeReconciliationPlanner {
     coordinator: Arc<IndexCommitCoordinator>,
     scope: LifecycleScope,
     relations: RelationProposalAdapter,
+    alias_sources: Option<AliasSources>,
 }
 impl AuthoritativeReconciliationPlanner {
     pub fn new(
@@ -179,12 +181,23 @@ impl AuthoritativeReconciliationPlanner {
             .map_err(|_| PlanError::Ownership)?;
         Ok(Self {
             relations,
+            alias_sources: None,
             notion,
             guard,
             coordinator,
             scope,
         })
     }
+    /// Trusted composition only: immutable source policy shared by runtime callers.
+    pub fn with_alias_sources(mut self, sources: AliasSources) -> Self {
+        self.alias_sources = Some(sources);
+        self
+    }
+
+    pub(crate) fn alias_configuration_identity(&self) -> Option<String> {
+        self.alias_sources.as_ref().map(AliasSources::identity)
+    }
+
     pub(crate) fn is_bound_to(&self, coordinator: &Arc<IndexCommitCoordinator>) -> bool {
         Arc::ptr_eq(&self.coordinator, coordinator) && self.guard.is_bound_to(coordinator)
     }
@@ -374,6 +387,19 @@ impl AuthoritativeReconciliationPlanner {
                 .map_err(|error| source_error(error.kind))?;
             let projection = RelationProjection::new(self.coordinator.binding(), id, false, edges)
                 .map_err(|_| PlanError::Index)?;
+            let root = match &evidence.status {
+                LifecycleStatus::Allowed { roots } => roots.first().ok_or(PlanError::Ownership)?,
+                _ => return Err(PlanError::Ownership),
+            };
+            let alias_complete = self.alias_sources.as_ref().map_or(Ok(true), |sources| {
+                let projection =
+                    AliasProjection::from_page(self.coordinator.binding(), &page, root, sources)
+                        .map(AliasProjection::with_owned_root_cleanup)
+                        .map_err(|_| PlanError::Index)?;
+                self.coordinator
+                    .alias_projection_complete(&projection)
+                    .map_err(|_| PlanError::Index)
+            })?;
             let relation_complete = self
                 .coordinator
                 .relation_projection_complete(&projection)
@@ -388,7 +414,8 @@ impl AuthoritativeReconciliationPlanner {
                         !c.is_tombstone()
                             && c.last_edited_time() == Some(page.last_edited_time.as_str())
                     }) && local.metadata_identity.as_ref() == Some(&identity)
-                        && relation_complete =>
+                        && relation_complete
+                        && alias_complete =>
                 {
                     Difference::Unchanged
                 }
@@ -415,12 +442,20 @@ impl AuthoritativeReconciliationPlanner {
             if local.is_some_and(|l| {
                 l.checkpoint.as_ref().is_some_and(|c| c.is_tombstone()) && l.chunks.is_empty()
             }) && self
-                .coordinator
-                .relation_projection_complete(
-                    &RelationProjection::new(self.coordinator.binding(), id, true, vec![])
-                        .map_err(|_| PlanError::Index)?,
-                )
+                .alias_sources
+                .as_ref()
+                .map_or(Ok(true), |sources| {
+                    self.coordinator
+                        .current_alias_projection_complete(id, sources)
+                })
                 .map_err(|_| PlanError::Index)?
+                && self
+                    .coordinator
+                    .relation_projection_complete(
+                        &RelationProjection::new(self.coordinator.binding(), id, true, vec![])
+                            .map_err(|_| PlanError::Index)?,
+                    )
+                    .map_err(|_| PlanError::Index)?
             {
                 return Ok(None);
             }

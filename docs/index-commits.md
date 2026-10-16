@@ -368,9 +368,11 @@ replace their unacknowledged proposal with freshly authorized current content;
 strict operations must retain their exact proposal. Repair resolution rejects
 original or repair receipts from another page/generation.
 
-This is the durable capability for #393. The installation follow-up #394 must
-carry startup-owned sources through planner, all refresh/reconciliation exits,
-operator rebuild handling and scoped local lookup. It must check unfinished
-repairs before source/content no-op decisions and preserve the serving gates for
-unacknowledged work. This capability alone does not activate alias maintenance in
-Notion indexing or satisfy parent #376's installed acceptance criteria.
+The installed runtime described in [canonical aliases](canonical-aliases.md)
+uses this capability with immutable startup sources throughout planning,
+refresh, no-op/replay, deletion, journal recovery and scoped local lookup.
+Installed projections opt into `with_owned_root_cleanup` to remove stale aliases
+from other physical roots owned by the same binding during a root transition;
+standalone projections continue to replace only their explicit namespace.
+`rebuild-aliases` uses the existing guarded Inventory maintenance transaction and
+invalidates only alias completeness, retaining operational history.

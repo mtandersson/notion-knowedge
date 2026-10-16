@@ -4,6 +4,7 @@ use notion_knowledge_notion::pages::page_id;
 pub enum Command {
     Apply(String),
     RebuildRelations(String),
+    RebuildAliases(String),
     DryRun,
     ScheduleStatus,
     ScheduleHistory(i64),
@@ -117,6 +118,7 @@ impl Command {
             }
             ["--reconcile", "apply", id] => Ok(Self::Apply(run(id)?)),
             ["--reconcile", "rebuild-relations", id] => Ok(Self::RebuildRelations(run(id)?)),
+            ["--reconcile", "rebuild-aliases", id] => Ok(Self::RebuildAliases(run(id)?)),
             ["--reconcile", "resume", id] => Ok(Self::Resume(run(id)?)),
             ["--reconcile", "status", id] => Ok(Self::Status(run(id)?)),
             ["--reconcile", "retry", id, page] => Ok(Self::Retry {
@@ -126,7 +128,7 @@ impl Command {
                     .0,
             }),
             _ => Err(
-                "expected --reconcile apply RUN | rebuild-relations RUN | dry-run | resume RUN | status RUN | retry RUN PAGE",
+                "expected --reconcile apply RUN | rebuild-relations RUN | rebuild-aliases RUN | dry-run | resume RUN | status RUN | retry RUN PAGE",
             ),
         }
     }
@@ -267,13 +269,14 @@ pub mod runtime {
             | Command::ScheduleConfigure { .. } => None,
             Command::Apply(s)
             | Command::RebuildRelations(s)
+            | Command::RebuildAliases(s)
             | Command::Resume(s)
             | Command::Status(s) => Some(s),
             Command::Retry { run, .. } => Some(run),
         } {
             let existing = inspected.coordinator.state().run(id, &inspected.scope);
             let valid = match &command {
-                Command::Apply(_) | Command::RebuildRelations(_) => {
+                Command::Apply(_) | Command::RebuildRelations(_) | Command::RebuildAliases(_) => {
                     matches!(existing, Err(JournalError::InvalidTransition))
                 }
                 Command::Retry { page, .. } => {
@@ -326,10 +329,17 @@ pub mod runtime {
             Ok(r) => r,
             Err(_) => return Output::error("index_state_configuration", 2),
         };
-        let fresh_run = matches!(command, Command::Apply(_) | Command::RebuildRelations(_));
+        let fresh_run = matches!(
+            command,
+            Command::Apply(_) | Command::RebuildRelations(_) | Command::RebuildAliases(_)
+        );
+        let mut rebuild_aliases = matches!(command, Command::RebuildAliases(_));
         let mut rebuild_relations = matches!(command, Command::RebuildRelations(_));
         let (run, retry) = match command {
-            Command::Apply(id) | Command::RebuildRelations(id) | Command::Resume(id) => (id, None),
+            Command::Apply(id)
+            | Command::RebuildRelations(id)
+            | Command::RebuildAliases(id)
+            | Command::Resume(id) => (id, None),
             Command::Retry { run, page } => (run, Some(page)),
             _ => unreachable!(),
         };
@@ -366,8 +376,15 @@ pub mod runtime {
                 }
             });
             let page = retry.take();
+            let aliases = std::mem::take(&mut rebuild_aliases);
             let rebuild = std::mem::take(&mut rebuild_relations);
             let work = async {
+                if aliases {
+                    runtime
+                        .runner
+                        .begin_alias_rebuild(&run, lease.clone(), clock.clone())
+                        .await?;
+                }
                 if rebuild {
                     runtime
                         .runner

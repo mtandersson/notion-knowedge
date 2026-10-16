@@ -289,6 +289,7 @@ async fn installed_status_validates_real_index_metadata_without_model_assets_or_
         drop(coordinator);
         config.notion_scope = Some(scope);
         config.webhook_worker = Some(notion_knowledge_server::webhook_worker::WorkerSettings {
+            alias_sources: notion_knowledge_core::aliases::AliasSources::new(true, vec![]).unwrap(),
             index: index.clone(),
             assets: dir.path().join("no-model-assets"),
             poll_ms: 10,

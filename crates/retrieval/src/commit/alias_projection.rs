@@ -16,6 +16,7 @@ pub struct AliasProjection {
     root: String,
     page: String,
     tombstone: bool,
+    clean_owned_roots: bool,
     configuration: String,
     aliases: Vec<PageAlias>,
     effect: String,
@@ -49,6 +50,33 @@ impl AliasProjection {
             aliases,
         )
     }
+    /// Build from current exact authoritative metadata after lifecycle validation.
+    pub fn from_page(
+        binding: &CommitBinding,
+        page: &notion_knowledge_core::backend::Page,
+        root: &str,
+        sources: &AliasSources,
+    ) -> Result<Self, CommitError> {
+        Self::from_indexed(
+            binding,
+            &IndexedMetadata {
+                page_id: page.id.0.clone(),
+                block_id: None,
+                url: page.url.clone(),
+                title: page.title.clone(),
+                heading_path: vec![],
+                last_edited_time: page.last_edited_time.clone(),
+                source: notion_knowledge_core::indexed::SourceMetadata {
+                    workspace_id: binding.workspace.clone(),
+                    root_page_id: root.into(),
+                    database_id: None,
+                    data_source_id: None,
+                },
+                properties: page.properties.clone(),
+            },
+            sources,
+        )
+    }
     pub fn tombstone(
         binding: &CommitBinding,
         root: &str,
@@ -75,12 +103,20 @@ impl AliasProjection {
             root: root.into(),
             page: page.into(),
             tombstone,
+            clean_owned_roots: false,
             configuration,
             aliases,
             effect: String::new(),
         };
         projection.effect = projection.identity();
         Ok(projection)
+    }
+    /// Installed physical-root transitions remove stale aliases from other
+    /// roots owned by this same binding, preserving every external namespace.
+    pub fn with_owned_root_cleanup(mut self) -> Self {
+        self.clean_owned_roots = true;
+        self.effect = self.identity();
+        self
     }
     pub fn page_id(&self) -> &str {
         &self.page
@@ -110,6 +146,9 @@ impl AliasProjection {
             hash.update(field);
         }
         hash.update([u8::from(self.tombstone)]);
+        if self.clean_owned_roots {
+            hash.update(b"owned-root-cleanup-v1");
+        }
         for alias in &self.aliases {
             for field in [alias.key(), alias.display(), alias.provenance()] {
                 hash.update((field.len() as u64).to_le_bytes());
@@ -179,6 +218,11 @@ impl AliasProjection {
                 )
             })
             .collect();
+        if self.clean_owned_roots {
+            for root in &self.binding.roots {
+                if root != &self.root && db.query_row("SELECT EXISTS(SELECT 1 FROM graph_aliases WHERE workspace_id=?1 AND root_page_id=?2 AND page_id=?3)", params![self.binding.workspace,root,self.page],|r|r.get::<_,bool>(0)).map_err(sql)? { return Ok(false); }
+            }
+        }
         Ok(actual == expected)
     }
     pub(super) fn install(&self, db: &Connection) -> Result<(), CommitError> {
@@ -187,6 +231,13 @@ impl AliasProjection {
             params![self.binding.workspace, self.root, self.page],
         )
         .map_err(sql)?;
+        if self.clean_owned_roots {
+            for root in &self.binding.roots {
+                if root != &self.root {
+                    db.execute("DELETE FROM graph_aliases WHERE workspace_id=?1 AND root_page_id=?2 AND page_id=?3",params![self.binding.workspace,root,self.page]).map_err(sql)?;
+                }
+            }
+        }
         for alias in &self.aliases {
             db.execute(
                 "INSERT INTO graph_aliases VALUES(?1,?2,?3,?4,?5,?6)",
@@ -271,6 +322,75 @@ pub(super) fn persist_proposal(
     Ok(())
 }
 impl IndexCommitCoordinator {
+    /// Check the exact current stored rows and configuration, including empty
+    /// and tombstoned pages. Existing derived rows never confer source authority.
+    pub fn current_alias_projection_complete(
+        &self,
+        page: &str,
+        sources: &AliasSources,
+    ) -> Result<bool, CommitError> {
+        self.identities()?;
+        let mut db = self
+            .state
+            .lock_connection()
+            .map_err(|_| CommitError::Unavailable)?;
+        let tx = db.transaction().map_err(sql)?;
+        self.validate_binding(&tx)?;
+        let result = current_complete(&tx, &self.binding, page, sources)?;
+        tx.commit().map_err(sql)?;
+        Ok(result)
+    }
+    /// Trusted local composition seam. Names resolve to all distinct scoped
+    /// IDs; they grant no content access. Pending effects or incompatible source
+    /// configuration fail closed under the same current snapshot read guard.
+    #[cfg(feature = "local-lancedb")]
+    pub fn lookup_canonical_alias(
+        &self,
+        sources: &AliasSources,
+        alias: &str,
+    ) -> Result<Vec<String>, CommitError> {
+        use notion_knowledge_core::aliases::PageAliasStore;
+        let _guard = self.search_guard()?;
+        let owned: std::collections::BTreeSet<_> = self.owned_page_ids()?.into_iter().collect();
+        for page in &owned {
+            if !self.current_alias_projection_complete(page, sources)? {
+                return Err(CommitError::ProjectionRepairRequired);
+            }
+        }
+        let mut candidates = std::collections::BTreeSet::new();
+        for root in &self.binding.roots {
+            candidates.extend(
+                self.state
+                    .lookup_alias(&self.binding.workspace, root, alias)
+                    .map_err(|_| CommitError::InvalidInput)?,
+            );
+        }
+        if candidates.iter().any(|page| !owned.contains(page)) {
+            return Err(CommitError::ProjectionRepairRequired);
+        }
+        Ok(candidates.into_iter().collect())
+    }
+    /// Select only a root already owned by this immutable binding. Used to
+    /// remove aliases when current negative lifecycle evidence has no allowed root.
+    pub fn alias_root(&self, page: &str) -> Result<String, CommitError> {
+        self.identities()?;
+        let db = self
+            .state
+            .lock_connection()
+            .map_err(|_| CommitError::Unavailable)?;
+        self.validate_binding(&db)?;
+        for root in &self.binding.roots {
+            let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM graph_aliases WHERE workspace_id=?1 AND root_page_id=?2 AND page_id=?3)", params![self.binding.workspace,root,page],|r|r.get(0)).map_err(sql)?;
+            if exists {
+                return Ok(root.clone());
+            }
+        }
+        self.binding
+            .roots
+            .first()
+            .cloned()
+            .ok_or(CommitError::BindingMismatch)
+    }
     /// Exact compatible-state read; never repairs, migrates or acquires a lease.
     pub fn alias_projection_complete(
         &self,
@@ -350,4 +470,41 @@ impl IndexCommitCoordinator {
             .filter(|r| matches!(r.status, ReceiptStatus::Pending | ReceiptStatus::Failed))
             .map(|_| id))
     }
+}
+
+fn current_complete(
+    db: &Connection,
+    binding: &CommitBinding,
+    page: &str,
+    sources: &AliasSources,
+) -> Result<bool, CommitError> {
+    let tombstone: Option<bool> = db
+        .query_row(
+            "SELECT tombstoned FROM page_sync_state WHERE page_id=?1",
+            [page],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql)?;
+    let Some(tombstone) = tombstone else {
+        return Ok(false);
+    };
+    for root in &binding.roots {
+        let mut statement = db.prepare("SELECT display_name,provenance FROM graph_aliases WHERE workspace_id=?1 AND root_page_id=?2 AND page_id=?3 ORDER BY alias_key,display_name,provenance").map_err(sql)?;
+        let aliases = statement
+            .query_map(params![binding.workspace, root, page], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(sql)?
+            .map(|r| {
+                let (name, provenance) = r.map_err(sql)?;
+                PageAlias::new(&name, &provenance).map_err(|_| CommitError::InvalidInput)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let projection = AliasProjection::new(binding, root, page, tombstone, sources, aliases)?;
+        if projection.clone().with_owned_root_cleanup().complete(db)? || projection.complete(db)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

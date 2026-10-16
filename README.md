@@ -529,6 +529,8 @@ The [read-only reconciliation planner](docs/reconciliation-planner.md) compares 
 SQLite/LanceDB ownership with fresh authoritative metadata and lifecycle evidence.
 Dry-run writes no acknowledgments. The [guarded durable reconciliation runner](docs/reconciliation-runner.md) applies differences through the shared lifecycle pipeline and resumes actual receipts; manual and periodic execution use the same production authority and runner.
 
+The [installed canonical alias runtime](docs/canonical-aliases.md) maintains explicit title/property names through shared authoritative commits, safe operator rebuild and trusted scoped local lookup.
+
 The [owned index commit coordinator](docs/index-commits.md) binds trusted local index authority and serializes cancellable callers through durable page checkpoints; concrete LanceDB consumers follow separately.
 
 The [storage pipeline acceptance smoke](docs/storage-pipeline-smoke.md) maps the integrated local persistence, embedding, incremental indexing and recovery contracts to reproducible checks.

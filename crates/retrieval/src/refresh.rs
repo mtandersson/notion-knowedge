@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use notion_knowledge_core::{
+    aliases::AliasSources,
     backend::{BackendErrorKind, PageId},
     chunking::ChunkConfig,
     embedding::EmbeddingProvider,
@@ -21,8 +22,8 @@ use sha2::{Digest, Sha256};
 use crate::{
     chunks::{ChunkDiffMetrics, ChunkTableError, GuardedChunkTable},
     commit::{
-        CommitBinding, CommitError, CommitOutcome, IndexCommitCoordinator, PageAction,
-        PageOperation, ReceiptStatus, RelationProjection,
+        AliasProjection, CommitBinding, CommitError, CommitOutcome, IndexCommitCoordinator,
+        PageAction, PageOperation, ReceiptStatus, RelationProjection,
     },
 };
 
@@ -83,6 +84,7 @@ pub(crate) struct ExpectedReconciliation {
 pub struct AuthoritativePageRefresh {
     notion: Arc<NotionClient>,
     relations: RelationProposalAdapter,
+    alias_sources: Option<AliasSources>,
     guard: GuardedChunkTable,
     coordinator: Arc<IndexCommitCoordinator>,
     scope: LifecycleScope,
@@ -115,11 +117,54 @@ impl AuthoritativePageRefresh {
             .map_err(|_| RefreshError::InvalidConfiguration)?;
         Ok(Self {
             relations,
+            alias_sources: None,
             notion,
             guard,
             coordinator,
             scope,
             chunk_config,
+        })
+    }
+
+    /// Trusted composition only: immutable source policy shared by runtime callers.
+    pub fn with_alias_sources(mut self, sources: AliasSources) -> Self {
+        self.alias_sources = Some(sources);
+        self
+    }
+
+    fn aliases_complete(&self, projection: &Option<AliasProjection>) -> Result<bool, CommitError> {
+        projection
+            .as_ref()
+            .map_or(Ok(true), |p| self.coordinator.alias_projection_complete(p))
+    }
+    fn current_aliases_complete(&self, page: &str) -> Result<bool, CommitError> {
+        self.alias_sources.as_ref().map_or(Ok(true), |s| {
+            self.coordinator.current_alias_projection_complete(page, s)
+        })
+    }
+    fn unfinished_alias_repair(&self, operation: &str, page: &str) -> Result<bool, CommitError> {
+        if self.alias_sources.is_none() {
+            return Ok(false);
+        }
+        if !self
+            .coordinator
+            .receipt(operation)?
+            .is_some_and(|r| r.status == ReceiptStatus::Applied)
+        {
+            return Ok(false);
+        }
+        Ok(self
+            .coordinator
+            .unfinished_alias_repair_id(operation, page)?
+            .is_some())
+    }
+    fn attach_aliases(
+        &self,
+        operation: PageOperation,
+        aliases: Option<AliasProjection>,
+    ) -> Result<PageOperation, CommitError> {
+        aliases.map_or(Ok(operation.clone()), |p| {
+            operation.with_alias_projection(p)
         })
     }
 
@@ -228,10 +273,11 @@ impl AuthoritativePageRefresh {
                 .map_err(|_| RefreshError::Index)?
                 .is_some_and(|state| !state.is_tombstone())
         {
-            if self
-                .coordinator
-                .unfinished_relation_repair_id(operation_id)?
-                .is_some()
+            if self.unfinished_alias_repair(operation_id, &page.0)?
+                || self
+                    .coordinator
+                    .unfinished_relation_repair_id(operation_id)?
+                    .is_some()
             {
                 return Err(RefreshError::Conflict);
             }
@@ -245,9 +291,12 @@ impl AuthoritativePageRefresh {
                     .map_err(|_| FailureClass::Conflict)?;
                 context.revalidate().map_err(|_| FailureClass::Conflict)?;
                 if !handler
-                    .coordinator
-                    .current_relation_projection_complete(&page.0)
+                    .current_aliases_complete(&page.0)
                     .map_err(|_| FailureClass::Index)?
+                    || !handler
+                        .coordinator
+                        .current_relation_projection_complete(&page.0)
+                        .map_err(|_| FailureClass::Index)?
                 {
                     return Err(FailureClass::Conflict);
                 }
@@ -261,10 +310,27 @@ impl AuthoritativePageRefresh {
         }
         let projection =
             RelationProjection::new(self.coordinator.binding(), &page.0, true, vec![])?;
+        let aliases = self
+            .alias_sources
+            .as_ref()
+            .map(|sources| {
+                AliasProjection::tombstone(
+                    self.coordinator.binding(),
+                    &self.coordinator.alias_root(&page.0)?,
+                    &page.0,
+                    sources,
+                )
+                .map(AliasProjection::with_owned_root_cleanup)
+            })
+            .transpose()?;
+        let alias_complete = self.aliases_complete(&aliases)?;
+        let alias_unfinished = self.unfinished_alias_repair(operation_id, &page.0)?;
         if self
             .coordinator
             .receipt(operation_id)?
             .is_some_and(|r| r.status == ReceiptStatus::Applied)
+            && alias_complete
+            && !alias_unfinished
             && self.coordinator.relation_projection_complete(&projection)?
             && self
                 .coordinator
@@ -280,9 +346,12 @@ impl AuthoritativePageRefresh {
                     .map_err(|_| FailureClass::Conflict)?;
                 context.revalidate().map_err(|_| FailureClass::Conflict)?;
                 if !handler
-                    .coordinator
-                    .relation_projection_complete(&projection)
+                    .aliases_complete(&aliases)
                     .map_err(|_| FailureClass::Index)?
+                    || !handler
+                        .coordinator
+                        .relation_projection_complete(&projection)
+                        .map_err(|_| FailureClass::Index)?
                 {
                     return Err(FailureClass::Conflict);
                 }
@@ -299,13 +368,24 @@ impl AuthoritativePageRefresh {
             .coordinator
             .receipt(operation_id)?
             .is_some_and(|r| r.status == ReceiptStatus::Applied)
-            && (!self.coordinator.relation_projection_complete(&projection)?
+            && (!alias_complete
+                || alias_unfinished
+                || !self.coordinator.relation_projection_complete(&projection)?
                 || self
                     .coordinator
                     .unfinished_relation_repair_id(operation_id)?
                     .is_some())
         {
-            repair_id = self.coordinator.relation_repair_id(operation_id)?;
+            repair_id = if let Some(unfinished) = self
+                .coordinator
+                .unfinished_relation_repair_id(operation_id)?
+            {
+                unfinished
+            } else if self.alias_sources.is_some() {
+                self.coordinator.alias_repair_id(operation_id, &page.0)?
+            } else {
+                self.coordinator.relation_repair_id(operation_id)?
+            };
             &repair_id
         } else {
             operation_id
@@ -318,6 +398,7 @@ impl AuthoritativePageRefresh {
         )
         .map_err(RefreshError::from)?
         .with_relation_projection(projection)?;
+        let operation = self.attach_aliases(operation, aliases)?;
         let expected_operation = operation.clone();
         let prepared = self.guard.prepare_page(provider, operation, &[]).await?;
         let diff = prepared.metrics();
@@ -435,7 +516,22 @@ impl AuthoritativePageRefresh {
             false,
             relation_proposal.edges().to_vec(),
         )?;
-        let complete = self.coordinator.relation_projection_complete(&projection)?;
+        let aliases = self
+            .alias_sources
+            .as_ref()
+            .map(|sources| {
+                AliasProjection::from_indexed(
+                    self.coordinator.binding(),
+                    &proposal.document.metadata,
+                    sources,
+                )
+                .map(AliasProjection::with_owned_root_cleanup)
+            })
+            .transpose()?;
+        let alias_complete = self.aliases_complete(&aliases)?;
+        let alias_unfinished = self.unfinished_alias_repair(operation_id, &page.0)?;
+        let complete =
+            alias_complete && self.coordinator.relation_projection_complete(&projection)?;
         let document = proposal.document;
         let chunks = proposal.chunks;
         let metadata_page = notion_knowledge_core::backend::Page {
@@ -489,6 +585,7 @@ impl AuthoritativePageRefresh {
             if old == new {
                 let handler = self.clone();
                 let expected_projection = projection.clone();
+                let expected_aliases = aliases.clone();
                 let proposal = relation_proposal;
                 let expected_checkpoint = checkpoint.clone();
                 let expected_metadata = metadata_identity.clone();
@@ -524,9 +621,12 @@ impl AuthoritativePageRefresh {
                         return Err(FailureClass::Conflict);
                     }
                     if !handler
-                        .coordinator
-                        .relation_projection_complete(&expected_projection)
+                        .aliases_complete(&expected_aliases)
                         .map_err(|_| FailureClass::Index)?
+                        || !handler
+                            .coordinator
+                            .relation_projection_complete(&expected_projection)
+                            .map_err(|_| FailureClass::Index)?
                     {
                         return Err(FailureClass::Conflict);
                     }
@@ -544,6 +644,7 @@ impl AuthoritativePageRefresh {
         }
 
         if complete
+            && !alias_unfinished
             && self
                 .coordinator
                 .unfinished_relation_repair_id(operation_id)?
@@ -562,9 +663,12 @@ impl AuthoritativePageRefresh {
                     .map_err(|_| FailureClass::Conflict)?;
                 context.revalidate().map_err(|_| FailureClass::Conflict)?;
                 if !handler
-                    .coordinator
-                    .relation_projection_complete(&projection)
+                    .aliases_complete(&aliases)
                     .map_err(|_| FailureClass::Index)?
+                    || !handler
+                        .coordinator
+                        .relation_projection_complete(&projection)
+                        .map_err(|_| FailureClass::Index)?
                 {
                     return Err(FailureClass::Conflict);
                 }
@@ -595,12 +699,22 @@ impl AuthoritativePageRefresh {
             .receipt(operation_id)?
             .is_some_and(|r| r.status == ReceiptStatus::Applied)
             && (!complete
+                || alias_unfinished
                 || self
                     .coordinator
                     .unfinished_relation_repair_id(operation_id)?
                     .is_some())
         {
-            repair_id = self.coordinator.relation_repair_id(operation_id)?;
+            repair_id = if let Some(unfinished) = self
+                .coordinator
+                .unfinished_relation_repair_id(operation_id)?
+            {
+                unfinished
+            } else if self.alias_sources.is_some() {
+                self.coordinator.alias_repair_id(operation_id, &page.0)?
+            } else {
+                self.coordinator.relation_repair_id(operation_id)?
+            };
             &repair_id
         } else {
             operation_id
@@ -620,6 +734,7 @@ impl AuthoritativePageRefresh {
         .map_err(RefreshError::from)?
         .with_relation_projection(projection)
         .map_err(RefreshError::from)?;
+        let operation = self.attach_aliases(operation, aliases)?;
         let expected_operation = operation.clone();
         let prepared = self
             .guard
@@ -699,6 +814,10 @@ impl AuthoritativePageRefresh {
             })
     }
 
+    pub(crate) fn alias_configuration_identity(&self) -> Option<String> {
+        self.alias_sources.as_ref().map(AliasSources::identity)
+    }
+
     pub(crate) fn is_bound_to(&self, coordinator: &Arc<IndexCommitCoordinator>) -> bool {
         Arc::ptr_eq(&self.coordinator, coordinator)
             && self.guard.is_bound_to(coordinator)
@@ -727,6 +846,11 @@ impl AuthoritativePageRefresh {
             self.scope.clone(),
         )
         .map_err(|_| FailureClass::Conflict)?;
+        let planner = if let Some(sources) = &self.alias_sources {
+            planner.with_alias_sources(sources.clone())
+        } else {
+            planner
+        };
         let local = planner.local_inventory().await.map_err(|e| match e {
             crate::planner::PlanError::Index => FailureClass::Index,
             _ => FailureClass::Conflict,
@@ -827,6 +951,19 @@ impl AuthoritativePageRefresh {
         )
         .map_err(RefreshError::from)?
         .with_relation_projection(projection)?;
+        let aliases = self
+            .alias_sources
+            .as_ref()
+            .map(|sources| {
+                AliasProjection::from_indexed(
+                    self.coordinator.binding(),
+                    &proposal.snapshot().document.metadata,
+                    sources,
+                )
+                .map(AliasProjection::with_owned_root_cleanup)
+            })
+            .transpose()?;
+        let operation = self.attach_aliases(operation, aliases)?;
         let handler = self.clone();
         let prepared = operation.clone();
         let owned_lease = lease.clone();
@@ -925,6 +1062,25 @@ impl AuthoritativePageRefresh {
                                 .revalidate(proposal)
                                 .await
                                 .map_err(|_| FailureClass::Conflict)?;
+                            let aliases = handler
+                                .alias_sources
+                                .as_ref()
+                                .map(|sources| {
+                                    AliasProjection::from_indexed(
+                                        handler.coordinator.binding(),
+                                        &proposal.snapshot().document.metadata,
+                                        sources,
+                                    )
+                                    .map(AliasProjection::with_owned_root_cleanup)
+                                })
+                                .transpose()
+                                .map_err(|_| FailureClass::Index)?;
+                            if !handler
+                                .aliases_complete(&aliases)
+                                .map_err(|_| FailureClass::Index)?
+                            {
+                                return Err(FailureClass::Conflict);
+                            }
                             let exact = RelationProjection::new(
                                 handler.coordinator.binding(),
                                 &page,
@@ -949,9 +1105,12 @@ impl AuthoritativePageRefresh {
                         };
                         context.revalidate().map_err(|_| FailureClass::Conflict)?;
                         if !handler
-                            .coordinator
-                            .current_relation_projection_complete(&page)
+                            .current_aliases_complete(&page)
                             .map_err(|_| FailureClass::Index)?
+                            || !handler
+                                .coordinator
+                                .current_relation_projection_complete(&page)
+                                .map_err(|_| FailureClass::Index)?
                         {
                             return Err(FailureClass::Index);
                         }
