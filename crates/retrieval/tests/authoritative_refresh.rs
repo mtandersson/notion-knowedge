@@ -5367,7 +5367,7 @@ async fn owned_body_links_follow_authorized_snapshot_cleanup_and_durable_repair(
     assert!(!index.coordinator.current_body_links_complete(PAGE).unwrap());
     let repair = index
         .coordinator
-        .unfinished_relation_repair_id("links-first")
+        .unfinished_alias_repair_id("links-first", PAGE)
         .unwrap()
         .unwrap();
     assert_ne!(
