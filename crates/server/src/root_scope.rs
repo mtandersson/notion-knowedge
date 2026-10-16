@@ -27,13 +27,20 @@ pub async fn compose(
     transport: Transport,
 ) -> Result<KnowledgeServer, &'static str> {
     // An unsuitable transport must not install even lazy private-state readers.
-    if config.retrieval.is_some() && !trusted_transport(config, transport) {
+    if (config.retrieval.is_some() || config.graph_index.is_some())
+        && !trusted_transport(config, transport)
+    {
         return handler.with_max_upload_files(config.max_upload_files);
     }
     let handler = attach_root_scope(handler, config, transport)?;
     #[cfg(all(unix, feature = "webhook-worker"))]
     {
-        crate::retrieval_runtime::configured(handler, config, transport).await
+        crate::retrieval_runtime::configured(
+            crate::graph_runtime::attach(handler, config)?,
+            config,
+            transport,
+        )
+        .await
     }
     #[cfg(not(all(unix, feature = "webhook-worker")))]
     Ok(handler)
@@ -49,11 +56,20 @@ pub async fn compose_client(
     source: Arc<notion_knowledge_notion::NotionClient>,
     provider: Arc<dyn notion_knowledge_core::embedding::EmbeddingProvider>,
 ) -> Result<KnowledgeServer, &'static str> {
-    if config.retrieval.is_some() && !trusted_transport(config, transport) {
+    if (config.retrieval.is_some() || config.graph_index.is_some())
+        && !trusted_transport(config, transport)
+    {
         return handler.with_max_upload_files(config.max_upload_files);
     }
     let handler = attach_client(handler, config, transport, source.as_ref().clone())?;
-    crate::retrieval_runtime::compose(handler, config, transport, source, provider).await
+    crate::retrieval_runtime::compose(
+        crate::graph_runtime::attach(handler, config)?,
+        config,
+        transport,
+        source,
+        provider,
+    )
+    .await
 }
 
 pub fn attach_root_scope(

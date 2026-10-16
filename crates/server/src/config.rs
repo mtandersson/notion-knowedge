@@ -43,6 +43,7 @@ pub struct Config {
     pub webhook_state_file: Option<std::path::PathBuf>,
     pub webhook_worker: Option<crate::webhook_worker::WorkerSettings>,
     pub reconciliation_schedule: Option<crate::scheduled_reconciliation::Settings>,
+    pub graph_index: Option<std::path::PathBuf>,
     pub retrieval: Option<crate::webhook_worker::WorkerSettings>,
     pub reconciliation_index: Option<crate::webhook_worker::WorkerSettings>,
 }
@@ -600,6 +601,34 @@ impl Config {
                 ));
             }
         };
+        let graph_enabled = match lookup("NK_GRAPH").as_deref() {
+            None => false,
+            Some(value) if value == "false" => false,
+            Some(value) if value == "true" => true,
+            _ => return Err(invalid("NK_GRAPH", "must be true or false")),
+        };
+        let graph_index = if graph_enabled {
+            if !cfg!(all(unix, feature = "webhook-worker")) || notion_scope.is_none() {
+                return Err(invalid(
+                    "NK_GRAPH",
+                    "requires Unix webhook-worker feature and trusted scope",
+                ));
+            }
+            let raw = text(
+                lookup("NK_WEBHOOK_INDEX_DIR")
+                    .ok_or_else(|| invalid("NK_WEBHOOK_INDEX_DIR", "required for graph binding"))?,
+                "NK_WEBHOOK_INDEX_DIR",
+            )?;
+            if !std::path::Path::new(&raw).is_absolute() || raw.chars().any(char::is_control) {
+                return Err(invalid(
+                    "NK_WEBHOOK_INDEX_DIR",
+                    "requires an absolute local directory",
+                ));
+            }
+            Some(raw.into())
+        } else {
+            None
+        };
         let retrieval_enabled = match lookup("NK_RETRIEVAL").as_deref() {
             None => false,
             Some(value) if value == "false" => false,
@@ -609,6 +638,7 @@ impl Config {
         let webhook_state_file =
             if matches!(webhook, crate::webhook::WebhookConfig::Verified { .. })
                 || lookup("NK_RECONCILIATION_INTERVAL_SECONDS").is_some()
+                || graph_enabled
                 || retrieval_enabled
             {
                 let path = text(
@@ -719,6 +749,7 @@ impl Config {
             max_upload_files,
             file_ingestion,
             reconciliation_index,
+            graph_index,
             retrieval,
             reconciliation_schedule,
             webhook_worker,
@@ -776,6 +807,23 @@ mod tests {
         })
     }
 
+    #[test]
+    fn graph_activation_is_explicit_and_needs_trusted_existing_state_settings() {
+        assert!(parse(&[]).unwrap().graph_index.is_none());
+        for value in ["", "TRUE", "yes"] {
+            assert_eq!(
+                parse(&[("NK_GRAPH", value)]).unwrap_err().setting,
+                "NK_GRAPH"
+            );
+        }
+        assert!(parse(&[("NK_GRAPH", "true")]).is_err());
+        assert!(
+            parse(&[("NK_GRAPH", "false")])
+                .unwrap()
+                .graph_index
+                .is_none()
+        );
+    }
     #[test]
     fn http_admission_limits_are_finite_and_validated() {
         let defaults = parse(&[]).unwrap();

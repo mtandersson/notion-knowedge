@@ -122,6 +122,10 @@ pub async fn navigate(
         return Err(RelatedError::Inaccessible);
     }
 
+    let snapshot = graph
+        .read_snapshot()
+        .map_err(|_| RelatedError::Unavailable)?;
+    let graph = snapshot.as_deref().unwrap_or(graph);
     let mut visited = BTreeSet::from([input.page_id.clone()]);
     let mut queue = VecDeque::from([(input.page_id.clone(), 0u8)]);
     let mut distinct = BTreeSet::new();
