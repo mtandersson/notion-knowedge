@@ -418,11 +418,29 @@ async fn isolated_bad_page_exhausts_while_healthy_page_becomes_searchable_and_op
     tick(&runtime.worker, false).await;
     assert_eq!(inspect(&runtime.worker, &bad).state, EventState::Pending);
     assert_eq!(inspect(&runtime.worker, &bad).cycle_attempts, 1);
-    tick(&runtime.worker, false).await;
+    // Retry deadlines use whole seconds. The older bad event may already
+    // be due again after its first source request, so FIFO may exhaust it
+    // before selecting the healthy event. Either order must preserve progress.
+    for _ in 0..2 {
+        if inspect(&runtime.worker, &good).state == EventState::Succeeded {
+            break;
+        }
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            runtime.worker.tick(CancellationToken::new(), false),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
     assert_eq!(inspect(&runtime.worker, &good).state, EventState::Succeeded);
+    assert_eq!(inspect(&runtime.worker, &good).cycle_attempts, 1);
+    assert_eq!(inspect(&runtime.worker, &good).lifetime_attempts, 1);
     assert!(runtime.searchable("Saffron").await > 0);
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    tick(&runtime.worker, false).await;
+    if inspect(&runtime.worker, &bad).state != EventState::Failed {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        tick(&runtime.worker, false).await;
+    }
     let failure = inspect(&runtime.worker, &bad);
     assert_eq!(failure.state, EventState::Failed);
     assert_eq!(failure.cycle_attempts, 2);
