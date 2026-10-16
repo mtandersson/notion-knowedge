@@ -7,6 +7,11 @@ pub struct Config {
     pub http_bind: SocketAddr,
     /// Upper bound on simultaneously dispatched MCP HTTP calls (not session count).
     pub mcp_max_in_flight: usize,
+    /// SDK stateful worker sessions and long-lived transport response caps.
+    pub mcp_max_sessions: usize,
+    pub mcp_session_idle_seconds: u64,
+    pub mcp_max_streams: usize,
+    pub mcp_stream_max_seconds: u64,
     /// Separate ingress pool so verified Notion receipts are not starved by MCP.
     pub webhook_max_in_flight: usize,
     pub max_upload_files: usize,
@@ -164,6 +169,12 @@ impl Config {
         };
         let mcp_max_in_flight = concurrency(&mut lookup, "NK_MCP_MAX_IN_FLIGHT", "8", 256)?;
         let webhook_max_in_flight = concurrency(&mut lookup, "NK_WEBHOOK_MAX_IN_FLIGHT", "4", 128)?;
+        let mcp_max_sessions = concurrency(&mut lookup, "NK_MCP_MAX_SESSIONS", "32", 512)?;
+        let mcp_session_idle_seconds =
+            concurrency(&mut lookup, "NK_MCP_SESSION_IDLE_SECONDS", "300", 3600)? as u64;
+        let mcp_max_streams = concurrency(&mut lookup, "NK_MCP_MAX_STREAMS", "16", 256)?;
+        let mcp_stream_max_seconds =
+            concurrency(&mut lookup, "NK_MCP_STREAM_MAX_SECONDS", "300", 3600)? as u64;
         let read_only = match optional(&mut lookup, "NK_READ_ONLY", "true")?.as_str() {
             "true" => true,
             "false" => false,
@@ -700,6 +711,10 @@ impl Config {
         )?;
         Ok(Self {
             mcp_max_in_flight,
+            mcp_max_sessions,
+            mcp_session_idle_seconds,
+            mcp_max_streams,
+            mcp_stream_max_seconds,
             webhook_max_in_flight,
             max_upload_files,
             file_ingestion,
@@ -765,6 +780,10 @@ mod tests {
     fn http_admission_limits_are_finite_and_validated() {
         let defaults = parse(&[]).unwrap();
         assert_eq!(defaults.mcp_max_in_flight, 8);
+        assert_eq!(defaults.mcp_max_sessions, 32);
+        assert_eq!(defaults.mcp_max_streams, 16);
+        assert_eq!(defaults.mcp_session_idle_seconds, 300);
+        assert_eq!(defaults.mcp_stream_max_seconds, 300);
         assert_eq!(defaults.webhook_max_in_flight, 4);
         let tuned = parse(&[
             ("NK_MCP_MAX_IN_FLIGHT", "2"),
@@ -776,6 +795,10 @@ mod tests {
         for (name, maximum) in [
             ("NK_MCP_MAX_IN_FLIGHT", 256),
             ("NK_WEBHOOK_MAX_IN_FLIGHT", 128),
+            ("NK_MCP_MAX_SESSIONS", 512),
+            ("NK_MCP_SESSION_IDLE_SECONDS", 3600),
+            ("NK_MCP_MAX_STREAMS", 256),
+            ("NK_MCP_STREAM_MAX_SECONDS", 3600),
         ] {
             for bad in ["0", "-1", "hello", "9999999999999999999999"] {
                 assert_eq!(parse(&[(name, bad)]).unwrap_err().setting, name);

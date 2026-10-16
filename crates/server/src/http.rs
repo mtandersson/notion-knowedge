@@ -28,9 +28,7 @@ use axum::{
 };
 use serde_json::{Value, json};
 
-use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
-};
+use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 
 /// Serve the shared MCP handler and orchestration probes until Ctrl-C.
 pub async fn serve(settings: crate::config::Config) -> io::Result<()> {
@@ -113,11 +111,24 @@ pub async fn serve_installed(
     ];
     config.cancellation_token = shutdown;
     let cancellation = config.cancellation_token.clone();
-    let service = StreamableHttpService::new(
-        move || Ok(handler.clone()),
-        Arc::new(LocalSessionManager::default()),
-        config,
-    );
+    let session_manager = Arc::new(crate::session_limits::BoundedSessions::new(
+        settings.mcp_max_sessions,
+        Duration::from_secs(settings.mcp_session_idle_seconds),
+    ));
+    let sweeper = session_manager.clone();
+    let stop_sweep = cancellation.clone();
+    let sweep_every = Duration::from_secs(settings.mcp_session_idle_seconds.min(30));
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(sweep_every);
+        loop {
+            tokio::select! {
+                _ = stop_sweep.cancelled() => break,
+                _ = interval.tick() => sweeper.sweep().await,
+            }
+        }
+    });
+    let service =
+        StreamableHttpService::new(move || Ok(handler.clone()), session_manager.clone(), config);
     let bearer = settings.bearer_fallback.map(Arc::new);
     // Operational state supplied for read activation is not webhook admission.
     // Only explicitly verified webhook mode can create or migrate its inbox.
@@ -163,7 +174,20 @@ pub async fn serve_installed(
         None => {
             let mcp = axum::Router::new()
                 .nest_service("/mcp", service)
+                // The session admission lock is inside JSON validation;
+                // request and SSE permits are acquired before SDK dispatch.
+                .layer(middleware::from_fn_with_state(
+                    session_manager.clone(),
+                    limit_session_initializations,
+                ))
                 .layer(middleware::from_fn(validate_json))
+                .layer(middleware::from_fn_with_state(
+                    crate::session_limits::StreamBudget::new(
+                        settings.mcp_max_streams,
+                        Duration::from_secs(settings.mcp_stream_max_seconds),
+                    ),
+                    crate::session_limits::limit_stream_responses,
+                ))
                 // Try-acquire happens before JSON buffering or SDK dispatch.
                 // Authentication remains the outermost MCP middleware.
                 .layer(middleware::from_fn_with_state(
@@ -392,6 +416,30 @@ async fn limit_mcp_requests(
     next.run(request).await
 }
 
+/// Set by the transport JSON validator after a syntactically valid MCP
+/// initialize message is detected. It is not a client-supplied header.
+#[derive(Clone)]
+struct McpInitialize;
+
+/// Serialize initialization quota checks and successful SDK allocation so
+/// concurrent initialize calls cannot outrun the session manager's bound.
+async fn limit_session_initializations(
+    State(manager): State<Arc<crate::session_limits::BoundedSessions>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if request.extensions().get::<McpInitialize>().is_none() {
+        return next.run(request).await;
+    }
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = LOCK.lock().await;
+    manager.sweep().await;
+    if !manager.has_capacity() {
+        return crate::session_limits::overload();
+    }
+    next.run(request).await
+}
+
 // The SDK returns plain text when deserializing malformed request bodies.
 // Validate JSON at the transport boundary so these protocol failures retain
 // JSON-RPC envelopes. Bound buffering; GET/SSE responses pass through untouched.
@@ -406,7 +454,7 @@ async fn validate_json(request: Request, next: Next) -> Response {
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.starts_with("application/json"));
-    let (parts, body) = request.into_parts();
+    let (mut parts, body) = request.into_parts();
     // An incomplete client body must not reserve one of the finite slots
     // indefinitely. Do not time out an already-dispatched mutation here.
     let bytes = match tokio::time::timeout(
@@ -441,6 +489,12 @@ async fn validate_json(request: Request, next: Next) -> Response {
         .filter(|id| id.is_string() || id.is_number())
         .cloned()
         .unwrap_or(Value::Null);
+    if parsed.as_ref().ok().is_some_and(|value| {
+        value.get("method").and_then(Value::as_str) == Some("initialize")
+            && value.get("id").is_some()
+    }) {
+        parts.extensions.insert(McpInitialize);
+    }
     let parse_failure = match parsed {
         Err(_) => Some((json!(null), -32700, "Parse error")),
         Ok(value) => {
