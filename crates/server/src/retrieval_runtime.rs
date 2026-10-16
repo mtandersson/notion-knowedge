@@ -21,16 +21,29 @@ fn validate_owned(config: &Config) -> Result<(), &'static str> {
     let own = std::fs::metadata("/proc/self")
         .map_err(|_| "retrieval ownership unavailable")?
         .uid();
-    let index = &config
+    validate_storage(
+        index_path(config)?,
+        config
+            .webhook_state_file
+            .as_deref()
+            .ok_or("retrieval state unavailable")?,
+        own,
+    )
+}
+fn index_path(config: &Config) -> Result<&std::path::Path, &'static str> {
+    Ok(&config
         .retrieval
         .as_ref()
         .ok_or("retrieval settings unavailable")?
-        .index;
-    let state = config
-        .webhook_state_file
-        .as_deref()
-        .ok_or("retrieval state unavailable")?;
-    for (path, directory) in [(index.as_path(), true), (state, false)] {
+        .index)
+}
+pub(crate) fn validate_storage(
+    index: &std::path::Path,
+    state: &std::path::Path,
+    own: u32,
+) -> Result<(), &'static str> {
+    use std::os::unix::fs::MetadataExt;
+    for (path, directory) in [(index, true), (state, false)] {
         let metadata =
             std::fs::symlink_metadata(path).map_err(|_| "retrieval storage unavailable")?;
         if metadata.uid() != own

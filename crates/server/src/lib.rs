@@ -50,3 +50,6 @@ pub mod file_ingestion;
 
 #[cfg(all(unix, feature = "webhook-worker"))]
 pub mod retrieval_runtime;
+
+#[cfg(all(unix, feature = "webhook-worker"))]
+pub mod graph_runtime;

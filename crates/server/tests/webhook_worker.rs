@@ -267,11 +267,24 @@ impl TestRuntime {
         Self::with_scope_policy("fixture").await
     }
     async fn with_scope_policy(policy: &str) -> Self {
+        Self::with_scope_exclusions(policy, ExclusionRules::default()).await
+    }
+    async fn with_scope_exclusions(policy: &str, exclusions: ExclusionRules) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let index = dir.path().join("index");
         std::fs::create_dir(&index).unwrap();
         let db = dir.path().join("state.sqlite");
-        let journal = ReconciliationScope::new(vec![ROOT.into()], vec![], policy, "1").unwrap();
+        let scope = LifecycleScope {
+            workspace_id: WORKSPACE.into(),
+            generation: 1,
+            roots: vec![PageId(ROOT.into())],
+            exclusions,
+        };
+        let journal = if policy == "webhook-v1" {
+            notion_knowledge_retrieval::planner::production_scope(&scope).unwrap()
+        } else {
+            ReconciliationScope::new(vec![ROOT.into()], vec![], policy, "1").unwrap()
+        };
         let binding = CommitBinding::new("chunks", WORKSPACE, &journal, "1", 1).unwrap();
         let coordinator = IndexCommitCoordinator::initialize(&index, &db, binding).unwrap();
         if policy == "webhook-v1" {
@@ -292,12 +305,6 @@ impl TestRuntime {
             .unwrap();
         state.release_lease(&lease, now_ms() / 1000).unwrap();
         let source = HttpNotion::start().await;
-        let scope = LifecycleScope {
-            workspace_id: WORKSPACE.into(),
-            generation: 1,
-            roots: vec![PageId(ROOT.into())],
-            exclusions: ExclusionRules::default(),
-        };
         let handler = AuthoritativePageRefresh::new(
             source.client(),
             guard,
@@ -1141,6 +1148,122 @@ fn retrieval_config(runtime: &TestRuntime) -> notion_knowledge_server::config::C
     })
     .unwrap()
 }
+fn graph_config(runtime: &TestRuntime) -> notion_knowledge_server::config::Config {
+    let mut config = retrieval_config(runtime);
+    config.retrieval = None; // graph reads do not require loading an embedding model
+    config.graph_index = Some(runtime.index.clone());
+    config
+}
+fn related_request(id: u64, arguments: Value) -> Value {
+    json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"knowledge_related","arguments":arguments}})
+}
+async fn commit_graph_fixture(runtime: &TestRuntime) {
+    runtime.source.state.lock().unwrap().markdown = format!(
+        "Saffron ravioli.\n\n[other](https://www.notion.so/{OTHER}) [duplicate](https://www.notion.so/{OTHER}) [denied](https://www.notion.so/{FOREIGN})"
+    );
+    commit_search_fixture(runtime).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn installed_graph_reopens_producer_commits_and_tracks_edits_tombstones_and_scope() {
+    let runtime = TestRuntime::with_scope_policy("webhook-v1").await;
+    commit_graph_fixture(&runtime).await;
+    let config = graph_config(&runtime);
+    let before = std::fs::read(&runtime.db).unwrap();
+    let handler = installed_retrieval(
+        &runtime,
+        &config,
+        notion_knowledge_server::root_scope::Transport::Stdio,
+    )
+    .await
+    .unwrap();
+    assert_eq!(before, std::fs::read(&runtime.db).unwrap());
+    let output = wire_stdio(
+        handler.clone(),
+        vec![
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+            related_request(3, json!({"page_id":PAGE})),
+            related_request(4, json!({"page_id":OTHER,"depth":2})),
+            related_request(5, json!({"page_id":PAGE,"depth":3})),
+            related_request(6, json!({"page_id":PAGE,"limit":0})),
+            related_request(7, json!({"page_id":PAGE,"workspace_id":WORKSPACE})),
+        ],
+    )
+    .await;
+    assert!(
+        output[1]["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "knowledge_related")
+    );
+    let edges = output[2]["result"]["structuredContent"]["relations"]
+        .as_array()
+        .unwrap();
+    assert_eq!(edges.len(), 1, "{:?}", output);
+    assert_eq!(edges[0]["source_page_id"], PAGE);
+    assert_eq!(edges[0]["target_page_id"], OTHER);
+    assert_eq!(edges[0]["direction"], "outgoing");
+    assert!(
+        edges[0]["relation_type"]
+            .as_str()
+            .unwrap()
+            .starts_with("link:")
+    );
+    assert!(edges[0]["provenance"].as_str().is_some());
+    assert_eq!(
+        output[3]["result"]["structuredContent"]["relations"][0]["direction"],
+        "incoming"
+    );
+    for item in &output[4..] {
+        assert_eq!(item["error"]["code"], -32602, "{item}");
+    }
+    let mut excluded = graph_config(&runtime);
+    excluded
+        .notion_scope
+        .as_mut()
+        .unwrap()
+        .exclusions
+        .page_ids
+        .insert(OTHER.into());
+    assert!(
+        installed_retrieval(
+            &runtime,
+            &excluded,
+            notion_knowledge_server::root_scope::Transport::Stdio
+        )
+        .await
+        .is_err()
+    );
+    {
+        let mut model = runtime.source.state.lock().unwrap();
+        model.markdown = "No links after edit.".into();
+        model.revision = "2026-10-10T13:00:00Z".into();
+    }
+    runtime
+        .worker
+        .state
+        .receive(&event(PAGE, "page.content_updated"))
+        .unwrap();
+    tick(&runtime.worker, false).await;
+    let output = wire_stdio(
+        handler.clone(),
+        vec![related_request(2, json!({"page_id":OTHER}))],
+    )
+    .await;
+    assert_eq!(
+        output[1]["result"]["structuredContent"]["relations"],
+        json!([])
+    );
+    runtime.source.state.lock().unwrap().archived = true;
+    runtime
+        .worker
+        .state
+        .receive(&event(PAGE, "page.deleted"))
+        .unwrap();
+    tick(&runtime.worker, false).await;
+    let output = wire_stdio(handler, vec![related_request(2, json!({"page_id":PAGE}))]).await;
+    assert_eq!(output[1]["result"]["isError"], true);
+}
 async fn installed_retrieval(
     runtime: &TestRuntime,
     config: &notion_knowledge_server::config::Config,
@@ -1403,10 +1526,12 @@ async fn http_json(response: reqwest::Response) -> Value {
     .unwrap()
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn authenticated_http_serves_committed_hybrid_and_denies_untrusted_session_requests() {
+async fn authenticated_http_serves_committed_hybrid_and_graph_and_denies_untrusted_session_requests()
+ {
     let runtime = TestRuntime::with_scope_policy("webhook-v1").await;
-    commit_search_fixture(&runtime).await;
+    commit_graph_fixture(&runtime).await;
     let mut config = retrieval_config(&runtime);
+    config.graph_index = Some(runtime.index.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     config.http_bind = listener.local_addr().unwrap();
     let address = config.http_bind;
@@ -1519,6 +1644,41 @@ async fn authenticated_http_serves_committed_hybrid_and_denies_untrusted_session
     assert!(!results.is_empty(), "{output}");
     assert_eq!(results[0]["source"]["page_id"], PAGE);
     assert_eq!(results[0]["matched_paths"], json!(["semantic", "lexical"]));
+    for request in [
+        json!({"jsonrpc":"2.0","id":8,"method":"tools/list"}),
+        related_request(9, json!({"page_id":PAGE})),
+        related_request(10, json!({"page_id":OTHER})),
+    ] {
+        let response = client
+            .post(&url)
+            .bearer_auth("fixture-private-authentication-token")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-session-id", &session)
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let output = http_json(response).await;
+        if request["id"] == 8 {
+            assert!(
+                output["result"]["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|t| t["name"] == "knowledge_related")
+            );
+        } else {
+            assert_eq!(
+                output["result"]["structuredContent"]["relations"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1,
+                "{output}"
+            );
+        }
+    }
     stop.cancel();
     tokio::time::timeout(Duration::from_secs(10), server)
         .await
@@ -1725,6 +1885,7 @@ async fn unsuitable_http_startup_keeps_private_read_state_closed_and_never_creat
         });
         config.webhook_state_file = Some(absent.join("state.sqlite"));
         config.retrieval.as_mut().unwrap().index = absent.join("index");
+        config.graph_index = Some(absent.join("index"));
         config.retrieval.as_mut().unwrap().assets = absent.join("model");
         if oauth {
             config.oauth_discovery =
@@ -1776,6 +1937,8 @@ async fn unsuitable_http_startup_keeps_private_read_state_closed_and_never_creat
                 .unwrap();
             for request in [
                 search_request(2, "hybrid", json!({})),
+                related_request(4, json!({"page_id":PAGE})),
+                json!({"jsonrpc":"2.0","id":5,"method":"tools/list"}),
                 json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"knowledge_sync_status","arguments":{}}}),
             ] {
                 let output = http_json(
@@ -1795,6 +1958,12 @@ async fn unsuitable_http_startup_keeps_private_read_state_closed_and_never_creat
                         .contains("operational_schema_version\":1")
                 );
                 assert!(!output.to_string().contains("Saffron"));
+                if output["id"] == 5 {
+                    assert!(!output.to_string().contains("knowledge_related"));
+                }
+                if output["id"] == 4 {
+                    assert_eq!(output["result"]["isError"], true);
+                }
                 if output["id"] == 2 {
                     assert!(output.to_string().contains("retrieval_unavailable"));
                 }
@@ -1815,4 +1984,156 @@ async fn unsuitable_http_startup_keeps_private_read_state_closed_and_never_creat
             .unwrap();
         assert!(!absent.exists());
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn installed_graph_is_default_off_and_untrusted_http_never_opens_private_state() {
+    let runtime = TestRuntime::with_scope_policy("webhook-v1").await;
+    commit_graph_fixture(&runtime).await;
+    let mut config = graph_config(&runtime);
+    config.graph_index = None;
+    config.webhook_state_file = Some(runtime._dir.path().join("missing.sqlite"));
+    let handler = installed_retrieval(
+        &runtime,
+        &config,
+        notion_knowledge_server::root_scope::Transport::Stdio,
+    )
+    .await
+    .unwrap();
+    let output = wire_stdio(
+        handler,
+        vec![json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})],
+    )
+    .await;
+    assert!(!output[1].to_string().contains("knowledge_related"));
+    config.graph_index = Some(runtime.index.clone());
+    assert!(
+        installed_retrieval(
+            &runtime,
+            &config,
+            notion_knowledge_server::root_scope::Transport::Stdio
+        )
+        .await
+        .is_err()
+    );
+    assert!(!config.webhook_state_file.as_ref().unwrap().exists());
+    config.bearer_fallback = None;
+    let source_before = runtime.source.attempts.load(Ordering::SeqCst);
+    let handler = installed_retrieval(
+        &runtime,
+        &config,
+        notion_knowledge_server::root_scope::Transport::Http,
+    )
+    .await
+    .unwrap();
+    let output = wire_stdio(
+        handler,
+        vec![
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+            related_request(3, json!({"page_id":PAGE})),
+        ],
+    )
+    .await;
+    assert!(!output[1].to_string().contains("knowledge_related"));
+    assert_eq!(output[2]["result"]["isError"], true);
+    assert_eq!(
+        source_before,
+        runtime.source.attempts.load(Ordering::SeqCst)
+    );
+    assert!(!config.webhook_state_file.as_ref().unwrap().exists());
+    config = graph_config(&runtime);
+    let other = TestRuntime::with_scope_policy("webhook-v1").await;
+    config.graph_index = Some(other.index.clone());
+    assert!(
+        installed_retrieval(
+            &runtime,
+            &config,
+            notion_knowledge_server::root_scope::Transport::Stdio
+        )
+        .await
+        .is_err()
+    );
+    config = graph_config(&runtime);
+    let bad = runtime._dir.path().join("corrupt.sqlite");
+    std::fs::write(&bad, b"invalid SQLite").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o600)).unwrap();
+    config.webhook_state_file = Some(bad.clone());
+    assert!(
+        installed_retrieval(
+            &runtime,
+            &config,
+            notion_knowledge_server::root_scope::Transport::Stdio
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(std::fs::read(bad).unwrap(), b"invalid SQLite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn installed_graph_suppresses_explicitly_excluded_producer_targets() {
+    let mut exclusions = ExclusionRules::default();
+    exclusions.page_ids.insert(OTHER.into());
+    let runtime = TestRuntime::with_scope_exclusions("webhook-v1", exclusions.clone()).await;
+    commit_graph_fixture(&runtime).await;
+    let mut config = graph_config(&runtime);
+    config.notion_scope.as_mut().unwrap().exclusions = exclusions;
+    let handler = installed_retrieval(
+        &runtime,
+        &config,
+        notion_knowledge_server::root_scope::Transport::Stdio,
+    )
+    .await
+    .unwrap();
+    let output = wire_stdio(handler, vec![related_request(2, json!({"page_id":PAGE}))]).await;
+    assert_eq!(
+        output[1]["result"]["structuredContent"]["relations"],
+        json!([])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn installed_graph_denies_reads_after_interrupted_owned_producer_commit() {
+    let mut runtime = TestRuntime::with_scope_policy("webhook-v1").await;
+    commit_graph_fixture(&runtime).await;
+    let config = graph_config(&runtime);
+    let handler = installed_retrieval(
+        &runtime,
+        &config,
+        notion_knowledge_server::root_scope::Transport::Stdio,
+    )
+    .await
+    .unwrap();
+    let metadata = runtime.worker.provider.metadata().clone();
+    Arc::get_mut(&mut runtime.worker).unwrap().provider = Arc::new(PauseSourceProvider {
+        metadata,
+        pause: runtime.source.pause_next.clone(),
+    });
+    runtime.source.change(|m| {
+        m.markdown = "Changed Saffron.".into();
+        m.revision = "2026-10-10T14:00:00Z".into();
+    });
+    runtime
+        .worker
+        .state
+        .receive(&event(PAGE, "page.content_updated"))
+        .unwrap();
+    let stop = CancellationToken::new();
+    let token = stop.clone();
+    let worker = runtime.worker.clone();
+    let running = tokio::spawn(async move { worker.run(token).await });
+    tokio::time::timeout(Duration::from_secs(10), runtime.source.entered.notified())
+        .await
+        .unwrap();
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(2), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    runtime.source.proceed.notify_one();
+    let output = wire_stdio(handler, vec![related_request(2, json!({"page_id":PAGE}))]).await;
+    assert_eq!(output[1]["result"]["isError"], true, "{:?}", output);
+    assert!(output[1]["result"]["structuredContent"].is_null());
 }
