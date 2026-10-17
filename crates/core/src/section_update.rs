@@ -32,6 +32,36 @@ pub struct SectionUpdateRequest {
     pub idempotency_key: String,
 }
 
+/// Once-only verified section edit with independent durable index status.
+pub async fn update_section_once_and_refresh(
+    reader: &dyn NotionRead,
+    writer: &dyn NotionSectionWrite,
+    gate: &RootScopeGate,
+    ledger: &dyn WriteIdempotencyStore,
+    queue: &dyn crate::write_refresh::MutationRefreshQueue,
+    request: SectionUpdateRequest,
+) -> Result<crate::write_refresh::WriteCompletion, SectionUpdateError> {
+    let result = update_section_once(reader, writer, gate, ledger, request.clone()).await?;
+    let claim = MutationClaim::new(
+        &gate.configured_scope().workspace_id,
+        &request.idempotency_key,
+        MutationOperation::UpdateSection,
+        &request.page_id.0,
+        &fingerprint(&request),
+    )
+    .map_err(ledger_error)?;
+    Ok(crate::write_refresh::admit_verified(
+        queue,
+        &crate::write_refresh::RefreshKey {
+            workspace_id: gate.configured_scope().workspace_id.clone(),
+            mutation_digest: claim.key_digest().to_owned(),
+            page_id: result.receipt.page_id.clone(),
+        },
+        result.receipt,
+        result.replayed,
+    ))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SectionUpdateResult {
     pub receipt: VerifiedReceipt,

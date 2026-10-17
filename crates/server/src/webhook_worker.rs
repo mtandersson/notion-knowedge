@@ -115,6 +115,7 @@ pub mod runtime {
     };
     use notion_knowledge_retrieval::{
         commit::IndexCommitCoordinator,
+        mutation_refresh::MutationRefreshClaim,
         refresh::{AuthoritativePageRefresh, RefreshError},
         sync_state::SqliteSyncStateStore,
     };
@@ -136,24 +137,40 @@ pub mod runtime {
     enum Work {
         Page(PageWorkClaim),
         Event(EventClaim, notion_knowledge_core::webhook::InboxEvent),
+        Mutation(MutationRefreshClaim),
     }
     impl Work {
-        fn hint(&self) -> &notion_knowledge_core::webhook::WebhookEvent {
+        fn hint(&self) -> Option<&notion_knowledge_core::webhook::WebhookEvent> {
             match self {
-                Self::Page(p) => &p.newest,
-                Self::Event(_, e) => &e.event,
+                Self::Page(p) => Some(&p.newest),
+                Self::Event(_, e) => Some(&e.event),
+                Self::Mutation(_) => None,
+            }
+        }
+        fn page_id(&self) -> &str {
+            match self {
+                Self::Page(p) => &p.key.page_id,
+                Self::Event(_, e) => &e.event.entity_id,
+                Self::Mutation(c) => &c.key.page_id,
             }
         }
         fn claims(&self) -> Vec<EventClaim> {
             match self {
                 Self::Page(p) => p.events.clone(),
                 Self::Event(c, _) => vec![c.clone()],
+                Self::Mutation(_) => vec![],
             }
         }
         fn operation(&self) -> String {
+            if let Self::Mutation(c) = self {
+                return format!(
+                    "mutation-refresh-{}-{}",
+                    c.key.workspace_id, c.key.mutation_digest
+                );
+            }
             let mut ids: Vec<_> = self.claims().into_iter().map(|c| c.key.event_id).collect();
             ids.sort();
-            let hint = self.hint();
+            let hint = self.hint().expect("webhook work has a hint");
             format!(
                 "webhook-{:x}",
                 Sha256::digest(format!(
@@ -359,6 +376,16 @@ pub mod runtime {
             }
             let state = self.state.clone();
             let claim = blocking(move || {
+                // Alternate mutation/page admission to avoid starving trusted
+                // post-write refresh work under continuous webhook arrivals.
+                if !page_first {
+                    if let Some(claim) = state
+                        .claim_mutation_refresh(&scope.workspace_id, now_ms() / 1000, duration)
+                        .map_err(|_| notion_knowledge_core::webhook::InboxError::Unavailable)?
+                    {
+                        return Ok(Some(Work::Mutation(claim)));
+                    }
+                }
                 let page = || {
                     state
                         .claim_page(&scope, now_ms(), duration)
@@ -369,11 +396,18 @@ pub mod runtime {
                         .claim(&scope, now_ms() / 1000, duration)
                         .map(|e| e.map(|(c, e)| Work::Event(c, e)))
                 };
-                if page_first {
+                let webhook = if page_first {
                     page()?.map_or_else(event, |p| Ok(Some(p)))
                 } else {
                     event()?.map_or_else(page, |p| Ok(Some(p)))
+                }?;
+                if webhook.is_some() {
+                    return Ok(webhook);
                 }
+                state
+                    .claim_mutation_refresh(&scope.workspace_id, now_ms() / 1000, duration)
+                    .map(|claim| claim.map(Work::Mutation))
+                    .map_err(|_| notion_knowledge_core::webhook::InboxError::Unavailable)
             })
             .await?;
             let result = match claim {
@@ -408,7 +442,10 @@ pub mod runtime {
                             | "page.moved"
                     )
             };
-            let supported = supported_hint(hint) && work.claims().iter().all(|claim| matches!(self.state.event(&claim.key), Ok(Some(e)) if supported_hint(&e.event) && e.event.entity_id == hint.entity_id));
+            let supported = match &work {
+                Work::Mutation(c) => c.key.workspace_id == self.scope.workspace_id,
+                _ => hint.is_some_and(|hint| supported_hint(hint) && work.claims().iter().all(|claim| matches!(self.state.event(&claim.key), Ok(Some(e)) if supported_hint(&e.event) && e.event.entity_id == hint.entity_id))),
+            };
             let processing = stop.child_token();
             let state = self.state.clone();
             let claims = work.claims();
@@ -417,17 +454,21 @@ pub mod runtime {
                 Work::Page(p) => Some(p.clone()),
                 _ => None,
             };
+            let mutation_claim = match &work {
+                Work::Mutation(c) => Some(c.clone()),
+                _ => None,
+            };
             // The commit adapter calls this clock under its real directory
             // guard immediately before mutation and checkpoint. Expired, taken
             // over or cancelled inbox ownership cannot authorize a stale write.
             let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || {
                 let now = now_ms() / 1000;
-                if cancelled.is_cancelled() || page_claim.as_ref().is_some_and(|p| !state.page_claim_is_current(p,now_ms()).unwrap_or(false)) || claims.iter().any(|c| !matches!(state.event(&c.key), Ok(Some(e)) if e.state==EventState::Running && e.generation==c.generation && e.lease_until.is_some_and(|until|until>now))) { i64::MAX } else { now }
+                if cancelled.is_cancelled() || mutation_claim.as_ref().is_some_and(|c| !state.mutation_refresh_is_current(c,now).unwrap_or(false)) || page_claim.as_ref().is_some_and(|p| !state.page_claim_is_current(p,now_ms()).unwrap_or(false)) || claims.iter().any(|c| !matches!(state.event(&c.key), Ok(Some(e)) if e.state==EventState::Running && e.generation==c.generation && e.lease_until.is_some_and(|until|until>now))) { i64::MAX } else { now }
             });
             let outcome = if !supported {
                 ProcessingOutcome::Permanent(EventFailure::Source)
             } else {
-                let page = PageId(hint.entity_id.clone());
+                let page = PageId(work.page_id().to_owned());
                 let operation = work.operation();
                 tokio::select! {
                     biased;
@@ -450,6 +491,18 @@ pub mod runtime {
                 Work::Event(c, _) => {
                     WebhookRecovery::complete(state.as_ref(), &c, now_ms() / 1000, outcome)
                 }
+                Work::Mutation(c) => state
+                    .complete_mutation_refresh(
+                        &c,
+                        now_ms() / 1000,
+                        outcome == ProcessingOutcome::Succeeded,
+                    )
+                    .map_err(|error| match error {
+                        notion_knowledge_core::write_refresh::RefreshQueueError::ClaimLost => {
+                            notion_knowledge_core::webhook::InboxError::ClaimLost
+                        }
+                        _ => notion_knowledge_core::webhook::InboxError::Unavailable,
+                    }),
             })
             .await?;
             match completion {
