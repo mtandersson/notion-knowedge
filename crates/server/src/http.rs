@@ -260,7 +260,7 @@ pub async fn serve_installed(
 
 /// Generated server-side IDs cannot be spoofed using client-supplied headers.
 /// Instrument the outer router, including rejected requests and health probes.
-async fn correlate_request(request: Request, next: Next) -> Response {
+pub(crate) async fn correlate_request(request: Request, next: Next) -> Response {
     let id = CorrelationId::new();
     let started = Instant::now();
     let mut response = logging::scope(id.clone(), next.run(request)).await;

@@ -124,6 +124,7 @@ impl Harness {
             .unwrap(),
             Some(login.clone()),
         );
+        let router = router.layer(axum::middleware::from_fn(crate::http::correlate_request));
         let server = tokio::spawn(async move {
             axum::serve(socket, router).await.unwrap();
         });
@@ -472,4 +473,72 @@ async fn provider_consent_denial_consumes_state_without_exchanging_credentials()
     assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
     assert_eq!(h.calls.load(Ordering::SeqCst), 0);
     assert!(h.store.load().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn identity_policy_denials_have_correlated_payload_free_logs() {
+    // Run the real HTTP policy-denial cases in a separate test process so
+    // stderr is observed without a global mutable log sink or parallel-test
+    // interference. This is the same production router and request scope.
+    let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "oauth_authorize::tests::denied_provider_identity_and_errors_never_persist_or_redirect",
+            "--nocapture",
+        ])
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(15), command.output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "policy fixture failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    for secret in [
+        "provider-access-secret",
+        "provider-refresh-secret",
+        "client-secret",
+        "provider-code",
+        "foreign-workspace",
+        "foreign-user",
+        "workspace-a",
+        "user-a",
+        "__Host-nk-oauth",
+        "code=",
+        "state=",
+    ] {
+        assert!(!stderr.contains(secret));
+    }
+    let events: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let denials: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event["operation"].as_str(),
+                Some("notion_oauth_workspace" | "notion_oauth_user")
+            )
+        })
+        .collect();
+    assert_eq!(denials.len(), 2);
+    for operation in ["notion_oauth_workspace", "notion_oauth_user"] {
+        let event = denials
+            .iter()
+            .find(|event| event["operation"] == operation)
+            .unwrap();
+        assert_eq!(event["outcome"], "rejected");
+        assert_eq!(event["level"], "warn");
+        assert!(event["http_status"].is_null());
+        assert_eq!(event.as_object().unwrap().len(), 7);
+        assert!(events.iter().any(|http| http["operation"] == "http_request"
+            && http["http_status"] == 400
+            && http["correlation_id"] == event["correlation_id"]));
+    }
 }

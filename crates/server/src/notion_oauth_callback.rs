@@ -1,7 +1,10 @@
 //! Fail-closed Notion OAuth callback verifier and browser correlation.
 //! The HTTP adapter must persist a verified grant before issuing an MCP code.
 //! Token issuance and resource/session enforcement remain separate gates.
-use std::{fmt, time::Duration};
+use std::{
+    fmt,
+    time::{Duration, Instant},
+};
 
 use reqwest::{Client, Url, redirect::Policy};
 use serde::Deserialize;
@@ -348,6 +351,7 @@ impl<'a> NotionCallback<'a> {
         raw_query: &str,
         browser: Option<&str>,
     ) -> Result<VerifiedCallback, CallbackError> {
+        let started = Instant::now();
         let params = CallbackParams::parse(raw_query)?;
         let transaction = match browser {
             Some(cookie) => self.redirect.take_browser(&params.state, cookie),
@@ -359,9 +363,25 @@ impl<'a> NotionCallback<'a> {
         }
         let code = params.code.ok_or(CallbackError::InvalidCallback)?;
         let grant = self.exchanger.exchange(&code).await?;
-        if grant.workspace_id != self.allowed.workspace_id
-            || grant.owner_user_id != self.allowed.owner_user_id
-        {
+        use notion_knowledge_core::logging::{self, Operation, Outcome};
+        let rejection = if grant.workspace_id != self.allowed.workspace_id {
+            Some(Operation::NotionOAuthWorkspace)
+        } else if grant.owner_user_id != self.allowed.owner_user_id {
+            Some(Operation::NotionOAuthUser)
+        } else {
+            None
+        };
+        if let Some(operation) = rejection {
+            // Only fixed operation/outcome enums cross the logging boundary.
+            // Never log supplied/configured identities or provider credentials.
+            logging::emit(
+                &logging::current_id(),
+                operation,
+                Outcome::Rejected,
+                started.elapsed(),
+                None,
+                Outcome::Rejected.level(),
+            );
             return Err(CallbackError::IdentityMismatch);
         }
         Ok(VerifiedCallback {

@@ -238,6 +238,9 @@ request context; detached index commit threads capture the ID before spawn.
 Stdio MCP tool calls also have their own operation IDs. `completed` on a
 tool event means the handler returned, not that a tool's business outcome
 succeeded. Response/status failures remain visible on HTTP and Notion events.
+Notion OAuth allowlist rejections have fixed `notion_oauth_workspace` and
+`notion_oauth_user` operations, correlated with the enclosing HTTP request.
+They include no supplied/configured identity or credential values.
 Server logs are sensitive operational metadata; apply normal access controls,
 retention and log-shipping redaction policies.
 
