@@ -115,7 +115,7 @@ Use the generation/exclusion settings in [root scope configuration](mcp-root-sco
 The consented connection must actually have permission to read those pages.
 
 Search and `knowledge_get` (including `freshness: "fresh"`, which first expands
-indexed references) require a Unix binary built with
+indexed references) require a Linux deployment with a binary built with
 `webhook-worker`, an existing compatible private committed SQLite/Lance index,
 FTS and trained vector indexes, and pinned offline Qwen assets:
 
