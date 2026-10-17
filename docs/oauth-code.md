@@ -94,11 +94,16 @@ code_verifier=<the original public client's PKCE verifier>
 The body is capped at **8 KiB** (413 for excess data). Missing, malformed,
 unknown or repeated fields, including percent-encoded duplicate keys, fail
 closed. Unsupported media types, compressed content, query/body mixing and
-client credentials are rejected. The server reads the current sealed grant,
-requires it to remain unchanged, and redeems the code against that grant's
-identity and epoch. Missing or expired grants cannot issue a token; unreadable
-or corrupt state returns a sanitized 503. It never falls back to an operator
-integration token or to an identity supplied by the client.
+client credentials are rejected. The server reads the current sealed grant
+and atomically claims the code against its identity/epoch and PKCE binding before any provider call. It then
+requires the exact upstream grant to be active, refreshing expired/near-expiry
+credentials through the shared runtime when appropriate. Only verified live
+evidence can mint the MCP bearer, and the code deadline/binding is rechecked
+after the provider response. Missing, inactive or mismatched grants cannot
+issue a token; unreadable/corrupt state or provider failure returns a sanitized
+503. A valid code is consumed even if later provider verification fails. It
+never falls back to an operator integration token or to an identity supplied
+by the client.
 
 Success returns only `access_token` (new opaque MCP token), `token_type=Bearer`,
 `expires_in=600`, and `scope=knowledge:read`. Neither Notion credential nor

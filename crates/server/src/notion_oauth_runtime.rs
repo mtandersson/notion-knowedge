@@ -59,6 +59,22 @@ impl NotionOAuthRuntime {
         self.store.clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn fixture(
+        store: Arc<GrantStore>,
+        client: NotionTokenClient,
+        policy: crate::notion_oauth_callback::NotionOwnerPolicy,
+    ) -> Self {
+        Self {
+            coordinator: Arc::new(NotionRefresh::shared(
+                store.clone(),
+                Arc::new(client),
+                Arc::new(policy),
+            )),
+            store,
+        }
+    }
+
     pub fn from_config(config: &Config) -> Result<Option<Self>, CredentialError> {
         let Some(settings) = &config.notion_grant_store else {
             return Ok(None);

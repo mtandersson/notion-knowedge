@@ -46,6 +46,7 @@ pub struct Login {
 }
 struct CallbackRuntime {
     store: Arc<GrantStore>,
+    credentials: NotionOAuthRuntime,
     client: NotionTokenClient,
     allowed: NotionOwnerPolicy,
     admission: Arc<tokio::sync::Semaphore>,
@@ -70,6 +71,7 @@ impl Login {
             .map(|runtime| {
                 Ok::<_, &'static str>(CallbackRuntime {
                     store: runtime.grant_store(),
+                    credentials: runtime.clone(),
                     client: NotionTokenClient::new(
                         registration,
                         policy.client_secret.expose_secret(),
@@ -378,9 +380,10 @@ pub async fn token(
     if query.is_some()
         || !token_content_type(&headers)
         || headers.contains_key(header::AUTHORIZATION)
+        || headers.get_all(header::CONTENT_ENCODING).iter().count() > 1
         || headers
             .get(header::CONTENT_ENCODING)
-            .is_some_and(|v| v.as_bytes() != b"identity")
+            .is_some_and(|v| !v.as_bytes().eq_ignore_ascii_case(b"identity"))
     {
         return token_error(Error::InvalidRequest, StatusCode::BAD_REQUEST);
     }
@@ -388,7 +391,7 @@ pub async fn token(
         Ok(bytes) => bytes,
         Err(error) => return token_error(Error::InvalidRequest, error.status()),
     };
-    let result = (|| {
+    let result = async {
         let raw = std::str::from_utf8(&bytes).map_err(|_| Error::InvalidRequest)?;
         let params = parse(
             raw,
@@ -403,14 +406,8 @@ pub async fn token(
         )?;
         let stored = runtime
             .store
-            .load()
-            .map_err(|error| {
-                if error == crate::notion_grant_store::StoreError::Expired {
-                    Error::InvalidGrant
-                } else {
-                    Error::TemporarilyUnavailable
-                }
-            })?
+            .load_for_refresh()
+            .map_err(|_| Error::TemporarilyUnavailable)?
             .ok_or(Error::InvalidGrant)?;
         if !runtime
             .store
@@ -426,7 +423,7 @@ pub async fn token(
             owner_type: "user",
             owner_user_id: stored.owner_user_id(),
         };
-        login.flow.redeem(
+        let prepared = login.flow.prepare_redemption(
             &TokenRequest {
                 grant_type: &params["grant_type"],
                 code: &params["code"],
@@ -436,8 +433,41 @@ pub async fn token(
                 code_verifier: &params["code_verifier"],
             },
             &binding,
-        )
-    })();
+        )?;
+        // Only a valid claimed code can trigger confidential provider work.
+        // No bearer exists until the exact grant is actively verified.
+        let active = runtime
+            .credentials
+            .ensure_active()
+            .await
+            .map_err(|error| match error {
+                crate::notion_oauth_runtime::CredentialError::NoGrant
+                | crate::notion_oauth_runtime::CredentialError::ReauthorizationRequired
+                | crate::notion_oauth_runtime::CredentialError::IdentityMismatch => {
+                    Error::InvalidGrant
+                }
+                crate::notion_oauth_runtime::CredentialError::Configuration
+                | crate::notion_oauth_runtime::CredentialError::Unavailable => {
+                    Error::TemporarilyUnavailable
+                }
+            })?;
+        if !runtime
+            .store
+            .still_current(&active)
+            .map_err(|_| Error::TemporarilyUnavailable)?
+        {
+            return Err(Error::InvalidGrant);
+        }
+        let active_binding = ApprovedNotionGrant {
+            grant_id: active.grant_id(),
+            epoch: active.epoch(),
+            workspace_id: active.workspace_id(),
+            owner_type: "user",
+            owner_user_id: active.owner_user_id(),
+        };
+        login.flow.issue_redemption(prepared, &active_binding)
+    }
+    .await;
     match result {
         Ok(issued) => (StatusCode::OK,
             [(header::CACHE_CONTROL, "no-store"), (header::PRAGMA, "no-cache")],

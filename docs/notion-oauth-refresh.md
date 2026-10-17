@@ -87,8 +87,8 @@ process**. Calling `NotionRefresh::new` for every request, running
 multiple workers/pods against the same file, or moving the state onto a
 shared filesystem is **not safe**. Distributed locking/fencing,
 rollback-resistant revocation and persistent session authorization
-remain #127/#128 requirements. No live HTTP callback, authorization,
-token issuing or private MCP route is enabled by this PR.
+remain #127/#128 requirements. The browser callback and token exchange use
+this shared coordinator; private MCP resource routes remain denied.
 
 The version-1 sealed file format remains unchanged, so records made
 under #123 can be refreshed in place. Since expired records need
@@ -118,8 +118,9 @@ and reports **only** a fixed success/failure message, never any
 credentials or provider responses.
 
 **This does not activate OAuth HTTP login or authenticated MCP access.**
-The production OAuth discovery router still denies `/authorize`,
-`/token` and `/mcp` pending #120/#125/#126/#127/#128 and #129. The
+The configured browser flow can issue codes and `/token` uses the runtime's
+live `ensure_active()` evidence before minting a grant-bound MCP bearer.
+`/mcp` remains denied pending #127/#128 and #129. The
 runtime is an internal credential composer and local operator probe;
 it must be explicitly connected to authorized backend tool handlers
 after the MCP authorization and durable revocation gates land. The

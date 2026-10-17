@@ -7,7 +7,7 @@ use axum::{Router, routing::post};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
-    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
 const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
@@ -21,6 +21,10 @@ struct Harness {
     base: String,
     client: reqwest::Client,
     calls: Arc<AtomicUsize>,
+    probes: Arc<AtomicUsize>,
+    active: Arc<AtomicBool>,
+    probe_gate: Arc<tokio::sync::Semaphore>,
+    probe_started: Arc<tokio::sync::Notify>,
     clock: Arc<AtomicU64>,
     server: tokio::task::JoinHandle<()>,
     provider: tokio::task::JoinHandle<()>,
@@ -70,15 +74,61 @@ impl Harness {
                             headers["authorization"],
                             "Basic bm90aW9uLWNsaWVudDpjbGllbnQtc2VjcmV0"
                         );
-                        assert_eq!(request["grant_type"], "authorization_code");
-                        assert_eq!(request["code"], "provider-code");
-                        assert_eq!(
-                            request["redirect_uri"],
-                            "https://auth.example.com/oauth/notion/callback"
-                        );
-                        assert_eq!(request.as_object().unwrap().len(), 3);
+                        let mut response = body;
+                        if request["grant_type"] == "authorization_code" {
+                            assert_eq!(request["code"], "provider-code");
+                            assert_eq!(
+                                request["redirect_uri"],
+                                "https://auth.example.com/oauth/notion/callback"
+                            );
+                            assert_eq!(request.as_object().unwrap().len(), 3);
+                        } else {
+                            assert_eq!(request["grant_type"], "refresh_token");
+                            assert_eq!(request["refresh_token"], "provider-refresh-secret");
+                            assert_eq!(request.as_object().unwrap().len(), 2);
+                            response["access_token"] = "rotated-access-secret".into();
+                            response["refresh_token"] = "rotated-refresh-secret".into();
+                            response.as_object_mut().unwrap().remove("expires_in");
+                        }
                         seen.fetch_add(1, Ordering::SeqCst);
-                        (status, axum::Json(body))
+                        (status, axum::Json(response))
+                    }
+                },
+            ),
+        );
+        let probes = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicBool::new(true));
+        let probe_gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let probe_started = Arc::new(tokio::sync::Notify::new());
+        let gate = probe_gate.clone();
+        let started_probe = probe_started.clone();
+        let seen_probe = probes.clone();
+        let provider_active = active.clone();
+        let provider_router = provider_router.route(
+            "/v1/oauth/introspect",
+            post(
+                move |headers: HeaderMap, axum::Json(request): axum::Json<serde_json::Value>| {
+                    let gate = gate.clone();
+                    let started_probe = started_probe.clone();
+                    let seen_probe = seen_probe.clone();
+                    let provider_active = provider_active.clone();
+                    async move {
+                        assert_eq!(
+                            headers["authorization"],
+                            "Basic bm90aW9uLWNsaWVudDpjbGllbnQtc2VjcmV0"
+                        );
+                        assert_eq!(headers["notion-version"], "2026-03-11");
+                        assert!(matches!(
+                            request["token"].as_str(),
+                            Some("provider-access-secret" | "rotated-access-secret")
+                        ));
+                        assert_eq!(request.as_object().unwrap().len(), 1);
+                        seen_probe.fetch_add(1, Ordering::SeqCst);
+                        started_probe.notify_one();
+                        let _permit = gate.acquire().await.unwrap();
+                        axum::Json(
+                            serde_json::json!({"active":provider_active.load(Ordering::SeqCst)}),
+                        )
                     }
                 },
             ),
@@ -111,6 +161,13 @@ impl Harness {
             redirect: NotionOAuthRedirect::new(registration.clone()),
             callback: Some(CallbackRuntime {
                 store: store.clone(),
+                credentials: NotionOAuthRuntime::fixture(
+                    store.clone(),
+                    NotionTokenClient::new(&registration, "client-secret")
+                        .unwrap()
+                        .for_local_fixture(&endpoint),
+                    policy.clone(),
+                ),
                 client: NotionTokenClient::new(&registration, "client-secret")
                     .unwrap()
                     .for_local_fixture(&endpoint),
@@ -146,6 +203,10 @@ impl Harness {
                 .build()
                 .unwrap(),
             calls,
+            probes,
+            active,
+            probe_gate,
+            probe_started,
             clock,
             server,
             provider,
@@ -654,6 +715,7 @@ async fn token_endpoint_rejects_bound_field_changes_and_expired_or_replayed_code
             );
         }
     }
+    assert_eq!(h.probes.load(Ordering::SeqCst), 0);
     let code = h.approved_code().await;
     h.clock.store(121, Ordering::SeqCst);
     let expired = h
@@ -782,4 +844,149 @@ async fn concurrent_token_redemption_issues_at_most_one_bearer() {
     let mut statuses = [a.unwrap().status().as_u16(), b.unwrap().status().as_u16()];
     statuses.sort();
     assert_eq!(statuses, [200, 400]);
+    assert_eq!(h.probes.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn token_minting_requires_live_provider_state_and_rejects_failed_code_reuse() {
+    let h = Harness::new(grant("workspace-a", "user-a"), StatusCode::OK).await;
+    let code = h.approved_code().await;
+    h.active.store(false, Ordering::SeqCst);
+    let denied = h
+        .token_request(encode_form(&token_params(&code)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        denied.json::<serde_json::Value>().await.unwrap(),
+        serde_json::json!({"error":"invalid_grant"})
+    );
+    assert_eq!(h.probes.load(Ordering::SeqCst), 1);
+    h.active.store(true, Ordering::SeqCst);
+    let replay = h
+        .token_request(encode_form(&token_params(&code)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(h.probes.load(Ordering::SeqCst), 1);
+    let valid = h.approved_code().await;
+    assert_eq!(
+        h.token_request(encode_form(&token_params(&valid)))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn token_exchange_supports_documented_unknown_expiry_and_atomic_refresh() {
+    for expiry in [None, Some(1u64)] {
+        let mut provider_grant = grant("workspace-a", "user-a");
+        match expiry {
+            Some(seconds) => provider_grant["expires_in"] = seconds.into(),
+            None => {
+                provider_grant.as_object_mut().unwrap().remove("expires_in");
+            }
+        }
+        let h = Harness::new(provider_grant, StatusCode::OK).await;
+        let code = h.approved_code().await;
+        let before = h.store.load_for_refresh().unwrap().unwrap();
+        let issued = h
+            .token_request(encode_form(&token_params(&code)))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(issued.status(), StatusCode::OK);
+        let result: serde_json::Value = issued.json().await.unwrap();
+        assert_eq!(result["token_type"], "Bearer");
+        assert!(h.probes.load(Ordering::SeqCst) > 0);
+        let after = h.store.load_for_refresh().unwrap().unwrap();
+        assert_eq!(after.expires_at_unix(), None);
+        assert_eq!(after.grant_id(), before.grant_id());
+        assert_eq!(after.epoch(), before.epoch());
+        assert_eq!(
+            h.calls.load(Ordering::SeqCst),
+            if expiry.is_some() { 2 } else { 1 }
+        );
+        for secret in [
+            "provider-access-secret",
+            "provider-refresh-secret",
+            "rotated-access-secret",
+            "rotated-refresh-secret",
+        ] {
+            assert!(!result.to_string().contains(secret));
+        }
+    }
+}
+
+#[tokio::test]
+async fn provider_unavailability_never_mints_or_reuses_a_claimed_code() {
+    let mut h = Harness::new(grant("workspace-a", "user-a"), StatusCode::OK).await;
+    let code = h.approved_code().await;
+    h.provider.abort();
+    let _ = (&mut h.provider).await;
+    let form = encode_form(&token_params(&code));
+    let unavailable = h.token_request(form.clone()).send().await.unwrap();
+    assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        unavailable.json::<serde_json::Value>().await.unwrap(),
+        serde_json::json!({"error":"temporarily_unavailable"})
+    );
+    let replay = h.token_request(form).send().await.unwrap();
+    assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        replay.json::<serde_json::Value>().await.unwrap(),
+        serde_json::json!({"error":"invalid_grant"})
+    );
+}
+
+#[tokio::test]
+async fn pending_provider_verification_cannot_outlive_code_or_grant() {
+    for replace_grant in [false, true] {
+        let h = Harness::new(grant("workspace-a", "user-a"), StatusCode::OK).await;
+        let code = h.approved_code().await;
+        let permit = h.probe_gate.clone().acquire_owned().await.unwrap();
+        let request = h.token_request(encode_form(&token_params(&code)));
+        let pending = tokio::spawn(async move { request.send().await.unwrap() });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            h.probe_started.notified(),
+        )
+        .await
+        .expect("claimed code must reach provider verification");
+        let replacement = if replace_grant {
+            Some(h.approved_code().await)
+        } else {
+            h.clock.store(121, Ordering::SeqCst);
+            None
+        };
+        drop(permit);
+        let denied = pending.await.unwrap();
+        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            denied.json::<serde_json::Value>().await.unwrap(),
+            serde_json::json!({"error":"invalid_grant"})
+        );
+        let replay = h
+            .token_request(encode_form(&token_params(&code)))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(h.probes.load(Ordering::SeqCst), 1);
+        if let Some(code) = replacement {
+            assert_eq!(
+                h.token_request(encode_form(&token_params(&code)))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+        }
+    }
 }
