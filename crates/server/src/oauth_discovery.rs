@@ -128,6 +128,10 @@ pub fn router_with_login(
         .merge(
             Router::new()
                 .route("/authorize", get(crate::oauth_authorize::authorize))
+                .route(
+                    "/oauth/notion/callback",
+                    get(crate::oauth_authorize::callback),
+                )
                 .with_state(login),
         )
         .route("/token", axum::routing::post(not_implemented))

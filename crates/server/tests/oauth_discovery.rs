@@ -314,6 +314,17 @@ async fn registered_browser_authorization_redirects_only_valid_pkce_requests_to_
         assert!(!response.headers().contains_key("location"));
         assert!(!response.headers().contains_key("set-cookie"));
     }
+    assert_eq!(
+        client
+            .get(format!(
+                "{base}/oauth/notion/callback?code=unused&state=invalid"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
     let valid_url = authorize_url(&params).to_string();
     for suffix in [
         "&client_id=chatgpt",
@@ -355,6 +366,82 @@ async fn registered_browser_authorization_redirects_only_valid_pkce_requests_to_
             .status(),
         StatusCode::UNAUTHORIZED
     );
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn configured_binary_mounts_browser_callback_but_rejects_uncorrelated_requests() {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let dir = tempfile::tempdir().unwrap();
+    let key = dir.path().join("key");
+    let state = dir.path().join("grant");
+    fs::write(&key, [42u8; 32]).unwrap();
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = socket.local_addr().unwrap().port();
+    drop(socket);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_notion-knowledge-server"))
+        .arg("--http")
+        .env_clear()
+        .env("NK_HTTP_PORT", port.to_string())
+        .env("NK_OAUTH_ISSUER", "https://auth.example.com")
+        .env("NK_OAUTH_RESOURCE", "https://knowledge.example.com/mcp")
+        .env("NK_OAUTH_CLIENT_ID", "chatgpt")
+        .env(
+            "NK_OAUTH_CLIENT_REDIRECT_URI",
+            "https://chatgpt.example.com/callback",
+        )
+        .env("NK_NOTION_OAUTH_CLIENT_ID", "notion-client")
+        .env(
+            "NK_NOTION_OAUTH_REDIRECT_URI",
+            "https://auth.example.com/oauth/notion/callback",
+        )
+        .env("NK_NOTION_OAUTH_CLIENT_SECRET", "fixture-server-secret")
+        .env("NK_NOTION_ALLOWED_WORKSPACE_ID", "workspace-a")
+        .env("NK_NOTION_ALLOWED_USER_ID", "user-a")
+        .env("NK_NOTION_GRANT_KEY_FILE", key)
+        .env("NK_NOTION_GRANT_STATE_FILE", &state)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    timeout(Duration::from_secs(15), async {
+        let mut stderr = BufReader::new(child.stderr.take().unwrap());
+        loop {
+            let mut line = String::new();
+            assert_ne!(stderr.read_line(&mut line).await.unwrap(), 0);
+            if line.contains("Serving MCP over Streamable HTTP") {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let client = Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let response = client
+        .get(format!(
+            "http://127.0.0.1:{port}/oauth/notion/callback?code=never-exchange&state={}",
+            "x".repeat(43)
+        ))
+        .header("cookie", format!("__Host-nk-oauth={}", "y".repeat(43)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert!(!response.headers().contains_key("location"));
+    assert_eq!(
+        response.text().await.unwrap(),
+        "Notion authorization could not be completed. Please start again."
+    );
+    assert!(!state.exists());
     child.kill().await.unwrap();
     child.wait().await.unwrap();
 }
