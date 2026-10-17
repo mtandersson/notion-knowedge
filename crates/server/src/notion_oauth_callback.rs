@@ -1,6 +1,6 @@
-//! Fail-closed Notion OAuth callback verifier. This is a server-side component,
-//! NOT a mounted HTTP login. #123/#127 must persist verified grants and enforce
-//! revocation before the MCP AuthorizationFlow can issue any usable code/token.
+//! Fail-closed Notion OAuth callback verifier and browser correlation.
+//! The HTTP adapter must persist a verified grant before issuing an MCP code.
+//! Token issuance and resource/session enforcement remain separate gates.
 use std::{fmt, time::Duration};
 
 use reqwest::{Client, Url, redirect::Policy};
@@ -316,8 +316,8 @@ impl fmt::Debug for VerifiedCallback {
     }
 }
 
-/// The caller must bind this to the exact canonical Notion callback only.
-/// There is NO public HTTP callback route or implicit activation in #122.
+/// Used internally or by the explicitly configured browser adapter at the
+/// exact canonical callback. Browser flows require the correlated cookie API.
 pub struct NotionCallback<'a> {
     redirect: &'a NotionOAuthRedirect,
     exchanger: &'a NotionTokenClient,
@@ -340,11 +340,20 @@ impl<'a> NotionCallback<'a> {
     /// single-use state BEFORE network I/O and BEFORE interpreting a provider
     /// error. Return only an independently validated provider identity.
     pub async fn complete(&self, raw_query: &str) -> Result<VerifiedCallback, CallbackError> {
+        self.complete_correlated(raw_query, None).await
+    }
+
+    async fn complete_correlated(
+        &self,
+        raw_query: &str,
+        browser: Option<&str>,
+    ) -> Result<VerifiedCallback, CallbackError> {
         let params = CallbackParams::parse(raw_query)?;
-        let transaction = self
-            .redirect
-            .take(&params.state)
-            .ok_or(CallbackError::InvalidState)?;
+        let transaction = match browser {
+            Some(cookie) => self.redirect.take_browser(&params.state, cookie),
+            None => self.redirect.take(&params.state),
+        }
+        .ok_or(CallbackError::InvalidState)?;
         if params.error {
             return Err(CallbackError::RejectedByNotion);
         }
@@ -398,13 +407,37 @@ impl<'a> NotionCallback<'a> {
         store: &GrantStore,
         flow: &AuthorizationFlow,
     ) -> Result<Redirect, ApproveError> {
+        self.complete_correlated_persist_and_approve(raw_query, None, store, flow)
+            .await
+    }
+
+    /// Public browser callbacks additionally require the independent secure
+    /// cookie that was bound to this exact upstream state at /authorize.
+    pub async fn complete_browser_persist_and_approve(
+        &self,
+        raw_query: &str,
+        browser: &str,
+        store: &GrantStore,
+        flow: &AuthorizationFlow,
+    ) -> Result<Redirect, ApproveError> {
+        self.complete_correlated_persist_and_approve(raw_query, Some(browser), store, flow)
+            .await
+    }
+
+    async fn complete_correlated_persist_and_approve(
+        &self,
+        raw_query: &str,
+        browser: Option<&str>,
+        store: &GrantStore,
+        flow: &AuthorizationFlow,
+    ) -> Result<Redirect, ApproveError> {
         // Reject foreign app storage BEFORE consuming the one-time state or
         // exchanging a confidential Notion authorization code.
         if !store.matches_client(&self.exchanger.client_id) {
             return Err(ApproveError::Store(StoreError::IdentityMismatch));
         }
         let verified = self
-            .complete(raw_query)
+            .complete_correlated(raw_query, browser)
             .await
             .map_err(ApproveError::Callback)?;
         // Refuse an inconsistent MCP owner policy BEFORE changing the sealed

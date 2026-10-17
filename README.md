@@ -128,15 +128,16 @@ The [staged Notion OAuth redirect core](docs/notion-oauth-redirect.md) accepts
 pair, bound to the canonical issuer's HTTPS callback. It generates independent
 single-use Notion state linked to an already validated MCP PKCE transaction.
 With an explicitly registered MCP client, `GET /authorize` starts browser-bound
-Notion consent. There is no public callback route or usable OAuth login until
-#122 and the downstream grant/session controls are implemented.
+Notion consent. With sealed storage, the public callback verifies and saves
+the approved grant before returning an MCP authorization code. Token exchange
+and MCP resource access remain disabled pending the downstream controls.
 
 The staged [Notion callback verifier](docs/notion-oauth-callback.md) supports
 confidential server-side code exchange, typed Notion grant parsing and
 immutable user/workspace allowlisting using paired operator configuration.
-It deliberately does **not** mount the public callback route or issue MCP
-tokens until the grant store and resource authorization gates (#123–#129)
-exist. Notion credentials must never be sent to ChatGPT clients.
+Its public callback requires explicit client registration, browser correlation
+and sealed grant storage. It issues no MCP access tokens; resource authorization
+and lifecycle gates (#120/#124/#127–#129) remain required. Notion credentials must never be sent to ChatGPT clients.
 
 The [encrypted Notion OAuth grant store](docs/notion-grant-store.md) is an
 opt-in, operator-controlled AES-256-GCM file with a separate 32-byte key file.

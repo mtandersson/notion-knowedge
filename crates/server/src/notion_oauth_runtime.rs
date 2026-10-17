@@ -54,6 +54,11 @@ impl fmt::Debug for NotionOAuthRuntime {
 }
 
 impl NotionOAuthRuntime {
+    /// Share the exact store/serialization boundary with browser callbacks.
+    pub(crate) fn grant_store(&self) -> Arc<GrantStore> {
+        self.store.clone()
+    }
+
     pub fn from_config(config: &Config) -> Result<Option<Self>, CredentialError> {
         let Some(settings) = &config.notion_grant_store else {
             return Ok(None);

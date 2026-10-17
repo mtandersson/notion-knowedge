@@ -102,16 +102,15 @@ supports one pending login per browser. The cookie never appears in the
 Notion URL. Use HTTPS at the configured issuer; do not weaken cookie security
 for a plain-HTTP development browser.
 
-## Intentional deployment gate
+## Deployment gate
 
-With explicit client registration, `/authorize` starts Notion consent. This
-is **not yet an end-to-end login**: there is no public
-`/oauth/notion/callback` route, `/token` and `/revoke` return **503**, and
-`/mcp` returns **401**. No MCP authorization code or token can be issued by
-this HTTP composition. Deploying a useful private connector still requires
-#122 callback mounting, #123–#126 persisted approved identity, #127–#128 live
-session binding/revocation, and #129–#130 acceptance tests/setup. The staged
-entry point does not authorize production remote MCP access.
+With explicit client registration, `/authorize` starts Notion consent. With
+sealed grant storage as well, the [public callback](notion-oauth-callback.md)
+validates and persists the allowlisted identity before returning an MCP code.
+Without storage the callback returns 503. `/token` and `/revoke` remain
+unavailable and `/mcp` returns 401. Production remote MCP access still requires
+#120 code redemption, #124/#127–#128 grant/session lifecycle and #129–#130
+acceptance tests and setup.
 
 Unit tests verify the fixed endpoint, correct URL encoding, lack of
 scope/secret injection, two independent states/transactions, wrong MCP client

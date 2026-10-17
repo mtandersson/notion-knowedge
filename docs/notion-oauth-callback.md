@@ -1,10 +1,11 @@
 # Notion OAuth callback and confidential exchange (#122)
 
-**Status:** staged, server-internal callback verifier. No public callback route is
-mounted. OAuth discovery still denies `/authorize` and `/token` (503), and
-`/mcp` (401). The application **must not** expose a private ChatGPT MCP
-resource until approved grants, durable storage, revocation and
-request/session-level token enforcement are in place (#123–#129).
+**Status:** browser-bound callback mounted only with explicit MCP client
+registration and sealed grant storage. `/authorize` can start consent; a
+successful `/oauth/notion/callback` persists the approved grant and returns
+a short-lived PKCE-bound MCP authorization code. `/token` and `/revoke`
+remain unavailable (503), and `/mcp` remains denied (401). This is not yet
+a usable private ChatGPT connector: #120/#124/#127–#130 remain deployment gates.
 
 ## Startup configuration
 
@@ -25,6 +26,13 @@ authorization or from untrusted client data. `Config` holds the secret in
 a redacted wrapper and error messages name only invalid keys, not values.
 A staged redirect-only configuration without these settings remains
 possible but **never enables callback handling or token issuance**.
+
+The HTTP callback also requires the [fixed MCP client registration](notion-oauth-redirect.md#browser-entry-point)
+and the paired `NK_NOTION_GRANT_KEY_FILE` / `NK_NOTION_GRANT_STATE_FILE`
+[sealed store settings](notion-grant-store.md). It shares the same store
+instance as the server credential runtime. Without the full composition,
+`GET /oauth/notion/callback` returns a sanitized 503; it cannot fall back
+to an ephemeral or plaintext grant.
 
 ## Callback state, exchange and typed grant
 
@@ -73,18 +81,39 @@ full access/refresh-token pair and expiry metadata. Failed validation or
 corrupt state does not replace the existing grant. The new grant receives a
 fresh grant ID and authorization epoch and survives a process restart.
 
-**This component is not mounted at an HTTP endpoint**. The pending MCP
-transaction is intentionally discarded by this persistence-only operation;
-neither an MCP session, authorization code nor bearer token is issued.
-Production callback routing and complete session authorization remain
-separate work under #120/#125/#126/#127/#128 and #129; refresh wiring is #299.
+## Public HTTP callback
 
-**Crucial next gate:** the grant store in #123 must protect credentials,
-record exact identity and integration binding, assign a durable
-`grant_id`/authorization epoch, and check the configured Notion roots
-and operations. Only then can the workflow re-enter the #120 authorization
-engine. #127/#128 must reject revoked/stale grants on every MCP operation.
-The current design keeps callback **unmounted** until this is safe.
+The exact registered path is `GET /oauth/notion/callback` on the canonical
+HTTPS issuer. The trusted proxy uses the backend Host/Origin policy already
+required by discovery; spoofed authorities are rejected before callback work.
+
+The adapter accepts exactly one `__Host-nk-oauth` cookie across all Cookie
+headers. It requires that independent secret to match the digest attached to
+the fresh Notion state. Missing, malformed, duplicate or mismatched cookies
+cannot exchange a code or consume another browser's transaction. The internal
+unbound callback method cannot consume browser-started state. The Notion state
+is consumed atomically before provider I/O, including provider-denial responses.
+
+At most four callback exchanges run simultaneously per server. Overload returns
+503 before consuming state. Provider calls retain their 12-second timeout and
+bounded response size. On verified success the shared sealed store independently
+checks the immutable identity and bot binding and commits the credentials before
+the MCP code engine may approve the original transaction. Storage failure or a
+changed grant fails closed. The original MCP redirect, state, read scope, S256
+challenge and resource remain bound to the resulting code; neither incoming
+callback fields nor Notion's response can choose a client destination.
+
+Success returns 302 to the exact registered MCP client destination, preserving
+registered query parameters and adding only the MCP `code` and original `state`.
+The cookie is cleared. All outcomes use `Cache-Control: no-store` and
+`Referrer-Policy: no-referrer`. Failures use one static user-facing message,
+never a provider body, callback query, secret, path or identity. The server's
+payload-free HTTP operation logs retain status and correlation ID for denials;
+operators must also redact callback queries and redirect Locations in proxy logs.
+
+No MCP access token is returned by this delivery. Code redemption, live grant
+checks for every resource operation, revocation, scope/session binding and
+multi-process fencing remain required before the production connector is usable.
 
 ## Verification
 
@@ -101,8 +130,13 @@ nix develop --command cargo test -p notion-knowledge-server notion_callback_cred
 nix develop .#format --command cargo fmt --all -- --check
 ```
 
-Future #129 integration tests must exercise production HTTP routing,
-proxy headers and logging, Notion error/callback handling, durable
-transactions/revocation, single-user deny matrix and ChatGPT MCP
-session enforcement. These tests are not a substitute for a complete
-remote login verification.
+HTTP tests exercise the production discovery/browser router over real local
+sockets with a test-only fake provider, proving cookie/state admission, code
+exchange, exact client redirection, sealed identity, replay denial, user/workspace
+and malformed-grant rejection, provider failures and bounded callback admission.
+The binary-level discovery suite proves callback denial without sealed storage.
+The production Notion endpoint cannot be overridden by configuration.
+
+#129 must still cover the complete token/resource/revocation path and a
+credential-controlled ChatGPT connection. These fixture tests make no claim
+that a real external connection has completed.

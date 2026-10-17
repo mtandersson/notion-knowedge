@@ -1,16 +1,20 @@
-//! Opt-in browser entry point. This starts upstream consent only; it does
-//! not mount a callback, issue credentials, or enable any MCP operation.
+//! Opt-in browser entry point. This starts upstream consent and
+//! can mount a browser-bound callback when sealed grant storage is installed.
+//! MCP token issuance and resource access remain disabled.
 use std::sync::Arc;
 
 use axum::{
     extract::{RawQuery, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
 
 use crate::{
     config::Config,
+    notion_grant_store::GrantStore,
+    notion_oauth_callback::{NotionCallback, NotionOwnerPolicy, NotionTokenClient},
     notion_oauth_redirect::NotionOAuthRedirect,
+    notion_oauth_runtime::NotionOAuthRuntime,
     oauth_code::{AuthorizationFlow, AuthorizationRequest, Client, Error},
 };
 
@@ -34,15 +38,51 @@ impl Settings {
 pub struct Login {
     flow: AuthorizationFlow,
     redirect: NotionOAuthRedirect,
+    callback: Option<CallbackRuntime>,
+}
+struct CallbackRuntime {
+    store: Arc<GrantStore>,
+    client: NotionTokenClient,
+    allowed: NotionOwnerPolicy,
+    admission: Arc<tokio::sync::Semaphore>,
 }
 impl Login {
-    pub fn from_config(config: &Config) -> Option<Arc<Self>> {
-        let settings = config.oauth_client.as_ref()?;
-        let allowed = &config.notion_oauth_callback.as_ref()?.allowed;
-        Some(Arc::new(Self {
-            flow: AuthorizationFlow::new(settings.client.clone(), allowed.authorization_identity()),
-            redirect: NotionOAuthRedirect::new(config.notion_oauth_redirect.as_ref()?.clone()),
-        }))
+    pub fn from_config(
+        config: &Config,
+        runtime: Option<&NotionOAuthRuntime>,
+    ) -> Result<Option<Arc<Self>>, &'static str> {
+        let Some(settings) = config.oauth_client.as_ref() else {
+            return Ok(None);
+        };
+        let policy = config
+            .notion_oauth_callback
+            .as_ref()
+            .ok_or("Notion OAuth callback policy unavailable")?;
+        let registration = config
+            .notion_oauth_redirect
+            .as_ref()
+            .ok_or("Notion OAuth registration unavailable")?;
+        let callback = runtime
+            .map(|runtime| {
+                Ok::<_, &'static str>(CallbackRuntime {
+                    store: runtime.grant_store(),
+                    client: NotionTokenClient::new(
+                        registration,
+                        policy.client_secret.expose_secret(),
+                    )?,
+                    allowed: policy.allowed.clone(),
+                    admission: Arc::new(tokio::sync::Semaphore::new(4)),
+                })
+            })
+            .transpose()?;
+        Ok(Some(Arc::new(Self {
+            flow: AuthorizationFlow::new(
+                settings.client.clone(),
+                policy.allowed.authorization_identity(),
+            ),
+            redirect: NotionOAuthRedirect::new(registration.clone()),
+            callback,
+        })))
     }
 }
 
@@ -154,3 +194,113 @@ pub async fn authorize(
             .into_response(),
     }
 }
+
+/// Reject ambiguous cookie headers before consuming state or contacting Notion.
+fn browser_cookie(headers: &HeaderMap) -> Option<&str> {
+    let mut found = None;
+    let mut size = 0usize;
+    for header in headers.get_all(header::COOKIE) {
+        let value = header.to_str().ok()?;
+        size = size.checked_add(value.len())?;
+        if size > 8192 {
+            return None;
+        }
+        for part in value.split(';') {
+            let Some((name, value)) = part.trim().split_once('=') else {
+                continue;
+            };
+            if name == "__Host-nk-oauth" {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(value);
+            }
+        }
+    }
+    found
+}
+
+pub async fn callback(
+    State(login): State<Option<Arc<Login>>>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let Some(login) = login else {
+        return callback_unavailable();
+    };
+    let Some(runtime) = login.callback.as_ref() else {
+        return callback_unavailable();
+    };
+    // Bound provider network work separately; no queue of secret callback
+    // requests, and no state consumption on overload.
+    let Ok(_permit) = runtime.admission.clone().try_acquire_owned() else {
+        return callback_unavailable();
+    };
+    let result = match browser_cookie(&headers) {
+        Some(cookie) => {
+            NotionCallback::new(&login.redirect, &runtime.client, &runtime.allowed)
+                .complete_browser_persist_and_approve(
+                    query.as_deref().unwrap_or_default(),
+                    cookie,
+                    &runtime.store,
+                    &login.flow,
+                )
+                .await
+        }
+        None => return callback_denied(),
+    };
+    match result {
+        Ok(approved) => {
+            // Only an operator-registered, exactly validated URI can reach
+            // this point. OAuth authorization codes are PKCE-bound and never
+            // contain upstream Notion credentials.
+            let Ok(mut destination) = reqwest::Url::parse(&approved.redirect_uri) else {
+                return callback_denied();
+            };
+            destination
+                .query_pairs_mut()
+                .append_pair("code", approved.code.expose())
+                .append_pair("state", &approved.state);
+            (
+                StatusCode::FOUND,
+                [
+                    (header::LOCATION, destination.as_str()),
+                    (
+                        header::SET_COOKIE,
+                        "__Host-nk-oauth=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0",
+                    ),
+                    (header::CACHE_CONTROL, "no-store"),
+                    (header::REFERRER_POLICY, "no-referrer"),
+                ],
+            )
+                .into_response()
+        }
+        Err(_) => callback_denied(),
+    }
+}
+
+fn callback_unavailable() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::REFERRER_POLICY, "no-referrer"),
+        ],
+        "Notion authorization is not available. Please start again later.",
+    )
+        .into_response()
+}
+fn callback_denied() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::REFERRER_POLICY, "no-referrer"),
+        ],
+        "Notion authorization could not be completed. Please start again.",
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod tests;

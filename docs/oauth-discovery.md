@@ -5,9 +5,11 @@ publishes RFC 9728 Protected Resource Metadata and RFC 8414 Authorization Server
 Metadata for the planned [OAuth trust model](oauth-trust-model.md). It exists so
 a generic OAuth client can discover the intended issuer and endpoints, without
 silently making the current unauthenticated MCP bootstrap a remote OAuth server.
-**No OAuth token, code, Notion grant or MCP session is issued or accepted.**
+**Discovery configuration alone issues no OAuth token, code, Notion grant or MCP session.**
 An optional [browser entry point](notion-oauth-redirect.md#browser-entry-point)
-can start upstream consent; its public callback is not mounted yet.
+can start upstream consent; the [public callback](notion-oauth-callback.md)
+also requires sealed storage and returns a PKCE-bound MCP code only after
+persisting the allowlisted Notion grant. MCP tokens and sessions remain disabled.
 
 ## Explicit configuration
 
@@ -42,6 +44,7 @@ setting grants permission to publish private content.
 | `GET /.well-known/oauth-protected-resource` | 200 JSON: same RFC 9728 document for root fallback discovery |
 | `GET /.well-known/oauth-authorization-server` | 200 JSON: issuer, authorization/token/revocation endpoints, authorization code and S256 capabilities |
 | `GET /authorize` | 503 by default; explicit [MCP client registration](notion-oauth-redirect.md#browser-entry-point) enables a browser-bound Notion consent redirect only |
+| `GET /oauth/notion/callback` | 503 without complete sealed-storage/browser configuration; otherwise strict cookie/state verification and allowlisted callback exchange |
 | `POST /token` | 503, no token issuance |
 | `POST /revoke` | 503, no token revocation claim |
 | `GET/POST/DELETE /mcp` | 401 with `WWW-Authenticate: Bearer resource_metadata="..."`; **the real MCP service is not mounted** |
