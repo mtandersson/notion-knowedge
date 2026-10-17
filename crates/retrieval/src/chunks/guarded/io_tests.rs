@@ -192,6 +192,20 @@ fn read_pauses() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf,
 fn read_pause(directory: &std::path::Path) -> Option<Arc<ReadPause>> {
     read_pauses().lock().unwrap().get(directory).cloned()
 }
+fn maintenance_pauses()
+-> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<ReadPause>>> {
+    static PAUSES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<ReadPause>>>,
+    > = std::sync::OnceLock::new();
+    PAUSES.get_or_init(Default::default)
+}
+pub(super) async fn pause_maintenance(directory: &std::path::Path) {
+    let pause = maintenance_pauses().lock().unwrap().get(directory).cloned();
+    if let Some(pause) = pause {
+        pause.entered.notify_one();
+        let _permit = pause.release.acquire().await.unwrap();
+    }
+}
 pub(super) fn test_uri(directory: &std::path::Path, uri: String) -> String {
     if child_root(directory).is_some() || read_pause(directory).is_some() {
         format!("file-object-store://{}", directory.display())
@@ -1539,4 +1553,124 @@ async fn guarded_source_expansion_rejects_authority_replaced_during_storage_read
     );
     assert!(pause.claimed.load(Ordering::SeqCst));
     read_pauses().lock().unwrap().remove(&f.index);
+}
+
+#[tokio::test]
+async fn guarded_index_maintenance_denies_lease_loss_during_actual_storage_read() {
+    for rebuild in [false, true] {
+        let f = Fixture::new();
+        f.create().await;
+        let table = f.guarded();
+        let provider = CountingProvider::new(f.embedding.clone());
+        let prepared = table
+            .prepare_page(
+                &provider,
+                operation("maintenance-seed", "same", false),
+                &[chunk("one", "cinnamon", "Seed")],
+            )
+            .await
+            .unwrap();
+        table
+            .commit_page(prepared, f.lease.clone(), clock(), || async { Ok(()) })
+            .await
+            .unwrap();
+        let before = f.readable().await.table.version().await.unwrap();
+        let pause = Arc::new(ReadPause {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+            claimed: std::sync::atomic::AtomicBool::new(false),
+        });
+        read_pauses()
+            .lock()
+            .unwrap()
+            .insert(f.index.clone(), pause.clone());
+        let time = Arc::new(std::sync::atomic::AtomicI64::new(10));
+        let checked_time = time.clone();
+        let clock: Arc<dyn Fn() -> i64 + Send + Sync> =
+            Arc::new(move || checked_time.load(Ordering::SeqCst));
+        let config = VectorIndexConfig {
+            num_partitions: Some(1),
+            ..Default::default()
+        };
+        let maintained = f.guarded();
+        let lease = f.lease.clone();
+        let pending = tokio::spawn(async move {
+            if rebuild {
+                maintained.rebuild_vector_index(config, lease, clock).await
+            } else {
+                maintained.ensure_vector_index(config, lease, clock).await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.notified())
+            .await
+            .unwrap();
+        time.store(111, Ordering::SeqCst);
+        pause.release.add_permits(1);
+        assert!(pending.await.unwrap().is_err());
+        f.coordinator.drain_owned().await.unwrap();
+        read_pauses().lock().unwrap().remove(&f.index);
+        assert_eq!(f.readable().await.table.version().await.unwrap(), before);
+        assert!(table.search_snapshot().await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn guarded_index_maintenance_rechecks_lease_after_index_inspection_before_training() {
+    for rebuild in [false, true] {
+        let f = Fixture::new();
+        f.create().await;
+        let table = f.guarded();
+        let provider = CountingProvider::new(f.embedding.clone());
+        let prepared = table
+            .prepare_page(
+                &provider,
+                operation("inspection-seed", "same", false),
+                &[chunk("one", "cinnamon", "Seed")],
+            )
+            .await
+            .unwrap();
+        table
+            .commit_page(prepared, f.lease.clone(), clock(), || async { Ok(()) })
+            .await
+            .unwrap();
+        let before = f.readable().await.table.version().await.unwrap();
+        let pause = Arc::new(ReadPause {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+            claimed: std::sync::atomic::AtomicBool::new(false),
+        });
+        // Hold the completed native index inspection after the first fence has
+        // passed; no timing assumption or mutation counter selects the boundary.
+        maintenance_pauses()
+            .lock()
+            .unwrap()
+            .insert(f.index.clone(), pause.clone());
+        let time = Arc::new(std::sync::atomic::AtomicI64::new(10));
+        let checked_time = time.clone();
+        let clock: Arc<dyn Fn() -> i64 + Send + Sync> =
+            Arc::new(move || checked_time.load(Ordering::SeqCst));
+        let config = VectorIndexConfig {
+            num_partitions: Some(1),
+            ..Default::default()
+        };
+        let maintained = f.guarded();
+        let lease = f.lease.clone();
+        let pending = tokio::spawn(async move {
+            if rebuild {
+                maintained.rebuild_vector_index(config, lease, clock).await
+            } else {
+                maintained.ensure_vector_index(config, lease, clock).await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.notified())
+            .await
+            .unwrap();
+        time.store(111, Ordering::SeqCst);
+        pause.release.add_permits(1);
+        assert!(pending.await.unwrap().is_err());
+        f.coordinator.drain_owned().await.unwrap();
+        maintenance_pauses().lock().unwrap().remove(&f.index);
+        assert_eq!(f.readable().await.table.version().await.unwrap(), before);
+        assert!(table.search_snapshot().await.is_err());
+    }
 }

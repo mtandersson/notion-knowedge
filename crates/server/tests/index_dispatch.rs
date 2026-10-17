@@ -27,6 +27,8 @@ fn index_operator_refuses_missing_model_before_creating_state_or_serving() {
     let output = Command::new(env!("CARGO_BIN_EXE_notion-knowledge-server"))
         .env_clear()
         .args(["--index", "ensure"])
+        .env("NK_NOTION_AUTH", "integration")
+        .env("NOTION_TOKEN", "fixture-sensitive")
         .env(
             "NK_NOTION_SCOPE_WORKSPACE_ID",
             "44444444-4444-4444-4444-444444444444",

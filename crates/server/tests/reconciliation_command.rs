@@ -2140,3 +2140,87 @@ async fn index_commands_refuse_missing_foreign_cancelled_and_busy_state() {
         .release_lease(&lease, now)
         .unwrap();
 }
+
+#[tokio::test]
+async fn index_rebuild_refuses_foreign_vector_distance_without_replacing_it() {
+    use notion_knowledge_retrieval::chunks::{
+        GuardedChunkTable, VectorDistance, VectorIndexConfig,
+    };
+    use notion_knowledge_server::index_command::{
+        Command as IndexCommand, runtime::execute as index,
+    };
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    counts(
+        &f.command(&http, &["--reconcile", "apply", "seed-distance"])
+            .await,
+        3,
+        0,
+        0,
+    );
+    let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+    let table = GuardedChunkTable::bind(
+        &f.settings.index,
+        "chunks",
+        f.provider.metadata().clone(),
+        runtime.coordinator.clone(),
+    )
+    .unwrap();
+    let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
+    let lease = runtime.coordinator.state().acquire_lease(now, 120).unwrap();
+    let config = VectorIndexConfig {
+        distance: VectorDistance::L2,
+        num_partitions: Some(1),
+        ..Default::default()
+    };
+    table
+        .ensure_vector_index(config.clone(), lease.clone(), Arc::new(move || now))
+        .await
+        .unwrap();
+    runtime
+        .coordinator
+        .state()
+        .release_lease(&lease, now)
+        .unwrap();
+    for command in [IndexCommand::Ensure, IndexCommand::Rebuild] {
+        let report = index(
+            command,
+            &f.settings,
+            &f.state,
+            authority(),
+            f.provider.metadata().clone(),
+            CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(report.exit, 3, "{report:?}");
+    }
+    let lease = runtime.coordinator.state().acquire_lease(now, 120).unwrap();
+    // An exact L2 ensure can still open and optimize: rejected Cosine maintenance
+    // did not replace the existing persisted distance configuration.
+    table
+        .ensure_vector_index(config, lease.clone(), Arc::new(move || now))
+        .await
+        .unwrap();
+    runtime
+        .coordinator
+        .state()
+        .release_lease(&lease, now)
+        .unwrap();
+    assert_eq!(
+        table
+            .search_snapshot()
+            .await
+            .unwrap()
+            .count_rows()
+            .await
+            .unwrap(),
+        4
+    );
+    counts(
+        &f.command(&http, &["--reconcile", "status", "seed-distance"])
+            .await,
+        3,
+        0,
+        0,
+    );
+}

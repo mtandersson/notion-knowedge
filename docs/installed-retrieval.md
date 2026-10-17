@@ -68,9 +68,9 @@ Neither command changes canonical chunks, source text, ownership, page receipts
 or Notion content. Neither calls Notion or embeds source text. The configured
 offline Qwen assets are validated and loaded before storage access, so an
 incompatible model identity cannot be attached to existing vectors. No model
-download or provider fallback occurs. No upstream credential is required solely
-for this local operation; unrelated configured authentication still must pass
-normal configuration validation.
+download or provider fallback occurs. Preserve the normal integration or complete
+OAuth configuration required for the configured scope; those credentials remain
+unused by this local operation. Configuration validation is unchanged.
 
 Both commands require an existing compatible populated table and current SQLite
 schema. They do not initialize, migrate or silently repair state. Empty tables,
@@ -85,7 +85,8 @@ lease before retry; it cannot authorize a second simultaneous writer.
 
 The command emits only `{"operation":"index","status":"complete"}` on
 success. Exit codes are 0 success, 2 invalid arguments/configuration or incompatible
-existing state, 3 failed index work/timeout/state failure, 4 busy writer and 5
+source/vector binding, 3 failed index work (including incompatible existing ANN
+layout), timeout or state failure, 4 busy writer and 5
 operator cancellation. Results never include credentials, paths or corpus text.
 After success, enable `NK_RETRIEVAL=true` and run the source-filtered MCP smoke
 below. Ordinary CI exercises real fixture Notion reads, SQLite/Lance population,

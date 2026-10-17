@@ -238,6 +238,8 @@ impl GuardedChunkTable {
                     .list_indices()
                     .await
                     .map_err(|e| failure(e.into()))?;
+                #[cfg(all(test, unix))]
+                io_tests::pause_maintenance(&directory).await;
                 for (name, column) in CHUNK_FTS_INDEXES {
                     if !indexes.iter().any(|index| {
                         index.name == name
@@ -249,6 +251,17 @@ impl GuardedChunkTable {
                         )));
                     }
                 }
+                if rebuild
+                    && indexes
+                        .iter()
+                        .any(|index| index.name == CHUNK_VECTOR_INDEX_NAME)
+                {
+                    current
+                        .validate_vector_index_config_matches(&config)
+                        .await
+                        .map_err(failure)?;
+                }
+                context.revalidate().map_err(fence_failure)?;
                 if rebuild {
                     current
                         .rebuild_vector_index(&config)
@@ -260,6 +273,7 @@ impl GuardedChunkTable {
                         .await
                         .map_err(failure)?;
                 }
+                context.revalidate().map_err(fence_failure)?;
                 Ok(())
             })
     }
