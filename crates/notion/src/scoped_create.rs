@@ -240,6 +240,12 @@ impl NotionClient {
                     let page: Value = serde_json::from_slice(&data)
                         .map_err(|_| err(VERIFY, BackendErrorKind::Internal))?;
                     if verified_page(&page, &id, &request.parent_page_id, &url, &request.title) {
+                        if request.icon_emoji.as_deref().is_some_and(|emoji| {
+                            page["icon"]["type"] != "emoji"
+                                || page["icon"]["emoji"].as_str() != Some(emoji)
+                        }) {
+                            return Err(err(VERIFY, BackendErrorKind::Conflict));
+                        }
                         let content = self.read_content(&id.0).await?;
                         if content.page.id != id
                             || content.page.archived
@@ -299,6 +305,7 @@ mod tests {
     fn complete_read() -> Value {
         let mut page = receipt();
         page["last_edited_time"] = json!("2026-10-11T10:00:00Z");
+        page["icon"] = json!({"type":"emoji","emoji":"📄"});
         page["properties"] =
             json!({"title":{"id":"title","type":"title","title":[{"plain_text":"A new page"}]}});
         page
@@ -471,9 +478,7 @@ mod tests {
         let mut steps = chain(ROOT);
         steps.extend(chain(ROOT));
         steps.push(("POST /v1/pages".into(), 200, receipt()));
-        let mut read = receipt();
-        read["properties"] = json!({"title":{"title":[{"plain_text":"A new page"}]}});
-        steps.push((format!("GET /v1/pages/{CHILD}"), 200, read));
+        steps.push((format!("GET /v1/pages/{CHILD}"), 200, complete_read()));
         steps.push((format!("GET /v1/pages/{CHILD}"), 200, complete_read()));
         steps.push((format!("GET /v1/pages/{CHILD}/markdown"),200,json!({"object":"page_markdown","id":CHILD,"markdown":"Body","truncated":false,"unknown_block_ids":[]})));
         steps.extend(child_chain());
@@ -526,6 +531,68 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[tokio::test]
+    async fn once_only_create_admits_refresh_and_replays_without_another_post() {
+        use notion_knowledge_core::write_refresh::IndexStatus;
+        const ROOT: &str = "33333333-3333-3333-3333-333333333333";
+        let mut steps = chain(ROOT); // outer trusted workflow authorization
+        steps.extend(chain(ROOT));
+        steps.extend(chain(ROOT));
+        steps.push(("POST /v1/pages".into(), 200, receipt()));
+        steps.push((format!("GET /v1/pages/{CHILD}"), 200, complete_read()));
+        steps.push((format!("GET /v1/pages/{CHILD}"), 200, complete_read()));
+        steps.push((format!("GET /v1/pages/{CHILD}/markdown"),200,json!({"object":"page_markdown","id":CHILD,"markdown":"Body","truncated":false,"unknown_block_ids":[]})));
+        steps.extend(child_chain());
+        steps.extend(child_chain());
+        steps.extend(chain(ROOT)); // replay still authorizes both parent and child
+        steps.extend(child_chain());
+        steps.extend(child_chain());
+        let (client, task) = fixture(steps).await;
+        let dir = tempfile::tempdir().unwrap();
+        let ledger =
+            notion_knowledge_retrieval::idempotency::SqliteIdempotencyStore::initialize_new(
+                dir.path().join("writes.sqlite"),
+            )
+            .unwrap();
+        let queue = notion_knowledge_retrieval::sync_state::SqliteSyncStateStore::open(
+            dir.path().join("sync.sqlite"),
+        )
+        .unwrap();
+        let first = client
+            .create_scoped_page_once_and_refresh(
+                &input(),
+                &scope(),
+                &ledger,
+                &queue,
+                "create-once-readback-test-1234",
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.index, IndexStatus::Queued);
+        assert!(!first.replayed);
+        let replay = client
+            .create_scoped_page_once_and_refresh(
+                &input(),
+                &scope(),
+                &ledger,
+                &queue,
+                "create-once-readback-test-1234",
+            )
+            .await
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.receipt, first.receipt);
+        assert_eq!(replay.refresh, first.refresh);
+        assert_eq!(
+            task.await
+                .unwrap()
+                .iter()
+                .filter(|(path, _)| path.starts_with("POST"))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
