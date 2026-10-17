@@ -6,6 +6,9 @@ use std::{
     },
 };
 
+use notion_knowledge_core::write_refresh::{
+    IndexStatus, MutationRefreshQueue, RefreshKey, RefreshQueueError,
+};
 use notion_knowledge_core::{
     append::{AppendError, AppendRequest, append_once},
     backend::{
@@ -22,6 +25,91 @@ use notion_knowledge_core::{
     },
     root_scope::RootScopeGate,
 };
+
+struct Queue {
+    unavailable: AtomicBool,
+    calls: AtomicUsize,
+}
+impl MutationRefreshQueue for Queue {
+    fn admit(&self, key: &RefreshKey) -> Result<IndexStatus, RefreshQueueError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(key.workspace_id, WORKSPACE);
+        assert_eq!(key.page_id, PAGE);
+        if self.unavailable.load(Ordering::SeqCst) {
+            Err(RefreshQueueError::Unavailable)
+        } else {
+            Ok(IndexStatus::Queued)
+        }
+    }
+    fn status(&self, _: &RefreshKey) -> Result<Option<IndexStatus>, RefreshQueueError> {
+        unreachable!()
+    }
+}
+
+#[tokio::test]
+async fn verified_append_survives_queue_failure_and_replay_repairs_admission_without_patch() {
+    use notion_knowledge_core::append::append_once_and_refresh;
+    let source = Fixture::new(Mode::Normal);
+    let ledger = Ledger::default();
+    let queue = Queue {
+        unavailable: AtomicBool::new(true),
+        calls: AtomicUsize::new(0),
+    };
+    let result = append_once_and_refresh(
+        source.as_ref(),
+        source.as_ref(),
+        &gate(source.clone()),
+        &ledger,
+        &queue,
+        request(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.index, IndexStatus::Unavailable);
+    assert_eq!(result.receipt.last_edited_time, AFTER);
+    assert!(!result.replayed);
+    assert_eq!(source.writes.load(Ordering::SeqCst), 1);
+    queue.unavailable.store(false, Ordering::SeqCst);
+    let replay = append_once_and_refresh(
+        source.as_ref(),
+        source.as_ref(),
+        &gate(source.clone()),
+        &ledger,
+        &queue,
+        request(),
+    )
+    .await
+    .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.receipt, result.receipt);
+    assert_eq!(replay.index, IndexStatus::Queued);
+    assert_eq!(source.writes.load(Ordering::SeqCst), 1);
+    assert_eq!(queue.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn unverified_append_never_admits_local_refresh_or_reports_completion() {
+    let source = Fixture::new(Mode::ReadbackUnavailable);
+    let ledger = Ledger::default();
+    let queue = Queue {
+        unavailable: AtomicBool::new(false),
+        calls: AtomicUsize::new(0),
+    };
+    assert_eq!(
+        notion_knowledge_core::append::append_once_and_refresh(
+            source.as_ref(),
+            source.as_ref(),
+            &gate(source.clone()),
+            &ledger,
+            &queue,
+            request()
+        )
+        .await,
+        Err(AppendError::OutcomeUnknown)
+    );
+    assert_eq!(queue.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(source.writes.load(Ordering::SeqCst), 1);
+}
 
 const PAGE: &str = "11111111-1111-1111-1111-111111111111";
 const ROOT: &str = "22222222-2222-2222-2222-222222222222";
@@ -169,7 +257,7 @@ impl PageLifecycle for Fixture {
                     LifecycleNode {
                         kind: LifecycleKind::Page,
                         id: PAGE.into(),
-                        revision: REVISION.into(),
+                        revision: self.page().last_edited_time,
                         inactive: false,
                         parent: PhysicalParent::Object {
                             kind: LifecycleKind::Page,
@@ -190,11 +278,13 @@ impl PageLifecycle for Fixture {
 
     fn revalidate_lifecycle<'a>(
         &'a self,
-        _: &'a LifecycleEvidence,
+        evidence: &'a LifecycleEvidence,
         _: &'a LifecycleScope,
     ) -> BackendFuture<'a, ()> {
         Box::pin(async move {
-            if self.deny_revalidation.load(Ordering::SeqCst) {
+            if self.deny_revalidation.load(Ordering::SeqCst)
+                || evidence.ancestry[0].revision != self.page().last_edited_time
+            {
                 Err(error())
             } else {
                 Ok(())
