@@ -107,9 +107,10 @@ for a plain-HTTP development browser.
 With explicit client registration, `/authorize` starts Notion consent. With
 sealed grant storage as well, the [public callback](notion-oauth-callback.md)
 validates and persists the allowlisted identity before returning an MCP code.
-Without storage the callback returns 503. `/token` and `/revoke` remain
-unavailable and `/mcp` returns 401. Production remote MCP access still requires
-#120 code redemption, #124/#127–#128 grant/session lifecycle and #129–#130
+Without storage the callback and token endpoint return 503. With the complete
+configuration, [`POST /token`](oauth-code.md) redeems the MCP code with S256
+PKCE. `/revoke` remains unavailable and `/mcp` returns 401. Production remote
+MCP access still requires #124/#127–#128 grant/session lifecycle and #129–#130
 acceptance tests and setup.
 
 Unit tests verify the fixed endpoint, correct URL encoding, lack of

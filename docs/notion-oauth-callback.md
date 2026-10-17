@@ -3,9 +3,10 @@
 **Status:** browser-bound callback mounted only with explicit MCP client
 registration and sealed grant storage. `/authorize` can start consent; a
 successful `/oauth/notion/callback` persists the approved grant and returns
-a short-lived PKCE-bound MCP authorization code. `/token` and `/revoke`
-remain unavailable (503), and `/mcp` remains denied (401). This is not yet
-a usable private ChatGPT connector: #120/#124/#127–#130 remain deployment gates.
+a short-lived PKCE-bound MCP authorization code. [`POST /token`](oauth-code.md)
+can redeem it against the current sealed grant. `/revoke` remains unavailable
+(503), and `/mcp` remains denied (401). This is not yet a usable private
+ChatGPT connector: #124/#127–#130 remain deployment gates.
 
 ## Startup configuration
 
@@ -120,7 +121,8 @@ the workspace rejection is recorded first. Malformed provider grants remain
 fail-closed and cannot be mistaken for a verified allowlist match. Set
 `NK_LOG_LEVEL=warn` (or more verbose) to retain these security denials.
 
-No MCP access token is returned by this delivery. Code redemption, live grant
+The callback itself returns no MCP access token; the separate token endpoint
+requires the original PKCE verifier and current grant binding. Live grant
 checks for every resource operation, revocation, scope/session binding and
 multi-process fencing remain required before the production connector is usable.
 

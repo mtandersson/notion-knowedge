@@ -1,10 +1,12 @@
 //! Opt-in browser entry point. This starts upstream consent and
 //! can mount a browser-bound callback when sealed grant storage is installed.
-//! MCP token issuance and resource access remain disabled.
+//! Tokens are issued only from persisted allowlisted grants and S256 codes.
+//! Resource access remains disabled until the session authorization gate.
 use std::sync::Arc;
 
 use axum::{
-    extract::{RawQuery, State},
+    body::Bytes,
+    extract::{RawQuery, State, rejection::BytesRejection},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -15,7 +17,9 @@ use crate::{
     notion_oauth_callback::{NotionCallback, NotionOwnerPolicy, NotionTokenClient},
     notion_oauth_redirect::NotionOAuthRedirect,
     notion_oauth_runtime::NotionOAuthRuntime,
-    oauth_code::{AuthorizationFlow, AuthorizationRequest, Client, Error},
+    oauth_code::{
+        ApprovedNotionGrant, AuthorizationFlow, AuthorizationRequest, Client, Error, TokenRequest,
+    },
 };
 
 #[derive(Clone)]
@@ -88,7 +92,7 @@ impl Login {
 
 /// Strictly bounded query parsing. Reject unknown and repeated parameters,
 /// including percent-encoded duplicates, rather than choosing one value.
-fn parse(raw: &str) -> Result<std::collections::HashMap<String, String>, Error> {
+fn parse(raw: &str, fields: &[&str]) -> Result<std::collections::HashMap<String, String>, Error> {
     if raw.is_empty()
         || raw.len() > 8192
         || !raw.is_ascii()
@@ -111,24 +115,15 @@ fn parse(raw: &str) -> Result<std::collections::HashMap<String, String>, Error> 
         .map_err(|_| Error::InvalidRequest)?;
     let mut values = std::collections::HashMap::new();
     for (key, value) in url.query_pairs() {
-        if !matches!(
-            key.as_ref(),
-            "response_type"
-                | "client_id"
-                | "redirect_uri"
-                | "resource"
-                | "state"
-                | "code_challenge"
-                | "code_challenge_method"
-                | "scope"
-        ) || values
-            .insert(key.into_owned(), value.into_owned())
-            .is_some()
+        if !fields.contains(&key.as_ref())
+            || values
+                .insert(key.into_owned(), value.into_owned())
+                .is_some()
         {
             return Err(Error::InvalidRequest);
         }
     }
-    if values.len() != 8 {
+    if values.len() != fields.len() {
         return Err(Error::InvalidRequest);
     }
     Ok(values)
@@ -147,7 +142,19 @@ pub async fn authorize(
             .into_response();
     };
     let result = (|| {
-        let params = parse(query.as_deref().unwrap_or_default())?;
+        let params = parse(
+            query.as_deref().unwrap_or_default(),
+            &[
+                "response_type",
+                "client_id",
+                "redirect_uri",
+                "resource",
+                "state",
+                "code_challenge",
+                "code_challenge_method",
+                "scope",
+            ],
+        )?;
         let request = AuthorizationRequest {
             response_type: &params["response_type"],
             client_id: &params["client_id"],
@@ -304,3 +311,138 @@ fn callback_denied() -> Response {
 
 #[cfg(test)]
 mod tests;
+
+fn token_error(error: Error, status: StatusCode) -> Response {
+    (
+        status,
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::PRAGMA, "no-cache"),
+        ],
+        axum::Json(serde_json::json!({"error": error.oauth_code()})),
+    )
+        .into_response()
+}
+
+fn token_content_type(headers: &HeaderMap) -> bool {
+    let mut values = headers.get_all(header::CONTENT_TYPE).iter();
+    let Some(value) = values.next().and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    if values.next().is_some() {
+        return false;
+    }
+    let mut parts = value.split(';');
+    if !parts
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+    {
+        return false;
+    }
+    match parts.next() {
+        None => true,
+        Some(charset) => {
+            parts.next().is_none()
+                && (charset.trim().eq_ignore_ascii_case("charset=utf-8")
+                    || charset.trim().eq_ignore_ascii_case("charset=\"utf-8\""))
+        }
+    }
+}
+
+pub async fn token(
+    State(login): State<Option<Arc<Login>>>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let Some(login) = login else {
+        return token_error(
+            Error::TemporarilyUnavailable,
+            StatusCode::SERVICE_UNAVAILABLE,
+        );
+    };
+    let Some(runtime) = login.callback.as_ref() else {
+        return token_error(
+            Error::TemporarilyUnavailable,
+            StatusCode::SERVICE_UNAVAILABLE,
+        );
+    };
+    let Ok(_permit) = runtime.admission.clone().try_acquire_owned() else {
+        return token_error(
+            Error::TemporarilyUnavailable,
+            StatusCode::SERVICE_UNAVAILABLE,
+        );
+    };
+    if query.is_some()
+        || !token_content_type(&headers)
+        || headers.contains_key(header::AUTHORIZATION)
+        || headers
+            .get(header::CONTENT_ENCODING)
+            .is_some_and(|v| v.as_bytes() != b"identity")
+    {
+        return token_error(Error::InvalidRequest, StatusCode::BAD_REQUEST);
+    }
+    let bytes = match body {
+        Ok(bytes) => bytes,
+        Err(error) => return token_error(Error::InvalidRequest, error.status()),
+    };
+    let result = (|| {
+        let raw = std::str::from_utf8(&bytes).map_err(|_| Error::InvalidRequest)?;
+        let params = parse(
+            raw,
+            &[
+                "grant_type",
+                "code",
+                "client_id",
+                "redirect_uri",
+                "resource",
+                "code_verifier",
+            ],
+        )?;
+        let stored = runtime
+            .store
+            .load()
+            .map_err(|error| {
+                if error == crate::notion_grant_store::StoreError::Expired {
+                    Error::InvalidGrant
+                } else {
+                    Error::TemporarilyUnavailable
+                }
+            })?
+            .ok_or(Error::InvalidGrant)?;
+        if !runtime
+            .store
+            .still_current(&stored)
+            .map_err(|_| Error::TemporarilyUnavailable)?
+        {
+            return Err(Error::InvalidGrant);
+        }
+        let binding = ApprovedNotionGrant {
+            grant_id: stored.grant_id(),
+            epoch: stored.epoch(),
+            workspace_id: stored.workspace_id(),
+            owner_type: "user",
+            owner_user_id: stored.owner_user_id(),
+        };
+        login.flow.redeem(
+            &TokenRequest {
+                grant_type: &params["grant_type"],
+                code: &params["code"],
+                client_id: &params["client_id"],
+                redirect_uri: &params["redirect_uri"],
+                resource: &params["resource"],
+                code_verifier: &params["code_verifier"],
+            },
+            &binding,
+        )
+    })();
+    match result {
+        Ok(issued) => (StatusCode::OK,
+            [(header::CACHE_CONTROL, "no-store"), (header::PRAGMA, "no-cache")],
+            axum::Json(serde_json::json!({"access_token": issued.access_token.expose(), "token_type":issued.token_type,
+                "expires_in":issued.expires_in, "scope":issued.scope}))).into_response(),
+        Err(error) => token_error(error, if error == Error::TemporarilyUnavailable { StatusCode::SERVICE_UNAVAILABLE } else { StatusCode::BAD_REQUEST }),
+    }
+}

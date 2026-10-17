@@ -1,14 +1,13 @@
 use super::*;
 use crate::{
-    notion_oauth_redirect::NotionOAuthConfig,
-    oauth_code::{ApprovedNotionGrant, TokenRequest},
+    notion_oauth_redirect::NotionOAuthConfig, oauth_code::ApprovedNotionGrant,
     oauth_discovery::OAuthDiscovery,
 };
 use axum::{Router, routing::post};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
 const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
@@ -22,6 +21,7 @@ struct Harness {
     base: String,
     client: reqwest::Client,
     calls: Arc<AtomicUsize>,
+    clock: Arc<AtomicU64>,
     server: tokio::task::JoinHandle<()>,
     provider: tokio::task::JoinHandle<()>,
 }
@@ -92,6 +92,9 @@ impl Harness {
             "https://auth.example.com",
         )
         .unwrap();
+        let clock = Arc::new(AtomicU64::new(0));
+        let elapsed = clock.clone();
+        let started = std::time::Instant::now();
         let login = Arc::new(Login {
             flow: AuthorizationFlow::new(
                 Client::new(
@@ -101,7 +104,10 @@ impl Harness {
                 )
                 .unwrap(),
                 policy.authorization_identity(),
-            ),
+            )
+            .with_clock(Arc::new(move || {
+                started + std::time::Duration::from_secs(elapsed.load(Ordering::SeqCst))
+            })),
             redirect: NotionOAuthRedirect::new(registration.clone()),
             callback: Some(CallbackRuntime {
                 store: store.clone(),
@@ -140,9 +146,34 @@ impl Harness {
                 .build()
                 .unwrap(),
             calls,
+            clock,
             server,
             provider,
         }
+    }
+    fn token_request(&self, body: String) -> reqwest::RequestBuilder {
+        self.client
+            .post(format!("{}/token", self.base))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(body)
+    }
+    async fn approved_code(&self) -> String {
+        let (callback, cookie) = self.begin().await;
+        let response = self
+            .client
+            .get(callback)
+            .header(header::COOKIE, cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let url =
+            reqwest::Url::parse(response.headers()[header::LOCATION].to_str().unwrap()).unwrap();
+        url.query_pairs()
+            .find(|(key, _)| key == "code")
+            .unwrap()
+            .1
+            .into_owned()
     }
     async fn begin(&self) -> (String, String) {
         let mut url = reqwest::Url::parse(&format!("{}/authorize", self.base)).unwrap();
@@ -227,16 +258,25 @@ async fn browser_callback_persists_allowlisted_grant_then_redirects_with_bound_c
     let stored = h.store.load().unwrap().unwrap();
     assert_eq!(stored.workspace_id(), "workspace-a");
     assert_eq!(stored.owner_user_id(), "user-a");
-    let request = TokenRequest {
-        grant_type: "authorization_code",
-        client_id: "chatgpt",
-        redirect_uri: CLIENT_REDIRECT,
-        resource: "https://knowledge.example.com/mcp",
-        code: &params["code"],
-        code_verifier: VERIFIER,
-    };
-    // Test-only redemption proves the code is bound to the persisted grant.
-    // Public /token must still be unavailable at this staged delivery.
+    let form = encode_form(&token_params(&params["code"]));
+    let response = h.token_request(form.clone()).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(response.headers()[header::PRAGMA], "no-cache");
+    let issued: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(issued.as_object().unwrap().len(), 4);
+    assert_eq!(issued["token_type"], "Bearer");
+    assert_eq!(issued["expires_in"], 600);
+    assert_eq!(issued["scope"], "knowledge:read");
+    let bearer = issued["access_token"].as_str().unwrap();
+    assert_eq!(bearer.len(), 43);
+    for secret in [
+        "provider-access-secret",
+        "provider-refresh-secret",
+        "client-secret",
+    ] {
+        assert!(!issued.to_string().contains(secret));
+    }
     let binding = ApprovedNotionGrant {
         grant_id: stored.grant_id(),
         epoch: stored.epoch(),
@@ -244,8 +284,29 @@ async fn browser_callback_persists_allowlisted_grant_then_redirects_with_bound_c
         owner_type: "user",
         owner_user_id: stored.owner_user_id(),
     };
-    assert!(h.login.flow.redeem(&request, &binding).is_ok());
-    assert!(h.login.flow.redeem(&request, &binding).is_err());
+    assert!(h.login.flow.verify(bearer, &binding));
+    let replayed = h.token_request(form).send().await.unwrap();
+    assert_eq!(replayed.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        replayed.json::<serde_json::Value>().await.unwrap()["error"],
+        "invalid_grant"
+    );
+    for method in [
+        reqwest::Method::POST,
+        reqwest::Method::GET,
+        reqwest::Method::DELETE,
+    ] {
+        assert_eq!(
+            h.client
+                .request(method, format!("{}/mcp", h.base))
+                .bearer_auth(bearer)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
     let replay = h
         .client
         .get(callback)
@@ -262,7 +323,7 @@ async fn browser_callback_persists_allowlisted_grant_then_redirects_with_bound_c
             .await
             .unwrap()
             .status(),
-        StatusCode::SERVICE_UNAVAILABLE
+        StatusCode::BAD_REQUEST
     );
     assert_eq!(
         h.client
@@ -541,4 +602,184 @@ async fn identity_policy_denials_have_correlated_payload_free_logs() {
             && http["http_status"] == 400
             && http["correlation_id"] == event["correlation_id"]));
     }
+}
+
+fn token_params(code: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("grant_type", "authorization_code".into()),
+        ("code", code.into()),
+        ("client_id", "chatgpt".into()),
+        ("redirect_uri", CLIENT_REDIRECT.into()),
+        ("resource", "https://knowledge.example.com/mcp".into()),
+        ("code_verifier", VERIFIER.into()),
+    ]
+}
+fn encode_form(params: &[(&str, String)]) -> String {
+    let mut url = reqwest::Url::parse("https://form.invalid").unwrap();
+    url.query_pairs_mut()
+        .extend_pairs(params.iter().map(|(key, value)| (*key, value.as_str())));
+    url.query().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn token_endpoint_rejects_bound_field_changes_and_expired_or_replayed_codes() {
+    let h = Harness::new(grant("workspace-a", "user-a"), StatusCode::OK).await;
+    for (key, wrong) in [
+        ("grant_type", "refresh_token"),
+        ("client_id", "other-client"),
+        ("redirect_uri", "https://evil.example.com/cb"),
+        ("resource", "https://foreign.example.com/mcp"),
+        (
+            "code_verifier",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
+        ("code", "not-an-issued-code"),
+    ] {
+        let code = h.approved_code().await;
+        let mut params = token_params(&code);
+        params.iter_mut().find(|(name, _)| *name == key).unwrap().1 = wrong.into();
+        let response = h.token_request(encode_form(&params)).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{key}");
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body.as_object().unwrap().len(), 1);
+        assert!(body.get("access_token").is_none());
+        if key == "code_verifier" {
+            assert_eq!(
+                h.token_request(encode_form(&token_params(&code)))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+    }
+    let code = h.approved_code().await;
+    h.clock.store(121, Ordering::SeqCst);
+    let expired = h
+        .token_request(encode_form(&token_params(&code)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(expired.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        expired.json::<serde_json::Value>().await.unwrap()["error"],
+        "invalid_grant"
+    );
+}
+
+#[tokio::test]
+async fn token_endpoint_requires_unambiguous_bounded_form_body_and_current_sealed_grant() {
+    let h = Harness::new(grant("workspace-a", "user-a"), StatusCode::OK).await;
+    let code = h.approved_code().await;
+    let form = encode_form(&token_params(&code));
+    for suffix in [
+        "&client_id=chatgpt",
+        "&%63ode=duplicate",
+        "&extra=value",
+        "&scope=knowledge:write",
+        "&code=%GG",
+    ] {
+        assert_eq!(
+            h.token_request(format!("{form}{suffix}"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let missing = encode_form(&token_params(&code)[..5]);
+    assert_eq!(
+        h.token_request(missing).send().await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+    for content_type in [
+        "application/json",
+        "text/plain",
+        "application/x-www-form-urlencoded; charset=invalid",
+    ] {
+        let response = h
+            .client
+            .post(format!("{}/token", h.base))
+            .header(header::CONTENT_TYPE, content_type)
+            .body(form.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    for header in [header::AUTHORIZATION, header::CONTENT_ENCODING] {
+        assert_eq!(
+            h.token_request(form.clone())
+                .header(header, "unsupported")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let oversized = h.token_request("x".repeat(8193)).send().await.unwrap();
+    assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        oversized.json::<serde_json::Value>().await.unwrap()["error"],
+        "invalid_request"
+    );
+    let query = h
+        .client
+        .post(format!("{}/token?code=ignored", h.base))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(form.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(query.status(), StatusCode::BAD_REQUEST);
+    // Valid code is still single-use after malformed envelope requests.
+    assert_eq!(
+        h.token_request(form).send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    let old = h.approved_code().await;
+    let new = h.approved_code().await;
+    let replaced = h
+        .token_request(encode_form(&token_params(&old)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replaced.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        h.token_request(encode_form(&token_params(&new)))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let corrupt_code = h.approved_code().await;
+    fs::write(h._dir.path().join("grant"), b"corrupt").unwrap();
+    let corrupt = h
+        .token_request(encode_form(&token_params(&corrupt_code)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(corrupt.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        corrupt.json::<serde_json::Value>().await.unwrap()["error"],
+        "temporarily_unavailable"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_token_redemption_issues_at_most_one_bearer() {
+    let h = Harness::new(grant("workspace-a", "user-a"), StatusCode::OK).await;
+    let code = h.approved_code().await;
+    let form = encode_form(&token_params(&code));
+    let (a, b) = tokio::join!(
+        h.token_request(form.clone()).send(),
+        h.token_request(form).send()
+    );
+    let mut statuses = [a.unwrap().status().as_u16(), b.unwrap().status().as_u16()];
+    statuses.sort();
+    assert_eq!(statuses, [200, 400]);
 }

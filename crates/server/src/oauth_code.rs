@@ -7,7 +7,7 @@ use std::{
     collections::HashMap,
     fmt,
     io::Read,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -228,6 +228,7 @@ pub struct AuthorizationFlow {
     client: Client,
     allowed: AllowedNotionIdentity,
     records: Mutex<Records>,
+    clock: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
 impl AuthorizationFlow {
     /// Preflight immutable provider identity before a callback can replace the
@@ -241,14 +242,21 @@ impl AuthorizationFlow {
             client,
             allowed,
             records: Mutex::new(Records::default()),
+            clock: Arc::new(Instant::now),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_clock(mut self, clock: Arc<dyn Fn() -> Instant + Send + Sync>) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Start an unapproved transaction. Does NOT issue a code or authorize a
     /// Notion grant. The returned opaque handle belongs to the future server-
     /// side Notion callback correlation, never to a client as proof of login.
     pub fn begin(&self, request: &AuthorizationRequest<'_>) -> Result<Secret, Error> {
-        self.begin_at(request, Instant::now())
+        self.begin_at(request, (self.clock)())
     }
     fn begin_at(&self, request: &AuthorizationRequest<'_>, now: Instant) -> Result<Secret, Error> {
         if request.client_id != self.client.client_id {
@@ -297,7 +305,7 @@ impl AuthorizationFlow {
         transaction: &str,
         grant: &ApprovedNotionGrant<'_>,
     ) -> Result<Redirect, Error> {
-        self.approve_at(transaction, grant, Instant::now())
+        self.approve_at(transaction, grant, (self.clock)())
     }
     fn approve_at(
         &self,
@@ -348,7 +356,7 @@ impl AuthorizationFlow {
         request: &TokenRequest<'_>,
         current_grant: &ApprovedNotionGrant<'_>,
     ) -> Result<AccessToken, Error> {
-        self.redeem_at(request, current_grant, Instant::now())
+        self.redeem_at(request, current_grant, (self.clock)())
     }
     fn redeem_at(
         &self,
@@ -411,7 +419,7 @@ impl AuthorizationFlow {
     /// grant. In-memory token presence alone never establishes identity.
     /// Actual MCP route enforcement still belongs to #127.
     pub fn verify(&self, bearer: &str, current_grant: &ApprovedNotionGrant<'_>) -> bool {
-        self.verify_at(bearer, current_grant, Instant::now())
+        self.verify_at(bearer, current_grant, (self.clock)())
     }
     fn verify_at(
         &self,
