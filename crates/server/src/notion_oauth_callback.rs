@@ -399,8 +399,9 @@ impl<'a> NotionCallback<'a> {
     /// AuthorizationFlow comes from the sealed store, not the browser or a
     /// caller-provided identity. A failed store write never issues a code.
     ///
-    /// This is a server-INTERNAL boundary only: #120 still needs mounted
-    /// HTTP routes, and #127/#128 must secure MCP sessions and revocation.
+    /// This unbound API is internal only. Public HTTP callbacks must use the
+    /// browser-correlated method below. #120 still needs code redemption, and
+    /// #127/#128 must secure MCP sessions and revocation.
     pub async fn complete_persist_and_approve(
         &self,
         raw_query: &str,
