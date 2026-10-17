@@ -15,7 +15,7 @@ no remote authorization.
 | Operational metrics | independent one-slot SQLite snapshot budget; owner retained through blocking completion after scrape cancellation | server `http::tests::cancelled_metrics_waiter_keeps_backend_slot_until_snapshot_finishes` |
 | Cancelled status inspection | backend task owns separate capacity through blocking SQLite/index completion | server `sync_status::tests` |
 | Webhook ingress | independent 4 slots; 64 KiB, 10s input deadline; bounded owner retains capacity through receipt/setup publication after cancellation or 20s response timeout | server `webhook::tests`, `tests/admission.rs` |
-| Retrieval and graph | calls share tool units; graph depth <=2, result <=100, fanout <=256; Qwen model permit remains inside blocking inference | MCP related tests; retrieval Qwen tests |
+| Retrieval and graph | calls share tool units; graph depth <=2, result <=100, combined adjacency <=256 enforced by storage sentinel reads; committed source projections bounded before receipt validation; Qwen permit stays inside blocking inference | MCP related/boost tests; SQLite and committed-source overflow tests (#421 / #422); retrieval Qwen tests |
 | Files | upload weight 8; serial bounded batch, operator count/size/time policy; exact host admission and pinned public DNS; private temporary ownership and audit receipts | `http::ingestion_tests`, downloader and ingestion tests |
 | Index/webhook worker | separately serialized worker, shared commit coordinator and durable journal; no client-timeout replay | worker, shutdown and reconciliation tests |
 
@@ -98,3 +98,9 @@ scrape cancellation. Concurrent snapshots receive fixed HTTP 503 with
 `Retry-After: 1` and `Cache-Control: no-store`; liveness and in-memory metrics
 without a configured store remain independent. This bound is intentionally
 fixed because the SQLite connection already serializes these aggregates.
+
+The graph storage correction is merged in [#422](https://github.com/mtandersson/notion-knowedge/pull/422)
+with successful CI run 39007401725. It also bounds high-degree source projection
+validation reached through a low-degree target, retaining the owned snapshot
+fence. Shared work/cancellation #399 was closed only after that correction and
+[#414](https://github.com/mtandersson/notion-knowedge/pull/414) both passed CI and merged.
