@@ -6,6 +6,8 @@ Metadata for the planned [OAuth trust model](oauth-trust-model.md). It exists so
 a generic OAuth client can discover the intended issuer and endpoints, without
 silently making the current unauthenticated MCP bootstrap a remote OAuth server.
 **No OAuth token, code, Notion grant or MCP session is issued or accepted.**
+An optional [browser entry point](notion-oauth-redirect.md#browser-entry-point)
+can start upstream consent; its public callback is not mounted yet.
 
 ## Explicit configuration
 
@@ -39,7 +41,7 @@ setting grants permission to publish private content.
 | `GET /.well-known/oauth-protected-resource/mcp` | 200 JSON: the exact configured MCP resource and its approved authorization-server issuer |
 | `GET /.well-known/oauth-protected-resource` | 200 JSON: same RFC 9728 document for root fallback discovery |
 | `GET /.well-known/oauth-authorization-server` | 200 JSON: issuer, authorization/token/revocation endpoints, authorization code and S256 capabilities |
-| `GET /authorize` | 503, no OAuth code or user authorization |
+| `GET /authorize` | 503 by default; explicit [MCP client registration](notion-oauth-redirect.md#browser-entry-point) enables a browser-bound Notion consent redirect only |
 | `POST /token` | 503, no token issuance |
 | `POST /revoke` | 503, no token revocation claim |
 | `GET/POST/DELETE /mcp` | 401 with `WWW-Authenticate: Bearer resource_metadata="..."`; **the real MCP service is not mounted** |

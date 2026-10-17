@@ -39,6 +39,10 @@ impl OAuthDiscovery {
         })
     }
 
+    pub(crate) fn resource(&self) -> &str {
+        &self.resource
+    }
+
     pub(crate) fn issuer(&self) -> &str {
         &self.issuer
     }
@@ -100,6 +104,14 @@ fn canonical_https(value: &str, required_path: &str) -> bool {
 /// Do not mount a real MCP handler in this mode until #120/#127 can validate
 /// issuer, audience, grant identity/epoch and revocation on every request.
 pub fn router(bind: SocketAddr, discovery: OAuthDiscovery) -> Router {
+    router_with_login(bind, discovery, None)
+}
+
+pub fn router_with_login(
+    bind: SocketAddr,
+    discovery: OAuthDiscovery,
+    login: Option<std::sync::Arc<crate::oauth_authorize::Login>>,
+) -> Router {
     Router::new()
         .route(
             "/.well-known/oauth-protected-resource",
@@ -113,7 +125,11 @@ pub fn router(bind: SocketAddr, discovery: OAuthDiscovery) -> Router {
             "/.well-known/oauth-authorization-server",
             get(authorization_server),
         )
-        .route("/authorize", get(not_implemented))
+        .merge(
+            Router::new()
+                .route("/authorize", get(crate::oauth_authorize::authorize))
+                .with_state(login),
+        )
         .route("/token", axum::routing::post(not_implemented))
         .route("/revoke", axum::routing::post(not_implemented))
         .route("/mcp", get(deny_mcp).post(deny_mcp).delete(deny_mcp))

@@ -95,6 +95,7 @@ pub async fn serve_installed(
     // remains fail-closed; no MCP bearer or callback routes are enabled here.
     let _notion_oauth = crate::notion_oauth_runtime::NotionOAuthRuntime::from_config(&settings)
         .map_err(|_| io::Error::other("Notion OAuth credential runtime unavailable"))?;
+    let oauth_login = crate::oauth_authorize::Login::from_config(&settings);
     let bind = settings.http_bind;
     let mut diagnostics = crate::diagnostics::bootstrap(&settings);
     let handler = handler
@@ -171,7 +172,7 @@ pub async fn serve_installed(
     // challenges requests, including session/SSE and spurious bearer tokens.
     // #120/#127 must supply a verified auth layer before re-enabling it.
     let mcp = match settings.oauth_discovery {
-        Some(discovery) => crate::oauth_discovery::router(bind, discovery),
+        Some(discovery) => crate::oauth_discovery::router_with_login(bind, discovery, oauth_login),
         None => {
             let mcp = axum::Router::new()
                 .nest_service("/mcp", service)

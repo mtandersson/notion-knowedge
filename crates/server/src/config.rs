@@ -29,9 +29,11 @@ pub struct Config {
     pub bearer_fallback: Option<SecretToken>,
     /// Diagnostics authentication is independent from the MCP route.
     pub health_requires_bearer: bool,
+    /// Fixed public client registration for the staged browser entry point.
+    pub oauth_client: Option<crate::oauth_authorize::Settings>,
     /// Opt-in discovery mode; all MCP calls are denied pending real OAuth.
     pub oauth_discovery: Option<crate::oauth_discovery::OAuthDiscovery>,
-    /// Optional, trusted Notion authorization redirect config; NOT a live HTTP login.
+    /// Trusted Notion redirect config; an explicit MCP client can start consent.
     pub notion_oauth_redirect: Option<crate::notion_oauth_redirect::NotionOAuthConfig>,
     /// Confidential Notion code exchange config, never a live MCP auth grant.
     pub notion_oauth_callback: Option<NotionCallbackSettings>,
@@ -784,7 +786,49 @@ impl Config {
             matches!(notion_auth, NotionAuth::Integration(_)),
             notion_scope.is_some(),
         )?;
+        let client_id = lookup("NK_OAUTH_CLIENT_ID")
+            .map(|v| text(v, "NK_OAUTH_CLIENT_ID"))
+            .transpose()?;
+        let client_redirect = lookup("NK_OAUTH_CLIENT_REDIRECT_URI")
+            .map(|v| text(v, "NK_OAUTH_CLIENT_REDIRECT_URI"))
+            .transpose()?;
+        let oauth_client = match (client_id, client_redirect) {
+            (None, None) => None,
+            (Some(id), Some(redirect)) => {
+                let discovery = oauth_discovery.as_ref().ok_or_else(|| {
+                    invalid("NK_OAUTH_ISSUER", "required for MCP client registration")
+                })?;
+                if notion_oauth_callback.is_none() {
+                    return Err(invalid(
+                        "NK_NOTION_ALLOWED_USER_ID",
+                        "complete Notion callback policy required before browser authorization",
+                    ));
+                }
+                Some(
+                    crate::oauth_authorize::Settings::new(&id, &redirect, discovery.resource())
+                        .map_err(|_| {
+                            invalid(
+                                "NK_OAUTH_CLIENT_REDIRECT_URI",
+                                "invalid fixed MCP client registration",
+                            )
+                        })?,
+                )
+            }
+            (None, Some(_)) => {
+                return Err(invalid(
+                    "NK_OAUTH_CLIENT_ID",
+                    "required with NK_OAUTH_CLIENT_REDIRECT_URI",
+                ));
+            }
+            (Some(_), None) => {
+                return Err(invalid(
+                    "NK_OAUTH_CLIENT_REDIRECT_URI",
+                    "required with NK_OAUTH_CLIENT_ID",
+                ));
+            }
+        };
         Ok(Self {
+            oauth_client,
             mcp_max_in_flight,
             mcp_tool_capacity,
             mcp_max_sessions,
@@ -1128,6 +1172,48 @@ mod tests {
         .unwrap();
         assert_eq!(custom.webhook_debounce.quiet_ms, 10);
         assert_eq!(custom.webhook_debounce.max_delay_ms, 20);
+    }
+
+    #[test]
+    fn browser_oauth_registration_requires_complete_fixed_provider_policy() {
+        let pair = [
+            ("NK_OAUTH_CLIENT_ID", "chatgpt"),
+            (
+                "NK_OAUTH_CLIENT_REDIRECT_URI",
+                "https://chatgpt.example.com/callback",
+            ),
+        ];
+        assert!(parse(&pair[..1]).is_err());
+        assert!(parse(&pair[1..]).is_err());
+        assert!(parse(&pair).is_err());
+        let mut settings = vec![
+            ("NK_OAUTH_ISSUER", "https://auth.example.com"),
+            ("NK_OAUTH_RESOURCE", "https://knowledge.example.com/mcp"),
+            ("NK_NOTION_OAUTH_CLIENT_ID", "notion-client"),
+            (
+                "NK_NOTION_OAUTH_REDIRECT_URI",
+                "https://auth.example.com/oauth/notion/callback",
+            ),
+            ("NK_NOTION_OAUTH_CLIENT_SECRET", "fixture-secret"),
+            ("NK_NOTION_ALLOWED_WORKSPACE_ID", "workspace-a"),
+            ("NK_NOTION_ALLOWED_USER_ID", "user-a"),
+        ];
+        settings.extend(pair);
+        assert!(parse(&settings).unwrap().oauth_client.is_some());
+        for missing in [
+            "NK_NOTION_ALLOWED_WORKSPACE_ID",
+            "NK_NOTION_ALLOWED_USER_ID",
+            "NK_NOTION_OAUTH_CLIENT_SECRET",
+        ] {
+            let partial: Vec<_> = settings
+                .iter()
+                .copied()
+                .filter(|(key, _)| *key != missing)
+                .collect();
+            assert!(parse(&partial).is_err());
+        }
+        settings.last_mut().unwrap().1 = "https://attacker.example.com/callback#fragment";
+        assert!(parse(&settings).is_err());
     }
 
     #[test]

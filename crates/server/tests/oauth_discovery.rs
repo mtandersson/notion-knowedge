@@ -194,3 +194,167 @@ async fn incomplete_or_non_https_discovery_configuration_fails_before_binding() 
         assert!(!String::from_utf8_lossy(&output.stderr).contains("https://other.example.com"));
     }
 }
+
+#[tokio::test]
+async fn registered_browser_authorization_redirects_only_valid_pkce_requests_to_notion() {
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = socket.local_addr().unwrap().port();
+    drop(socket);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_notion-knowledge-server"))
+        .arg("--http")
+        .env_clear()
+        .env("NK_HTTP_PORT", port.to_string())
+        .env("NK_OAUTH_ISSUER", "https://auth.example.com")
+        .env("NK_OAUTH_RESOURCE", "https://knowledge.example.com/mcp")
+        .env("NK_OAUTH_CLIENT_ID", "chatgpt")
+        .env(
+            "NK_OAUTH_CLIENT_REDIRECT_URI",
+            "https://chatgpt.example.com/callback",
+        )
+        .env("NK_NOTION_OAUTH_CLIENT_ID", "notion-client")
+        .env(
+            "NK_NOTION_OAUTH_REDIRECT_URI",
+            "https://auth.example.com/oauth/notion/callback",
+        )
+        .env("NK_NOTION_OAUTH_CLIENT_SECRET", "fixture-server-secret")
+        .env("NK_NOTION_ALLOWED_WORKSPACE_ID", "workspace-a")
+        .env("NK_NOTION_ALLOWED_USER_ID", "user-a")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    timeout(Duration::from_secs(15), async {
+        let mut stderr = BufReader::new(child.stderr.take().unwrap());
+        loop {
+            let mut line = String::new();
+            assert_ne!(stderr.read_line(&mut line).await.unwrap(), 0);
+            if line.contains("Serving MCP over Streamable HTTP") {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let client = Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let base = format!("http://127.0.0.1:{port}");
+    let params = [
+        ("response_type", "code"),
+        ("client_id", "chatgpt"),
+        ("redirect_uri", "https://chatgpt.example.com/callback"),
+        ("resource", "https://knowledge.example.com/mcp"),
+        ("state", "client-state-123456789"),
+        (
+            "code_challenge",
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        ),
+        ("code_challenge_method", "S256"),
+        ("scope", "knowledge:read"),
+    ];
+    let authorize_url = |params: &[(&str, &str)]| {
+        let mut url = reqwest::Url::parse(&format!("{base}/authorize")).unwrap();
+        url.query_pairs_mut().extend_pairs(params.iter().copied());
+        url
+    };
+    let mut upstream_states = Vec::new();
+    for _ in 0..2 {
+        let response = client.get(authorize_url(&params)).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+        let cookie = response.headers()["set-cookie"].to_str().unwrap();
+        assert!(cookie.starts_with("__Host-nk-oauth="));
+        for flag in [
+            "Path=/",
+            "Secure",
+            "HttpOnly",
+            "SameSite=Lax",
+            "Max-Age=120",
+        ] {
+            assert!(cookie.contains(flag));
+        }
+        let location = response.headers()["location"].to_str().unwrap();
+        assert!(!location.contains("fixture-server-secret"));
+        assert!(!location.contains(cookie.split(';').next().unwrap().split('=').nth(1).unwrap()));
+        let url = reqwest::Url::parse(location).unwrap();
+        assert_eq!(url.origin().ascii_serialization(), "https://api.notion.com");
+        assert_eq!(url.path(), "/v1/oauth/authorize");
+        let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(query.len(), 5);
+        assert_eq!(query["owner"], "user");
+        assert_eq!(query["client_id"], "notion-client");
+        assert_eq!(
+            query["redirect_uri"],
+            "https://auth.example.com/oauth/notion/callback"
+        );
+        assert_eq!(query["response_type"], "code");
+        assert_eq!(query["state"].len(), 43);
+        assert_ne!(query["state"], params[4].1);
+        upstream_states.push(query["state"].clone());
+    }
+    assert_ne!(upstream_states[0], upstream_states[1]);
+    for (key, invalid) in [
+        ("client_id", "unregistered"),
+        ("redirect_uri", "https://attacker.example.com/callback"),
+        ("resource", "https://foreign.example.com/mcp"),
+        ("code_challenge_method", "plain"),
+        ("code_challenge", "bad"),
+        ("scope", "knowledge:write"),
+        ("response_type", "token"),
+    ] {
+        let mut denied = params;
+        denied.iter_mut().find(|(k, _)| *k == key).unwrap().1 = invalid;
+        let response = client.get(authorize_url(&denied)).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{key}");
+        assert!(!response.headers().contains_key("location"));
+        assert!(!response.headers().contains_key("set-cookie"));
+    }
+    let valid_url = authorize_url(&params).to_string();
+    for suffix in [
+        "&client_id=chatgpt",
+        "&%63lient_id=chatgpt",
+        "&extra=value",
+        "&state=%GG",
+    ] {
+        let response = client
+            .get(format!("{valid_url}{suffix}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    let spoofed = client
+        .get(&valid_url)
+        .header("host", "evil.example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(spoofed.status(), StatusCode::FORBIDDEN);
+    for path in ["/token", "/revoke"] {
+        assert_eq!(
+            client
+                .post(format!("{base}{path}"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+    assert_eq!(
+        client
+            .post(format!("{base}/mcp"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
+}

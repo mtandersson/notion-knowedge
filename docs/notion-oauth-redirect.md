@@ -23,8 +23,10 @@ fragments, query strings, userinfo, alternative origins and unregistered
 paths are rejected. This avoids open redirects and attacks relying on
 `Host`, `Forwarded` or a browser-supplied callback. Configure this exact
 HTTPS callback in the Notion public integration's settings. The client ID is
-public; its confidential client **secret is deliberately not configured here**,
-is not placed in an URL and belongs to the server-only exchange in #122.
+public. The redirect core alone needs no confidential client secret; the
+optional browser entry point below requires the full server-only callback
+configuration. The secret is never placed in a URL and is reserved for the
+server-only exchange in #122.
 
 ## Consent and state
 
@@ -62,17 +64,54 @@ canonical Notion `owner.type=user` plus exact operator allowlisted
 calling `AuthorizationFlow::approve`. A forged or replayed callback must
 not invoke that method.
 
+## Browser entry point
+
+To mount `GET /authorize`, additionally register one MCP public client and
+configure the complete server-only callback identity policy:
+
+```sh
+NK_OAUTH_CLIENT_ID=chatgpt
+NK_OAUTH_CLIENT_REDIRECT_URI=https://chatgpt.example.com/callback
+NK_NOTION_OAUTH_CLIENT_SECRET=<server-only secret>
+NK_NOTION_ALLOWED_WORKSPACE_ID=<operator-approved workspace ID>
+NK_NOTION_ALLOWED_USER_ID=<operator-approved user ID>
+```
+
+Use the actual exact callback supplied by your MCP client, not the example.
+The two `NK_OAUTH_CLIENT_*` settings are paired. Missing discovery or Notion
+callback policy rejects startup. Without this registration, `/authorize`
+continues returning 503. No client registration is learned from a request.
+
+The HTTP entry point requires all eight parameters: `response_type=code`,
+`client_id`, `redirect_uri`, canonical `resource`, `state`, S256
+`code_challenge`, `code_challenge_method=S256`, and `scope=knowledge:read`.
+It rejects missing, repeated, unknown, oversized or malformed parameters and
+invalid registered-client/PKCE values with a sanitized 400 response, without
+redirecting to any caller-supplied URI. Accepted requests return 302 to the
+fixed Notion consent endpoint, with `Cache-Control: no-store` and
+`Referrer-Policy: no-referrer`. Existing backend Host/Origin checks apply.
+
+Each accepted browser request also sets an independent 256-bit random
+`__Host-nk-oauth` cookie (`Secure; HttpOnly; SameSite=Lax; Path=/;
+Max-Age=120`). Only its digest is bound to the pending Notion state. Future
+HTTP callbacks must call `take_browser(state, cookie)`: the unbound `take`
+cannot consume browser transactions, and a missing/wrong cookie cannot
+consume another browser's state. Both secrets expire after 120 seconds and
+state is single-use. A new login replaces the cookie; this deliberately
+supports one pending login per browser. The cookie never appears in the
+Notion URL. Use HTTPS at the configured issuer; do not weaken cookie security
+for a plain-HTTP development browser.
+
 ## Intentional deployment gate
 
-The existing discovery router still returns **503** on `/authorize`
-and `/token` and **401** on `/mcp`. There is currently **no**
-`/oauth/notion/callback` route. The new component is reusable core with
-validated startup configuration and unit tests, not a connected browser flow.
-An HTTP route must not bypass the missing #122 trusted Notion callback,
-#123–#126 grant storage/identity policy and #127–#129 tokens/session
-authorization and negative-path verification. The standalone #121 code is
-ready for that later composition, but **production remote MCP access is
-still prohibited**.
+With explicit client registration, `/authorize` starts Notion consent. This
+is **not yet an end-to-end login**: there is no public
+`/oauth/notion/callback` route, `/token` and `/revoke` return **503**, and
+`/mcp` returns **401**. No MCP authorization code or token can be issued by
+this HTTP composition. Deploying a useful private connector still requires
+#122 callback mounting, #123–#126 persisted approved identity, #127–#128 live
+session binding/revocation, and #129–#130 acceptance tests/setup. The staged
+entry point does not authorize production remote MCP access.
 
 Unit tests verify the fixed endpoint, correct URL encoding, lack of
 scope/secret injection, two independent states/transactions, wrong MCP client
@@ -84,3 +123,6 @@ nix develop --command cargo test -p notion-knowledge-server notion_oauth_redirec
 nix develop --command cargo test -p notion-knowledge-server notion_oauth_redirect_requires --locked
 nix develop .#format --command cargo fmt --all -- --check
 ```
+
+The process-level `oauth_discovery` suite also tests the actual HTTP redirect,
+security cookie, parameter denial, Host protection and continued token/MCP denial.
