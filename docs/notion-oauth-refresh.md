@@ -14,16 +14,22 @@ remaining authentication, authorization and revocation controls in #117 land.
   success response is bounded to 64 KiB.
 - Shared parsing requires `token_type=bearer`, a valid access token,
   `owner.type=user`, `owner.user.id`, `workspace_id` and `bot_id`.
-  For refresh, also require a new nonempty `refresh_token` and explicit
-  `expires_in`; the new refresh token may not be identical to the
-  current one. Missing/ambiguous binding **fails closed**.
+  For refresh, also require a new nonempty `refresh_token`; the new refresh
+  token may not be identical to the current one. `expires_in` is optional:
+  the documented Notion response omits it, and sealed expiry stays `None`. Missing/ambiguous binding **fails closed**.
 - `NotionRefresh::ensure_fresh()` loads the sealed grant from #123. If
   `expires_at_unix` is more than **300 seconds** away, return the
   private server-only grant without a network call. At/inside the
   300-second threshold (including already expired), perform a server-side
-  refresh. An **unknown** expiry also requires refresh rather than being
-  considered permanently valid. If no grant or refresh token exists,
-  require reauthorization. Upstream failures never return the old token.
+  refresh. An **unknown** expiry requires a confidential Basic-authenticated
+  `POST /v1/oauth/introspect` for the exact access token before every use.
+  Only boolean `active: true` succeeds; inactive, absent, malformed or failed
+  responses deny without trying refresh to mask revocation. For active grants,
+  a separate **24-hour server-owned rotation age** triggers proactive rotation;
+  this cadence never asserts a provider expiry. Newly rotated unknown-expiry
+  credentials are also introspected before release. If no grant exists, or
+  rotation is due without a refresh token, require reauthorization. Upstream
+  failures never return the old token.
 - Exact **operator-allowlisted user/workspace**, previous stored
   user/workspace, and unchanged `bot_id` are mandatory before persistence.
   A refresh cannot silently switch to another Notion identity, integration
@@ -33,7 +39,21 @@ remaining authentication, authorization and revocation controls in #117 land.
   request and committed file write. This coalesces concurrent refreshes
   **within one process**: after first successful rotation, later callers
   read the newly stored pair and skip refresh while it remains sufficiently
-  valid.
+  valid. Unknown-expiry callers still verify their own live active state.
+
+The provider contract is based on Notion's [refresh response](https://developers.notion.com/reference/refresh-a-token)
+and [introspection response](https://developers.notion.com/reference/introspect-token).
+Introspection establishes active state only, not identity or expiry. Identity
+continues to come from the sealed, allowlisted callback grant. Requests use
+`Notion-Version: 2026-03-11`, fixed HTTPS endpoints, redirect denial, the
+12-second timeout and 64 KiB response bound. No real credentials or live
+provider calls are part of automated verification.
+
+`NotionOAuthRuntime::ensure_active()` supplies server-only active grant evidence
+for future per-request resource authorization (#127). It introspects even a
+known-expiry grant and rechecks the exact sealed snapshot after the network
+request. The local bot-identity probe uses this stronger check too. This API
+does not itself authorize an MCP session or complete parent #124.
 
 ## Atomic sealed rotation
 
@@ -125,6 +145,6 @@ cargo fmt --all -- --check
 Local fake Notion token servers test confidential Basic/POST body,
 single-call concurrent refresh, skip of healthy tokens, unknown expiry,
 atomic persistence, grant/epoch preservation, owner/workspace/bot
-denials, missing rotation/expiry, provider errors, absent state and
+denials, missing rotation, optional expiry, active-state denials, provider errors, absent state and
 failure without stale-token fallback. Grant-store tests include
 replacement invalidation and stale-snapshot compare-and-swap denial.

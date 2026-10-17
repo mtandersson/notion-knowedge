@@ -96,6 +96,13 @@ impl NotionOAuthRuntime {
         }))
     }
 
+    /// Server-only live authorization evidence for the exact sealed grant.
+    pub(crate) async fn ensure_active(
+        &self,
+    ) -> Result<crate::notion_grant_store::StoredGrant, CredentialError> {
+        self.coordinator.ensure_active().await.map_err(map_refresh)
+    }
+
     /// Acquire a fresh verified credential for EVERY server-side Notion
     /// operation. The passed backend client is never cached in the runtime.
     /// No request is made after a failed refresh or a mismatched identity.
@@ -122,7 +129,7 @@ impl NotionOAuthRuntime {
     /// Concrete read-only Notion request: verify the live bot ID equals the
     /// sealed callback's immutable integration identity. Never return tokens.
     pub async fn verify_bot_identity(&self) -> Result<(), CredentialError> {
-        let grant = self.coordinator.ensure_fresh().await.map_err(map_refresh)?;
+        let grant = self.ensure_active().await?;
         if !self
             .store
             .still_current(&grant)

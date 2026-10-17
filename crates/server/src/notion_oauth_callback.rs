@@ -81,6 +81,7 @@ pub struct NotionTokenClient {
     client_secret: Secret,
     redirect_uri: String,
     token_endpoint: String,
+    introspect_endpoint: String,
 }
 impl fmt::Debug for NotionTokenClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -106,12 +107,14 @@ impl NotionTokenClient {
             client_secret: Secret::from_internal(client_secret.to_owned()),
             redirect_uri: registration.redirect_uri().to_owned(),
             token_endpoint: TOKEN_ENDPOINT.to_owned(),
+            introspect_endpoint: "https://api.notion.com/v1/oauth/introspect".to_owned(),
         })
     }
 
     #[cfg(test)]
     pub(crate) fn for_local_fixture(mut self, endpoint: &str) -> Self {
         self.token_endpoint = endpoint.to_owned();
+        self.introspect_endpoint = endpoint.replace("/token", "/introspect");
         self
     }
 
@@ -141,14 +144,38 @@ impl NotionTokenClient {
         .await
     }
 
+    /// Verify only the submitted access token's active state. Identity remains
+    /// bound to the sealed callback grant; introspection does not supply it.
+    pub(crate) async fn is_active(&self, access_token: &str) -> Result<bool, CallbackError> {
+        let body = self
+            .provider_request(&self.introspect_endpoint, json!({"token": access_token}))
+            .await?;
+        #[derive(serde::Deserialize)]
+        struct Introspection {
+            active: bool,
+        }
+        serde_json::from_slice::<Introspection>(&body)
+            .map(|response| response.active)
+            .map_err(|_| CallbackError::InvalidGrant)
+    }
+
     async fn token_request(&self, params: serde_json::Value) -> Result<NotionGrant, CallbackError> {
+        NotionGrant::parse(&self.provider_request(&self.token_endpoint, params).await?)
+    }
+
+    async fn provider_request(
+        &self,
+        endpoint: &str,
+        params: serde_json::Value,
+    ) -> Result<Vec<u8>, CallbackError> {
         // Never log the reqwest request or propagate its error: Basic auth,
         // refresh tokens and provider bodies are confidential.
         let mut response = self
             .http
-            .post(&self.token_endpoint)
+            .post(endpoint)
             .basic_auth(&self.client_id, Some(self.client_secret.expose()))
             .header(reqwest::header::ACCEPT, "application/json")
+            .header("Notion-Version", "2026-03-11")
             .json(&params)
             .send()
             .await
@@ -169,7 +196,7 @@ impl NotionTokenClient {
             }
             body.extend_from_slice(&chunk);
         }
-        NotionGrant::parse(&body)
+        Ok(body)
     }
 }
 
