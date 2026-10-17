@@ -40,6 +40,11 @@ ordered and deduplicated by source, target, relation type and provenance.
    Unverifiable lifecycle metadata fails the entire call without partial data.
 3. Each node's incoming + outgoing read is capped at 256 graph entries to
    avoid unbounded local traversal, with at most two hops and 100 emitted edges.
+   SQLite consumes at most the remaining direction budget plus one overflow
+   sentinel, and committed reads reject overflow before validating sources.
+   Each source projection is also capped at 256 outgoing entries before its
+   complete receipt is validated. Overflow fails the entire request; graph
+   evidence is never silently truncated.
    Database failure or invalid graph direction fails the request without
    returning partial metadata.
 4. The shared MCP serialized-output budget (512 KiB) applies after traversing.

@@ -26,6 +26,15 @@ enforced before any graph lookup. The MCP knowledge_search handler continues
 to authorize **each returned page** with fresh physical ancestry and trusted
 root scope before exposing any snippet.
 
+Each expanded page has a combined incoming/outgoing adjacency budget of 256,
+including edges to pages outside the candidate set and unresolved references.
+The incoming read receives only the budget remaining after outgoing edges.
+With at most 100 candidate pages, this bounds accepted adjacency to 25,600
+entries per search; SQLite consumes at most one additional overflow sentinel
+per read. Committed adapters additionally cap each source projection at 256
+outgoing entries before validating its full receipt. Any overflow fails the
+search without returning partially reranked results.
+
 Expansion is seeded from the first double-matched (semantic + lexical) hit
 among the top 3. Single-path hits cannot seed another boost; without such a
 seed, results are unchanged and no graph reads occur. For eligible neighbors

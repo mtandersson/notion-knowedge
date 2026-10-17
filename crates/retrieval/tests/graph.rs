@@ -255,3 +255,27 @@ fn relation_label_migration_is_explicit_and_preserves_operational_state_and_lega
     let reader = SqliteSyncStateStore::open_read_only(&db.0).unwrap();
     assert_eq!(reader.edges_from("source").unwrap()[0].display_name(), None);
 }
+
+#[test]
+fn bounded_adjacency_accepts_exact_degree_and_rejects_overflow_in_both_directions() {
+    let store = SqliteSyncStateStore::open_in_memory().unwrap();
+    let edges: Vec<_> = (0..257)
+        .map(|i| page("hub", "target", "link:page", &format!("markdown:{i}")))
+        .collect();
+    store.replace_page_edges("hub", &edges).unwrap();
+    for incoming in [false, true] {
+        let read = |limit| {
+            if incoming {
+                store.edges_to_bounded("target", limit)
+            } else {
+                store.edges_from_bounded("hub", limit)
+            }
+        };
+        assert_eq!(read(256), Err(SyncStateError::Unavailable));
+        assert_eq!(read(0), Err(SyncStateError::Unavailable));
+        assert_eq!(read(257).unwrap().len(), 257);
+        assert_eq!(read(usize::MAX), Err(SyncStateError::InvalidInput));
+    }
+    assert!(store.edges_from_bounded("missing", 0).unwrap().is_empty());
+    assert!(store.edges_to_bounded("missing", 0).unwrap().is_empty());
+}

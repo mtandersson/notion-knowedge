@@ -5598,3 +5598,68 @@ async fn reconciliation_commits_body_links_and_never_acknowledges_missing_link_r
     assert_eq!(remaining.len(), 1);
     assert!(remaining[0].relation_type().starts_with("relation:"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn committed_graph_bounds_source_projection_through_low_degree_target_and_keeps_snapshot_fence()
+ {
+    use notion_knowledge_core::graph::GraphEdgeStore;
+    use notion_knowledge_retrieval::graph::CommittedGraph;
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let handler = index.handler(source.client());
+    let provider = CountingProvider::new(index.embed.clone());
+    for degree in [256, 257] {
+        source.change(|m| {
+            // ROOT has only one incoming edge while its source has a large
+            // projection that must be validated in full, never truncated.
+            m.markdown = format!("[root](https://www.notion.so/{ROOT})\n");
+            for i in 1..degree {
+                // Distinct unresolved targets still consume projection budget;
+                // repeated links to one page are intentionally deduplicated.
+                m.markdown.push_str(&format!(
+                    "[other](https://www.notion.so/66666666-6666-6666-6666-{i:012x})\n"
+                ));
+            }
+            m.revision = format!("2026-10-10T12:00:{:02}Z", degree - 250);
+        });
+        handler
+            .refresh_page(
+                &PageId(PAGE.into()),
+                &PageId(ROOT.into()),
+                &format!("degree-{degree}"),
+                &provider,
+                index.lease.clone(),
+                clock(),
+            )
+            .await
+            .unwrap();
+        assert!(index.coordinator.current_body_links_complete(PAGE).unwrap());
+        assert_eq!(
+            index
+                .coordinator
+                .state()
+                .edges_to_bounded(ROOT, 1)
+                .unwrap()
+                .len(),
+            1
+        );
+        let graph = CommittedGraph::new(index.coordinator.clone());
+        let snapshot = graph.read_snapshot().unwrap().unwrap();
+        let writer = std::fs::File::open(&index.index).unwrap();
+        assert!(matches!(
+            writer.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        let result = snapshot.edges_to_bounded(ROOT, 1);
+        if degree == 256 {
+            assert_eq!(result.unwrap().len(), 1);
+            assert_eq!(snapshot.edges_from_bounded(PAGE, 256).unwrap().len(), 256);
+        } else {
+            assert!(result.is_err());
+            assert!(snapshot.edges_from_bounded(PAGE, 256).is_err());
+        }
+        drop(snapshot);
+        assert!(writer.try_lock().is_ok());
+    }
+}
