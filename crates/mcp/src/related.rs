@@ -135,10 +135,10 @@ pub async fn navigate(
             continue;
         }
         let outgoing = graph
-            .edges_from(&current)
+            .edges_from_bounded(&current, MAX_FANOUT)
             .map_err(|_| RelatedError::Unavailable)?;
         let incoming = graph
-            .edges_to(&current)
+            .edges_to_bounded(&current, MAX_FANOUT.saturating_sub(outgoing.len()))
             .map_err(|_| RelatedError::Unavailable)?;
         if outgoing.len().saturating_add(incoming.len()) > MAX_FANOUT {
             return Err(RelatedError::Unavailable);

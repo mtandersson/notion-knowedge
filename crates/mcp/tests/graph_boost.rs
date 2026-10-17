@@ -91,6 +91,24 @@ impl GraphEdgeStore for GraphFixture {
         self.reads.fetch_add(1, Ordering::SeqCst);
         Ok(vec![])
     }
+    fn edges_from_bounded(
+        &self,
+        page: &str,
+        limit: usize,
+    ) -> Result<Vec<GraphEdge>, SyncStateError> {
+        let edges = self.edges_from(page)?;
+        if edges.len() > limit {
+            return Err(SyncStateError::Unavailable);
+        }
+        Ok(edges)
+    }
+    fn edges_to_bounded(&self, page: &str, limit: usize) -> Result<Vec<GraphEdge>, SyncStateError> {
+        let edges = self.edges_to(page)?;
+        if edges.len() > limit {
+            return Err(SyncStateError::Unavailable);
+        }
+        Ok(edges)
+    }
 }
 
 async fn exchange(handler: KnowledgeServer) -> Value {

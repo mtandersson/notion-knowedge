@@ -125,4 +125,16 @@ pub trait GraphEdgeStore: Send + Sync {
 
     /// Only resolved targets can be queried as authoritative graph nodes.
     fn edges_to(&self, target_page_id: &str) -> Result<Vec<GraphEdge>, SyncStateError>;
+    /// Read at most `limit` edges, rejecting overflow without partial evidence.
+    /// Implementations must bound storage consumption to limit plus one sentinel
+    /// before allocating edges or validating their source projections. Adapters
+    /// without bounded reads fail closed rather than falling back to full reads.
+    fn edges_from_bounded(&self, _: &str, _: usize) -> Result<Vec<GraphEdge>, SyncStateError> {
+        Err(SyncStateError::Unavailable)
+    }
+
+    /// Incoming equivalent of `edges_from_bounded`; zero permits only no edges.
+    fn edges_to_bounded(&self, _: &str, _: usize) -> Result<Vec<GraphEdge>, SyncStateError> {
+        Err(SyncStateError::Unavailable)
+    }
 }

@@ -100,6 +100,24 @@ impl GraphEdgeStore for GraphFixture {
             .cloned()
             .collect())
     }
+    fn edges_from_bounded(
+        &self,
+        page: &str,
+        limit: usize,
+    ) -> Result<Vec<GraphEdge>, SyncStateError> {
+        let edges = self.edges_from(page)?;
+        if edges.len() > limit {
+            return Err(SyncStateError::Unavailable);
+        }
+        Ok(edges)
+    }
+    fn edges_to_bounded(&self, page: &str, limit: usize) -> Result<Vec<GraphEdge>, SyncStateError> {
+        let edges = self.edges_to(page)?;
+        if edges.len() > limit {
+            return Err(SyncStateError::Unavailable);
+        }
+        Ok(edges)
+    }
 }
 fn on(max_hops: usize, weight: f64, candidate_limit: usize) -> GraphBoostConfig {
     GraphBoostConfig {
