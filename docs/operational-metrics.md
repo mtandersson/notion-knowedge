@@ -1,6 +1,6 @@
 # Operational Prometheus metrics (#107)
 
-The HTTP server exposes `GET /metrics` in Prometheus text format (0.0.4). This endpoint uses **the same host/origin guard and optional `NK_HEALTH_REQUIRES_BEARER` authentication as `/health`**, rather than the MCP authorization surface. Keep the scrape endpoint private to loopback or a trusted network, and configure a short scrape timeout.
+The HTTP server exposes `GET /metrics` in Prometheus text format (0.0.4). This endpoint uses **the same host/origin guard and optional `NK_HTTP_HEALTH_AUTH=bearer` authentication as `/health`**, rather than the MCP authorization surface. Keep the scrape endpoint private to loopback or a trusted network, and configure a short scrape timeout.
 
 Metrics are process-local, monotonic since startup unless explicitly described as gauges. No metric has user-controlled labels. Never add page IDs, workspace IDs, query text, credentials, request paths, signed URLs, correlation IDs or exception messages to metric labels.
 

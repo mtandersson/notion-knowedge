@@ -767,7 +767,10 @@ mod tests {
         let (release, wait) = std::sync::mpsc::channel();
         let (finished, done) = tokio::sync::oneshot::channel();
         let first_pool = pool.clone();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first_calls = calls.clone();
         let waiter = tokio::spawn(bounded_metrics_snapshot(first_pool, move || {
+            first_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             started.send(()).unwrap();
             wait.recv().unwrap();
             finished.send(()).unwrap();
@@ -777,11 +780,15 @@ mod tests {
         waiter.abort();
         assert!(waiter.await.unwrap_err().is_cancelled());
         for _ in 0..16 {
-            let result =
-                bounded_metrics_snapshot(pool.clone(), || panic!("rejected snapshot executed"))
-                    .await;
+            let rejected_calls = calls.clone();
+            let result = bounded_metrics_snapshot(pool.clone(), move || {
+                rejected_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                2
+            })
+            .await;
             assert!(result.is_err());
         }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         release.send(()).unwrap();
         done.await.unwrap();
         let recovered = tokio::time::timeout(Duration::from_secs(2), pool.acquire())

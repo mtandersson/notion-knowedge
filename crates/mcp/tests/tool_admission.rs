@@ -59,34 +59,39 @@ async fn exchange(handler: KnowledgeServer, name: &str) -> Value {
 
 #[tokio::test]
 async fn cloned_mcp_services_reject_mixed_tools_before_arguments_or_adapters_and_recover() {
-    let source = Arc::new(Status {
-        entered: Default::default(),
-        release: Default::default(),
-        calls: AtomicUsize::new(0),
-    });
-    let handler = KnowledgeServer::default()
-        .with_read_only(false)
-        .with_tool_capacity(1)
-        .and_sync_status(source.clone());
-    let first_handler = handler.clone();
-    let first = tokio::spawn(async move { exchange(first_handler, "knowledge_sync_status").await });
-    source.entered.notified().await;
-    for name in [
-        "knowledge_search",
-        "knowledge_get",
-        "knowledge_upload_file",
-        "knowledge_sync_status",
-    ] {
-        let result = exchange(handler.clone(), name).await;
-        assert_eq!(result["result"]["isError"], true, "{result}");
-        assert_eq!(
-            result["result"]["content"][0]["text"],
-            "tool_busy: retry later"
-        );
-    }
-    assert_eq!(source.calls.load(Ordering::SeqCst), 1);
-    source.release.notify_one();
-    assert!(first.await.unwrap()["error"].is_null());
-    assert!(exchange(handler, "knowledge_sync_status").await["error"].is_null());
-    assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let source = Arc::new(Status {
+            entered: Default::default(),
+            release: Default::default(),
+            calls: AtomicUsize::new(0),
+        });
+        let handler = KnowledgeServer::default()
+            .with_read_only(false)
+            .with_tool_capacity(1)
+            .and_sync_status(source.clone());
+        let first_handler = handler.clone();
+        let first =
+            tokio::spawn(async move { exchange(first_handler, "knowledge_sync_status").await });
+        source.entered.notified().await;
+        for name in [
+            "knowledge_search",
+            "knowledge_get",
+            "knowledge_upload_file",
+            "knowledge_sync_status",
+        ] {
+            let result = exchange(handler.clone(), name).await;
+            assert_eq!(result["result"]["isError"], true, "{result}");
+            assert_eq!(
+                result["result"]["content"][0]["text"],
+                "tool_busy: retry later"
+            );
+        }
+        assert_eq!(source.calls.load(Ordering::SeqCst), 1);
+        source.release.notify_one();
+        assert!(first.await.unwrap()["error"].is_null());
+        assert!(exchange(handler, "knowledge_sync_status").await["error"].is_null());
+        assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+    })
+    .await
+    .expect("MCP admission contract must complete within its deadline");
 }

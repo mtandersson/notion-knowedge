@@ -335,6 +335,17 @@ mod tests {
             })
         }
     }
+    // Unwinding a failed cancellation assertion must also release the actual
+    // blocking fixture, otherwise the Tokio runtime would wait forever.
+    struct ReleaseOnDrop(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            let (lock, wake) = &*self.0;
+            *lock.lock().unwrap() = true;
+            wake.notify_all();
+        }
+    }
+
     struct BlockingSink {
         started: tokio::sync::Notify,
         release: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
@@ -368,6 +379,7 @@ mod tests {
             started: Default::default(),
             release: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
         });
+        let _cleanup = ReleaseOnDrop(sink.release.clone());
         let pool = Arc::new(Semaphore::new(1));
         let endpoint = Endpoint {
             config: Arc::new(verified()),
@@ -384,12 +396,19 @@ mod tests {
         let first_endpoint = endpoint.clone();
         let first_request = request();
         let waiter = tokio::spawn(receive(State(first_endpoint), first_request));
-        sink.started.notified().await;
+        tokio::time::timeout(Duration::from_secs(5), sink.started.notified())
+            .await
+            .unwrap();
         waiter.abort();
         assert!(waiter.await.unwrap_err().is_cancelled());
         for _ in 0..16 {
             assert_eq!(
-                receive(State(endpoint.clone()), request()).await,
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    receive(State(endpoint.clone()), request())
+                )
+                .await
+                .unwrap(),
                 StatusCode::SERVICE_UNAVAILABLE
             );
         }
