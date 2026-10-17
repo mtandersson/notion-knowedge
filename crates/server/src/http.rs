@@ -45,10 +45,18 @@ pub(crate) fn mcp_transport(
     login: Option<Arc<crate::oauth_authorize::Login>>,
 ) -> axum::Router {
     let oauth = settings.oauth_discovery.as_ref();
-    let handler = if oauth.is_some() {
+    let handler = if oauth.is_some() && !handler.requires_request_scope() {
         notion_knowledge_mcp::KnowledgeServer::default()
     } else {
         handler
+    };
+    let content = if handler.requires_request_scope() {
+        settings
+            .notion_scope
+            .as_ref()
+            .and_then(|scope| login.as_ref()?.content_factory(scope.clone()))
+    } else {
+        None
     };
     let handler = if oauth.is_some() {
         handler.with_http_authorization_required()
@@ -94,6 +102,7 @@ pub(crate) fn mcp_transport(
                 sessions,
                 admission: Arc::new(Semaphore::new(settings.mcp_max_in_flight)),
                 metadata_url: discovery.protected_metadata_url(),
+                content,
             },
             crate::oauth_mcp::require_authorization,
         ))
@@ -169,6 +178,22 @@ pub async fn serve_installed(
         .map_err(|_| io::Error::other("Notion OAuth credential runtime unavailable"))?;
     let oauth_login = crate::oauth_authorize::Login::from_config(&settings, notion_oauth.as_ref())
         .map_err(|_| io::Error::other("Notion OAuth browser runtime unavailable"))?;
+    let handler = if settings.oauth_discovery.is_some() && settings.notion_scope.is_some() {
+        if notion_oauth.is_none() || oauth_login.is_none() {
+            return Err(io::Error::other("OAuth content authorization unavailable"));
+        }
+        let handler = notion_knowledge_mcp::KnowledgeServer::default().with_request_bound_content();
+        #[cfg(all(unix, feature = "webhook-worker"))]
+        let handler = crate::retrieval_runtime::configured_oauth(
+            crate::graph_runtime::attach_request(handler, &settings).map_err(io::Error::other)?,
+            &settings,
+        )
+        .await
+        .map_err(io::Error::other)?;
+        handler
+    } else {
+        handler
+    };
     let bind = settings.http_bind;
     let mut diagnostics = crate::diagnostics::bootstrap(&settings);
     let listener = tokio::net::TcpListener::bind(bind).await?;

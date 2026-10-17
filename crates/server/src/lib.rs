@@ -59,3 +59,5 @@ pub mod oauth_authorize;
 
 /// Installed OAuth MCP resource and exact-token session enforcement.
 mod oauth_mcp;
+
+mod oauth_content;

@@ -473,7 +473,17 @@ impl Config {
         let notion_scope = match (roots, workspace) {
             (None, None) => None,
             (Some(roots), Some(workspace)) => {
-                if !matches!(notion_auth, NotionAuth::Integration(_)) {
+                if oauth_discovery.is_some() {
+                    if !matches!(notion_auth, NotionAuth::None)
+                        || notion_oauth_callback.is_none()
+                        || notion_grant_store.is_none()
+                    {
+                        return Err(invalid(
+                            "NK_NOTION_AUTH",
+                            "OAuth scope requires complete OAuth grant configuration and no integration credentials",
+                        ));
+                    }
+                } else if !matches!(notion_auth, NotionAuth::Integration(_)) {
                     return Err(invalid(
                         "NK_NOTION_AUTH",
                         "integration required for authoritative scope",
@@ -491,6 +501,16 @@ impl Config {
                         "must be canonical page UUID",
                     )
                 })?;
+                if oauth_discovery.is_some()
+                    && notion_oauth_callback
+                        .as_ref()
+                        .is_none_or(|callback| callback.allowed.workspace_id() != workspace_id)
+                {
+                    return Err(invalid(
+                        "NK_NOTION_SCOPE_WORKSPACE_ID",
+                        "must match allowlisted OAuth workspace",
+                    ));
+                }
                 let root_ids: Option<Vec<_>> = roots
                     .split(',')
                     .map(|part| parse(part).map(notion_knowledge_core::backend::PageId))
@@ -827,6 +847,12 @@ impl Config {
                 ));
             }
         };
+        if oauth_discovery.is_some() && notion_scope.is_some() && oauth_client.is_none() {
+            return Err(invalid(
+                "NK_OAUTH_CLIENT_ID",
+                "registered client required for OAuth content",
+            ));
+        }
         Ok(Self {
             oauth_client,
             mcp_max_in_flight,

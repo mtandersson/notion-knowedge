@@ -46,6 +46,8 @@ fn map_refresh(error: RefreshError) -> CredentialError {
 pub struct NotionOAuthRuntime {
     coordinator: Arc<NotionRefresh<'static>>,
     store: Arc<GrantStore>,
+    #[cfg(test)]
+    read_fixture_port: Option<u16>,
 }
 impl fmt::Debug for NotionOAuthRuntime {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -72,6 +74,7 @@ impl NotionOAuthRuntime {
                     .with_test_clock(clock),
             ),
             store,
+            read_fixture_port: None,
         }
     }
 
@@ -109,7 +112,23 @@ impl NotionOAuthRuntime {
                 Arc::new(callback.allowed.clone()),
             )),
             store,
+            #[cfg(test)]
+            read_fixture_port: None,
         }))
+    }
+
+    pub(crate) fn read_client(&self, token: &str) -> Result<NotionClient, BackendError> {
+        let client = NotionClient::integration(token)?;
+        #[cfg(test)]
+        if let Some(port) = self.read_fixture_port {
+            return Ok(client.with_loopback_fixture(port));
+        }
+        Ok(client)
+    }
+    #[cfg(test)]
+    pub(crate) fn with_read_fixture(mut self, port: u16) -> Self {
+        self.read_fixture_port = Some(port);
+        self
     }
 
     /// Server-only live authorization evidence for the exact sealed grant.
@@ -219,6 +238,7 @@ mod tests {
         NotionOAuthRuntime {
             coordinator: Arc::new(NotionRefresh::shared(store.clone(), Arc::new(http), policy)),
             store,
+            read_fixture_port: None,
         }
     }
 

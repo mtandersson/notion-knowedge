@@ -12,6 +12,20 @@ pub(crate) fn attach(
     handler: KnowledgeServer,
     config: &Config,
 ) -> Result<KnowledgeServer, &'static str> {
+    attach_mode(handler, config, false)
+}
+
+pub(crate) fn attach_request(
+    handler: KnowledgeServer,
+    config: &Config,
+) -> Result<KnowledgeServer, &'static str> {
+    attach_mode(handler, config, true)
+}
+fn attach_mode(
+    handler: KnowledgeServer,
+    config: &Config,
+    request_bound: bool,
+) -> Result<KnowledgeServer, &'static str> {
     let Some(index) = &config.graph_index else {
         return Ok(handler);
     };
@@ -38,7 +52,12 @@ pub(crate) fn attach(
     .map_err(|_| "graph binding invalid")?;
     let coordinator = IndexCommitCoordinator::open_read_only(index, state, binding)
         .map_err(|_| "graph state unavailable or incompatible")?;
-    handler
-        .with_root_page_ids(scope.roots.iter().map(|root| root.0.clone()).collect())?
-        .and_related_graph(Arc::new(CommittedGraph::new(coordinator)))
+    let handler =
+        handler.with_root_page_ids(scope.roots.iter().map(|root| root.0.clone()).collect())?;
+    let graph = Arc::new(CommittedGraph::new(coordinator));
+    if request_bound {
+        Ok(handler.and_request_graph(graph, config.graph_boost))
+    } else {
+        handler.and_related_graph(graph)
+    }
 }
