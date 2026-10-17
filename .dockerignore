@@ -7,6 +7,8 @@
 !crates/**/
 !crates/**/Cargo.toml
 !crates/**/*.rs
+!vendor/
+!vendor/**
 # Never allow common credential files, even inside an otherwise allowed tree.
 **/.env*
 **/*.pem
