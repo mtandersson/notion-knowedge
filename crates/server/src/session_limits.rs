@@ -25,6 +25,7 @@ use axum::{
 };
 use futures::{Stream, StreamExt};
 use http_body::{Body as HttpBody, Frame, SizeHint};
+use notion_knowledge_core::metrics::{Resource, ResourceLease};
 use rmcp::{
     model::{ClientJsonRpcMessage, ServerJsonRpcMessage},
     transport::streamable_http_server::session::{
@@ -34,6 +35,7 @@ use rmcp::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 struct Entry {
+    _metric: ResourceLease,
     _permit: OwnedSemaphorePermit,
     last_seen: Instant,
     active_streams: usize,
@@ -186,6 +188,7 @@ impl SessionManager for BoundedSessions {
             id.clone(),
             Entry {
                 _permit: permit,
+                _metric: Resource::Session.enter(1),
                 last_seen: Instant::now(),
                 active_streams: 0,
             },
@@ -311,8 +314,10 @@ pub(crate) async fn limit_stream_responses(
         return next.run(request).await;
     }
     let Ok(permit) = budget.permits.clone().try_acquire_owned() else {
+        Resource::Stream.reject();
         return overload();
     };
+    let metric = Resource::Stream.enter(1);
     let response = next.run(request).await;
     let streaming = response.headers().get(CONTENT_TYPE).is_some_and(|v| {
         v.to_str()
@@ -328,6 +333,7 @@ pub(crate) async fn limit_stream_responses(
         Body::new(BoundedBody {
             inner: body,
             permit: Some(permit),
+            metric: Some(metric),
             deadline: Box::pin(tokio::time::sleep(budget.max_age)),
             finished: false,
         }),
@@ -351,6 +357,7 @@ pub(crate) fn overload() -> Response {
 struct BoundedBody {
     inner: Body,
     permit: Option<OwnedSemaphorePermit>,
+    metric: Option<ResourceLease>,
     deadline: Pin<Box<tokio::time::Sleep>>,
     finished: bool,
 }
@@ -366,12 +373,14 @@ impl HttpBody for BoundedBody {
         }
         if self.deadline.as_mut().poll(cx).is_ready() {
             self.inner = Body::empty();
+            self.metric.take();
             self.permit.take();
             self.finished = true;
             return Poll::Ready(None);
         }
         let frame = Pin::new(&mut self.inner).poll_frame(cx);
         if matches!(&frame, Poll::Ready(None)) {
+            self.metric.take();
             self.permit.take();
             self.finished = true;
         }

@@ -154,11 +154,14 @@ async fn receive(State(endpoint): State<Endpoint>, request: Request) -> StatusCo
     // Own admission through actual backend completion, even when a client
     // disconnects or stops waiting. Never queue or replay a durable receipt.
     let Ok(permit) = endpoint.limit.clone().try_acquire_owned() else {
+        notion_knowledge_core::metrics::Resource::WebhookRequest.reject();
         return StatusCode::SERVICE_UNAVAILABLE;
     };
     let correlation = logging::current_id();
+    let metric = notion_knowledge_core::metrics::Resource::WebhookRequest.enter(1);
     let task = tokio::spawn(logging::scope(correlation, async move {
         let _permit = permit;
+        let _metric = metric;
         receive_admitted(endpoint, request).await
     }));
     // Body input has its own 10s deadline. The response waiter is bounded,
@@ -332,6 +335,17 @@ mod tests {
             })
         }
     }
+    // Unwinding a failed cancellation assertion must also release the actual
+    // blocking fixture, otherwise the Tokio runtime would wait forever.
+    struct ReleaseOnDrop(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            let (lock, wake) = &*self.0;
+            *lock.lock().unwrap() = true;
+            wake.notify_all();
+        }
+    }
+
     struct BlockingSink {
         started: tokio::sync::Notify,
         release: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
@@ -365,6 +379,7 @@ mod tests {
             started: Default::default(),
             release: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
         });
+        let _cleanup = ReleaseOnDrop(sink.release.clone());
         let pool = Arc::new(Semaphore::new(1));
         let endpoint = Endpoint {
             config: Arc::new(verified()),
@@ -381,12 +396,19 @@ mod tests {
         let first_endpoint = endpoint.clone();
         let first_request = request();
         let waiter = tokio::spawn(receive(State(first_endpoint), first_request));
-        sink.started.notified().await;
+        tokio::time::timeout(Duration::from_secs(5), sink.started.notified())
+            .await
+            .unwrap();
         waiter.abort();
         assert!(waiter.await.unwrap_err().is_cancelled());
         for _ in 0..16 {
             assert_eq!(
-                receive(State(endpoint.clone()), request()).await,
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    receive(State(endpoint.clone()), request())
+                )
+                .await
+                .unwrap(),
                 StatusCode::SERVICE_UNAVAILABLE
             );
         }

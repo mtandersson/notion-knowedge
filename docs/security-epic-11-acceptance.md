@@ -17,17 +17,27 @@ The original #84–#93 native subissues are **closed**, but closing them is not 
 | [#90](https://github.com/mtandersson/notion-knowedge/issues/90) Privacy-aware audit | [event contract](../crates/core/src/audit.rs), [durable SQLite](../crates/retrieval/src/audit.rs), [installed runtime](../crates/server/src/file_ingestion.rs) | Audit module tests; [installed HTTP/stdio ingestion tests](../crates/server/src/http/ingestion_tests.rs) include partial, failed and indeterminate/cancelled outcomes | **Installed for file ingestion**, not all future Notion page writes. Durable audit is not an atomic transaction with Notion. |
 | [#91](https://github.com/mtandersson/notion-knowedge/issues/91) Threat model | [threat-model.md](threat-model.md), [OAuth trust model](oauth-trust-model.md) | Updated boundary/mitigation links and this review; each concrete control cites its own negative-path tests | Documentation/design control, not an automated behavior test. Re-review architecture changes and explicitly accept residual risks at release. |
 | [#92](https://github.com/mtandersson/notion-knowedge/issues/92) Dependency and secret scanning | [CI](../.github/workflows/ci.yml), [security scripts](../scripts/check-dependencies.sh), [secret scan](../scripts/check-secrets.sh) | [scanner failure-path tests](../scripts/test-security-scanning.py); [security guide](security-scanning.md) | CI catches known RustSec advisories and matching committed secrets; does not prove absence of unknown vulnerabilities or leaked runtime material. |
-| [#93](https://github.com/mtandersson/notion-knowedge/issues/93) Bounded payloads/results | [HTTP 4 MiB gate](../crates/server/src/http.rs), [64 KiB webhook gate](../crates/server/src/webhook.rs), [MCP 512 KiB tool budget](../crates/mcp/src/lib.rs) | [HTTP integration tests](../crates/server/tests/http.rs), [MCP search/get tests](../crates/mcp/tests/search_adapter.rs), [webhook integration tests](../crates/server/tests/http.rs) | Per-payload/result bounds are installed; **global session/concurrency/time/resource limits remain #396**. |
+| [#93](https://github.com/mtandersson/notion-knowedge/issues/93) Bounded payloads/results | [HTTP 4 MiB gate](../crates/server/src/http.rs), [64 KiB webhook gate](../crates/server/src/webhook.rs), [MCP 512 KiB tool budget](../crates/mcp/src/lib.rs) | [HTTP integration tests](../crates/server/tests/http.rs), [MCP search/get tests](../crates/mcp/tests/search_adapter.rs), [webhook integration tests](../crates/server/tests/http.rs) | Per-payload/result bounds are installed; **process-local session/concurrency controls now have [integrated load evidence](security-resource-acceptance.md)**; deployed OS/proxy containment remains #416. |
 
 ## Effective activation envelope
 
 - **Default:** read-only stdio/HTTP tool catalog with retrieval unavailable until explicitly installed. A loopback address, Host/Origin checks and an MCP session ID are **not** client authentication or public-data authorization.
 - **Trusted local reads:** explicitly installed [retrieval](installed-retrieval.md) and scoped [related navigation](knowledge-related.md) require authenticated operator integration credentials and fresh root checks. `knowledge_sync_status` exposes bounded operational metadata, not page bodies.
 - **Trusted local file writes:** explicit `NK_READ_ONLY=false`, `NK_FILE_INGESTION=true`, valid scope/source/audit settings and trusted stdio or **authenticated loopback bearer HTTP**. Source download, native attach/readback and minimized durable audit run in the [installed ingestion flow](installed-file-ingestion.md). This does not authorize arbitrary page mutations.
-- **Not installed for production:** remote ChatGPT OAuth/token identity binding under [#117](https://github.com/mtandersson/notion-knowedge/issues/117); live disposable Notion root smoke under [#110](https://github.com/mtandersson/notion-knowedge/issues/110); cumulative session/concurrency/resource hardening under [#396](https://github.com/mtandersson/notion-knowedge/issues/396).
+- **Not installed for production:** remote ChatGPT OAuth/token identity binding under [#117](https://github.com/mtandersson/notion-knowedge/issues/117); live disposable Notion root smoke under [#110](https://github.com/mtandersson/notion-knowedge/issues/110); deployed OS/proxy resource containment under [#416](https://github.com/mtandersson/notion-knowedge/issues/416). Process-local admission is covered by [the resource acceptance gates](security-resource-acceptance.md).
 
 ## Closure and review notes
 
 The ten original children are closed and correspond to implemented components with negative-test references. Complete epic closure also depends on [documentation reconciliation #395](https://github.com/mtandersson/notion-knowedge/issues/395) and [concurrency hardening #396](https://github.com/mtandersson/notion-knowedge/issues/396). #110 and #117 are separate production-gate epics, not hidden uncompleted deliverables of #11.
 
 Documentation review must challenge stale claims, missing paths, authorization boundaries, test scope and future-work labeling. No unrelated source change, permission relaxation or simulated unit test should be introduced solely to make prose appear verified. Verify this PR's changed-files list and CI results before merge.
+
+## Resource acceptance follow-up (2026-10-17)
+
+The source-review snapshot above is historical. #397 installs HTTP/webhook
+admission; #398 installs session/idle/SSE controls; #399 installs weighted shared
+tool work plus backend-owned status/webhook work after caller cancellation.
+#400 supplies [the integrated load/metric and operator inventory](security-resource-acceptance.md).
+Those tests complement the original component negative tests; they do not
+claim a live Notion smoke, production OAuth or OS isolation. Deployment quotas
+are explicitly tracked under #416/#13, while #110/#117 retain their scopes.

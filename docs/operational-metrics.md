@@ -1,6 +1,6 @@
 # Operational Prometheus metrics (#107)
 
-The HTTP server exposes `GET /metrics` in Prometheus text format (0.0.4). This endpoint uses **the same host/origin guard and optional `NK_HEALTH_REQUIRES_BEARER` authentication as `/health`**, rather than the MCP authorization surface. Keep the scrape endpoint private to loopback or a trusted network, and configure a short scrape timeout.
+The HTTP server exposes `GET /metrics` in Prometheus text format (0.0.4). This endpoint uses **the same host/origin guard and optional `NK_HTTP_HEALTH_AUTH=bearer` authentication as `/health`**, rather than the MCP authorization surface. Keep the scrape endpoint private to loopback or a trusted network, and configure a short scrape timeout.
 
 Metrics are process-local, monotonic since startup unless explicitly described as gauges. No metric has user-controlled labels. Never add page IDs, workspace IDs, query text, credentials, request paths, signed URLs, correlation IDs or exception messages to metric labels.
 
@@ -13,3 +13,24 @@ Metrics are process-local, monotonic since startup unless explicitly described a
 Histogram duration buckets are fixed at 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5 and 10 seconds, plus `+Inf`. No ephemeral per-user or per-request time series are produced. Alerts may use `rate(nk_http_requests_total{outcome="failed"}[5m])`, `rate(nk_notion_rate_limits_total[5m])` and `nk_webhook_oldest_outstanding_age_seconds` where the optional sample exists.
 
 Operational caveats: these metrics expose current server activity, not the full local-index architecture when adapters are absent; readiness remains separate. They are not a substitute for authentication or root authorization. The queue gauges require configured SQLite state and should not be interpreted as full-page indexing backlog across unrelated stores.
+
+Resource admission adds `nk_resource_active` and `nk_resource_peak` gauges and
+`nk_resource_rejected_total` counters. Fixed labels are `mcp_request`,
+`webhook_request`, `session`, `stream`, `tool_work`, `metrics_snapshot`; tool work counts weighted
+units, others count owners. Peaks and rejections reset at process restart.
+Stream counts include reservations during request dispatch, and backend webhook
+owners retain their count after caller timeout. See [resource acceptance](security-resource-acceptance.md)
+for load commands, tuning and deployment limitations.
+
+Tool-work gauges describe live handler permits. A cancelled sync-status caller
+can leave a bounded backend inspection running under its separate owner budget;
+that detached status work is not included in `tool_work`. A zero gauge alone is
+not evidence that the process has no backend work. Webhook ownership, in contrast,
+remains counted through durable completion after the HTTP waiter leaves.
+
+Operational SQLite metric snapshots have a separate process-wide capacity of
+one, with no queue. Their owned permit stays inside the blocking query after
+scrape cancellation. Concurrent snapshots receive fixed HTTP 503 with
+`Retry-After: 1` and `Cache-Control: no-store`; liveness and in-memory metrics
+without a configured store remain independent. This bound is intentionally
+fixed because the SQLite connection already serializes these aggregates.

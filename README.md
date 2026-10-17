@@ -107,7 +107,9 @@ read-only mode; an explicitly enabled [audited ingestion runtime](docs/installed
 can attach files through trusted stdio or authenticated loopback bearer HTTP.
 Ingestion has separate operator-owned file-count, size and time limits, plus
 bounded structured outcomes; it does not make remote ChatGPT OAuth available.
-[Session/concurrency resource limits remain separate work (#396)](https://github.com/mtandersson/notion-knowedge/issues/396).
+[Installed resource budgets and load acceptance](docs/security-resource-acceptance.md)
+cover process-local session, stream and tool admission; deployed host/proxy
+containment remains [#416](https://github.com/mtandersson/notion-knowedge/issues/416).
 
 `knowledge_get` optionally verifies authoritative content with `freshness: "fresh"`,
 using a configured read-only Notion backend after authorizing indexed references.
