@@ -172,3 +172,207 @@ async fn disconnected_logout_observer_cannot_abandon_session_cleanup_or_its_admi
     initialize(&h, &fresh).await;
     initialize(&h, &fresh).await;
 }
+
+async fn same_grant_token(h: &Harness) -> String {
+    let stored = h.store.load_for_refresh().unwrap().unwrap();
+    let pending = h
+        .login
+        .flow
+        .begin(&AuthorizationRequest {
+            response_type: "code",
+            client_id: "chatgpt",
+            redirect_uri: CLIENT_REDIRECT,
+            resource: "https://knowledge.example.com/mcp",
+            state: "second-client-state-123",
+            code_challenge: CHALLENGE,
+            code_challenge_method: "S256",
+            scope: "knowledge:read",
+        })
+        .unwrap();
+    let next = h
+        .login
+        .flow
+        .approve(
+            pending.expose(),
+            &ApprovedNotionGrant {
+                grant_id: stored.grant_id(),
+                epoch: stored.epoch(),
+                workspace_id: stored.workspace_id(),
+                owner_type: "user",
+                owner_user_id: stored.owner_user_id(),
+            },
+        )
+        .unwrap();
+    super::resource::redeem(h, next.code.expose()).await
+}
+
+#[tokio::test]
+async fn logout_revokes_only_the_exact_token_and_leaves_same_grant_peers_live() {
+    let h = Harness::installed(
+        grant("workspace-a", "user-a"),
+        StatusCode::OK,
+        Some((4, 4, 4)),
+        Duration::ZERO,
+    )
+    .await;
+    let first = mint(&h).await;
+    let second = same_grant_token(&h).await;
+    let (first_session, _) = initialize(&h, &first).await;
+    let (second_session, _) = initialize(&h, &second).await;
+    assert_eq!(
+        revoke(&h, &first).send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        rpc(
+            &h,
+            &first,
+            Some(&first_session),
+            json!({"jsonrpc":"2.0","id":2,"method":"ping"})
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = rpc(
+        &h,
+        &second,
+        Some(&second_session),
+        json!({"jsonrpc":"2.0","id":3,"method":"ping"}),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        super::resource::reply(response)
+            .await
+            .get("result")
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn revoked_token_cannot_complete_authorization_that_was_waiting_on_provider() {
+    let h = Harness::installed(
+        grant("workspace-a", "user-a"),
+        StatusCode::OK,
+        Some((4, 4, 4)),
+        Duration::ZERO,
+    )
+    .await;
+    let token = mint(&h).await;
+    let (session, _) = initialize(&h, &token).await;
+    let block = h.probe_gate.acquire().await.unwrap();
+    let before = h.probes.load(Ordering::SeqCst);
+    let request = rpc(
+        &h,
+        &token,
+        Some(&session),
+        json!({"jsonrpc":"2.0","id":4,"method":"tools/list"}),
+    );
+    let pending = tokio::spawn(async move { request.send().await.unwrap() });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while h.probes.load(Ordering::SeqCst) == before {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        revoke(&h, &token).send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    drop(block);
+    let response = pending.await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(!response.text().await.unwrap().contains(&token));
+}
+
+#[tokio::test]
+async fn logout_before_initialize_response_cannot_leave_an_unbound_sdk_worker() {
+    use axum::{Router, middleware, response::IntoResponse, routing::post};
+    use rmcp::transport::streamable_http_server::session::SessionManager;
+    let h = Harness::installed(
+        grant("workspace-a", "user-a"),
+        StatusCode::OK,
+        Some((4, 4, 4)),
+        Duration::ZERO,
+    )
+    .await;
+    let token = mint(&h).await;
+    let sessions = Arc::new(crate::session_limits::BoundedSessions::new(
+        1,
+        Duration::from_secs(60),
+    ));
+    h.login.attach_sessions(&sessions);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Semaphore::new(0));
+    let gate = crate::oauth_mcp::ResourceGate {
+        login: Some(h.login.clone()),
+        sessions: sessions.clone(),
+        admission: Arc::new(tokio::sync::Semaphore::new(4)),
+        metadata_url: "https://knowledge.example.com/.well-known/oauth-protected-resource/mcp"
+            .into(),
+        content: None,
+    };
+    let app = Router::new()
+        .route(
+            "/mcp",
+            post({
+                let sessions = sessions.clone();
+                let entered = entered.clone();
+                let resume = resume.clone();
+                move || {
+                    let sessions = sessions.clone();
+                    let entered = entered.clone();
+                    let resume = resume.clone();
+                    async move {
+                        // Hold the SDK response at the exact allocation -> middleware-bind boundary.
+                        let (id, _transport) = sessions.create_session().await.unwrap();
+                        entered.notify_one();
+                        let _release = resume.acquire().await.unwrap();
+                        (
+                            StatusCode::OK,
+                            [("mcp-session-id", id.to_string())],
+                            "initialized",
+                        )
+                            .into_response()
+                    }
+                }
+            }),
+        )
+        .layer(middleware::from_fn_with_state(
+            gate,
+            crate::oauth_mcp::require_authorization,
+        ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let request = h
+        .client
+        .post(format!("http://{address}/mcp"))
+        .bearer_auth(&token);
+    let pending = tokio::spawn(async move { request.send().await.unwrap() });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    assert!(!sessions.has_capacity());
+    assert_eq!(
+        revoke(&h, &token).send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    resume.add_permits(1);
+    let denied = pending.await.unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    assert!(!denied.headers().contains_key("mcp-session-id"));
+    assert!(
+        sessions.has_capacity(),
+        "late initialization must close its orphan and release capacity"
+    );
+    server.abort();
+}
