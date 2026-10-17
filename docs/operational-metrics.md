@@ -16,7 +16,7 @@ Operational caveats: these metrics expose current server activity, not the full 
 
 Resource admission adds `nk_resource_active` and `nk_resource_peak` gauges and
 `nk_resource_rejected_total` counters. Fixed labels are `mcp_request`,
-`webhook_request`, `session`, `stream`, `tool_work`; tool work counts weighted
+`webhook_request`, `session`, `stream`, `tool_work`, `metrics_snapshot`; tool work counts weighted
 units, others count owners. Peaks and rejections reset at process restart.
 Stream counts include reservations during request dispatch, and backend webhook
 owners retain their count after caller timeout. See [resource acceptance](security-resource-acceptance.md)
@@ -27,3 +27,10 @@ can leave a bounded backend inspection running under its separate owner budget;
 that detached status work is not included in `tool_work`. A zero gauge alone is
 not evidence that the process has no backend work. Webhook ownership, in contrast,
 remains counted through durable completion after the HTTP waiter leaves.
+
+Operational SQLite metric snapshots have a separate process-wide capacity of
+one, with no queue. Their owned permit stays inside the blocking query after
+scrape cancellation. Concurrent snapshots receive fixed HTTP 503 with
+`Retry-After: 1` and `Cache-Control: no-store`; liveness and in-memory metrics
+without a configured store remain independent. This bound is intentionally
+fixed because the SQLite connection already serializes these aggregates.

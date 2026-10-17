@@ -634,6 +634,31 @@ async fn health_response(State(diagnostics): State<crate::diagnostics::Diagnosti
         .into_response()
 }
 
+/// Separate management budget: SQLite snapshots serialize on one connection,
+/// so admitting more blocking waiters only increases contention and memory.
+fn metrics_snapshot_pool() -> Arc<Semaphore> {
+    static POOL: std::sync::OnceLock<Arc<Semaphore>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| Arc::new(Semaphore::new(1))).clone()
+}
+
+async fn bounded_metrics_snapshot<T: Send + 'static>(
+    pool: Arc<Semaphore>,
+    snapshot: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, ()> {
+    use notion_knowledge_core::metrics::Resource;
+    let permit = pool.try_acquire_owned().map_err(|_| {
+        Resource::MetricsSnapshot.reject();
+    })?;
+    let metric = Resource::MetricsSnapshot.enter(1);
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let _metric = metric;
+        snapshot()
+    })
+    .await
+    .map_err(|_| ())
+}
+
 /// Prometheus metrics share the health endpoint's host/origin and optional bearer gates.
 async fn metrics_response(State(diagnostics): State<crate::diagnostics::Diagnostics>) -> Response {
     let mut output = notion_knowledge_core::metrics::render();
@@ -642,10 +667,14 @@ async fn metrics_response(State(diagnostics): State<crate::diagnostics::Diagnost
             .duration_since(std::time::UNIX_EPOCH)
             .map(|value| i64::try_from(value.as_secs()).unwrap_or(i64::MAX))
             .unwrap_or(0);
-        let snapshot = tokio::task::spawn_blocking(move || store.operational_metrics(now)).await;
+        let snapshot = bounded_metrics_snapshot(metrics_snapshot_pool(), move || {
+            store.operational_metrics(now)
+        })
+        .await;
         let Ok(Ok(snapshot)) = snapshot else {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
+                [(CACHE_CONTROL, "no-store"), (RETRY_AFTER, "1")],
                 "Operational state unavailable",
             )
                 .into_response();
@@ -729,6 +758,38 @@ mod tests {
                 DependencyState::Unavailable
             }
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_metrics_waiter_keeps_backend_slot_until_snapshot_finishes() {
+        let pool = Arc::new(Semaphore::new(1));
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let (finished, done) = tokio::sync::oneshot::channel();
+        let first_pool = pool.clone();
+        let waiter = tokio::spawn(bounded_metrics_snapshot(first_pool, move || {
+            started.send(()).unwrap();
+            wait.recv().unwrap();
+            finished.send(()).unwrap();
+            1
+        }));
+        ready.await.unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        for _ in 0..16 {
+            let result =
+                bounded_metrics_snapshot(pool.clone(), || panic!("rejected snapshot executed"))
+                    .await;
+            assert!(result.is_err());
+        }
+        release.send(()).unwrap();
+        done.await.unwrap();
+        let recovered = tokio::time::timeout(Duration::from_secs(2), pool.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(recovered);
+        assert_eq!(bounded_metrics_snapshot(pool, || 2).await, Ok(2));
     }
 
     #[tokio::test]

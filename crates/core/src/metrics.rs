@@ -50,7 +50,7 @@ struct Metrics {
     webhook_counts: [AtomicU64; 3],
     index_counts: [AtomicU64; 3],
     last_index_commit_seconds: AtomicU64,
-    resources: [ResourceMetrics; 5],
+    resources: [ResourceMetrics; 6],
 }
 
 /// Fixed resource classes; never derive labels from request data.
@@ -61,6 +61,7 @@ pub enum Resource {
     Session,
     Stream,
     ToolWork,
+    MetricsSnapshot,
 }
 
 #[derive(Default)]
@@ -338,6 +339,7 @@ pub fn render() -> String {
             "session",
             "stream",
             "tool_work",
+            "metrics_snapshot",
         ]
         .iter()
         .enumerate()

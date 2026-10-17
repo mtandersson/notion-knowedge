@@ -12,6 +12,7 @@ no remote authorization.
 | HTTP session initialize/continue/DELETE | 32 SDK sessions, 300s idle; DELETE releases worker | `tests/session_bounds.rs` |
 | GET/SSE/reconnect and POST responses | 16 response slots, 300s hard age; body owns slot through disconnect/EOF | `tests/session_bounds.rs` |
 | HTTP and trusted stdio tools | 16 weighted units; status 1, get 2, graph 3, search 4, upload 8; zero queue | MCP `tests/tool_admission.rs`, `src/tool_budget.rs` |
+| Operational metrics | independent one-slot SQLite snapshot budget; owner retained through blocking completion after scrape cancellation | server `http::tests::cancelled_metrics_waiter_keeps_backend_slot_until_snapshot_finishes` |
 | Cancelled status inspection | backend task owns separate capacity through blocking SQLite/index completion | server `sync_status::tests` |
 | Webhook ingress | independent 4 slots; 64 KiB, 10s input deadline; bounded owner retains capacity through receipt/setup publication after cancellation or 20s response timeout | server `webhook::tests`, `tests/admission.rs` |
 | Retrieval and graph | calls share tool units; graph depth <=2, result <=100, fanout <=256; Qwen model permit remains inside blocking inference | MCP related tests; retrieval Qwen tests |
@@ -59,7 +60,7 @@ representative data. Changing settings requires a restart.
 
 `nk_resource_active`, `nk_resource_peak`, and `nk_resource_rejected_total`
 have only the fixed `resource` labels `mcp_request`, `webhook_request`,
-`session`, `stream`, `tool_work`. Tool values count weighted units; other values
+`session`, `stream`, `tool_work`, `metrics_snapshot`. Tool values count weighted units; other values
 count owners. Stream ownership includes pending dispatch reserved for a response,
 not just SSE bodies. Peaks/rejections reset on restart; scrapes are concurrent
 snapshots, not transactionally aligned across series. Alert on sustained rejects
@@ -90,3 +91,10 @@ For an initial local fixture deployment, CPU 2, memory 4 GiB, 256 PIDs,
 ceilings **without a loaded model**; they are not validated production sizing.
 Production Qwen/index workloads need measured larger limits. Keep the development
 Compose loopback-only; resource quotas alone do not make OAuth available.
+
+Operational SQLite metric snapshots have a separate process-wide capacity of
+one, with no queue. Their owned permit stays inside the blocking query after
+scrape cancellation. Concurrent snapshots receive fixed HTTP 503 with
+`Retry-After: 1` and `Cache-Control: no-store`; liveness and in-memory metrics
+without a configured store remain independent. This bound is intentionally
+fixed because the SQLite connection already serializes these aggregates.
