@@ -409,3 +409,67 @@ async fn callback_rejects_query_ambiguity_and_host_spoofing_before_provider_io()
         StatusCode::FOUND
     );
 }
+
+#[tokio::test]
+async fn failed_sealed_commit_never_returns_an_mcp_authorization_code() {
+    let h = Harness::new(grant("workspace-a", "user-a"), StatusCode::OK).await;
+    let (callback, cookie) = h.begin().await;
+    // Corrupt state after startup: callback must not overwrite unknown state.
+    let state_path = h._dir.path().join("grant");
+    fs::write(&state_path, b"corrupt-state").unwrap();
+    fs::set_permissions(&state_path, fs::Permissions::from_mode(0o600)).unwrap();
+    let response = h
+        .client
+        .get(callback)
+        .header(header::COOKIE, cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(!response.headers().contains_key(header::LOCATION));
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fs::read(state_path).unwrap(), b"corrupt-state");
+}
+
+#[tokio::test]
+async fn concurrent_callback_replay_can_exchange_and_commit_at_most_once() {
+    let h = Harness::new(grant("workspace-a", "user-a"), StatusCode::OK).await;
+    let (callback, cookie) = h.begin().await;
+    let a = h.client.get(&callback).header(header::COOKIE, &cookie);
+    let b = h.client.get(&callback).header(header::COOKIE, &cookie);
+    let (a, b) = tokio::join!(a.send(), b.send());
+    let mut statuses = [a.unwrap().status().as_u16(), b.unwrap().status().as_u16()];
+    statuses.sort();
+    assert_eq!(statuses, [302, 400]);
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(h.store.load().unwrap().unwrap().epoch(), 1);
+}
+
+#[tokio::test]
+async fn provider_consent_denial_consumes_state_without_exchanging_credentials() {
+    let h = Harness::new(grant("workspace-a", "user-a"), StatusCode::OK).await;
+    let (callback, cookie) = h.begin().await;
+    let denied = callback.replace(
+        "code=provider-code",
+        "error=access_denied&error_description=provider-secret",
+    );
+    let response = h
+        .client
+        .get(denied)
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(!response.text().await.unwrap().contains("provider-secret"));
+    let replay = h
+        .client
+        .get(callback)
+        .header(header::COOKIE, cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+    assert!(h.store.load().unwrap().is_none());
+}
