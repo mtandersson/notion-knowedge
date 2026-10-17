@@ -10,8 +10,13 @@
 > revocation storage are not implemented. Read the lifecycle requirements below
 > in that scope, rather than as a claim of multi-process durable token storage.
 
-
-**Status:** security design for [#118](https://github.com/mtandersson/notion-knowedge/issues/118), 2026-10-09. **Not implemented.** This is a contract for the child tickets in [#117](https://github.com/mtandersson/notion-knowedge/issues/117), not permission to enable remote/private access. Review with [the threat model](threat-model.md) and [ADR 0001](adr/0001-runtime-and-component-boundaries.md). The current bootstrap has no authenticated MCP application principal; `NK_NOTION_AUTH=integration` and its get-self probe are **not** a production OAuth grant.
+**Status:** original [#118](https://github.com/mtandersson/notion-knowedge/issues/118)
+design contract, written 2026-10-09. Its one-person, single-process OAuth flow,
+identity binding and local revocation are installed. The implementation and
+operating limits are described in [production setup](oauth-production-setup.md),
+[the threat model](threat-model.md) and [ADR 0001](adr/0001-runtime-and-component-boundaries.md).
+`NK_NOTION_AUTH=integration` and its bot-identity probe remain a separate trusted
+operator mode; they do not establish the authorizing Notion person's approval.
 
 ## Principals and separate trust boundaries
 

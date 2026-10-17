@@ -132,8 +132,9 @@ The [encrypted Notion OAuth grant store](docs/notion-grant-store.md) is an
 opt-in, operator-controlled AES-256-GCM file with a separate 32-byte key file.
 Configure `NK_NOTION_GRANT_KEY_FILE` and `NK_NOTION_GRANT_STATE_FILE` as a
 pair alongside the full callback identity settings. Startup rejects corrupt or wrong-owner state rather than enabling login;
-expired credentials require refresh before use. The store is still
-**not** an active source of MCP authentication or permission.
+expired credentials require refresh before use. Resource authorization combines
+the sealed grant with live Notion verification, the bound MCP token and the
+configured content scope. Sealed storage alone authenticates no caller.
 
 [Server-only Notion token refresh](docs/notion-oauth-refresh.md) now uses the
 same confidential Notion client, immutable owner/workspace check and the sealed
