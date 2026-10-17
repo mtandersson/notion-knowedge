@@ -3,8 +3,12 @@
 use crate::{NotionClient, pages, writes::MARKDOWN_VERSION};
 use notion_knowledge_core::{
     backend::{BackendError, BackendErrorKind, PageId},
+    idempotency::{
+        MutationClaim, MutationOperation, Reservation, VerifiedReceipt, WriteIdempotencyStore,
+    },
     lifecycle::LifecycleScope,
     root_scope::{RootScopeGate, ScopeError},
+    write_refresh::{MutationRefreshQueue, RefreshKey, WriteCompletion, admit_verified},
 };
 use reqwest::header::AUTHORIZATION;
 use serde_json::{Value, json};
@@ -19,6 +23,7 @@ pub struct ScopedPageCreated {
     pub parent_page_id: PageId,
     pub url: String,
     pub verified: bool,
+    pub last_edited_time: String,
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +102,78 @@ fn verified_page(value: &Value, id: &PageId, parent: &PageId, url: &str, title: 
 }
 
 impl NotionClient {
+    /// Durable once-only creation plus independent local refresh admission.
+    /// A crash between verified ledger commit and queue admission is repaired
+    /// by replaying the same key; replay never issues another creation POST.
+    pub async fn create_scoped_page_once_and_refresh(
+        &self,
+        request: &ScopedPageCreateInput,
+        scope: &LifecycleScope,
+        ledger: &dyn WriteIdempotencyStore,
+        queue: &dyn MutationRefreshQueue,
+        idempotency_key: &str,
+    ) -> Result<WriteCompletion, BackendError> {
+        if !valid(request) {
+            return Err(err(CREATE, BackendErrorKind::InvalidInput));
+        }
+        let gate =
+            RootScopeGate::new(Arc::new(self.clone()), scope.clone()).map_err(scope_error)?;
+        gate.authorize(&request.parent_page_id)
+            .await
+            .map_err(scope_error)?;
+        let payload = serde_json::to_vec(
+            &json!({"title":request.title,"markdown":request.markdown,"icon":request.icon_emoji}),
+        )
+        .map_err(|_| err(CREATE, BackendErrorKind::InvalidInput))?;
+        let claim = MutationClaim::new(
+            &scope.workspace_id,
+            idempotency_key,
+            MutationOperation::CreatePage,
+            &request.parent_page_id.0,
+            &MutationClaim::payload_sha256(&payload),
+        )
+        .map_err(|_| err(CREATE, BackendErrorKind::InvalidInput))?;
+        let (receipt, replayed) = match ledger
+            .begin(&claim)
+            .map_err(|_| err(CREATE, BackendErrorKind::Conflict))?
+        {
+            Reservation::Replay(receipt) => {
+                let post = gate
+                    .authorize(&PageId(receipt.page_id.clone()))
+                    .await
+                    .map_err(scope_error)?;
+                gate.revalidate(&post, scope).await.map_err(scope_error)?;
+                (receipt, true)
+            }
+            Reservation::Reconcile => return Err(err(CREATE, BackendErrorKind::Conflict)),
+            Reservation::ExecuteOnce => {
+                ledger
+                    .mark_uncertain(&claim)
+                    .map_err(|_| err(CREATE, BackendErrorKind::Unavailable))?;
+                let created = self.create_scoped_page(request, scope).await?;
+                let receipt = VerifiedReceipt::from_readback(
+                    created.page_id.0,
+                    created.url,
+                    created.last_edited_time,
+                )
+                .map_err(|_| err(VERIFY, BackendErrorKind::Conflict))?;
+                ledger
+                    .record_verified(&claim, &receipt)
+                    .map_err(|_| err(VERIFY, BackendErrorKind::Unavailable))?;
+                (receipt, false)
+            }
+        };
+        Ok(admit_verified(
+            queue,
+            &RefreshKey {
+                workspace_id: scope.workspace_id.clone(),
+                mutation_digest: claim.key_digest().to_owned(),
+                page_id: receipt.page_id.clone(),
+            },
+            receipt,
+            replayed,
+        ))
+    }
     /// Only trusted server-owned `scope` may authorize the explicit parent.
     /// The physical parent ancestry is fetched and revalidated before POST.
     /// No uncertain POST is replayed, even if readback never materializes.
@@ -163,11 +240,25 @@ impl NotionClient {
                     let page: Value = serde_json::from_slice(&data)
                         .map_err(|_| err(VERIFY, BackendErrorKind::Internal))?;
                     if verified_page(&page, &id, &request.parent_page_id, &url, &request.title) {
+                        let content = self.read_content(&id.0).await?;
+                        if content.page.id != id
+                            || content.page.archived
+                            || content.page.url != url
+                            || content.page.title != request.title
+                            || content.markdown != request.markdown
+                        {
+                            return Err(err(VERIFY, BackendErrorKind::Conflict));
+                        }
+                        // The mutation changed the new page's revision. Fresh
+                        // physical authorization, not the parent's pre-write permit.
+                        let post = gate.authorize(&id).await.map_err(scope_error)?;
+                        gate.revalidate(&post, scope).await.map_err(scope_error)?;
                         return Ok(ScopedPageCreated {
                             page_id: id,
                             parent_page_id: request.parent_page_id.clone(),
                             url,
                             verified: true,
+                            last_edited_time: content.page.last_edited_time,
                         });
                     }
                 }
@@ -204,6 +295,40 @@ mod tests {
     fn receipt() -> Value {
         json!({"object":"page","id":CHILD,"url":format!("https://www.notion.so/{CHILD}"),
             "parent":{"type":"page_id","page_id":PARENT},"in_trash":false})
+    }
+    fn complete_read() -> Value {
+        let mut page = receipt();
+        page["last_edited_time"] = json!("2026-10-11T10:00:00Z");
+        page["properties"] =
+            json!({"title":{"id":"title","type":"title","title":[{"plain_text":"A new page"}]}});
+        page
+    }
+    fn child_chain() -> Vec<(String, u16, Value)> {
+        const ROOT: &str = "33333333-3333-3333-3333-333333333333";
+        vec![
+            (
+                format!("GET /v1/pages/{CHILD}"),
+                200,
+                node(CHILD, Some(PARENT)),
+            ),
+            (
+                format!("GET /v1/pages/{PARENT}"),
+                200,
+                node(PARENT, Some(ROOT)),
+            ),
+            (format!("GET /v1/pages/{ROOT}"), 200, node(ROOT, None)),
+            (format!("GET /v1/pages/{ROOT}"), 200, node(ROOT, None)),
+            (
+                format!("GET /v1/pages/{PARENT}"),
+                200,
+                node(PARENT, Some(ROOT)),
+            ),
+            (
+                format!("GET /v1/pages/{CHILD}"),
+                200,
+                node(CHILD, Some(PARENT)),
+            ),
+        ]
     }
     #[test]
     fn input_rejects_bad_parent_content_and_icons() {
@@ -341,7 +466,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scoped_create_verifies_explicit_parent_and_title_after_mutation() {
+    async fn scoped_create_verifies_complete_body_and_fresh_child_scope_after_mutation() {
         const ROOT: &str = "33333333-3333-3333-3333-333333333333";
         let mut steps = chain(ROOT);
         steps.extend(chain(ROOT));
@@ -349,15 +474,58 @@ mod tests {
         let mut read = receipt();
         read["properties"] = json!({"title":{"title":[{"plain_text":"A new page"}]}});
         steps.push((format!("GET /v1/pages/{CHILD}"), 200, read));
+        steps.push((format!("GET /v1/pages/{CHILD}"), 200, complete_read()));
+        steps.push((format!("GET /v1/pages/{CHILD}/markdown"),200,json!({"object":"page_markdown","id":CHILD,"markdown":"Body","truncated":false,"unknown_block_ids":[]})));
+        steps.extend(child_chain());
+        steps.extend(child_chain());
         let (client, task) = fixture(steps).await;
         let created = client.create_scoped_page(&input(), &scope()).await.unwrap();
         assert!(created.verified);
         assert_eq!(created.page_id.0, CHILD);
         assert_eq!(created.parent_page_id.0, PARENT);
         let calls = task.await.unwrap();
-        assert_eq!(calls.len(), 10);
+        assert_eq!(calls.len(), 24);
         assert_eq!(calls[8].1["icon"]["emoji"], "📄");
         assert_eq!(calls[8].1["markdown"], "Body");
+    }
+
+    #[tokio::test]
+    async fn created_metadata_cannot_hide_mismatched_or_incomplete_authoritative_content() {
+        const ROOT: &str = "33333333-3333-3333-3333-333333333333";
+        for (markdown, truncated, unknown, kind) in [
+            ("Different", false, vec![], BackendErrorKind::Conflict),
+            ("Body", true, vec![], BackendErrorKind::UnsupportedContent),
+            (
+                "Body",
+                false,
+                vec!["unknown"],
+                BackendErrorKind::UnsupportedContent,
+            ),
+        ] {
+            let mut steps = chain(ROOT);
+            steps.extend(chain(ROOT));
+            steps.push(("POST /v1/pages".into(), 200, receipt()));
+            steps.push((format!("GET /v1/pages/{CHILD}"), 200, complete_read()));
+            steps.push((format!("GET /v1/pages/{CHILD}"), 200, complete_read()));
+            steps.push((format!("GET /v1/pages/{CHILD}/markdown"),200,json!({"object":"page_markdown","id":CHILD,"markdown":markdown,"truncated":truncated,"unknown_block_ids":unknown})));
+            let (client, task) = fixture(steps).await;
+            assert_eq!(
+                client
+                    .create_scoped_page(&input(), &scope())
+                    .await
+                    .unwrap_err()
+                    .kind,
+                kind
+            );
+            assert_eq!(
+                task.await
+                    .unwrap()
+                    .iter()
+                    .filter(|(p, _)| p.starts_with("POST"))
+                    .count(),
+                1
+            );
+        }
     }
 
     #[tokio::test]

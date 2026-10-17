@@ -234,7 +234,11 @@ pub async fn append_once(
     {
         return Err(AppendError::OutcomeUnknown);
     }
-    gate.revalidate(&permit, gate.configured_scope())
+    let post_permit = gate
+        .authorize(&request.page_id)
+        .await
+        .map_err(|_| AppendError::OutcomeUnknown)?;
+    gate.revalidate(&post_permit, gate.configured_scope())
         .await
         .map_err(|_| AppendError::OutcomeUnknown)?;
 
@@ -251,4 +255,35 @@ pub async fn append_once(
         receipt,
         replayed: false,
     })
+}
+
+/// Verified append followed by durable local refresh admission. Queue failure
+/// never turns a committed Notion mutation into a retryable write failure.
+pub async fn append_once_and_refresh(
+    reader: &dyn NotionRead,
+    writer: &dyn NotionWrite,
+    gate: &RootScopeGate,
+    ledger: &dyn WriteIdempotencyStore,
+    queue: &dyn crate::write_refresh::MutationRefreshQueue,
+    request: AppendRequest,
+) -> Result<crate::write_refresh::WriteCompletion, AppendError> {
+    let result = append_once(reader, writer, gate, ledger, request.clone()).await?;
+    let claim = MutationClaim::new(
+        &gate.configured_scope().workspace_id,
+        &request.idempotency_key,
+        MutationOperation::Append,
+        &request.page_id.0,
+        &fingerprint(&request),
+    )
+    .map_err(ledger_error)?;
+    Ok(crate::write_refresh::admit_verified(
+        queue,
+        &crate::write_refresh::RefreshKey {
+            workspace_id: gate.configured_scope().workspace_id.clone(),
+            mutation_digest: claim.key_digest().to_owned(),
+            page_id: result.receipt.page_id.clone(),
+        },
+        result.receipt,
+        result.replayed,
+    ))
 }
