@@ -154,7 +154,7 @@ async fn bound_backend_rejects_callback_replacement_while_read_is_pending() {
 
 #[cfg(all(unix, feature = "webhook-worker"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn authorized_http_search_get_and_fresh_content_use_committed_index_and_bound_provider() {
+async fn http_oauth_lifecycle_reads_refreshes_revokes_and_reauthorizes() {
     let h = harness().await;
     let before_state = fs::read(h._dir.path().join("content-state.sqlite")).unwrap();
     let before_pages = h.page_reads.load(Ordering::SeqCst);
@@ -217,7 +217,69 @@ async fn authorized_http_search_get_and_fresh_content_use_committed_index_and_bo
     assert_eq!(rotated.grant_id(), stored.grant_id());
     assert_eq!(rotated.epoch(), stored.epoch());
     assert_eq!(rotated.expires_at_unix(), None);
+    assert_eq!(rotated.access_token(), "rotated-access-secret");
+    assert_ne!(rotated.access_token(), stored.access_token());
     assert_eq!(rotated.refresh_token(), Some("rotated-refresh-secret"));
+    let revoked = h
+        .client
+        .post(format!("{}/revoke", h.base))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(encode_form(&[
+            ("client_id", "chatgpt".into()),
+            ("token", token.clone()),
+        ]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), StatusCode::OK);
+    assert!(revoked.bytes().await.unwrap().is_empty());
+    let before_denied = (
+        h.probes.load(Ordering::SeqCst),
+        h.page_reads.load(Ordering::SeqCst),
+        h.calls.load(Ordering::SeqCst),
+    );
+    let denied = rpc(&h, &token, Some(&session), get()).send().await.unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    let body = denied.text().await.unwrap();
+    for private in [
+        "Saffron private evidence",
+        PAGE,
+        ROOT,
+        WORKSPACE,
+        token.as_str(),
+    ] {
+        assert!(!body.contains(private));
+    }
+    assert_eq!(
+        (
+            h.probes.load(Ordering::SeqCst),
+            h.page_reads.load(Ordering::SeqCst),
+            h.calls.load(Ordering::SeqCst)
+        ),
+        before_denied
+    );
+    let fresh_token = mint(&h).await;
+    assert_ne!(fresh_token, token);
+    let (fresh_session, _) = initialize(&h, &fresh_token).await;
+    let value = reply(
+        rpc(&h, &fresh_token, Some(&fresh_session), get())
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        value.to_string().contains("Saffron private evidence"),
+        "{value}"
+    );
+    assert_eq!(
+        rpc(&h, &token, Some(&session), get())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
     assert_eq!(
         fs::read(h._dir.path().join("content-state.sqlite")).unwrap(),
         before_state,

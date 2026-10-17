@@ -571,6 +571,78 @@ async fn invalid_browser_correlation_never_exchanges_or_consumes_another_login()
 }
 
 #[tokio::test]
+async fn unknown_and_cross_login_states_preserve_both_legitimate_browser_transactions() {
+    let h = Harness::installed(
+        grant("workspace-a", "user-a"),
+        StatusCode::OK,
+        Some((4, 4, 4)),
+        std::time::Duration::ZERO,
+    )
+    .await;
+    let (first_callback, first_cookie) = h.begin().await;
+    let (second_callback, second_cookie) = h.begin().await;
+    assert_ne!(first_callback, second_callback);
+    assert_ne!(first_cookie, second_cookie);
+    let mut unknown = reqwest::Url::parse(&first_callback).unwrap();
+    unknown.query_pairs_mut().clear().extend_pairs([
+        ("code", "provider-code"),
+        ("state", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+    ]);
+    assert_ne!(unknown.as_str(), first_callback);
+    for (callback, cookie) in [
+        (unknown.as_str(), first_cookie.as_str()),
+        (first_callback.as_str(), second_cookie.as_str()),
+        (second_callback.as_str(), first_cookie.as_str()),
+    ] {
+        let denied = h
+            .client
+            .get(callback)
+            .header(header::COOKIE, cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(denied.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(!denied.headers().contains_key(header::LOCATION));
+        assert_eq!(
+            denied.text().await.unwrap(),
+            "Notion authorization could not be completed. Please start again."
+        );
+    }
+    assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(h.probes.load(Ordering::SeqCst), 0);
+    assert!(h.store.load().unwrap().is_none());
+    for (index, (callback, cookie)) in [
+        (first_callback, first_cookie),
+        (second_callback, second_cookie),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let accepted = h
+            .client
+            .get(callback)
+            .header(header::COOKIE, cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::FOUND);
+        let redirect =
+            reqwest::Url::parse(accepted.headers()[header::LOCATION].to_str().unwrap()).unwrap();
+        let code = redirect
+            .query_pairs()
+            .find(|(key, _)| key == "code")
+            .unwrap()
+            .1
+            .into_owned();
+        let token = resource::redeem(&h, &code).await;
+        let (session, _) = resource::initialize(&h, &token).await;
+        assert!(!session.is_empty());
+        assert_eq!(h.calls.load(Ordering::SeqCst), index + 1);
+    }
+}
+
+#[tokio::test]
 async fn denied_provider_identity_and_errors_never_persist_or_redirect() {
     let mut missing_workspace = grant("workspace-a", "user-a");
     missing_workspace
