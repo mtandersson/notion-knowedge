@@ -175,8 +175,25 @@ fn child_root(directory: &std::path::Path) -> Option<PathBuf> {
     let root = PathBuf::from(std::env::var_os("NK_REAL_IO_ROOT")?);
     (root.join("index") == directory).then_some(root)
 }
+// Per-directory test IO gates avoid process-wide environment changes and let
+// the real Lance open/read await span replacement of operational authority.
+#[derive(Debug)]
+struct ReadPause {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Semaphore,
+    claimed: std::sync::atomic::AtomicBool,
+}
+fn read_pauses() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<ReadPause>>> {
+    static PAUSES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<ReadPause>>>,
+    > = std::sync::OnceLock::new();
+    PAUSES.get_or_init(Default::default)
+}
+fn read_pause(directory: &std::path::Path) -> Option<Arc<ReadPause>> {
+    read_pauses().lock().unwrap().get(directory).cloned()
+}
 pub(super) fn test_uri(directory: &std::path::Path, uri: String) -> String {
-    if child_root(directory).is_some() {
+    if child_root(directory).is_some() || read_pause(directory).is_some() {
         format!("file-object-store://{}", directory.display())
     } else {
         uri
@@ -186,15 +203,20 @@ pub(super) fn instrument(
     directory: &std::path::Path,
     builder: lancedb::connection::OpenTableBuilder,
 ) -> lancedb::connection::OpenTableBuilder {
-    let Some(root) = child_root(directory) else {
+    let pause = read_pause(directory);
+    let root = if pause.is_some() {
+        directory.parent().unwrap().to_path_buf()
+    } else if let Some(root) = child_root(directory) {
+        root
+    } else {
         return builder;
     };
-    if std::env::var("NK_REAL_IO_NAME").as_deref() != Ok("one") {
+    if pause.is_none() && std::env::var("NK_REAL_IO_NAME").as_deref() != Ok("one") {
         return builder;
     }
     builder.lance_read_params(lance::dataset::ReadParams {
         store_options: Some(lance::io::ObjectStoreParams {
-            object_store_wrapper: Some(Arc::new(Gate { root })),
+            object_store_wrapper: Some(Arc::new(Gate { root, pause })),
             ..Default::default()
         }),
         ..Default::default()
@@ -203,9 +225,13 @@ pub(super) fn instrument(
 #[derive(Debug, Clone)]
 struct Gate {
     root: PathBuf,
+    pause: Option<Arc<ReadPause>>,
 }
 impl Gate {
     async fn wait(&self, location: &object_store::path::Path) -> object_store::Result<()> {
+        if self.pause.is_some() {
+            return Ok(());
+        }
         // Real data and index multipart completion or put calls, never the
         // source callback. Mark only the first write per family.
         let name = location.as_ref();
@@ -302,6 +328,12 @@ impl object_store::ObjectStore for PausedStore {
         location: &object_store::path::Path,
         options: object_store::GetOptions,
     ) -> object_store::Result<object_store::GetResult> {
+        if let Some(pause) = &self.gate.pause
+            && !pause.claimed.swap(true, Ordering::SeqCst)
+        {
+            pause.entered.notify_one();
+            let _permit = pause.release.acquire().await.unwrap();
+        }
         self.inner.get_opts(location, options).await
     }
 
@@ -1352,3 +1384,159 @@ async fn returned_commit_authority_is_held_until_final_sqlite_acknowledgment() {
 }
 
 mod aliases;
+
+#[tokio::test]
+async fn guarded_source_expansion_preserves_scope_budget_and_read_only_storage() {
+    use notion_knowledge_core::source::{
+        SourceExpandQuery, SourceExpansion, SourceExpansionError, StableSourceRef,
+    };
+    let f = Fixture::new();
+    f.create().await;
+    let table = f.guarded();
+    let provider = CountingProvider::new(f.embedding.clone());
+    let prepared = table
+        .prepare_page(
+            &provider,
+            operation("seed-expand", "seed", false),
+            &[chunk("one", "cinnamon pudding", "Dessert")],
+        )
+        .await
+        .unwrap();
+    table
+        .commit_page(prepared, f.lease.clone(), clock(), || async { Ok(()) })
+        .await
+        .unwrap();
+    let before = super::open_current(&f.index, "chunks", &f.embedding)
+        .await
+        .unwrap();
+    let removed = super::CHUNK_FTS_INDEXES[0].0.to_owned();
+    before.table.drop_index(&removed).await.unwrap();
+    let version = before.table.version().await.unwrap();
+    let indexes: Vec<_> = before
+        .table
+        .list_indices()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.name)
+        .collect();
+    assert!(!indexes.contains(&removed));
+    let query = |reference, root: &str, max_chars| SourceExpandQuery {
+        refs: vec![reference],
+        root_page_ids: vec![root.into()],
+        max_chars,
+    };
+    for reference in [
+        StableSourceRef::Page("page".into()),
+        StableSourceRef::Chunk("one".into()),
+    ] {
+        let expanded = table
+            .expand(query(reference.clone(), "root", 8))
+            .await
+            .unwrap();
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(expanded[0].reference, reference);
+        assert_eq!(expanded[0].text, "cinnamon");
+        assert!(expanded[0].truncated);
+        assert_eq!(expanded[0].provenance.page_id, "page");
+        assert_eq!(expanded[0].provenance.root_page_id, "root");
+        assert_eq!(expanded[0].provenance.chunk_ids, ["one"]);
+    }
+    assert_eq!(
+        table
+            .expand(query(StableSourceRef::Page("page".into()), "elsewhere", 20))
+            .await,
+        Err(SourceExpansionError::OutOfScope)
+    );
+    assert_eq!(
+        table
+            .expand(query(StableSourceRef::Page("missing".into()), "root", 20))
+            .await,
+        Err(SourceExpansionError::Missing)
+    );
+    let after = super::open_current(&f.index, "chunks", &f.embedding)
+        .await
+        .unwrap();
+    assert_eq!(after.table.version().await.unwrap(), version);
+    let after_indexes: Vec<_> = after
+        .table
+        .list_indices()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.name)
+        .collect();
+    assert_eq!(after_indexes, indexes);
+    // An externally held writer fence excludes even reads of known content.
+    let lock = std::fs::File::open(&f.index).unwrap();
+    lock.lock().unwrap();
+    assert_eq!(
+        table
+            .expand(query(StableSourceRef::Page("page".into()), "root", 20))
+            .await,
+        Err(SourceExpansionError::Unavailable)
+    );
+    drop(lock);
+    // Replacing the authority file must not release the old pinned content.
+    std::fs::rename(f.root.join("state.sqlite"), f.root.join("old-state.sqlite")).unwrap();
+    std::fs::write(f.root.join("state.sqlite"), "replacement").unwrap();
+    assert_eq!(
+        table
+            .expand(query(StableSourceRef::Page("page".into()), "root", 20))
+            .await,
+        Err(SourceExpansionError::Unavailable)
+    );
+}
+
+#[tokio::test]
+async fn guarded_source_expansion_rejects_authority_replaced_during_storage_read() {
+    use notion_knowledge_core::source::{
+        SourceExpandQuery, SourceExpansion, SourceExpansionError, StableSourceRef,
+    };
+    let f = Fixture::new();
+    f.create().await;
+    let table = f.guarded();
+    let provider = CountingProvider::new(f.embedding.clone());
+    let prepared = table
+        .prepare_page(
+            &provider,
+            operation("seed-race", "seed", false),
+            &[chunk("one", "private cinnamon", "Dessert")],
+        )
+        .await
+        .unwrap();
+    table
+        .commit_page(prepared, f.lease.clone(), clock(), || async { Ok(()) })
+        .await
+        .unwrap();
+    let pause = Arc::new(ReadPause {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Semaphore::new(0),
+        claimed: std::sync::atomic::AtomicBool::new(false),
+    });
+    read_pauses()
+        .lock()
+        .unwrap()
+        .insert(f.index.clone(), pause.clone());
+    let pending = tokio::spawn(async move {
+        table
+            .expand(SourceExpandQuery {
+                refs: vec![StableSourceRef::Page("page".into())],
+                root_page_ids: vec!["root".into()],
+                max_chars: 100,
+            })
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.notified())
+        .await
+        .expect("expansion must reach real storage IO after obtaining its fence");
+    std::fs::rename(f.root.join("state.sqlite"), f.root.join("old-state.sqlite")).unwrap();
+    std::fs::write(f.root.join("state.sqlite"), "replacement").unwrap();
+    pause.release.add_permits(1);
+    assert_eq!(
+        pending.await.unwrap(),
+        Err(SourceExpansionError::Unavailable)
+    );
+    assert!(pause.claimed.load(Ordering::SeqCst));
+    read_pauses().lock().unwrap().remove(&f.index);
+}

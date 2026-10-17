@@ -31,6 +31,31 @@ pub struct GuardedChunkTable {
     coordinator: Arc<IndexCommitCoordinator>,
 }
 
+/// Expand content only from a compatible committed snapshot. Hold the shared
+/// directory fence through all reads and reject replaced operational authority
+/// before releasing any content. This read path never repairs indexes.
+impl SourceExpansion for GuardedChunkTable {
+    fn expand(&self, query: SourceExpandQuery) -> SourceExpansionFuture<'_> {
+        Box::pin(async move {
+            let _guard = self
+                .coordinator
+                .search_guard()
+                .map_err(|_| SourceExpansionError::Unavailable)?;
+            let snapshot = open_current(&self.index_directory, &self.table_name, &self.embedding)
+                .await
+                .map_err(|_| SourceExpansionError::Unavailable)?
+                .read_snapshot()
+                .await
+                .map_err(|_| SourceExpansionError::Unavailable)?;
+            let result = snapshot.expand(query).await;
+            self.coordinator
+                .identities()
+                .map_err(|_| SourceExpansionError::Unavailable)?;
+            result
+        })
+    }
+}
+
 /// An immutable, one-shot page proposal. A new table version requires a new
 /// preparation/embedding pass; the caller cannot bypass that comparison.
 pub struct PreparedPageMutation {
