@@ -229,7 +229,6 @@ impl GrantStore {
             .matches(fresh.workspace_id(), fresh.owner_user_id())
             || fresh.bot_id() != expected.record.bot_id
             || fresh.refresh_token().is_none()
-            || fresh.expires_in().is_none()
         {
             return Err(StoreError::IdentityMismatch);
         }
@@ -248,9 +247,10 @@ impl GrantStore {
             return Err(StoreError::IdentityMismatch);
         }
         let now = now_unix()?;
-        let expires = now
-            .checked_add(fresh.expires_in().ok_or(StoreError::Corrupt)?)
-            .ok_or(StoreError::Corrupt)?;
+        let expires = fresh
+            .expires_in()
+            .map(|seconds| now.checked_add(seconds).ok_or(StoreError::Corrupt))
+            .transpose()?;
         let record = Record {
             schema: SCHEMA,
             grant_id: old.grant_id,
@@ -260,7 +260,7 @@ impl GrantStore {
             owner_user_id: old.owner_user_id,
             bot_id: old.bot_id,
             issued_at_unix: now,
-            expires_at_unix: Some(expires),
+            expires_at_unix: expires,
             access_token: fresh.access_token().to_owned(),
             refresh_token: Some(fresh.refresh_token().ok_or(StoreError::Corrupt)?.to_owned()),
         };
