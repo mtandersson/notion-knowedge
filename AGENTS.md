@@ -35,6 +35,10 @@ an agreed policy. Use Conventional Commits; mark breaking changes with `!` or
 a `BREAKING CHANGE:` footer. Read `CONTRIBUTING.md` when present for additional
 conventions. Independent tickets may run in parallel when requested, each in
 its own worktree and PR. Start a blocked ticket after its dependency merges.
+Open a linked draft PR early, once there is an initial meaningful change, while
+local builds and tests continue. This runs CI in parallel and makes ticket
+ownership visible to other clients. Keep it draft until implementation and
+independent review are complete; mark it ready before merge.
 Confirm relevant CI checks before merging, and verify the PR and issue state
 afterward. A single-ticket delivery run ends after its PR merges or the issue
 has been decomposed. Follow the user's requested delivery scope for other work.

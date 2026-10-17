@@ -34,7 +34,11 @@ branches after another ticket merges. Follow each issue's acceptance criteria
 and add behavior tests where they establish a meaningful contract. Use
 `$writing-tests` when writing tests.
 
-Before the PR, ask a separate subagent to use `$adversarial-review` against
+Push an initial meaningful change and open a linked draft PR early so CI runs
+while local builds and tests continue, and other clients can see ticket ownership.
+Keep the PR draft while implementation or review is incomplete.
+
+Before marking the PR ready, ask a separate subagent to use `$adversarial-review` against
 the issue, diff, relevant documentation, and verification evidence. The review
 is read-only. Fix in-scope blockers and repeat the review after material
 changes. File valid out-of-scope findings as separate issues.
@@ -44,7 +48,8 @@ changes. File valid out-of-scope findings as separate issues.
 Run the narrowest useful local checks, then any relevant build, lint, race,
 and browser checks. Review the final diff. Make a Conventional Commit with a
 short explanatory body; mark a breaking change in the commit message. Push
-and open a PR that closes the issue. Inspect the repository CI and merge once its relevant jobs pass. Confirm the PR merged and the issue closed. If no required
+updates to the early draft PR, include the closing issue reference, and mark it
+ready after review. Inspect the repository CI and merge once its relevant jobs pass. Confirm the PR merged and the issue closed. If no required
 checks are configured, state that and rely on the observed CI and local checks.
 
 Report each issue, PR, review outcome, checks, and merge state. For an epic,
