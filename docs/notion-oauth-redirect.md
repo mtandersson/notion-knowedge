@@ -23,8 +23,10 @@ fragments, query strings, userinfo, alternative origins and unregistered
 paths are rejected. This avoids open redirects and attacks relying on
 `Host`, `Forwarded` or a browser-supplied callback. Configure this exact
 HTTPS callback in the Notion public integration's settings. The client ID is
-public; its confidential client **secret is deliberately not configured here**,
-is not placed in an URL and belongs to the server-only exchange in #122.
+public. The redirect core alone needs no confidential client secret; the
+optional browser entry point below requires the full server-only callback
+configuration. The secret is never placed in a URL and is reserved for the
+server-only exchange in #122.
 
 ## Consent and state
 

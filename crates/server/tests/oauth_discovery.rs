@@ -256,14 +256,14 @@ async fn registered_browser_authorization_redirects_only_valid_pkce_requests_to_
         ("code_challenge_method", "S256"),
         ("scope", "knowledge:read"),
     ];
+    let authorize_url = |params: &[(&str, &str)]| {
+        let mut url = reqwest::Url::parse(&format!("{base}/authorize")).unwrap();
+        url.query_pairs_mut().extend_pairs(params.iter().copied());
+        url
+    };
     let mut upstream_states = Vec::new();
     for _ in 0..2 {
-        let response = client
-            .get(format!("{base}/authorize"))
-            .query(&params)
-            .send()
-            .await
-            .unwrap();
+        let response = client.get(authorize_url(&params)).send().await.unwrap();
         assert_eq!(response.status(), StatusCode::FOUND);
         assert_eq!(response.headers()["cache-control"], "no-store");
         assert_eq!(response.headers()["referrer-policy"], "no-referrer");
@@ -309,23 +309,12 @@ async fn registered_browser_authorization_redirects_only_valid_pkce_requests_to_
     ] {
         let mut denied = params;
         denied.iter_mut().find(|(k, _)| *k == key).unwrap().1 = invalid;
-        let response = client
-            .get(format!("{base}/authorize"))
-            .query(&denied)
-            .send()
-            .await
-            .unwrap();
+        let response = client.get(authorize_url(&denied)).send().await.unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{key}");
         assert!(!response.headers().contains_key("location"));
         assert!(!response.headers().contains_key("set-cookie"));
     }
-    let valid_url = client
-        .get(format!("{base}/authorize"))
-        .query(&params)
-        .build()
-        .unwrap()
-        .url()
-        .to_string();
+    let valid_url = authorize_url(&params).to_string();
     for suffix in [
         "&client_id=chatgpt",
         "&%63lient_id=chatgpt",

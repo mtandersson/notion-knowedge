@@ -29,10 +29,11 @@ pub struct Config {
     pub bearer_fallback: Option<SecretToken>,
     /// Diagnostics authentication is independent from the MCP route.
     pub health_requires_bearer: bool,
-    /// Opt-in discovery mode; all MCP calls are denied pending real OAuth.
+    /// Fixed public client registration for the staged browser entry point.
     pub oauth_client: Option<crate::oauth_authorize::Settings>,
+    /// Opt-in discovery mode; all MCP calls are denied pending real OAuth.
     pub oauth_discovery: Option<crate::oauth_discovery::OAuthDiscovery>,
-    /// Optional, trusted Notion authorization redirect config; NOT a live HTTP login.
+    /// Trusted Notion redirect config; an explicit MCP client can start consent.
     pub notion_oauth_redirect: Option<crate::notion_oauth_redirect::NotionOAuthConfig>,
     /// Confidential Notion code exchange config, never a live MCP auth grant.
     pub notion_oauth_callback: Option<NotionCallbackSettings>,
