@@ -6,6 +6,7 @@ ARG VERSION
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+COPY vendor ./vendor
 # OCI metadata may mirror Cargo's version, but may never override it.
 RUN test "$VERSION" = "$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' Cargo.toml)" \
     && cargo build --release --locked -p notion-knowledge-server \
