@@ -177,6 +177,24 @@ impl GraphEdgeStore for GraphFixture {
             Ok(vec![])
         }
     }
+    fn edges_from_bounded(
+        &self,
+        page: &str,
+        limit: usize,
+    ) -> Result<Vec<GraphEdge>, SyncStateError> {
+        let edges = self.edges_from(page)?;
+        if edges.len() > limit {
+            return Err(SyncStateError::Unavailable);
+        }
+        Ok(edges)
+    }
+    fn edges_to_bounded(&self, page: &str, limit: usize) -> Result<Vec<GraphEdge>, SyncStateError> {
+        let edges = self.edges_to(page)?;
+        if edges.len() > limit {
+            return Err(SyncStateError::Unavailable);
+        }
+        Ok(edges)
+    }
 }
 fn graph() -> GraphFixture {
     GraphFixture {
@@ -533,4 +551,76 @@ async fn authoritative_relation_labels_survive_sqlite_and_rename_without_changin
     fixture.await.unwrap();
     drop(store);
     std::fs::remove_file(path).unwrap();
+}
+
+// A production SQLite adapter behind a port that rejects unbounded reads.
+struct BoundedGraphProbe {
+    store: notion_knowledge_retrieval::sync_state::SqliteSyncStateStore,
+    budgets: std::sync::Mutex<Vec<(bool, usize)>>,
+}
+impl GraphEdgeStore for BoundedGraphProbe {
+    fn replace_page_edges(&self, page: &str, edges: &[GraphEdge]) -> Result<(), SyncStateError> {
+        self.store.replace_page_edges(page, edges)
+    }
+    fn replace_page_relation_edges(&self, _: &str, _: &[GraphEdge]) -> Result<(), SyncStateError> {
+        unreachable!()
+    }
+    fn replace_page_link_edges(&self, _: &str, _: &[GraphEdge]) -> Result<(), SyncStateError> {
+        unreachable!()
+    }
+    fn edges_from(&self, _: &str) -> Result<Vec<GraphEdge>, SyncStateError> {
+        panic!("navigation must never request unbounded adjacency")
+    }
+    fn edges_to(&self, _: &str) -> Result<Vec<GraphEdge>, SyncStateError> {
+        panic!("navigation must never request unbounded adjacency")
+    }
+    fn edges_from_bounded(
+        &self,
+        page: &str,
+        limit: usize,
+    ) -> Result<Vec<GraphEdge>, SyncStateError> {
+        self.budgets.lock().unwrap().push((false, limit));
+        self.store.edges_from_bounded(page, limit)
+    }
+    fn edges_to_bounded(&self, page: &str, limit: usize) -> Result<Vec<GraphEdge>, SyncStateError> {
+        self.budgets.lock().unwrap().push((true, limit));
+        self.store.edges_to_bounded(page, limit)
+    }
+}
+#[tokio::test]
+async fn related_enforces_combined_storage_budget_before_returning_any_relations() {
+    use notion_knowledge_retrieval::sync_state::SqliteSyncStateStore;
+    for (outgoing, incoming, accepted) in [
+        (256, 0, true),
+        (255, 1, true),
+        (256, 1, false),
+        (128, 129, false),
+        (0, 257, false),
+    ] {
+        let graph = BoundedGraphProbe {
+            store: SqliteSyncStateStore::open_in_memory().unwrap(),
+            budgets: Default::default(),
+        };
+        let edges: Vec<_> = (0..outgoing)
+            .map(|i| edge(ROOT, A, "link:page", &format!("markdown:{i}")))
+            .collect();
+        graph.replace_page_edges(ROOT, &edges).unwrap();
+        let edges: Vec<_> = (0..incoming)
+            .map(|i| edge(B, ROOT, "link:page", &format!("markdown:{i}")))
+            .collect();
+        graph.replace_page_edges(B, &edges).unwrap();
+        let result = related::navigate(&request(1, 1), &graph, &gate(), &[ROOT.into()]).await;
+        assert_eq!(
+            result.is_ok(),
+            accepted,
+            "outgoing={outgoing}, incoming={incoming}"
+        );
+        if !accepted {
+            assert!(matches!(result, Err(related::RelatedError::Unavailable)));
+        }
+        assert_eq!(
+            *graph.budgets.lock().unwrap(),
+            vec![(false, 256), (true, 256 - outgoing)]
+        );
+    }
 }

@@ -54,6 +54,7 @@ struct GraphFixture {
     edges: Vec<GraphEdge>,
     calls: AtomicUsize,
     fail: bool,
+    budgets: Mutex<Vec<(bool, usize)>>,
 }
 impl GraphFixture {
     fn with_edges(edges: Vec<GraphEdge>) -> Self {
@@ -99,6 +100,26 @@ impl GraphEdgeStore for GraphFixture {
             .filter(|e| matches!(e.target(), GraphTarget::Page { page_id } if page_id == page))
             .cloned()
             .collect())
+    }
+    fn edges_from_bounded(
+        &self,
+        page: &str,
+        limit: usize,
+    ) -> Result<Vec<GraphEdge>, SyncStateError> {
+        self.budgets.lock().unwrap().push((false, limit));
+        let edges = self.edges_from(page)?;
+        if edges.len() > limit {
+            return Err(SyncStateError::Unavailable);
+        }
+        Ok(edges)
+    }
+    fn edges_to_bounded(&self, page: &str, limit: usize) -> Result<Vec<GraphEdge>, SyncStateError> {
+        self.budgets.lock().unwrap().push((true, limit));
+        let edges = self.edges_to(page)?;
+        if edges.len() > limit {
+            return Err(SyncStateError::Unavailable);
+        }
+        Ok(edges)
     }
 }
 fn on(max_hops: usize, weight: f64, candidate_limit: usize) -> GraphBoostConfig {
@@ -310,4 +331,29 @@ async fn wrapper_changes_only_order_and_fetch_budget_on_explicit_opt_in() {
     assert_eq!(base.queries.lock().unwrap()[1].limit, 4);
     assert_eq!(boosted[1].score, 0.85);
     assert_eq!(boosted[1].matched_paths, [RetrievalPath::Semantic]);
+}
+
+#[test]
+fn graph_boost_enforces_combined_adjacency_even_for_non_candidate_neighbors() {
+    for (outgoing, incoming, accepted) in [
+        (256, 0, true),
+        (255, 1, true),
+        (256, 1, false),
+        (128, 129, false),
+        (0, 257, false),
+    ] {
+        let mut edges: Vec<_> = (0..outgoing)
+            .map(|i| edge("root-a", &format!("outside-{i}")))
+            .collect();
+        edges.extend((0..incoming).map(|i| edge(&format!("parent-{i}"), "root-a")));
+        let graph = GraphFixture::with_edges(edges);
+        assert_eq!(
+            rank_candidates(corpus(), &graph, on(1, 0.2, 8), 4, None).is_ok(),
+            accepted
+        );
+        assert_eq!(
+            *graph.budgets.lock().unwrap(),
+            vec![(false, 256), (true, 256 - outgoing)]
+        );
+    }
 }

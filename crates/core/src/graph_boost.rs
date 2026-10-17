@@ -16,6 +16,10 @@ use std::{
     sync::Arc,
 };
 
+/// Maximum combined incoming/outgoing edges per expanded page. With at most
+/// 100 candidate pages this bounds each search to 25,600 accepted edges.
+pub const MAX_GRAPH_BOOST_ADJACENCY: usize = 256;
+
 /// Feature is disabled by default and must be explicitly opted into.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GraphBoostConfig {
@@ -220,8 +224,18 @@ pub fn rank_candidates(
         if depth >= config.max_hops {
             continue;
         }
-        let outgoing = graph.edges_from(&page).map_err(|_| SearchUnavailable)?;
-        let incoming = graph.edges_to(&page).map_err(|_| SearchUnavailable)?;
+        let outgoing = graph
+            .edges_from_bounded(&page, MAX_GRAPH_BOOST_ADJACENCY)
+            .map_err(|_| SearchUnavailable)?;
+        let incoming = graph
+            .edges_to_bounded(
+                &page,
+                MAX_GRAPH_BOOST_ADJACENCY.saturating_sub(outgoing.len()),
+            )
+            .map_err(|_| SearchUnavailable)?;
+        if outgoing.len().saturating_add(incoming.len()) > MAX_GRAPH_BOOST_ADJACENCY {
+            return Err(SearchUnavailable);
+        }
         for edge in outgoing.into_iter().chain(incoming) {
             let other = if edge.source_page_id() == page {
                 match edge.target() {

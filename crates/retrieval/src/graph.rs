@@ -212,6 +212,44 @@ impl GraphEdgeStore for SqliteSyncStateStore {
             target_page_id,
         )
     }
+    fn edges_from_bounded(
+        &self,
+        page: &str,
+        limit: usize,
+    ) -> Result<Vec<GraphEdge>, SyncStateError> {
+        self.read_bounded(page, false, limit)
+    }
+
+    fn edges_to_bounded(&self, page: &str, limit: usize) -> Result<Vec<GraphEdge>, SyncStateError> {
+        self.read_bounded(page, true, limit)
+    }
+}
+
+impl SqliteSyncStateStore {
+    fn read_bounded(
+        &self,
+        page: &str,
+        incoming: bool,
+        limit: usize,
+    ) -> Result<Vec<GraphEdge>, SyncStateError> {
+        validate_identifier(page)?;
+        let sentinel = limit
+            .checked_add(1)
+            .and_then(|n| i64::try_from(n).ok())
+            .ok_or(SyncStateError::InvalidInput)?;
+        let connection = self.lock_connection()?;
+        // No ORDER BY: the matching index can stop after the overflow sentinel.
+        // Navigation sorts only the accepted, bounded adjacency.
+        let column = if incoming {
+            "target_page_id"
+        } else {
+            "source_page_id"
+        };
+        let sql = format!(
+            "SELECT source_page_id,target_page_id,unresolved_reference,relation_type,provenance,display_name FROM graph_edges WHERE {column}=?1 LIMIT {sentinel}"
+        );
+        read_edges_limited(&connection, &sql, page, Some(limit))
+    }
 }
 
 pub(crate) fn read_edges(
@@ -219,8 +257,17 @@ pub(crate) fn read_edges(
     sql: &str,
     page_id: &str,
 ) -> Result<Vec<GraphEdge>, SyncStateError> {
+    read_edges_limited(connection, sql, page_id, None)
+}
+
+fn read_edges_limited(
+    connection: &Connection,
+    sql: &str,
+    page_id: &str,
+    limit: Option<usize>,
+) -> Result<Vec<GraphEdge>, SyncStateError> {
     let mut statement = connection.prepare(sql).map_err(sqlite_failure)?;
-    let rows = statement
+    let mut rows = statement
         .query_map(params![page_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -232,9 +279,7 @@ pub(crate) fn read_edges(
             ))
         })
         .map_err(sqlite_failure)?;
-    let stored = rows
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(sqlite_failure)?;
+    let stored = consume_rows(&mut rows, limit)?;
 
     stored
         .into_iter()
@@ -258,6 +303,21 @@ pub(crate) fn read_edges(
         .collect()
 }
 
+// Stop on the first overflow row, before materializing a full adjacency.
+fn consume_rows<T>(
+    rows: impl Iterator<Item = rusqlite::Result<T>>,
+    limit: Option<usize>,
+) -> Result<Vec<T>, SyncStateError> {
+    let mut stored = Vec::new();
+    for row in rows {
+        if limit.is_some_and(|limit| stored.len() == limit) {
+            return Err(SyncStateError::Unavailable);
+        }
+        stored.push(row.map_err(sqlite_failure)?);
+    }
+    Ok(stored)
+}
+
 fn sqlite_failure(_: rusqlite::Error) -> SyncStateError {
     // Do not leak local paths, page IDs, source content, or raw SQL errors.
     SyncStateError::Unavailable
@@ -278,7 +338,14 @@ impl CommittedGraph {
             guard: None,
         }
     }
-    fn read(&self, page: &str, incoming: bool) -> Result<Vec<GraphEdge>, SyncStateError> {
+    const MAX_SOURCE_PROJECTION_EDGES: usize = 256;
+
+    fn read(
+        &self,
+        page: &str,
+        incoming: bool,
+        limit: Option<usize>,
+    ) -> Result<Vec<GraphEdge>, SyncStateError> {
         let _guard = if self.guard.is_none() {
             Some(
                 self.coordinator
@@ -288,22 +355,25 @@ impl CommittedGraph {
         } else {
             None
         };
+        // Reject degree overflow before any per-source commit validation.
+        let state = self.coordinator.state();
+        let edges = match (incoming, limit) {
+            (true, Some(limit)) => state.edges_to_bounded(page, limit)?,
+            (false, Some(limit)) => state.edges_from_bounded(page, limit)?,
+            (true, None) => state.edges_to(page)?,
+            (false, None) => state.edges_from(page)?,
+        };
         if self
             .coordinator
             .owns_page_work(page)
             .map_err(|_| SyncStateError::Unavailable)?
             && !self
                 .coordinator
-                .current_body_links_complete(page)
+                .current_body_links_complete_bounded(page, Self::MAX_SOURCE_PROJECTION_EDGES)
                 .map_err(|_| SyncStateError::Unavailable)?
         {
             return Err(SyncStateError::Unavailable);
         }
-        let edges = if incoming {
-            self.coordinator.state().edges_to(page)?
-        } else {
-            self.coordinator.state().edges_from(page)?
-        };
         for source in edges
             .iter()
             .map(GraphEdge::source_page_id)
@@ -311,7 +381,7 @@ impl CommittedGraph {
         {
             if !self
                 .coordinator
-                .current_body_links_complete(source)
+                .current_body_links_complete_bounded(source, Self::MAX_SOURCE_PROJECTION_EDGES)
                 .map_err(|_| SyncStateError::Unavailable)?
             {
                 return Err(SyncStateError::Unavailable);
@@ -342,9 +412,45 @@ impl GraphEdgeStore for CommittedGraph {
         Err(SyncStateError::InvalidInput)
     }
     fn edges_from(&self, page: &str) -> Result<Vec<GraphEdge>, SyncStateError> {
-        self.read(page, false)
+        self.read(page, false, None)
     }
     fn edges_to(&self, page: &str) -> Result<Vec<GraphEdge>, SyncStateError> {
-        self.read(page, true)
+        self.read(page, true, None)
+    }
+    fn edges_from_bounded(
+        &self,
+        page: &str,
+        limit: usize,
+    ) -> Result<Vec<GraphEdge>, SyncStateError> {
+        self.read(page, false, Some(limit))
+    }
+    fn edges_to_bounded(&self, page: &str, limit: usize) -> Result<Vec<GraphEdge>, SyncStateError> {
+        self.read(page, true, Some(limit))
+    }
+}
+
+#[cfg(test)]
+mod bounded_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn row_consumption_stops_at_one_overflow_sentinel() {
+        for limit in [0, 1, 255, 256] {
+            let consumed = Cell::new(0);
+            let rows = (0..10000).map(|value| {
+                consumed.set(consumed.get() + 1);
+                Ok(value)
+            });
+            assert_eq!(
+                consume_rows(rows, Some(limit)),
+                Err(SyncStateError::Unavailable)
+            );
+            assert_eq!(consumed.get(), limit + 1);
+            assert_eq!(
+                consume_rows((0..limit).map(Ok), Some(limit)).unwrap().len(),
+                limit
+            );
+        }
     }
 }

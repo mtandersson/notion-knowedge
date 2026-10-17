@@ -321,6 +321,22 @@ impl IndexCommitCoordinator {
         .map(|value| value.unwrap_or(false))
     }
 
+    /// Bound source projection materialization before recomputing its receipt.
+    /// The graph caller holds its owned read fence across this check and the
+    /// complete validation, so a writer cannot expand the projection between them.
+    #[cfg(all(unix, feature = "local-lancedb"))]
+    pub(crate) fn current_body_links_complete_bounded(
+        &self,
+        page: &str,
+        limit: usize,
+    ) -> Result<bool, CommitError> {
+        use notion_knowledge_core::graph::GraphEdgeStore;
+        self.state
+            .edges_from_bounded(page, limit)
+            .map_err(|_| CommitError::Unavailable)?;
+        self.current_body_links_complete(page)
+    }
+
     /// Only reads compatible existing state. Does not acquire a writer lease,
     /// migrate, repair, or infer completeness from a nonzero edge count.
     pub fn relation_projection_complete(
