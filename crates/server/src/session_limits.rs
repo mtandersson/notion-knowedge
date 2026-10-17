@@ -72,12 +72,13 @@ impl BoundedSessions {
         id: &SessionId,
         auth: &notion_knowledge_mcp::HttpAuthorization,
     ) -> bool {
-        self.entries.lock().is_ok_and(|registry| {
-            registry
-                .get(id)
-                .and_then(|entry| entry.authorization.as_ref())
-                .is_some_and(|bound| bound.same_session(auth))
-        })
+        auth.is_active()
+            && self.entries.lock().is_ok_and(|registry| {
+                registry
+                    .get(id)
+                    .and_then(|entry| entry.authorization.as_ref())
+                    .is_some_and(|bound| bound.same_session(auth))
+            })
     }
 
     pub(crate) fn bind_session(
@@ -88,6 +89,9 @@ impl BoundedSessions {
         let Ok(mut registry) = self.entries.lock() else {
             return false;
         };
+        if !auth.is_active() {
+            return false;
+        }
         let Some(entry) = registry.get_mut(id) else {
             return false;
         };
@@ -98,6 +102,58 @@ impl BoundedSessions {
                 true
             }
         }
+    }
+
+    pub(crate) fn has_token(&self, digest: &[u8; 32]) -> bool {
+        self.entries.lock().is_ok_and(|entries| {
+            entries.values().any(|entry| {
+                entry
+                    .authorization
+                    .as_ref()
+                    .is_some_and(|auth| auth.matches_token_digest(digest))
+            })
+        })
+    }
+
+    pub(crate) async fn close_token(&self, digest: &[u8; 32]) {
+        let ids = self
+            .entries
+            .lock()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|(_, entry)| {
+                        entry
+                            .authorization
+                            .as_ref()
+                            .is_some_and(|auth| auth.matches_token_digest(digest))
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for id in ids {
+            let _ = self.close_session(&id).await;
+        }
+    }
+
+    /// An initializer denied after allocation must clean up even if the HTTP
+    /// observer disconnects. The session permit bounds and owns this task.
+    pub(crate) async fn close_denied(self: &Arc<Self>, id: SessionId) {
+        let lease = self
+            .entries
+            .lock()
+            .ok()
+            .and_then(|mut entries| entries.remove(&id));
+        let Some(lease) = lease else {
+            return;
+        };
+        let manager = self.clone();
+        let cleanup = tokio::spawn(async move {
+            let _lease = lease;
+            let _ = manager.inner.close_session(&id).await;
+        });
+        let _ = cleanup.await;
     }
 
     pub(crate) fn has_capacity(&self) -> bool {
@@ -354,6 +410,10 @@ pub(crate) async fn limit_stream_responses(
         return overload();
     };
     let metric = Resource::Stream.enter(1);
+    let revoked = request
+        .extensions()
+        .get::<notion_knowledge_mcp::HttpAuthorization>()
+        .map(|auth| Box::pin(auth.cancellation().cancelled_owned()));
     let deadline = request
         .extensions()
         .get::<notion_knowledge_mcp::HttpAuthorization>()
@@ -378,6 +438,7 @@ pub(crate) async fn limit_stream_responses(
             inner: body,
             permit: Some(permit),
             metric: Some(metric),
+            revoked,
             deadline: Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(
                 deadline,
             ))),
@@ -404,6 +465,7 @@ struct BoundedBody {
     inner: Body,
     permit: Option<OwnedSemaphorePermit>,
     metric: Option<ResourceLease>,
+    revoked: Option<Pin<Box<tokio_util::sync::WaitForCancellationFutureOwned>>>,
     deadline: Pin<Box<tokio::time::Sleep>>,
     finished: bool,
 }
@@ -417,7 +479,11 @@ impl HttpBody for BoundedBody {
         if self.finished {
             return Poll::Ready(None);
         }
-        if self.deadline.as_mut().poll(cx).is_ready() {
+        let revoked = self
+            .revoked
+            .as_mut()
+            .is_some_and(|future| future.as_mut().poll(cx).is_ready());
+        if revoked || self.deadline.as_mut().poll(cx).is_ready() {
             self.inner = Body::empty();
             self.metric.take();
             self.permit.take();

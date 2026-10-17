@@ -8,6 +8,7 @@ repository.workspace = true
 notion-knowledge-core = { path = "../core" }
 rmcp.workspace = true
 http = "1"
+tokio-util = { version = "0.7", features = ["rt"] }
 tokio = { workspace = true, features = ["sync"] }
 
 serde = { version = "1", features = ["derive"] }

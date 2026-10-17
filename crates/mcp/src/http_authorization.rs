@@ -11,6 +11,7 @@ pub struct HttpAuthorization {
     workspace_id: String,
     owner_user_id: String,
     expires: Instant,
+    cancellation: tokio_util::sync::CancellationToken,
 }
 impl HttpAuthorization {
     /// Only trusted server authorization composition may construct evidence.
@@ -29,7 +30,21 @@ impl HttpAuthorization {
             workspace_id,
             owner_user_id,
             expires,
+            cancellation: tokio_util::sync::CancellationToken::new(),
         }
+    }
+    pub fn with_cancellation(mut self, cancellation: tokio_util::sync::CancellationToken) -> Self {
+        self.cancellation = cancellation;
+        self
+    }
+    pub fn cancellation(&self) -> tokio_util::sync::CancellationToken {
+        self.cancellation.clone()
+    }
+    pub fn is_active(&self) -> bool {
+        !self.cancellation.is_cancelled() && self.expires > Instant::now()
+    }
+    pub fn matches_token_digest(&self, digest: &[u8; 32]) -> bool {
+        &self.token_digest == digest
     }
     pub fn grant_id(&self) -> &str {
         &self.grant_id

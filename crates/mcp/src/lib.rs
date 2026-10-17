@@ -154,7 +154,7 @@ impl KnowledgeServer {
             .extensions
             .get::<http::request::Parts>()
             .and_then(|parts| parts.extensions.get::<HttpAuthorization>());
-        if !auth.is_some_and(|auth| auth.expires_at() > std::time::Instant::now()) {
+        if !auth.is_some_and(|auth| auth.is_active()) {
             return Err(rmcp::ErrorData::invalid_request(
                 "MCP authorization required",
                 None,
@@ -965,7 +965,19 @@ impl ServerHandler for KnowledgeServer {
             );
         };
         if !self.request_scope_required {
-            return self.call_tool_authorized(request, context).await;
+            let authorization = context
+                .extensions
+                .get::<http::request::Parts>()
+                .and_then(|parts| parts.extensions.get::<HttpAuthorization>())
+                .cloned();
+            let result = self.call_tool_authorized(request, context).await;
+            if authorization.is_some_and(|auth| !auth.is_active()) {
+                return Err(rmcp::ErrorData::invalid_request(
+                    "MCP authorization required",
+                    None,
+                ));
+            }
+            return result;
         }
         let parts = context
             .extensions
@@ -1006,6 +1018,12 @@ impl ServerHandler for KnowledgeServer {
             })?;
         }
         let result = scoped.call_tool_authorized(request, context).await;
+        if !adapters.authorization.is_active() {
+            return Err(rmcp::ErrorData::invalid_request(
+                "MCP authorization required",
+                None,
+            ));
+        }
         adapters.source.validate().await.map_err(|_| {
             rmcp::ErrorData::invalid_request("request authorization unavailable", None)
         })?;

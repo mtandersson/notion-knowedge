@@ -44,6 +44,9 @@ pub(crate) fn mcp_transport(
     cancellation: tokio_util::sync::CancellationToken,
     login: Option<Arc<crate::oauth_authorize::Login>>,
 ) -> axum::Router {
+    if let Some(login) = &login {
+        login.attach_sessions(&sessions);
+    }
     let oauth = settings.oauth_discovery.as_ref();
     let handler = if oauth.is_some() && !handler.requires_request_scope() {
         notion_knowledge_mcp::KnowledgeServer::default()

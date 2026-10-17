@@ -8,7 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use rmcp::transport::streamable_http_server::session::SessionId;
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 #[derive(Clone)]
@@ -83,7 +83,7 @@ pub(crate) async fn require_authorization(
         return crate::session_limits::overload();
     };
     let auth = match login.active_resource_authorization(bearer).await {
-        Ok(auth) if auth.same_session(&local) && auth.expires_at() > Instant::now() => auth,
+        Ok(auth) if auth.same_session(&local) && auth.is_active() => auth,
         Err(
             crate::notion_oauth_runtime::CredentialError::Unavailable
             | crate::notion_oauth_runtime::CredentialError::Configuration,
@@ -116,8 +116,22 @@ pub(crate) async fn require_authorization(
     {
         let id = SessionId::from(id.to_owned());
         if !gate.sessions.bind_session(&id, &auth) {
+            gate.sessions.close_denied(id).await;
             return gate.denied();
         }
+    }
+    if !auth.is_active() {
+        if session.is_none()
+            && let Some(id) = response
+                .headers()
+                .get("mcp-session-id")
+                .and_then(|v| v.to_str().ok())
+        {
+            gate.sessions
+                .close_denied(SessionId::from(id.to_owned()))
+                .await;
+        }
+        return gate.denied();
     }
     response
 }

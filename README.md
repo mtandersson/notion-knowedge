@@ -118,8 +118,7 @@ See [fresh-source verification](docs/fresh-source.md).
 
 Optional [OAuth discovery](docs/oauth-discovery.md) can be configured with the
 paired `NK_OAUTH_ISSUER` and `NK_OAUTH_RESOURCE` HTTPS settings. In that mode,
-the server publishes metadata; unverified MCP calls return 401 and `/revoke`
-remains unavailable. Complete OAuth configuration enables the
+the server publishes metadata; unverified MCP calls return 401. Complete OAuth configuration enables [local logout and revocation](docs/oauth-revocation.md) and the
 [token-bound MCP transport](docs/oauth-mcp-sessions.md). Explicit matching
 scope and compatible existing retrieval state enable
 [request-bound OAuth content](docs/oauth-content.md). `/token` requires the complete browser/grant configuration. `/authorize` remains unavailable unless the
@@ -135,8 +134,7 @@ Notion consent. With sealed storage, the public callback verifies and saves
 the approved grant before returning an MCP authorization code. The public
 [`POST /token` endpoint](docs/oauth-code.md) redeems it with S256 PKCE against
 the current active sealed grant. MCP sessions require live token/grant binding;
-configured content reads use request-bound authority; durable revocation
-remains gated by #128 and joined acceptance by #127.
+configured content reads use request-bound authority. Revocation immediately denies the local bearer and terminates its sessions; operator forget requires exclusive access to the sealed store.
 
 The staged [Notion callback verifier](docs/notion-oauth-callback.md) supports
 confidential server-side code exchange, typed Notion grant parsing and
@@ -156,8 +154,7 @@ expired credentials require refresh before use. The store is still
 same confidential Notion client, immutable owner/workspace check and the sealed
 grant store. Calls within a single refresh coordinator serialize renewal,
 atomically rotate both token values, and fail closed on provider or storage
-errors. Multi-process fencing and live MCP token/session revocation are still
-required before enabling remote access.
+errors. Credential users hold an exclusive process lease; [local revocation and operator forget](docs/oauth-revocation.md) invalidate local access. Remote deployment acceptance remains tracked by #129/#130.
 
 The HTTP listener validates Host against loopback names and the configured IP,
 and validates browser Origin against the configured HTTP authority or localhost
