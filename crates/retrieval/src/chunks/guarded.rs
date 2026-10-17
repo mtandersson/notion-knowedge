@@ -204,6 +204,26 @@ impl GuardedChunkTable {
         lease: Lease,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> impl Future<Output = Result<(), CommitError>> + Send + 'static {
+        self.maintain_vector_index(config, lease, clock, false)
+    }
+
+    /// Explicit operator retraining of derived ANN state under owned fencing.
+    pub fn rebuild_vector_index(
+        &self,
+        config: VectorIndexConfig,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> impl Future<Output = Result<(), CommitError>> + Send + 'static {
+        self.maintain_vector_index(config, lease, clock, true)
+    }
+
+    fn maintain_vector_index(
+        &self,
+        config: VectorIndexConfig,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+        rebuild: bool,
+    ) -> impl Future<Output = Result<(), CommitError>> + Send + 'static {
         let directory = self.index_directory.clone();
         let table_name = self.table_name.clone();
         let embedding = self.embedding.clone();
@@ -213,10 +233,33 @@ impl GuardedChunkTable {
                     .await
                     .map_err(failure)?;
                 context.revalidate().map_err(fence_failure)?;
-                current
-                    .optimize_vector_index(&config)
+                let indexes = current
+                    .table
+                    .list_indices()
                     .await
-                    .map_err(failure)?;
+                    .map_err(|e| failure(e.into()))?;
+                for (name, column) in CHUNK_FTS_INDEXES {
+                    if !indexes.iter().any(|index| {
+                        index.name == name
+                            && index.index_type == IndexType::FTS
+                            && index.columns == vec![column.to_string()]
+                    }) {
+                        return Err(failure(ChunkTableError::InvalidSchema(
+                            "required FTS index unavailable".into(),
+                        )));
+                    }
+                }
+                if rebuild {
+                    current
+                        .rebuild_vector_index(&config)
+                        .await
+                        .map_err(failure)?;
+                } else {
+                    current
+                        .optimize_vector_index(&config)
+                        .await
+                        .map_err(failure)?;
+                }
                 Ok(())
             })
     }
