@@ -1,11 +1,12 @@
 # Encrypted Notion OAuth grant store (#123)
 
-**Status:** server-internal persistence, **not** public login or authorization.
-The OAuth discovery router remains fail-closed: `/authorize` and `/token`
-return 503, and `/mcp` returns 401 in OAuth mode. The grant store is NOT
-connected to MCP bearer issuance or live Notion calls. #124/#127/#128 must
-implement serialized token refresh, durable revocation and every-request grant
-and session enforcement before private HTTP access.
+**Status:** encrypted persistence is installed in the explicit
+[browser callback](notion-oauth-callback.md), not just an internal primitive.
+The callback and credential runtime share one store instance. A verified,
+allowlisted Notion grant must be durably saved before the original MCP PKCE
+transaction can receive an authorization code. Failed storage never returns
+a code. MCP access tokens and private MCP resource access remain disabled;
+those are separate #120/#124/#127–#130 release gates under #117.
 
 ## Key, directory, and startup
 
@@ -65,8 +66,10 @@ schema: 1
 grant_id: 128-bit random UUID-like opaque hex ID (new for each save)
 epoch: monotonically increasing u64 per replacement
 notion_client_id, workspace_id, owner_user_id, bot_id
-issued_at_unix, expires_at_unix: optional
-access_token, refresh_token: optional
+issued_at_unix
+expires_at_unix: optional
+access_token
+refresh_token: optional
 ```
 
 The callback parses optional upstream `expires_in` (1 second through one
@@ -85,9 +88,10 @@ appear in plaintext on disk.
 
 ## Boundary and limitations
 
-- The callback-to-store boundary in #298 uses NotionCallback::complete_and_persist
-  to require a matching confidential Notion client before code exchange,
-  then saves verified grants atomically. A preexisting bot identity must match
+- The internal callback-to-store boundary from #298 and the installed
+  browser callback require a matching confidential Notion client before code
+  exchange, then save verified grants atomically. Browser callbacks also
+  require the independent secure cookie bound to the single-use Notion state. A preexisting bot identity must match
   the new verified grant; switching integration bots requires an explicit,
   controlled state reset rather than a silent account change.
 - The store only accepts an already typed, verified `NotionGrant` and
@@ -95,10 +99,11 @@ appear in plaintext on disk.
   policy before storing. Every load rechecks the configured Notion client,
   workspace and authorizing user. Replacing a grant rotates its `grant_id`
   and increases the epoch; no caller automatically inherits the new grant.
-- **An encrypted file is not proof of a live OAuth grant.** This component
-  cannot mint a ChatGPT/MCP token and does not call
-  `AuthorizationFlow::approve`. #127 must bind these records to live
-  application authorization and enforce revocation and root-policy checks.
+- **An encrypted file is not proof of a live OAuth grant.** The store cannot
+  mint a ChatGPT/MCP token. The callback may call `AuthorizationFlow::approve`
+  only after successful persistence and a current-generation check. Code
+  redemption must re-read the current approved grant; #127 must enforce live
+  resource authorization, revocation and root-policy checks.
 - Refresh rotation preserves the grant ID and epoch, atomically replaces the
 encrypted access/refresh pair and compares the expected prior token snapshot.
 See [#124 refresh](notion-oauth-refresh.md) for why a shared in-process
@@ -128,3 +133,41 @@ cargo fmt --all -- --check
 Tests cover encrypted persistence and reload, stable random IDs/epoch
 rotation, owner binding, changed client/secret key, ciphertext tampering,
 symlink and unsafe permissions, missing key, and startup configuration.
+
+
+## Final storage integration assessment (#123)
+
+The original staged store and internal callback commit were insufficient to
+prove installed persistence. The public composition merged in
+[PR #425](https://github.com/mtandersson/notion-knowedge/pull/425) now supplies
+that missing boundary: the HTTP server constructs the credential runtime,
+passes its exact shared store to the browser login adapter, and refuses to
+mount a usable callback without configured sealed storage. Missing state is
+an unapproved login, not authentication. Existing corrupt or foreign state
+fails startup, and state corrupted after startup cannot be overwritten by a
+callback or used to obtain an MCP code.
+
+| Storage acceptance requirement | Current evidence |
+| --- | --- |
+| Access/refresh credentials encrypted at rest | `GrantStore::write_record` seals the complete record with AES-256-GCM, a fresh nonce and authenticated application/version binding; `encrypted_round_trip_is_durable_and_secrets_never_on_disk` checks ciphertext, reload and absence of plaintext credentials/identifiers. |
+| Workspace, authorizing user and expiry metadata retained | Typed `NotionGrant` fields are encrypted together in `Record`; each load rechecks the configured Notion client/user/workspace. `None` expiry remains explicitly unknown. |
+| Tokens absent from logs and audit | Credential containers redact Debug and are not transport-serializable; provider failures are discarded; callback HTTP errors are static, with no provider body, query, identity, secret or path. |
+| Explicit schema/version | Magic `NKGRANT1`, schema `1`, AEAD namespace and strict record deserialization bind the format. Wrong schema, key or tampering fails closed. |
+| Safe missing/corrupt startup state | `Config::validate_grant_store` runs before commands/transports. Missing state means no approved grant; missing key, unreadable/corrupt state, wrong owner/client or unsafe permissions fail. Store/configuration and binary startup tests cover these cases. |
+| Installed confidential callback persists before MCP approval | `browser_callback_persists_allowlisted_grant_then_redirects_with_bound_code` exercises the production HTTP router; `failed_sealed_commit_never_returns_an_mcp_authorization_code` proves a bad commit returns no redirect/code and preserves suspicious state. Binary tests verify full configured callback wiring and refusal without storage. |
+
+Reproduce the relevant checks in the pinned environment:
+
+```sh
+nix develop --command cargo test -p notion-knowledge-server --locked
+nix develop --command cargo fmt --all -- --check
+nix develop --command cargo clippy -p notion-knowledge-server --all-targets --locked -- -D warnings
+```
+
+This assessment completes the installed **storage** contract. It does not
+claim that discovery, a saved grant or an MCP authorization code permits a
+private tool call. Provider-compatible refresh, writer/revocation fencing,
+code redemption, token/session enforcement and complete end-to-end production
+acceptance remain tracked by #117. In particular, the current file writer is
+process-local: the deployment must not introduce concurrent independent
+writers or restore an old grant as a way to restore authorization.
