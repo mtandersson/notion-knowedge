@@ -287,7 +287,7 @@ impl Tensor {
             let mut reader = zip.by_index(i)?;
             let name = {
                 let name = reader.name()?;
-                name.strip_suffix(NPY_SUFFIX).unwrap_or(name.as_ref()).to_owned()
+                name.strip_suffix(NPY_SUFFIX).unwrap_or(&name).to_owned()
             };
             let header = read_header(&mut reader)?;
             let header = Header::parse(&header)?;
@@ -384,7 +384,7 @@ impl NpzTensors {
             let file = zip.by_index(i)?;
             let name = {
                 let name = file.name()?;
-                name.strip_suffix(NPY_SUFFIX).unwrap_or(name.as_ref()).to_owned()
+                name.strip_suffix(NPY_SUFFIX).unwrap_or(&name).to_owned()
             };
             index_per_name.insert(name, i);
         }

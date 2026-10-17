@@ -251,7 +251,7 @@ features = ["derive"]
 version = "0.8"
 
 [dependencies.zip]
-version = "9.0.0"
+version = "9.0.3"
 default-features = false
 
 [dev-dependencies.anyhow]

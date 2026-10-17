@@ -677,7 +677,7 @@ pub fn read_pth_tensor_info<P: AsRef<std::path::Path>>(
     let mut zip = zip::ZipArchive::new(zip_reader)?;
     let zip_file_names = zip
         .file_names()
-        .map(|f| f.map(|name| name.into_owned()))
+        .map(|f| f.map(|f| f.to_string()))
         .collect::<std::result::Result<Vec<String>, _>>()?;
 
     let mut tensor_infos = vec![];
