@@ -53,10 +53,10 @@ Run these as the dedicated service identity, choosing persistent private paths:
 
 ```sh
 umask 077
-mkdir -p "$HOME/.local/state/notion-knowledge"
-chmod 700 "$HOME/.local/state/notion-knowledge"
-openssl rand -out "$HOME/.local/state/notion-knowledge/grant.key" 32
-chmod 600 "$HOME/.local/state/notion-knowledge/grant.key"
+mkdir -p "$HOME/.config/notion-knowledge/secrets" "$HOME/.local/state/notion-knowledge"
+chmod 700 "$HOME/.config/notion-knowledge" "$HOME/.config/notion-knowledge/secrets" "$HOME/.local/state/notion-knowledge"
+openssl rand -out "$HOME/.config/notion-knowledge/secrets/grant.key" 32
+chmod 600 "$HOME/.config/notion-knowledge/secrets/grant.key"
 ```
 
 Generate the key **once**: it is 32 raw bytes, not hex or base64. Keep a protected
@@ -82,8 +82,8 @@ NK_NOTION_OAUTH_CLIENT_SECRET=<secret-from-private-service-environment>
 NK_NOTION_OAUTH_REDIRECT_URI=https://knowledge.example.com/oauth/notion/callback
 NK_NOTION_ALLOWED_WORKSPACE_ID=<independently-verified-workspace-UUID>
 NK_NOTION_ALLOWED_USER_ID=<independently-verified-authorizing-person-id>
-NK_NOTION_GRANT_KEY_FILE=<absolute-private-directory>/grant.key
-NK_NOTION_GRANT_STATE_FILE=<absolute-private-directory>/grant.json
+NK_NOTION_GRANT_KEY_FILE=<absolute-home>/.config/notion-knowledge/secrets/grant.key
+NK_NOTION_GRANT_STATE_FILE=<absolute-home>/.local/state/notion-knowledge/grant.json
 ```
 
 These are service environment entries, not a shell script to source unchanged.
@@ -94,25 +94,28 @@ change policy by stopping and restarting the service. The grant runtime holds an
 exclusive lifetime lease on its state; never delete its `.lock` sidecar while
 any runtime or credential probe is running.
 
-Validate the supplied environment and then start the installed binary:
+The commands below assume the built binary is installed on the service PATH
+(or replace its name with the absolute build output path). Validate the supplied
+environment and then start it:
 
 ```sh
 notion-knowledge-server --check
 notion-knowledge-server --http
 ```
 
-`--check` checks configuration only. It does not prove provider connectivity,
+`--check` validates configuration and configured sealed-store/key safety. It does not prove provider connectivity,
 consent, index compatibility or a working ChatGPT connection.
 
 ## Enable useful content deliberately
 
-OAuth without content scope exposes no private knowledge. For fresh page reads,
-also configure `NK_NOTION_SCOPE_WORKSPACE_ID` equal to the allowlisted workspace
+OAuth without content scope exposes no private knowledge. To enable scoped content,
+configure `NK_NOTION_SCOPE_WORKSPACE_ID` equal to the allowlisted workspace
 and `NK_NOTION_SCOPE_ROOTS` as the operator-approved physical root page IDs.
 Use the generation/exclusion settings in [root scope configuration](mcp-root-scope-enforcement.md).
 The consented connection must actually have permission to read those pages.
 
-Search and indexed expansion additionally require a Unix binary built with
+Search and `knowledge_get` (including `freshness: "fresh"`, which first expands
+indexed references) require a Unix binary built with
 `webhook-worker`, an existing compatible private committed SQLite/Lance index,
 FTS and trained vector indexes, and pinned offline Qwen assets:
 
