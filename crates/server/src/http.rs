@@ -170,8 +170,9 @@ pub async fn serve_installed(
     // mode the real MCP SDK service is NOT mounted. The discovery router always
     // challenges requests, including session/SSE and spurious bearer tokens.
     // #120/#127 must supply a verified auth layer before re-enabling it.
+    let oauth_login = crate::oauth_authorize::Login::from_config(&settings);
     let mcp = match settings.oauth_discovery {
-        Some(discovery) => crate::oauth_discovery::router(bind, discovery),
+        Some(discovery) => crate::oauth_discovery::router_with_login(bind, discovery, oauth_login),
         None => {
             let mcp = axum::Router::new()
                 .nest_service("/mcp", service)

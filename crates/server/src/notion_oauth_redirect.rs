@@ -64,6 +64,7 @@ impl fmt::Debug for AuthorizationUrl {
 struct Pending {
     mcp_transaction: Secret,
     expires: Instant,
+    browser: Option<[u8; 32]>,
 }
 /// In-memory state correlation; #122 consumes it BEFORE upstream code exchange.
 pub struct NotionOAuthRedirect {
@@ -92,6 +93,27 @@ impl NotionOAuthRedirect {
         request: &AuthorizationRequest<'_>,
         now: Instant,
     ) -> Result<AuthorizationUrl, Error> {
+        self.begin_bound_at(flow, request, None, now)
+    }
+    /// Browser correlation is independent of the upstream state and MCP PKCE.
+    /// The cookie secret must never be included in the Notion redirect URL.
+    pub(crate) fn begin_browser(
+        &self,
+        flow: &AuthorizationFlow,
+        request: &AuthorizationRequest<'_>,
+    ) -> Result<(AuthorizationUrl, Secret), Error> {
+        let browser = crate::oauth_code::random_secret()?;
+        let digest = Sha256::digest(browser.expose().as_bytes()).into();
+        let url = self.begin_bound_at(flow, request, Some(digest), Instant::now())?;
+        Ok((url, browser))
+    }
+    fn begin_bound_at(
+        &self,
+        flow: &AuthorizationFlow,
+        request: &AuthorizationRequest<'_>,
+        browser: Option<[u8; 32]>,
+        now: Instant,
+    ) -> Result<AuthorizationUrl, Error> {
         let mut pending = self
             .pending
             .lock()
@@ -112,6 +134,7 @@ impl NotionOAuthRedirect {
             Pending {
                 mcp_transaction,
                 expires: now + STATE_TTL,
+                browser,
             },
         );
         // Notion capabilities are selected on the integration and consent
@@ -131,6 +154,30 @@ impl NotionOAuthRedirect {
         self.take_at(state, Instant::now())
     }
     fn take_at(&self, state: &str, now: Instant) -> Option<Secret> {
+        self.take_bound_at(state, None, now)
+    }
+    /// Public callbacks MUST use browser correlation. Unbound internal takes
+    /// cannot consume transactions started through the browser entry point.
+    pub fn take_browser(&self, state: &str, browser: &str) -> Option<Secret> {
+        if browser.len() != 43
+            || !browser
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        {
+            return None;
+        }
+        self.take_bound_at(
+            state,
+            Some(Sha256::digest(browser.as_bytes()).into()),
+            Instant::now(),
+        )
+    }
+    fn take_bound_at(
+        &self,
+        state: &str,
+        browser: Option<[u8; 32]>,
+        now: Instant,
+    ) -> Option<Secret> {
         if state.len() != 43
             || !state
                 .bytes()
@@ -140,6 +187,11 @@ impl NotionOAuthRedirect {
         }
         let digest: [u8; 32] = Sha256::digest(state.as_bytes()).into();
         let mut pending = self.pending.lock().ok()?;
+        let value = pending.get(&digest)?;
+        // A cross-browser request cannot consume somebody else's login.
+        if value.browser != browser {
+            return None;
+        }
         let value = pending.remove(&digest)?;
         (value.expires > now).then_some(value.mcp_transaction)
     }
@@ -276,6 +328,19 @@ mod tests {
             "https%3A%2F%2Fexample.com%2Fa%3Fb%3D1%26c%3D2"
         );
     }
+    #[test]
+    fn browser_started_state_requires_the_same_independent_cookie() {
+        let (redirect, flow) = setup();
+        let (url, cookie) = redirect.begin_browser(&flow, &request()).unwrap();
+        let state = state(url.expose());
+        assert!(!url.expose().contains(cookie.expose()));
+        assert!(redirect.take(state).is_none());
+        assert!(redirect.take_browser(state, "malformed").is_none());
+        assert!(redirect.take_browser(state, &"x".repeat(43)).is_none());
+        assert!(redirect.take_browser(state, cookie.expose()).is_some());
+        assert!(redirect.take_browser(state, cookie.expose()).is_none());
+    }
+
     #[test]
     fn restart_invalidates_correlation() {
         let (redirect, flow) = setup();

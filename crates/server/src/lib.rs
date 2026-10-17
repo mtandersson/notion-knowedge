@@ -53,3 +53,6 @@ pub mod retrieval_runtime;
 
 #[cfg(all(unix, feature = "webhook-worker"))]
 pub mod graph_runtime;
+
+/// Browser entry point for staged Notion authorization.
+pub mod oauth_authorize;

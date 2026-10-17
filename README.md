@@ -118,16 +118,18 @@ See [fresh-source verification](docs/fresh-source.md).
 
 Optional [OAuth discovery](docs/oauth-discovery.md) can be configured with the
 paired `NK_OAUTH_ISSUER` and `NK_OAUTH_RESOURCE` HTTPS settings. In that mode,
-the server only publishes metadata; `/authorize`, `/token` and `/revoke` are
-unavailable and **all MCP calls return 401**. Discovery is not authentication,
+the server publishes metadata; `/token` and `/revoke` are unavailable and
+**all MCP calls return 401**. `/authorize` remains unavailable unless the
+explicit browser-entry configuration below is supplied. Discovery is not authentication,
 and remote/private deployment remains blocked until the rest of #117 ships.
 
 The [staged Notion OAuth redirect core](docs/notion-oauth-redirect.md) accepts
 `NK_NOTION_OAUTH_CLIENT_ID` plus `NK_NOTION_OAUTH_REDIRECT_URI` only as a
 pair, bound to the canonical issuer's HTTPS callback. It generates independent
 single-use Notion state linked to an already validated MCP PKCE transaction.
-There is no public redirect/callback route or usable OAuth login until #122 and
-the downstream grant/session controls are implemented.
+With an explicitly registered MCP client, `GET /authorize` starts browser-bound
+Notion consent. There is no public callback route or usable OAuth login until
+#122 and the downstream grant/session controls are implemented.
 
 The staged [Notion callback verifier](docs/notion-oauth-callback.md) supports
 confidential server-side code exchange, typed Notion grant parsing and

@@ -46,6 +46,11 @@ impl NotionOwnerPolicy {
         self.workspace_id == workspace && self.owner_user_id == user
     }
 
+    pub(crate) fn authorization_identity(&self) -> crate::oauth_code::AllowedNotionIdentity {
+        crate::oauth_code::AllowedNotionIdentity::new(&self.workspace_id, &self.owner_user_id)
+            .expect("validated immutable Notion policy")
+    }
+
     pub fn new(workspace_id: &str, owner_user_id: &str) -> Result<Self, &'static str> {
         if !valid_id(workspace_id) {
             return Err("NK_NOTION_ALLOWED_WORKSPACE_ID");
