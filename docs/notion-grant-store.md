@@ -37,8 +37,8 @@ mismatched approved workspace/user all **fail closed with sanitized errors**.
 Startup calls `Config::validate_grant_store()` before HTTP/stdio/diagnostics
 and `--check` execution when the store is configured. Startup validates the encrypted grant and identity even when its access token
 has expired, permitting the server-only [refresh coordinator](notion-oauth-refresh.md)
-to attempt renewal. Expired and unknown-expiry grants are **not usable**
-without a successful refresh. Errors contain neither raw paths nor plaintext
+to attempt renewal. Expired grants require a successful refresh; unknown-expiry
+grants require positive live introspection before use and rotation when due. Errors contain neither raw paths nor plaintext
 secrets.
 
 Keys and state must be backed up/recovered **together** under independent
@@ -171,3 +171,13 @@ code redemption, token/session enforcement and complete end-to-end production
 acceptance remain tracked by #117. In particular, the current file writer is
 process-local: the deployment must not introduce concurrent independent
 writers or restore an old grant as a way to restore authorization.
+
+### Provider lifetime and rotation
+
+Notion's documented refresh response may omit `expires_in`; sealed
+`expires_at_unix` remains absent in that case. Before use, the shared refresh
+coordinator requires positive provider introspection of that exact access token.
+Its separate 24-hour proactive rotation cadence is server policy, not provider
+expiry. Both rotated tokens are committed together while grant ID and epoch
+remain stable. Inactive or ambiguous unknown-expiry grants deny without rotation.
+See [refresh and active-state policy](notion-oauth-refresh.md).

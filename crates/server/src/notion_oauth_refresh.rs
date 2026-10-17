@@ -84,15 +84,26 @@ impl<'a> NotionRefresh<'a> {
     /// Failure yields no stale credentials, even when an old token might
     /// otherwise still work. Never silently change owner or workspace.
     pub async fn ensure_fresh(&self) -> Result<StoredGrant, RefreshError> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| RefreshError::StoreUnavailable)?
-            .as_secs();
-        self.ensure_fresh_at(now).await
+        self.ensure_fresh_with_clock(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|time| time.as_secs())
+                .map_err(|_| RefreshError::StoreUnavailable)
+        })
+        .await
     }
 
+    #[cfg(test)]
     async fn ensure_fresh_at(&self, now: u64) -> Result<StoredGrant, RefreshError> {
+        self.ensure_fresh_with_clock(|| Ok(now)).await
+    }
+
+    async fn ensure_fresh_with_clock(
+        &self,
+        clock: impl FnOnce() -> Result<u64, RefreshError>,
+    ) -> Result<StoredGrant, RefreshError> {
         let _guard = self.serial.lock().await;
+        let now = clock()?;
         let existing = self
             .store
             .load_for_refresh()
@@ -351,6 +362,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queued_request_evaluates_expiry_when_it_acquires_the_lock() {
+        use std::{
+            future::Future,
+            sync::atomic::{AtomicU64, Ordering},
+            task::Poll,
+        };
+        let (_dir, store, policy, _) = setup();
+        let before = store
+            .save(&NotionGrant::fixture("workspace-a", "user-a", Some(3600)))
+            .unwrap();
+        let (url, task) = stub(
+            success(
+                "workspace-a",
+                "user-a",
+                "bot-test",
+                Some("rotated-refresh-secret"),
+                Some(3600),
+            ),
+            200,
+        )
+        .await;
+        let http = client(&url);
+        let refresh = NotionRefresh::new(&store, &http, &policy);
+        let guard = refresh.serial.lock().await;
+        let clock = AtomicU64::new(before.issued_at_unix());
+        let queued = refresh.ensure_fresh_with_clock(|| Ok(clock.load(Ordering::SeqCst)));
+        tokio::pin!(queued);
+        std::future::poll_fn(|cx| {
+            assert!(queued.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        clock.store(before.expires_at_unix().unwrap() + 1, Ordering::SeqCst);
+        drop(guard);
+        assert_eq!(
+            queued.await.unwrap().access_token(),
+            "rotated-access-secret"
+        );
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn healthy_unexpired_grant_skips_refresh_without_network() {
         let (_dir, store, policy, _) = setup();
         let before = store
@@ -517,6 +570,87 @@ mod tests {
             Err(RefreshError::InvalidIdentity)
         ));
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn expired_rotation_rejects_authorization_replacement_during_exchange() {
+        let (_dir, store, policy, _) = setup();
+        let store = Arc::new(store);
+        let before = store
+            .save(&NotionGrant::fixture("workspace-a", "user-a", Some(120)))
+            .unwrap();
+        let writer = store.clone();
+        let (url, task) = scripted(
+            vec![(
+                success(
+                    "workspace-a",
+                    "user-a",
+                    "bot-test",
+                    Some("rotated-refresh-secret"),
+                    None,
+                ),
+                200,
+            )],
+            Some(Box::new(move || {
+                writer
+                    .save(&NotionGrant::fixture("workspace-a", "user-a", Some(3600)))
+                    .unwrap();
+            })),
+        )
+        .await;
+        let http = client(&url);
+        let refresh = NotionRefresh::new(&store, &http, &policy);
+        assert!(matches!(
+            refresh
+                .ensure_fresh_at(before.expires_at_unix().unwrap() + 1)
+                .await,
+            Err(RefreshError::InvalidIdentity)
+        ));
+        let current = store.load_for_refresh().unwrap().unwrap();
+        assert_ne!(current.grant_id(), before.grant_id());
+        assert_eq!(current.access_token(), "test-access-secret");
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rotated_unknown_expiry_must_be_active_before_credentials_are_issued() {
+        for (body, status) in [
+            (r#"{"active":false}"#, 200),
+            (r#"{}"#, 200),
+            ("unavailable", 503),
+        ] {
+            let (_dir, store, policy, _) = setup();
+            let before = store
+                .save(&NotionGrant::fixture("workspace-a", "user-a", Some(120)))
+                .unwrap();
+            let (url, task) = scripted(
+                vec![
+                    (
+                        success(
+                            "workspace-a",
+                            "user-a",
+                            "bot-test",
+                            Some("rotated-refresh-secret"),
+                            None,
+                        ),
+                        200,
+                    ),
+                    (body.into(), status),
+                ],
+                None,
+            )
+            .await;
+            let http = client(&url);
+            let refresh = NotionRefresh::new(&store, &http, &policy);
+            assert!(refresh.ensure_fresh().await.is_err());
+            // Preserve the provider's rotated pair atomically even when active
+            // verification fails; never issue it or reuse the consumed old pair.
+            let current = store.load_for_refresh().unwrap().unwrap();
+            assert_eq!(current.grant_id(), before.grant_id());
+            assert_eq!(current.expires_at_unix(), None);
+            assert_eq!(current.refresh_token(), Some("rotated-refresh-secret"));
+            task.await.unwrap();
+        }
     }
 
     #[tokio::test]
