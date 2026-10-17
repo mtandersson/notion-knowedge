@@ -408,3 +408,44 @@ async fn ordinary_http_entrypoint_accepts_oauth_scope_without_static_integration
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn revoked_token_cannot_disclose_private_content_from_an_already_started_read() {
+    let h = harness().await;
+    let token = mint(&h).await;
+    let (session, _) = initialize(&h, &token).await;
+    let block = h.page_gate.acquire().await.unwrap();
+    h.pause_page.store(true, Ordering::SeqCst);
+    let before = h.page_reads.load(Ordering::SeqCst);
+    let request = rpc(&h, &token, Some(&session), get());
+    let pending = tokio::spawn(async move { request.send().await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while h.page_reads.load(Ordering::SeqCst) == before {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let response = h
+        .client
+        .post(format!("{}/revoke", h.base))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(encode_form(&[
+            ("client_id", "chatgpt".into()),
+            ("token", token.clone()),
+        ]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(block);
+    // Closing the SDK worker may close the stream before an RPC error can be
+    // delivered. Both outcomes must withhold every private content byte.
+    if let Ok(response) = pending.await.unwrap() {
+        let text = response.text().await.unwrap_or_default();
+        for private in ["Saffron private evidence", PAGE, ROOT, WORKSPACE] {
+            assert!(!text.contains(private));
+        }
+    }
+    assert!(h.login.local_resource_authorization(&token).is_none());
+}

@@ -32,8 +32,7 @@ scope and compatible existing retrieval state enable
 [request-bound content](oauth-content.md). Missing configuration/context remains
 fail-closed; static integration-backed handlers cannot substitute for these ports.
 Joined acceptance and remaining lifecycle gates still belong to #127/#117.
-Durable logout/revocation and cancellation of already in-flight work after
-upstream revocation remain #128; expiry of an existing stream is enforced here.
+[Local logout and revocation](oauth-revocation.md) cancel token evidence, terminate existing streams and close SDK sessions. Already-started bounded provider work may finish, but its result cannot pass authorization after local revocation. Upstream active state is checked before and after content disclosure.
 
 Verification uses real local HTTP sockets, fake local Notion providers, the
 production router/budget composition and actual SDK sessions. Run:

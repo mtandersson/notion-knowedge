@@ -81,6 +81,19 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if all_args
+        .iter()
+        .any(|arg| arg.starts_with("--notion-oauth-forget"))
+    {
+        if all_args != ["--notion-oauth-forget"] {
+            eprintln!("Notion OAuth forget accepts no other arguments.");
+            return ExitCode::from(2);
+        }
+        return match notion_knowledge_server::notion_oauth_runtime::NotionOAuthRuntime::forget_from_config(&config) {
+            Ok(()) => { println!("Stored Notion OAuth grant forgotten; fresh authorization required."); ExitCode::SUCCESS },
+            Err(_) => { eprintln!("Notion OAuth grant could not be forgotten; stop credential users and check private state."); ExitCode::FAILURE },
+        };
+    }
     notion_knowledge_core::logging::set_level(config.log_level);
     // Never start HTTP, stdio, diagnostics or --check with a corrupt or
     // foreign encrypted Notion grant. A missing state means unapproved.

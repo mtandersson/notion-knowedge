@@ -43,6 +43,15 @@ pub struct Login {
     flow: AuthorizationFlow,
     redirect: NotionOAuthRedirect,
     callback: Option<CallbackRuntime>,
+    sessions: std::sync::Mutex<Option<std::sync::Weak<crate::session_limits::BoundedSessions>>>,
+    revocation_admission: Arc<tokio::sync::Semaphore>,
+    #[cfg(test)]
+    cleanup_gate: std::sync::Mutex<Option<Arc<CleanupGate>>>,
+}
+#[cfg(test)]
+struct CleanupGate {
+    started: tokio::sync::Notify,
+    proceed: tokio::sync::Semaphore,
 }
 struct CallbackRuntime {
     store: Arc<GrantStore>,
@@ -52,6 +61,43 @@ struct CallbackRuntime {
     admission: Arc<tokio::sync::Semaphore>,
 }
 impl Login {
+    pub(crate) fn attach_sessions(&self, sessions: &Arc<crate::session_limits::BoundedSessions>) {
+        *self.sessions.lock().expect("session registry") = Some(Arc::downgrade(sessions));
+    }
+    async fn revoke_token(
+        &self,
+        client_id: &str,
+        token: &str,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Result<(), Error> {
+        let digest = self.flow.revoke(client_id, token)?;
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| Error::TemporarilyUnavailable)?
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade);
+        if let Some(sessions) = sessions
+            && sessions.has_token(&digest)
+        {
+            #[cfg(test)]
+            let gate = self.cleanup_gate.lock().unwrap().clone();
+            let cleanup = tokio::spawn(async move {
+                // A disconnected HTTP observer cannot abandon remaining SDK
+                // workers. Finite revocation admission remains held to completion.
+                let _permit = permit;
+                #[cfg(test)]
+                if let Some(gate) = gate {
+                    gate.started.notify_one();
+                    let _release = gate.proceed.acquire().await.unwrap();
+                }
+                sessions.close_token(&digest).await;
+            });
+            cleanup.await.map_err(|_| Error::TemporarilyUnavailable)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn content_factory(
         &self,
         scope: notion_knowledge_core::lifecycle::LifecycleScope,
@@ -146,6 +192,10 @@ impl Login {
             ),
             redirect: NotionOAuthRedirect::new(registration.clone()),
             callback,
+            sessions: std::sync::Mutex::new(None),
+            revocation_admission: Arc::new(tokio::sync::Semaphore::new(4)),
+            #[cfg(test)]
+            cleanup_gate: std::sync::Mutex::new(None),
         })))
     }
 }
@@ -532,5 +582,86 @@ pub async fn token(
             axum::Json(serde_json::json!({"access_token": issued.access_token.expose(), "token_type":issued.token_type,
                 "expires_in":issued.expires_in, "scope":issued.scope}))).into_response(),
         Err(error) => token_error(error, if error == Error::TemporarilyUnavailable { StatusCode::SERVICE_UNAVAILABLE } else { StatusCode::BAD_REQUEST }),
+    }
+}
+
+/// Bounded RFC7009 public-client token revocation. No provider call or grant
+/// mutation occurs; unknown and already-revoked tokens produce the same reply.
+pub async fn revoke(
+    State(login): State<Option<Arc<Login>>>,
+    request: axum::extract::Request,
+) -> Response {
+    let Some(login) = login.filter(|login| login.callback.is_some()) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CACHE_CONTROL, "no-store")],
+            "OAuth revocation unavailable",
+        )
+            .into_response();
+    };
+    let Ok(permit) = login.revocation_admission.clone().try_acquire_owned() else {
+        return crate::session_limits::overload();
+    };
+    let (parts, body) = request.into_parts();
+    let result = async {
+        if parts.uri.query().is_some()
+            || !token_content_type(&parts.headers)
+            || parts.headers.contains_key(header::AUTHORIZATION)
+            || parts
+                .headers
+                .get_all(header::CONTENT_ENCODING)
+                .iter()
+                .count()
+                > 1
+            || parts
+                .headers
+                .get(header::CONTENT_ENCODING)
+                .is_some_and(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"))
+        {
+            return Err(Error::InvalidRequest);
+        }
+        let bytes = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            axum::body::to_bytes(body, 8192),
+        )
+        .await
+        .map_err(|_| Error::InvalidRequest)?
+        .map_err(|_| Error::InvalidRequest)?;
+        let raw = std::str::from_utf8(&bytes).map_err(|_| Error::InvalidRequest)?;
+        let params = parse(raw, &["token", "client_id"])
+            .or_else(|_| parse(raw, &["token", "client_id", "token_type_hint"]))?;
+        if params["token"].is_empty()
+            || params["token"].len() > 256
+            || params["token"]
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(Error::InvalidRequest);
+        }
+        login
+            .revoke_token(&params["client_id"], &params["token"], permit)
+            .await
+    }
+    .await;
+    match result {
+        Ok(()) => (
+            StatusCode::OK,
+            [
+                (header::CACHE_CONTROL, "no-store"),
+                (header::PRAGMA, "no-cache"),
+            ],
+            "",
+        )
+            .into_response(),
+        Err(error) => (
+            if error == Error::TemporarilyUnavailable {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::BAD_REQUEST
+            },
+            [(header::CACHE_CONTROL, "no-store")],
+            axum::Json(serde_json::json!({"error":error.oauth_code()})),
+        )
+            .into_response(),
     }
 }

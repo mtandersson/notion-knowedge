@@ -235,6 +235,9 @@ impl Harness {
                 started + std::time::Duration::from_secs(elapsed.load(Ordering::SeqCst))
             })),
             redirect: NotionOAuthRedirect::new(registration.clone()),
+            sessions: std::sync::Mutex::new(None),
+            revocation_admission: Arc::new(tokio::sync::Semaphore::new(4)),
+            cleanup_gate: std::sync::Mutex::new(None),
             callback: Some(CallbackRuntime {
                 store: store.clone(),
                 credentials: NotionOAuthRuntime::fixture_with_clock(
@@ -1139,3 +1142,5 @@ mod content;
 #[cfg(all(unix, feature = "webhook-worker"))]
 #[path = "tests/content_index.rs"]
 mod content_index;
+
+mod revocation;

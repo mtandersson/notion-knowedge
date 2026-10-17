@@ -31,6 +31,7 @@ const SCHEMA: u32 = 1;
 pub enum StoreError {
     Configuration,
     Unavailable,
+    InUse,
     Corrupt,
     IdentityMismatch,
     Expired,
@@ -40,6 +41,7 @@ impl std::fmt::Display for StoreError {
         f.write_str(match self {
             Self::Configuration => "Notion grant store configuration invalid",
             Self::Unavailable => "Notion grant store unavailable",
+            Self::InUse => "Notion grant store is already in use",
             Self::Corrupt => "Notion grant store invalid or unreadable",
             Self::IdentityMismatch => "Notion grant identity binding rejected",
             Self::Expired => "Notion grant expired; reauthorization required",
@@ -115,6 +117,7 @@ pub struct GrantStore {
     policy: NotionOwnerPolicy,
     notion_client_id: String,
     guard: Mutex<()>,
+    lease: Option<crate::notion_grant_lease::GrantLease>,
 }
 impl std::fmt::Debug for GrantStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -122,6 +125,48 @@ impl std::fmt::Debug for GrantStore {
     }
 }
 impl GrantStore {
+    /// One lifetime owner for production callbacks, refresh and read consumers.
+    pub(crate) fn open_exclusive(
+        key: &Path,
+        state: &Path,
+        client: &str,
+        policy: NotionOwnerPolicy,
+    ) -> Result<Self, StoreError> {
+        if !valid_path(key)
+            || !valid_path(state)
+            || key == state
+            || key == crate::notion_grant_lease::GrantLease::path(state)
+        {
+            return Err(StoreError::Configuration);
+        }
+        let lease = crate::notion_grant_lease::GrantLease::acquire(state)?;
+        let mut store = Self::open(key, state, client, policy)?;
+        store.lease = Some(lease);
+        store.read_record()?;
+        Ok(store)
+    }
+
+    /// Offline operator reset. The key and stable lock inode remain in place.
+    pub(crate) fn forget(&self) -> Result<(), StoreError> {
+        let _guard = self.guard.lock().map_err(|_| StoreError::Unavailable)?;
+        self.lease
+            .as_ref()
+            .ok_or(StoreError::Configuration)?
+            .validate()?;
+        self.read_record()?;
+        match fs::remove_file(&self.file) {
+            Ok(()) => File::open(self.file.parent().ok_or(StoreError::Configuration)?)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|_| StoreError::Unavailable)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(StoreError::Unavailable),
+        }
+        self.lease
+            .as_ref()
+            .ok_or(StoreError::Configuration)?
+            .validate()
+    }
+
     /// Confirm that the callback token exchanger is the configured Notion app.
     pub(crate) fn matches_client(&self, client_id: &str) -> bool {
         self.notion_client_id == client_id
@@ -173,6 +218,7 @@ impl GrantStore {
             policy,
             notion_client_id: client_id.to_owned(),
             guard: Mutex::new(()),
+            lease: None,
         };
         store.read_record()?; // startup checks integrity + owner binding
         Ok(store)
@@ -320,6 +366,9 @@ impl GrantStore {
     }
 
     fn write_record(&self, record: &Record) -> Result<(), StoreError> {
+        if let Some(lease) = &self.lease {
+            lease.validate()?;
+        }
         let raw = serde_json::to_vec(record).map_err(|_| StoreError::Unavailable)?;
         if raw.len() + MAGIC.len() + NONCE_LEN + TAG_LEN > MAX_FILE {
             return Err(StoreError::Unavailable);
@@ -374,6 +423,9 @@ impl GrantStore {
     }
 
     fn read_record(&self) -> Result<Option<Record>, StoreError> {
+        if let Some(lease) = &self.lease {
+            lease.validate()?;
+        }
         self.validate_existing_file()?;
         let file = match File::open(&self.file) {
             Ok(value) => value,
@@ -469,6 +521,30 @@ mod tests {
         let file = dir.path().join("grant.bin");
         let policy = NotionOwnerPolicy::new("workspace-a", "user-a").unwrap();
         (dir, key, file, policy)
+    }
+
+    #[test]
+    fn live_lease_replacement_or_permission_loss_denies_reads_writes_and_forget() {
+        for replace in [false, true] {
+            let (_dir, key, path, policy) = setup();
+            let store = GrantStore::open_exclusive(&key, &path, "client-a", policy).unwrap();
+            let grant = NotionGrant::fixture("workspace-a", "user-a", None);
+            let snapshot = store.save(&grant).unwrap();
+            let original = fs::read(&path).unwrap();
+            let lock = crate::notion_grant_lease::GrantLease::path(&path);
+            if replace {
+                fs::rename(&lock, lock.with_extension("old-lock")).unwrap();
+                fs::write(&lock, []).unwrap();
+                fs::set_permissions(&lock, fs::Permissions::from_mode(0o600)).unwrap();
+            } else {
+                fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
+            }
+            assert!(store.load_for_refresh().is_err());
+            assert!(!store.still_current(&snapshot).unwrap_or(false));
+            assert!(store.save(&grant).is_err());
+            assert!(store.forget().is_err());
+            assert_eq!(fs::read(&path).unwrap(), original);
+        }
     }
 
     #[test]

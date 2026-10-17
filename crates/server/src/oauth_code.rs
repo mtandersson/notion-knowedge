@@ -177,6 +177,7 @@ pub(crate) struct PreparedRedemption {
     code: IssuedCode,
 }
 struct IssuedToken {
+    cancellation: tokio_util::sync::CancellationToken,
     binding: Binding,
     resource: String,
     scope: String,
@@ -459,6 +460,7 @@ impl AuthorizationFlow {
         records.tokens.insert(
             digest(token.expose()),
             IssuedToken {
+                cancellation: tokio_util::sync::CancellationToken::new(),
                 binding: code.binding,
                 resource: code.resource,
                 scope: code.scope.clone(),
@@ -471,6 +473,23 @@ impl AuthorizationFlow {
             expires_in: ACCESS_TTL.as_secs(),
             scope: code.scope,
         })
+    }
+
+    /// Public-client logout has no upstream side effects. Return only the
+    /// digest for bounded session cleanup, including unknown/expired tokens.
+    pub(crate) fn revoke(&self, client_id: &str, bearer: &str) -> Result<[u8; 32], Error> {
+        if client_id != self.client.client_id {
+            return Err(Error::InvalidClient);
+        }
+        let digest = digest(bearer);
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| Error::TemporarilyUnavailable)?;
+        if let Some(record) = records.tokens.remove(&digest) {
+            record.cancellation.cancel();
+        }
+        Ok(digest)
     }
 
     /// A token can only authorize after consulting the CURRENT approved
@@ -492,21 +511,25 @@ impl AuthorizationFlow {
         let records = self.records.lock().ok()?;
         let token_digest = digest(bearer);
         let record = records.tokens.get(&token_digest)?;
-        if record.expires <= now
+        if record.cancellation.is_cancelled()
+            || record.expires <= now
             || record.resource != self.client.resource
             || record.scope != "knowledge:read"
             || !record.binding.matches(current_grant)
         {
             return None;
         }
-        Some(notion_knowledge_mcp::HttpAuthorization::new(
-            token_digest,
-            record.binding.grant_id.clone(),
-            record.binding.epoch,
-            record.binding.workspace_id.clone(),
-            record.binding.owner_user_id.clone(),
-            record.expires,
-        ))
+        Some(
+            notion_knowledge_mcp::HttpAuthorization::new(
+                token_digest,
+                record.binding.grant_id.clone(),
+                record.binding.epoch,
+                record.binding.workspace_id.clone(),
+                record.binding.owner_user_id.clone(),
+                record.expires,
+            )
+            .with_cancellation(record.cancellation.clone()),
+        )
     }
 
     fn verify_at(
@@ -522,7 +545,8 @@ impl AuthorizationFlow {
             return false;
         };
         records.tokens.get(&digest(bearer)).is_some_and(|record| {
-            record.expires > now
+            !record.cancellation.is_cancelled()
+                && record.expires > now
                 && record.resource == self.client.resource
                 && record.scope == "knowledge:read"
                 && record.binding.matches(current_grant)
@@ -627,6 +651,36 @@ mod tests {
             resource: RESOURCE,
             code_verifier: VERIFIER,
         }
+    }
+
+    #[test]
+    fn revocation_invalidates_all_evidence_clones_and_is_idempotent() {
+        let flow = flow();
+        let start = flow.begin(&authorization()).unwrap();
+        let approved = flow.approve(start.expose(), &grant()).unwrap();
+        let token = flow
+            .redeem(&exchange(approved.code.expose()), &grant())
+            .unwrap();
+        let evidence = flow
+            .authorize_resource(token.access_token.expose(), &grant())
+            .unwrap();
+        let clone = evidence.clone();
+        assert!(evidence.is_active());
+        assert!(
+            flow.revoke("foreign-client", token.access_token.expose())
+                .is_err()
+        );
+        assert!(evidence.is_active());
+        flow.revoke(CLIENT, token.access_token.expose()).unwrap();
+        assert!(!clone.is_active());
+        assert!(!evidence.is_active());
+        assert!(
+            flow.authorize_resource(token.access_token.expose(), &grant())
+                .is_none()
+        );
+        assert!(!flow.verify(token.access_token.expose(), &grant()));
+        assert!(flow.revoke(CLIENT, token.access_token.expose()).is_ok());
+        assert!(flow.revoke(CLIENT, "never-issued").is_ok());
     }
 
     #[test]

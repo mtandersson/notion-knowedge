@@ -78,6 +78,31 @@ impl NotionOAuthRuntime {
         }
     }
 
+    /// Requires exclusive stopped-server ownership; never revoke Notion consent.
+    pub fn forget_from_config(config: &Config) -> Result<(), CredentialError> {
+        let settings = config
+            .notion_grant_store
+            .as_ref()
+            .ok_or(CredentialError::Configuration)?;
+        let callback = config
+            .notion_oauth_callback
+            .as_ref()
+            .ok_or(CredentialError::Configuration)?;
+        let registration = config
+            .notion_oauth_redirect
+            .as_ref()
+            .ok_or(CredentialError::Configuration)?;
+        GrantStore::open_exclusive(
+            &settings.key_file,
+            &settings.state_file,
+            registration.client_id(),
+            callback.allowed.clone(),
+        )
+        .map_err(|_| CredentialError::Unavailable)?
+        .forget()
+        .map_err(|_| CredentialError::Unavailable)
+    }
+
     pub fn from_config(config: &Config) -> Result<Option<Self>, CredentialError> {
         let Some(settings) = &config.notion_grant_store else {
             return Ok(None);
@@ -90,7 +115,7 @@ impl NotionOAuthRuntime {
             .notion_oauth_redirect
             .as_ref()
             .ok_or(CredentialError::Configuration)?;
-        let store = GrantStore::open(
+        let store = GrantStore::open_exclusive(
             &settings.key_file,
             &settings.state_file,
             registration.client_id(),

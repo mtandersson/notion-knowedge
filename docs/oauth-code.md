@@ -11,7 +11,7 @@ redemption. Discovery settings alone still enable no login: explicit client,
 Notion callback policy and sealed storage are required. The
 [OAuth MCP transport](oauth-mcp-sessions.md) now enforces live token/grant and
 exact-token session binding. Configured content uses
-[request-bound source composition](oauth-content.md); durable revocation remains #128. A token response alone is not permission to expose private tools.
+[request-bound source composition](oauth-content.md); [local revocation](oauth-revocation.md) is installed. A token response alone is not permission to expose private tools.
 
 ## Transaction phases
 
@@ -114,10 +114,10 @@ OAuth error code only. Codes are short-lived and single-use, including under
 simultaneous redemption; an incorrect well-formed verifier consumes its code.
 The endpoint shares the bounded four-operation admission pool with callbacks.
 
-MCP bearer verification is not installed by this delivery: all MCP HTTP
-methods still return 401, even with a newly issued token. `/revoke` is still
-503. The token's upstream-grant binding must be checked on **every** resource
-operation and session continuation in #127, with durable revocation in #128.
+MCP bearer verification checks the exact live grant and token on every HTTP
+operation and session continuation. `POST /revoke` invalidates the local bearer
+and closes its sessions without contacting Notion; see [revocation and operator
+forget](oauth-revocation.md).
 Process restart invalidates all pending codes and MCP tokens; it does not make
 an old sealed grant into an authenticated session.
 
@@ -129,10 +129,9 @@ an old sealed grant into an authenticated session.
 - #124 supplies provider-compatible active-state verification and server-side
   credential rotation; a saved approval is not proof that a Notion credential
   is permanently live.
-- #127/#128 must persist/revoke grant epochs and MCP tokens, validate them on
-  every transport operation, bind SSE/session continuity, revoke on logout,
-  and protect against concurrent refresh/revocation and multiple server
-  processes. The process-local engine does not solve distributed/HA security.
+- Exact grant epochs, token-bound sessions and local logout protect every
+  transport operation. A lifetime exclusive store lease excludes competing
+  credential processes. This single-process engine does not provide distributed/HA coordination.
 - #129 and #130 must exercise the public HTTP end-to-end login and configured
   HTTPS proxy with negative-path tests before access is enabled.
 

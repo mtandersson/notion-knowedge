@@ -151,9 +151,12 @@ pub(crate) fn router_with_mcp(
                     axum::routing::post(crate::oauth_authorize::token)
                         .layer(axum::extract::DefaultBodyLimit::max(8192)),
                 )
+                .route(
+                    "/revoke",
+                    axum::routing::post(crate::oauth_authorize::revoke),
+                )
                 .with_state(login),
         )
-        .route("/revoke", axum::routing::post(not_implemented))
         .with_state(discovery)
         .merge(resource)
         // The SDK Host/Origin checks do not cover sibling routes. The trusted
@@ -179,6 +182,7 @@ async fn authorization_server(State(discovery): State<OAuthDiscovery>) -> Respon
         "authorization_endpoint": format!("{issuer}/authorize"),
         "token_endpoint": format!("{issuer}/token"),
         "revocation_endpoint": format!("{issuer}/revoke"),
+        "revocation_endpoint_auth_methods_supported": ["none"],
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code"],
         "code_challenge_methods_supported": ["S256"],
@@ -213,17 +217,6 @@ async fn deny_mcp(State(discovery): State<OAuthDiscovery>) -> Response {
             (header::WWW_AUTHENTICATE, challenge.as_str()),
         ],
         "MCP OAuth authorization is not yet available",
-    )
-        .into_response()
-}
-
-/// The three advertised URLs exist but must fail closed until the production
-/// authorization handler, grant storage and revocation are implemented.
-async fn not_implemented() -> Response {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        [(header::CACHE_CONTROL, "no-store")],
-        "OAuth authorization not available",
     )
         .into_response()
 }

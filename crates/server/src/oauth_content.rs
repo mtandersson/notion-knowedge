@@ -9,7 +9,7 @@ use notion_knowledge_core::{
 };
 use notion_knowledge_mcp::{HttpAuthorization, RequestBoundSource, RequestScopeAdapters};
 use notion_knowledge_notion::NotionClient;
-use std::{future::Future, sync::Arc, time::Instant};
+use std::{future::Future, sync::Arc};
 
 fn failure(kind: BackendErrorKind) -> BackendError {
     BackendError {
@@ -58,7 +58,7 @@ struct BoundSource {
 }
 impl BoundSource {
     async fn grant(&self) -> Result<crate::notion_grant_store::StoredGrant, BackendError> {
-        if self.authorization.expires_at() <= Instant::now() {
+        if !self.authorization.is_active() {
             return Err(failure(BackendErrorKind::Unauthenticated));
         }
         let grant = self.runtime.ensure_active().await.map_err(credential)?;
@@ -73,7 +73,7 @@ impl BoundSource {
         Ok(grant)
     }
     fn current(&self, grant: &crate::notion_grant_store::StoredGrant) -> Result<(), BackendError> {
-        if self.authorization.expires_at() <= Instant::now()
+        if !self.authorization.is_active()
             || !self
                 .runtime
                 .grant_store()
