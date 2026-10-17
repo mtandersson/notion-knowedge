@@ -328,11 +328,11 @@ impl object_store::ObjectStore for PausedStore {
         location: &object_store::path::Path,
         options: object_store::GetOptions,
     ) -> object_store::Result<object_store::GetResult> {
-        if let Some(pause) = &self.gate.pause {
-            if !pause.claimed.swap(true, Ordering::SeqCst) {
-                pause.entered.notify_one();
-                let _permit = pause.release.acquire().await.unwrap();
-            }
+        if let Some(pause) = &self.gate.pause
+            && !pause.claimed.swap(true, Ordering::SeqCst)
+        {
+            pause.entered.notify_one();
+            let _permit = pause.release.acquire().await.unwrap();
         }
         self.inner.get_opts(location, options).await
     }
