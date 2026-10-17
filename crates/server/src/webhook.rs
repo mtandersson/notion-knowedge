@@ -154,11 +154,14 @@ async fn receive(State(endpoint): State<Endpoint>, request: Request) -> StatusCo
     // Own admission through actual backend completion, even when a client
     // disconnects or stops waiting. Never queue or replay a durable receipt.
     let Ok(permit) = endpoint.limit.clone().try_acquire_owned() else {
+        notion_knowledge_core::metrics::Resource::WebhookRequest.reject();
         return StatusCode::SERVICE_UNAVAILABLE;
     };
     let correlation = logging::current_id();
+    let metric = notion_knowledge_core::metrics::Resource::WebhookRequest.enter(1);
     let task = tokio::spawn(logging::scope(correlation, async move {
         let _permit = permit;
+        let _metric = metric;
         receive_admitted(endpoint, request).await
     }));
     // Body input has its own 10s deadline. The response waiter is bounded,

@@ -3,6 +3,7 @@
 //! Owned guards cover the *whole* handler future, including root authorization,
 //! retrieval, Notion requests and upload receipt completion. The budget is
 //! transport-independent: stdio and HTTP handlers are clones of one server.
+use notion_knowledge_core::metrics::{Resource, ResourceLease};
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -13,6 +14,11 @@ pub(crate) const MAX_CAPACITY: usize = 128;
 pub(crate) struct ToolBudget {
     permits: Arc<Semaphore>,
     capacity: u32,
+}
+
+pub(crate) struct ToolPermit {
+    _metric: ResourceLease,
+    _permit: OwnedSemaphorePermit,
 }
 
 impl ToolBudget {
@@ -37,11 +43,18 @@ impl ToolBudget {
         }
     }
 
-    pub(crate) fn try_acquire(&self, tool: &str) -> Option<OwnedSemaphorePermit> {
-        self.permits
-            .clone()
-            .try_acquire_many_owned(Self::weight(tool).min(self.capacity))
-            .ok()
+    pub(crate) fn try_acquire(&self, tool: &str) -> Option<ToolPermit> {
+        let units = Self::weight(tool).min(self.capacity);
+        match self.permits.clone().try_acquire_many_owned(units) {
+            Ok(permit) => Some(ToolPermit {
+                _permit: permit,
+                _metric: Resource::ToolWork.enter(units.into()),
+            }),
+            Err(_) => {
+                Resource::ToolWork.reject();
+                None
+            }
+        }
     }
 
     #[cfg(test)]

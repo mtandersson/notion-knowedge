@@ -50,6 +50,61 @@ struct Metrics {
     webhook_counts: [AtomicU64; 3],
     index_counts: [AtomicU64; 3],
     last_index_commit_seconds: AtomicU64,
+    resources: [ResourceMetrics; 5],
+}
+
+/// Fixed resource classes; never derive labels from request data.
+#[derive(Clone, Copy, Debug)]
+pub enum Resource {
+    McpRequest,
+    WebhookRequest,
+    Session,
+    Stream,
+    ToolWork,
+}
+
+#[derive(Default)]
+struct ResourceMetrics {
+    active: AtomicU64,
+    peak: AtomicU64,
+    rejected: AtomicU64,
+}
+
+impl Resource {
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    /// Count an admitted resource for exactly the lifetime of its owner.
+    pub fn enter(self, units: u64) -> ResourceLease {
+        let m = &metrics().resources[self.index()];
+        let active = m.active.fetch_add(units, Ordering::Relaxed) + units;
+        m.peak.fetch_max(active, Ordering::Relaxed);
+        ResourceLease {
+            resource: self,
+            units,
+        }
+    }
+
+    pub fn reject(self) {
+        metrics().resources[self.index()]
+            .rejected
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Drop with the resource permit, including cancellation and response EOF.
+#[derive(Debug)]
+pub struct ResourceLease {
+    resource: Resource,
+    units: u64,
+}
+impl Drop for ResourceLease {
+    fn drop(&mut self) {
+        metrics().resources[self.resource.index()]
+            .active
+            .fetch_sub(self.units, Ordering::Relaxed);
+    }
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -270,6 +325,36 @@ pub fn render() -> String {
         "nk_index_last_commit_timestamp_seconds {}",
         m.last_index_commit_seconds.load(Ordering::Relaxed)
     );
+    for (name, field) in [
+        ("nk_resource_active", 0),
+        ("nk_resource_peak", 1),
+        ("nk_resource_rejected_total", 2),
+    ] {
+        let kind = if field == 2 { "counter" } else { "gauge" };
+        let _ = writeln!(out, "# TYPE {name} {kind}");
+        for (i, label) in [
+            "mcp_request",
+            "webhook_request",
+            "session",
+            "stream",
+            "tool_work",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let r = &m.resources[i];
+            let value = match field {
+                0 => &r.active,
+                1 => &r.peak,
+                _ => &r.rejected,
+            };
+            let _ = writeln!(
+                out,
+                "{name}{{resource=\"{label}\"}} {}",
+                value.load(Ordering::Relaxed)
+            );
+        }
+    }
     out
 }
 

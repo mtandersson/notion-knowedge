@@ -24,12 +24,12 @@ Host/Origin and optional credential gates. An overloaded MCP route therefore
 cannot consume webhook admission slots. Excess webhooks receive 503 for Notion
 to redeliver; durable deduplication remains the existing webhook contract.
 
-**Known residual risk:** the SDK's `LocalSessionManager` still has no enforced
-active-session/idle cap, GET/SSE and POST streaming response bodies currently
-outlive the request-dispatch permit, stdio is trusted but unmetered, and a timed
-out webhook waiter can leave a blocking receipt commit running. These gaps are
-explicitly tracked by #398 and #399. Host/proxy/container concurrency, memory,
-temporary disk and file descriptors require deployment limits under #400/#13.
+Session/idle and GET/POST-stream lifetime controls now live in
+[session budgets](session-resource-limits.md). Weighted HTTP/stdio tool work and
+backend ownership after cancellation live in [work admission](mcp-work-admission.md).
+A timed-out webhook waiter retains capacity through actual receipt completion;
+it never replays that receipt. See [integrated load acceptance](security-resource-acceptance.md)
+for evidence and remaining deployment-level limits under #416/#13.
 
 Verification: `cargo fmt --all -- --check`,
 `cargo clippy --workspace --all-targets --locked -- -D warnings`,

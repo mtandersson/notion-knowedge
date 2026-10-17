@@ -13,3 +13,11 @@ Metrics are process-local, monotonic since startup unless explicitly described a
 Histogram duration buckets are fixed at 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5 and 10 seconds, plus `+Inf`. No ephemeral per-user or per-request time series are produced. Alerts may use `rate(nk_http_requests_total{outcome="failed"}[5m])`, `rate(nk_notion_rate_limits_total[5m])` and `nk_webhook_oldest_outstanding_age_seconds` where the optional sample exists.
 
 Operational caveats: these metrics expose current server activity, not the full local-index architecture when adapters are absent; readiness remains separate. They are not a substitute for authentication or root authorization. The queue gauges require configured SQLite state and should not be interpreted as full-page indexing backlog across unrelated stores.
+
+Resource admission adds `nk_resource_active` and `nk_resource_peak` gauges and
+`nk_resource_rejected_total` counters. Fixed labels are `mcp_request`,
+`webhook_request`, `session`, `stream`, `tool_work`; tool work counts weighted
+units, others count owners. Peaks and rejections reset at process restart.
+Stream counts include reservations during request dispatch, and backend webhook
+owners retain their count after caller timeout. See [resource acceptance](security-resource-acceptance.md)
+for load commands, tuning and deployment limitations.

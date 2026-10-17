@@ -403,6 +403,7 @@ async fn limit_mcp_requests(
         return next.run(request).await;
     }
     let Ok(_permit) = pool.try_acquire_owned() else {
+        notion_knowledge_core::metrics::Resource::McpRequest.reject();
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             [(CACHE_CONTROL, "no-store"), (RETRY_AFTER, "1")],
@@ -414,6 +415,7 @@ async fn limit_mcp_requests(
         )
             .into_response();
     };
+    let _metric = notion_knowledge_core::metrics::Resource::McpRequest.enter(1);
     next.run(request).await
 }
 
@@ -436,6 +438,7 @@ async fn limit_session_initializations(
     let _guard = LOCK.lock().await;
     manager.sweep().await;
     if !manager.has_capacity() {
+        notion_knowledge_core::metrics::Resource::Session.reject();
         return crate::session_limits::overload();
     }
     next.run(request).await
