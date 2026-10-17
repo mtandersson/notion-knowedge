@@ -21,6 +21,7 @@ struct Harness {
     base: String,
     client: reqwest::Client,
     calls: Arc<AtomicUsize>,
+    available: Arc<AtomicBool>,
     probes: Arc<AtomicUsize>,
     active: Arc<AtomicBool>,
     probe_gate: Arc<tokio::sync::Semaphore>,
@@ -42,6 +43,14 @@ fn grant(workspace: &str, user: &str) -> serde_json::Value {
 }
 impl Harness {
     async fn new(body: serde_json::Value, status: StatusCode) -> Self {
+        Self::installed(body, status, None, std::time::Duration::ZERO).await
+    }
+    async fn installed(
+        body: serde_json::Value,
+        status: StatusCode,
+        limits: Option<(usize, usize, usize)>,
+        clock_age: std::time::Duration,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("key");
         fs::write(&key, [42u8; 32]).unwrap();
@@ -56,6 +65,8 @@ impl Harness {
             )
             .unwrap(),
         );
+        let available = Arc::new(AtomicBool::new(true));
+        let token_available = available.clone();
         let calls = Arc::new(AtomicUsize::new(0));
         let seen = calls.clone();
         let provider_socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -69,6 +80,7 @@ impl Harness {
                 move |headers: HeaderMap, axum::Json(request): axum::Json<serde_json::Value>| {
                     let seen = seen.clone();
                     let body = body.clone();
+                    let available = token_available.clone();
                     async move {
                         assert_eq!(
                             headers["authorization"],
@@ -91,7 +103,14 @@ impl Harness {
                             response.as_object_mut().unwrap().remove("expires_in");
                         }
                         seen.fetch_add(1, Ordering::SeqCst);
-                        (status, axum::Json(response))
+                        (
+                            if available.load(Ordering::SeqCst) {
+                                status
+                            } else {
+                                StatusCode::SERVICE_UNAVAILABLE
+                            },
+                            axum::Json(response),
+                        )
                     }
                 },
             ),
@@ -104,6 +123,7 @@ impl Harness {
         let started_probe = probe_started.clone();
         let seen_probe = probes.clone();
         let provider_active = active.clone();
+        let introspect_available = available.clone();
         let provider_router = provider_router.route(
             "/v1/oauth/introspect",
             post(
@@ -112,6 +132,7 @@ impl Harness {
                     let started_probe = started_probe.clone();
                     let seen_probe = seen_probe.clone();
                     let provider_active = provider_active.clone();
+                    let available = introspect_available.clone();
                     async move {
                         assert_eq!(
                             headers["authorization"],
@@ -126,9 +147,9 @@ impl Harness {
                         seen_probe.fetch_add(1, Ordering::SeqCst);
                         started_probe.notify_one();
                         let _permit = gate.acquire().await.unwrap();
-                        axum::Json(
+                        (if available.load(Ordering::SeqCst) { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE }, axum::Json(
                             serde_json::json!({"active":provider_active.load(Ordering::SeqCst)}),
-                        )
+                        ))
                     }
                 },
             ),
@@ -144,7 +165,12 @@ impl Harness {
         .unwrap();
         let clock = Arc::new(AtomicU64::new(0));
         let elapsed = clock.clone();
-        let started = std::time::Instant::now();
+        let started = std::time::Instant::now() - clock_age;
+        let wall_origin = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let refresh_elapsed = clock.clone();
         let login = Arc::new(Login {
             flow: AuthorizationFlow::new(
                 Client::new(
@@ -161,12 +187,13 @@ impl Harness {
             redirect: NotionOAuthRedirect::new(registration.clone()),
             callback: Some(CallbackRuntime {
                 store: store.clone(),
-                credentials: NotionOAuthRuntime::fixture(
+                credentials: NotionOAuthRuntime::fixture_with_clock(
                     store.clone(),
                     NotionTokenClient::new(&registration, "client-secret")
                         .unwrap()
                         .for_local_fixture(&endpoint),
                     policy.clone(),
+                    Arc::new(move || wall_origin + refresh_elapsed.load(Ordering::SeqCst)),
                 ),
                 client: NotionTokenClient::new(&registration, "client-secret")
                     .unwrap()
@@ -178,14 +205,36 @@ impl Harness {
         let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let bind = socket.local_addr().unwrap();
         let base = format!("http://{bind}");
-        let router = crate::oauth_discovery::router_with_login(
-            bind,
-            OAuthDiscovery::new(
-                "https://auth.example.com",
-                "https://knowledge.example.com/mcp",
+        let discovery = OAuthDiscovery::new(
+            "https://auth.example.com",
+            "https://knowledge.example.com/mcp",
+        )
+        .unwrap();
+        let transport = limits.map(|(requests, sessions, streams)| {
+            let mut settings = Config::from_lookup(|_| None).unwrap();
+            settings.http_bind = bind;
+            settings.oauth_discovery = Some(discovery.clone());
+            settings.read_only = false;
+            settings.destructive_writes_enabled = true;
+            settings.mcp_max_in_flight = requests;
+            settings.mcp_max_sessions = sessions;
+            settings.mcp_max_streams = streams;
+            crate::http::mcp_transport(
+                &settings,
+                notion_knowledge_mcp::KnowledgeServer::default(),
+                Arc::new(crate::session_limits::BoundedSessions::new(
+                    sessions,
+                    std::time::Duration::from_secs(30),
+                )),
+                tokio_util::sync::CancellationToken::new(),
+                Some(login.clone()),
             )
-            .unwrap(),
+        });
+        let router = crate::oauth_discovery::router_with_mcp(
+            bind,
+            discovery,
             Some(login.clone()),
+            transport,
         );
         let router = router.layer(axum::middleware::from_fn(crate::http::correlate_request));
         let server = tokio::spawn(async move {
@@ -203,6 +252,7 @@ impl Harness {
                 .build()
                 .unwrap(),
             calls,
+            available,
             probes,
             active,
             probe_gate,
@@ -990,3 +1040,6 @@ async fn pending_provider_verification_cannot_outlive_code_or_grant() {
         }
     }
 }
+
+#[path = "tests/resource.rs"]
+mod resource;

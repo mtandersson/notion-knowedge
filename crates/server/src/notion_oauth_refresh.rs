@@ -59,6 +59,8 @@ pub struct NotionRefresh<'a> {
     client: Part<'a, NotionTokenClient>,
     policy: Part<'a, NotionOwnerPolicy>,
     serial: Mutex<()>,
+    #[cfg(test)]
+    test_clock: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
 }
 impl fmt::Debug for NotionRefresh<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -76,6 +78,8 @@ impl<'a> NotionRefresh<'a> {
             client: Part::Borrowed(client),
             policy: Part::Borrowed(policy),
             serial: Mutex::new(()),
+            #[cfg(test)]
+            test_clock: None,
         }
     }
 
@@ -85,12 +89,22 @@ impl<'a> NotionRefresh<'a> {
     /// otherwise still work. Never silently change owner or workspace.
     pub async fn ensure_fresh(&self) -> Result<StoredGrant, RefreshError> {
         self.ensure_fresh_with_clock(|| {
+            #[cfg(test)]
+            if let Some(clock) = &self.test_clock {
+                return Ok(clock());
+            }
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|time| time.as_secs())
                 .map_err(|_| RefreshError::StoreUnavailable)
         })
         .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_clock(mut self, clock: Arc<dyn Fn() -> u64 + Send + Sync>) -> Self {
+        self.test_clock = Some(clock);
+        self
     }
 
     #[cfg(test)]
@@ -197,6 +211,8 @@ impl NotionRefresh<'static> {
             client: Part::Owned(client),
             policy: Part::Owned(policy),
             serial: Mutex::new(()),
+            #[cfg(test)]
+            test_clock: None,
         }
     }
 }

@@ -60,17 +60,17 @@ impl NotionOAuthRuntime {
     }
 
     #[cfg(test)]
-    pub(crate) fn fixture(
+    pub(crate) fn fixture_with_clock(
         store: Arc<GrantStore>,
         client: NotionTokenClient,
         policy: crate::notion_oauth_callback::NotionOwnerPolicy,
+        clock: Arc<dyn Fn() -> u64 + Send + Sync>,
     ) -> Self {
         Self {
-            coordinator: Arc::new(NotionRefresh::shared(
-                store.clone(),
-                Arc::new(client),
-                Arc::new(policy),
-            )),
+            coordinator: Arc::new(
+                NotionRefresh::shared(store.clone(), Arc::new(client), Arc::new(policy))
+                    .with_test_clock(clock),
+            ),
             store,
         }
     }

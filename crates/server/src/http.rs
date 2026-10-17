@@ -35,6 +35,73 @@ pub async fn serve(settings: crate::config::Config) -> io::Result<()> {
     serve_with_handler(settings, notion_knowledge_mcp::KnowledgeServer::default()).await
 }
 
+/// The same installed transport/budgets serve production and local fake-provider
+/// tests. OAuth starts with no content adapters until request-bound composition.
+pub(crate) fn mcp_transport(
+    settings: &crate::config::Config,
+    handler: notion_knowledge_mcp::KnowledgeServer,
+    sessions: Arc<crate::session_limits::BoundedSessions>,
+    cancellation: tokio_util::sync::CancellationToken,
+    login: Option<Arc<crate::oauth_authorize::Login>>,
+) -> axum::Router {
+    let oauth = settings.oauth_discovery.as_ref();
+    let handler = if oauth.is_some() {
+        notion_knowledge_mcp::KnowledgeServer::default()
+    } else {
+        handler
+    };
+    let handler = if oauth.is_some() {
+        handler.with_http_authorization_required()
+    } else {
+        handler
+    };
+    let handler = handler
+        .with_tool_capacity(settings.mcp_tool_capacity)
+        .with_read_only(oauth.is_some() || settings.read_only)
+        .with_destructive_writes_enabled(settings.destructive_writes_enabled)
+        .with_capability_policy(settings.capability_policy.clone());
+    let bind = settings.http_bind;
+    let mut config = StreamableHttpServerConfig::default();
+    config.allowed_hosts.push(bind.ip().to_string());
+    config.allowed_origins = vec![
+        format!("http://{bind}"),
+        format!("http://localhost:{}", bind.port()),
+    ];
+    config.cancellation_token = cancellation;
+    let service = StreamableHttpService::new(move || Ok(handler.clone()), sessions.clone(), config);
+    let transport = axum::Router::new()
+        .nest_service("/mcp", service)
+        .layer(middleware::from_fn_with_state(
+            sessions.clone(),
+            limit_session_initializations,
+        ))
+        .layer(middleware::from_fn(validate_json))
+        .layer(middleware::from_fn_with_state(
+            crate::session_limits::StreamBudget::new(
+                settings.mcp_max_streams,
+                Duration::from_secs(settings.mcp_stream_max_seconds),
+            ),
+            crate::session_limits::limit_stream_responses,
+        ))
+        .layer(middleware::from_fn_with_state(
+            Arc::new(Semaphore::new(settings.mcp_max_in_flight)),
+            limit_mcp_requests,
+        ));
+    if let Some(discovery) = oauth {
+        transport.layer(middleware::from_fn_with_state(
+            crate::oauth_mcp::ResourceGate {
+                login,
+                sessions,
+                admission: Arc::new(Semaphore::new(settings.mcp_max_in_flight)),
+                metadata_url: discovery.protected_metadata_url(),
+            },
+            crate::oauth_mcp::require_authorization,
+        ))
+    } else {
+        transport
+    }
+}
+
 /// Both normal and explicit experimental composition use the same transport.
 pub async fn serve_with_handler(
     settings: crate::config::Config,
@@ -66,10 +133,15 @@ pub async fn serve_composed(
     >,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> io::Result<()> {
-    let handler =
+    let handler = if settings.oauth_discovery.is_some() {
+        // Until request-bound content composition (#432), never install private
+        // state readers or static integration credentials on the OAuth route.
+        notion_knowledge_mcp::KnowledgeServer::default()
+    } else {
         crate::root_scope::compose(handler, &settings, crate::root_scope::Transport::Http)
             .await
-            .map_err(io::Error::other)?;
+            .map_err(io::Error::other)?
+    };
     serve_installed(
         settings,
         handler,
@@ -99,21 +171,8 @@ pub async fn serve_installed(
         .map_err(|_| io::Error::other("Notion OAuth browser runtime unavailable"))?;
     let bind = settings.http_bind;
     let mut diagnostics = crate::diagnostics::bootstrap(&settings);
-    let handler = handler
-        .with_tool_capacity(settings.mcp_tool_capacity)
-        .with_read_only(settings.read_only)
-        .with_destructive_writes_enabled(settings.destructive_writes_enabled)
-        .with_capability_policy(settings.capability_policy.clone());
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    let mut config = StreamableHttpServerConfig::default();
-    // Keep the SDK's DNS rebinding protection, including for configured IPs.
-    config.allowed_hosts.push(bind.ip().to_string());
-    config.allowed_origins = vec![
-        format!("http://{bind}"),
-        format!("http://localhost:{}", bind.port()),
-    ];
-    config.cancellation_token = shutdown;
-    let cancellation = config.cancellation_token.clone();
+    let cancellation = shutdown;
     let session_manager = Arc::new(crate::session_limits::BoundedSessions::new(
         settings.mcp_max_sessions,
         Duration::from_secs(settings.mcp_session_idle_seconds),
@@ -130,8 +189,13 @@ pub async fn serve_installed(
             }
         }
     });
-    let service =
-        StreamableHttpService::new(move || Ok(handler.clone()), session_manager.clone(), config);
+    let transport = mcp_transport(
+        &settings,
+        handler,
+        session_manager.clone(),
+        cancellation.clone(),
+        oauth_login.clone(),
+    );
     let bearer = settings.bearer_fallback.map(Arc::new);
     // Operational state supplied for read activation is not webhook admission.
     // Only explicitly verified webhook mode can create or migrate its inbox.
@@ -168,44 +232,18 @@ pub async fn serve_installed(
         admission,
         settings.webhook_max_in_flight,
     );
-    // Discovery alone does not authenticate anyone. In that explicitly opted-in
-    // mode the real MCP SDK service is NOT mounted. The discovery router always
-    // challenges requests, including session/SSE and spurious bearer tokens.
-    // #120/#127 must supply a verified auth layer before re-enabling it.
     let mcp = match settings.oauth_discovery {
-        Some(discovery) => crate::oauth_discovery::router_with_login(bind, discovery, oauth_login),
+        Some(discovery) => {
+            crate::oauth_discovery::router_with_mcp(bind, discovery, oauth_login, Some(transport))
+        }
         None => {
-            let mcp = axum::Router::new()
-                .nest_service("/mcp", service)
-                // The session admission lock is inside JSON validation;
-                // request and SSE permits are acquired before SDK dispatch.
-                .layer(middleware::from_fn_with_state(
-                    session_manager.clone(),
-                    limit_session_initializations,
-                ))
-                .layer(middleware::from_fn(validate_json))
-                .layer(middleware::from_fn_with_state(
-                    crate::session_limits::StreamBudget::new(
-                        settings.mcp_max_streams,
-                        Duration::from_secs(settings.mcp_stream_max_seconds),
-                    ),
-                    crate::session_limits::limit_stream_responses,
-                ))
-                // Try-acquire happens before JSON buffering or SDK dispatch.
-                // Authentication remains the outermost MCP middleware.
-                .layer(middleware::from_fn_with_state(
-                    Arc::new(Semaphore::new(settings.mcp_max_in_flight)),
-                    limit_mcp_requests,
-                ));
             if let Some(token) = bearer {
-                // Authentication is the outermost MCP gate, before body parsing,
-                // initialization, session lookup and all tool dispatch.
-                mcp.layer(middleware::from_fn_with_state(
+                transport.layer(middleware::from_fn_with_state(
                     token,
                     require_development_bearer,
                 ))
             } else {
-                mcp
+                transport
             }
         }
     };

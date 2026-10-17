@@ -47,7 +47,7 @@ impl OAuthDiscovery {
         &self.issuer
     }
 
-    fn protected_metadata_url(&self) -> String {
+    pub(crate) fn protected_metadata_url(&self) -> String {
         // The root well-known route is also exposed; the suffixed URL is the
         // RFC 9728 canonical well-known location for a /mcp resource.
         format!(
@@ -112,6 +112,20 @@ pub fn router_with_login(
     discovery: OAuthDiscovery,
     login: Option<std::sync::Arc<crate::oauth_authorize::Login>>,
 ) -> Router {
+    router_with_mcp(bind, discovery, login, None)
+}
+
+pub(crate) fn router_with_mcp(
+    bind: SocketAddr,
+    discovery: OAuthDiscovery,
+    login: Option<std::sync::Arc<crate::oauth_authorize::Login>>,
+    mcp: Option<Router>,
+) -> Router {
+    let resource = mcp.unwrap_or_else(|| {
+        Router::new()
+            .route("/mcp", get(deny_mcp).post(deny_mcp).delete(deny_mcp))
+            .with_state(discovery.clone())
+    });
     Router::new()
         .route(
             "/.well-known/oauth-protected-resource",
@@ -140,8 +154,8 @@ pub fn router_with_login(
                 .with_state(login),
         )
         .route("/revoke", axum::routing::post(not_implemented))
-        .route("/mcp", get(deny_mcp).post(deny_mcp).delete(deny_mcp))
         .with_state(discovery)
+        .merge(resource)
         // The SDK Host/Origin checks do not cover sibling routes. The trusted
         // reverse proxy must rewrite Host to the backend authority, as it does
         // for the existing MCP and private health routes.

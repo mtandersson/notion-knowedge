@@ -479,6 +479,36 @@ impl AuthorizationFlow {
     pub fn verify(&self, bearer: &str, current_grant: &ApprovedNotionGrant<'_>) -> bool {
         self.verify_at(bearer, current_grant, (self.clock)())
     }
+    /// Non-secret, exact-token evidence for the installed HTTP/session gate.
+    pub(crate) fn authorize_resource(
+        &self,
+        bearer: &str,
+        current_grant: &ApprovedNotionGrant<'_>,
+    ) -> Option<notion_knowledge_mcp::HttpAuthorization> {
+        let now = (self.clock)();
+        if !self.allowed.matches(current_grant) {
+            return None;
+        }
+        let records = self.records.lock().ok()?;
+        let token_digest = digest(bearer);
+        let record = records.tokens.get(&token_digest)?;
+        if record.expires <= now
+            || record.resource != self.client.resource
+            || record.scope != "knowledge:read"
+            || !record.binding.matches(current_grant)
+        {
+            return None;
+        }
+        Some(notion_knowledge_mcp::HttpAuthorization::new(
+            token_digest,
+            record.binding.grant_id.clone(),
+            record.binding.epoch,
+            record.binding.workspace_id.clone(),
+            record.binding.owner_user_id.clone(),
+            record.expires,
+        ))
+    }
+
     fn verify_at(
         &self,
         bearer: &str,
@@ -596,6 +626,38 @@ mod tests {
             redirect_uri: REDIRECT,
             resource: RESOURCE,
             code_verifier: VERIFIER,
+        }
+    }
+
+    #[test]
+    fn resource_evidence_rejects_wrong_scope_resource_and_expired_records() {
+        for invalid in ["scope", "resource", "expiry"] {
+            let flow = flow();
+            let start = flow.begin(&authorization()).unwrap();
+            let redirect = flow.approve(start.expose(), &grant()).unwrap();
+            let token = flow
+                .redeem(&exchange(redirect.code.expose()), &grant())
+                .unwrap();
+            assert!(
+                flow.authorize_resource(token.access_token.expose(), &grant())
+                    .is_some()
+            );
+            {
+                let mut records = flow.records.lock().unwrap();
+                let record = records
+                    .tokens
+                    .get_mut(&digest(token.access_token.expose()))
+                    .unwrap();
+                match invalid {
+                    "scope" => record.scope = "knowledge:write".into(),
+                    "resource" => record.resource = "https://other.example.com/mcp".into(),
+                    _ => record.expires = Instant::now() - Duration::from_secs(1),
+                }
+            }
+            assert!(
+                flow.authorize_resource(token.access_token.expose(), &grant())
+                    .is_none()
+            );
         }
     }
 
