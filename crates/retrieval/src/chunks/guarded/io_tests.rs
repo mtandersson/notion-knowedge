@@ -1352,3 +1352,84 @@ async fn returned_commit_authority_is_held_until_final_sqlite_acknowledgment() {
 }
 
 mod aliases;
+
+#[tokio::test]
+async fn guarded_source_expansion_preserves_scope_budget_and_read_only_storage() {
+    use notion_knowledge_core::source::{
+        SourceExpandQuery, SourceExpansion, SourceExpansionError, StableSourceRef,
+    };
+    let f = Fixture::new();
+    f.create().await;
+    let table = f.guarded();
+    let provider = CountingProvider::new(f.embedding.clone());
+    let prepared = table
+        .prepare_page(
+            &provider,
+            operation("seed-expand", "seed", false),
+            &[chunk("one", "cinnamon pudding", "Dessert")],
+        )
+        .await
+        .unwrap();
+    table
+        .commit_page(prepared, f.lease.clone(), clock(), || async { Ok(()) })
+        .await
+        .unwrap();
+    let before = f.readable().await;
+    let version = before.table.version().await.unwrap();
+    let indexes = before.table.list_indices().await.unwrap();
+    let query = |reference, root: &str, max_chars| SourceExpandQuery {
+        refs: vec![reference],
+        root_page_ids: vec![root.into()],
+        max_chars,
+    };
+    for reference in [
+        StableSourceRef::Page("page".into()),
+        StableSourceRef::Chunk("one".into()),
+    ] {
+        let expanded = table
+            .expand(query(reference.clone(), "root", 8))
+            .await
+            .unwrap();
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(expanded[0].reference, reference);
+        assert_eq!(expanded[0].text, "cinnamon");
+        assert!(expanded[0].truncated);
+        assert_eq!(expanded[0].provenance.page_id, "page");
+        assert_eq!(expanded[0].provenance.root_page_id, "root");
+        assert_eq!(expanded[0].provenance.chunk_ids, ["one"]);
+    }
+    assert_eq!(
+        table
+            .expand(query(StableSourceRef::Page("page".into()), "elsewhere", 20))
+            .await,
+        Err(SourceExpansionError::OutOfScope)
+    );
+    assert_eq!(
+        table
+            .expand(query(StableSourceRef::Page("missing".into()), "root", 20))
+            .await,
+        Err(SourceExpansionError::Missing)
+    );
+    let after = f.readable().await;
+    assert_eq!(after.table.version().await.unwrap(), version);
+    assert_eq!(after.table.list_indices().await.unwrap(), indexes);
+    // An externally held writer fence excludes even reads of known content.
+    let lock = std::fs::File::open(&f.index).unwrap();
+    lock.lock().unwrap();
+    assert_eq!(
+        table
+            .expand(query(StableSourceRef::Page("page".into()), "root", 20))
+            .await,
+        Err(SourceExpansionError::Unavailable)
+    );
+    drop(lock);
+    // Replacing the authority file must not release the old pinned content.
+    std::fs::rename(f.root.join("state.sqlite"), f.root.join("old-state.sqlite")).unwrap();
+    std::fs::write(f.root.join("state.sqlite"), "replacement").unwrap();
+    assert_eq!(
+        table
+            .expand(query(StableSourceRef::Page("page".into()), "root", 20))
+            .await,
+        Err(SourceExpansionError::Unavailable)
+    );
+}
