@@ -156,10 +156,11 @@ async fn receive(State(endpoint): State<Endpoint>, request: Request) -> StatusCo
     let Ok(permit) = endpoint.limit.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE;
     };
-    let task = tokio::spawn(async move {
+    let correlation = logging::current_id();
+    let task = tokio::spawn(logging::scope(correlation, async move {
         let _permit = permit;
         receive_admitted(endpoint, request).await
-    });
+    }));
     // Body input has its own 10s deadline. The response waiter is bounded,
     // while a slow commit keeps its slot until the backend actually returns.
     match tokio::time::timeout(Duration::from_secs(20), task).await {

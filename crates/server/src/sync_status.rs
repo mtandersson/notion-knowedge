@@ -143,10 +143,14 @@ async fn finish_status_work(
     permit: tokio::sync::OwnedSemaphorePermit,
     inspect: impl std::future::Future<Output = SyncStatus> + Send + 'static,
 ) -> SyncStatus {
-    tokio::spawn(async move {
-        let _permit = permit;
-        inspect.await
-    })
+    let correlation = notion_knowledge_core::logging::current_id();
+    tokio::spawn(notion_knowledge_core::logging::scope(
+        correlation,
+        async move {
+            let _permit = permit;
+            inspect.await
+        },
+    ))
     .await
     .unwrap_or_default()
 }
