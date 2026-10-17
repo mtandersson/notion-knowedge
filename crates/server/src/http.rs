@@ -143,8 +143,8 @@ pub async fn serve_composed(
     shutdown: tokio_util::sync::CancellationToken,
 ) -> io::Result<()> {
     let handler = if settings.oauth_discovery.is_some() {
-        // Until request-bound content composition (#432), never install private
-        // state readers or static integration credentials on the OAuth route.
+        // Install OAuth request-bound readers in serve_installed, where they
+        // share the credential runtime. Keep integration composition out here.
         notion_knowledge_mcp::KnowledgeServer::default()
     } else {
         crate::root_scope::compose(handler, &settings, crate::root_scope::Transport::Http)

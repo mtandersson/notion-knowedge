@@ -429,26 +429,6 @@ impl KnowledgeServer {
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
         let _log = EventGuard::new(Operation::McpTool);
-        // Check before argument handling or invoking any adapter; the same
-        // handler serves stdio and HTTP, so there is no transport bypass.
-        if !self.tool_permitted(request.name.as_ref()) {
-            return Err(rmcp::ErrorData::invalid_params(
-                "tool unavailable in read-only mode",
-                None,
-            ));
-        }
-        // Reserve before inspecting user arguments or calling a backend.
-        // Permit is owned by this future through every await, and drops on
-        // completion/cancellation. Do not add timeout/retry around writes:
-        // uncertain mutation outcomes must keep their original receipts.
-        let Some(_tool_permit) = self.tool_budget.try_acquire(request.name.as_ref()) else {
-            return Ok(
-                rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(
-                    "tool_busy: retry later",
-                )])
-                .into(),
-            );
-        };
         let arguments = request.arguments.unwrap_or_default();
         let error = |message: &str| {
             rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(message)])
@@ -964,6 +944,26 @@ impl ServerHandler for KnowledgeServer {
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
         self.authorize_context(&context)?;
+        // Check before argument handling or invoking any adapter; the same
+        // handler serves stdio and HTTP, so there is no transport bypass.
+        if !self.tool_permitted(request.name.as_ref()) {
+            return Err(rmcp::ErrorData::invalid_params(
+                "tool unavailable in read-only mode",
+                None,
+            ));
+        }
+        // Reserve before inspecting user arguments or calling a backend.
+        // Permit is owned by this future through every await, and drops on
+        // completion/cancellation. Do not add timeout/retry around writes:
+        // uncertain mutation outcomes must keep their original receipts.
+        let Some(_tool_permit) = self.tool_budget.try_acquire(request.name.as_ref()) else {
+            return Ok(
+                rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(
+                    "tool_busy: retry later",
+                )])
+                .into(),
+            );
+        };
         if !self.request_scope_required {
             return self.call_tool_authorized(request, context).await;
         }
@@ -998,12 +998,12 @@ impl ServerHandler for KnowledgeServer {
                 rmcp::ErrorData::invalid_request("request authorization unavailable", None)
             })?
             .and_fresh_source(adapters.source.clone());
-        if let Some((graph, boost)) = &self.request_graph_boost {
-            if boost.enabled {
-                scoped = scoped.and_graph_boost(graph.clone(), *boost).map_err(|_| {
-                    rmcp::ErrorData::invalid_request("request authorization unavailable", None)
-                })?;
-            }
+        if let Some((graph, boost)) = &self.request_graph_boost
+            && boost.enabled
+        {
+            scoped = scoped.and_graph_boost(graph.clone(), *boost).map_err(|_| {
+                rmcp::ErrorData::invalid_request("request authorization unavailable", None)
+            })?;
         }
         let result = scoped.call_tool_authorized(request, context).await;
         adapters.source.validate().await.map_err(|_| {

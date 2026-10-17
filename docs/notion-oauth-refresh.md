@@ -50,7 +50,7 @@ continues to come from the sealed, allowlisted callback grant. Requests use
 provider calls are part of automated verification.
 
 `NotionOAuthRuntime::ensure_active()` supplies server-only active grant evidence
-for per-request resource authorization (#431) and future content composition (#432). It introspects even a
+for per-request resource authorization (#431) and request-bound content composition (#432). It introspects even a
 known-expiry grant and rechecks the exact sealed snapshot after the network
 request. The local bot-identity probe uses this stronger check too. This API
 does not itself authorize an MCP session or complete parent #124.
@@ -89,7 +89,7 @@ shared filesystem is **not safe**. Distributed locking/fencing,
 rollback-resistant revocation and persistent session authorization
 remain #127/#128 requirements. The browser callback and token exchange use
 this shared coordinator; the MCP transport also verifies active grants, while
-private content remains denied pending request-bound sources.
+configured content uses request-bound authoritative sources.
 
 The version-1 sealed file format remains unchanged, so records made
 under #123 can be refreshed in place. Since expired records need
@@ -122,10 +122,11 @@ credentials or provider responses.
 The configured browser flow can issue codes and `/token` uses the runtime's
 live `ensure_active()` evidence before minting a grant-bound MCP bearer.
 `/mcp` now enforces live token/grant and exact-token session binding (#431),
-while private content remains denied pending #432 and durable revocation #128. The
+while configured content uses request-bound sources (#432); durable revocation
+remains #128. The
 runtime is an internal credential composer and local operator probe;
-it must be explicitly connected to authorized backend tool handlers
-after the MCP authorization and durable revocation gates land. The
+its content ports require verified request-owned authorization. Durable
+revocation remains a separate release gate. The
 legacy `NK_NOTION_AUTH=integration` operator token remains a separate
 opt-in mode and is NEVER a fallback for failed OAuth refresh.
 

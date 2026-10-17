@@ -22,6 +22,10 @@ struct Harness {
     client: reqwest::Client,
     calls: Arc<AtomicUsize>,
     available: Arc<AtomicBool>,
+    page_status: Arc<AtomicUsize>,
+    page_reads: Arc<AtomicUsize>,
+    page_gate: Arc<tokio::sync::Semaphore>,
+    pause_page: Arc<AtomicBool>,
     probes: Arc<AtomicUsize>,
     active: Arc<AtomicBool>,
     probe_gate: Arc<tokio::sync::Semaphore>,
@@ -51,11 +55,27 @@ impl Harness {
         limits: Option<(usize, usize, usize)>,
         clock_age: std::time::Duration,
     ) -> Self {
+        Self::with_content(body, status, limits, clock_age, None).await
+    }
+    async fn with_content(
+        body: serde_json::Value,
+        status: StatusCode,
+        limits: Option<(usize, usize, usize)>,
+        clock_age: std::time::Duration,
+        content_scope: Option<notion_knowledge_core::lifecycle::LifecycleScope>,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("key");
         fs::write(&key, [42u8; 32]).unwrap();
         fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
-        let policy = NotionOwnerPolicy::new("workspace-a", "user-a").unwrap();
+        let policy = NotionOwnerPolicy::new(
+            content_scope
+                .as_ref()
+                .map(|scope| scope.workspace_id.as_str())
+                .unwrap_or("workspace-a"),
+            "user-a",
+        )
+        .unwrap();
         let store = Arc::new(
             GrantStore::open(
                 &key,
@@ -70,6 +90,7 @@ impl Harness {
         let calls = Arc::new(AtomicUsize::new(0));
         let seen = calls.clone();
         let provider_socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let provider_port = provider_socket.local_addr().unwrap().port();
         let endpoint = format!(
             "http://{}/v1/oauth/token",
             provider_socket.local_addr().unwrap()
@@ -154,6 +175,35 @@ impl Harness {
                 },
             ),
         );
+        let page_status = Arc::new(AtomicUsize::new(200));
+        let page_reads = Arc::new(AtomicUsize::new(0));
+        let page_gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let pause_page = Arc::new(AtomicBool::new(false));
+        let page_state = page_status.clone();
+        let reads = page_reads.clone();
+        let page_wait = page_gate.clone();
+        let pause = pause_page.clone();
+        let root = content_scope
+            .as_ref()
+            .map(|scope| scope.roots[0].0.clone())
+            .unwrap_or("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".into());
+        let provider_router = provider_router.route("/v1/pages/{id}", axum::routing::get(move |axum::extract::Path(id): axum::extract::Path<String>, headers: HeaderMap| {
+            let root = root.clone(); let status = page_state.clone(); let reads = reads.clone();
+            let wait = page_wait.clone(); let pause = pause.clone();
+            async move {
+                assert!(matches!(headers["authorization"].to_str().unwrap(), "Bearer provider-access-secret" | "Bearer rotated-access-secret"));
+                reads.fetch_add(1, Ordering::SeqCst);
+                if pause.swap(false, Ordering::SeqCst) { let _hold = wait.acquire().await.unwrap(); }
+                (StatusCode::from_u16(status.load(Ordering::SeqCst) as u16).unwrap(), axum::Json(serde_json::json!({
+                    "object":"page", "id":id, "url":format!("https://www.notion.so/{id}"), "last_edited_time":"2026-10-17T00:00:00.000Z", "in_trash":false,
+                    "parent":if id == root { serde_json::json!({"type":"workspace","workspace":true}) } else { serde_json::json!({"type":"page_id","page_id":root}) },
+                    "properties":{"Title":{"id":"title","type":"title","title":[{"plain_text":"Saffron private evidence"}]}}
+                })))
+            }
+        })).route("/v1/pages/{id}/markdown", axum::routing::get(|axum::extract::Path(id):axum::extract::Path<String>, headers:HeaderMap| async move {
+            assert!(matches!(headers["authorization"].to_str().unwrap(), "Bearer provider-access-secret" | "Bearer rotated-access-secret"));
+            axum::Json(serde_json::json!({"object":"page_markdown","id":id,"markdown":"Saffron private evidence fresh content", "truncated":false,"unknown_block_ids":[]}))
+        }));
         let provider = tokio::spawn(async move {
             axum::serve(provider_socket, provider_router).await.unwrap();
         });
@@ -194,7 +244,8 @@ impl Harness {
                         .for_local_fixture(&endpoint),
                     policy.clone(),
                     Arc::new(move || wall_origin + refresh_elapsed.load(Ordering::SeqCst)),
-                ),
+                )
+                .with_read_fixture(provider_port),
                 client: NotionTokenClient::new(&registration, "client-secret")
                     .unwrap()
                     .for_local_fixture(&endpoint),
@@ -210,7 +261,7 @@ impl Harness {
             "https://knowledge.example.com/mcp",
         )
         .unwrap();
-        let transport = limits.map(|(requests, sessions, streams)| {
+        let transport = if let Some((requests, sessions, streams)) = limits {
             let mut settings = Config::from_lookup(|_| None).unwrap();
             settings.http_bind = bind;
             settings.oauth_discovery = Some(discovery.clone());
@@ -219,17 +270,52 @@ impl Harness {
             settings.mcp_max_in_flight = requests;
             settings.mcp_max_sessions = sessions;
             settings.mcp_max_streams = streams;
-            crate::http::mcp_transport(
+            settings.notion_scope = content_scope.clone();
+            if content_scope.is_some() {
+                settings.mcp_tool_capacity = 2;
+            }
+            let handler = notion_knowledge_mcp::KnowledgeServer::default();
+            #[cfg(all(unix, feature = "webhook-worker"))]
+            let handler = if let Some(scope) = &content_scope {
+                let seeded =
+                    content_index::seed(dir.path(), scope, "cccccccc-cccc-cccc-cccc-cccccccccccc")
+                        .await;
+                settings.graph_index = Some(seeded.index.clone());
+                settings.graph_boost.enabled = true;
+                settings.webhook_state_file = Some(seeded.state);
+                settings.retrieval = Some(crate::webhook_worker::WorkerSettings {
+                    alias_sources: notion_knowledge_core::aliases::AliasSources::new(true, vec![])
+                        .unwrap(),
+                    index: seeded.index,
+                    assets: "/tmp/unused-oauth-provider".into(),
+                    poll_ms: 100,
+                    timeout_seconds: 30,
+                });
+                crate::retrieval_runtime::compose_oauth_queries(handler, &settings, seeded.provider)
+                    .await
+                    .unwrap()
+            } else {
+                handler
+            };
+            #[cfg(not(all(unix, feature = "webhook-worker")))]
+            let handler = if content_scope.is_some() {
+                handler.with_request_bound_content()
+            } else {
+                handler
+            };
+            Some(crate::http::mcp_transport(
                 &settings,
-                notion_knowledge_mcp::KnowledgeServer::default(),
+                handler,
                 Arc::new(crate::session_limits::BoundedSessions::new(
                     sessions,
                     std::time::Duration::from_secs(30),
                 )),
                 tokio_util::sync::CancellationToken::new(),
                 Some(login.clone()),
-            )
-        });
+            ))
+        } else {
+            None
+        };
         let router = crate::oauth_discovery::router_with_mcp(
             bind,
             discovery,
@@ -253,6 +339,10 @@ impl Harness {
                 .unwrap(),
             calls,
             available,
+            page_status,
+            page_reads,
+            page_gate,
+            pause_page,
             probes,
             active,
             probe_gate,
@@ -1043,3 +1133,9 @@ async fn pending_provider_verification_cannot_outlive_code_or_grant() {
 
 #[path = "tests/resource.rs"]
 mod resource;
+
+#[path = "tests/content.rs"]
+mod content;
+#[cfg(all(unix, feature = "webhook-worker"))]
+#[path = "tests/content_index.rs"]
+mod content_index;

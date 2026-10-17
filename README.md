@@ -120,8 +120,9 @@ Optional [OAuth discovery](docs/oauth-discovery.md) can be configured with the
 paired `NK_OAUTH_ISSUER` and `NK_OAUTH_RESOURCE` HTTPS settings. In that mode,
 the server publishes metadata; unverified MCP calls return 401 and `/revoke`
 remains unavailable. Complete OAuth configuration enables the
-[token-bound MCP transport](docs/oauth-mcp-sessions.md); private content remains
-unavailable until request-bound adapters are installed. `/token` requires the complete browser/grant configuration. `/authorize` remains unavailable unless the
+[token-bound MCP transport](docs/oauth-mcp-sessions.md). Explicit matching
+scope and compatible existing retrieval state enable
+[request-bound OAuth content](docs/oauth-content.md). `/token` requires the complete browser/grant configuration. `/authorize` remains unavailable unless the
 explicit browser-entry configuration below is supplied. Discovery is not authentication,
 and remote/private deployment remains blocked until the rest of #117 ships.
 
@@ -134,7 +135,8 @@ Notion consent. With sealed storage, the public callback verifies and saves
 the approved grant before returning an MCP authorization code. The public
 [`POST /token` endpoint](docs/oauth-code.md) redeems it with S256 PKCE against
 the current active sealed grant. MCP sessions require live token/grant binding;
-private content and durable revocation remain gated by #127/#128.
+configured content reads use request-bound authority; durable revocation
+remains gated by #128 and joined acceptance by #127.
 
 The staged [Notion callback verifier](docs/notion-oauth-callback.md) supports
 confidential server-side code exchange, typed Notion grant parsing and

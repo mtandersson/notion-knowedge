@@ -255,6 +255,24 @@ fn denied(response: Value) {
 }
 
 #[tokio::test]
+async fn request_bound_handler_denies_missing_http_context_before_index_disclosure() {
+    let index = Search::new();
+    let response = invoke(
+        KnowledgeServer::with_search(index.clone()).with_request_bound_content(),
+        "knowledge_search",
+        json!({"query":"secret","limit":1,"mode":"semantic"}),
+    )
+    .await;
+    assert!(response.get("error").is_some(), "{response}");
+    assert!(
+        !response
+            .to_string()
+            .contains("PRIVATE_CONTENT_SHOULD_NOT_LEAK")
+    );
+    assert_eq!(index.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn search_denies_missing_scope_without_calling_index() {
     let index = Search::new();
     let response = invoke(

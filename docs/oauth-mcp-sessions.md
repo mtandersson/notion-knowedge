@@ -27,10 +27,11 @@ its token expiry and configured stream lifetime, including time spent awaiting
 SDK dispatch. Disconnect or expiry drops the stream permit.
 
 The only supported scope is `knowledge:read`: OAuth tool discovery and dispatch
-remain read-only regardless of operator mutation settings. This slice uses a
-handler without private content adapters, including when a trusted caller
-supplies an integration-backed handler. Content calls fail closed until #432
-installs request-bound sources. It does not complete parent #127 or #117.
+remain read-only regardless of operator mutation settings. Explicit matching
+scope and compatible existing retrieval state enable
+[request-bound content](oauth-content.md). Missing configuration/context remains
+fail-closed; static integration-backed handlers cannot substitute for these ports.
+Joined acceptance and remaining lifecycle gates still belong to #127/#117.
 Durable logout/revocation and cancellation of already in-flight work after
 upstream revocation remain #128; expiry of an existing stream is enforced here.
 
