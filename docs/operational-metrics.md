@@ -21,3 +21,9 @@ units, others count owners. Peaks and rejections reset at process restart.
 Stream counts include reservations during request dispatch, and backend webhook
 owners retain their count after caller timeout. See [resource acceptance](security-resource-acceptance.md)
 for load commands, tuning and deployment limitations.
+
+Tool-work gauges describe live handler permits. A cancelled sync-status caller
+can leave a bounded backend inspection running under its separate owner budget;
+that detached status work is not included in `tool_work`. A zero gauge alone is
+not evidence that the process has no backend work. Webhook ownership, in contrast,
+remains counted through durable completion after the HTTP waiter leaves.
