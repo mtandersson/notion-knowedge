@@ -524,6 +524,30 @@ mod tests {
     }
 
     #[test]
+    fn live_lease_replacement_or_permission_loss_denies_reads_writes_and_forget() {
+        for replace in [false, true] {
+            let (_dir, key, path, policy) = setup();
+            let store = GrantStore::open_exclusive(&key, &path, "client-a", policy).unwrap();
+            let grant = NotionGrant::fixture("workspace-a", "user-a", None);
+            let snapshot = store.save(&grant).unwrap();
+            let original = fs::read(&path).unwrap();
+            let lock = crate::notion_grant_lease::GrantLease::path(&path);
+            if replace {
+                fs::rename(&lock, lock.with_extension("old-lock")).unwrap();
+                fs::write(&lock, []).unwrap();
+                fs::set_permissions(&lock, fs::Permissions::from_mode(0o600)).unwrap();
+            } else {
+                fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
+            }
+            assert!(store.load_for_refresh().is_err());
+            assert!(!store.still_current(&snapshot).unwrap_or(false));
+            assert!(store.save(&grant).is_err());
+            assert!(store.forget().is_err());
+            assert_eq!(fs::read(&path).unwrap(), original);
+        }
+    }
+
+    #[test]
     fn encrypted_round_trip_is_durable_and_secrets_never_on_disk() {
         let (_dir, key, path, policy) = setup();
         let store = GrantStore::open(&key, &path, "client-a", policy.clone()).unwrap();

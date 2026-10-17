@@ -591,7 +591,7 @@ pub async fn revoke(
     State(login): State<Option<Arc<Login>>>,
     request: axum::extract::Request,
 ) -> Response {
-    let Some(login) = login else {
+    let Some(login) = login.filter(|login| login.callback.is_some()) else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             [(header::CACHE_CONTROL, "no-store")],
