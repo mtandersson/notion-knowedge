@@ -132,9 +132,13 @@ pub fn router_with_login(
                     "/oauth/notion/callback",
                     get(crate::oauth_authorize::callback),
                 )
+                .route(
+                    "/token",
+                    axum::routing::post(crate::oauth_authorize::token)
+                        .layer(axum::extract::DefaultBodyLimit::max(8192)),
+                )
                 .with_state(login),
         )
-        .route("/token", axum::routing::post(not_implemented))
         .route("/revoke", axum::routing::post(not_implemented))
         .route("/mcp", get(deny_mcp).post(deny_mcp).delete(deny_mcp))
         .with_state(discovery)

@@ -9,7 +9,8 @@ silently making the current unauthenticated MCP bootstrap a remote OAuth server.
 An optional [browser entry point](notion-oauth-redirect.md#browser-entry-point)
 can start upstream consent; the [public callback](notion-oauth-callback.md)
 also requires sealed storage and returns a PKCE-bound MCP code only after
-persisting the allowlisted Notion grant. MCP tokens and sessions remain disabled.
+persisting the allowlisted Notion grant. The [token endpoint](oauth-code.md)
+can redeem that code, while MCP resource access and sessions remain disabled.
 
 ## Explicit configuration
 
@@ -45,7 +46,7 @@ setting grants permission to publish private content.
 | `GET /.well-known/oauth-authorization-server` | 200 JSON: issuer, authorization/token/revocation endpoints, authorization code and S256 capabilities |
 | `GET /authorize` | 503 by default; explicit [MCP client registration](notion-oauth-redirect.md#browser-entry-point) enables a browser-bound Notion consent redirect only |
 | `GET /oauth/notion/callback` | 503 without complete sealed-storage/browser configuration; otherwise strict cookie/state verification and allowlisted callback exchange |
-| `POST /token` | 503, no token issuance |
+| `POST /token` | 503 without complete browser/storage configuration; otherwise strict form-only code + S256 redemption against the current sealed grant |
 | `POST /revoke` | 503, no token revocation claim |
 | `GET/POST/DELETE /mcp` | 401 with `WWW-Authenticate: Bearer resource_metadata="..."`; **the real MCP service is not mounted** |
 
@@ -55,8 +56,7 @@ fabricated Bearer token or old MCP session ID cannot access a tool in discovery
 mode. The advertised OAuth paths are deliberately reserved and closed until
 the subsequent implementation; metadata alone is not a successful OAuth login.
 
-**Production rollout is blocked** on #120 (actual OAuth client/code/PKCE/token
-flow and HTTP enforcement), #121–#126 (Notion grant and allowlisted identities),
+**Production rollout is blocked** on #124 (provider-compatible refresh),
 #127–#128 (token/session binding, revocation), #129 (negative-path tests) and
 #130 (deployment configuration). This issue does not close the parent #117.
 

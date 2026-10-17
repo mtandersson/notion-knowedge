@@ -5,8 +5,9 @@
 The callback and credential runtime share one store instance. A verified,
 allowlisted Notion grant must be durably saved before the original MCP PKCE
 transaction can receive an authorization code. Failed storage never returns
-a code. MCP access tokens and private MCP resource access remain disabled;
-those are separate #120/#124/#127–#130 release gates under #117.
+a code. The [MCP token endpoint](oauth-code.md) rechecks the sealed grant and
+PKCE before redemption. Private MCP resource access remains disabled pending
+#124/#127–#130 release gates under #117.
 
 ## Key, directory, and startup
 

@@ -7,7 +7,7 @@ use std::{
     collections::HashMap,
     fmt,
     io::Read,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -171,6 +171,11 @@ struct IssuedCode {
     binding: Binding,
     expires: Instant,
 }
+/// A single-use code already claimed locally, awaiting live upstream evidence.
+/// Private fields and move-only ownership prevent replay or caller forgery.
+pub(crate) struct PreparedRedemption {
+    code: IssuedCode,
+}
 struct IssuedToken {
     binding: Binding,
     resource: String,
@@ -228,6 +233,7 @@ pub struct AuthorizationFlow {
     client: Client,
     allowed: AllowedNotionIdentity,
     records: Mutex<Records>,
+    clock: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
 impl AuthorizationFlow {
     /// Preflight immutable provider identity before a callback can replace the
@@ -241,14 +247,21 @@ impl AuthorizationFlow {
             client,
             allowed,
             records: Mutex::new(Records::default()),
+            clock: Arc::new(Instant::now),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_clock(mut self, clock: Arc<dyn Fn() -> Instant + Send + Sync>) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Start an unapproved transaction. Does NOT issue a code or authorize a
     /// Notion grant. The returned opaque handle belongs to the future server-
     /// side Notion callback correlation, never to a client as proof of login.
     pub fn begin(&self, request: &AuthorizationRequest<'_>) -> Result<Secret, Error> {
-        self.begin_at(request, Instant::now())
+        self.begin_at(request, (self.clock)())
     }
     fn begin_at(&self, request: &AuthorizationRequest<'_>, now: Instant) -> Result<Secret, Error> {
         if request.client_id != self.client.client_id {
@@ -297,7 +310,7 @@ impl AuthorizationFlow {
         transaction: &str,
         grant: &ApprovedNotionGrant<'_>,
     ) -> Result<Redirect, Error> {
-        self.approve_at(transaction, grant, Instant::now())
+        self.approve_at(transaction, grant, (self.clock)())
     }
     fn approve_at(
         &self,
@@ -348,7 +361,7 @@ impl AuthorizationFlow {
         request: &TokenRequest<'_>,
         current_grant: &ApprovedNotionGrant<'_>,
     ) -> Result<AccessToken, Error> {
-        self.redeem_at(request, current_grant, Instant::now())
+        self.redeem_at(request, current_grant, (self.clock)())
     }
     fn redeem_at(
         &self,
@@ -356,6 +369,26 @@ impl AuthorizationFlow {
         current_grant: &ApprovedNotionGrant<'_>,
         now: Instant,
     ) -> Result<AccessToken, Error> {
+        let prepared = self.prepare_at(request, current_grant, now)?;
+        self.issue_at(prepared, current_grant, now)
+    }
+
+    /// Validate and consume the code before any expensive provider request.
+    /// This returns no bearer and creates no token record.
+    pub(crate) fn prepare_redemption(
+        &self,
+        request: &TokenRequest<'_>,
+        current_grant: &ApprovedNotionGrant<'_>,
+    ) -> Result<PreparedRedemption, Error> {
+        self.prepare_at(request, current_grant, (self.clock)())
+    }
+
+    fn prepare_at(
+        &self,
+        request: &TokenRequest<'_>,
+        current_grant: &ApprovedNotionGrant<'_>,
+        now: Instant,
+    ) -> Result<PreparedRedemption, Error> {
         if request.grant_type != "authorization_code"
             || request.client_id != self.client.client_id
             || !valid_verifier(request.code_verifier)
@@ -389,6 +422,39 @@ impl AuthorizationFlow {
         if records.tokens.len() >= TOKEN_LIMIT {
             return Err(Error::TemporarilyUnavailable);
         }
+        Ok(PreparedRedemption { code })
+    }
+
+    /// Mint only after the caller independently verified the live upstream
+    /// grant. A changed binding or deadline cannot inherit the claimed code.
+    pub(crate) fn issue_redemption(
+        &self,
+        prepared: PreparedRedemption,
+        active_grant: &ApprovedNotionGrant<'_>,
+    ) -> Result<AccessToken, Error> {
+        self.issue_at(prepared, active_grant, (self.clock)())
+    }
+    fn issue_at(
+        &self,
+        prepared: PreparedRedemption,
+        active_grant: &ApprovedNotionGrant<'_>,
+        now: Instant,
+    ) -> Result<AccessToken, Error> {
+        let code = prepared.code;
+        if code.expires <= now
+            || !self.allowed.matches(active_grant)
+            || !code.binding.matches(active_grant)
+        {
+            return Err(Error::InvalidGrant);
+        }
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| Error::TemporarilyUnavailable)?;
+        records.sweep(now);
+        if records.tokens.len() >= TOKEN_LIMIT {
+            return Err(Error::TemporarilyUnavailable);
+        }
         let token = random_secret()?;
         records.tokens.insert(
             digest(token.expose()),
@@ -411,7 +477,7 @@ impl AuthorizationFlow {
     /// grant. In-memory token presence alone never establishes identity.
     /// Actual MCP route enforcement still belongs to #127.
     pub fn verify(&self, bearer: &str, current_grant: &ApprovedNotionGrant<'_>) -> bool {
-        self.verify_at(bearer, current_grant, Instant::now())
+        self.verify_at(bearer, current_grant, (self.clock)())
     }
     fn verify_at(
         &self,

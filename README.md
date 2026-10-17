@@ -118,8 +118,8 @@ See [fresh-source verification](docs/fresh-source.md).
 
 Optional [OAuth discovery](docs/oauth-discovery.md) can be configured with the
 paired `NK_OAUTH_ISSUER` and `NK_OAUTH_RESOURCE` HTTPS settings. In that mode,
-the server publishes metadata; `/token` and `/revoke` are unavailable and
-**all MCP calls return 401**. `/authorize` remains unavailable unless the
+the server publishes metadata; **all MCP calls return 401** and `/revoke`
+remains unavailable. `/token` requires the complete browser/grant configuration. `/authorize` remains unavailable unless the
 explicit browser-entry configuration below is supplied. Discovery is not authentication,
 and remote/private deployment remains blocked until the rest of #117 ships.
 
@@ -129,15 +129,16 @@ pair, bound to the canonical issuer's HTTPS callback. It generates independent
 single-use Notion state linked to an already validated MCP PKCE transaction.
 With an explicitly registered MCP client, `GET /authorize` starts browser-bound
 Notion consent. With sealed storage, the public callback verifies and saves
-the approved grant before returning an MCP authorization code. Token exchange
-and MCP resource access remain disabled pending the downstream controls.
+the approved grant before returning an MCP authorization code. The public
+[`POST /token` endpoint](docs/oauth-code.md) redeems it with S256 PKCE against
+the current sealed grant. MCP resource access remains disabled pending #127/#128.
 
 The staged [Notion callback verifier](docs/notion-oauth-callback.md) supports
 confidential server-side code exchange, typed Notion grant parsing and
 immutable user/workspace allowlisting using paired operator configuration.
 Its public callback requires explicit client registration, browser correlation
-and sealed grant storage. It issues no MCP access tokens; resource authorization
-and lifecycle gates (#120/#124/#127–#129) remain required. Notion credentials must never be sent to ChatGPT clients.
+and sealed grant storage. Its approved codes can be redeemed for opaque MCP
+tokens; resource authorization and lifecycle gates (#124/#127–#129) remain required. Notion credentials must never be sent to ChatGPT clients.
 
 The [encrypted Notion OAuth grant store](docs/notion-grant-store.md) is an
 opt-in, operator-controlled AES-256-GCM file with a separate 32-byte key file.
