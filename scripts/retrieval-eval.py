@@ -191,15 +191,15 @@ def main(argv=None):
     parser.add_argument("--adapter", required=True, help="Executable and arguments, no shell")
     parser.add_argument("--modes", default=",".join(MODES))
     parser.add_argument("--top-k", type=int, default=10)
-    parser.add_argument("--timeout", type=float, default=60)
+    parser.add_argument("--timeout", type=float, default=60, help="Adapter deadline in seconds (up to 3600 for local CPU model runs)")
     parser.add_argument("--output", default="-", help="JSON path or '-' for stdout")
     args = parser.parse_args(argv)
     try:
         modes = args.modes.split(",")
         if not modes or any(mode not in MODES for mode in modes) or len(modes) != len(set(modes)):
             raise EvaluationError("modes must be distinct vector,fts,hybrid names")
-        if not 1 <= args.top_k <= 100 or not 0 < args.timeout <= 300:
-            raise EvaluationError("top-k must be 1..100 and timeout must be (0,300] seconds")
+        if not 1 <= args.top_k <= 100 or not 0 < args.timeout <= 3600:
+            raise EvaluationError("top-k must be 1..100 and timeout must be (0,3600] seconds")
         command = shlex.split(args.adapter)
         if not command:
             raise EvaluationError("adapter command must not be empty")
