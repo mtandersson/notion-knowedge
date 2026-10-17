@@ -83,6 +83,14 @@ fn expired_claims_are_fenced_and_recovery_is_bounded_without_write_replay() {
             .is_none()
     );
     assert_eq!(db.admit(&key()).unwrap(), IndexStatus::Failed);
+    db.retry_mutation_refresh(&key()).unwrap();
+    assert_eq!(db.status(&key()).unwrap(), Some(IndexStatus::Queued));
+    let retry = db
+        .claim_mutation_refresh(WORKSPACE, 131, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retry.generation, 4);
+    db.complete_mutation_refresh(&retry, 132, true).unwrap();
     assert_eq!(
         db.complete_mutation_refresh(&third, 130, true),
         Err(RefreshQueueError::ClaimLost)

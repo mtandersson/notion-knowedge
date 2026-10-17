@@ -68,6 +68,7 @@ struct HttpNotion {
     pause_next: Arc<AtomicBool>,
     entered: Arc<tokio::sync::Notify>,
     proceed: Arc<tokio::sync::Notify>,
+    writes: Arc<AtomicUsize>,
 }
 impl HttpNotion {
     async fn start() -> Self {
@@ -87,6 +88,8 @@ impl HttpNotion {
         let pause = pause_next.clone();
         let paused = entered.clone();
         let resume = proceed.clone();
+        let writes = Arc::new(AtomicUsize::new(0));
+        let mutations = writes.clone();
         let server = tokio::spawn(async move {
             'connections: loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
@@ -104,10 +107,33 @@ impl HttpNotion {
                         break;
                     }
                 }
-                let req = String::from_utf8(bytes).unwrap();
+                let end = bytes.windows(4).position(|v| v == b"\r\n\r\n").unwrap() + 4;
+                let length = String::from_utf8_lossy(&bytes[..end])
+                    .lines()
+                    .find_map(|line| {
+                        line.to_lowercase()
+                            .strip_prefix("content-length: ")
+                            .and_then(|value| value.parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                while bytes.len() < end + length {
+                    let mut part = [0u8; 4096];
+                    let n = stream.read(&mut part).await.unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&part[..n]);
+                }
+                let payload = if length > 0 {
+                    serde_json::from_slice::<Value>(&bytes[end..end + length]).unwrap()
+                } else {
+                    Value::Null
+                };
+                let req = String::from_utf8(bytes[..end].to_vec()).unwrap();
                 assert!(req.contains("authorization: Bearer fixture-credential"));
                 assert!(req.contains("notion-version: 2026-03-11"));
-                assert!(req.starts_with("GET /v1/"));
+                assert!(
+                    req.starts_with("GET /v1/")
+                        || req.starts_with(&format!("PATCH /v1/pages/{PAGE}/markdown"))
+                );
                 counts.fetch_add(1, Ordering::SeqCst);
                 let route = req
                     .lines()
@@ -116,6 +142,16 @@ impl HttpNotion {
                     .split_whitespace()
                     .nth(1)
                     .unwrap();
+                if req.starts_with("PATCH ") {
+                    assert_eq!(payload["type"], "insert_content");
+                    assert_eq!(payload["insert_content"]["position"]["type"], "end");
+                    let mut model = values.lock().unwrap();
+                    model
+                        .markdown
+                        .push_str(payload["insert_content"]["content"].as_str().unwrap());
+                    model.revision = "2026-10-10T12:00:01Z".into();
+                    mutations.fetch_add(1, Ordering::SeqCst);
+                }
                 let snapshot = values.lock().unwrap().clone();
                 let mut response = if route == format!("/v1/pages/{PAGE}/markdown") {
                     bodies.fetch_add(1, Ordering::SeqCst);
@@ -209,6 +245,7 @@ impl HttpNotion {
             pause_next,
             entered,
             proceed,
+            writes,
         }
     }
     fn client(&self) -> Arc<NotionClient> {
@@ -407,6 +444,231 @@ impl TestRuntime {
         .unwrap()
         .len()
     }
+}
+
+struct UnavailableEmbedding(EmbeddingMetadata);
+impl EmbeddingProvider for UnavailableEmbedding {
+    fn metadata(&self) -> &EmbeddingMetadata {
+        &self.0
+    }
+    fn embed_batch<'a>(&'a self, _: &'a [String]) -> EmbeddingFuture<'a> {
+        Box::pin(async { Err(notion_knowledge_core::embedding::EmbeddingError::Unavailable) })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mutation_refresh_preserves_verified_write_on_index_failure_and_retries_only_hash_diff() {
+    use notion_knowledge_core::{
+        append::{AppendRequest, append_once_and_refresh},
+        root_scope::RootScopeGate,
+        write_refresh::{IndexStatus, MutationRefreshQueue, RefreshKey},
+    };
+    let mut runtime = TestRuntime::new().await;
+    let state = runtime.worker.state.clone();
+    let seed = RefreshKey {
+        workspace_id: WORKSPACE.into(),
+        mutation_digest: "0".repeat(64),
+        page_id: PAGE.into(),
+    };
+    state.admit(&seed).unwrap();
+    tick(&runtime.worker, false).await;
+    assert_eq!(state.status(&seed).unwrap(), Some(IndexStatus::Completed));
+    let old_hash = state
+        .page_state(PAGE)
+        .unwrap()
+        .unwrap()
+        .content_hash()
+        .unwrap()
+        .to_owned();
+    let client = runtime.source.client();
+    let gate = RootScopeGate::new(
+        client.clone(),
+        LifecycleScope {
+            workspace_id: WORKSPACE.into(),
+            generation: 1,
+            roots: vec![PageId(ROOT.into())],
+            exclusions: ExclusionRules::default(),
+        },
+    )
+    .unwrap();
+    let ledger = notion_knowledge_retrieval::idempotency::SqliteIdempotencyStore::initialize_new(
+        runtime._dir.path().join("write-ledger.sqlite"),
+    )
+    .unwrap();
+    let request = AppendRequest {
+        page_id: PageId(PAGE.into()),
+        markdown: "\n## Addition\n\nMarjoram and fennel.\n".into(),
+        expected_last_edited_time: Some("2026-10-10T12:00:00Z".into()),
+        expected_markdown_sha256: None,
+        idempotency_key: "mutation-refresh-http-fixture-1234".into(),
+    };
+    let result = append_once_and_refresh(
+        client.as_ref(),
+        client.as_ref(),
+        &gate,
+        &ledger,
+        state.as_ref(),
+        request.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.index, IndexStatus::Queued);
+    assert!(!result.replayed);
+    assert_eq!(result.receipt.last_edited_time, "2026-10-10T12:00:01Z");
+    assert_eq!(runtime.source.writes.load(Ordering::SeqCst), 1);
+    let provider = runtime.worker.provider.clone();
+    Arc::get_mut(&mut runtime.worker).unwrap().provider =
+        Arc::new(UnavailableEmbedding(provider.metadata().clone()));
+    tick(&runtime.worker, false).await;
+    assert_eq!(
+        state.status(&result.refresh).unwrap(),
+        Some(IndexStatus::Failed)
+    );
+    assert!(
+        runtime
+            .source
+            .state
+            .lock()
+            .unwrap()
+            .markdown
+            .contains("Marjoram")
+    );
+    let replay = append_once_and_refresh(
+        client.as_ref(),
+        client.as_ref(),
+        &gate,
+        &ledger,
+        state.as_ref(),
+        request,
+    )
+    .await
+    .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.index, IndexStatus::Failed);
+    assert_eq!(replay.receipt, result.receipt);
+    assert_eq!(runtime.source.writes.load(Ordering::SeqCst), 1);
+    Arc::get_mut(&mut runtime.worker).unwrap().provider = provider;
+    state.retry_mutation_refresh(&result.refresh).unwrap();
+    tick(&runtime.worker, false).await;
+    assert_eq!(
+        state.status(&result.refresh).unwrap(),
+        Some(IndexStatus::Completed)
+    );
+    assert_ne!(
+        state
+            .page_state(PAGE)
+            .unwrap()
+            .unwrap()
+            .content_hash()
+            .unwrap(),
+        old_hash
+    );
+    assert!(runtime.searchable("Marjoram").await > 0);
+    let embedded = runtime.embeddings.load(Ordering::SeqCst);
+    state
+        .admit(&RefreshKey {
+            mutation_digest: "f".repeat(64),
+            ..seed
+        })
+        .unwrap();
+    tick(&runtime.worker, false).await;
+    assert_eq!(
+        runtime.embeddings.load(Ordering::SeqCst),
+        embedded,
+        "unchanged authoritative content follows normal hash/diff reuse"
+    );
+    assert_eq!(runtime.source.writes.load(Ordering::SeqCst), 1);
+    let db = rusqlite::Connection::open(&runtime.db).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM webhook_inbox", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    let reopened =
+        notion_knowledge_retrieval::sync_state::SqliteSyncStateStore::open_existing(&runtime.db)
+            .unwrap();
+    assert_eq!(
+        reopened.status(&result.refresh).unwrap(),
+        Some(IndexStatus::Completed)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mutation_refresh_recovers_committed_index_after_lost_queue_ack_without_embedding_again() {
+    use notion_knowledge_core::write_refresh::{IndexStatus, MutationRefreshQueue, RefreshKey};
+    let runtime = TestRuntime::new().await;
+    let key = RefreshKey {
+        workspace_id: WORKSPACE.into(),
+        mutation_digest: "a".repeat(64),
+        page_id: PAGE.into(),
+    };
+    runtime.worker.state.admit(&key).unwrap();
+    let db = rusqlite::Connection::open(&runtime.db).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_mutation_ack BEFORE UPDATE OF state ON mutation_refresh WHEN NEW.state=2 BEGIN SELECT RAISE(ABORT,'fixture');END;").unwrap();
+    assert!(
+        runtime
+            .worker
+            .tick(CancellationToken::new(), false)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        runtime.worker.state.status(&key).unwrap(),
+        Some(IndexStatus::Running)
+    );
+    assert!(runtime.searchable("Saffron").await > 0);
+    let embedded = runtime.embeddings.load(Ordering::SeqCst);
+    db.execute_batch(
+        "DROP TRIGGER fail_mutation_ack; UPDATE mutation_refresh SET lease_until=0 WHERE state=1;",
+    )
+    .unwrap();
+    tick(&runtime.worker, false).await;
+    assert_eq!(
+        runtime.worker.state.status(&key).unwrap(),
+        Some(IndexStatus::Completed)
+    );
+    assert_eq!(runtime.embeddings.load(Ordering::SeqCst), embedded);
+    assert_eq!(runtime.source.writes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mutation_refresh_cancellation_fences_the_old_attempt_and_recovers_after_expiry() {
+    use notion_knowledge_core::write_refresh::{IndexStatus, MutationRefreshQueue, RefreshKey};
+    let runtime = TestRuntime::new().await;
+    let key = RefreshKey {
+        workspace_id: WORKSPACE.into(),
+        mutation_digest: "c".repeat(64),
+        page_id: PAGE.into(),
+    };
+    runtime.worker.state.admit(&key).unwrap();
+    runtime.source.pause_next.store(true, Ordering::SeqCst);
+    let worker = runtime.worker.clone();
+    let stop = CancellationToken::new();
+    let task_stop = stop.clone();
+    let task = tokio::spawn(async move { worker.tick(task_stop, false).await });
+    tokio::time::timeout(Duration::from_secs(5), runtime.source.entered.notified())
+        .await
+        .unwrap();
+    stop.cancel();
+    assert!(task.await.unwrap().unwrap());
+    runtime.source.proceed.notify_one();
+    assert_eq!(
+        runtime.worker.state.status(&key).unwrap(),
+        Some(IndexStatus::Running)
+    );
+    assert!(runtime.worker.state.page_state(PAGE).unwrap().is_none());
+    rusqlite::Connection::open(&runtime.db)
+        .unwrap()
+        .execute_batch("UPDATE mutation_refresh SET lease_until=0 WHERE state=1;")
+        .unwrap();
+    tick(&runtime.worker, false).await;
+    assert_eq!(
+        runtime.worker.state.status(&key).unwrap(),
+        Some(IndexStatus::Completed)
+    );
+    assert!(runtime.searchable("Saffron").await > 0);
+    assert_eq!(runtime.source.writes.load(Ordering::SeqCst), 0);
 }
 fn event(page: &str, kind: &str) -> WebhookEvent {
     WebhookEvent {

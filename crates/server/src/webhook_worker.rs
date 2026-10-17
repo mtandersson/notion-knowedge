@@ -378,13 +378,12 @@ pub mod runtime {
             let claim = blocking(move || {
                 // Alternate mutation/page admission to avoid starving trusted
                 // post-write refresh work under continuous webhook arrivals.
-                if !page_first {
-                    if let Some(claim) = state
+                if !page_first
+                    && let Some(claim) = state
                         .claim_mutation_refresh(&scope.workspace_id, now_ms() / 1000, duration)
                         .map_err(|_| notion_knowledge_core::webhook::InboxError::Unavailable)?
-                    {
-                        return Ok(Some(Work::Mutation(claim)));
-                    }
+                {
+                    return Ok(Some(Work::Mutation(claim)));
                 }
                 let page = || {
                     state

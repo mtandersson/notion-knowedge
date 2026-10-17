@@ -42,6 +42,7 @@ pub struct WriteCompletion {
     pub replayed: bool,
     /// A verified write is independent of this derived local index status.
     pub index: IndexStatus,
+    pub refresh: RefreshKey,
 }
 
 pub fn admit_verified(
@@ -59,5 +60,6 @@ pub fn admit_verified(
         receipt,
         replayed,
         index,
+        refresh: key.clone(),
     }
 }

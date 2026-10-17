@@ -79,6 +79,18 @@ impl MutationRefreshQueue for SqliteSyncStateStore {
     }
 }
 impl SqliteSyncStateStore {
+    /// Explicit derived-index retry. This port has no Notion write capability;
+    /// preserve the generation so an expired worker cannot acknowledge it.
+    pub fn retry_mutation_refresh(&self, key: &RefreshKey) -> Result<(), Error> {
+        valid(key)?;
+        let db = self.lock_connection().map_err(|_| Error::Unavailable)?;
+        let changed = db.execute("UPDATE mutation_refresh SET state=0,attempts=0,lease_until=NULL WHERE workspace_id=?1 AND mutation_digest=?2 AND page_id=?3 AND state=3",params![key.workspace_id,key.mutation_digest,key.page_id]).map_err(sql)?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(Error::Conflict)
+        }
+    }
     pub fn claim_mutation_refresh(
         &self,
         workspace: &str,

@@ -267,7 +267,6 @@ pub async fn append_once_and_refresh(
     queue: &dyn crate::write_refresh::MutationRefreshQueue,
     request: AppendRequest,
 ) -> Result<crate::write_refresh::WriteCompletion, AppendError> {
-    let result = append_once(reader, writer, gate, ledger, request.clone()).await?;
     let claim = MutationClaim::new(
         &gate.configured_scope().workspace_id,
         &request.idempotency_key,
@@ -276,6 +275,7 @@ pub async fn append_once_and_refresh(
         &fingerprint(&request),
     )
     .map_err(ledger_error)?;
+    let result = append_once(reader, writer, gate, ledger, request).await?;
     Ok(crate::write_refresh::admit_verified(
         queue,
         &crate::write_refresh::RefreshKey {
