@@ -52,6 +52,16 @@ struct CallbackRuntime {
     admission: Arc<tokio::sync::Semaphore>,
 }
 impl Login {
+    pub(crate) fn content_factory(
+        &self,
+        scope: notion_knowledge_core::lifecycle::LifecycleScope,
+    ) -> Option<crate::oauth_content::ContentFactory> {
+        Some(crate::oauth_content::ContentFactory {
+            runtime: self.callback.as_ref()?.credentials.clone(),
+            scope,
+        })
+    }
+
     /// Reject invalid local credentials before any confidential provider work.
     pub(crate) fn local_resource_authorization(
         &self,

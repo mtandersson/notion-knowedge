@@ -175,6 +175,109 @@ pub async fn compose(
         Ok(handler)
     }
 }
+/// Read-only OAuth query composition. No concrete token client, writer,
+/// reconciliation handler, migrations or index repair is constructed here.
+pub(crate) async fn configured_oauth(
+    handler: KnowledgeServer,
+    config: &Config,
+) -> Result<KnowledgeServer, &'static str> {
+    if config.retrieval.is_none() {
+        return Ok(handler);
+    }
+    let settings = config
+        .retrieval
+        .as_ref()
+        .ok_or("retrieval settings unavailable")?;
+    let provider = Arc::new(
+        notion_knowledge_retrieval::qwen::QwenProvider::load(
+            notion_knowledge_retrieval::qwen::QwenConfig::cpu(&settings.assets),
+        )
+        .await
+        .map_err(|_| "retrieval model unavailable or incompatible")?,
+    );
+    compose_oauth_queries(handler, config, provider).await
+}
+
+pub(crate) async fn compose_oauth_queries(
+    handler: KnowledgeServer,
+    config: &Config,
+    provider: Arc<dyn EmbeddingProvider>,
+) -> Result<KnowledgeServer, &'static str> {
+    use notion_knowledge_retrieval::{
+        commit::{CommitBinding, IndexCommitCoordinator},
+        planner::production_scope,
+    };
+    validate_owned(config)?;
+    let settings = config
+        .retrieval
+        .as_ref()
+        .ok_or("retrieval settings unavailable")?;
+    let scope = config
+        .notion_scope
+        .as_ref()
+        .ok_or("retrieval scope unavailable")?;
+    let journal = production_scope(scope).map_err(|_| "invalid index scope")?;
+    let binding = CommitBinding::new(
+        "chunks",
+        &scope.workspace_id,
+        &journal,
+        &scope.generation.to_string(),
+        scope.generation,
+    )
+    .map_err(|_| "invalid index binding")?;
+    let coordinator = IndexCommitCoordinator::open_read_only(
+        &settings.index,
+        config
+            .webhook_state_file
+            .as_deref()
+            .ok_or("retrieval state unavailable")?,
+        binding,
+    )
+    .map_err(|_| "existing index authority unavailable or incompatible")?;
+    let table = GuardedChunkTable::bind(
+        &settings.index,
+        "chunks",
+        provider.metadata().clone(),
+        coordinator.clone(),
+    )
+    .map_err(|_| "retrieval binding incompatible")?;
+    table
+        .search_snapshot()
+        .await
+        .map_err(|_| "retrieval index unavailable or incompatible")?;
+    let handler = handler
+        .with_request_bound_content()
+        .with_root_page_ids(scope.roots.iter().map(|root| root.0.clone()).collect())?
+        .and_search(Arc::new(ScopedSearch {
+            table: table.clone(),
+            provider: provider.clone(),
+        }))
+        .and_lexical_search(Arc::new(ScopedLexical {
+            table: table.clone(),
+        }))
+        .and_hybrid_search(Arc::new(ScopedHybrid {
+            table: table.clone(),
+            provider,
+        }))
+        .and_source_expansion(
+            Arc::new(table),
+            scope.roots.iter().map(|root| root.0.clone()).collect(),
+        )?;
+    if config.graph_index.is_some() || config.graph_boost.enabled {
+        if config.graph_index.as_ref() != Some(&settings.index) {
+            return Err("graph requires retrieval index binding");
+        }
+        Ok(handler.and_request_graph(
+            Arc::new(notion_knowledge_retrieval::graph::CommittedGraph::new(
+                coordinator,
+            )),
+            config.graph_boost,
+        ))
+    } else {
+        Ok(handler)
+    }
+}
+
 struct ScopedSearch {
     table: GuardedChunkTable,
     provider: Arc<dyn EmbeddingProvider>,

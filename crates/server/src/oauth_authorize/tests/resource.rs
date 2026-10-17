@@ -14,11 +14,11 @@ async fn harness(limits: (usize, usize, usize)) -> Harness {
     )
     .await
 }
-async fn mint(h: &Harness) -> String {
+pub(super) async fn mint(h: &Harness) -> String {
     let code = h.approved_code().await;
     redeem(h, &code).await
 }
-async fn redeem(h: &Harness, code: &str) -> String {
+pub(super) async fn redeem(h: &Harness, code: &str) -> String {
     let response = h
         .token_request(encode_form(&token_params(code)))
         .send()
@@ -28,7 +28,7 @@ async fn redeem(h: &Harness, code: &str) -> String {
     let value: Value = response.json().await.unwrap();
     value["access_token"].as_str().unwrap().to_owned()
 }
-fn rpc(
+pub(super) fn rpc(
     h: &Harness,
     bearer: &str,
     session: Option<&str>,
@@ -47,7 +47,7 @@ fn rpc(
         request
     }
 }
-async fn reply(mut response: reqwest::Response) -> Value {
+pub(super) async fn reply(mut response: reqwest::Response) -> Value {
     if response
         .headers()
         .get("content-type")
@@ -68,7 +68,7 @@ async fn reply(mut response: reqwest::Response) -> Value {
     }
     panic!("missing RPC reply");
 }
-async fn initialize(h: &Harness, token: &str) -> (String, Value) {
+pub(super) async fn initialize(h: &Harness, token: &str) -> (String, Value) {
     let response = rpc(h, token, None, json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
         "protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"oauth-fixture","version":"1"}
     }})).send().await.unwrap();
@@ -79,7 +79,7 @@ async fn initialize(h: &Harness, token: &str) -> (String, Value) {
         .to_owned();
     (session, reply(response).await)
 }
-fn continuation(
+pub(super) fn continuation(
     h: &Harness,
     token: &str,
     session: &str,

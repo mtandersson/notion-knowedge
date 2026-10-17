@@ -45,6 +45,9 @@ pub struct NotionOwnerPolicy {
     owner_user_id: String,
 }
 impl NotionOwnerPolicy {
+    pub(crate) fn workspace_id(&self) -> &str {
+        &self.workspace_id
+    }
     pub(crate) fn matches(&self, workspace: &str, user: &str) -> bool {
         self.workspace_id == workspace && self.owner_user_id == user
     }

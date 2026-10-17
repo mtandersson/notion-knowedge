@@ -473,7 +473,17 @@ impl Config {
         let notion_scope = match (roots, workspace) {
             (None, None) => None,
             (Some(roots), Some(workspace)) => {
-                if !matches!(notion_auth, NotionAuth::Integration(_)) {
+                if oauth_discovery.is_some() {
+                    if !matches!(notion_auth, NotionAuth::None)
+                        || notion_oauth_callback.is_none()
+                        || notion_grant_store.is_none()
+                    {
+                        return Err(invalid(
+                            "NK_NOTION_AUTH",
+                            "OAuth scope requires complete OAuth grant configuration and no integration credentials",
+                        ));
+                    }
+                } else if !matches!(notion_auth, NotionAuth::Integration(_)) {
                     return Err(invalid(
                         "NK_NOTION_AUTH",
                         "integration required for authoritative scope",
@@ -491,6 +501,16 @@ impl Config {
                         "must be canonical page UUID",
                     )
                 })?;
+                if oauth_discovery.is_some()
+                    && notion_oauth_callback
+                        .as_ref()
+                        .is_none_or(|callback| callback.allowed.workspace_id() != workspace_id)
+                {
+                    return Err(invalid(
+                        "NK_NOTION_SCOPE_WORKSPACE_ID",
+                        "must match allowlisted OAuth workspace",
+                    ));
+                }
                 let root_ids: Option<Vec<_>> = roots
                     .split(',')
                     .map(|part| parse(part).map(notion_knowledge_core::backend::PageId))
@@ -827,6 +847,23 @@ impl Config {
                 ));
             }
         };
+        if oauth_discovery.is_some()
+            && notion_scope.is_some()
+            && (webhook_worker.is_some()
+                || reconciliation_schedule.is_some()
+                || file_ingestion.is_some())
+        {
+            return Err(invalid(
+                "NK_WEBHOOK_WORKER",
+                "OAuth content cannot enable integration writers",
+            ));
+        }
+        if oauth_discovery.is_some() && notion_scope.is_some() && oauth_client.is_none() {
+            return Err(invalid(
+                "NK_OAUTH_CLIENT_ID",
+                "registered client required for OAuth content",
+            ));
+        }
         Ok(Self {
             oauth_client,
             mcp_max_in_flight,
@@ -986,6 +1023,60 @@ mod tests {
                 name
             );
         }
+    }
+
+    #[test]
+    fn oauth_scope_requires_complete_registration_and_exact_allowlisted_workspace() {
+        const WORKSPACE: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        let mut values = vec![
+            ("NK_OAUTH_ISSUER", "https://auth.example.com"),
+            ("NK_OAUTH_RESOURCE", "https://knowledge.example.com/mcp"),
+            ("NK_NOTION_OAUTH_CLIENT_ID", "notion-client"),
+            (
+                "NK_NOTION_OAUTH_REDIRECT_URI",
+                "https://auth.example.com/oauth/notion/callback",
+            ),
+            ("NK_NOTION_OAUTH_CLIENT_SECRET", "client-secret"),
+            ("NK_NOTION_ALLOWED_WORKSPACE_ID", WORKSPACE),
+            ("NK_NOTION_ALLOWED_USER_ID", "user-a"),
+            ("NK_NOTION_GRANT_KEY_FILE", "/run/notion/key"),
+            ("NK_NOTION_GRANT_STATE_FILE", "/var/lib/notion/grant"),
+            ("NK_OAUTH_CLIENT_ID", "chatgpt"),
+            (
+                "NK_OAUTH_CLIENT_REDIRECT_URI",
+                "https://chatgpt.example.com/callback",
+            ),
+            ("NK_NOTION_SCOPE_WORKSPACE_ID", WORKSPACE),
+            (
+                "NK_NOTION_SCOPE_ROOTS",
+                "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            ),
+        ];
+        let configured = parse(&values).unwrap();
+        assert!(matches!(configured.notion_auth, NotionAuth::None));
+        assert_eq!(configured.notion_scope.unwrap().workspace_id, WORKSPACE);
+        values[11].1 = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+        assert_eq!(
+            parse(&values).unwrap_err().setting,
+            "NK_NOTION_SCOPE_WORKSPACE_ID"
+        );
+        values[11].1 = WORKSPACE;
+        let incomplete: Vec<_> = values
+            .iter()
+            .copied()
+            .filter(|(key, _)| {
+                !matches!(*key, "NK_OAUTH_CLIENT_ID" | "NK_OAUTH_CLIENT_REDIRECT_URI")
+            })
+            .collect();
+        assert_eq!(
+            parse(&incomplete).unwrap_err().setting,
+            "NK_OAUTH_CLIENT_ID"
+        );
+        values.extend([
+            ("NK_NOTION_AUTH", "integration"),
+            ("NOTION_TOKEN", "static-private-token"),
+        ]);
+        assert_eq!(parse(&values).unwrap_err().setting, "NK_NOTION_AUTH");
     }
 
     #[test]

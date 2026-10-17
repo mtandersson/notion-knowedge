@@ -1985,6 +1985,18 @@ async fn unsuitable_http_startup_keeps_private_read_state_closed_and_never_creat
             None,
             cancelled,
         ));
+        if oauth {
+            // An explicit content scope without a complete OAuth grant runtime
+            // must fail before binding HTTP or opening any private read state.
+            let result = tokio::time::timeout(Duration::from_secs(10), server)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(result.is_err());
+            assert!(tokio::net::TcpStream::connect(address).await.is_err());
+            assert!(!absent.exists());
+            continue;
+        }
         for _ in 0..100 {
             if tokio::net::TcpStream::connect(address).await.is_ok() {
                 break;
@@ -1994,9 +2006,7 @@ async fn unsuitable_http_startup_keeps_private_read_state_closed_and_never_creat
         let client = reqwest::Client::new();
         let url = format!("http://{address}/mcp");
         let response = client.post(&url).header("accept", "application/json, text/event-stream").json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"unavailable-read","version":"1"}}})).send().await.unwrap();
-        if oauth {
-            assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
-        } else {
+        {
             assert!(response.status().is_success());
             let session = response.headers()["mcp-session-id"]
                 .to_str()

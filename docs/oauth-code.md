@@ -10,8 +10,8 @@ request, browser-bound Notion callback, sealed allowlisted grant and MCP code
 redemption. Discovery settings alone still enable no login: explicit client,
 Notion callback policy and sealed storage are required. The
 [OAuth MCP transport](oauth-mcp-sessions.md) now enforces live token/grant and
-exact-token session binding. Private content remains denied until #432 installs
-request-bound source composition; durable revocation remains #128. A token response alone is not permission to expose private tools.
+exact-token session binding. Configured content uses
+[request-bound source composition](oauth-content.md); durable revocation remains #128. A token response alone is not permission to expose private tools.
 
 ## Transaction phases
 

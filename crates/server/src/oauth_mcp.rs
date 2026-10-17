@@ -17,6 +17,7 @@ pub(crate) struct ResourceGate {
     pub sessions: Arc<BoundedSessions>,
     pub admission: Arc<Semaphore>,
     pub metadata_url: String,
+    pub content: Option<crate::oauth_content::ContentFactory>,
 }
 impl ResourceGate {
     fn denied(&self) -> Response {
@@ -96,6 +97,13 @@ pub(crate) async fn require_authorization(
         }
         _ => return gate.denied(),
     };
+    if let Some(content) = &gate.content {
+        let Ok(adapters) = content.bind(&auth) else {
+            return gate.denied();
+        };
+        request.extensions_mut().insert(adapters);
+    }
+    request.headers_mut().remove(header::AUTHORIZATION);
     request.extensions_mut().insert(auth.clone());
     let response = next.run(request).await;
     // The SDK returns a session ID only after successful initialization. Bind

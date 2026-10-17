@@ -12,8 +12,8 @@ also requires sealed storage and returns a PKCE-bound MCP code only after
 persisting the allowlisted Notion grant. The [token endpoint](oauth-code.md)
 can redeem that code. With complete configuration, the
 [OAuth MCP transport](oauth-mcp-sessions.md) validates live token/grant evidence
-and binds sessions to exact tokens. Private content remains unavailable until
-request-bound sources are installed.
+and binds sessions to exact tokens. Explicit matching scope and compatible
+existing index state enable [request-bound content](oauth-content.md).
 
 ## Explicit configuration
 
@@ -51,7 +51,7 @@ setting grants permission to publish private content.
 | `GET /oauth/notion/callback` | 503 without complete sealed-storage/browser configuration; otherwise strict cookie/state verification and allowlisted callback exchange |
 | `POST /token` | 503 without complete browser/storage configuration; otherwise strict form-only code + S256 redemption against the current sealed grant |
 | `POST /revoke` | 503, no token revocation claim |
-| `GET/POST/DELETE /mcp` | 401 challenge without valid token/grant evidence; otherwise the SDK transport enforces exact-token session ownership and read-only scope; private content remains unavailable |
+| `GET/POST/DELETE /mcp` | 401 challenge without valid token/grant evidence; otherwise the SDK transport enforces exact-token session ownership and read-only scope; configured content uses request-bound authority |
 
 All listed routes apply the existing loopback/backend Host and Origin
 restrictions; discovery responses specify `Cache-Control: no-store`. Even a
