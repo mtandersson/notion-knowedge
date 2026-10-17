@@ -111,6 +111,15 @@ never a provider body, callback query, secret, path or identity. The server's
 payload-free HTTP operation logs retain status and correlation ID for denials;
 operators must also redact callback queries and redirect Locations in proxy logs.
 
+Verified owner/workspace policy failures additionally emit a fixed
+`notion_oauth_workspace` or `notion_oauth_user` operation with outcome `rejected`
+at warning level. These events carry the same server-generated correlation ID
+as the enclosing HTTP rejection, never the supplied/configured IDs, tokens,
+provider error, URL or callback fields. When both identity claims mismatch,
+the workspace rejection is recorded first. Malformed provider grants remain
+fail-closed and cannot be mistaken for a verified allowlist match. Set
+`NK_LOG_LEVEL=warn` (or more verbose) to retain these security denials.
+
 No MCP access token is returned by this delivery. Code redemption, live grant
 checks for every resource operation, revocation, scope/session binding and
 multi-process fencing remain required before the production connector is usable.

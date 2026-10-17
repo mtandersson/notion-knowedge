@@ -98,6 +98,8 @@ pub enum Operation {
     HttpRequest,
     McpTool,
     NotionApi,
+    NotionOAuthWorkspace,
+    NotionOAuthUser,
     WebhookAdmission,
     IndexCommit,
 }
@@ -108,6 +110,8 @@ impl Operation {
             Self::HttpRequest => "http_request",
             Self::McpTool => "mcp_tool",
             Self::NotionApi => "notion_api",
+            Self::NotionOAuthWorkspace => "notion_oauth_workspace",
+            Self::NotionOAuthUser => "notion_oauth_user",
             Self::WebhookAdmission => "webhook_admission",
             Self::IndexCommit => "index_commit",
         }
