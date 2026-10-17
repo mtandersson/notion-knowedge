@@ -12,8 +12,11 @@ NK_RETRIEVAL=true target/debug/notion-knowledge-server
 
 Supply these immutable startup settings through the service environment:
 
-- `NK_NOTION_AUTH=integration` and a locally held `NOTION_TOKEN` for fresh physical
-  ancestry authorization. No token is taken from MCP requests.
+- For trusted operator stdio/local bearer: `NK_NOTION_AUTH=integration` and a
+  locally held `NOTION_TOKEN` for fresh physical ancestry authorization. For
+  production OAuth: `NK_NOTION_AUTH=none` and the complete
+  [OAuth configuration](oauth-production-setup.md); content uses the request-bound
+  approved grant. No Notion token is taken from MCP requests.
 - `NK_NOTION_SCOPE_WORKSPACE_ID`, `NK_NOTION_SCOPE_ROOTS` and the existing scope
   generation and exclusions, exactly matching the operator's committed binding.
 - `NK_WEBHOOK_STATE_FILE`: existing protected operational SQLite database.
@@ -37,15 +40,14 @@ FTS indexes and incompatible provider/model/vector-space metadata fail startup
 with a bounded error. `--check` validates settings only; actual transport startup
 also validates existing storage and loads the offline provider.
 
-Trusted operator stdio may activate directly. HTTP additionally requires
-`NK_HTTP_AUTH=bearer`, `NK_HTTP_BEARER_TOKEN` and a loopback listener. The ordinary
-middleware enforces bearer authentication on initialization, session continuation,
-SSE and deletion. Unauthenticated and OAuth-discovery-only HTTP leave retrieval
+Trusted operator stdio may activate directly. Local fallback HTTP requires
+`NK_HTTP_AUTH=bearer`, its configured token and a loopback listener. Production
+OAuth HTTP instead requires the full [OAuth setup](oauth-production-setup.md)
+and exact matching scope; its [request-bound source](oauth-content.md) authorizes
+each content disclosure. Anonymous and discovery-only HTTP leave retrieval
 unavailable without opening the private index, model or state, including lazy
-sync-status readers. Only verified webhook activation installs writable inbox
-admission; read retrieval does not create or migrate the inbox. Physical scope authorizes
-data; it does not authenticate an HTTP caller. Private ChatGPT OAuth and container
-model packaging remain separate work.
+sync-status readers. OAuth content never installs webhook/reconciliation writers.
+The stock container still does not package the production model/index path.
 
 Search modes use the existing Lance semantic adapter, BM25 lexical adapter and
 weighted reciprocal-rank fusion (100 candidates per path, rank constant 60,

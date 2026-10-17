@@ -1,5 +1,16 @@
 # OAuth trust and single-identity binding
 
+> Original #118 design contract. The installed implementation is described in
+> [production setup](oauth-production-setup.md) and [joined acceptance](oauth-e2e-tests.md).
+> Its supported lifecycle is single-process: exact-token local logout cancels
+> only that token, while offline operator forget removes the upstream grant after
+> stopping the server. MCP tokens/sessions/codes are process-local and restart
+> invalidates them. File ownership plus a lifetime lease excludes competing
+> credential runtimes; distributed fencing and rollback-resistant external
+> revocation storage are not implemented. Read the lifecycle requirements below
+> in that scope, rather than as a claim of multi-process durable token storage.
+
+
 **Status:** security design for [#118](https://github.com/mtandersson/notion-knowedge/issues/118), 2026-10-09. **Not implemented.** This is a contract for the child tickets in [#117](https://github.com/mtandersson/notion-knowedge/issues/117), not permission to enable remote/private access. Review with [the threat model](threat-model.md) and [ADR 0001](adr/0001-runtime-and-component-boundaries.md). The current bootstrap has no authenticated MCP application principal; `NK_NOTION_AUTH=integration` and its get-self probe are **not** a production OAuth grant.
 
 ## Principals and separate trust boundaries
@@ -59,7 +70,7 @@ ReauthRequired -> PendingOAuth -> Approved(new grant_id/epoch after full allowli
 
 - Every MCP token/session references a **specific** durable grant identity and authorization epoch, not simply "current credential". Authorization looks up that live approved record and compares the configured workspace/user. Binding is never based only on a refresh token fingerprint or `bot_id`.
 - **Refresh** retaining the identical approved identity may keep an epoch *only when* the grant continuity is proven and persisted atomically. A changed Notion account, workspace, OAuth client, root policy or grant replacement requires a new epoch and invalidation of incompatible MCP tokens/sessions, even if the same browser remains logged in.
-- **Logout, upstream revocation, forced reauthorization, local operator revocation or detected mismatch** invalidates the grant and associated MCP tokens, sessions, pending codes and refresh token families. Persist revocation **before** acknowledging the request or returning success. Never silently fall back to another Notion grant or integrate a new one from an attacker-controlled callback.
+- **Local client logout** removes the exact process-local MCP token and cancels its request/session evidence before success; it does not revoke other tokens or the upstream grant. **Forced upstream reauthorization** requires offline operator forget, which durably removes the sealed grant while excluding any running credential runtime; restart discards all process-local tokens, sessions and codes. Detected inactive/mismatched provider state denies resource use. Never silently fall back to another Notion grant or integrate a new one from an attacker-controlled callback.
 - Each request checks the live epoch/status; any cache of this authorization decision needs an explicitly documented, short revocation bound and must be tested. No indefinitely cached valid token or open SSE connection may outlive revocation: reauthorize active streams on resume and terminate them on revocation/expiry, subject to a documented upper bound.
 - Deny safely when the grant store is unavailable/corrupt, identity verification fails, configured allowlist changes or a token references a nonexistent epoch. Prevent a partial grant-save from issuing a functioning MCP token. Re-authentication must never migrate existing sessions to a new owner/workspace.
 - Make token/session/code IDs unguessable, bounded-lived and single-use where applicable. Use minimal, nonsecret audit entries (hashed/correlation IDs, state transition class, timestamp); never persist full bearer values in telemetry, errors, SQLite sync checkpoints or index content.
@@ -82,7 +93,7 @@ ReauthRequired -> PendingOAuth -> Approved(new grant_id/epoch after full allowli
 | Missing authorization on HTTP initialize, GET/SSE, POST or DELETE | 401; no protocol-state side effect |
 | Revoked long-lived SSE connection | Terminates or fails further sensitive data, within explicit revocation bound |
 
-Use strict fake-provider HTTP fixtures and deterministic clocks for positive and negative cases; then run a credential-controlled live end-to-end flow (#129/#130) without exposing real identities or secrets in logs. Verify behavior for simultaneous sessions, restart, cache invalidation, token expiry, and arbitrary source/transport failures. This design document alone makes **no** runtime-security claim.
+Use strict fake-provider HTTP fixtures and deterministic clocks for positive and negative cases; then perform the operator-controlled deployed-client smoke in [production setup](oauth-production-setup.md) without exposing real identities or secrets in logs. Verify behavior for simultaneous sessions, restart, cache invalidation, token expiry, and arbitrary source/transport failures. This design document alone makes **no** runtime-security claim.
 
 ## Implementation sequencing and deployment gate
 
@@ -92,7 +103,7 @@ Use strict fake-provider HTTP fixtures and deterministic clocks for positive and
 - #127/#128: atomic grant-epoch binding across MCP tokens/sessions and revocation.
 - #129/#130/#109: negative-path integration tests, deployment/proxy guidance and real ChatGPT connection verification.
 
-**Do not** expose private tools or production HTTP to remote/untrusted clients until all relevant #117 controls, safe application scope checks and deployment reviews have shipped. Host/Origin checks, a private tunnel, the local demo in [chatgpt-spike.md](chatgpt-spike.md), TLS alone and an otherwise valid Notion OAuth login do **not** waive this gate. See also #84 for explicitly development-only bearer fallback.
+Use the installed [production setup](oauth-production-setup.md), application scope checks and deployment review before exposing private tools. Host/Origin checks, a private tunnel, the local demo in [chatgpt-spike.md](chatgpt-spike.md), TLS alone and an otherwise valid Notion OAuth login do **not** waive this gate. See also #84 for explicitly development-only bearer fallback.
 
 ## Sources / compatibility
 

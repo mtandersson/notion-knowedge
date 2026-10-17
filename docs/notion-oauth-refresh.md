@@ -1,8 +1,8 @@
 # Notion OAuth access-token refresh and rotation (#124)
 
-**Status:** server-internal, opt-in component, not a public OAuth login.
-The authorization and MCP HTTP endpoints remain **fail-closed** until the
-remaining authentication, authorization and revocation controls in #117 land.
+The shared server-only coordinator is installed in the browser/token/MCP
+composition. Every authorized resource operation requires live grant evidence;
+refresh alone is not caller authorization. See [production setup](oauth-production-setup.md).
 
 ## Refresh policy and provider request
 
@@ -52,8 +52,8 @@ provider calls are part of automated verification.
 `NotionOAuthRuntime::ensure_active()` supplies server-only active grant evidence
 for per-request resource authorization (#431) and request-bound content composition (#432). It introspects even a
 known-expiry grant and rechecks the exact sealed snapshot after the network
-request. The local bot-identity probe uses this stronger check too. This API
-does not itself authorize an MCP session or complete parent #124.
+request. The local bot-identity probe uses this stronger check too. This API does not itself authorize an MCP session; the transport enforces
+token, grant and session ownership independently.
 
 ## Atomic sealed rotation
 
@@ -70,9 +70,8 @@ written files or in logs.
 A refresh **preserves grant ID and authorization epoch**: changing a
 Notion upstream credential is not a new MCP consent decision. A *new
 OAuth authorization* through `save()`, by contrast, creates a new
-grant ID and increments epoch. The later resource authorization code
-(#127/#128) must compare this stable binding and reject revoked grants
-on every call.
+grant ID and increments epoch. Resource authorization compares this stable binding and rejects revoked
+tokens or incompatible grants on every call.
 
 When the provider has rotated its refresh token but storing the new
 pair fails, the call returns failure with **no credentials**. The
@@ -85,19 +84,17 @@ retrying an already consumed refresh token is safe.
 The mutex is attached to **one shared coordinator instance in one
 process**. Calling `NotionRefresh::new` for every request, running
 multiple workers/pods against the same file, or moving the state onto a
-shared filesystem is **not safe**. Distributed locking/fencing,
-rollback-resistant revocation and persistent session authorization
-remain #127/#128 requirements. The browser callback and token exchange use
-this shared coordinator; the MCP transport also verifies active grants, while
-configured content uses request-bound authoritative sources.
+shared filesystem is **not safe**. The installed runtime acquires a lifetime exclusive state lease, rejecting a
+second process or operator reset while active. It does not provide distributed
+fencing, rollback-resistant storage or persistent MCP sessions. The browser,
+token and content adapters share the same coordinator.
 
 The version-1 sealed file format remains unchanged, so records made
 under #123 can be refreshed in place. Since expired records need
 renewal, startup now validates cryptographic integrity and owner
 binding using `load_for_refresh()` *without* treating expiry as
 malformed state. The runtime may only **use** a grant after
-`ensure_fresh()` succeeds. The server-internal runtime is now wired at HTTP startup, but no OAuth
-callback or authorized MCP credential dispatch route is enabled.
+`ensure_fresh()` succeeds. The server-internal runtime is now wired at HTTP startup, including the configured callback, token exchange and request-bound content.
 
 ## Shared server runtime (#299)
 
@@ -118,25 +115,17 @@ checks the remote bot ID against the immutable verified callback grant
 and reports **only** a fixed success/failure message, never any
 credentials or provider responses.
 
-**This does not activate OAuth HTTP login or authenticated MCP access.**
-The configured browser flow can issue codes and `/token` uses the runtime's
-live `ensure_active()` evidence before minting a grant-bound MCP bearer.
-`/mcp` now enforces live token/grant and exact-token session binding (#431),
-while configured content uses request-bound sources (#432); durable revocation
-remains #128. The
-runtime is an internal credential composer and local operator probe;
-its content ports require verified request-owned authorization. Durable
-revocation remains a separate release gate. The
-legacy `NK_NOTION_AUTH=integration` operator token remains a separate
-opt-in mode and is NEVER a fallback for failed OAuth refresh.
+The browser flow issues codes and `/token` uses live `ensure_active()` evidence
+before minting a grant-bound MCP bearer. `/mcp` enforces live authorization and
+exact-token session ownership; content ports require verified request-owned
+evidence. [Local revocation](oauth-revocation.md) cancels that evidence and blocks
+pending results before disclosure. Already-started bounded provider operations
+may finish; bytes already delivered cannot be recalled. The legacy integration
+token is a separate opt-in mode and NEVER a failed-refresh fallback.
 
-**Deployment/security:** one shared coordinator per HTTP process, one
-writer for the private sealed file. Do not scale it across workers/pods
-without distributed fencing. Snapshot checks prevent known stale
-generations at dispatch, but cannot guarantee revocation of an
-already in-flight request; #127/#128 own session- and per-request
-authorization/revocation enforcement. Restore key and state together
-or reauthorize after a lost key or failed provider rotation.
+Use one active process per private state file. The state lease excludes a second
+runtime but does not protect against an operator restoring old state. Restore
+protected key/state together or reauthorize after a lost key or ambiguous rotation.
 
 ## Verification
 

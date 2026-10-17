@@ -1,12 +1,12 @@
 # Notion OAuth callback and confidential exchange (#122)
 
-**Status:** browser-bound callback mounted only with explicit MCP client
-registration and sealed grant storage. `/authorize` can start consent; a
-successful `/oauth/notion/callback` persists the approved grant and returns
-a short-lived PKCE-bound MCP authorization code. [`POST /token`](oauth-code.md)
-can redeem it against the current sealed grant. `/revoke` remains unavailable
-(503), and `/mcp` remains denied (401). This is not yet a usable private
-ChatGPT connector: #124/#127–#130 remain deployment gates.
+The browser-bound callback is mounted only with explicit MCP client
+registration and sealed grant storage. `/authorize` starts consent; a successful
+callback persists the approved grant before returning a PKCE-bound MCP code.
+[`POST /token`](oauth-code.md) checks live grant evidence before minting an MCP
+bearer. [Session authorization](oauth-mcp-sessions.md),
+[revocation](oauth-revocation.md) and [request-bound content](oauth-content.md)
+complete the resource boundary. See [production setup](oauth-production-setup.md).
 
 ## Startup configuration
 
@@ -122,9 +122,9 @@ fail-closed and cannot be mistaken for a verified allowlist match. Set
 `NK_LOG_LEVEL=warn` (or more verbose) to retain these security denials.
 
 The callback itself returns no MCP access token; the separate token endpoint
-requires the original PKCE verifier and current grant binding. Live grant
-checks for every resource operation, revocation, scope/session binding and
-multi-process fencing remain required before the production connector is usable.
+requires the original PKCE verifier and current grant binding. The installed transport and content adapters perform live grant, token,
+scope/session and revocation checks on resource operations. A lifetime state
+lease supports a single credential runtime; multi-process deployment is unsupported.
 
 ## Verification
 
@@ -148,6 +148,6 @@ and malformed-grant rejection, provider failures and bounded callback admission.
 The binary-level discovery suite proves callback denial without sealed storage.
 The production Notion endpoint cannot be overridden by configuration.
 
-#129 must still cover the complete token/resource/revocation path and a
-credential-controlled ChatGPT connection. These fixture tests make no claim
-that a real external connection has completed.
+The [joined acceptance suite](oauth-e2e-tests.md) covers token/resource/revocation
+paths. These fixture tests make no claim that a real external connection has
+completed; follow [production setup](oauth-production-setup.md) for that operator smoke.

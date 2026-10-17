@@ -132,8 +132,9 @@ an old sealed grant into an authenticated session.
 - Exact grant epochs, token-bound sessions and local logout protect every
   transport operation. A lifetime exclusive store lease excludes competing
   credential processes. This single-process engine does not provide distributed/HA coordination.
-- #129 and #130 must exercise the public HTTP end-to-end login and configured
-  HTTPS proxy with negative-path tests before access is enabled.
+- [Joined HTTP acceptance](oauth-e2e-tests.md) covers the public end-to-end
+  login and negative paths. [Production setup](oauth-production-setup.md) covers
+  the HTTPS boundary and operator-performed real ChatGPT smoke.
 
 The implementation tests the RFC 7636 Appendix B verifier/challenge vector,
 valid flow, incorrect or missing PKCE, strict client/redirect/resource,
