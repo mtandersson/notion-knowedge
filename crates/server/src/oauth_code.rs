@@ -171,6 +171,11 @@ struct IssuedCode {
     binding: Binding,
     expires: Instant,
 }
+/// A single-use code already claimed locally, awaiting live upstream evidence.
+/// Private fields and move-only ownership prevent replay or caller forgery.
+pub(crate) struct PreparedRedemption {
+    code: IssuedCode,
+}
 struct IssuedToken {
     binding: Binding,
     resource: String,
@@ -364,6 +369,26 @@ impl AuthorizationFlow {
         current_grant: &ApprovedNotionGrant<'_>,
         now: Instant,
     ) -> Result<AccessToken, Error> {
+        let prepared = self.prepare_at(request, current_grant, now)?;
+        self.issue_at(prepared, current_grant, now)
+    }
+
+    /// Validate and consume the code before any expensive provider request.
+    /// This returns no bearer and creates no token record.
+    pub(crate) fn prepare_redemption(
+        &self,
+        request: &TokenRequest<'_>,
+        current_grant: &ApprovedNotionGrant<'_>,
+    ) -> Result<PreparedRedemption, Error> {
+        self.prepare_at(request, current_grant, (self.clock)())
+    }
+
+    fn prepare_at(
+        &self,
+        request: &TokenRequest<'_>,
+        current_grant: &ApprovedNotionGrant<'_>,
+        now: Instant,
+    ) -> Result<PreparedRedemption, Error> {
         if request.grant_type != "authorization_code"
             || request.client_id != self.client.client_id
             || !valid_verifier(request.code_verifier)
@@ -394,6 +419,39 @@ impl AuthorizationFlow {
         {
             return Err(Error::InvalidGrant);
         }
+        if records.tokens.len() >= TOKEN_LIMIT {
+            return Err(Error::TemporarilyUnavailable);
+        }
+        Ok(PreparedRedemption { code })
+    }
+
+    /// Mint only after the caller independently verified the live upstream
+    /// grant. A changed binding or deadline cannot inherit the claimed code.
+    pub(crate) fn issue_redemption(
+        &self,
+        prepared: PreparedRedemption,
+        active_grant: &ApprovedNotionGrant<'_>,
+    ) -> Result<AccessToken, Error> {
+        self.issue_at(prepared, active_grant, (self.clock)())
+    }
+    fn issue_at(
+        &self,
+        prepared: PreparedRedemption,
+        active_grant: &ApprovedNotionGrant<'_>,
+        now: Instant,
+    ) -> Result<AccessToken, Error> {
+        let code = prepared.code;
+        if code.expires <= now
+            || !self.allowed.matches(active_grant)
+            || !code.binding.matches(active_grant)
+        {
+            return Err(Error::InvalidGrant);
+        }
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| Error::TemporarilyUnavailable)?;
+        records.sweep(now);
         if records.tokens.len() >= TOKEN_LIMIT {
             return Err(Error::TemporarilyUnavailable);
         }
