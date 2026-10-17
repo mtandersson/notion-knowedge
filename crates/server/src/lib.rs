@@ -56,3 +56,6 @@ pub mod graph_runtime;
 
 /// Browser entry point for staged Notion authorization.
 pub mod oauth_authorize;
+
+/// Installed OAuth MCP resource and exact-token session enforcement.
+mod oauth_mcp;

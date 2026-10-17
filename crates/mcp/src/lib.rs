@@ -13,6 +13,9 @@ use rmcp::{
 };
 use std::{io::Write, sync::Arc};
 
+mod http_authorization;
+pub use http_authorization::HttpAuthorization;
+
 mod tool_budget;
 use tool_budget::ToolBudget;
 
@@ -61,6 +64,7 @@ pub struct KnowledgeServer {
     file_ingestion: Option<Arc<dyn upload::FileIngestion>>,
     /// Deny mutation-capable tools unless the operator explicitly disables read-only mode.
     read_only: bool,
+    http_authorization_required: bool,
     /// One capacity pool shared across cloned HTTP sessions and stdio calls.
     tool_budget: Arc<ToolBudget>,
     /// Additional opt-in gate for all destructive write operations.
@@ -79,6 +83,7 @@ impl Default for KnowledgeServer {
             max_upload_files: upload::DEFAULT_MAX_FILES,
             file_ingestion: None,
             read_only: true,
+            http_authorization_required: false,
             tool_budget: Arc::new(ToolBudget::new(tool_budget::DEFAULT_CAPACITY)),
             destructive_writes_enabled: false,
             capability_policy: capabilities::CapabilityPolicy::default(),
@@ -97,6 +102,34 @@ impl Default for KnowledgeServer {
 }
 
 impl KnowledgeServer {
+    /// OAuth HTTP handlers require middleware evidence for every tool request.
+    /// Its single supported scope is read-only even if operator writes are on.
+    pub fn with_http_authorization_required(mut self) -> Self {
+        self.http_authorization_required = true;
+        self.read_only = true;
+        self
+    }
+
+    fn authorize_context(
+        &self,
+        context: &rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<(), rmcp::ErrorData> {
+        if !self.http_authorization_required {
+            return Ok(());
+        }
+        let auth = context
+            .extensions
+            .get::<http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<HttpAuthorization>());
+        if !auth.is_some_and(|auth| auth.expires_at() > std::time::Instant::now()) {
+            return Err(rmcp::ErrorData::invalid_request(
+                "MCP authorization required",
+                None,
+            ));
+        }
+        Ok(())
+    }
+
     /// Enforce the configured access mode before exposing or dispatching MCP tools.
     /// Only explicitly audited read tools are permitted in read-only mode.
     fn tool_permitted(&self, name: &str) -> bool {
@@ -360,8 +393,9 @@ impl ServerHandler for KnowledgeServer {
     async fn list_tools(
         &self,
         _request: Option<rmcp::model::PaginatedRequestParams>,
-        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        self.authorize_context(&context)?;
         let _log = EventGuard::new(Operation::McpTool);
         Ok(rmcp::model::ListToolsResult {
             tools: self.tool_catalog(),
@@ -389,6 +423,7 @@ impl ServerHandler for KnowledgeServer {
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+        self.authorize_context(&context)?;
         let _log = EventGuard::new(Operation::McpTool);
         // Check before argument handling or invoking any adapter; the same
         // handler serves stdio and HTTP, so there is no transport bypass.

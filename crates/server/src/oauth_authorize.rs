@@ -52,6 +52,54 @@ struct CallbackRuntime {
     admission: Arc<tokio::sync::Semaphore>,
 }
 impl Login {
+    /// Reject invalid local credentials before any confidential provider work.
+    pub(crate) fn local_resource_authorization(
+        &self,
+        bearer: &str,
+    ) -> Option<notion_knowledge_mcp::HttpAuthorization> {
+        let runtime = self.callback.as_ref()?;
+        let grant = runtime.store.load_for_refresh().ok()??;
+        self.flow.authorize_resource(
+            bearer,
+            &ApprovedNotionGrant {
+                grant_id: grant.grant_id(),
+                epoch: grant.epoch(),
+                workspace_id: grant.workspace_id(),
+                owner_type: "user",
+                owner_user_id: grant.owner_user_id(),
+            },
+        )
+    }
+
+    pub(crate) async fn active_resource_authorization(
+        &self,
+        bearer: &str,
+    ) -> Result<notion_knowledge_mcp::HttpAuthorization, crate::notion_oauth_runtime::CredentialError>
+    {
+        use crate::notion_oauth_runtime::CredentialError;
+        let runtime = self.callback.as_ref().ok_or(CredentialError::NoGrant)?;
+        let grant = runtime.credentials.ensure_active().await?;
+        if !runtime
+            .store
+            .still_current(&grant)
+            .map_err(|_| CredentialError::Unavailable)?
+        {
+            return Err(CredentialError::IdentityMismatch);
+        }
+        self.flow
+            .authorize_resource(
+                bearer,
+                &ApprovedNotionGrant {
+                    grant_id: grant.grant_id(),
+                    epoch: grant.epoch(),
+                    workspace_id: grant.workspace_id(),
+                    owner_type: "user",
+                    owner_user_id: grant.owner_user_id(),
+                },
+            )
+            .ok_or(CredentialError::ReauthorizationRequired)
+    }
+
     pub fn from_config(
         config: &Config,
         runtime: Option<&NotionOAuthRuntime>,
