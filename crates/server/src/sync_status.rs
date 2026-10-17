@@ -6,6 +6,7 @@ use std::{path::PathBuf, sync::Arc};
 #[derive(Clone)]
 pub struct LocalStatus {
     state: Option<PathBuf>,
+    work: Arc<tokio::sync::Semaphore>,
     inbox: Option<(String, String, String)>,
     #[cfg(all(unix, feature = "webhook-worker"))]
     index: Option<(PathBuf, notion_knowledge_retrieval::commit::CommitBinding)>,
@@ -45,6 +46,7 @@ impl LocalStatus {
             });
         Self {
             state: config.webhook_state_file.clone(),
+            work: Arc::new(tokio::sync::Semaphore::new(config.mcp_tool_capacity)),
             inbox,
             #[cfg(all(unix, feature = "webhook-worker"))]
             index,
@@ -117,7 +119,16 @@ impl SyncStatusSource for LocalStatus {
     fn status(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = SyncStatus> + Send + '_>> {
-        Box::pin(self.inspect())
+        Box::pin(async move {
+            // Admission happens before spawning. The task owns the permit and
+            // runs to completion even if the MCP waiter disconnects. In turn,
+            // inspect awaits each blocking operation before releasing capacity.
+            let Ok(permit) = self.work.clone().try_acquire_owned() else {
+                return SyncStatus::default();
+            };
+            let source = self.clone();
+            finish_status_work(permit, async move { source.inspect().await }).await
+        })
     }
 }
 pub fn attach(
@@ -125,4 +136,61 @@ pub fn attach(
     config: &Config,
 ) -> notion_knowledge_mcp::KnowledgeServer {
     handler.and_sync_status(Arc::new(LocalStatus::from_config(config)))
+}
+
+/// Detach only bounded, read-only inspection; never detach/replay a mutation.
+async fn finish_status_work(
+    permit: tokio::sync::OwnedSemaphorePermit,
+    inspect: impl std::future::Future<Output = SyncStatus> + Send + 'static,
+) -> SyncStatus {
+    let correlation = notion_knowledge_core::logging::current_id();
+    tokio::spawn(notion_knowledge_core::logging::scope(
+        correlation,
+        async move {
+            let _permit = permit;
+            inspect.await
+        },
+    ))
+    .await
+    .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_status_waiter_cannot_admit_work_until_blocking_inspection_finishes() {
+        let work = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = work.clone().try_acquire_owned().unwrap();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let (finished, done) = tokio::sync::oneshot::channel();
+        let waiter = tokio::spawn(finish_status_work(permit, async move {
+            tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                wait.recv().unwrap();
+            })
+            .await
+            .unwrap();
+            finished.send(()).unwrap();
+            SyncStatus::default()
+        }));
+        ready.await.unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        // Real blocking work still runs. Repeated cancelled callers cannot
+        // reserve capacity or enqueue another blocking task.
+        for _ in 0..32 {
+            assert!(work.clone().try_acquire_owned().is_err());
+        }
+        release.send(()).unwrap();
+        done.await.unwrap();
+        let recovered = tokio::time::timeout(std::time::Duration::from_secs(2), work.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(recovered);
+        assert_eq!(work.available_permits(), 1);
+    }
 }

@@ -36,3 +36,21 @@ to #400. No retries or timeouts were added to mutation futures.
 
 Tests exercise a mixed search/graph/status/upload budget, denied admission
 without executing a second effect, and permit release on cancellation.
+
+## Cancellation and local status inspection
+
+Local sync-status inspection has a second, shared backend budget equal to
+`NK_MCP_TOOL_CAPACITY`. Admission occurs before spawning an inspection task.
+That task retains its permit through SQLite/index reads and their blocking
+completions, even when the HTTP/stdio caller is cancelled. Saturated status
+inspection reports unavailable fields (the existing empty status contract),
+without queuing additional work. This bounds detached read-only inspections;
+it introduces no mutation retry or deadline. A deterministic regression holds
+an actual blocking inspection, cancels its caller, verifies rejection of
+additional work and releases the backend before asserting recovery.
+
+Webhook request capacity also stays owned by a detached, bounded task through
+body admission, setup-file publication and durable SQLite receipt completion.
+The response waiter ends after 20 seconds (including the independent 10-second
+body deadline); timeout or client disconnect never frees backend capacity early.
+Excess deliveries fail with 503 and rely on existing deduplication on redelivery.

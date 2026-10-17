@@ -151,12 +151,25 @@ pub fn valid_id(id: &str) -> bool {
 }
 
 async fn receive(State(endpoint): State<Endpoint>, request: Request) -> StatusCode {
-    // Bound even invalid/signature-less and slow-body deliveries before buffering.
-    // This does not bound a spawned blocking commit after caller cancellation:
-    // #399 owns backend work-lifetime permits.
-    let Ok(_permit) = endpoint.limit.try_acquire() else {
+    // Own admission through actual backend completion, even when a client
+    // disconnects or stops waiting. Never queue or replay a durable receipt.
+    let Ok(permit) = endpoint.limit.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE;
     };
+    let correlation = logging::current_id();
+    let task = tokio::spawn(logging::scope(correlation, async move {
+        let _permit = permit;
+        receive_admitted(endpoint, request).await
+    }));
+    // Body input has its own 10s deadline. The response waiter is bounded,
+    // while a slow commit keeps its slot until the backend actually returns.
+    match tokio::time::timeout(Duration::from_secs(20), task).await {
+        Ok(Ok(status)) => status,
+        _ => StatusCode::SERVICE_UNAVAILABLE,
+    }
+}
+
+async fn receive_admitted(endpoint: Endpoint, request: Request) -> StatusCode {
     let (parts, body) = request.into_parts();
     if parts.headers.contains_key("content-encoding") {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE;
@@ -262,8 +275,8 @@ async fn receive(State(endpoint): State<Endpoint>, request: Request) -> StatusCo
                 entity_type: event.entity.entity_type,
                 attempt_number: event.attempt_number,
             };
-            match tokio::time::timeout(Duration::from_secs(10), admission.admit(hint)).await {
-                Ok(Ok(())) => StatusCode::OK,
+            match admission.admit(hint).await {
+                Ok(()) => StatusCode::OK,
                 _ => StatusCode::SERVICE_UNAVAILABLE,
             }
         }
@@ -319,6 +332,77 @@ mod tests {
             })
         }
     }
+    struct BlockingSink {
+        started: tokio::sync::Notify,
+        release: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    }
+    impl WebhookAdmission for BlockingSink {
+        fn admit(
+            &self,
+            _: WebhookEvent,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), AdmissionError>> + Send + '_>,
+        > {
+            Box::pin(async move {
+                let release = self.release.clone();
+                let task = tokio::task::spawn_blocking(move || {
+                    let (lock, wake) = &*release;
+                    let mut released = lock.lock().unwrap();
+                    while !*released {
+                        released = wake.wait(released).unwrap();
+                    }
+                });
+                self.started.notify_one();
+                task.await.unwrap();
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_webhook_waiter_retains_admission_through_receipt_completion() {
+        let sink = Arc::new(BlockingSink {
+            started: Default::default(),
+            release: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+        });
+        let pool = Arc::new(Semaphore::new(1));
+        let endpoint = Endpoint {
+            config: Arc::new(verified()),
+            admission: Some(sink.clone()),
+            limit: pool.clone(),
+        };
+        let request = || {
+            let body = payload();
+            Request::builder()
+                .header("x-notion-signature", signature(&body))
+                .body(axum::body::Body::from(body))
+                .unwrap()
+        };
+        let first_endpoint = endpoint.clone();
+        let first_request = request();
+        let waiter = tokio::spawn(receive(State(first_endpoint), first_request));
+        sink.started.notified().await;
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        for _ in 0..16 {
+            assert_eq!(
+                receive(State(endpoint.clone()), request()).await,
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+        }
+        {
+            let (lock, wake) = &*sink.release;
+            *lock.lock().unwrap() = true;
+            wake.notify_one();
+        }
+        let permit = tokio::time::timeout(Duration::from_secs(2), pool.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(permit);
+        assert_eq!(receive(State(endpoint), request()).await, StatusCode::OK);
+    }
+
     fn verified() -> WebhookConfig {
         crate::config::Config::from_lookup(|key| match key {
             "NK_WEBHOOK_MODE" => Some(OsString::from("verified")),
