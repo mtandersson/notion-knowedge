@@ -93,8 +93,7 @@ fixed Notion consent endpoint, with `Cache-Control: no-store` and
 
 Each accepted browser request also sets an independent 256-bit random
 `__Host-nk-oauth` cookie (`Secure; HttpOnly; SameSite=Lax; Path=/;
-Max-Age=120`). Only its digest is bound to the pending Notion state. Future
-HTTP callbacks must call `take_browser(state, cookie)`: the unbound `take`
+Max-Age=120`). Only its digest is bound to the pending Notion state. HTTP callbacks call `take_browser(state, cookie)`: the unbound `take`
 cannot consume browser transactions, and a missing/wrong cookie cannot
 consume another browser's state. Both secrets expire after 120 seconds and
 state is single-use. A new login replaces the cookie; this deliberately
@@ -102,16 +101,15 @@ supports one pending login per browser. The cookie never appears in the
 Notion URL. Use HTTPS at the configured issuer; do not weaken cookie security
 for a plain-HTTP development browser.
 
-## Deployment gate
+## Installed composition
 
-With explicit client registration, `/authorize` starts Notion consent. With
-sealed grant storage as well, the [public callback](notion-oauth-callback.md)
-validates and persists the allowlisted identity before returning an MCP code.
-Without storage the callback and token endpoint return 503. With the complete
-configuration, [`POST /token`](oauth-code.md) redeems the MCP code with S256
-PKCE. `/revoke` remains unavailable and `/mcp` returns 401. Production remote
-MCP access still requires #124/#127–#128 grant/session lifecycle and #129–#130
-acceptance tests and setup.
+With complete client/callback/sealed-store configuration, `/authorize` starts
+Notion consent, the [callback](notion-oauth-callback.md) saves the allowlisted
+grant, and [`POST /token`](oauth-code.md) redeems its MCP code with PKCE S256.
+The [MCP transport](oauth-mcp-sessions.md) requires live grant-bound authorization;
+[local revocation](oauth-revocation.md) closes token-owned sessions. Partial
+configuration leaves callback/token routes unavailable. Follow
+[production setup](oauth-production-setup.md) for both exact registrations.
 
 Unit tests verify the fixed endpoint, correct URL encoding, lack of
 scope/secret injection, two independent states/transactions, wrong MCP client

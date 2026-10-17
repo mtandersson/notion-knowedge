@@ -116,53 +116,39 @@ using a configured read-only Notion backend after authorizing indexed references
 It distinguishes indexed and refreshed edit timestamps without updating the index.
 See [fresh-source verification](docs/fresh-source.md).
 
-Optional [OAuth discovery](docs/oauth-discovery.md) can be configured with the
-paired `NK_OAUTH_ISSUER` and `NK_OAUTH_RESOURCE` HTTPS settings. In that mode,
-the server publishes metadata; unverified MCP calls return 401. Complete OAuth configuration enables [local logout and revocation](docs/oauth-revocation.md) and the
-[token-bound MCP transport](docs/oauth-mcp-sessions.md). Explicit matching
-scope and compatible existing retrieval state enable
-[request-bound OAuth content](docs/oauth-content.md). `/token` requires the complete browser/grant configuration. `/authorize` remains unavailable unless the
-explicit browser-entry configuration below is supplied. Discovery is not authentication,
-and remote/private deployment remains blocked until the rest of #117 ships.
+### Production ChatGPT OAuth
 
-The [staged Notion OAuth redirect core](docs/notion-oauth-redirect.md) accepts
-`NK_NOTION_OAUTH_CLIENT_ID` plus `NK_NOTION_OAUTH_REDIRECT_URI` only as a
-pair, bound to the canonical issuer's HTTPS callback. It generates independent
-single-use Notion state linked to an already validated MCP PKCE transaction.
-With an explicitly registered MCP client, `GET /authorize` starts browser-bound
-Notion consent. With sealed storage, the public callback verifies and saves
-the approved grant before returning an MCP authorization code. The public
-[`POST /token` endpoint](docs/oauth-code.md) redeems it with S256 PKCE against
-the current active sealed grant. MCP sessions require live token/grant binding;
-configured content reads use request-bound authority. Revocation immediately denies the local bearer and terminates its sessions; operator forget requires exclusive access to the sealed store.
-
-The staged [Notion callback verifier](docs/notion-oauth-callback.md) supports
-confidential server-side code exchange, typed Notion grant parsing and
-immutable user/workspace allowlisting using paired operator configuration.
-Its public callback requires explicit client registration, browser correlation
-and sealed grant storage. Its approved codes can be redeemed for opaque MCP
-tokens; resource authorization and lifecycle gates (#124/#127–#129) remain required. Notion credentials must never be sent to ChatGPT clients.
+Follow [production OAuth setup](docs/oauth-production-setup.md) for the two
+separate registrations, exact callbacks, independently pinned Notion workspace
+and authorizing person, private bootstrap, HTTPS proxy and reauthentication.
+Complete configuration enables Authorization Code + PKCE S256, encrypted Notion
+credentials, request-bound read-only content and immediate local token logout.
+Discovery settings alone authenticate nobody. A missing content scope or index
+never grants private data; the stock container remains a separate bootstrap.
+See [OAuth end-to-end evidence](docs/oauth-e2e-tests.md) and perform a real
+operator-controlled deployed ChatGPT smoke before relying on the connection.
 
 The [encrypted Notion OAuth grant store](docs/notion-grant-store.md) is an
 opt-in, operator-controlled AES-256-GCM file with a separate 32-byte key file.
 Configure `NK_NOTION_GRANT_KEY_FILE` and `NK_NOTION_GRANT_STATE_FILE` as a
 pair alongside the full callback identity settings. Startup rejects corrupt or wrong-owner state rather than enabling login;
-expired credentials require refresh before use. The store is still
-**not** an active source of MCP authentication or permission.
+expired credentials require refresh before use. Resource authorization combines
+the sealed grant with live Notion verification, the bound MCP token and the
+configured content scope. Sealed storage alone authenticates no caller.
 
 [Server-only Notion token refresh](docs/notion-oauth-refresh.md) now uses the
 same confidential Notion client, immutable owner/workspace check and the sealed
 grant store. Calls within a single refresh coordinator serialize renewal,
 atomically rotate both token values, and fail closed on provider or storage
-errors. Credential users hold an exclusive process lease; [local revocation and operator forget](docs/oauth-revocation.md) invalidate local access. Remote deployment acceptance remains tracked by #129/#130.
+errors. Credential users hold an exclusive process lease; [local revocation and operator forget](docs/oauth-revocation.md) invalidate local access. See [production setup](docs/oauth-production-setup.md) for deployment and operator smoke.
 
 The HTTP listener validates Host against loopback names and the configured IP,
 and validates browser Origin against the configured HTTP authority or localhost
 at the configured port. Clients without Origin are accepted. For remote access,
-place this listener behind a trusted HTTPS proxy; public hostname routing and
-MCP authentication are separate deployment work. The [OAuth trust and single-identity
-binding design](docs/oauth-trust-model.md) defines the planned ChatGPT/MCP and
-MCP/Notion authorization boundaries; it is **not implemented** in this bootstrap.
+follow [production OAuth setup](docs/oauth-production-setup.md), including strict
+public Host/Origin validation before forwarding to the loopback backend. The
+[trust contract](docs/oauth-trust-model.md) explains the separate MCP/Notion
+boundaries and the single-process lifecycle limits.
 
 For MCP Inspector-style clients, build the binary with
 `cargo build -p notion-knowledge-server` and configure the stdio command as the
@@ -303,10 +289,11 @@ quality, authorization, native-file, freshness, recovery, and connector-
 independence requirements. They are proposed acceptance thresholds, **not**
 evidence that the current server is ready to replace the official connector.
 
-The official connector
-remains the default for private/authoritative workflows: the custom production
-bootstrap does not yet provide working private ChatGPT authentication or
-configured retrieval. Local file ingestion is explicitly operator-enabled; private ChatGPT OAuth remains gated.
+The official connector remains the default for write/file workflows and full
+cutover until their separate acceptance gates pass. The custom server supports
+explicit [read-only OAuth deployment](docs/oauth-production-setup.md) with
+configured retrieval; that does not establish full connector replacement.
+Local file ingestion is separately operator-enabled.
 The playbook includes a documented **non-sensitive** operational smoke checklist
 and distinguishes pilot targets from demonstrated results.
 

@@ -6,8 +6,8 @@ The callback and credential runtime share one store instance. A verified,
 allowlisted Notion grant must be durably saved before the original MCP PKCE
 transaction can receive an authorization code. Failed storage never returns
 a code. The [MCP token endpoint](oauth-code.md) rechecks the sealed grant and
-PKCE before redemption. Private MCP resource access remains disabled pending
-#124/#127–#130 release gates under #117.
+PKCE before redemption. Resource access additionally requires [live session authorization](oauth-mcp-sessions.md)
+and [request-bound content](oauth-content.md). Follow [production setup](oauth-production-setup.md).
 
 ## Key, directory, and startup
 
@@ -76,8 +76,8 @@ refresh_token: optional
 The callback parses optional upstream `expires_in` (1 second through one
 year), which is recorded as `issued_at_unix + expires_in`. When Notion
 doesn't supply a lifetime, the expiry is **explicitly unknown**, not
-invented. Stored expiry, if present, is checked on load. The grant is still
-not granted to MCP until #124/#127 verify live validity and revocation.
+invented. Stored expiry, if present, is checked on load. The credential runtime checks live validity before token issuance and resource
+use; a sealed record alone never authorizes an MCP caller.
 
 Payloads are limited to 32 KiB. Encrypt first, write to a `0600`
 temporary file in the same private directory, `fsync` contents, atomically
@@ -103,25 +103,21 @@ appear in plaintext on disk.
 - **An encrypted file is not proof of a live OAuth grant.** The store cannot
   mint a ChatGPT/MCP token. The callback may call `AuthorizationFlow::approve`
   only after successful persistence and a current-generation check. Code
-  redemption must re-read the current approved grant; #127 must enforce live
-  resource authorization, revocation and root-policy checks.
+  redemption re-reads the current approved grant; the installed transport/content
+  boundary enforces live authorization, revocation and root-policy checks.
 - Refresh rotation preserves the grant ID and epoch, atomically replaces the
 encrypted access/refresh pair and compares the expected prior token snapshot.
 See [#124 refresh](notion-oauth-refresh.md) for why a shared in-process
 coordinator is required and why refresh failures deny stale credentials.
 
-The current writer uses a process-local mutex. **Multi-process
-  write fencing, crash-safe refresh/rotation, rollback prevention,
-  and durable revocation** remain open in #124/#127; do not share the
-  state file between active writers. An attacker with write access
-  to the file and an older authenticated copy could roll back epochs:
-  strictly protect file integrity and implement external durable
-  epoch/revocation fencing before remote production use.
-- For a multi-pod deployment use one coordinated secret manager/transaction
-  store; do not put the local encrypted file on an unsafe shared filesystem.
-  Kubernetes Secret mounts are suitable for the key when their access
-  permissions are restricted, but the exact 32-byte raw key and file
-  permissions must match the above contract.
+- The writer uses a process-local mutex plus an exclusive lifetime production
+  state lease. A second runtime/reset is refused while the lease is held. Never
+  delete its `.lock` sidecar while credential users run. This supports one active
+  process, not independent replicas or distributed fencing.
+- An operator with write access and an older authenticated copy can roll back
+  local state. Protect state/backups against replacement; this is not external
+  rollback-resistant storage. Do not restore old grants to recover authorization.
+  [Offline operator forget](oauth-revocation.md) is the supported local reset.
 
 ## Tests
 
@@ -165,13 +161,11 @@ nix develop --command cargo fmt --all -- --check
 nix develop --command cargo clippy -p notion-knowledge-server --all-targets --locked -- -D warnings
 ```
 
-This assessment completes the installed **storage** contract. It does not
-claim that discovery, a saved grant or an MCP authorization code permits a
-private tool call. Provider-compatible refresh, writer/revocation fencing,
-code redemption, token/session enforcement and complete end-to-end production
-acceptance remain tracked by #117. In particular, the current file writer is
-process-local: the deployment must not introduce concurrent independent
-writers or restore an old grant as a way to restore authorization.
+This assessment covers the installed storage contract. Live provider checks,
+code redemption, token/session enforcement and revocation are verified by the
+[joined acceptance suite](oauth-e2e-tests.md). A saved grant is not a private
+resource capability. The deployment remains single-process and requires the
+[production setup](oauth-production-setup.md) and an operator-run real client smoke.
 
 ### Provider lifetime and rotation
 

@@ -67,7 +67,7 @@ local IO exposes replacement, revocation and cleanup races deterministically.
 
 These tests establish the local HTTP single-user authorization contract. They
 do not verify a real ChatGPT installation, real Notion account consent or a
-public HTTPS reverse proxy. Deployment configuration and external client
-onboarding remain separate acceptance work in #130. See [local logout and
+public HTTPS reverse proxy. [Production setup](oauth-production-setup.md) describes deployment configuration
+and operator-performed external client onboarding. See [local logout and
 operator forget](oauth-revocation.md) for process ownership and local/provider
 revocation distinctions.

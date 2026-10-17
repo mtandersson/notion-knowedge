@@ -1,19 +1,12 @@
-# OAuth discovery only (#119)
+# OAuth discovery and endpoint configuration
 
-This is a **staged discovery implementation**, not OAuth authorization. It
-publishes RFC 9728 Protected Resource Metadata and RFC 8414 Authorization Server
-Metadata for the planned [OAuth trust model](oauth-trust-model.md). It exists so
-a generic OAuth client can discover the intended issuer and endpoints, without
-silently making the current unauthenticated MCP bootstrap a remote OAuth server.
-**Discovery configuration alone issues no OAuth token, code, Notion grant or MCP session.**
-An optional [browser entry point](notion-oauth-redirect.md#browser-entry-point)
-can start upstream consent; the [public callback](notion-oauth-callback.md)
-also requires sealed storage and returns a PKCE-bound MCP code only after
-persisting the allowlisted Notion grant. The [token endpoint](oauth-code.md)
-can redeem that code. With complete configuration, the
-[OAuth MCP transport](oauth-mcp-sessions.md) validates live token/grant evidence
-and binds sessions to exact tokens. Explicit matching scope and compatible
-existing index state enable [request-bound content](oauth-content.md).
+The server publishes RFC 9728 Protected Resource Metadata and RFC 8414
+Authorization Server Metadata. Discovery settings alone issue no token, code,
+Notion grant or MCP session. Complete browser/client/store configuration enables
+[Authorization Code + PKCE](oauth-code.md), [Notion consent](notion-oauth-callback.md),
+[token-bound sessions](oauth-mcp-sessions.md), [local revocation](oauth-revocation.md)
+and explicit [request-bound content](oauth-content.md).
+Start with [production OAuth setup](oauth-production-setup.md).
 
 ## Explicit configuration
 
@@ -50,18 +43,16 @@ setting grants permission to publish private content.
 | `GET /authorize` | 503 by default; explicit [MCP client registration](notion-oauth-redirect.md#browser-entry-point) enables a browser-bound Notion consent redirect only |
 | `GET /oauth/notion/callback` | 503 without complete sealed-storage/browser configuration; otherwise strict cookie/state verification and allowlisted callback exchange |
 | `POST /token` | 503 without complete browser/storage configuration; otherwise strict form-only code + S256 redemption against the current sealed grant |
-| `POST /revoke` | 503, no token revocation claim |
+| `POST /revoke` | 503 without complete configuration; otherwise bounded form-only local token revocation and session cancellation |
 | `GET/POST/DELETE /mcp` | 401 challenge without valid token/grant evidence; otherwise the SDK transport enforces exact-token session ownership and read-only scope; configured content uses request-bound authority |
 
 All listed routes apply the existing loopback/backend Host and Origin
 restrictions; discovery responses specify `Cache-Control: no-store`. Even a
 fabricated Bearer token or old MCP session ID cannot access a tool in discovery
-mode. The advertised OAuth paths are deliberately reserved and closed until
-the subsequent implementation; metadata alone is not a successful OAuth login.
-
-**Production rollout is blocked** on #124 (provider-compatible refresh),
-#127–#128 (token/session binding, revocation), #129 (negative-path tests) and
-#130 (deployment configuration). This issue does not close the parent #117.
+mode. Partial configuration keeps reserved login routes closed; metadata alone
+is not a successful OAuth login. Fully configured routes are covered by the
+[joined end-to-end suite](oauth-e2e-tests.md). Follow the
+[production guide](oauth-production-setup.md) for HTTPS routing and onboarding.
 
 ## Verification
 

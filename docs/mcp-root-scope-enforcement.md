@@ -9,8 +9,9 @@ not in one particular transport.
 
 ## Operator configuration
 
-For existing Notion integration authentication (`NK_NOTION_AUTH=integration`,
-`NOTION_TOKEN` held in secret configuration), configure:
+For trusted operator integration mode (`NK_NOTION_AUTH=integration`,
+`NOTION_TOKEN` held in secret configuration), or complete request-bound
+[OAuth mode](oauth-production-setup.md) (`NK_NOTION_AUTH=none`), configure:
 
 - `NK_NOTION_SCOPE_WORKSPACE_ID`: trusted canonical lowercase hyphenated UUID
   of the workspace associated with the integration credential
@@ -20,7 +21,8 @@ For existing Notion integration authentication (`NK_NOTION_AUTH=integration`,
   Increment and restart the process when changing scope policy.
 
 Roots and workspace must be set together. Invalid or partial settings abort
-startup; a configured scope requires integration credentials. Absent scope
+startup; a configured scope requires either integration credentials or the complete
+OAuth client/callback/store composition with exactly matching allowlisted workspace. Absent scope
 keeps the handler in the **no data access** state. Credentials and raw Notion
 API errors are never included in public denial responses.
 
@@ -29,11 +31,14 @@ provisioned for that workspace. Notion's workspace parent object contains
 `workspace: true`, not a verifiable workspace UUID. Operator credential
 binding remains a prerequisite; a caller cannot supply or change this identity.
 
-The same `attach_root_scope` composition path configures HTTP and stdio.
+Integration mode uses the shared `attach_root_scope` path for HTTP and stdio.
+OAuth HTTP uses [request-bound adapters](oauth-content.md) with the same policy
+checks and live grant evidence; it never substitutes the integration client.
 The normal bootstrap does not install retrieval by default. Explicit
 [`NK_RETRIEVAL=true` activation](installed-retrieval.md) installs the scoped
 semantic/lexical/hybrid adapters for trusted stdio or authenticated loopback
-bearer HTTP, and the common handler denies data without the physical gate.
+bearer HTTP, or fully configured OAuth HTTP. The common handler denies data
+without the physical gate.
 The optional [`knowledge_related` graph](knowledge-related.md) also
 authorizes each discovered page using fresh physical ancestry rather than
 treating graph edges as permission.

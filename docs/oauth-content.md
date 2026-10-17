@@ -40,9 +40,11 @@ metadata validation, output limits and read-only scope continue to apply. Missin
 request context fails before content adapters run.
 
 This is read-only content composition. It does not enable indexing/reconciliation,
-uploads or mutations through OAuth. Durable logout/revocation and cancellation of
-already in-flight work remain #128. Full external-client E2E and production setup
-remain #129/#130; parent #127 requires a joined acceptance audit.
+uploads or mutations through OAuth. [Local logout and operator reset](oauth-revocation.md) cancel token evidence and
+prevent pending results from disclosing content after revocation. See the
+[joined HTTP acceptance suite](oauth-e2e-tests.md) and
+[production setup](oauth-production-setup.md); a real deployed ChatGPT smoke
+remains an operator responsibility.
 
 Tests use real local HTTP/SDK sessions and an actual committed SQLite/Lance index,
 with typed local Notion and embedding fixtures. No production provider credentials

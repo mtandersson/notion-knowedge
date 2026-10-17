@@ -163,9 +163,10 @@ HTTP authority and `http://localhost:3000` at the listener port. With bind
 `0.0.0.0`, browser clients should use `http://localhost:3000` as their Origin;
 `http://127.0.0.1:3000` is not an allowed Origin in this configuration. Clients
 without Origin are accepted. If mapping a different host port, allowed Origins
-still use the *container listener port*. MCP authentication and public-host
-HTTPS proxy configuration are not implemented. Keep publishing on loopback
-unless a separate deployment provides the required access controls.
+still use the *container listener port*. The stock Compose example is a loopback bootstrap. Production
+[OAuth and public-host HTTPS setup](oauth-production-setup.md) requires separate
+explicit configuration; its feature-built retrieval binary and assets are not
+packaged by this image. Keep the backend private behind the reviewed proxy.
 
 ## Reserved external data locations
 

@@ -3,7 +3,7 @@
 Reviewed baseline: 2026-10-02, main `04c638f`, for
 [#91](https://github.com/mtandersson/notion-knowedge/issues/91).
 OAuth discovery implementation reviewed 2026-10-09 for [#119](https://github.com/mtandersson/notion-knowedge/issues/119);
-see [staged OAuth discovery](oauth-discovery.md). OAuth trust-boundary addendum reviewed 2026-10-09 for [#118](https://github.com/mtandersson/notion-knowedge/issues/118);
+see [production OAuth setup](oauth-production-setup.md). OAuth trust-boundary addendum reviewed 2026-10-09 for [#118](https://github.com/mtandersson/notion-knowedge/issues/118);
 see [OAuth trust and single-identity binding](oauth-trust-model.md).
 Security documentation reconciliation: 2026-10-15, main
 `5308b7f74a77616c53a2498a2429c81b9e2ee8df`, tracked in
@@ -26,7 +26,13 @@ this model; adding it requires a new review. Notion is authoritative. Derived
 local content is disposable but remains confidential, including embeddings,
 page titles, graph edges, checkpoints and backups.
 
-Explicit HTTPS [OAuth discovery mode](oauth-discovery.md) now advertises RFC 9728/RFC 8414 metadata while blocking all MCP methods with a Bearer discovery challenge and returning 503 on reserved authorization/token/revocation endpoints. This is **not** login or token authorization; the existing anonymous bootstrap is unchanged when discovery is unset. A trusted proxy still must preserve the restricted backend Host/Origin rules. It must not be exposed as a private knowledge service until #120–#130 ship.
+Explicit HTTPS [OAuth configuration](oauth-production-setup.md) installs separate
+MCP/Notion authorization, PKCE S256, encrypted allowlisted grants, live request-bound
+content checks and exact-token logout. Discovery alone does not enable login.
+A controlled proxy must validate public Host/Origin before backend rewriting;
+keep the backend private. [Joined tests](oauth-e2e-tests.md) use credential-free
+fixtures; an actual deployed ChatGPT smoke remains an operator responsibility.
+
 
 The default bootstrap serves stdio/HTTP and the MCP tool catalog; retrieval
 calls remain unavailable until adapter composition is explicitly enabled.
@@ -148,26 +154,18 @@ the system.
 
 ## OAuth trust-binding addendum (2026-10-09, #118)
 
-The full target authentication chain is defined in [oauth-trust-model.md](oauth-trust-model.md).
-It does **not** describe shipped controls. Notion's OAuth token response must
-identify **both** the explicitly configured `workspace_id` and `owner.user.id`;
-neither an OAuth callback, email, workspace name, bot ID nor the first login may
-enroll or replace the allowed identity. A valid upstream Notion grant is necessary
-but insufficient to authorize a ChatGPT MCP token. MCP tokens have their own
-issuer, **canonical MCP resource/audience** (RFC 8707), client/scopes, expiry,
-revocation identity and durable Notion grant/authorization-epoch binding. A
-foreign-audience or upstream Notion bearer must never authenticate MCP requests.
+The [OAuth trust contract](oauth-trust-model.md) is implemented in the supported
+single-process read-only envelope described by [production setup](oauth-production-setup.md).
+Tokens are resource/client/scope/expiry bound and reference the exact approved
+Notion grant. The [joined acceptance matrix](oauth-e2e-tests.md) covers denied
+identities, PKCE/state/code failures, sessions, refresh, replacement and logout.
+A real ChatGPT/Notion deployment smoke and host-specific containment remain
+operator responsibilities. Local files are not rollback-resistant external
+storage; protecting state/backups is part of that deployment envelope.
 
-Every HTTP operation and continued SSE/session use must revalidate the live
-token/grant binding independently of session IDs and Host/Origin checks.
-Grant revocation/replacement, changed identity or root policy, ambiguous Notion
-refresh, and corrupt/unavailable authorization storage fail closed. Concurrent
-refresh cannot undo logout/revocation; stale sessions cannot silently adopt a
-new grant. Before exposure, #119–#130 must verify these denial paths, code +
-PKCE S256, single-use state/code, redirect and token binding, upstream secret
-storage, session invalidation, bounded revocation and safe proxy discovery.
-These are **requirements**, not a claim that the current HTTP server enforces
-MCP authorization.
+> Historical incremental assessments below describe their dated PR snapshots,
+> including routes that were then unimplemented. They do not override the
+> installed combined boundary above.
 
 ## OAuth discovery boundary review (2026-10-09, #119)
 
