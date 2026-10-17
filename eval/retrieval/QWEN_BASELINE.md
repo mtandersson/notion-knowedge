@@ -25,11 +25,13 @@ nix develop .#spike --command cargo build -p notion-knowledge-retrieval \
 python3 scripts/retrieval-eval.py \
   --adapter 'python3 scripts/qwen-eval-measure.py target/debug/examples/qwen-eval /path/to/assets /tmp/qwen-measurements.json' \
   --dataset eval/retrieval/personal-knowledge-v1.json \
-  --modes vector --top-k 10 --timeout 300 --output /tmp/qwen-ranking.json
+  --modes vector --top-k 10 --timeout 3600 --output /tmp/qwen-ranking.json
 ```
 
 On Linux, the wrapper records whole-process peak resident memory using child
-`ru_maxrss` (KiB), including model loading and inference. Timings use monotonic
+`ru_maxrss` (KiB), including model loading and inference. The commands above
+use the unoptimized debug profile; record that profile with results and do not
+interpret these timings as release-build service latency. Timings use monotonic
 wall time, with model load, corpus embedding and each query measured separately.
 
 The corpus is 14 chunks from 12 fictional pages, with 24 queries paired across
