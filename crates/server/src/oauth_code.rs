@@ -630,6 +630,38 @@ mod tests {
     }
 
     #[test]
+    fn resource_evidence_rejects_wrong_scope_resource_and_expired_records() {
+        for invalid in ["scope", "resource", "expiry"] {
+            let flow = flow();
+            let start = flow.begin(&authorization()).unwrap();
+            let redirect = flow.approve(start.expose(), &grant()).unwrap();
+            let token = flow
+                .redeem(&exchange(redirect.code.expose()), &grant())
+                .unwrap();
+            assert!(
+                flow.authorize_resource(token.access_token.expose(), &grant())
+                    .is_some()
+            );
+            {
+                let mut records = flow.records.lock().unwrap();
+                let record = records
+                    .tokens
+                    .get_mut(&digest(token.access_token.expose()))
+                    .unwrap();
+                match invalid {
+                    "scope" => record.scope = "knowledge:write".into(),
+                    "resource" => record.resource = "https://other.example.com/mcp".into(),
+                    _ => record.expires = Instant::now() - Duration::from_secs(1),
+                }
+            }
+            assert!(
+                flow.authorize_resource(token.access_token.expose(), &grant())
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
     fn rfc7636_known_s256_vector_and_successful_code_exchange() {
         assert_eq!(pkce_challenge(VERIFIER), CHALLENGE);
         let flow = flow();

@@ -100,16 +100,15 @@ pub(crate) async fn require_authorization(
     let response = next.run(request).await;
     // The SDK returns a session ID only after successful initialization. Bind
     // it before the response exposes that ID to the caller, never on client input.
-    if session.is_none() {
-        if let Some(id) = response
+    if session.is_none()
+        && let Some(id) = response
             .headers()
             .get("mcp-session-id")
             .and_then(|v| v.to_str().ok())
-        {
-            let id = SessionId::from(id.to_owned());
-            if !gate.sessions.bind_session(&id, &auth) {
-                return gate.denied();
-            }
+    {
+        let id = SessionId::from(id.to_owned());
+        if !gate.sessions.bind_session(&id, &auth) {
+            return gate.denied();
         }
     }
     response

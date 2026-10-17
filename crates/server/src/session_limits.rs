@@ -354,11 +354,14 @@ pub(crate) async fn limit_stream_responses(
         return overload();
     };
     let metric = Resource::Stream.enter(1);
-    let lifetime = request
+    let deadline = request
         .extensions()
         .get::<notion_knowledge_mcp::HttpAuthorization>()
-        .map(|auth| auth.expires_at().saturating_duration_since(Instant::now()))
-        .map_or(budget.max_age, |remaining| remaining.min(budget.max_age));
+        .map(|auth| auth.expires_at())
+        .map_or_else(
+            || Instant::now() + budget.max_age,
+            |expires| expires.min(Instant::now() + budget.max_age),
+        );
     let response = next.run(request).await;
     let streaming = response.headers().get(CONTENT_TYPE).is_some_and(|v| {
         v.to_str()
@@ -375,7 +378,9 @@ pub(crate) async fn limit_stream_responses(
             inner: body,
             permit: Some(permit),
             metric: Some(metric),
-            deadline: Box::pin(tokio::time::sleep(lifetime)),
+            deadline: Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(
+                deadline,
+            ))),
             finished: false,
         }),
     )
@@ -455,6 +460,54 @@ mod tests {
         assert_ne!(id, new_id);
         manager.close_session(&new_id).await.unwrap();
         assert!(manager.has_capacity());
+    }
+
+    #[tokio::test]
+    async fn delayed_dispatch_cannot_extend_authorized_sse_deadline() {
+        use axum::{Router, middleware, routing::get};
+        let budget = StreamBudget::new(1, Duration::from_secs(2));
+        let auth = notion_knowledge_mcp::HttpAuthorization::new(
+            [1; 32],
+            "grant".into(),
+            1,
+            "workspace".into(),
+            "owner".into(),
+            Instant::now() + Duration::from_millis(300),
+        );
+        let router = Router::new()
+            .route(
+                "/mcp",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                    (
+                        [(CONTENT_TYPE, "text/event-stream")],
+                        Body::from_stream(
+                            futures::stream::pending::<Result<Bytes, std::io::Error>>(),
+                        ),
+                    )
+                }),
+            )
+            .layer(middleware::from_fn_with_state(
+                budget,
+                limit_stream_responses,
+            ))
+            .layer(axum::Extension(auth));
+        let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = socket.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(socket, router).await.unwrap();
+        });
+        let response = reqwest::Client::new()
+            .get(format!("http://{addr}/mcp"))
+            .send()
+            .await
+            .unwrap();
+        let bytes = tokio::time::timeout(Duration::from_millis(100), response.bytes())
+            .await
+            .expect("dispatch must not add time to bearer lifetime")
+            .unwrap();
+        assert!(bytes.is_empty());
+        server.abort();
     }
 
     #[tokio::test]
