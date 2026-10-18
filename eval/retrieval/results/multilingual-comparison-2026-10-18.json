@@ -1,0 +1,825 @@
+{
+  "schema_version": 1,
+  "date_utc": "2026-10-18",
+  "source_commit": "86305d91170246585a9be35056bdeb1d2a8742e0",
+  "dataset_id": "personal-knowledge-fixtures-v1",
+  "dataset_sha256": "b96d4eba5be7ea7b9d48be12ce088d455f38868fe09b658ce06319ced9888efe",
+  "environment": {
+    "profile": "release optimized",
+    "rustc": "1.98.1 (48a229cea 2026-09-01)",
+    "os": "Linux 6.18.51 x86_64",
+    "cpu": "AMD Ryzen 7 7800X3D, 8 cores /16 logical CPUs",
+    "host_memory_kib": 31997376,
+    "load": "Shared host; concurrent build work, no CPU isolation or cache eviction. Two observations are not confidence intervals."
+  },
+  "run_order": [
+    [
+      "e5",
+      "qwen"
+    ],
+    [
+      "qwen",
+      "e5"
+    ]
+  ],
+  "models": {
+    "qwen": {
+      "assets_sha256": {
+        "config": "b5bf1f51fc45be473a54718cef92448d90a1be001bf9b9a44b8c7f10a19feaa9",
+        "vocabulary": "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a",
+        "weights": "0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd"
+      },
+      "rankings": "qwen-0.6b-2026-10-18-ranking.json",
+      "measurements": [
+        {
+          "as_of": "2026-03-02",
+          "backend": "exhaustive cosine over normalized model vectors",
+          "batch_size": 1,
+          "chunks": 14,
+          "corpus_embed_ms": 17285.524714,
+          "dataset_id": "personal-knowledge-fixtures-v1",
+          "document_format": "Title: {title}\\nStatus: {status}\\nUpdated: {updated_at}\\nLinks: {comma-separated link IDs}\\n{chunk text}",
+          "document_prefix": "",
+          "max_tokens": 512,
+          "model": {
+            "dimension": 1024,
+            "model_id": "Qwen/Qwen3-Embedding-0.6B",
+            "model_version": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3:fastembed7.1.0:candle0.11.0:tokenizers0.23.2:last-token:left-padding:l2:exact-text:untruncated-v1",
+            "provider_id": "local-fastembed-candle-cpu-f32",
+            "schema_version": "1"
+          },
+          "model_load_ms": 3414.10968,
+          "queries": [
+            {
+              "category": "semantic",
+              "embedding_ms": 665.99848,
+              "exact_search_ms": 0.013365,
+              "language": "en",
+              "query_id": "semantic-energy-en"
+            },
+            {
+              "category": "semantic",
+              "embedding_ms": 597.569206,
+              "exact_search_ms": 0.013476,
+              "language": "en",
+              "query_id": "semantic-memory-en"
+            },
+            {
+              "category": "semantic",
+              "embedding_ms": 603.394623,
+              "exact_search_ms": 0.013545,
+              "language": "en",
+              "query_id": "semantic-watering-en"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 591.979465,
+              "exact_search_ms": 0.013545,
+              "language": "en",
+              "query_id": "exact-project-en"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 690.510713,
+              "exact_search_ms": 0.013696,
+              "language": "en",
+              "query_id": "exact-bike-en"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 652.4536330000001,
+              "exact_search_ms": 0.013736,
+              "language": "en",
+              "query_id": "exact-reading-en"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 696.258625,
+              "exact_search_ms": 0.013335,
+              "language": "en",
+              "query_id": "status-active-en"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 763.705265,
+              "exact_search_ms": 0.013316,
+              "language": "en",
+              "query_id": "date-bike-en"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 779.071265,
+              "exact_search_ms": 0.013585,
+              "language": "en",
+              "query_id": "date-review-en"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 597.891774,
+              "exact_search_ms": 0.013135,
+              "language": "en",
+              "query_id": "link-energy-en"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 721.050772,
+              "exact_search_ms": 0.012452999999999999,
+              "language": "en",
+              "query_id": "link-garden-en"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 757.913546,
+              "exact_search_ms": 0.013335,
+              "language": "en",
+              "query_id": "link-study-en"
+            },
+            {
+              "category": "semantic",
+              "embedding_ms": 765.981802,
+              "exact_search_ms": 0.013295000000000001,
+              "language": "sv",
+              "query_id": "semantic-energy-sv"
+            },
+            {
+              "category": "semantic",
+              "embedding_ms": 596.9832240000001,
+              "exact_search_ms": 0.013726,
+              "language": "sv",
+              "query_id": "semantic-memory-sv"
+            },
+            {
+              "category": "semantic",
+              "embedding_ms": 825.981196,
+              "exact_search_ms": 0.013817,
+              "language": "sv",
+              "query_id": "semantic-watering-sv"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 713.3895,
+              "exact_search_ms": 0.013075,
+              "language": "sv",
+              "query_id": "exact-project-sv"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 785.573348,
+              "exact_search_ms": 0.013526,
+              "language": "sv",
+              "query_id": "exact-bike-sv"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 646.204108,
+              "exact_search_ms": 0.014287000000000001,
+              "language": "sv",
+              "query_id": "exact-reading-sv"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 734.755354,
+              "exact_search_ms": 0.014778,
+              "language": "sv",
+              "query_id": "status-active-sv"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 700.78919,
+              "exact_search_ms": 0.013746,
+              "language": "sv",
+              "query_id": "date-bike-sv"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 743.170478,
+              "exact_search_ms": 0.012874,
+              "language": "sv",
+              "query_id": "date-review-sv"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 843.983275,
+              "exact_search_ms": 0.014126,
+              "language": "sv",
+              "query_id": "link-energy-sv"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 827.324579,
+              "exact_search_ms": 0.012805,
+              "language": "sv",
+              "query_id": "link-garden-sv"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 742.6396189999999,
+              "exact_search_ms": 0.013075,
+              "language": "sv",
+              "query_id": "link-study-sv"
+            }
+          ],
+          "query_instruction": null,
+          "schema_version": 1,
+          "peak_process_rss_kib": 3519532,
+          "memory_method": "Linux child ru_maxrss; whole adapter including load and inference"
+        },
+        {
+          "as_of": "2026-03-02",
+          "backend": "exhaustive cosine over normalized model vectors",
+          "batch_size": 1,
+          "chunks": 14,
+          "corpus_embed_ms": 10103.949294,
+          "dataset_id": "personal-knowledge-fixtures-v1",
+          "document_format": "Title: {title}\\nStatus: {status}\\nUpdated: {updated_at}\\nLinks: {comma-separated link IDs}\\n{chunk text}",
+          "document_prefix": "",
+          "max_tokens": 512,
+          "model": {
+            "dimension": 1024,
+            "model_id": "Qwen/Qwen3-Embedding-0.6B",
+            "model_version": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3:fastembed7.1.0:candle0.11.0:tokenizers0.23.2:last-token:left-padding:l2:exact-text:untruncated-v1",
+            "provider_id": "local-fastembed-candle-cpu-f32",
+            "schema_version": "1"
+          },
+          "model_load_ms": 2370.142704,
+          "queries": [
+            {
+              "category": "semantic",
+              "embedding_ms": 272.94286800000003,
+              "exact_search_ms": 0.040605,
+              "language": "en",
+              "query_id": "semantic-energy-en"
+            },
+            {
+              "category": "semantic",
+              "embedding_ms": 269.57597100000004,
+              "exact_search_ms": 0.011802,
+              "language": "en",
+              "query_id": "semantic-memory-en"
+            },
+            {
+              "category": "semantic",
+              "embedding_ms": 303.204857,
+              "exact_search_ms": 0.013966,
+              "language": "en",
+              "query_id": "semantic-watering-en"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 616.941018,
+              "exact_search_ms": 0.017753,
+              "language": "en",
+              "query_id": "exact-project-en"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 958.83271,
+              "exact_search_ms": 0.012924,
+              "language": "en",
+              "query_id": "exact-bike-en"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 679.934924,
+              "exact_search_ms": 0.013726,
+              "language": "en",
+              "query_id": "exact-reading-en"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 1177.251608,
+              "exact_search_ms": 0.014327,
+              "language": "en",
+              "query_id": "status-active-en"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 778.70858,
+              "exact_search_ms": 0.013104000000000001,
+              "language": "en",
+              "query_id": "date-bike-en"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 691.566683,
+              "exact_search_ms": 0.013946,
+              "language": "en",
+              "query_id": "date-review-en"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 537.4002,
+              "exact_search_ms": 0.014015999999999999,
+              "language": "en",
+              "query_id": "link-energy-en"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 527.337881,
+              "exact_search_ms": 0.013765,
+              "language": "en",
+              "query_id": "link-garden-en"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 514.90152,
+              "exact_search_ms": 0.013153999999999999,
+              "language": "en",
+              "query_id": "link-study-en"
+            },
+            {
+              "category": "semantic",
+              "embedding_ms": 442.716808,
+              "exact_search_ms": 0.014136,
+              "language": "sv",
+              "query_id": "semantic-energy-sv"
+            },
+            {
+              "category": "semantic",
+              "embedding_ms": 362.367655,
+              "exact_search_ms": 0.012454,
+              "language": "sv",
+              "query_id": "semantic-memory-sv"
+            },
+            {
+              "category": "semantic",
+              "embedding_ms": 353.870358,
+              "exact_search_ms": 0.013966,
+              "language": "sv",
+              "query_id": "semantic-watering-sv"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 297.51801,
+              "exact_search_ms": 0.012173,
+              "language": "sv",
+              "query_id": "exact-project-sv"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 281.96215,
+              "exact_search_ms": 0.011752,
+              "language": "sv",
+              "query_id": "exact-bike-sv"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 280.750312,
+              "exact_search_ms": 0.012113,
+              "language": "sv",
+              "query_id": "exact-reading-sv"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 310.901891,
+              "exact_search_ms": 0.012543,
+              "language": "sv",
+              "query_id": "status-active-sv"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 321.03955299999996,
+              "exact_search_ms": 0.012383,
+              "language": "sv",
+              "query_id": "date-bike-sv"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 338.287356,
+              "exact_search_ms": 0.011871999999999999,
+              "language": "sv",
+              "query_id": "date-review-sv"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 323.036497,
+              "exact_search_ms": 0.012583,
+              "language": "sv",
+              "query_id": "link-energy-sv"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 323.15997699999997,
+              "exact_search_ms": 0.012663,
+              "language": "sv",
+              "query_id": "link-garden-sv"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 310.17129700000004,
+              "exact_search_ms": 0.012744,
+              "language": "sv",
+              "query_id": "link-study-sv"
+            }
+          ],
+          "query_instruction": null,
+          "schema_version": 1,
+          "peak_process_rss_kib": 3518212,
+          "memory_method": "Linux child ru_maxrss; whole adapter including load and inference"
+        }
+      ]
+    },
+    "e5": {
+      "assets_sha256": {
+        "config": "69137736cab8b8903a07fe8afaafdda25aac55415a12a55d1bffa9f581abf959",
+        "vocabulary": "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39",
+        "weights": "1a55775f53449dac10a2bcbc312469fac40b96d53198c407081a831f81c98477"
+      },
+      "rankings": "e5-small-2026-10-18-ranking.json",
+      "measurements": [
+        {
+          "as_of": "2026-03-02",
+          "backend": "exhaustive cosine over normalized model vectors",
+          "batch_size": 1,
+          "chunks": 14,
+          "corpus_embed_ms": 1504.7848470000001,
+          "dataset_id": "personal-knowledge-fixtures-v1",
+          "document_format": "Title: {title}\\nStatus: {status}\\nUpdated: {updated_at}\\nLinks: {comma-separated link IDs}\\n{chunk text}",
+          "document_prefix": "passage: ",
+          "max_tokens": 512,
+          "model": {
+            "dimension": 384,
+            "model_id": "intfloat/multilingual-e5-small",
+            "model_version": "614241f622f53c4eeff9890bdc4f31cfecc418b3:candle0.11.0:tokenizers0.23.2:masked-mean:l2:query-passage-prefix:untruncated-v1",
+            "provider_id": "eval-candle-cpu-f32",
+            "schema_version": "1"
+          },
+          "model_load_ms": 4614.767432,
+          "queries": [
+            {
+              "category": "semantic",
+              "embedding_ms": 72.225956,
+              "exact_search_ms": 0.007723999999999999,
+              "language": "en",
+              "query_id": "semantic-energy-en"
+            },
+            {
+              "category": "semantic",
+              "embedding_ms": 65.212342,
+              "exact_search_ms": 0.007665,
+              "language": "en",
+              "query_id": "semantic-memory-en"
+            },
+            {
+              "category": "semantic",
+              "embedding_ms": 71.817861,
+              "exact_search_ms": 0.0074540000000000006,
+              "language": "en",
+              "query_id": "semantic-watering-en"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 116.222172,
+              "exact_search_ms": 0.007764999999999999,
+              "language": "en",
+              "query_id": "exact-project-en"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 66.2697,
+              "exact_search_ms": 0.007003,
+              "language": "en",
+              "query_id": "exact-bike-en"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 64.75851,
+              "exact_search_ms": 0.007174000000000001,
+              "language": "en",
+              "query_id": "exact-reading-en"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 67.663088,
+              "exact_search_ms": 0.007354,
+              "language": "en",
+              "query_id": "status-active-en"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 58.05291,
+              "exact_search_ms": 0.007825,
+              "language": "en",
+              "query_id": "date-bike-en"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 74.493124,
+              "exact_search_ms": 0.007805,
+              "language": "en",
+              "query_id": "date-review-en"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 73.495509,
+              "exact_search_ms": 0.007503999999999999,
+              "language": "en",
+              "query_id": "link-energy-en"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 66.051225,
+              "exact_search_ms": 0.007614,
+              "language": "en",
+              "query_id": "link-garden-en"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 59.981925,
+              "exact_search_ms": 0.007524,
+              "language": "en",
+              "query_id": "link-study-en"
+            },
+            {
+              "category": "semantic",
+              "embedding_ms": 63.585932,
+              "exact_search_ms": 0.006883,
+              "language": "sv",
+              "query_id": "semantic-energy-sv"
+            },
+            {
+              "category": "semantic",
+              "embedding_ms": 106.516078,
+              "exact_search_ms": 0.007815,
+              "language": "sv",
+              "query_id": "semantic-memory-sv"
+            },
+            {
+              "category": "semantic",
+              "embedding_ms": 83.36916799999999,
+              "exact_search_ms": 0.007233,
+              "language": "sv",
+              "query_id": "semantic-watering-sv"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 63.445904,
+              "exact_search_ms": 0.007904999999999999,
+              "language": "sv",
+              "query_id": "exact-project-sv"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 64.074849,
+              "exact_search_ms": 0.007995,
+              "language": "sv",
+              "query_id": "exact-bike-sv"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 71.92710500000001,
+              "exact_search_ms": 0.008857,
+              "language": "sv",
+              "query_id": "exact-reading-sv"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 56.707675,
+              "exact_search_ms": 0.007805,
+              "language": "sv",
+              "query_id": "status-active-sv"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 74.87711800000001,
+              "exact_search_ms": 0.008135,
+              "language": "sv",
+              "query_id": "date-bike-sv"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 84.942116,
+              "exact_search_ms": 0.008566,
+              "language": "sv",
+              "query_id": "date-review-sv"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 75.853733,
+              "exact_search_ms": 0.007614,
+              "language": "sv",
+              "query_id": "link-energy-sv"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 60.961906000000006,
+              "exact_search_ms": 0.007834,
+              "language": "sv",
+              "query_id": "link-garden-sv"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 59.173769,
+              "exact_search_ms": 0.007274,
+              "language": "sv",
+              "query_id": "link-study-sv"
+            }
+          ],
+          "query_instruction": "query: ",
+          "schema_version": 1,
+          "peak_process_rss_kib": 939980,
+          "memory_method": "Linux child ru_maxrss; whole adapter including load and inference"
+        },
+        {
+          "as_of": "2026-03-02",
+          "backend": "exhaustive cosine over normalized model vectors",
+          "batch_size": 1,
+          "chunks": 14,
+          "corpus_embed_ms": 791.1799139999999,
+          "dataset_id": "personal-knowledge-fixtures-v1",
+          "document_format": "Title: {title}\\nStatus: {status}\\nUpdated: {updated_at}\\nLinks: {comma-separated link IDs}\\n{chunk text}",
+          "document_prefix": "passage: ",
+          "max_tokens": 512,
+          "model": {
+            "dimension": 384,
+            "model_id": "intfloat/multilingual-e5-small",
+            "model_version": "614241f622f53c4eeff9890bdc4f31cfecc418b3:candle0.11.0:tokenizers0.23.2:masked-mean:l2:query-passage-prefix:untruncated-v1",
+            "provider_id": "eval-candle-cpu-f32",
+            "schema_version": "1"
+          },
+          "model_load_ms": 1126.655569,
+          "queries": [
+            {
+              "category": "semantic",
+              "embedding_ms": 38.975348,
+              "exact_search_ms": 0.006692,
+              "language": "en",
+              "query_id": "semantic-energy-en"
+            },
+            {
+              "category": "semantic",
+              "embedding_ms": 41.167368,
+              "exact_search_ms": 0.0063620000000000005,
+              "language": "en",
+              "query_id": "semantic-memory-en"
+            },
+            {
+              "category": "semantic",
+              "embedding_ms": 40.498866,
+              "exact_search_ms": 0.006562,
+              "language": "en",
+              "query_id": "semantic-watering-en"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 35.789271,
+              "exact_search_ms": 0.006422,
+              "language": "en",
+              "query_id": "exact-project-en"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 37.146119999999996,
+              "exact_search_ms": 0.006562,
+              "language": "en",
+              "query_id": "exact-bike-en"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 35.920615000000005,
+              "exact_search_ms": 0.006312,
+              "language": "en",
+              "query_id": "exact-reading-en"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 36.247732,
+              "exact_search_ms": 0.006502,
+              "language": "en",
+              "query_id": "status-active-en"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 35.775625999999995,
+              "exact_search_ms": 0.006232,
+              "language": "en",
+              "query_id": "date-bike-en"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 38.849464,
+              "exact_search_ms": 0.0064919999999999995,
+              "language": "en",
+              "query_id": "date-review-en"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 38.204014,
+              "exact_search_ms": 0.006792,
+              "language": "en",
+              "query_id": "link-energy-en"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 38.466401999999995,
+              "exact_search_ms": 0.006622,
+              "language": "en",
+              "query_id": "link-garden-en"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 37.641380000000005,
+              "exact_search_ms": 0.006783,
+              "language": "en",
+              "query_id": "link-study-en"
+            },
+            {
+              "category": "semantic",
+              "embedding_ms": 37.273057,
+              "exact_search_ms": 0.006943,
+              "language": "sv",
+              "query_id": "semantic-energy-sv"
+            },
+            {
+              "category": "semantic",
+              "embedding_ms": 36.045417,
+              "exact_search_ms": 0.006783,
+              "language": "sv",
+              "query_id": "semantic-memory-sv"
+            },
+            {
+              "category": "semantic",
+              "embedding_ms": 40.923576000000004,
+              "exact_search_ms": 0.007424,
+              "language": "sv",
+              "query_id": "semantic-watering-sv"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 37.461405000000006,
+              "exact_search_ms": 0.0061909999999999995,
+              "language": "sv",
+              "query_id": "exact-project-sv"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 40.038422,
+              "exact_search_ms": 0.006402,
+              "language": "sv",
+              "query_id": "exact-bike-sv"
+            },
+            {
+              "category": "exact_name",
+              "embedding_ms": 36.487467,
+              "exact_search_ms": 0.006502,
+              "language": "sv",
+              "query_id": "exact-reading-sv"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 35.560135,
+              "exact_search_ms": 0.007284,
+              "language": "sv",
+              "query_id": "status-active-sv"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 38.450513,
+              "exact_search_ms": 0.006953,
+              "language": "sv",
+              "query_id": "date-bike-sv"
+            },
+            {
+              "category": "date_status",
+              "embedding_ms": 39.14335,
+              "exact_search_ms": 0.006742,
+              "language": "sv",
+              "query_id": "date-review-sv"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 38.987389,
+              "exact_search_ms": 0.006522,
+              "language": "sv",
+              "query_id": "link-energy-sv"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 38.385408000000005,
+              "exact_search_ms": 0.006162,
+              "language": "sv",
+              "query_id": "link-garden-sv"
+            },
+            {
+              "category": "cross_link",
+              "embedding_ms": 38.882929,
+              "exact_search_ms": 0.0065119999999999996,
+              "language": "sv",
+              "query_id": "link-study-sv"
+            }
+          ],
+          "query_instruction": "query: ",
+          "schema_version": 1,
+          "peak_process_rss_kib": 939948,
+          "memory_method": "Linux child ru_maxrss; whole adapter including load and inference"
+        }
+      ]
+    }
+  },
+  "source_files_sha256": {
+    "qwen_adapter": "e3ebf899bda4bcc00e4cd44e0a8173615ece5bd0464c6ef708079c361e6e46ca",
+    "e5_adapter": "218993bca73ec68c7905dd8488686f5f39fec5c12ed4fa6ed8a058dd0591c5df",
+    "shared_protocol": "7c24ff9cba3644b47c40f664828865cd3a2998ca90f66af14b919d4da3d089e1",
+    "memory_wrapper": "201752d59bbfe3bddd9840735970937319086cc19ea0d91c919d695be70c7a71"
+  }
+}

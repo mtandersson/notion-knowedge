@@ -2,6 +2,8 @@
 
 The [measured Qwen baseline](QWEN_BASELINE.md) records real pinned-model
 vector-only rankings, latency, memory and weak query classes on this fixture.
+The [multilingual comparison](MODEL_COMPARISON.md) measures E5-small against
+the same Qwen corpus and retains the current production default.
 
 The [hosted Notion baseline](HOSTED_NOTION.md) records search availability and
 the protocol for comparable hosted measurements; unavailable cases are not
