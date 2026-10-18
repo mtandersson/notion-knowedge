@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "scope": "Fixed fictional corpus numeric checks only; no live/pilot acceptance claim",
+  "policies": [
+    "docs/chatgpt-cutover-acceptance.md G1",
+    "docs/cutover-gates.md gate1"
+  ],
+  "checks": {
+    "chatgpt_smoke_G1": {
+      "recall_at_5": {
+        "observed": 0.9305555555555555,
+        "minimum": 0.8,
+        "pass": true
+      },
+      "ndcg_at_5": {
+        "observed": 0.7604743242820168,
+        "minimum": 0.8,
+        "pass": false
+      },
+      "mrr": {
+        "observed": 0.7928240740740741,
+        "minimum": 0.8,
+        "pass": false
+      }
+    },
+    "personal_exact_name_top3": {
+      "fts": true,
+      "hybrid": true
+    },
+    "primary_cutover_fixed_corpus": {
+      "fts": {
+        "recall_at_5": {
+          "observed": 0.7361111111111112,
+          "minimum": 0.95,
+          "pass": false
+        },
+        "mrr": {
+          "observed": 0.7060185185185185,
+          "minimum": 0.9,
+          "pass": false
+        },
+        "ndcg_at_5": {
+          "observed": 0.6296787746449914,
+          "minimum": 0.9,
+          "pass": false
+        }
+      },
+      "hybrid": {
+        "recall_at_5": {
+          "observed": 0.9305555555555555,
+          "minimum": 0.95,
+          "pass": false
+        },
+        "mrr": {
+          "observed": 0.7928240740740741,
+          "minimum": 0.9,
+          "pass": false
+        },
+        "ndcg_at_5": {
+          "observed": 0.7604743242820168,
+          "minimum": 0.9,
+          "pass": false
+        }
+      }
+    }
+  },
+  "all_fixed_corpus_checks_pass": false
+}

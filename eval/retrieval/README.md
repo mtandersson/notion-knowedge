@@ -4,6 +4,9 @@ The [measured Qwen baseline](QWEN_BASELINE.md) records real pinned-model
 vector-only rankings, latency, memory and weak query classes on this fixture.
 The [multilingual comparison](MODEL_COMPARISON.md) measures E5-small against
 the same Qwen corpus and retains the current production default.
+The [configured backend evaluation](PRODUCTION_RETRIEVAL.md) documents the
+real guarded vector/FTS/hybrid measurements, passing exact-identifier gate,
+failed broad quality floors and measured graph-OFF decision.
 
 The [hosted Notion baseline](HOSTED_NOTION.md) records search availability and
 the protocol for comparable hosted measurements; unavailable cases are not
@@ -146,7 +149,9 @@ private data. Run only trusted local adapters with approved fixture data;
 the harness does not authorize or sanitize arbitrary external adapter code.
 The credential-free tests use a deterministic **contract stub**, not a real
 embedding model or full LanceDB evaluation. A complete model/index-specific
-report requires an actual adapter command; no production score is claimed.
+report requires an actual adapter command. The separately recorded
+[configured backend measurements](PRODUCTION_RETRIEVAL.md) supply that evidence;
+these synthetic harness tests do not certify those scores.
 
 ## Ranking metrics (#96)
 
@@ -190,8 +195,9 @@ No-hit queries contribute zero to macro averages rather than being excluded.
 These metrics are deterministic calculations on the adapter's real ranked IDs,
 **not evidence of production search quality**. Current contract tests exercise
 a synthetic mode-aware stub and known hand-calculated metric values. The [Qwen baseline](QWEN_BASELINE.md) now supplies real exact-vector model
-measurements. Production LanceDB/FTS/hybrid quality still needs an adapter
-that exercises those configured backends over the same fixed corpus.
+measurements. The [configured production adapter](PRODUCTION_RETRIEVAL.md)
+now measures actual LanceDB/FTS/hybrid paths over the same corpus and records
+their failed broad acceptance floors without changing them.
 
 ## Stale-index and authoritative read evaluation (#101)
 
@@ -359,7 +365,8 @@ but deliberately scripted baseline retrieval scores. Its six positive and six
 negative-control cases show deterministic linked-target lift and expose a
 promotion of an unrelated linked decision in two date-review controls. That is
 **behavioral evidence, not a real embedding/index benchmark**: it is a reason
-to keep the feature OFF rather than claim a multilingual uplift. A separately
-configured real vector/FTS adapter and a reviewed measured report are required
-before production activation. The harness can generate that report without
-changing judgments or enabling graph boost as a product default.
+to keep the feature OFF rather than claim a multilingual uplift. The separate
+[real configured graph comparison](PRODUCTION_RETRIEVAL.md#real-graph-comparison)
+uses production Qwen/vector/FTS candidates and committed links; it also records
+`keep_disabled` because modest lift does not outweigh its safety regressions.
+Neither report changes judgments or enables graph boost as a product default.
