@@ -1,0 +1,20 @@
+{
+  "image": "REPLACE_WITH_MEASURED_IMAGE_DIGEST",
+  "cpus": 0,
+  "memory_bytes": 0,
+  "pids": 0,
+  "nofile": 0,
+  "tmp_bytes": 0,
+  "log_bytes": 0,
+  "log_files": 0,
+  "proxy_connections": 0,
+  "per_client_connections": 0,
+  "requests_per_second": 0,
+  "request_burst": 0,
+  "header_bytes": 0,
+  "body_bytes": 0,
+  "header_timeout_seconds": 0,
+  "body_timeout_seconds": 0,
+  "write_timeout_seconds": 0,
+  "upstream_timeout_seconds": 0
+}
