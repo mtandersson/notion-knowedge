@@ -535,7 +535,7 @@ pub async fn run(
         .flat_map(|p| {
             p.chunks
                 .iter()
-                .map(|c| (chunk_id(&c.id), (&c.id, &c.text, p)))
+                .map(move |c| (chunk_id(&c.id), (&c.id, &c.text, p)))
         })
         .collect();
     let mut results = vec![];
@@ -645,9 +645,9 @@ mod tests {
             "../../../../eval/retrieval/exact-identifiers-v1.json"
         ))
         .unwrap();
-        let q = &dataset["queries"][0];
+        let queries: Vec<_> = dataset["queries"].as_array().unwrap().iter().map(|q| json!({"id":q["id"],"text":q["text"],"language":q["language"],"category":q["category"]})).collect();
         parse(&json!({"schema_version":1,"dataset_id":dataset["dataset_id"],"as_of":dataset["as_of"],"mode":"fts","top_k":3,"pages":dataset["pages"],
-            "queries":[{"id":q["id"],"text":q["text"],"language":q["language"],"category":q["category"]}]}).to_string()).unwrap()
+            "queries":queries}).to_string()).unwrap()
     }
     #[tokio::test]
     async fn fixed_snapshot_reuses_real_indexes_and_rejects_changes_or_missing_state() {
@@ -670,6 +670,50 @@ mod tests {
             first, second,
             "same persisted corpus/index must preserve ranks and signature"
         );
+        // Real FTS ranks on all unchanged exact-ID cases must meet the existing
+        // 75% top1/top3, 50%-per-language and >=one-per-family floors. Judgments
+        // live only in this assertion, never in the adapter input/ranker.
+        let dataset: Value = serde_json::from_str(include_str!(
+            "../../../../eval/retrieval/exact-identifiers-v1.json"
+        ))
+        .unwrap();
+        let mut top1 = 0;
+        let mut top3 = 0;
+        let mut languages = BTreeMap::<String, usize>::new();
+        let mut families = BTreeMap::<String, usize>::new();
+        for (query, row) in dataset["queries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(first["results"].as_array().unwrap())
+        {
+            assert_eq!(query["id"], row["query_id"]);
+            let ranks = row["ranked_source_ids"].as_array().unwrap();
+            let correct = &query["relevant"][0]["source_id"];
+            top1 += usize::from(ranks.first() == Some(correct));
+            let found = usize::from(ranks.iter().take(3).any(|id| id == correct));
+            top3 += found;
+            *languages
+                .entry(query["language"].as_str().unwrap().into())
+                .or_default() += found;
+            *families
+                .entry(
+                    query["id"]
+                        .as_str()
+                        .unwrap()
+                        .rsplit_once('-')
+                        .unwrap()
+                        .0
+                        .into(),
+                )
+                .or_default() += found;
+        }
+        assert!(
+            top1 >= 6 && top3 >= 6,
+            "unchanged lexical exact-ID floors: top1={top1}/8 top3={top3}/8"
+        );
+        assert!(languages.values().all(|count| *count >= 2));
+        assert!(families.values().all(|count| *count >= 1));
         let mut changed = boundary_request();
         changed.pages[0].chunks[0].text.push_str(" changed");
         assert!(run(provider.clone(), &root, changed).await.is_err());
@@ -692,7 +736,77 @@ mod tests {
                 .await
                 .is_err()
         );
-        fs::remove_file(root.join("manifest.json")).unwrap();
+        fs::rename(index.join("missing.lance"), index.join("chunks.lance")).unwrap();
+        for filename in ["snapshot.json", "manifest.json"] {
+            let path = root.join(filename);
+            let contents = fs::read(&path).unwrap();
+            fs::remove_file(&path).unwrap();
+            assert!(
+                run(provider.clone(), &root, boundary_request())
+                    .await
+                    .is_err()
+            );
+            fs::write(path, contents).unwrap();
+        }
+        // A real authorized later commit changes a title while retaining all
+        // chunk identities and row count. It must not become benchmark input.
+        let binding = CommitBinding::new(
+            "chunks",
+            WORKSPACE,
+            &production_scope(&scope()).unwrap(),
+            "1",
+            1,
+        )
+        .unwrap();
+        let coordinator =
+            IndexCommitCoordinator::open_existing(&index, root.join("state.sqlite"), binding)
+                .unwrap();
+        let table = GuardedChunkTable::bind(
+            &index,
+            "chunks",
+            provider.metadata().clone(),
+            coordinator.clone(),
+        )
+        .unwrap();
+        let page = &boundary_request().pages[0];
+        let id = page_id(&page.id);
+        let mut chunks = table.page_chunks(&id).await.unwrap();
+        let rows = table
+            .search_snapshot()
+            .await
+            .unwrap()
+            .count_rows()
+            .await
+            .unwrap();
+        chunks[0].metadata.title = "Changed canonical title".into();
+        let lease = coordinator.state().acquire_lease(now(), 120).unwrap();
+        let operation = PageOperation::new(
+            "later-authorized-edit",
+            &revision(page),
+            PageAction::Refresh,
+            PageSyncState::present(id, "changed-source-checkpoint".into(), Some(revision(page)))
+                .unwrap(),
+        )
+        .unwrap();
+        let prepared = table
+            .prepare_page(provider.as_ref(), operation, &chunks)
+            .await
+            .unwrap();
+        table
+            .commit_page(prepared, lease.clone(), Arc::new(now), || async { Ok(()) })
+            .await
+            .unwrap();
+        coordinator.state().release_lease(&lease, now()).unwrap();
+        assert_eq!(
+            table
+                .search_snapshot()
+                .await
+                .unwrap()
+                .count_rows()
+                .await
+                .unwrap(),
+            rows
+        );
         assert!(run(provider, &root, boundary_request()).await.is_err());
         fs::remove_dir_all(root).unwrap();
     }

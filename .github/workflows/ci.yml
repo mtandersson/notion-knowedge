@@ -141,6 +141,8 @@ jobs:
         run: nix develop .#spike --command cargo clippy -p notion-knowledge-retrieval --all-targets --features local-qwen --locked -- -D warnings
       - name: Lint production webhook worker
         run: nix develop .#spike --command cargo clippy -p notion-knowledge-server --all-targets --features webhook-worker --locked -- -D warnings
+      - name: Lint production retrieval evaluation adapter
+        run: nix develop .#spike --command cargo clippy -p notion-knowledge-retrieval --example production-eval --features local-qwen,local-lancedb --locked -- -D warnings
       - name: Lint optional local LanceDB adapter
         run: nix develop .#spike --command cargo clippy -p notion-knowledge-retrieval --all-targets --features local-lancedb --locked -- -D warnings
 
