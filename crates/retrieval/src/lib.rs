@@ -28,6 +28,9 @@ pub mod webhook;
 
 pub mod webhook_debounce;
 
+/// Durable trusted post-mutation page work, consumed by the shared refresh worker.
+pub mod mutation_refresh;
+
 /// Owned cross-process index commit coordination (local Unix filesystems).
 #[cfg(unix)]
 pub mod commit;

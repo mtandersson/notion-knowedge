@@ -39,7 +39,8 @@ revision preflight, and the **durable**, separate `WriteIdempotencyStore`.
    original Markdown prefix*, followed by the *exact inserted Markdown*, an
    active matching page ID and a trusted Notion URL becomes a verified receipt.
    No unrelated original bytes may be changed.
-6. Revalidate the approved scope and persist that verified receipt **before**
+6. Acquire and revalidate fresh post-write physical scope (the write itself
+   changes the old evidence's page revision), and persist that verified receipt **before**
    returning success. If any post-PATCH verification or ledger write fails,
    return `OutcomeUnknown`. Reconciliation must be deliberate and based on
    authoritative evidence; never infer failure from a network timeout.
@@ -50,6 +51,9 @@ retrieval cache. Initial setup must use `initialize_new` explicitly.
 A lost ledger is not proof that no operations committed.
 
 ## Boundaries
+
+The [verified write and durable refresh wrapper](write-refresh.md) queues derived
+indexing after verified ledger commit and reports its status independently.
 
 This is a **core application workflow**, not a newly enabled MCP mutation
 tool. The existing `knowledge_append` schema is still development-only
