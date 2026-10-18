@@ -97,6 +97,12 @@ these command services and actual vector queries without model downloads:
 nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test reconciliation_command index_commands --locked
 ```
 
+Trusted installed readers also bind guarded indexed source expansion and the
+same configured authoritative client for `knowledge_get` with `freshness: "fresh"`.
+Fresh mode retains its indexed anchor and root checks; moved/out-of-root pages
+are rejected before Markdown is read. OAuth uses its separate request-bound
+source composition rather than this static integration client.
+
 Search modes use the existing Lance semantic adapter, BM25 lexical adapter and
 weighted reciprocal-rank fusion (100 candidates per path, rank constant 60,
 equal weights). Results preserve scores and matched paths. Each call opens the
