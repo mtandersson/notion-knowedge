@@ -58,6 +58,14 @@ impl NotionClient {
         self.with_fast_fixture_transport()
     }
 
+    /// Retain the ordinary admission/retry policy for credential-free pacing
+    /// fixtures, unlike the explicitly unpaced loopback helper.
+    #[cfg(feature = "test-fixtures")]
+    pub fn with_fixture_pacing(mut self) -> Self {
+        self.transport = Default::default();
+        self
+    }
+
     /// The composition root supplies a validated credential from secret configuration.
     /// No token discovery, file loading or logging occurs in the adapter.
     pub fn integration(token: &str) -> Result<Self, BackendError> {

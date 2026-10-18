@@ -22,6 +22,7 @@ struct Harness {
     client: reqwest::Client,
     calls: Arc<AtomicUsize>,
     available: Arc<AtomicBool>,
+    mutation_status: Arc<AtomicUsize>,
     mutations: Arc<AtomicUsize>,
     mutation_gate: Arc<tokio::sync::Semaphore>,
     mutation_started: Arc<tokio::sync::Notify>,
@@ -217,17 +218,20 @@ impl Harness {
             assert!(matches!(headers["authorization"].to_str().unwrap(), "Bearer provider-access-secret" | "Bearer rotated-access-secret"));
             axum::Json(serde_json::json!({"object":"page_markdown","id":id,"markdown":"Saffron private evidence fresh content", "truncated":false,"unknown_block_ids":[]}))
         }));
+        let mutation_status = Arc::new(AtomicUsize::new(200));
         let mutations = Arc::new(AtomicUsize::new(0));
         let mutation_gate = Arc::new(tokio::sync::Semaphore::new(1));
         let mutation_started = Arc::new(tokio::sync::Notify::new());
         let effects = mutations.clone();
         let held = mutation_gate.clone();
         let signal = mutation_started.clone();
+        let effect_status = mutation_status.clone();
         let patch = move |axum::extract::Path(id): axum::extract::Path<String>,
                           axum::Json(body): axum::Json<serde_json::Value>| {
             let effects = effects.clone();
             let held = held.clone();
             let signal = signal.clone();
+            let status = effect_status.clone();
             async move {
                 assert!(matches!(
                     body["type"].as_str(),
@@ -236,8 +240,12 @@ impl Harness {
                 effects.fetch_add(1, Ordering::SeqCst);
                 signal.notify_one();
                 let _permit = held.acquire().await.unwrap();
-                axum::Json(
-                    serde_json::json!({"object":"page_markdown","id":id,"truncated":false,"unknown_block_ids":[]}),
+                (
+                    StatusCode::from_u16(status.load(Ordering::SeqCst) as u16).unwrap(),
+                    [("Retry-After", "1")],
+                    axum::Json(
+                        serde_json::json!({"object":"page_markdown","id":id,"truncated":false,"unknown_block_ids":[]}),
+                    ),
                 )
             }
         };
@@ -314,7 +322,8 @@ impl Harness {
             "https://auth.example.com",
             "https://knowledge.example.com/mcp",
         )
-        .unwrap();
+        .unwrap()
+        .with_write_policy(writes);
         let transport = if let Some((requests, sessions, streams)) = limits {
             let mut settings = Config::from_lookup(|_| None).unwrap();
             settings.http_bind = bind;
@@ -393,6 +402,7 @@ impl Harness {
                 .unwrap(),
             calls,
             available,
+            mutation_status,
             mutations,
             mutation_gate,
             mutation_started,

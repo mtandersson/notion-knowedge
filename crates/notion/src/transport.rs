@@ -648,24 +648,29 @@ mod tests {
     #[tokio::test]
     async fn mutation_authority_is_rechecked_after_admission_wait_before_any_send() {
         let mut clock = TestClock::new().await;
-        let (client, server) = mock(&clock.handle(), vec![(200, "")]).await;
-        clock.run(send(&client, true)).await.unwrap();
-        server.await.unwrap();
-        let authority = std::sync::Arc::new(RevocableAuthority {
-            active: true.into(),
-            checks: 0.into(),
-            reject_on: usize::MAX,
-        });
-        let client = client.with_request_authority(authority.clone());
-        let request = client.http.patch(&client.api_root);
-        let pending = TestClock::park(client.send_effect(request, "notion.test")).await;
-        assert_eq!(authority.checks.load(Ordering::SeqCst), 0);
-        authority.active.store(false, Ordering::SeqCst);
-        assert_eq!(
-            clock.run(pending).await.unwrap_err().kind,
-            BackendErrorKind::Unauthenticated
-        );
-        assert_eq!(client.request_metrics().attempts, 1);
+        let tracker = clock.handle();
+        clock
+            .run(async {
+                let (client, server) = mock(&tracker, vec![(200, "")]).await;
+                send(&client, true).await.unwrap();
+                server.await.unwrap();
+                let authority = std::sync::Arc::new(RevocableAuthority {
+                    active: true.into(),
+                    checks: 0.into(),
+                    reject_on: usize::MAX,
+                });
+                let client = client.with_request_authority(authority.clone());
+                let request = client.http.patch(&client.api_root);
+                let pending = TestClock::park(client.send_effect(request, "notion.test")).await;
+                assert_eq!(authority.checks.load(Ordering::SeqCst), 0);
+                authority.active.store(false, Ordering::SeqCst);
+                assert_eq!(
+                    pending.await.unwrap_err().kind,
+                    BackendErrorKind::Unauthenticated
+                );
+                assert_eq!(client.request_metrics().attempts, 1);
+            })
+            .await;
     }
     #[tokio::test]
     async fn mutation_retry_revalidates_authority_and_never_sends_after_rejection() {

@@ -185,6 +185,10 @@ impl RequestAuthority for RequestGrantAuthority {
             return Err(failure(BackendErrorKind::PermissionDenied));
         }
         if !self.authorization.is_active()
+            || self
+                .grant
+                .expires_at_unix()
+                .is_some_and(|expiry| self.runtime.now_unix().map_or(true, |now| expiry <= now))
             || !self
                 .runtime
                 .grant_store()

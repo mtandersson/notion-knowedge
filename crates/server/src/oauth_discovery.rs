@@ -240,6 +240,35 @@ async fn deny_mcp(State(discovery): State<OAuthDiscovery>) -> Response {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn metadata_advertises_only_operator_supported_scope_tokens() {
+        for enabled in [false, true] {
+            let discovery = OAuthDiscovery::new(
+                "https://auth.example.com",
+                "https://knowledge.example.com/mcp",
+            )
+            .unwrap()
+            .with_write_policy(enabled);
+            for response in [
+                protected_resource(State(discovery.clone())).await,
+                authorization_server(State(discovery)).await,
+            ] {
+                let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                    .await
+                    .unwrap();
+                let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(
+                    value["scopes_supported"],
+                    if enabled {
+                        json!(["knowledge:read", "knowledge:write"])
+                    } else {
+                        json!(["knowledge:read"])
+                    }
+                );
+            }
+        }
+    }
+
     #[test]
     fn strict_https_metadata_config_rejects_ambiguous_or_unsafe_origins() {
         assert!(

@@ -699,6 +699,21 @@ mod tests {
                 })
                 .is_err()
         );
+        // Opt-in never relaxes the exact registered client/resource boundary.
+        for invalid in [
+            AuthorizationRequest {
+                scope: "knowledge:read knowledge:write",
+                client_id: "foreign",
+                ..authorization()
+            },
+            AuthorizationRequest {
+                scope: "knowledge:read knowledge:write",
+                resource: "https://foreign.example.com/mcp",
+                ..authorization()
+            },
+        ] {
+            assert!(flow().with_write_policy(true).begin(&invalid).is_err());
+        }
         let flow = flow().with_write_policy(true);
         for (scope, expected) in [
             ("knowledge:read", OAuthPermissions::Read),
