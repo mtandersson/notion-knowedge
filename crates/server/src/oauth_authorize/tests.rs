@@ -22,6 +22,9 @@ struct Harness {
     client: reqwest::Client,
     calls: Arc<AtomicUsize>,
     available: Arc<AtomicBool>,
+    mutations: Arc<AtomicUsize>,
+    mutation_gate: Arc<tokio::sync::Semaphore>,
+    mutation_started: Arc<tokio::sync::Notify>,
     page_status: Arc<AtomicUsize>,
     page_reads: Arc<AtomicUsize>,
     page_gate: Arc<tokio::sync::Semaphore>,
@@ -63,6 +66,16 @@ impl Harness {
         limits: Option<(usize, usize, usize)>,
         clock_age: std::time::Duration,
         content_scope: Option<notion_knowledge_core::lifecycle::LifecycleScope>,
+    ) -> Self {
+        Self::with_authority(body, status, limits, clock_age, content_scope, false).await
+    }
+    async fn with_authority(
+        body: serde_json::Value,
+        status: StatusCode,
+        limits: Option<(usize, usize, usize)>,
+        clock_age: std::time::Duration,
+        content_scope: Option<notion_knowledge_core::lifecycle::LifecycleScope>,
+        writes: bool,
     ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("key");
@@ -204,6 +217,43 @@ impl Harness {
             assert!(matches!(headers["authorization"].to_str().unwrap(), "Bearer provider-access-secret" | "Bearer rotated-access-secret"));
             axum::Json(serde_json::json!({"object":"page_markdown","id":id,"markdown":"Saffron private evidence fresh content", "truncated":false,"unknown_block_ids":[]}))
         }));
+        let mutations = Arc::new(AtomicUsize::new(0));
+        let mutation_gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let mutation_started = Arc::new(tokio::sync::Notify::new());
+        let effects = mutations.clone();
+        let held = mutation_gate.clone();
+        let signal = mutation_started.clone();
+        let patch = move |axum::extract::Path(id): axum::extract::Path<String>,
+                          axum::Json(body): axum::Json<serde_json::Value>| {
+            let effects = effects.clone();
+            let held = held.clone();
+            let signal = signal.clone();
+            async move {
+                assert!(matches!(
+                    body["type"].as_str(),
+                    Some("insert_content" | "update_content")
+                ));
+                effects.fetch_add(1, Ordering::SeqCst);
+                signal.notify_one();
+                let _permit = held.acquire().await.unwrap();
+                axum::Json(
+                    serde_json::json!({"object":"page_markdown","id":id,"truncated":false,"unknown_block_ids":[]}),
+                )
+            }
+        };
+        let effects = mutations.clone();
+        let held = mutation_gate.clone();
+        let signal = mutation_started.clone();
+        let provider_router = provider_router.route("/v1/pages/{id}/markdown", axum::routing::patch(patch))
+            .route("/v1/pages", axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let effects = effects.clone(); let held = held.clone(); let signal = signal.clone();
+                async move {
+                    assert!(body["parent"]["page_id"].is_string());
+                    effects.fetch_add(1, Ordering::SeqCst); signal.notify_one();
+                    let _permit = held.acquire().await.unwrap();
+                    axum::Json(serde_json::json!({"object":"page","id":"cccccccc-cccc-cccc-cccc-cccccccccccc","url":"https://www.notion.so/cccccccc-cccc-cccc-cccc-cccccccccccc"}))
+                }
+            }));
         let provider = tokio::spawn(async move {
             axum::serve(provider_socket, provider_router).await.unwrap();
         });
@@ -231,6 +281,7 @@ impl Harness {
                 .unwrap(),
                 policy.authorization_identity(),
             )
+            .with_write_policy(writes)
             .with_clock(Arc::new(move || {
                 started + std::time::Duration::from_secs(elapsed.load(Ordering::SeqCst))
             })),
@@ -342,6 +393,9 @@ impl Harness {
                 .unwrap(),
             calls,
             available,
+            mutations,
+            mutation_gate,
+            mutation_started,
             page_status,
             page_reads,
             page_gate,
@@ -362,7 +416,10 @@ impl Harness {
             .body(body)
     }
     async fn approved_code(&self) -> String {
-        let (callback, cookie) = self.begin().await;
+        self.approved_code_with_scope("knowledge:read").await
+    }
+    async fn approved_code_with_scope(&self, scope: &str) -> String {
+        let (callback, cookie) = self.begin_with_scope(scope).await;
         let response = self
             .client
             .get(callback)
@@ -380,13 +437,16 @@ impl Harness {
             .into_owned()
     }
     async fn begin(&self) -> (String, String) {
+        self.begin_with_scope("knowledge:read").await
+    }
+    async fn begin_with_scope(&self, scope: &str) -> (String, String) {
         let mut url = reqwest::Url::parse(&format!("{}/authorize", self.base)).unwrap();
         url.query_pairs_mut().extend_pairs([
             ("client_id", "chatgpt"),
             ("redirect_uri", CLIENT_REDIRECT),
             ("response_type", "code"),
             ("resource", "https://knowledge.example.com/mcp"),
-            ("scope", "knowledge:read"),
+            ("scope", scope),
             ("state", "original-client-state-123"),
             ("code_challenge", CHALLENGE),
             ("code_challenge_method", "S256"),
@@ -1216,3 +1276,6 @@ mod content;
 mod content_index;
 
 mod revocation;
+
+#[path = "tests/write_authority.rs"]
+mod write_authority;

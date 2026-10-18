@@ -16,6 +16,7 @@ pub struct NotionClient {
     identity_url: String,
     pub(crate) api_root: String,
     pub(crate) replacement_enabled: bool,
+    pub(crate) request_authority: Option<std::sync::Arc<dyn crate::transport::RequestAuthority>>,
 }
 
 impl std::fmt::Debug for NotionClient {
@@ -82,7 +83,17 @@ impl NotionClient {
             identity_url: identity_url.to_owned(),
             api_root: "https://api.notion.com/v1".to_owned(),
             replacement_enabled: false,
+            request_authority: None,
         })
+    }
+
+    /// Trusted ephemeral authority, checked at each actual transport attempt.
+    pub fn with_request_authority(
+        mut self,
+        authority: std::sync::Arc<dyn crate::transport::RequestAuthority>,
+    ) -> Self {
+        self.request_authority = Some(authority);
+        self
     }
 
     /// Verify the integration with GET /v1/users/me. Raw upstream errors are discarded.

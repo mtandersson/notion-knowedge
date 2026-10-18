@@ -97,7 +97,7 @@ impl NotionClient {
             .header("Notion-Version", MARKDOWN_VERSION)
             .header("Content-Type", "application/json")
             .body(body);
-        let mut response = self.send(request, false, operation).await?;
+        let mut response = self.send_effect(request, operation).await?;
         if response.status().as_u16() != 200 {
             let kind = match response.status().as_u16() {
                 400 => BackendErrorKind::InvalidInput,

@@ -14,10 +14,10 @@ use rmcp::{
 use std::{io::Write, sync::Arc};
 
 mod request_scope;
-pub use request_scope::{RequestBoundSource, RequestScopeAdapters};
+pub use request_scope::{RequestBoundMutations, RequestBoundSource, RequestScopeAdapters};
 
 mod http_authorization;
-pub use http_authorization::HttpAuthorization;
+pub use http_authorization::{HttpAuthorization, OAuthPermissions};
 
 mod tool_budget;
 use tool_budget::ToolBudget;

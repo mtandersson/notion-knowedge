@@ -20,6 +20,7 @@ use serde_json::json;
 pub struct OAuthDiscovery {
     issuer: String,
     resource: String,
+    writes_enabled: bool,
 }
 
 impl OAuthDiscovery {
@@ -36,9 +37,21 @@ impl OAuthDiscovery {
         Ok(Self {
             issuer: issuer.to_owned(),
             resource: resource.to_owned(),
+            writes_enabled: false,
         })
     }
 
+    pub(crate) fn with_write_policy(mut self, enabled: bool) -> Self {
+        self.writes_enabled = enabled;
+        self
+    }
+    fn supported_scopes(&self) -> Vec<&'static str> {
+        if self.writes_enabled {
+            vec!["knowledge:read", "knowledge:write"]
+        } else {
+            vec!["knowledge:read"]
+        }
+    }
     pub(crate) fn resource(&self) -> &str {
         &self.resource
     }
@@ -172,6 +185,7 @@ async fn protected_resource(State(discovery): State<OAuthDiscovery>) -> Response
     metadata_response(json!({
         "resource": discovery.resource,
         "authorization_servers": [discovery.issuer],
+        "scopes_supported": discovery.supported_scopes(),
     }))
 }
 
@@ -179,6 +193,7 @@ async fn authorization_server(State(discovery): State<OAuthDiscovery>) -> Respon
     let issuer = &discovery.issuer;
     metadata_response(json!({
         "issuer": issuer,
+        "scopes_supported": discovery.supported_scopes(),
         "authorization_endpoint": format!("{issuer}/authorize"),
         "token_endpoint": format!("{issuer}/token"),
         "revocation_endpoint": format!("{issuer}/revoke"),
