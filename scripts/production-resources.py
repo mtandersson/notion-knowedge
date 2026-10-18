@@ -4,7 +4,6 @@
 No policy defaults are production sizing. No secrets are emitted in evidence.
 """
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import re
@@ -95,11 +94,24 @@ def inspect(data, container):
                 'PidsLimit': data['pids'], 'ReadonlyRootfs': True}
     if any(host.get(k) != v for k, v in expected.items()):
         raise ValueError('effective container resource bounds differ from policy')
+    if current['Config'].get('User') != '65532:65532' or host.get('CapAdd'):
+        raise ValueError('container user or added capabilities differ from envelope')
+    if current['Config']['Image'] != data['image']:
+        raise ValueError('container image differs from policy')
+    if host.get('NetworkMode') == 'host' or host.get('Privileged'):
+        raise ValueError('unsafe container network or privilege mode')
+    if host.get('PortBindings') != {'3000/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '3000'}]}:
+        raise ValueError('backend must publish only on the reviewed loopback port')
+    if 'ALL' not in host.get('CapDrop', []) or 'no-new-privileges:true' not in host.get('SecurityOpt', []):
+        raise ValueError('container hardening differs from envelope')
+    logs = host.get('LogConfig', {})
+    if logs.get('Type') != 'local' or logs.get('Config', {}).get('max-size') != str(data['log_bytes']) or logs.get('Config', {}).get('max-file') != str(data['log_files']):
+        raise ValueError('container log rotation differs from policy')
     limits = {x['Name']: (x['Soft'], x['Hard']) for x in host.get('Ulimits', [])}
     if limits.get('nofile') != (data['nofile'], data['nofile']):
         raise ValueError('file descriptor ceiling differs from policy')
     tmp = host.get('Tmpfs', {}).get('/tmp', '')
-    if f'size={data["tmp_bytes"]}' not in tmp.split(','):
+    if not {'noexec', 'nosuid', 'nodev', f'size={data["tmp_bytes"]}'}.issubset(tmp.split(',')):
         raise ValueError('temporary storage ceiling differs from policy')
     if not current['State']['Running']:
         raise ValueError('container is not running')

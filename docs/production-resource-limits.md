@@ -96,3 +96,24 @@ Repository checks use credential-free fixtures:
 ```sh
 python3 scripts/test-production-resources.py
 ```
+
+For the optional real local proof, use an already-built **nonsecret bootstrap**
+server image, Linux x86_64 with cgroup v2, Docker Compose, a C compiler, OpenSSL
+and NGINX. Port 3000 must be free. This creates and removes only its own named
+fixture container/network, mounts a libc-free probe read-only, and uses a
+high-port loopback TLS listener with a temporary self-signed certificate:
+
+```sh
+python3 scripts/test-production-resources-integration.py \
+  --nginx /absolute/path/to/nginx --image notion-knowledge:local \
+  > /private/local-resource-proof.json
+```
+
+The fixture intentionally uses tiny bootstrap-only bounds, **without loading a
+model/index**. It verifies actual kernel cgroup CPU/memory/swap/PID settings,
+non-root tmpfs/FD/PID exhaustion and cleanup, private diagnostics, rejected
+foreign Origin and oversized headers/bodies, rate overload, slow header closure
+and exact healthy backend/liveness recovery. The generated proxy config hash,
+actual NGINX version and selected bounds are recorded. It does not test every
+slow-progress case, application-model memory pressure or actual deployment
+capacity; those remain #455. Do not use its numbers to size a production model.
