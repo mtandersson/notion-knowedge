@@ -251,6 +251,9 @@ class Stack:
                                    "Real semantic/lexical/hybrid retrieval did not return indexed source")
                     common.require(math.isfinite(hits[0]["score"]) and "cinnamon" in hits[0]["text"],
                                    "Indexed source text/finite score missing")
+                    expected_paths = {"semantic", "lexical"} if mode == "hybrid" else {mode}
+                    common.require(set(hits[0]["matched_paths"]) == expected_paths,
+                                   "Installed search did not execute the requested production retrieval paths")
                     identity = (hits[0]["source"]["chunk_id"], hits[0]["text"])
                     if canonical is None:
                         canonical = identity
@@ -284,6 +287,8 @@ def main():
     parser.add_argument("--assets", type=Path, required=True)
     parser.add_argument("--download-assets", action="store_true")
     args = parser.parse_args()
+    common.require(ROOT not in args.assets.resolve().parents and args.assets.resolve() != ROOT,
+                   "Provision public model assets outside the source checkout")
     assets(args.assets, args.download_assets)
     compose_configuration(args.assets)
     if not args.prebuilt:

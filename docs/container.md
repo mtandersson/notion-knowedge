@@ -251,6 +251,11 @@ nor persistent operation state.
 
 ## Supported roles and initial indexing
 
+The Compose workflow below is private/local configuration, not a production
+resource sizing policy. Apply the separately reviewed [production resource
+envelope](production-resource-limits.md) and actual-host acceptance before public
+deployment; a small fixture does not prove workload capacity.
+
 The same feature-built executable supports distinct configurations:
 
 1. **Private integration indexer:** `--http`, verified webhook configuration,
