@@ -56,3 +56,7 @@ required-features = ["local-qwen"]
 [[example]]
 name = "e5-eval"
 required-features = ["eval-e5"]
+
+[[example]]
+name = "production-eval"
+required-features = ["local-qwen", "local-lancedb"]

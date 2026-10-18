@@ -243,6 +243,10 @@ jobs:
         if: matrix.suite == 'local-qwen'
         run: nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-qwen,eval-e5 --example qwen-eval --example e5-eval --locked
 
+      - name: Test production evaluation storage and authorization boundaries
+        if: matrix.suite == 'webhook-worker'
+        run: nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-qwen,local-lancedb --example production-eval --locked
+
       - name: Report compiled test cache footprint
         run: |
           du -h --max-depth=2 target/debug
