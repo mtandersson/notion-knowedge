@@ -96,6 +96,9 @@ pub mod sections;
 /// Server-owned durable once-only scoped Markdown section update (#312).
 pub mod section_update;
 
+/// Verified mutation completion and durable derived-index refresh admission.
+pub mod write_refresh;
+
 pub mod sync_status;
 
 /// Audited request-scoped single native file ingestion.
