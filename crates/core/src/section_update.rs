@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     backend::{NotionRead, NotionSectionWrite, PageId, UpdateSectionContent},
+    destructive::{ConfirmationProvider, ConfirmationRequest, DestructivePolicy, WriteOperation},
     idempotency::{
         IdempotencyError, MutationClaim, MutationOperation, Reservation, VerifiedReceipt,
         WriteIdempotencyStore,
@@ -41,6 +42,41 @@ pub async fn update_section_once_and_refresh(
     queue: &dyn crate::write_refresh::MutationRefreshQueue,
     request: SectionUpdateRequest,
 ) -> Result<crate::write_refresh::WriteCompletion, SectionUpdateError> {
+    update_section_and_refresh(reader, writer, gate, ledger, queue, request, None).await
+}
+
+/// An actual new effect requires trusted confirmation; a verified ledger replay
+/// returns its old receipt without consuming a second one-use approval.
+pub async fn update_section_confirmed_once_and_refresh(
+    reader: &dyn NotionRead,
+    writer: &dyn NotionSectionWrite,
+    gate: &RootScopeGate,
+    ledger: &dyn WriteIdempotencyStore,
+    queue: &dyn crate::write_refresh::MutationRefreshQueue,
+    request: SectionUpdateRequest,
+    confirmation: &dyn ConfirmationProvider,
+) -> Result<crate::write_refresh::WriteCompletion, SectionUpdateError> {
+    update_section_and_refresh(
+        reader,
+        writer,
+        gate,
+        ledger,
+        queue,
+        request,
+        Some(confirmation),
+    )
+    .await
+}
+
+async fn update_section_and_refresh(
+    reader: &dyn NotionRead,
+    writer: &dyn NotionSectionWrite,
+    gate: &RootScopeGate,
+    ledger: &dyn WriteIdempotencyStore,
+    queue: &dyn crate::write_refresh::MutationRefreshQueue,
+    request: SectionUpdateRequest,
+    confirmation: Option<&dyn ConfirmationProvider>,
+) -> Result<crate::write_refresh::WriteCompletion, SectionUpdateError> {
     let claim = MutationClaim::new(
         &gate.configured_scope().workspace_id,
         &request.idempotency_key,
@@ -49,7 +85,7 @@ pub async fn update_section_once_and_refresh(
         &fingerprint(&request),
     )
     .map_err(ledger_error)?;
-    let result = update_section_once(reader, writer, gate, ledger, request).await?;
+    let result = update_section_inner(reader, writer, gate, ledger, request, confirmation).await?;
     Ok(crate::write_refresh::admit_verified(
         queue,
         &crate::write_refresh::RefreshKey {
@@ -139,6 +175,17 @@ pub async fn update_section_once(
     ledger: &dyn WriteIdempotencyStore,
     request: SectionUpdateRequest,
 ) -> Result<SectionUpdateResult, SectionUpdateError> {
+    update_section_inner(reader, writer, gate, ledger, request, None).await
+}
+
+async fn update_section_inner(
+    reader: &dyn NotionRead,
+    writer: &dyn NotionSectionWrite,
+    gate: &RootScopeGate,
+    ledger: &dyn WriteIdempotencyStore,
+    request: SectionUpdateRequest,
+    confirmation: Option<&dyn ConfirmationProvider>,
+) -> Result<SectionUpdateResult, SectionUpdateError> {
     if (request.expected_last_edited_time.is_none() && request.expected_markdown_sha256.is_none())
         || request
             .expected_last_edited_time
@@ -227,6 +274,25 @@ pub async fn update_section_once(
         return Err(SectionUpdateError::SelectionRejected);
     }
 
+    if let Some(provider) = confirmation {
+        let scope = gate.configured_scope();
+        let scope_digest=MutationClaim::payload_sha256(&serde_json::to_vec(&serde_json::json!({"workspace":scope.workspace_id,"generation":scope.generation,"roots":scope.roots.iter().map(|r|&r.0).collect::<Vec<_>>()})).map_err(|_|SectionUpdateError::InvalidInput)?);
+        let intended = ConfirmationRequest::new(
+            WriteOperation::UpdateSection,
+            &format!("scope-{scope_digest}"),
+            &request.page_id.0,
+            &fingerprint(&request),
+            &request.idempotency_key,
+        )
+        .map_err(|_| SectionUpdateError::InvalidInput)?;
+        DestructivePolicy::new(true)
+            .require_confirmation(&intended, Some(provider))
+            .await
+            .map_err(|_| SectionUpdateError::NotAuthorized)?
+            .consume(&intended)
+            .map_err(|_| SectionUpdateError::NotAuthorized)?;
+    }
+    // Approval can await human input; recheck source and scope AFTER it.
     gate.revalidate(&permit, gate.configured_scope())
         .await
         .map_err(|_| SectionUpdateError::NotAuthorized)?;

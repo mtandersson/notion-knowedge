@@ -1,6 +1,9 @@
 # Semantic Notion write-tool surface (#76)
 
-This is a **contract design**, not a working write implementation. The
+This page records the original **contract design** and development preview.
+The separately injected [trusted semantic dispatch](semantic-mutation-dispatch.md)
+implements create/append/section workflows while shipping startup and OAuth stay
+read-only. The
 production `KnowledgeServer` advertises read-only `knowledge_search` and
 `knowledge_get`. Explicit writable configuration can additionally expose the
 unavailable `knowledge_upload_file` schema. Nothing in this issue grants Notion

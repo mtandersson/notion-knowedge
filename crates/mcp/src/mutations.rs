@@ -5,11 +5,14 @@ use notion_knowledge_core::{
     audit::{AuditActor, AuditEvent, AuditOutcome, AuditStore, AuditTool},
     backend::{NotionRead, NotionSectionWrite, NotionWrite, PageId},
     create::{CreateError, CreateRequest, create_once_and_refresh},
-    destructive::{ConfirmationProvider, ConfirmationRequest, DestructivePolicy, WriteOperation},
-    idempotency::{MutationClaim, WriteIdempotencyStore},
+    destructive::ConfirmationProvider,
+    idempotency::WriteIdempotencyStore,
     lifecycle::{LifecycleScope, PageLifecycle},
+    revision::RevisionMetadata,
     root_scope::{RootScopeGate, ScopeError},
-    section_update::{SectionUpdateError, SectionUpdateRequest, update_section_once_and_refresh},
+    section_update::{
+        SectionUpdateError, SectionUpdateRequest, update_section_confirmed_once_and_refresh,
+    },
     sections::SectionAnchor,
     write_refresh::{IndexStatus, MutationRefreshQueue, WriteCompletion},
 };
@@ -117,7 +120,13 @@ impl MutationRuntime {
                 response.is_error = Some(!audited);
                 response
             }
-            Err(error) => failure(error.code(), audited),
+            Err(error) => {
+                let metadata = match &error {
+                    Failure::Conflict(meta) => Some(meta),
+                    _ => None,
+                };
+                failure_with_metadata(error.code(), audited, metadata)
+            }
         })
     }
     async fn execute(&self, input: Input) -> Result<WriteCompletion, Failure> {
@@ -161,52 +170,27 @@ impl MutationRuntime {
             )
             .await
             .map_err(Failure::from),
-            Input::Section(input) => {
-                gate.authorize(&PageId(input.page_id.clone()))
-                    .await
-                    .map_err(|_| Failure::Denied)?;
-                let digest = MutationClaim::payload_sha256(
-                    &serde_json::to_vec(&input).map_err(|_| Failure::Invalid)?,
-                );
-                let trusted_scope = format!(
-                    "{}:{}:{}",
-                    scope.workspace_id, scope.generation, input.root_page_id
-                );
-                let request = ConfirmationRequest::new(
-                    WriteOperation::UpdateSection,
-                    &trusted_scope,
-                    &input.page_id,
-                    &digest,
-                    &input.idempotency_key,
-                )
-                .map_err(|_| Failure::Invalid)?;
-                DestructivePolicy::new(true)
-                    .require_confirmation(&request, self.confirmation.as_deref())
-                    .await
-                    .map_err(|_| Failure::Denied)?
-                    .consume(&request)
-                    .map_err(|_| Failure::Denied)?;
-                update_section_once_and_refresh(
-                    self.source.as_ref(),
-                    self.source.as_ref(),
-                    &gate,
-                    self.ledger.as_ref(),
-                    self.queue.as_ref(),
-                    SectionUpdateRequest {
-                        page_id: PageId(input.page_id),
-                        anchor: SectionAnchor {
-                            level: input.section_anchor.level,
-                            heading: input.section_anchor.heading,
-                        },
-                        replacement: input.markdown,
-                        expected_last_edited_time: input.expected_last_edited_time,
-                        expected_markdown_sha256: input.expected_markdown_sha256,
-                        idempotency_key: input.idempotency_key,
+            Input::Section(input) => update_section_confirmed_once_and_refresh(
+                self.source.as_ref(),
+                self.source.as_ref(),
+                &gate,
+                self.ledger.as_ref(),
+                self.queue.as_ref(),
+                SectionUpdateRequest {
+                    page_id: PageId(input.page_id),
+                    anchor: SectionAnchor {
+                        level: input.section_anchor.level,
+                        heading: input.section_anchor.heading,
                     },
-                )
-                .await
-                .map_err(Failure::from)
-            }
+                    replacement: input.markdown,
+                    expected_last_edited_time: input.expected_last_edited_time,
+                    expected_markdown_sha256: input.expected_markdown_sha256,
+                    idempotency_key: input.idempotency_key,
+                },
+                self.confirmation.as_deref().ok_or(Failure::Denied)?,
+            )
+            .await
+            .map_err(Failure::from),
         }
     }
 }
@@ -306,7 +290,7 @@ impl Input {
 enum Failure {
     Invalid,
     Denied,
-    Conflict,
+    Conflict(RevisionMetadata),
     Idempotency,
     Unavailable,
     Unknown,
@@ -316,7 +300,7 @@ impl Failure {
         match self {
             Self::Invalid => "invalid_input",
             Self::Denied => "not_authorized",
-            Self::Conflict => "revision_conflict",
+            Self::Conflict(_) => "revision_conflict",
             Self::Idempotency => "idempotency_conflict",
             Self::Unavailable => "unavailable",
             Self::Unknown => "outcome_unknown",
@@ -339,7 +323,7 @@ impl From<AppendError> for Failure {
         match e {
             AppendError::InvalidInput => Self::Invalid,
             AppendError::NotAuthorized => Self::Denied,
-            AppendError::RevisionConflict(_) => Self::Conflict,
+            AppendError::RevisionConflict(meta) => Self::Conflict(meta),
             AppendError::IdempotencyConflict => Self::Idempotency,
             AppendError::Unavailable => Self::Unavailable,
             AppendError::OutcomeUnknown => Self::Unknown,
@@ -353,7 +337,7 @@ impl From<SectionUpdateError> for Failure {
                 Self::Invalid
             }
             SectionUpdateError::NotAuthorized => Self::Denied,
-            SectionUpdateError::RevisionConflict(_) => Self::Conflict,
+            SectionUpdateError::RevisionConflict(meta) => Self::Conflict(meta),
             SectionUpdateError::IdempotencyConflict => Self::Idempotency,
             SectionUpdateError::Unavailable => Self::Unavailable,
             SectionUpdateError::OutcomeUnknown => Self::Unknown,
@@ -361,8 +345,20 @@ impl From<SectionUpdateError> for Failure {
     }
 }
 fn failure(code: &str, audited: bool) -> rmcp::model::CallToolResult {
+    failure_with_metadata(code, audited, None)
+}
+fn failure_with_metadata(
+    code: &str,
+    audited: bool,
+    metadata: Option<&RevisionMetadata>,
+) -> rmcp::model::CallToolResult {
+    let mut write = json!({"status":code});
+    if let Some(meta) = metadata {
+        write["page_id"] = json!(meta.page_id.0);
+        write["current_last_edited_time"] = json!(meta.last_edited_time);
+    }
     let mut output = rmcp::model::CallToolResult::structured(
-        json!({"write":{"status":code},"index":{"status":"not_queued"},"audit":{"status":if audited {"recorded"} else {"unavailable"}}}),
+        json!({"write":write,"index":{"status":"not_attempted"},"audit":{"status":if audited {"recorded"} else {"unavailable"}}}),
     );
     output.is_error = Some(true);
     output
@@ -445,6 +441,19 @@ pub(crate) fn tool(name: &str) -> rmcp::model::Tool {
         }
         tool.input_schema = Arc::new(schema);
     }
-    tool.output_schema=Some(Arc::new(json!({"type":"object","required":["write","index","audit"],"properties":{"write":{"type":"object"},"index":{"type":"object"},"audit":{"type":"object"}},"additionalProperties":false}).as_object().unwrap().clone()));
+    tool.output_schema=Some(Arc::new(json!({
+        "type":"object","required":["write","index","audit"],"additionalProperties":false,
+        "properties":{
+            "write":{"type":"object","required":["status"],"additionalProperties":false,"properties":{
+                "status":{"enum":["verified","cancelled","invalid_input","not_authorized","revision_conflict","idempotency_conflict","unavailable","outcome_unknown"]},
+                "page_id":{"type":"string"},"url":{"type":"string"},"last_edited_time":{"type":"string"},"current_last_edited_time":{"type":"string"},"replayed":{"type":"boolean"}
+            }},
+            "index":{"type":"object","required":["status"],"additionalProperties":false,"properties":{
+                "status":{"enum":["queued","running","completed","failed","unavailable","not_attempted"]},
+                "refresh_id":{"type":"string","pattern":"^[a-f0-9]{64}$"}
+            }},
+            "audit":{"type":"object","required":["status"],"additionalProperties":false,"properties":{"status":{"enum":["recorded","unavailable"]}}}
+        }
+    }).as_object().unwrap().clone()));
     tool
 }
