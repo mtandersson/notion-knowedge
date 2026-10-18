@@ -1,5 +1,8 @@
 # Personal-knowledge retrieval dataset
 
+The [measured Qwen baseline](QWEN_BASELINE.md) records real pinned-model
+vector-only rankings, latency, memory and weak query classes on this fixture.
+
 The [hosted Notion baseline](HOSTED_NOTION.md) records search availability and
 the protocol for comparable hosted measurements; unavailable cases are not
 retrieval failures or zero scores.
@@ -37,15 +40,14 @@ Each judgment records a chunk `source_id`, an integer `grade` and a `rationale`:
 Unlisted chunks and explicit exclusions have grade 0. Positive judgments are
 unordered; order in the JSON does not establish the expected ranking. For binary
 recall/MRR, grades 1–3 count as relevant. For graded nDCG use the recorded grades;
-the metrics implementation must document its gain convention. There is no
-retrieval harness or metric calculation in this dataset change.
+the metrics implementation must document its gain convention. The harness below computes metrics against these judgments.
 
 When a query asks to identify a page by title or project status, every chunk on
 that page receives grade 3 because the indexable page metadata satisfies that
 request. Questions asking for particular content judge chunks by their text.
 
 Chunk IDs are the evaluation unit. The containing page provides the expected
-page ID without a separate duplicated judgment. A future harness should load all
+page ID without a separate duplicated judgment. A retrieval adapter must load all
 chunks and page metadata into the same fixed corpus for every retrieval mode,
 return these chunk IDs, and retain query IDs in machine-readable results.
 For page-level evaluation, deduplicate judgments by containing page and use the
@@ -185,9 +187,9 @@ No-hit queries contribute zero to macro averages rather than being excluded.
 
 These metrics are deterministic calculations on the adapter's real ranked IDs,
 **not evidence of production search quality**. Current contract tests exercise
-a synthetic mode-aware stub and known hand-calculated metric values. The
-harness still needs a trusted real Qwen/LanceDB adapter and fixed
-model/index for meaningful quality results.
+a synthetic mode-aware stub and known hand-calculated metric values. The [Qwen baseline](QWEN_BASELINE.md) now supplies real exact-vector model
+measurements. Production LanceDB/FTS/hybrid quality still needs an adapter
+that exercises those configured backends over the same fixed corpus.
 
 ## Stale-index and authoritative read evaluation (#101)
 

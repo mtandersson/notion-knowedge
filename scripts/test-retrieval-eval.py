@@ -117,10 +117,14 @@ class EvaluationHarnessTests(unittest.TestCase):
             self.run_cli("--timeout", "0.05", environment=environment).returncode, 2
         )
 
+    def test_explicit_slow_cpu_model_deadline_is_supported(self):
+        result = self.run_cli("--timeout", "3600")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_bad_arguments_and_invalid_dataset_are_fatal(self):
         for opts in (
             ("--modes", "vector,vector"), ("--modes", "unknown"),
-            ("--top-k", "0"), ("--timeout", "0"),
+            ("--top-k", "0"), ("--timeout", "0"), ("--timeout", "3601"),
         ):
             with self.subTest(options=opts):
                 self.assertEqual(self.run_cli(*opts).returncode, 2)

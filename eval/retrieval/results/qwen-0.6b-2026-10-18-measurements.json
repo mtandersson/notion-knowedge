@@ -1,0 +1,208 @@
+{
+  "as_of": "2026-03-02",
+  "backend": "exhaustive cosine over normalized Qwen vectors",
+  "batch_size": 1,
+  "chunks": 14,
+  "corpus_embed_ms": 6707.061474,
+  "dataset_id": "personal-knowledge-fixtures-v1",
+  "document_format": "Title: {title}\\nStatus: {status}\\nUpdated: {updated_at}\\nLinks: {comma-separated link IDs}\\n{chunk text}",
+  "max_tokens": 512,
+  "model": {
+    "dimension": 1024,
+    "model_id": "Qwen/Qwen3-Embedding-0.6B",
+    "model_version": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3:fastembed7.1.0:candle0.11.0:tokenizers0.23.2:last-token:left-padding:l2:exact-text:untruncated-v1",
+    "provider_id": "local-fastembed-candle-cpu-f32",
+    "schema_version": "1"
+  },
+  "model_load_ms": 2859.7027399999997,
+  "queries": [
+    {
+      "category": "semantic",
+      "embedding_ms": 255.386331,
+      "exact_search_ms": 0.011952,
+      "language": "en",
+      "query_id": "semantic-energy-en"
+    },
+    {
+      "category": "semantic",
+      "embedding_ms": 269.86849,
+      "exact_search_ms": 0.011732000000000001,
+      "language": "en",
+      "query_id": "semantic-memory-en"
+    },
+    {
+      "category": "semantic",
+      "embedding_ms": 287.636663,
+      "exact_search_ms": 0.014096000000000001,
+      "language": "en",
+      "query_id": "semantic-watering-en"
+    },
+    {
+      "category": "exact_name",
+      "embedding_ms": 266.193458,
+      "exact_search_ms": 0.012293,
+      "language": "en",
+      "query_id": "exact-project-en"
+    },
+    {
+      "category": "exact_name",
+      "embedding_ms": 274.070677,
+      "exact_search_ms": 0.011803000000000001,
+      "language": "en",
+      "query_id": "exact-bike-en"
+    },
+    {
+      "category": "exact_name",
+      "embedding_ms": 249.27888000000002,
+      "exact_search_ms": 0.01116,
+      "language": "en",
+      "query_id": "exact-reading-en"
+    },
+    {
+      "category": "date_status",
+      "embedding_ms": 301.73613700000004,
+      "exact_search_ms": 0.012343,
+      "language": "en",
+      "query_id": "status-active-en"
+    },
+    {
+      "category": "date_status",
+      "embedding_ms": 289.765805,
+      "exact_search_ms": 0.013916,
+      "language": "en",
+      "query_id": "date-bike-en"
+    },
+    {
+      "category": "date_status",
+      "embedding_ms": 325.60326499999996,
+      "exact_search_ms": 0.011792,
+      "language": "en",
+      "query_id": "date-review-en"
+    },
+    {
+      "category": "cross_link",
+      "embedding_ms": 279.464282,
+      "exact_search_ms": 0.011852,
+      "language": "en",
+      "query_id": "link-energy-en"
+    },
+    {
+      "category": "cross_link",
+      "embedding_ms": 294.712574,
+      "exact_search_ms": 0.014127,
+      "language": "en",
+      "query_id": "link-garden-en"
+    },
+    {
+      "category": "cross_link",
+      "embedding_ms": 291.074081,
+      "exact_search_ms": 0.014207,
+      "language": "en",
+      "query_id": "link-study-en"
+    },
+    {
+      "category": "semantic",
+      "embedding_ms": 315.51732599999997,
+      "exact_search_ms": 0.012093,
+      "language": "sv",
+      "query_id": "semantic-energy-sv"
+    },
+    {
+      "category": "semantic",
+      "embedding_ms": 295.527559,
+      "exact_search_ms": 0.013906,
+      "language": "sv",
+      "query_id": "semantic-memory-sv"
+    },
+    {
+      "category": "semantic",
+      "embedding_ms": 329.541539,
+      "exact_search_ms": 0.012033,
+      "language": "sv",
+      "query_id": "semantic-watering-sv"
+    },
+    {
+      "category": "exact_name",
+      "embedding_ms": 297.53950000000003,
+      "exact_search_ms": 0.013715,
+      "language": "sv",
+      "query_id": "exact-project-sv"
+    },
+    {
+      "category": "exact_name",
+      "embedding_ms": 283.57066100000003,
+      "exact_search_ms": 0.014888,
+      "language": "sv",
+      "query_id": "exact-bike-sv"
+    },
+    {
+      "category": "exact_name",
+      "embedding_ms": 267.77239099999997,
+      "exact_search_ms": 0.011792,
+      "language": "sv",
+      "query_id": "exact-reading-sv"
+    },
+    {
+      "category": "date_status",
+      "embedding_ms": 290.50457600000004,
+      "exact_search_ms": 0.012123,
+      "language": "sv",
+      "query_id": "status-active-sv"
+    },
+    {
+      "category": "date_status",
+      "embedding_ms": 295.907449,
+      "exact_search_ms": 0.011913,
+      "language": "sv",
+      "query_id": "date-bike-sv"
+    },
+    {
+      "category": "date_status",
+      "embedding_ms": 325.14903499999997,
+      "exact_search_ms": 0.011611,
+      "language": "sv",
+      "query_id": "date-review-sv"
+    },
+    {
+      "category": "cross_link",
+      "embedding_ms": 307.972378,
+      "exact_search_ms": 0.011942,
+      "language": "sv",
+      "query_id": "link-energy-sv"
+    },
+    {
+      "category": "cross_link",
+      "embedding_ms": 300.267671,
+      "exact_search_ms": 0.011892,
+      "language": "sv",
+      "query_id": "link-garden-sv"
+    },
+    {
+      "category": "cross_link",
+      "embedding_ms": 296.489016,
+      "exact_search_ms": 0.012193,
+      "language": "sv",
+      "query_id": "link-study-sv"
+    }
+  ],
+  "query_instruction": null,
+  "schema_version": 1,
+  "peak_process_rss_kib": 3519744,
+  "memory_method": "Linux child ru_maxrss; whole adapter including load and inference",
+  "run": {
+    "date_utc": "2026-10-18",
+    "source_commit": "70c58bca2506ec30e0947457a59cb4f0efb19c0e",
+    "profile": "release (optimized)",
+    "rustc": "1.98.1 (48a229cea 2026-09-01)",
+    "os": "Linux 6.18.51 x86_64",
+    "cpu": "AMD Ryzen 7 7800X3D, 8 cores / 16 logical CPUs",
+    "host_memory_kib": 31997376,
+    "host_load": "shared host; other builds may run; no CPU isolation or cache eviction",
+    "dataset_sha256": "b96d4eba5be7ea7b9d48be12ce088d455f38868fe09b658ce06319ced9888efe",
+    "assets_sha256": {
+      "config": "b5bf1f51fc45be473a54718cef92448d90a1be001bf9b9a44b8c7f10a19feaa9",
+      "vocabulary": "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a",
+      "weights": "0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd"
+    }
+  }
+}

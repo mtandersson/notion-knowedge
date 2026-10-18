@@ -1,0 +1,1013 @@
+{
+  "schema_version": 1,
+  "dataset_id": "personal-knowledge-fixtures-v1",
+  "as_of": "2026-03-02",
+  "top_k": 10,
+  "modes": [
+    "vector"
+  ],
+  "summary": {
+    "vector": {
+      "queries": 24,
+      "queries_with_any_relevant_at_k": 24,
+      "queries_with_direct_answer_at_k": 24,
+      "metrics": {
+        "recall_at_1": 0.4930555555555556,
+        "ndcg_at_1": 0.5416666666666666,
+        "recall_at_3": 0.9375,
+        "ndcg_at_3": 0.8097621812030801,
+        "recall_at_5": 0.9583333333333334,
+        "ndcg_at_5": 0.8040200917206084,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.8272448095903178,
+        "mrr": 0.8055555555555555
+      }
+    }
+  },
+  "results": [
+    {
+      "mode": "vector",
+      "query_id": "semantic-energy-en",
+      "language": "en",
+      "category": "semantic",
+      "ranked_source_ids": [
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:bike-old:service"
+      ],
+      "grades": [
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 1.0,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "semantic-memory-en",
+      "language": "en",
+      "category": "semantic",
+      "ranked_source_ids": [
+        "fixture:chunk:reading:queue",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:travel:list",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:energy-decision:decision"
+      ],
+      "grades": [
+        1,
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 0.5,
+        "ndcg_at_1": 0.14285714285714285,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 0.7098097413968655,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 0.7098097413968655,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.7098097413968655,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "semantic-watering-en",
+      "language": "en",
+      "category": "semantic",
+      "ranked_source_ids": [
+        "fixture:chunk:travel:list",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:garden-old:plan",
+        "fixture:chunk:reading:queue"
+      ],
+      "grades": [
+        0,
+        0,
+        3,
+        2,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 0.0,
+        "ndcg_at_1": 0.0,
+        "recall_at_3": 0.5,
+        "ndcg_at_3": 0.3935773014954859,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 0.5388668879616774,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.5388668879616774,
+        "mrr": 0.3333333333333333
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "exact-project-en",
+      "language": "en",
+      "category": "exact_name",
+      "ranked_source_ids": [
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:garden-old:plan"
+      ],
+      "grades": [
+        3,
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 0.5,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "exact-bike-en",
+      "language": "en",
+      "category": "exact_name",
+      "ranked_source_ids": [
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:bike:service",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:garden-old:plan",
+        "fixture:chunk:study:routine"
+      ],
+      "grades": [
+        0,
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 0.0,
+        "ndcg_at_1": 0.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 0.6309297535714575,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 0.6309297535714575,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.6309297535714575,
+        "mrr": 0.5
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "exact-reading-en",
+      "language": "en",
+      "category": "exact_name",
+      "ranked_source_ids": [
+        "fixture:chunk:reading:queue",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:odling:watering"
+      ],
+      "grades": [
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 1.0,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "status-active-en",
+      "language": "en",
+      "category": "date_status",
+      "ranked_source_ids": [
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:bike:service"
+      ],
+      "grades": [
+        2,
+        3,
+        3,
+        0,
+        0,
+        2,
+        3,
+        0,
+        3,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 0.16666666666666666,
+        "ndcg_at_1": 0.42857142857142855,
+        "recall_at_3": 0.5,
+        "ndcg_at_3": 0.7318407279869963,
+        "recall_at_5": 0.5,
+        "ndcg_at_5": 0.5717903386011555,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.8147483904726126,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "date-bike-en",
+      "language": "en",
+      "category": "date_status",
+      "ranked_source_ids": [
+        "fixture:chunk:bike:service",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:garden-old:plan",
+        "fixture:chunk:odling:watering"
+      ],
+      "grades": [
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 1.0,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "date-review-en",
+      "language": "en",
+      "category": "date_status",
+      "ranked_source_ids": [
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:bike:service"
+      ],
+      "grades": [
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 1.0,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "link-energy-en",
+      "language": "en",
+      "category": "cross_link",
+      "ranked_source_ids": [
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:garden-old:plan"
+      ],
+      "grades": [
+        0,
+        2,
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 0.0,
+        "ndcg_at_1": 0.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 0.606422698504514,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 0.606422698504514,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.606422698504514,
+        "mrr": 0.5
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "link-garden-en",
+      "language": "en",
+      "category": "cross_link",
+      "ranked_source_ids": [
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:garden-old:plan",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:reading:queue",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:project-lighthouse-old:overview"
+      ],
+      "grades": [
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 1.0,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "link-study-en",
+      "language": "en",
+      "category": "cross_link",
+      "ranked_source_ids": [
+        "fixture:chunk:study:routine",
+        "fixture:chunk:reading:queue",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:travel:list"
+      ],
+      "grades": [
+        0,
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 0.0,
+        "ndcg_at_1": 0.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 0.6309297535714575,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 0.6309297535714575,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.6309297535714575,
+        "mrr": 0.5
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "semantic-energy-sv",
+      "language": "sv",
+      "category": "semantic",
+      "ranked_source_ids": [
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:bike-old:service"
+      ],
+      "grades": [
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 1.0,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "semantic-memory-sv",
+      "language": "sv",
+      "category": "semantic",
+      "ranked_source_ids": [
+        "fixture:chunk:study:routine",
+        "fixture:chunk:reading:queue",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:odling:plan"
+      ],
+      "grades": [
+        3,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 0.5,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "semantic-watering-sv",
+      "language": "sv",
+      "category": "semantic",
+      "ranked_source_ids": [
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:garden-old:plan",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:travel:list",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:reading:queue",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:lighthouse-review:notes"
+      ],
+      "grades": [
+        0,
+        2,
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 0.0,
+        "ndcg_at_1": 0.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 0.606422698504514,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 0.606422698504514,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.606422698504514,
+        "mrr": 0.5
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "exact-project-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "ranked_source_ids": [
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:bike-old:service"
+      ],
+      "grades": [
+        0,
+        3,
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 0.0,
+        "ndcg_at_1": 0.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 0.6934264036172708,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 0.6934264036172708,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.6934264036172708,
+        "mrr": 0.5
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "exact-bike-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "ranked_source_ids": [
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:bike:service",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:garden-old:plan",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:project-lighthouse-old:overview"
+      ],
+      "grades": [
+        0,
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 0.0,
+        "ndcg_at_1": 0.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 0.6309297535714575,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 0.6309297535714575,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.6309297535714575,
+        "mrr": 0.5
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "exact-reading-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "ranked_source_ids": [
+        "fixture:chunk:reading:queue",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:odling:plan"
+      ],
+      "grades": [
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 1.0,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "status-active-sv",
+      "language": "sv",
+      "category": "date_status",
+      "ranked_source_ids": [
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:bike:service",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:energy-decision:decision"
+      ],
+      "grades": [
+        2,
+        2,
+        3,
+        0,
+        0,
+        3,
+        0,
+        3,
+        3,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 0.16666666666666666,
+        "ndcg_at_1": 0.42857142857142855,
+        "recall_at_3": 0.5,
+        "ndcg_at_3": 0.5626510645779305,
+        "recall_at_5": 0.5,
+        "ndcg_at_5": 0.4396017199182606,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.7540368969198279,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "date-bike-sv",
+      "language": "sv",
+      "category": "date_status",
+      "ranked_source_ids": [
+        "fixture:chunk:bike:service",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:garden-old:plan",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:project-lighthouse-old:overview"
+      ],
+      "grades": [
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 1.0,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "date-review-sv",
+      "language": "sv",
+      "category": "date_status",
+      "ranked_source_ids": [
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:bike:service",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:garden-old:plan"
+      ],
+      "grades": [
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 1.0,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "link-energy-sv",
+      "language": "sv",
+      "category": "cross_link",
+      "ranked_source_ids": [
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:garden-old:plan",
+        "fixture:chunk:odling:watering"
+      ],
+      "grades": [
+        0,
+        2,
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 0.0,
+        "ndcg_at_1": 0.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 0.606422698504514,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 0.606422698504514,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.606422698504514,
+        "mrr": 0.5
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "link-garden-sv",
+      "language": "sv",
+      "category": "cross_link",
+      "ranked_source_ids": [
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:garden-old:plan",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:bike:service",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:project-lighthouse:overview"
+      ],
+      "grades": [
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 1.0,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "vector",
+      "query_id": "link-study-sv",
+      "language": "sv",
+      "category": "cross_link",
+      "ranked_source_ids": [
+        "fixture:chunk:study:routine",
+        "fixture:chunk:reading:queue",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:odling:plan"
+      ],
+      "grades": [
+        0,
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 0.0,
+        "ndcg_at_1": 0.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 0.6309297535714575,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 0.6309297535714575,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.6309297535714575,
+        "mrr": 0.5
+      }
+    }
+  ]
+}
