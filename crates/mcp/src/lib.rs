@@ -80,6 +80,7 @@ pub struct KnowledgeServer {
     capability_policy: capabilities::CapabilityPolicy,
     fresh_source: Option<Arc<dyn notion_knowledge_core::backend::NotionRead>>,
     write_design_preview: bool,
+    mutations: Option<Arc<mutations::MutationRuntime>>,
     sync_status: Option<Arc<dyn notion_knowledge_core::sync_status::SyncStatusSource>>,
     related_graph: Option<Arc<dyn notion_knowledge_core::graph::GraphEdgeStore>>,
 }
@@ -99,6 +100,7 @@ impl Default for KnowledgeServer {
             capability_policy: capabilities::CapabilityPolicy::default(),
             fresh_source: None,
             write_design_preview: false,
+            mutations: None,
             sync_status: None,
             related_graph: None,
             search: None,
@@ -117,6 +119,7 @@ impl KnowledgeServer {
         self.root_gate = None;
         self.fresh_source = None;
         self.file_ingestion = None;
+        self.mutations = None;
         self.read_only = true;
         self.http_authorization_required = true;
         self.request_scope_required = true;
@@ -140,6 +143,7 @@ impl KnowledgeServer {
     pub fn with_http_authorization_required(mut self) -> Self {
         self.http_authorization_required = true;
         self.read_only = true;
+        self.mutations = None;
         self
     }
 
@@ -166,14 +170,17 @@ impl KnowledgeServer {
     /// Enforce the configured access mode before exposing or dispatching MCP tools.
     /// Only explicitly audited read tools are permitted in read-only mode.
     fn tool_permitted(&self, name: &str) -> bool {
-        (!self.read_only
-            || matches!(
-                name,
-                "knowledge_search"
-                    | "knowledge_get"
-                    | "knowledge_sync_status"
-                    | "knowledge_related"
-            ))
+        // Static trusted capabilities cannot bypass request-bound OAuth's
+        // current read-only contract, including through builder ordering.
+        (!(write_contract::is_planned_write(name) && self.http_authorization_required))
+            && (!self.read_only
+                || matches!(
+                    name,
+                    "knowledge_search"
+                        | "knowledge_get"
+                        | "knowledge_sync_status"
+                        | "knowledge_related"
+                ))
             && (self.destructive_writes_enabled || !write_contract::is_destructive_write(name))
             && self.capability_policy.permits(name)
     }
@@ -247,6 +254,14 @@ impl KnowledgeServer {
         self
     }
 
+    /// Inject trusted mutation capabilities without enabling writes. The
+    /// independent read-only/destructive/allowlist gates remain mandatory.
+    /// Shipping server startup and request-bound OAuth do not install this.
+    pub fn and_mutations(mut self, runtime: Arc<mutations::MutationRuntime>) -> Self {
+        self.mutations = Some(runtime);
+        self
+    }
+
     /// Shared discovery catalog for both MCP transport implementations.
     pub fn tool_catalog(&self) -> Vec<rmcp::model::Tool> {
         let mut catalog = vec![
@@ -258,7 +273,9 @@ impl KnowledgeServer {
         if self.related_graph.is_some() {
             catalog.push(related::tool());
         }
-        if self.write_design_preview {
+        if let Some(runtime) = &self.mutations {
+            catalog.extend(runtime.tools());
+        } else if self.write_design_preview {
             catalog.extend(write_contract::tools());
         }
         catalog
@@ -421,6 +438,8 @@ pub mod search;
 pub mod sync_status;
 pub mod upload;
 pub mod write_contract;
+
+pub mod mutations;
 
 impl KnowledgeServer {
     async fn call_tool_authorized(
@@ -899,7 +918,28 @@ impl KnowledgeServer {
                     )),
                 }
             }
-            name if self.write_design_preview && write_contract::is_planned_write(name) => {
+            name if self
+                .mutations
+                .as_ref()
+                .is_some_and(|runtime| runtime.supports(name)) =>
+            {
+                let output = self
+                    .mutations
+                    .as_ref()
+                    .expect("installed mutation runtime")
+                    .call(name, arguments, context.ct)
+                    .await?;
+                if !output_fits_budget(&output) {
+                    return Ok(error(
+                        "mutation_output_limit: preserve the original idempotency key; do not repeat the mutation",
+                    ));
+                }
+                Ok(output.into())
+            }
+            name if self.mutations.is_none()
+                && self.write_design_preview
+                && write_contract::is_planned_write(name) =>
+            {
                 Ok(error(
                     "workflow_unavailable: semantic write tool is a schema preview; no mutation was attempted",
                 ))
@@ -933,7 +973,16 @@ impl ServerHandler for KnowledgeServer {
             "knowledge_related" if self.related_graph.is_some() => Some(related::tool()),
             "knowledge_sync_status" => Some(sync_status::tool()),
             "knowledge_upload_file" => Some(upload::tool_with_limit(self.max_upload_files)),
-            name if self.write_design_preview => write_contract::tool(name),
+            name if self
+                .mutations
+                .as_ref()
+                .is_some_and(|runtime| runtime.supports(name)) =>
+            {
+                Some(mutations::tool(name))
+            }
+            name if self.mutations.is_none() && self.write_design_preview => {
+                write_contract::tool(name)
+            }
             _ => None,
         }
     }

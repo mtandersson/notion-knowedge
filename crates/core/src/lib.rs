@@ -87,6 +87,9 @@ pub mod root_scope;
 /// Opt-in, scope-checked, durable once-only Notion append application workflow.
 pub mod append;
 
+/// Provider-neutral guarded once-only page creation and refresh admission.
+pub mod create;
+
 /// Server-trusted confirmation gate for destructive operations (#82).
 pub mod destructive;
 
