@@ -236,6 +236,10 @@ jobs:
       - name: Run ${{ matrix.suite }} tests
         run: nix develop .#${{ matrix.shell }} --command cargo test ${{ matrix.args }} --locked
 
+      - name: Test offline model comparison examples
+        if: matrix.suite == 'local-qwen'
+        run: nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-qwen,eval-e5 --example qwen-eval --example e5-eval --locked
+
       - name: Report compiled test cache footprint
         run: |
           du -h --max-depth=2 target/debug
