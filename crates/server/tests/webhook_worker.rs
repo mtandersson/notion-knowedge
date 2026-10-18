@@ -1082,6 +1082,48 @@ struct PausedProvider {
     entered: tokio::sync::Notify,
     proceed: tokio::sync::Notify,
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mutation_refresh_expired_ownership_during_embedding_cannot_commit_under_live_writer_lease()
+{
+    use notion_knowledge_core::write_refresh::{IndexStatus, MutationRefreshQueue, RefreshKey};
+    let mut runtime = TestRuntime::new().await;
+    let key = RefreshKey {
+        workspace_id: WORKSPACE.into(),
+        mutation_digest: "d".repeat(64),
+        page_id: PAGE.into(),
+    };
+    runtime.worker.state.admit(&key).unwrap();
+    let provider = runtime.worker.provider.clone();
+    let paused = Arc::new(PausedProvider {
+        metadata: provider.metadata().clone(),
+        entered: tokio::sync::Notify::new(),
+        proceed: tokio::sync::Notify::new(),
+    });
+    Arc::get_mut(&mut runtime.worker).unwrap().provider = paused.clone();
+    let worker = runtime.worker.clone();
+    let task = tokio::spawn(async move { worker.tick(CancellationToken::new(), false).await });
+    tokio::time::timeout(Duration::from_secs(5), paused.entered.notified())
+        .await
+        .unwrap();
+    // Keep the shared writer lease live while expiring ONLY mutation ownership.
+    // The final guarded commit must consult the mutation claim's deadline.
+    rusqlite::Connection::open(&runtime.db)
+        .unwrap()
+        .execute_batch("UPDATE mutation_refresh SET lease_until=0 WHERE state=1;")
+        .unwrap();
+    paused.proceed.notify_one();
+    task.await.unwrap().unwrap();
+    assert_eq!(runtime.searchable("Saffron").await, 0);
+    assert!(runtime.worker.state.page_state(PAGE).unwrap().is_none());
+    Arc::get_mut(&mut runtime.worker).unwrap().provider = provider;
+    tick(&runtime.worker, false).await;
+    assert_eq!(
+        runtime.worker.state.status(&key).unwrap(),
+        Some(IndexStatus::Completed)
+    );
+    assert!(runtime.searchable("Saffron").await > 0);
+    assert_eq!(runtime.source.writes.load(Ordering::SeqCst), 0);
+}
 impl EmbeddingProvider for PausedProvider {
     fn metadata(&self) -> &EmbeddingMetadata {
         &self.metadata
