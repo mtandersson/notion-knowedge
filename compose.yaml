@@ -27,7 +27,7 @@ services:
       - state:/var/lib/notion-knowledge/state
       - models:/var/lib/notion-knowledge/models
     healthcheck:
-      # Liveness, not readiness: the index is intentionally unconfigured today.
+      # Liveness is independent of configured retrieval/index readiness.
       test: ["CMD", "/usr/local/bin/notion-knowledge-server", "--healthcheck"]
       interval: 30s
       timeout: 3s

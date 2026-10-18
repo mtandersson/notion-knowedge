@@ -308,7 +308,7 @@ jobs:
     if: needs.changes.outputs.container == 'true'
     name: Container smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       DOCKER_CACHE_SCOPE: nk-container-v1-Linux-X64-${{ github.event.pull_request.number || github.ref_name }}
     steps:
@@ -368,6 +368,9 @@ jobs:
 
       - name: Verify final runtime image
         run: python3 scripts/smoke-container.py --prebuilt --builder-image notion-knowledge:smoke-builder
+
+      - name: Verify production indexing and offline retrieval in final image
+        run: python3 scripts/smoke-retrieval-container.py --prebuilt --assets "$RUNNER_TEMP/nk-qwen-assets" --download-assets
 
       - name: Smoke test local Docker Compose stack
         run: |

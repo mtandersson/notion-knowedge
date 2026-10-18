@@ -1,0 +1,29 @@
+# Optional real in-process indexing role. Combine with compose.yaml through
+# scripts/compose-dev.sh -f compose.indexer.yaml. Keep credentials in ignored .env.
+# This private integration worker does not install public OAuth content handling.
+services:
+  notion-knowledge:
+    environment:
+      NK_NOTION_AUTH: integration
+      NOTION_TOKEN: ${NOTION_TOKEN:?Provide the private indexing integration credential}
+      NK_NOTION_SCOPE_WORKSPACE_ID: ${NK_NOTION_SCOPE_WORKSPACE_ID:?Provide the exact workspace UUID}
+      NK_NOTION_SCOPE_ROOTS: ${NK_NOTION_SCOPE_ROOTS:?Provide canonical comma-separated root page UUIDs}
+      NK_NOTION_SCOPE_GENERATION: ${NK_NOTION_SCOPE_GENERATION:-1}
+      NK_NOTION_SCOPE_EXCLUDED_PAGES:
+      NK_NOTION_SCOPE_EXCLUDED_DESCENDANTS:
+      NK_WEBHOOK_MODE: verified
+      NK_WEBHOOK_WORKER: "true"
+      NK_WEBHOOK_WORKSPACE_ID: ${NK_NOTION_SCOPE_WORKSPACE_ID:?Provide the exact workspace UUID}
+      NK_WEBHOOK_INTEGRATION_ID: ${NK_WEBHOOK_INTEGRATION_ID:?Provide the verified integration UUID}
+      NK_WEBHOOK_SUBSCRIPTION_ID: ${NK_WEBHOOK_SUBSCRIPTION_ID:?Provide the verified subscription UUID}
+      NK_WEBHOOK_VERIFICATION_TOKEN: ${NK_WEBHOOK_VERIFICATION_TOKEN:?Provide the verified private signing token}
+      NK_WEBHOOK_STATE_FILE: /var/lib/notion-knowledge/state/state.sqlite
+      NK_WEBHOOK_INDEX_DIR: /var/lib/notion-knowledge/index
+      NK_WEBHOOK_QWEN_ASSETS: /var/lib/notion-knowledge/models
+    volumes:
+      - type: bind
+        source: ${NK_MODEL_ASSETS:?Pre-provision the exact public Qwen assets outside the image}
+        target: /var/lib/notion-knowledge/models
+        read_only: true
+        bind:
+          create_host_path: false
