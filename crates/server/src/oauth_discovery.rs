@@ -20,6 +20,7 @@ use serde_json::json;
 pub struct OAuthDiscovery {
     issuer: String,
     resource: String,
+    writes_enabled: bool,
 }
 
 impl OAuthDiscovery {
@@ -36,9 +37,21 @@ impl OAuthDiscovery {
         Ok(Self {
             issuer: issuer.to_owned(),
             resource: resource.to_owned(),
+            writes_enabled: false,
         })
     }
 
+    pub(crate) fn with_write_policy(mut self, enabled: bool) -> Self {
+        self.writes_enabled = enabled;
+        self
+    }
+    fn supported_scopes(&self) -> Vec<&'static str> {
+        if self.writes_enabled {
+            vec!["knowledge:read", "knowledge:write"]
+        } else {
+            vec!["knowledge:read"]
+        }
+    }
     pub(crate) fn resource(&self) -> &str {
         &self.resource
     }
@@ -172,6 +185,7 @@ async fn protected_resource(State(discovery): State<OAuthDiscovery>) -> Response
     metadata_response(json!({
         "resource": discovery.resource,
         "authorization_servers": [discovery.issuer],
+        "scopes_supported": discovery.supported_scopes(),
     }))
 }
 
@@ -179,6 +193,7 @@ async fn authorization_server(State(discovery): State<OAuthDiscovery>) -> Respon
     let issuer = &discovery.issuer;
     metadata_response(json!({
         "issuer": issuer,
+        "scopes_supported": discovery.supported_scopes(),
         "authorization_endpoint": format!("{issuer}/authorize"),
         "token_endpoint": format!("{issuer}/token"),
         "revocation_endpoint": format!("{issuer}/revoke"),
@@ -224,6 +239,35 @@ async fn deny_mcp(State(discovery): State<OAuthDiscovery>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn metadata_advertises_only_operator_supported_scope_tokens() {
+        for enabled in [false, true] {
+            let discovery = OAuthDiscovery::new(
+                "https://auth.example.com",
+                "https://knowledge.example.com/mcp",
+            )
+            .unwrap()
+            .with_write_policy(enabled);
+            for response in [
+                protected_resource(State(discovery.clone())).await,
+                authorization_server(State(discovery)).await,
+            ] {
+                let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                    .await
+                    .unwrap();
+                let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(
+                    value["scopes_supported"],
+                    if enabled {
+                        json!(["knowledge:read", "knowledge:write"])
+                    } else {
+                        json!(["knowledge:read"])
+                    }
+                );
+            }
+        }
+    }
 
     #[test]
     fn strict_https_metadata_config_rejects_ambiguous_or_unsafe_origins() {

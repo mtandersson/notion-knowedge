@@ -88,17 +88,19 @@ impl<'a> NotionRefresh<'a> {
     /// Failure yields no stale credentials, even when an old token might
     /// otherwise still work. Never silently change owner or workspace.
     pub async fn ensure_fresh(&self) -> Result<StoredGrant, RefreshError> {
-        self.ensure_fresh_with_clock(|| {
-            #[cfg(test)]
-            if let Some(clock) = &self.test_clock {
-                return Ok(clock());
-            }
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|time| time.as_secs())
-                .map_err(|_| RefreshError::StoreUnavailable)
-        })
-        .await
+        self.ensure_fresh_with_clock(|| self.now_unix()).await
+    }
+
+    /// Shared wall clock for credential validity at provider attempt boundaries.
+    pub(crate) fn now_unix(&self) -> Result<u64, RefreshError> {
+        #[cfg(test)]
+        if let Some(clock) = &self.test_clock {
+            return Ok(clock());
+        }
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|time| time.as_secs())
+            .map_err(|_| RefreshError::StoreUnavailable)
     }
 
     #[cfg(test)]

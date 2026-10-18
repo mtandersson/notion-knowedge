@@ -3,8 +3,37 @@
 //! no upstream or MCP credentials and must never be serialized to a client.
 use std::{fmt, time::Instant};
 
+/// Immutable supported permission set minted by trusted OAuth authorization.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OAuthPermissions {
+    #[default]
+    Read,
+    ReadWrite,
+}
+impl OAuthPermissions {
+    /// Bounded exact supported scope sets; no unknown, duplicate or empty scopes.
+    pub fn parse(scope: &str) -> Option<Self> {
+        match scope {
+            "knowledge:read" => Some(Self::Read),
+            "knowledge:read knowledge:write" | "knowledge:write knowledge:read" => {
+                Some(Self::ReadWrite)
+            }
+            _ => None,
+        }
+    }
+    pub fn can_write(self) -> bool {
+        self == Self::ReadWrite
+    }
+    pub fn scope(self) -> &'static str {
+        match self {
+            Self::Read => "knowledge:read",
+            Self::ReadWrite => "knowledge:read knowledge:write",
+        }
+    }
+}
 #[derive(Clone)]
 pub struct HttpAuthorization {
+    permissions: OAuthPermissions,
     token_digest: [u8; 32],
     grant_id: String,
     epoch: u64,
@@ -24,6 +53,7 @@ impl HttpAuthorization {
         expires: Instant,
     ) -> Self {
         Self {
+            permissions: OAuthPermissions::Read,
             token_digest,
             grant_id,
             epoch,
@@ -32,6 +62,14 @@ impl HttpAuthorization {
             expires,
             cancellation: tokio_util::sync::CancellationToken::new(),
         }
+    }
+    /// Trusted issuance only; request JSON cannot elevate permissions.
+    pub fn with_permissions(mut self, permissions: OAuthPermissions) -> Self {
+        self.permissions = permissions;
+        self
+    }
+    pub fn permissions(&self) -> OAuthPermissions {
+        self.permissions
     }
     pub fn with_cancellation(mut self, cancellation: tokio_util::sync::CancellationToken) -> Self {
         self.cancellation = cancellation;
@@ -62,7 +100,8 @@ impl HttpAuthorization {
         self.expires
     }
     pub fn same_session(&self, other: &Self) -> bool {
-        self.token_digest == other.token_digest
+        self.permissions == other.permissions
+            && self.token_digest == other.token_digest
             && self.grant_id == other.grant_id
             && self.epoch == other.epoch
             && self.workspace_id == other.workspace_id
