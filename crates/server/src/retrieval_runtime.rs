@@ -152,12 +152,18 @@ pub async fn compose(
         table: table.clone(),
         provider,
     });
-    let lexical: Arc<dyn LexicalSearch> = Arc::new(ScopedLexical { table });
+    let lexical: Arc<dyn LexicalSearch> = Arc::new(ScopedLexical {
+        table: table.clone(),
+    });
     let handler = handler
-        .with_root_page_ids(scope.roots.iter().map(|r| r.0.clone()).collect())?
-        .and_authoritative_scope(source, scope)
+        .and_source_expansion(
+            Arc::new(table),
+            scope.roots.iter().map(|r| r.0.clone()).collect(),
+        )?
+        .and_authoritative_scope(source.clone(), scope)
         .map(|h| {
-            h.and_search(semantic)
+            h.and_fresh_source(source)
+                .and_search(semantic)
                 .and_lexical_search(lexical)
                 .and_hybrid_search(Arc::new(hybrid))
         })?;

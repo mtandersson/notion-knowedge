@@ -402,9 +402,18 @@ impl IndexCommitCoordinator {
         if state.exists() && fs::metadata(state).map_err(io)?.nlink() != 1 {
             return Err(CommitError::BindingMismatch);
         }
-        let store =
-            Arc::new(SqliteSyncStateStore::open(state).map_err(|_| CommitError::Unavailable)?);
-        let state_path = fs::canonicalize(state).map_err(io)?;
+        // The coordinator supports trusted aliases, but the storage boundary
+        // deliberately refuses to follow a final-component symlink. Resolve an
+        // existing alias here, then open its target with that strict boundary.
+        let state_target = if state.exists() {
+            fs::canonicalize(state).map_err(io)?
+        } else {
+            state.to_path_buf()
+        };
+        let store = Arc::new(
+            SqliteSyncStateStore::open(&state_target).map_err(|_| CommitError::Unavailable)?,
+        );
+        let state_path = fs::canonicalize(&state_target).map_err(io)?;
         let state_identity = Identity::read(&state_path)?;
         let state_token = store
             .lock_connection()

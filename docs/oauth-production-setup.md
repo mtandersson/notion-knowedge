@@ -130,8 +130,10 @@ not populate, migrate or repair storage. Prepare/update the index through the
 separate trusted operator indexing workflow; stop conflicting credential users
 and writers as required by their ownership rules. OAuth content does not enable
 webhook workers, reconciliation schedules, file ingestion or mutation tools.
-The stock Docker image/Compose bootstrap does not package this production
-retrieval path; see [container limitations](container.md).
+The [production Docker image](container.md) packages the feature-built retrieval
+binary. Model assets and compatible state remain external. Configure this OAuth
+reader separately from the private integration indexing role; the default
+Compose bootstrap alone does not configure production OAuth.
 
 ## Put the loopback service behind HTTPS
 
