@@ -590,8 +590,21 @@ pub async fn run(
                 })
                 .await
                 .map_err(|_| "guarded source expansion failed")?;
+            // Production chunk expansion returns its complete heading section.
+            // These unchanged fixtures have page-level headings, so all chunks
+            // on that page contribute in their persisted source order.
+            let section = page
+                .chunks
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let section_ids: Vec<_> = page.chunks.iter().map(|c| chunk_id(&c.id)).collect();
             if expanded.len() != 1
-                || expanded[0].text != **text
+                || expanded[0].text != section.chars().take(2000).collect::<String>()
+                || expanded[0].truncated != (section.chars().count() > 2000)
+                || expanded[0].provenance.chunk_ids != section_ids
+                || expanded[0].provenance.page_id != page_id(&page.id)
                 || expanded[0].provenance.root_page_id != ROOT
                 || expanded[0].provenance.indexed_last_edited_time != revision(page)
             {
@@ -808,6 +821,36 @@ mod tests {
             rows
         );
         assert!(run(provider, &root, boundary_request()).await.is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn unchanged_multichunk_fixture_preserves_production_heading_expansion() {
+        let dataset: Value = serde_json::from_str(include_str!(
+            "../../../../eval/retrieval/personal-knowledge-v1.json"
+        ))
+        .unwrap();
+        let request = parse(&json!({"schema_version":1,"dataset_id":dataset["dataset_id"],"as_of":dataset["as_of"],"mode":"fts","top_k":10,"pages":dataset["pages"],
+            "queries":[{"id":"boundary-heading","text":"Project Lighthouse","language":"en","category":"exact_name"}]}).to_string()).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "nk-production-eval-heading-{}-{}",
+            std::process::id(),
+            now()
+        ));
+        let provider: Arc<dyn EmbeddingProvider> = Arc::new(BoundaryProvider(
+            EmbeddingMetadata::new("fixture".into(), "boundary-only".into(), "1".into(), 3)
+                .unwrap(),
+        ));
+        let output = run(provider, &root, request).await.unwrap();
+        let ids = output["results"][0]["ranked_source_ids"]
+            .as_array()
+            .unwrap();
+        assert!(
+            dataset["pages"][0]["chunks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|c| ids.contains(&c["id"]))
+        );
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
