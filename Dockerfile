@@ -3,15 +3,21 @@ FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288
 
 FROM toolchain AS builder
 ARG VERSION
+# Lance's protobuf schemas are compiled at build time; the compiler never enters
+# the runtime image. Pin the Bookworm package rather than accepting an upgrade.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler=3.21.12-3+deb12u1 libprotobuf-dev=3.21.12-3+deb12u1 \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY vendor ./vendor
 # OCI metadata may mirror Cargo's version, but may never override it.
 RUN test "$VERSION" = "$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' Cargo.toml)" \
-    && cargo build --release --locked -p notion-knowledge-server \
+    && cargo build --release --locked -p notion-knowledge-server --features webhook-worker \
     && ldd target/release/notion-knowledge-server \
     && mkdir -p /runtime-data/index /runtime-data/state /runtime-data/models \
+    && chmod 0700 /runtime-data/index /runtime-data/state \
     && chown -R 65532:65532 /runtime-data
 
 # Disposable mount-probe compiler: same pinned toolchain, without Cargo outputs.

@@ -2530,3 +2530,60 @@ async fn installed_graph_denies_reads_after_interrupted_owned_producer_commit() 
 
 #[path = "support/joined_graph.rs"]
 mod joined_graph;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn installed_trusted_fresh_get_uses_authoritative_source_without_reading_out_of_root_content()
+{
+    let runtime = TestRuntime::with_scope_policy("webhook-v1").await;
+    commit_search_fixture(&runtime).await;
+    let config = retrieval_config(&runtime);
+    let handler = installed_retrieval(
+        &runtime,
+        &config,
+        notion_knowledge_server::root_scope::Transport::Stdio,
+    )
+    .await
+    .unwrap();
+    let before = std::fs::read(&runtime.db).unwrap();
+    let body_reads = runtime.source.body_reads.load(Ordering::SeqCst);
+    runtime.source.change(|model| {
+        model.markdown = "# Updated\n\nFresh cardamom from the authoritative source.\n".into();
+        model.revision = "2026-10-11T12:00:00Z".into();
+    });
+    let request = |id, freshness| {
+        json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{
+        "name":"knowledge_get","arguments":{"refs":[{"kind":"page","id":PAGE}],"max_chars":2000,"freshness":freshness}}})
+    };
+    let output = wire_stdio(
+        handler.clone(),
+        vec![request(2, "indexed"), request(3, "fresh")],
+    )
+    .await;
+    assert!(
+        output[1]["result"]["structuredContent"]["sources"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Saffron")
+    );
+    let fresh = &output[2]["result"]["structuredContent"]["sources"][0];
+    assert_eq!(fresh["content_scope"], "page");
+    assert!(fresh["text"].as_str().unwrap().contains("Fresh cardamom"));
+    assert_eq!(fresh["provenance"]["page_id"], PAGE);
+    assert_eq!(fresh["provenance"]["index_stale"], true);
+    assert_eq!(
+        runtime.source.body_reads.load(Ordering::SeqCst),
+        body_reads + 1
+    );
+    assert_eq!(std::fs::read(&runtime.db).unwrap(), before);
+    runtime.source.change(|model| model.parent = FOREIGN.into());
+    let reads = runtime.source.body_reads.load(Ordering::SeqCst);
+    let output = wire_stdio(handler, vec![request(4, "fresh")]).await;
+    assert_eq!(output[1]["result"]["isError"], true);
+    assert!(!output[1].to_string().contains("Fresh cardamom"));
+    assert_eq!(
+        runtime.source.body_reads.load(Ordering::SeqCst),
+        reads,
+        "out-of-root source must not reach authoritative Markdown reads"
+    );
+    assert_eq!(std::fs::read(&runtime.db).unwrap(), before);
+}

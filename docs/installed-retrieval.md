@@ -47,7 +47,8 @@ and exact matching scope; its [request-bound source](oauth-content.md) authorize
 each content disclosure. Anonymous and discovery-only HTTP leave retrieval
 unavailable without opening the private index, model or state, including lazy
 sync-status readers. OAuth content never installs webhook/reconciliation writers.
-The stock container still does not package the production model/index path (#145).
+The [production image](container.md) packages this feature; exact model assets
+and compatible index/state remain externally provisioned.
 
 ## Provision and rebuild the derived vector index
 
@@ -95,6 +96,12 @@ these command services and actual vector queries without model downloads:
 ```sh
 nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test reconciliation_command index_commands --locked
 ```
+
+Trusted installed readers also bind guarded indexed source expansion and the
+same configured authoritative client for `knowledge_get` with `freshness: "fresh"`.
+Fresh mode retains its indexed anchor and root checks; moved/out-of-root pages
+are rejected before Markdown is read. OAuth uses its separate request-bound
+source composition rather than this static integration client.
 
 Search modes use the existing Lance semantic adapter, BM25 lexical adapter and
 weighted reciprocal-rank fusion (100 candidates per path, rank constant 60,
