@@ -171,6 +171,16 @@ pub mod runtime {
             Ok(c) => c,
             Err(_) => return Output::error("configuration", 2),
         };
+        crate::shutdown::operator(
+            "reconciliation",
+            stop.clone(),
+            Duration::from_secs(config.shutdown_timeout_seconds),
+            configured_inner(command, stop, config),
+        )
+        .await
+    }
+
+    async fn configured_inner(command: Command, stop: CancellationToken, config: Config) -> Output {
         if config.validate_grant_store().is_err() {
             return Output::error("configuration", 2);
         }

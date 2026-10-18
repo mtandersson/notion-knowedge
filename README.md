@@ -69,8 +69,9 @@ cargo run -p notion-knowledge-server -- --http
 The default endpoint is `http://127.0.0.1:3000/mcp`. `NK_HTTP_HOST` and
 `NK_HTTP_PORT` set the listener address. HTTP supports initialization, tool
 discovery and calls, stateful sessions, SSE responses, and session deletion.
-Protocol failures return structured JSON-RPC errors. Ctrl-C stops the listener
-and cancels active sessions. Both transports share the [semantic search contract](docs/knowledge-search.md);
+Protocol failures return structured JSON-RPC errors. SIGINT/SIGTERM stop HTTP
+admission and drain workers/owned commits under the configurable
+[shutdown deadline](docs/graceful-shutdown.md). Both transports share the [semantic search contract](docs/knowledge-search.md);
 valid search calls in the default bootstrap return an explicit retrieval-unavailable tool error. The isolated [semantic MCP spike](docs/semantic-mcp-spike.md) explicitly configures real local semantic retrieval through this same handler and transport wiring.
 Calls to unknown tools return protocol errors.
 

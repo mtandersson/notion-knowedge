@@ -19,8 +19,17 @@ fn components() -> [&'static str; 4] {
     ]
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    match notion_knowledge_server::shutdown::run(run()) {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("Server runtime failed: {}", safe_error(&error));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> ExitCode {
     let all_args: Vec<String> = env::args().skip(1).collect();
     if all_args.iter().any(|arg| arg.starts_with("--index")) {
         let command = match notion_knowledge_server::index_command::Command::parse(&all_args) {
@@ -35,7 +44,7 @@ async fn main() -> ExitCode {
             let stop = tokio_util::sync::CancellationToken::new();
             let signal = stop.clone();
             let task = tokio::spawn(async move {
-                let _ = tokio::signal::ctrl_c().await;
+                let _ = notion_knowledge_server::shutdown::signal().await;
                 signal.cancel();
             });
             let output =
@@ -65,7 +74,7 @@ async fn main() -> ExitCode {
             let stop = tokio_util::sync::CancellationToken::new();
             let signal = stop.clone();
             let task = tokio::spawn(async move {
-                let _ = tokio::signal::ctrl_c().await;
+                let _ = notion_knowledge_server::shutdown::signal().await;
                 signal.cancel();
             });
             let output =

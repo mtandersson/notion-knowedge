@@ -5,6 +5,8 @@ use std::{env, ffi::OsString, fmt, net::SocketAddr};
 #[derive(Debug)]
 pub struct Config {
     pub http_bind: SocketAddr,
+    /// One shared deadline for HTTP, workers and owned native effects after stop.
+    pub shutdown_timeout_seconds: u64,
     /// Upper bound on simultaneously dispatched MCP HTTP calls (not session count).
     pub mcp_max_in_flight: usize,
     /// Shared weighted MCP tool admission across stdio and HTTP.
@@ -174,6 +176,8 @@ impl Config {
                 })
         };
         let mcp_max_in_flight = concurrency(&mut lookup, "NK_MCP_MAX_IN_FLIGHT", "8", 256)?;
+        let shutdown_timeout_seconds =
+            concurrency(&mut lookup, "NK_SHUTDOWN_TIMEOUT_SECONDS", "30", 3600)? as u64;
         let mcp_tool_capacity = concurrency(&mut lookup, "NK_MCP_TOOL_CAPACITY", "16", 128)?;
         let webhook_max_in_flight = concurrency(&mut lookup, "NK_WEBHOOK_MAX_IN_FLIGHT", "4", 128)?;
         let mcp_max_sessions = concurrency(&mut lookup, "NK_MCP_MAX_SESSIONS", "32", 512)?;
@@ -865,6 +869,7 @@ impl Config {
             ));
         }
         Ok(Self {
+            shutdown_timeout_seconds,
             oauth_client,
             mcp_max_in_flight,
             mcp_tool_capacity,
@@ -933,6 +938,25 @@ mod tests {
                 .find(|(name, _)| *name == key)
                 .map(|(_, value)| OsString::from(value))
         })
+    }
+
+    #[test]
+    fn shutdown_timeout_is_bounded_and_explicitly_configurable() {
+        assert_eq!(parse(&[]).unwrap().shutdown_timeout_seconds, 30);
+        for value in ["1", "3600"] {
+            assert_eq!(
+                parse(&[("NK_SHUTDOWN_TIMEOUT_SECONDS", value)])
+                    .unwrap()
+                    .shutdown_timeout_seconds
+                    .to_string(),
+                value
+            );
+        }
+        for value in ["", "0", "3601", "-1", "1.5", "secret-sentinel"] {
+            let error = parse(&[("NK_SHUTDOWN_TIMEOUT_SECONDS", value)]).unwrap_err();
+            assert_eq!(error.setting, "NK_SHUTDOWN_TIMEOUT_SECONDS");
+            assert!(!error.to_string().contains("secret-sentinel"));
+        }
     }
 
     #[test]

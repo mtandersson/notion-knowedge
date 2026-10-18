@@ -30,7 +30,7 @@ use serde_json::{Value, json};
 
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 
-/// Serve the shared MCP handler and orchestration probes until Ctrl-C.
+/// Serve until SIGINT/SIGTERM, worker failure or explicit cancellation.
 pub async fn serve(settings: crate::config::Config) -> io::Result<()> {
     serve_with_handler(settings, notion_knowledge_mcp::KnowledgeServer::default()).await
 }
@@ -198,6 +198,7 @@ pub async fn serve_installed(
         handler
     };
     let bind = settings.http_bind;
+    let shutdown_timeout = Duration::from_secs(settings.shutdown_timeout_seconds);
     let mut diagnostics = crate::diagnostics::bootstrap(&settings);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let cancellation = shutdown;
@@ -279,6 +280,10 @@ pub async fn serve_installed(
         .merge(diagnostics)
         .merge(mcp)
         .merge(webhooks)
+        .layer(middleware::from_fn_with_state(
+            cancellation.clone(),
+            reject_during_shutdown,
+        ))
         .layer(middleware::from_fn(correlate_request));
     eprintln!("Serving MCP over Streamable HTTP at http://{bind}/mcp.");
     #[cfg(all(unix, feature = "webhook-worker"))]
@@ -294,34 +299,41 @@ pub async fn serve_installed(
             result
         })
     });
-    let shutdown = cancellation.clone();
-    let result = axum::serve(listener, router)
-        .with_graceful_shutdown(async move {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {},
-                _ = cancellation.cancelled() => {},
-            }
-            cancellation.cancel();
-        })
-        .await;
-    shutdown.cancel();
-    #[cfg(all(unix, feature = "webhook-worker"))]
-    if let Some(task) = worker_task {
-        let worker_result = task
-            .await
-            .map_err(|_| io::Error::other("index worker terminated"))
-            .and_then(|result| result.map_err(io::Error::other));
-        // The supervisor also owns cleanup after panic: a dropped observer
-        // cannot release a submitted effect's guard before its thread finishes.
-        if let Some(coordinator) = owned_coordinator {
-            coordinator
-                .drain_owned()
+    let stopped = cancellation.clone();
+    crate::shutdown::supervise(cancellation, shutdown_timeout, async move {
+        let result = axum::serve(listener, router)
+            .with_graceful_shutdown(stopped.clone().cancelled_owned())
+            .await;
+        stopped.cancel();
+        #[cfg(all(unix, feature = "webhook-worker"))]
+        if let Some(task) = worker_task {
+            let worker_result = task
                 .await
-                .map_err(|_| io::Error::other("index drain failed"))?;
+                .map_err(|_| io::Error::other("index worker terminated"))
+                .and_then(|result| result.map_err(io::Error::other));
+            // Never abort an owned native effect or release its live guard.
+            if let Some(coordinator) = owned_coordinator {
+                coordinator
+                    .drain_owned()
+                    .await
+                    .map_err(|_| io::Error::other("index drain failed"))?;
+            }
+            worker_result?;
         }
-        worker_result?;
+        result
+    })
+    .await
+}
+
+async fn reject_during_shutdown(
+    State(stop): State<tokio_util::sync::CancellationToken>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if stop.is_cancelled() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
-    result
+    next.run(request).await
 }
 
 /// Generated server-side IDs cannot be spoofed using client-supplied headers.
