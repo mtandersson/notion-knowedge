@@ -1,0 +1,816 @@
+{
+  "schema_version": 1,
+  "dataset_id": "personal-knowledge-fixtures-v1",
+  "as_of": "2026-03-02",
+  "config": {
+    "max_hops": 1,
+    "weight": 0.15,
+    "candidate_limit": 20
+  },
+  "top_k": 10,
+  "evidence": "adapter_measured",
+  "decision": "keep_disabled",
+  "reason": "Insufficient graph lift or safety/control regression",
+  "summary": {
+    "linked_queries": 6,
+    "control_queries": 6,
+    "linked": {
+      "baseline": {
+        "recall_at_1": 0.16666666666666666,
+        "ndcg_at_1": 0.2380952380952381,
+        "recall_at_3": 0.6666666666666666,
+        "ndcg_at_3": 0.4810610138073839,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 0.6278075325464227,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.6278075325464227,
+        "mrr": 0.5972222222222222
+      },
+      "boosted": {
+        "recall_at_1": 0.16666666666666666,
+        "ndcg_at_1": 0.2380952380952381,
+        "recall_at_3": 0.75,
+        "ndcg_at_3": 0.5309953037951615,
+        "recall_at_5": 0.8333333333333334,
+        "ndcg_at_5": 0.5874968096431249,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.6430523651986805,
+        "mrr": 0.6071428571428571
+      }
+    },
+    "negative_controls": {
+      "baseline": {
+        "recall_at_1": 1.0,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      },
+      "boosted": {
+        "recall_at_1": 1.0,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    },
+    "target_rank_improvements": 2,
+    "new_guard_regressions": [],
+    "guard_rank_regressions": [
+      "date-review-en",
+      "date-review-sv"
+    ],
+    "new_unjudged_regressions": [
+      "link-garden-en",
+      "semantic-energy-en",
+      "date-review-en",
+      "date-review-sv"
+    ],
+    "target_top3_regressions": []
+  },
+  "results": [
+    {
+      "query_id": "link-energy-en",
+      "kind": "linked",
+      "language": "en",
+      "baseline": {
+        "ranked_source_ids": [
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:project-lighthouse-old:overview",
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:reading:queue",
+          "fixture:chunk:garden-old:plan",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:odling:plan",
+          "fixture:chunk:travel:list"
+        ],
+        "metrics": {
+          "recall_at_1": 0.5,
+          "ndcg_at_1": 1.0,
+          "recall_at_3": 0.5,
+          "ndcg_at_3": 0.7871546029909718,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 0.9324441894571632,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 0.9324441894571632,
+          "mrr": 1.0
+        }
+      },
+      "boosted": {
+        "ranked_source_ids": [
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:project-lighthouse-old:overview",
+          "fixture:chunk:reading:queue",
+          "fixture:chunk:garden-old:plan",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:odling:plan",
+          "fixture:chunk:travel:list"
+        ],
+        "metrics": {
+          "recall_at_1": 0.5,
+          "ndcg_at_1": 1.0,
+          "recall_at_3": 1.0,
+          "ndcg_at_3": 0.95583058934618,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 0.95583058934618,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 0.95583058934618,
+          "mrr": 1.0
+        }
+      },
+      "target_rank_before": 1,
+      "target_rank_after": 1,
+      "new_guard_sources_top3": [],
+      "promoted_guard_sources": [],
+      "new_unjudged_sources_top3": []
+    },
+    {
+      "query_id": "link-garden-en",
+      "kind": "linked",
+      "language": "en",
+      "baseline": {
+        "ranked_source_ids": [
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:odling:plan",
+          "fixture:chunk:garden-old:plan",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:reading:queue",
+          "fixture:chunk:odling:watering",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:project-lighthouse-old:overview"
+        ],
+        "metrics": {
+          "recall_at_1": 0.0,
+          "ndcg_at_1": 0.0,
+          "recall_at_3": 0.0,
+          "ndcg_at_3": 0.0,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 0.43067655807339306,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 0.43067655807339306,
+          "mrr": 0.25
+        }
+      },
+      "boosted": {
+        "ranked_source_ids": [
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:odling:plan",
+          "fixture:chunk:garden-old:plan",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:reading:queue",
+          "fixture:chunk:odling:watering",
+          "fixture:chunk:project-lighthouse-old:overview"
+        ],
+        "metrics": {
+          "recall_at_1": 0.0,
+          "ndcg_at_1": 0.0,
+          "recall_at_3": 0.0,
+          "ndcg_at_3": 0.0,
+          "recall_at_5": 0.0,
+          "ndcg_at_5": 0.0,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 0.33333333333333337,
+          "mrr": 0.14285714285714285
+        }
+      },
+      "target_rank_before": 4,
+      "target_rank_after": 7,
+      "new_guard_sources_top3": [],
+      "promoted_guard_sources": [],
+      "new_unjudged_sources_top3": [
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:project-lighthouse:overview"
+      ]
+    },
+    {
+      "query_id": "link-study-en",
+      "kind": "linked",
+      "language": "en",
+      "baseline": {
+        "ranked_source_ids": [
+          "fixture:chunk:project-lighthouse-old:overview",
+          "fixture:chunk:reading:queue",
+          "fixture:chunk:study:routine",
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:travel:list",
+          "fixture:chunk:odling:watering"
+        ],
+        "metrics": {
+          "recall_at_1": 0.0,
+          "ndcg_at_1": 0.0,
+          "recall_at_3": 1.0,
+          "ndcg_at_3": 0.6309297535714575,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 0.6309297535714575,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 0.6309297535714575,
+          "mrr": 0.5
+        }
+      },
+      "boosted": {
+        "ranked_source_ids": [
+          "fixture:chunk:project-lighthouse-old:overview",
+          "fixture:chunk:reading:queue",
+          "fixture:chunk:study:routine",
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:travel:list",
+          "fixture:chunk:odling:watering"
+        ],
+        "metrics": {
+          "recall_at_1": 0.0,
+          "ndcg_at_1": 0.0,
+          "recall_at_3": 1.0,
+          "ndcg_at_3": 0.6309297535714575,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 0.6309297535714575,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 0.6309297535714575,
+          "mrr": 0.5
+        }
+      },
+      "target_rank_before": 2,
+      "target_rank_after": 2,
+      "new_guard_sources_top3": [],
+      "promoted_guard_sources": [],
+      "new_unjudged_sources_top3": []
+    },
+    {
+      "query_id": "semantic-energy-en",
+      "kind": "negative_control",
+      "language": "en",
+      "baseline": {
+        "ranked_source_ids": [
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:project-lighthouse-old:overview",
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:travel:list",
+          "fixture:chunk:reading:queue",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:bike-old:service",
+          "fixture:chunk:odling:plan"
+        ],
+        "metrics": {
+          "recall_at_1": 1.0,
+          "ndcg_at_1": 1.0,
+          "recall_at_3": 1.0,
+          "ndcg_at_3": 1.0,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 1.0,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 1.0,
+          "mrr": 1.0
+        }
+      },
+      "boosted": {
+        "ranked_source_ids": [
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:project-lighthouse-old:overview",
+          "fixture:chunk:travel:list",
+          "fixture:chunk:reading:queue",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:bike-old:service",
+          "fixture:chunk:odling:plan"
+        ],
+        "metrics": {
+          "recall_at_1": 1.0,
+          "ndcg_at_1": 1.0,
+          "recall_at_3": 1.0,
+          "ndcg_at_3": 1.0,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 1.0,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 1.0,
+          "mrr": 1.0
+        }
+      },
+      "target_rank_before": null,
+      "target_rank_after": null,
+      "new_guard_sources_top3": [],
+      "promoted_guard_sources": [],
+      "new_unjudged_sources_top3": [
+        "fixture:chunk:lighthouse-review:notes"
+      ]
+    },
+    {
+      "query_id": "exact-bike-en",
+      "kind": "negative_control",
+      "language": "en",
+      "baseline": {
+        "ranked_source_ids": [
+          "fixture:chunk:bike:service",
+          "fixture:chunk:bike-old:service",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:travel:list",
+          "fixture:chunk:reading:queue",
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:project-lighthouse-old:overview"
+        ],
+        "metrics": {
+          "recall_at_1": 1.0,
+          "ndcg_at_1": 1.0,
+          "recall_at_3": 1.0,
+          "ndcg_at_3": 1.0,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 1.0,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 1.0,
+          "mrr": 1.0
+        }
+      },
+      "boosted": {
+        "ranked_source_ids": [
+          "fixture:chunk:bike:service",
+          "fixture:chunk:bike-old:service",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:travel:list",
+          "fixture:chunk:reading:queue",
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:project-lighthouse-old:overview"
+        ],
+        "metrics": {
+          "recall_at_1": 1.0,
+          "ndcg_at_1": 1.0,
+          "recall_at_3": 1.0,
+          "ndcg_at_3": 1.0,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 1.0,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 1.0,
+          "mrr": 1.0
+        }
+      },
+      "target_rank_before": null,
+      "target_rank_after": null,
+      "new_guard_sources_top3": [],
+      "promoted_guard_sources": [],
+      "new_unjudged_sources_top3": []
+    },
+    {
+      "query_id": "date-review-en",
+      "kind": "negative_control",
+      "language": "en",
+      "baseline": {
+        "ranked_source_ids": [
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:project-lighthouse-old:overview",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:bike:service",
+          "fixture:chunk:reading:queue",
+          "fixture:chunk:bike-old:service",
+          "fixture:chunk:garden-old:plan"
+        ],
+        "metrics": {
+          "recall_at_1": 1.0,
+          "ndcg_at_1": 1.0,
+          "recall_at_3": 1.0,
+          "ndcg_at_3": 1.0,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 1.0,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 1.0,
+          "mrr": 1.0
+        }
+      },
+      "boosted": {
+        "ranked_source_ids": [
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:project-lighthouse-old:overview",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:bike:service",
+          "fixture:chunk:reading:queue",
+          "fixture:chunk:bike-old:service",
+          "fixture:chunk:garden-old:plan"
+        ],
+        "metrics": {
+          "recall_at_1": 1.0,
+          "ndcg_at_1": 1.0,
+          "recall_at_3": 1.0,
+          "ndcg_at_3": 1.0,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 1.0,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 1.0,
+          "mrr": 1.0
+        }
+      },
+      "target_rank_before": null,
+      "target_rank_after": null,
+      "new_guard_sources_top3": [],
+      "promoted_guard_sources": [
+        "fixture:chunk:energy-decision:decision"
+      ],
+      "new_unjudged_sources_top3": [
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:project-lighthouse:overview"
+      ]
+    },
+    {
+      "query_id": "link-energy-sv",
+      "kind": "linked",
+      "language": "sv",
+      "baseline": {
+        "ranked_source_ids": [
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:project-lighthouse-old:overview",
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:odling:plan",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:garden-old:plan",
+          "fixture:chunk:odling:watering",
+          "fixture:chunk:bike-old:service"
+        ],
+        "metrics": {
+          "recall_at_1": 0.5,
+          "ndcg_at_1": 0.42857142857142855,
+          "recall_at_3": 0.5,
+          "ndcg_at_3": 0.3373519727104165,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 0.641864940605065,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 0.641864940605065,
+          "mrr": 1.0
+        }
+      },
+      "boosted": {
+        "ranked_source_ids": [
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:project-lighthouse-old:overview",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:odling:plan",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:garden-old:plan",
+          "fixture:chunk:odling:watering",
+          "fixture:chunk:bike-old:service"
+        ],
+        "metrics": {
+          "recall_at_1": 0.5,
+          "ndcg_at_1": 0.42857142857142855,
+          "recall_at_3": 0.5,
+          "ndcg_at_3": 0.3373519727104165,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 0.6763610077981964,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 0.6763610077981964,
+          "mrr": 1.0
+        }
+      },
+      "target_rank_before": 5,
+      "target_rank_after": 4,
+      "new_guard_sources_top3": [],
+      "promoted_guard_sources": [],
+      "new_unjudged_sources_top3": []
+    },
+    {
+      "query_id": "link-garden-sv",
+      "kind": "linked",
+      "language": "sv",
+      "baseline": {
+        "ranked_source_ids": [
+          "fixture:chunk:odling:plan",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:garden-old:plan",
+          "fixture:chunk:odling:watering",
+          "fixture:chunk:bike-old:service",
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:bike:service",
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:project-lighthouse-old:overview"
+        ],
+        "metrics": {
+          "recall_at_1": 0.0,
+          "ndcg_at_1": 0.0,
+          "recall_at_3": 1.0,
+          "ndcg_at_3": 0.6309297535714575,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 0.6309297535714575,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 0.6309297535714575,
+          "mrr": 0.5
+        }
+      },
+      "boosted": {
+        "ranked_source_ids": [
+          "fixture:chunk:odling:plan",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:garden-old:plan",
+          "fixture:chunk:odling:watering",
+          "fixture:chunk:bike-old:service",
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:bike:service",
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:project-lighthouse-old:overview"
+        ],
+        "metrics": {
+          "recall_at_1": 0.0,
+          "ndcg_at_1": 0.0,
+          "recall_at_3": 1.0,
+          "ndcg_at_3": 0.6309297535714575,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 0.6309297535714575,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 0.6309297535714575,
+          "mrr": 0.5
+        }
+      },
+      "target_rank_before": 2,
+      "target_rank_after": 2,
+      "new_guard_sources_top3": [],
+      "promoted_guard_sources": [],
+      "new_unjudged_sources_top3": []
+    },
+    {
+      "query_id": "link-study-sv",
+      "kind": "linked",
+      "language": "sv",
+      "baseline": {
+        "ranked_source_ids": [
+          "fixture:chunk:study:routine",
+          "fixture:chunk:project-lighthouse-old:overview",
+          "fixture:chunk:reading:queue",
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:odling:plan",
+          "fixture:chunk:odling:watering"
+        ],
+        "metrics": {
+          "recall_at_1": 0.0,
+          "ndcg_at_1": 0.0,
+          "recall_at_3": 1.0,
+          "ndcg_at_3": 0.5,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 0.5,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 0.5,
+          "mrr": 0.3333333333333333
+        }
+      },
+      "boosted": {
+        "ranked_source_ids": [
+          "fixture:chunk:study:routine",
+          "fixture:chunk:reading:queue",
+          "fixture:chunk:project-lighthouse-old:overview",
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:odling:plan",
+          "fixture:chunk:odling:watering"
+        ],
+        "metrics": {
+          "recall_at_1": 0.0,
+          "ndcg_at_1": 0.0,
+          "recall_at_3": 1.0,
+          "ndcg_at_3": 0.6309297535714575,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 0.6309297535714575,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 0.6309297535714575,
+          "mrr": 0.5
+        }
+      },
+      "target_rank_before": 3,
+      "target_rank_after": 2,
+      "new_guard_sources_top3": [],
+      "promoted_guard_sources": [],
+      "new_unjudged_sources_top3": []
+    },
+    {
+      "query_id": "semantic-energy-sv",
+      "kind": "negative_control",
+      "language": "sv",
+      "baseline": {
+        "ranked_source_ids": [
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:project-lighthouse-old:overview",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:bike-old:service",
+          "fixture:chunk:reading:queue",
+          "fixture:chunk:odling:watering",
+          "fixture:chunk:odling:plan"
+        ],
+        "metrics": {
+          "recall_at_1": 1.0,
+          "ndcg_at_1": 1.0,
+          "recall_at_3": 1.0,
+          "ndcg_at_3": 1.0,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 1.0,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 1.0,
+          "mrr": 1.0
+        }
+      },
+      "boosted": {
+        "ranked_source_ids": [
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:project-lighthouse-old:overview",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:bike-old:service",
+          "fixture:chunk:reading:queue",
+          "fixture:chunk:odling:watering",
+          "fixture:chunk:odling:plan"
+        ],
+        "metrics": {
+          "recall_at_1": 1.0,
+          "ndcg_at_1": 1.0,
+          "recall_at_3": 1.0,
+          "ndcg_at_3": 1.0,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 1.0,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 1.0,
+          "mrr": 1.0
+        }
+      },
+      "target_rank_before": null,
+      "target_rank_after": null,
+      "new_guard_sources_top3": [],
+      "promoted_guard_sources": [],
+      "new_unjudged_sources_top3": []
+    },
+    {
+      "query_id": "exact-bike-sv",
+      "kind": "negative_control",
+      "language": "sv",
+      "baseline": {
+        "ranked_source_ids": [
+          "fixture:chunk:bike:service",
+          "fixture:chunk:bike-old:service",
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:project-lighthouse-old:overview",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:travel:list",
+          "fixture:chunk:odling:watering"
+        ],
+        "metrics": {
+          "recall_at_1": 1.0,
+          "ndcg_at_1": 1.0,
+          "recall_at_3": 1.0,
+          "ndcg_at_3": 1.0,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 1.0,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 1.0,
+          "mrr": 1.0
+        }
+      },
+      "boosted": {
+        "ranked_source_ids": [
+          "fixture:chunk:bike:service",
+          "fixture:chunk:bike-old:service",
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:project-lighthouse-old:overview",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:travel:list",
+          "fixture:chunk:odling:watering"
+        ],
+        "metrics": {
+          "recall_at_1": 1.0,
+          "ndcg_at_1": 1.0,
+          "recall_at_3": 1.0,
+          "ndcg_at_3": 1.0,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 1.0,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 1.0,
+          "mrr": 1.0
+        }
+      },
+      "target_rank_before": null,
+      "target_rank_after": null,
+      "new_guard_sources_top3": [],
+      "promoted_guard_sources": [],
+      "new_unjudged_sources_top3": []
+    },
+    {
+      "query_id": "date-review-sv",
+      "kind": "negative_control",
+      "language": "sv",
+      "baseline": {
+        "ranked_source_ids": [
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:project-lighthouse-old:overview",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:bike:service",
+          "fixture:chunk:bike-old:service",
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:garden-old:plan",
+          "fixture:chunk:odling:plan"
+        ],
+        "metrics": {
+          "recall_at_1": 1.0,
+          "ndcg_at_1": 1.0,
+          "recall_at_3": 1.0,
+          "ndcg_at_3": 1.0,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 1.0,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 1.0,
+          "mrr": 1.0
+        }
+      },
+      "boosted": {
+        "ranked_source_ids": [
+          "fixture:chunk:lighthouse-review:notes",
+          "fixture:chunk:project-lighthouse:decision",
+          "fixture:chunk:project-lighthouse:overview",
+          "fixture:chunk:energy-decision:decision",
+          "fixture:chunk:project-lighthouse-old:overview",
+          "fixture:chunk:odling-review:notes",
+          "fixture:chunk:bike:service",
+          "fixture:chunk:bike-old:service",
+          "fixture:chunk:garden-old:plan",
+          "fixture:chunk:odling:plan"
+        ],
+        "metrics": {
+          "recall_at_1": 1.0,
+          "ndcg_at_1": 1.0,
+          "recall_at_3": 1.0,
+          "ndcg_at_3": 1.0,
+          "recall_at_5": 1.0,
+          "ndcg_at_5": 1.0,
+          "recall_at_10": 1.0,
+          "ndcg_at_10": 1.0,
+          "mrr": 1.0
+        }
+      },
+      "target_rank_before": null,
+      "target_rank_after": null,
+      "new_guard_sources_top3": [],
+      "promoted_guard_sources": [
+        "fixture:chunk:energy-decision:decision"
+      ],
+      "new_unjudged_sources_top3": [
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:project-lighthouse:overview"
+      ]
+    }
+  ]
+}

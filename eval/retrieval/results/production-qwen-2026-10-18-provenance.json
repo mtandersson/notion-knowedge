@@ -1,0 +1,282 @@
+{
+  "schema_version": 1,
+  "environment": {
+    "schema_version": 1,
+    "source_commit": "62f1cd085f4c1e2fa3eb2d5606899b2697f99f11",
+    "source_tree": "308014ec7c17a9b6777524604c3bc9dc9d635115",
+    "build_profile": "release",
+    "system": "Linux",
+    "architecture": "x86_64",
+    "kernel": "6.18.51",
+    "cpu": "AMD Ryzen 7 7800X3D 8-Core Processor",
+    "files_sha256": {
+      "Cargo.lock": "b20a4fe23b4b4d10e4c11a2e2ddb649385cddefac7ddf0f3f0820c631fee2e0d",
+      "flake.lock": "a1f7a48e7814d9b61f28cbaf978ce70225777811ebab245d3cf5e20c73b1e750",
+      "crates/retrieval/examples/production-eval.rs": "4447ef664bc57d1ad811ae0b459c5d5e7fddeb9fc765b3e159ed27eb4f15749a",
+      "crates/retrieval/examples/production_support/mod.rs": "51260aec3a744d10ab24a77199cf023e4cff717cea96760b64f91456d49a3905",
+      "eval/retrieval/personal-knowledge-v1.json": "b96d4eba5be7ea7b9d48be12ce088d455f38868fe09b658ce06319ced9888efe",
+      "eval/retrieval/exact-identifiers-v1.json": "8fce43d4b85e79fd2d60a9bd9f0b5e8b0f4d0eec423505bd6c01d5cbff6268a3",
+      "eval/retrieval/graph-boost-v1.json": "5b861bc140925f5fdd0ba75d74aa5d898464f203c8cb6cdd856f9ad3dd1c8ac8"
+    },
+    "environment": "Nix .#spike pinned Rust 1.98.1; default Qwen CPU configuration, no provider credentials",
+    "quality_scope": "unchanged fictional fixtures, actual production guarded retrieval implementation; one IVF partition, not deployed capacity proof",
+    "binary_sha256": "b979fa7347621cf974bd9ec141a63fa356de1f515c1b429d9faf3edacb0d72f6",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "model_asset_sha256": {
+      "configuration": "b5bf1f51fc45be473a54718cef92448d90a1be001bf9b9a44b8c7f10a19feaa9",
+      "vocabulary": "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a",
+      "weights": "0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd"
+    },
+    "provider_limits": {
+      "batch_size": 1,
+      "max_tokens": 512,
+      "device": "CPU",
+      "precision": "f32",
+      "pooling": "last-token",
+      "normalization": "L2",
+      "query_prefix": "",
+      "document_text": "raw unchanged chunk.text",
+      "too_long": "reject, never truncate"
+    },
+    "initial_source_commit": "8dc623c55395cf1c2d8ad0726801cde26e670f94",
+    "initial_source_tree": "10efe686feaff32ecafa3e211b0f06362e225709",
+    "retained_initial_index": "Initialized at 8dc623c; that run rejected an incorrect anchor-only expansion assertion before returning ranks. Corrected adapter 62f1cd0 reuses the unchanged pinned corpus, vectors, graph, configuration and persistent snapshot."
+  },
+  "corpora": {
+    "personal": {
+      "manifest": {
+        "as_of": "2026-03-02",
+        "configuration": {
+          "distance": "Cosine",
+          "fts": "production default body/title/identifier indices",
+          "max_iterations": 20,
+          "nprobes": 1,
+          "partitions": 1,
+          "rrf": {
+            "candidate_limit": 100,
+            "lexical_weight": 1,
+            "rank_constant": 60,
+            "semantic_weight": 1
+          },
+          "sample_rate": 8,
+          "vector": "IVF_FLAT"
+        },
+        "corpus_sha256": "dfe4206d18b61b10b58e3dae7cd021729912ac9e2d2ff3b05570d57b3729f174",
+        "dataset_id": "personal-knowledge-fixtures-v1",
+        "model": {
+          "dimension": 1024,
+          "model_id": "Qwen/Qwen3-Embedding-0.6B",
+          "model_version": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3:fastembed7.1.0:candle0.11.0:tokenizers0.23.2:last-token:left-padding:l2:exact-text:untruncated-v1",
+          "provider_id": "local-fastembed-candle-cpu-f32",
+          "schema_version": "1"
+        },
+        "preprocessing": "raw unchanged chunk.text, no title/status/date prefix and no query instruction",
+        "root_page_id": "22222222-2222-2222-2222-222222222222",
+        "schema_version": 1,
+        "sources": {
+          "fixture:chunk:bike-old:service": {
+            "chunk_id": "48359b1a01acc382baa35c82556eebb57bfe451ec7c0340d551684aeabfdc585",
+            "indexed_last_edited_time": "2025-02-12T00:00:00Z",
+            "page_id": "f447f0e5-cff8-c91b-21e5-6159f5c47dc0",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          },
+          "fixture:chunk:bike:service": {
+            "chunk_id": "060c93e04ad228ef0325d565988726ee8032b49ce93bbfbce4a3c3030f1fb573",
+            "indexed_last_edited_time": "2026-02-12T00:00:00Z",
+            "page_id": "2195b03c-d08c-9229-9e20-226bcc90a885",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          },
+          "fixture:chunk:energy-decision:decision": {
+            "chunk_id": "cf32c8f0e98e6ebc181555a164fbf64d5abdd5bc893bd4bf0471928b99529c5a",
+            "indexed_last_edited_time": "2026-02-10T00:00:00Z",
+            "page_id": "99b4270e-b51a-646c-374a-bb42f43c6054",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          },
+          "fixture:chunk:garden-old:plan": {
+            "chunk_id": "cfb43c73607ebf8bd6011dcb5e8a8534462f8828d1516b7ee9cedf547593b92e",
+            "indexed_last_edited_time": "2025-08-30T00:00:00Z",
+            "page_id": "6848bf7c-b14d-a35d-b338-95b96bd5f6b8",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          },
+          "fixture:chunk:lighthouse-review:notes": {
+            "chunk_id": "46efb7592f4232f17442ba43ab524a881c588ba83ca531b8da3c90fca0307733",
+            "indexed_last_edited_time": "2026-02-18T00:00:00Z",
+            "page_id": "f69aa94f-7991-8ac3-e981-afeed63e53d5",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          },
+          "fixture:chunk:odling-review:notes": {
+            "chunk_id": "df43f9943ad091a0ee8a53048a42b80375f9df4cd9883e2afd68a7f6456b5ae5",
+            "indexed_last_edited_time": "2026-03-02T00:00:00Z",
+            "page_id": "cf7eb121-9a4f-9f68-b430-dea6c3801072",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          },
+          "fixture:chunk:odling:plan": {
+            "chunk_id": "791f7c6bc519ccb53f33177df39afdde3d14385d1737d9c33b05a139935983ce",
+            "indexed_last_edited_time": "2026-03-02T00:00:00Z",
+            "page_id": "c670c18a-7c71-52e2-7b32-8672e6336e16",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          },
+          "fixture:chunk:odling:watering": {
+            "chunk_id": "b38b8bde03c6c0df72c797d2348f8b5ad6ba7dae5f5b3f4dd55aaf748bd1e478",
+            "indexed_last_edited_time": "2026-03-02T00:00:00Z",
+            "page_id": "c670c18a-7c71-52e2-7b32-8672e6336e16",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          },
+          "fixture:chunk:project-lighthouse-old:overview": {
+            "chunk_id": "7d6571da1cd4b2e874e8c9d409c0e37f5216a190f2de4fef7bd819f72c8c6056",
+            "indexed_last_edited_time": "2025-11-15T00:00:00Z",
+            "page_id": "28870818-9e1f-8831-e16c-3b6f68a41c89",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          },
+          "fixture:chunk:project-lighthouse:decision": {
+            "chunk_id": "c82e394481ce411aaa7fc33ad785812556b5ea1f71f1fb3a551b1da2119a8176",
+            "indexed_last_edited_time": "2026-02-18T00:00:00Z",
+            "page_id": "307bc1bb-e76a-85a3-cf84-1a68e7af7032",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          },
+          "fixture:chunk:project-lighthouse:overview": {
+            "chunk_id": "d2bda5c1dba6bcf6a69821ab4681ae2135a5a00b8060fc00f76a06a3141a89b7",
+            "indexed_last_edited_time": "2026-02-18T00:00:00Z",
+            "page_id": "307bc1bb-e76a-85a3-cf84-1a68e7af7032",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          },
+          "fixture:chunk:reading:queue": {
+            "chunk_id": "a5a19686c9d57ada3df24a9f23cbd70b35bebb73ae5fdc5c0f64c8eb3efb51b8",
+            "indexed_last_edited_time": "2026-01-20T00:00:00Z",
+            "page_id": "515e896e-6ad3-8110-8b73-154d6cdfae88",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          },
+          "fixture:chunk:study:routine": {
+            "chunk_id": "db1aa377eb86be5a686e4e04e5d6cd4337df91f68fe1a0ae52a2ecc0c76b8b38",
+            "indexed_last_edited_time": "2026-01-22T00:00:00Z",
+            "page_id": "560b55ea-7621-7f56-abb4-91a926775f1a",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          },
+          "fixture:chunk:travel:list": {
+            "chunk_id": "6315a1638801c5c4ba04ff53d864f074c8aba8c2e56370aaf44bd6bc49905bc9",
+            "indexed_last_edited_time": "2026-02-01T00:00:00Z",
+            "page_id": "21b8354b-3dca-2b20-c6c9-b4e81dad2caf",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          }
+        },
+        "workspace_id": "44444444-4444-4444-4444-444444444444"
+      },
+      "snapshot": {
+        "index_sha256": "d2f14a7b876219de87b20dde4df1ce179c6b2bcdc4b3f6b8cef614bbeba5bd0b",
+        "inventory_version": 30,
+        "operational_sha256": "d506f062e93f7860444ab58b7622cd8c91e90aafcf9ccdb4205b26884b6b2ee8"
+      }
+    },
+    "exact": {
+      "manifest": {
+        "as_of": "2026-10-01",
+        "configuration": {
+          "distance": "Cosine",
+          "fts": "production default body/title/identifier indices",
+          "max_iterations": 20,
+          "nprobes": 1,
+          "partitions": 1,
+          "rrf": {
+            "candidate_limit": 100,
+            "lexical_weight": 1,
+            "rank_constant": 60,
+            "semantic_weight": 1
+          },
+          "sample_rate": 8,
+          "vector": "IVF_FLAT"
+        },
+        "corpus_sha256": "d7f5af951f33a659bcbb91aef0dbce4bde959d798631b9462b84756136810776",
+        "dataset_id": "exact-identifiers-fictional-v1",
+        "model": {
+          "dimension": 1024,
+          "model_id": "Qwen/Qwen3-Embedding-0.6B",
+          "model_version": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3:fastembed7.1.0:candle0.11.0:tokenizers0.23.2:last-token:left-padding:l2:exact-text:untruncated-v1",
+          "provider_id": "local-fastembed-candle-cpu-f32",
+          "schema_version": "1"
+        },
+        "preprocessing": "raw unchanged chunk.text, no title/status/date prefix and no query instruction",
+        "root_page_id": "22222222-2222-2222-2222-222222222222",
+        "schema_version": 1,
+        "sources": {
+          "fixture:chunk:issue-good:record": {
+            "chunk_id": "09e928d4ebc3f32855a3f891e54095967e8fe01cd27fd17323ca2b5452bf6c04",
+            "indexed_last_edited_time": "2026-10-01T00:00:00Z",
+            "page_id": "85d16765-f734-b5fc-87f8-ef80cc89d805",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          },
+          "fixture:chunk:issue-near:record": {
+            "chunk_id": "8fcbe2fb3ff0012d5a7b9e6f0c64889726d3ec1b527c86690f603b6d99664624",
+            "indexed_last_edited_time": "2026-10-01T00:00:00Z",
+            "page_id": "b7d4b741-4543-3364-3c1c-ed96a5e91671",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          },
+          "fixture:chunk:mixed-good:record": {
+            "chunk_id": "34716eeffca16fe4fb6ff215b0ddc48c78049e8ee12f2102ad23a31726f16ed1",
+            "indexed_last_edited_time": "2026-10-01T00:00:00Z",
+            "page_id": "5859806f-6697-c25c-41f7-0252b9145b67",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          },
+          "fixture:chunk:mixed-near:record": {
+            "chunk_id": "921982fde2157c9bccb649398d1c2fcbcfe43c0f22e8255ea4ee26ee839bc8bf",
+            "indexed_last_edited_time": "2026-10-01T00:00:00Z",
+            "page_id": "17df6a11-d7b5-b201-43af-0afde794f3f6",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          },
+          "fixture:chunk:name-good:record": {
+            "chunk_id": "425b51e3b27da7b21959cffd07fd19ba5c3f3847566c80e4ead863673178717f",
+            "indexed_last_edited_time": "2026-10-01T00:00:00Z",
+            "page_id": "d8bef8a9-0f2d-8aad-263c-41f676f10c8e",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          },
+          "fixture:chunk:name-near:record": {
+            "chunk_id": "76948d5f72a308ac6f84f3d4a9816caa76cc69187a9f204bd59c0fc1461b1122",
+            "indexed_last_edited_time": "2026-10-01T00:00:00Z",
+            "page_id": "7ae439e9-a379-aca2-688d-b3ee6fab40a3",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          },
+          "fixture:chunk:order-good:record": {
+            "chunk_id": "9b4d11afba480727b6e0e8b814490c7d00b7d6ba931bea861b160ea6945f4218",
+            "indexed_last_edited_time": "2026-10-01T00:00:00Z",
+            "page_id": "121ca2c3-f2d7-702c-65d6-5d4353d0a1e7",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          },
+          "fixture:chunk:order-near:record": {
+            "chunk_id": "c8219041c6780165b1cfbb899e1d034d1dc28931e45a2219632b4563c1d17074",
+            "indexed_last_edited_time": "2026-10-01T00:00:00Z",
+            "page_id": "684f0368-4620-8ddf-3eee-23c80d9c817b",
+            "root_page_id": "22222222-2222-2222-2222-222222222222"
+          }
+        },
+        "workspace_id": "44444444-4444-4444-4444-444444444444"
+      },
+      "snapshot": {
+        "index_sha256": "5af67ae9485f9e8ad31d67ebd85f09558246586d3a11ef808a5b3a288f80806e",
+        "inventory_version": 22,
+        "operational_sha256": "3d75bc2469db33997e1e99b2921d60e9814b021545622c2ac6d6fa534a79089a"
+      }
+    }
+  },
+  "determinism": {
+    "personal-ranking": {
+      "byte_identical_repeat": true,
+      "sha256": "c4e7bb4354091f9cc3022cd7488518a35756c5b700e4445e15ccf0fb31d80833"
+    },
+    "exact-ranking": {
+      "byte_identical_repeat": true,
+      "sha256": "70c6bbc5865af85678de2fe571057292b46fcf90ccda359e1d5084a9ea1d6ef2"
+    },
+    "graph": {
+      "byte_identical_repeat": true,
+      "sha256": "77064bab46ff7449b1f0350fa4c9eb48f05a6786a70d21027cb28cfb7daa8e43"
+    }
+  },
+  "initial_adapter_assertion_failure": {
+    "cause": "Chunk anchor expands the whole heading section; initial adapter incorrectly demanded anchor-only text. Corrected validation and added multi-chunk fixture; no corpus/vector/index/ranking changes.",
+    "initialization_commit": "8dc623c55395cf1c2d8ad0726801cde26e670f94",
+    "measured_adapter_commit": "62f1cd085f4c1e2fa3eb2d5606899b2697f99f11"
+  },
+  "exact_gate": [
+    "fts: exact top-1 8/8; top-3 8/8; EN 4, SV 4; PASS",
+    "hybrid: exact top-1 7/8; top-3 8/8; EN 4, SV 4; PASS"
+  ]
+}
