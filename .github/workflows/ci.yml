@@ -336,6 +336,9 @@ jobs:
       - name: Test cached image identity rejection
         run: python3 scripts/test-container-smoke.py
 
+      - name: Verify actual Docker context excludes runtime and private data
+        run: python3 scripts/test-container-context.py
+
       - name: Read canonical image identity
         id: identity
         run: |

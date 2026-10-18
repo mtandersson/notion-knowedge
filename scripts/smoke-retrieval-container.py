@@ -102,6 +102,18 @@ def certificates(directory):
         "-extfile", str(directory / "extensions"), "-out", str(directory / "server.pem"), **quiet)
 
 
+def compose_configuration(model):
+    # Render the shipped private role without inheriting any caller's service
+    # settings or printing a Compose document containing credential fields.
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("NK_") and key != "NOTION_TOKEN"}
+    env.update({"NOTION_TOKEN": "container-fixture-credential", "NK_MODEL_ASSETS": str(model.resolve()),
+        "NK_NOTION_SCOPE_WORKSPACE_ID": fixture.WORKSPACE, "NK_NOTION_SCOPE_ROOTS": fixture.ROOT,
+        "NK_WEBHOOK_INTEGRATION_ID": fixture.INTEGRATION, "NK_WEBHOOK_SUBSCRIPTION_ID": fixture.SUBSCRIPTION,
+        "NK_WEBHOOK_VERIFICATION_TOKEN": fixture.SIGNING_KEY})
+    run(str(ROOT / "scripts/compose-dev.sh"), "-f", "compose.indexer.yaml", "config", "--quiet", env=env)
+
+
 class Stack:
     def __init__(self, image, model, ca):
         self.image, self.model, self.ca = image, model, ca
@@ -273,6 +285,7 @@ def main():
     parser.add_argument("--download-assets", action="store_true")
     args = parser.parse_args()
     assets(args.assets, args.download_assets)
+    compose_configuration(args.assets)
     if not args.prebuilt:
         revision = run("git", "rev-parse", "HEAD", capture_output=True).stdout.strip()
         docker("build", "--build-arg", f"VERSION={common.workspace_version()}", "--build-arg",

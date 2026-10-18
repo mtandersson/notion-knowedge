@@ -2,11 +2,12 @@
 
 This image packages the real `notion-knowledge-server` composition root, MCP
 transports and the `webhook-worker` feature: local Qwen, LanceDB and SQLite. The
-authoritative indexing worker runs in process under HTTP supervision. The default image advertises the read-only tools
+authoritative indexing worker runs in process under HTTP supervision. Defaults
+advertise the read-only tools
 `knowledge_search`, `knowledge_get` and `knowledge_sync_status`. Retrieval
 and authoritative scope are unconfigured: search/get report unavailable, and
-status reports null local-state fields. Explicit configured roles below load external assets and operate real persistent
-state. Building the feature does not automatically download weights, grant
+status reports null local-state fields. Explicit configured roles below load
+external assets and operate real persistent state. Building the feature does not automatically download weights, grant
 content access or initialize an OAuth reader index. There is no separate
 indexing worker executable.
 
@@ -58,8 +59,10 @@ defaults to `unknown`; release builds must supply the Git commit. The smoke
 script derives VERSION directly from Cargo.toml. See [health diagnostics](diagnostics.md)
 for the running HTTP dependency report; `--check` validates configuration only.
 The smoke script derives these values from Cargo.toml and HEAD. Do not pass
-credentials through build arguments. `.dockerignore` allows only Cargo manifests,
-Cargo.lock and Rust source files under crates into the context. Environment
+credentials through build arguments. `.dockerignore` allows only Cargo manifests/lockfile, Rust and SQL source,
+and required vendored source/license metadata into the context. Its real Docker
+context probe rejects nested model assets, indexes, state, environment and key
+files, including beneath an otherwise required crate/vendor directory. Environment
 files, keys, model weights, derived indexes, Git metadata and build outputs are
 excluded. When adding other required source assets, review the allowlist rather
 than broadening it to local runtime data.
