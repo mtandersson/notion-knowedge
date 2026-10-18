@@ -22,6 +22,35 @@ fn components() -> [&'static str; 4] {
 #[tokio::main]
 async fn main() -> ExitCode {
     let all_args: Vec<String> = env::args().skip(1).collect();
+    if all_args.iter().any(|arg| arg.starts_with("--index")) {
+        let command = match notion_knowledge_server::index_command::Command::parse(&all_args) {
+            Ok(c) => c,
+            Err(_) => {
+                eprintln!("Index argument error.");
+                return ExitCode::from(2);
+            }
+        };
+        #[cfg(all(unix, feature = "webhook-worker"))]
+        {
+            let stop = tokio_util::sync::CancellationToken::new();
+            let signal = stop.clone();
+            let task = tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                signal.cancel();
+            });
+            let output =
+                notion_knowledge_server::index_command::runtime::configured(command, stop).await;
+            task.abort();
+            println!("{}", output.json);
+            return ExitCode::from(output.exit);
+        }
+        #[cfg(not(all(unix, feature = "webhook-worker")))]
+        {
+            let _ = command;
+            eprintln!("Index maintenance requires Unix and the webhook-worker feature.");
+            return ExitCode::from(2);
+        }
+    }
     if all_args.iter().any(|arg| arg.starts_with("--reconcile")) {
         let command =
             match notion_knowledge_server::reconciliation_command::Command::parse(&all_args) {

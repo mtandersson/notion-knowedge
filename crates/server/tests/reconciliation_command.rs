@@ -1,4 +1,5 @@
 #![cfg(all(unix, feature = "webhook-worker"))]
+// Index maintenance shares these real authoritative HTTP / SQLite / Lance fixtures.
 //! Credential-free, real Notion HTTP -> real SQLite/LanceDB integration.
 use notion_knowledge_core::{
     backend::PageId,
@@ -1980,5 +1981,246 @@ async fn installed_alias_persistence_failure_replays_durable_repair_without_muta
             .unwrap()
             .unwrap(),
         history
+    );
+}
+
+#[tokio::test]
+async fn index_commands_provision_reuse_and_rebuild_search_without_changing_authoritative_content()
+{
+    use notion_knowledge_retrieval::chunks::GuardedChunkTable;
+    use notion_knowledge_server::index_command::{
+        Command as IndexCommand, runtime::execute as index,
+    };
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    counts(
+        &f.command(&http, &["--reconcile", "apply", "seed-index"])
+            .await,
+        3,
+        0,
+        0,
+    );
+    let body_reads = http.body_reads.load(Ordering::SeqCst);
+    let embeddings = f.provider.count.load(Ordering::SeqCst);
+    let runtime = f.open(&http, OpenMode::ReadOnly).await;
+    let table = GuardedChunkTable::bind(
+        &f.settings.index,
+        "chunks",
+        f.provider.metadata().clone(),
+        runtime.coordinator.clone(),
+    )
+    .unwrap();
+    assert!(
+        table.search_snapshot().await.is_err(),
+        "population alone must not imply trained ANN"
+    );
+    let owned = runtime.coordinator.owned_page_ids().unwrap();
+    drop(table);
+    drop(runtime);
+    for action in ["ensure", "ensure", "rebuild"] {
+        let command = IndexCommand::parse(&["--index".into(), action.into()]).unwrap();
+        let report = index(
+            command,
+            &f.settings,
+            &f.state,
+            authority(),
+            f.provider.metadata().clone(),
+            CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(report.exit, 0, "{report:?}");
+        assert_eq!(
+            report.json,
+            json!({"operation":"index","status":"complete"})
+        );
+        let runtime = f.open(&http, OpenMode::ReadOnly).await;
+        assert_eq!(runtime.coordinator.owned_page_ids().unwrap(), owned);
+        let table = GuardedChunkTable::bind(
+            &f.settings.index,
+            "chunks",
+            f.provider.metadata().clone(),
+            runtime.coordinator.clone(),
+        )
+        .unwrap();
+        let snapshot = table.search_snapshot().await.unwrap();
+        assert_eq!(snapshot.count_rows().await.unwrap(), 4);
+        let hits = snapshot.vector_query(&[1.0, 0.0, 0.0], 3, 1).await.unwrap();
+        assert!(!hits.is_empty());
+        assert!(hits.iter().all(|hit| owned.contains(&hit.page_id)));
+    }
+    assert_eq!(http.body_reads.load(Ordering::SeqCst), body_reads);
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), embeddings);
+    counts(
+        &f.command(&http, &["--reconcile", "status", "seed-index"])
+            .await,
+        3,
+        0,
+        0,
+    );
+}
+
+#[tokio::test]
+async fn index_commands_refuse_missing_foreign_cancelled_and_busy_state() {
+    use notion_knowledge_server::index_command::{
+        Command as IndexCommand, runtime::execute as index,
+    };
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    let before = f.snapshot();
+    let foreign =
+        EmbeddingMetadata::new("foreign".into(), "model".into(), "revision".into(), 3).unwrap();
+    for (state, scope, metadata, stop, exit) in [
+        (
+            f.dir.path().join("missing.sqlite"),
+            authority(),
+            f.provider.metadata().clone(),
+            CancellationToken::new(),
+            2,
+        ),
+        (
+            f.state.clone(),
+            authority(),
+            foreign,
+            CancellationToken::new(),
+            2,
+        ),
+        (
+            f.state.clone(),
+            LifecycleScope {
+                generation: 2,
+                ..authority()
+            },
+            f.provider.metadata().clone(),
+            CancellationToken::new(),
+            2,
+        ),
+        (
+            f.state.clone(),
+            authority(),
+            f.provider.metadata().clone(),
+            {
+                let s = CancellationToken::new();
+                s.cancel();
+                s
+            },
+            5,
+        ),
+    ] {
+        let report = index(
+            IndexCommand::Ensure,
+            &f.settings,
+            &state,
+            scope,
+            metadata,
+            stop,
+        )
+        .await;
+        assert_eq!(report.exit, exit, "{report:?}");
+        assert_eq!(f.snapshot(), before);
+    }
+    let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+    let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
+    let lease = runtime.coordinator.state().acquire_lease(now, 120).unwrap();
+    let before = f.snapshot();
+    let report = index(
+        IndexCommand::Rebuild,
+        &f.settings,
+        &f.state,
+        authority(),
+        f.provider.metadata().clone(),
+        CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(report.exit, 4);
+    assert_eq!(report.json["status"], "busy");
+    assert_eq!(f.snapshot(), before);
+    runtime
+        .coordinator
+        .state()
+        .release_lease(&lease, now)
+        .unwrap();
+}
+
+#[tokio::test]
+async fn index_rebuild_refuses_foreign_vector_distance_without_replacing_it() {
+    use notion_knowledge_retrieval::chunks::{
+        GuardedChunkTable, VectorDistance, VectorIndexConfig,
+    };
+    use notion_knowledge_server::index_command::{
+        Command as IndexCommand, runtime::execute as index,
+    };
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    counts(
+        &f.command(&http, &["--reconcile", "apply", "seed-distance"])
+            .await,
+        3,
+        0,
+        0,
+    );
+    let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+    let table = GuardedChunkTable::bind(
+        &f.settings.index,
+        "chunks",
+        f.provider.metadata().clone(),
+        runtime.coordinator.clone(),
+    )
+    .unwrap();
+    let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
+    let lease = runtime.coordinator.state().acquire_lease(now, 120).unwrap();
+    let config = VectorIndexConfig {
+        distance: VectorDistance::L2,
+        num_partitions: Some(1),
+        ..Default::default()
+    };
+    table
+        .ensure_vector_index(config.clone(), lease.clone(), Arc::new(move || now))
+        .await
+        .unwrap();
+    runtime
+        .coordinator
+        .state()
+        .release_lease(&lease, now)
+        .unwrap();
+    for command in [IndexCommand::Ensure, IndexCommand::Rebuild] {
+        let report = index(
+            command,
+            &f.settings,
+            &f.state,
+            authority(),
+            f.provider.metadata().clone(),
+            CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(report.exit, 3, "{report:?}");
+    }
+    let lease = runtime.coordinator.state().acquire_lease(now, 120).unwrap();
+    // An exact L2 ensure can still open and optimize: rejected Cosine maintenance
+    // did not replace the existing persisted distance configuration.
+    table
+        .ensure_vector_index(config, lease.clone(), Arc::new(move || now))
+        .await
+        .unwrap();
+    runtime
+        .coordinator
+        .state()
+        .release_lease(&lease, now)
+        .unwrap();
+    assert_eq!(
+        table
+            .search_snapshot()
+            .await
+            .unwrap()
+            .count_rows()
+            .await
+            .unwrap(),
+        4
+    );
+    counts(
+        &f.command(&http, &["--reconcile", "status", "seed-distance"])
+            .await,
+        3,
+        0,
+        0,
     );
 }
