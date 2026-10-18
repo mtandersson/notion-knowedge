@@ -6,11 +6,6 @@
 !crates/**/Cargo.toml
 !crates/**/*.rs
 !crates/**/*.sql
-!vendor/**/Cargo.toml
-!vendor/**/Cargo.toml.orig
-!vendor/**/*.rs
-!vendor/**/*.md
-!vendor/**/LICENSE
 # Never allow common credential files, even inside an otherwise allowed tree.
 **/.env*
 **/*.pem
