@@ -124,7 +124,8 @@ and authorizing person, private bootstrap, HTTPS proxy and reauthentication.
 Complete configuration enables Authorization Code + PKCE S256, encrypted Notion
 credentials, request-bound read-only content and immediate local token logout.
 Discovery settings alone authenticate nobody. A missing content scope or index
-never grants private data; the stock container remains a separate bootstrap.
+never grants private data; the feature-built container still requires explicit
+[production role and external asset configuration](docs/container.md).
 See [OAuth end-to-end evidence](docs/oauth-e2e-tests.md) and perform a real
 operator-controlled deployed ChatGPT smoke before relying on the connection.
 

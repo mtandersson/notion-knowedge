@@ -125,7 +125,37 @@ impl SqliteSyncStateStore {
             fs::create_dir_all(parent).map_err(|_| SyncStateError::Unavailable)?;
         }
 
-        let connection = Connection::open(path).map_err(map_sqlite_error)?;
+        // SQLite otherwise creates new databases with the ambient process
+        // umask (often 0644). Protect the inode atomically before SQLite writes
+        // anything; never repair permissions on an existing operator file.
+        let mut create = fs::OpenOptions::new();
+        create.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            create.mode(0o600);
+        }
+        match create.open(path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !fs::symlink_metadata(path)
+                    .map_err(|_| SyncStateError::Unavailable)?
+                    .is_file()
+                {
+                    return Err(SyncStateError::Unavailable);
+                }
+            }
+            Err(_) => return Err(SyncStateError::Unavailable),
+        }
+        // No CREATE fallback: a removed/replaced path must not reappear with
+        // SQLite's default permissions or follow a substituted final symlink.
+        let connection = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(map_sqlite_error)?;
         Self::from_connection(connection)
     }
 

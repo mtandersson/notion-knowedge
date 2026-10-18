@@ -131,6 +131,7 @@ class Stack:
         }
         options = ["--name", name, "--read-only", "--network", self.network,
             "--user", "65532:65532", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+            "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=268435456,mode=0700,uid=65532,gid=65532",
             "--mount", f"type=volume,src={self.index},dst={DATA}/index",
             "--mount", f"type=volume,src={self.state},dst={DATA}/state",
             "--mount", f"type=bind,src={model or self.model},dst={DATA}/models,readonly",
@@ -164,7 +165,14 @@ class Stack:
         self.helper("admit", "--event", event, network=True)
         self.wait(lambda: self.helper("page", check=False).returncode == 0,
                   "Signed hint did not produce an authoritative committed page", name)
+        self.wait(lambda: self.helper("disposable", check=False).returncode == 0,
+                  "Fixture work did not reach a completed no-write state", name)
         checkpoint = json.loads(self.helper("page").stdout)
+        permissions = json.loads(self.helper("permissions").stdout)
+        print(f"Actual runtime storage permissions: {permissions}", flush=True)
+        common.require(permissions == {"index": {"uid": 65532, "gid": 65532, "mode": "0o700"},
+            "state": {"uid": 65532, "gid": 65532, "mode": "0o600"}},
+            "Actual indexing path did not create private operator-owned storage")
         docker("stop", "--time", "30", name, stdout=subprocess.DEVNULL)
         common.cleanup(name)
         return checkpoint
@@ -208,7 +216,9 @@ class Stack:
                 while time.monotonic() < deadline:
                     if selector.select(timeout=1):
                         line = process.stdout.readline()
-                        common.require(line, "Feature-built MCP reader exited before a protocol response")
+                        if not line:
+                            diagnostics.seek(0)
+                            raise RuntimeError("Feature-built MCP reader exited: " + diagnostics.read()[-2000:])
                         reply = json.loads(line)
                         if reply.get("id") == value["id"]:
                             result = common.response(reply, value["id"])
@@ -302,8 +312,20 @@ def main():
             common.require(stack.retrieve("replacement") == first, "Container replacement lost retrieval state")
             common.require(json.loads(stack.helper("snapshot").stdout) == before,
                            "Replacement reader mutated the persistent mounts")
+            # The supported production rebuild preserves ALL operational rows
+            # (except the maintenance lease itself), including actual hint and
+            # page-commit receipts. It only retrains derived ANN state.
+            ledgers = json.loads(stack.helper("ledgers").stdout)
+            common.require(ledgers["webhook_inbox"] and ledgers["index_commit_receipts"],
+                           "Supported rebuild must preserve actual nonempty operational receipts")
+            stack.maintain("retained-state", action="rebuild")
+            common.require(json.loads(stack.helper("ledgers").stdout) == ledgers,
+                           "ANN rebuild changed durable operational ledger/checkpoint rows")
+            common.require(stack.retrieve("retained-state") == first,
+                           "Supported retained-state ANN rebuild changed source-linked retrieval")
             # Remove derived index AND its bound operational state, with no live
             # writers/pending work. The independent authoritative fixture remains.
+            stack.helper("disposable")
             for name in list(stack.containers):
                 if name != source:
                     common.cleanup(name)

@@ -47,7 +47,8 @@ and exact matching scope; its [request-bound source](oauth-content.md) authorize
 each content disclosure. Anonymous and discovery-only HTTP leave retrieval
 unavailable without opening the private index, model or state, including lazy
 sync-status readers. OAuth content never installs webhook/reconciliation writers.
-The stock container still does not package the production model/index path (#145).
+The [production image](container.md) packages this feature; exact model assets
+and compatible index/state remain externally provisioned.
 
 ## Provision and rebuild the derived vector index
 

@@ -17,6 +17,10 @@ services:
     ports:
       - "127.0.0.1:${NK_COMPOSE_PORT:-3000}:3000"
     read_only: true
+    # Lance creates private scratch/spill directories even with external indexes.
+    # This is disposable, bounded scratch; never authoritative or durable state.
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=268435456,mode=0700,uid=65532,gid=65532
     user: "65532:65532"
     cap_drop:
       - ALL

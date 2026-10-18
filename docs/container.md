@@ -1,13 +1,14 @@
-# Current server container
+# Production server and indexing container
 
-This image packages the real `notion-knowledge-server` composition root and its
-current MCP transports. The default image advertises the read-only tools
+This image packages the real `notion-knowledge-server` composition root, MCP
+transports and the `webhook-worker` feature: local Qwen, LanceDB and SQLite. The
+authoritative indexing worker runs in process under HTTP supervision. The default image advertises the read-only tools
 `knowledge_search`, `knowledge_get` and `knowledge_sync_status`. Retrieval
 and authoritative scope are unconfigured: search/get report unavailable, and
-status reports null local-state fields. This bootstrap does not load models or
-process indexes; reserved data locations below are not consumed. Parent issue #104 remains
-open until follow-on #145 integrates and verifies those adapters in the image.
-There is no separate indexing worker executable today.
+status reports null local-state fields. Explicit configured roles below load external assets and operate real persistent
+state. Building the feature does not automatically download weights, grant
+content access or initialize an OAuth reader index. There is no separate
+indexing worker executable.
 
 ## Build and update
 
@@ -34,17 +35,19 @@ job. Its HTTP ports are dynamically allocated and published on loopback only.
 
 The Dockerfile pins the Rust 1.98.1 Bookworm builder and Debian 12 distroless
 C++ runtime by immutable multi-platform image index digests. The build uses
-`cargo build --release --locked -p notion-knowledge-server` and the committed
+`cargo build --release --locked -p notion-knowledge-server --features webhook-worker` and the committed
 Cargo.lock. This makes base layers, toolchain and dependency versions repeatable;
 it does not promise byte-identical OCI archives across Docker versions or
 platforms. Linux amd64 is verified in CI; other architectures require their
-own final-image smoke before being supported.
+own final-image smoke before being supported. Protobuf compiler and well-known
+schemas (`protobuf-compiler` and `libprotobuf-dev`, pinned Bookworm
+`3.21.12-3+deb12u1`) are build-only dependencies; neither enters the runtime.
 
 To update, select compatible builder/runtime releases, resolve their immutable
 index digests with `docker buildx imagetools inspect IMAGE:TAG`, change both
 Dockerfile references, and rerun the smoke script. Check the printed `ldd` output
-from the builder: the current binary needs the ELF loader, libc, libm and
-libgcc_s supplied by the distroless C++ runtime. If future adapters add dynamic
+from the builder and exercise the actual model/index pipeline in the final
+distroless C++ runtime. If future adapters add dynamic
 libraries, add them to the runtime deliberately and verify the final executable.
 The Nix flake remains the development/ordinary Rust CI toolchain; the pinned
 container builder defines the image toolchain independently.
@@ -123,8 +126,9 @@ docker run --rm -i --read-only --network=none notion-knowledge:local
 For an MCP client's stdio configuration, use `docker` as the command and
 `["run", "--rm", "-i", "--read-only", "--network=none", "notion-knowledge:local"]`
 as its arguments. The bootstrap requires no Notion token. `--network=none`
-is appropriate for this current runtime; future Notion adapters will need
-outbound connectivity.
+is appropriate for unconfigured diagnostics. Configured authoritative reads,
+indexing and OAuth need controlled Notion connectivity; model loading/inference
+itself remains offline.
 
 One-shot configuration validation:
 
@@ -163,23 +167,23 @@ HTTP authority and `http://localhost:3000` at the listener port. With bind
 `0.0.0.0`, browser clients should use `http://localhost:3000` as their Origin;
 `http://127.0.0.1:3000` is not an allowed Origin in this configuration. Clients
 without Origin are accepted. If mapping a different host port, allowed Origins
-still use the *container listener port*. The stock Compose example is a loopback bootstrap. Production
-[OAuth and public-host HTTPS setup](oauth-production-setup.md) requires separate
-explicit configuration; its feature-built retrieval binary and assets are not
-packaged by this image. Keep the backend private behind the reviewed proxy.
+still use the *container listener port*. The stock Compose example is a loopback bootstrap. The integration indexer override and production
+[OAuth and public-host HTTPS setup](oauth-production-setup.md) require separate
+explicit roles below; the model assets remain externally provisioned. Keep the backend private behind the reviewed proxy.
 
-## Reserved external data locations
+## Actual external data locations
 
 The runtime uses numeric UID/GID **65532:65532**. The image contains empty,
 writable directories owned by that user:
 
-| Container path | Reserved purpose |
+| Container path | Consumed configuration |
 | --- | --- |
-| `/var/lib/notion-knowledge/index` | Rebuildable retrieval indexes |
-| `/var/lib/notion-knowledge/state` | Derived synchronization state |
-| `/var/lib/notion-knowledge/models` | Local model files/cache |
+| `/var/lib/notion-knowledge/index` | `NK_WEBHOOK_INDEX_DIR`; bound chunks, vectors, FTS and ANN |
+| `/var/lib/notion-knowledge/state/state.sqlite` | `NK_WEBHOOK_STATE_FILE`; operational state/checkpoints and durable ledgers |
+| `/var/lib/notion-knowledge/models` | `NK_WEBHOOK_QWEN_ASSETS`; exact public weights/config/tokenizer, mounted read-only |
 
-These are future integration locations, not active bootstrap settings. No models
+Index/state directories are mode 0700 and newly created SQLite is 0600.
+Model assets must be readable by UID 65532. No models
 or indexes are baked into the image. A fresh Docker named volume mounted at one
 of these paths inherits the directory ownership. For bind mounts, create the
 host directories and grant UID/GID 65532 appropriate access before mounting;
@@ -188,11 +192,142 @@ Docker does not fix bind-mount ownership. For example, on a Linux host:
 ```sh
 mkdir -p runtime/index runtime/state runtime/models
 sudo chown 65532:65532 runtime/index runtime/state runtime/models
-# Add these flags to the HTTP invocation when testing future adapter integration:
+sudo chmod 700 runtime/index runtime/state
+# Add these flags to the explicitly configured runtime invocation:
 # --mount type=bind,src="$PWD/runtime/index",dst=/var/lib/notion-knowledge/index
 # --mount type=bind,src="$PWD/runtime/state",dst=/var/lib/notion-knowledge/state
-# --mount type=bind,src="$PWD/runtime/models",dst=/var/lib/notion-knowledge/models
+# --mount type=bind,src="$PWD/runtime/models",dst=/var/lib/notion-knowledge/models,readonly
 ```
 
 `--read-only` protects the image filesystem; explicit writable mounts remain
 writable. The current bootstrap runs without any mounts and writes no data.
+
+## Production model and indexing acceptance
+
+After the ordinary image smoke, run the real production pipeline smoke with
+public assets provisioned outside the checkout:
+
+```sh
+python3 scripts/smoke-retrieval-container.py --prebuilt \
+  --image notion-knowledge:smoke --assets /absolute/public-qwen-assets
+```
+
+`--download-assets` explicitly fetches the public pinned revision and verifies
+all three checksums against the production provider source. CI uses it with
+`--assets "$RUNNER_TEMP/nk-qwen-assets"`. Weights stay outside BuildKit and its
+exported caches; no model, index data or credentials enter image layers.
+The test also requires OpenSSL. Its pinned disposable Python image supplies only
+the local HTTPS source fixture and read-only volume probes, never a fake worker.
+
+The smoke resolves the unchanged `https://api.notion.com` endpoint only inside
+an internal Docker network to a disposable TLS fixture with an ephemeral CA.
+No ports are published, no real provider credentials are supplied and no
+production endpoint override or fake embedding provider is installed. It runs
+signed webhook admission, the actual supervised worker, real offline Qwen
+inference and guarded Lance/SQLite commits. It then invokes the shipping
+`--index ensure` command and source-filtered MCP semantic/lexical/hybrid search
+and fresh source get. It checks real native loading, missing/tampered assets,
+private storage ownership, read-only retrieval bytes and reader replacement.
+Its destructive rebuild operates only on isolated, quiescent fixture volumes
+with no accepted writes; the independent authoritative source stays intact.
+It never touches an existing Compose project, OAuth grant or production state.
+
+Lance requires writable scratch even when its durable index is external.
+Configured runtime invocations therefore need a private, bounded disposable
+`/tmp`, while the image root remains read-only. Compose and the fixture use:
+
+```sh
+--tmpfs /tmp:rw,nosuid,nodev,noexec,size=268435456,mode=0700,uid=65532,gid=65532
+```
+
+256 MiB is the example/fixture scratch cap, not a general corpus capacity or
+production memory guarantee. A spill exceeding it fails instead of filling the
+image filesystem. Size scratch and process/container resource limits for the
+actual workload and acceptance policy. Scratch is neither authoritative data
+nor persistent operation state.
+
+## Supported roles and initial indexing
+
+The same feature-built executable supports distinct configurations:
+
+1. **Private integration indexer:** `--http`, verified webhook configuration,
+   trusted scope and offline assets. It supervises the worker in process. Its
+   anonymous MCP endpoint discloses no private indexed content. Publish only the
+   reviewed webhook route through the HTTPS boundary.
+2. **Trusted local reader/operator:** stdio with `NK_RETRIEVAL=true`, matching
+   integration scope/assets and compatible existing state. Local `--reconcile`
+   and `--index` commands use the production authority as one-shot operators.
+3. **Public OAuth reader:** `--http`, complete [OAuth setup](oauth-production-setup.md),
+   matching scope and `NK_RETRIEVAL=true`. Content uses the approved request-bound
+   grant. This OAuth process does not accept the indexer's integration credential
+   or run an integration webhook/reconciliation writer. Keep grant key/state
+   private, persistent and separate from disposable retrieval storage; never share
+   the grant runtime across replicas. This topology does not claim installed
+   OAuth mutation/file ingestion (#441/#446).
+
+For an actual private indexer, put configuration in a local ignored `.env`,
+never image build arguments. Supply `NOTION_TOKEN`, the exact
+`NK_NOTION_SCOPE_WORKSPACE_ID` and comma-separated `NK_NOTION_SCOPE_ROOTS`,
+verified `NK_WEBHOOK_INTEGRATION_ID`, `NK_WEBHOOK_SUBSCRIPTION_ID`,
+`NK_WEBHOOK_VERIFICATION_TOKEN`, and an absolute `NK_MODEL_ASSETS` directory
+provisioned from [local Qwen](local-qwen.md). Scope exclusions/generation must
+match every reader/operator sharing the derived state. Then:
+
+```sh
+scripts/compose-dev.sh -f compose.indexer.yaml config --quiet
+scripts/compose-dev.sh -f compose.indexer.yaml up -d --build
+```
+
+This override consumes the named index/state volumes and a read-only model bind;
+it refuses to create a missing host asset directory. After startup creates an
+empty compatible table, populate it through signed authoritative hints or the
+existing [manual reconciliation](manual-reconciliation.md) command. Stop
+competing writers before an initial operator population, then run:
+
+```sh
+scripts/compose-dev.sh -f compose.indexer.yaml stop
+scripts/compose-dev.sh -f compose.indexer.yaml run --rm -T --no-deps \
+  -e NK_WEBHOOK_WORKER=false -e NK_WEBHOOK_MODE=disabled \
+  notion-knowledge --reconcile apply initial-population-1
+scripts/compose-dev.sh -f compose.indexer.yaml run --rm -T --no-deps \
+  -e NK_WEBHOOK_WORKER=false -e NK_WEBHOOK_MODE=disabled \
+  notion-knowledge --index ensure
+scripts/compose-dev.sh -f compose.indexer.yaml up -d --no-build
+```
+
+Use a new reconciliation run ID for a new inventory; resume an interrupted run
+rather than discarding receipts. `--index ensure` trains/optimizes the production
+Cosine IVF_FLAT index after real vectors exist. Configure the separate reader
+over the same compatible paths; read activation never populates or repairs
+state. Trusted stdio uses `docker run -i`, the external mounts/scope above,
+`NK_RETRIEVAL=true`, private scratch and controlled Notion connectivity, with no
+HTTP argument and no enabled webhook worker. Verify [source-filtered search/get](installed-retrieval.md).
+Local static bearer mode on a non-loopback container listener cannot substitute
+for production OAuth.
+
+## Updates and safe recovery
+
+Stop writers and back up operational SQLite, private OAuth grant/key state and
+configuration before image replacement. Build with canonical VERSION and the new
+commit REVISION, run both final-image smokes and inspect model/vector identity
+compatibility. Recreate the container while retaining correctly owned mounts.
+Existing compatible state is reopened; missing/changed assets or foreign bindings
+fail rather than downloading, falling back or attaching a new identity to old
+vectors. Existing unsafe permissions are not silently repaired; inspect their
+provenance, stop users and explicitly provision the documented owner/modes.
+
+For a compatible **ANN-only** rebuild, keep all canonical chunks and the entire
+operational database, stop competing writers and run `--index rebuild`. This
+replaces derived ANN state through the guarded coordinator/lease and preserves
+receipts, checkpoints and durable operation ledgers. It does not re-embed chunks
+under a different model. Do not delete operational SQLite to change model
+identity; use a separately supported, audited re-embedding/recovery procedure
+before that migration. A same-dimensional revision is still an identity change.
+
+Production state can include accepted-write idempotency/audit records and pending
+durable mutation-refresh work, and configured OAuth grants have their own private
+persistent paths. These are not disposable retrieval caches. Preserve them and
+resolve/drain pending work during recovery. `docker compose down -v` is not an
+update or general rebuild procedure. The automated fixture discards only its
+isolated, completed derived index/checkpoint volumes with no accepted writes;
+its independent public source is indexed again from scratch.

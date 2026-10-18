@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 import sqlite3
 import ssl
+import stat
 import urllib.parse
 from datetime import datetime, timezone
 
@@ -76,7 +77,7 @@ class Notion(http.server.BaseHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["serve", "page", "snapshot", "health", "admit"])
+    parser.add_argument("action", choices=["serve", "page", "snapshot", "health", "admit", "permissions", "ledgers", "disposable"])
     parser.add_argument("--event")
     args = parser.parse_args()
     if args.action == "serve":
@@ -110,6 +111,32 @@ def main():
             if not row or not row[0] or row[1] != 0:
                 raise SystemExit(1)
             print(json.dumps({"content_hash": row[0], "tombstoned": False}))
+    elif args.action in ("ledgers", "disposable"):
+        with sqlite3.connect("file:/state/state.sqlite?mode=ro", uri=True) as state:
+            names = {row[0] for row in state.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+            if args.action == "disposable":
+                # Only a no-write, completed read-hint fixture may discard its
+                # checkpoint pair. Production ledgers are never disposable.
+                for name in ("mutation_refresh", "mutation_claims"):
+                    if name in names and state.execute(f'SELECT count(*) FROM "{name}"').fetchone()[0] != 0:
+                        raise SystemExit("fixture has durable mutation work; refusing destructive reset")
+                if state.execute("SELECT count(*) FROM webhook_inbox WHERE state != 2").fetchone()[0] != 0:
+                    raise SystemExit(1)
+                if state.execute("SELECT count(*) FROM webhook_page_members").fetchone()[0] != 0:
+                    raise SystemExit(1)
+                print(json.dumps({"disposable": True}))
+            else:
+                ledgers = {}
+                for name in sorted(names - {"reconciliation_lease"}):
+                    escaped = name.replace('"', '""')
+                    rows = [[value.hex() if isinstance(value, bytes) else value for value in row]
+                            for row in state.execute(f'SELECT * FROM "{escaped}"')]
+                    ledgers[name] = sorted(rows, key=json.dumps)
+                print(json.dumps(ledgers, sort_keys=True))
+    elif args.action == "permissions":
+        print(json.dumps({name: {"uid": file.stat().st_uid, "gid": file.stat().st_gid,
+            "mode": oct(stat.S_IMODE(file.stat().st_mode))} for name, file in {
+                "index": Path("/index"), "state": Path("/state/state.sqlite")}.items()}))
     else:
         files = {}
         for directory in (Path("/index"), Path("/state")):

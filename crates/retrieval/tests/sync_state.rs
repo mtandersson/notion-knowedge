@@ -12,6 +12,52 @@ use rusqlite::Connection;
 
 static NEXT_DB: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(unix)]
+#[test]
+fn database_creation_is_private_and_reopen_preserves_operator_permissions_and_content() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let db = TestDb::new("private-creation");
+    let page = PageSyncState::present("page".into(), "hash".into(), None).unwrap();
+    let store = SqliteSyncStateStore::open(db.path()).unwrap();
+    store.put_page_state(&page).unwrap();
+    drop(store);
+    let created = fs::metadata(db.path()).unwrap();
+    assert_eq!(created.mode() & 0o777, 0o600);
+    assert_eq!(
+        created.uid(),
+        fs::metadata(db.path().parent().unwrap()).unwrap().uid()
+    );
+    // Existing permissions are never silently changed to make read activation
+    // appear safe; its separate private-storage validation still owns that gate.
+    fs::set_permissions(db.path(), fs::Permissions::from_mode(0o640)).unwrap();
+    let reopened = SqliteSyncStateStore::open(db.path()).unwrap();
+    assert_eq!(reopened.page_state("page").unwrap(), Some(page));
+    let after = fs::metadata(db.path()).unwrap();
+    assert_eq!(after.mode() & 0o777, 0o640);
+    assert_eq!(
+        (after.dev(), after.ino(), after.uid()),
+        (created.dev(), created.ino(), created.uid())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn database_creation_rejects_symlinks_and_non_file_targets_without_changing_them() {
+    use std::os::unix::fs::symlink;
+    let db = TestDb::new("creation-target");
+    let target = db.path().with_extension("target");
+    let alias = db.path().with_extension("alias");
+    let directory = db.path().with_extension("directory");
+    fs::write(&target, "untouched").unwrap();
+    symlink(&target, &alias).unwrap();
+    fs::create_dir(&directory).unwrap();
+    assert!(SqliteSyncStateStore::open(&alias).is_err());
+    assert!(SqliteSyncStateStore::open(&directory).is_err());
+    assert_eq!(fs::read_to_string(&target).unwrap(), "untouched");
+    assert_eq!(fs::read_link(&alias).unwrap(), target);
+    assert!(fs::read_dir(&directory).unwrap().next().is_none());
+}
+
 struct TestDb {
     path: PathBuf,
 }
