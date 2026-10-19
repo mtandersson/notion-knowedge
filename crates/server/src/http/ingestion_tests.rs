@@ -93,6 +93,58 @@ async fn source(
 ) {
     source_many(vec![(bytes, status, slow)], 64).await
 }
+fn source_tls_config() -> ServerConfig {
+    let certificate = include_bytes!("../../../notion/tests/fixtures/ingest-cert.pem");
+    let key = PrivateKeyDer::Pkcs8(
+        include_bytes!("../../../notion/tests/fixtures/ingest-key.der")
+            .to_vec()
+            .into(),
+    );
+    ServerConfig::builder_with_provider(Arc::new(
+        tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![CertificateDer::from_pem_slice(certificate).unwrap()],
+        key,
+    )
+    .unwrap()
+}
+
+async fn write_source_response<W: tokio::io::AsyncWrite + Unpin>(
+    tls: &mut W,
+    bytes: &[u8],
+    status: u16,
+    slow: bool,
+) {
+    tls.write_all(
+        format!(
+            "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            bytes.len()
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    if slow {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    }
+    for chunk in bytes.chunks(16384) {
+        if tls.write_all(chunk).await.is_err() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    // Accepting plaintext does not guarantee buffered TLS records reached the
+    // transport. Finish the body and close_notify before dropping the stream.
+    // Negative fixtures may deliberately disconnect after rejecting headers.
+    if tls.flush().await.is_ok() {
+        let _ = tls.shutdown().await;
+    }
+}
+
 async fn source_many(
     files: Vec<(Vec<u8>, u16, bool)>,
     maximum: usize,
@@ -103,22 +155,7 @@ async fn source_many(
     Arc<Mutex<Vec<std::path::PathBuf>>>,
 ) {
     let certificate = include_bytes!("../../../notion/tests/fixtures/ingest-cert.pem");
-    let key = PrivateKeyDer::Pkcs8(
-        include_bytes!("../../../notion/tests/fixtures/ingest-key.der")
-            .to_vec()
-            .into(),
-    );
-    let tls = ServerConfig::builder_with_provider(Arc::new(
-        tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_no_client_auth()
-    .with_single_cert(
-        vec![CertificateDer::from_pem_slice(certificate).unwrap()],
-        key,
-    )
-    .unwrap();
+    let tls = source_tls_config();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let paths = Arc::new(Mutex::new(Vec::new()));
     let policy = DownloadPolicy::new(&["fixture.example"], maximum, Duration::from_secs(20))
@@ -141,24 +178,7 @@ async fn source_many(
             assert!(headers.starts_with("GET /file?token=signed-secret "));
             assert!(!headers.to_ascii_lowercase().contains("authorization:"));
             observed.fetch_add(1, Ordering::SeqCst);
-            tls.write_all(
-                format!(
-                    "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    bytes.len()
-                )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
-            if slow {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-            }
-            for chunk in bytes.chunks(16384) {
-                if tls.write_all(chunk).await.is_err() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
+            write_source_response(&mut tls, &bytes, status, slow).await;
         }
     });
     (policy, count, handle, paths)
@@ -1213,4 +1233,62 @@ async fn installed_transports_reject_mismatched_observed_type_before_upload() {
         );
         assert!(paths.lock().unwrap().iter().all(|p| !p.exists()));
     }
+}
+
+#[tokio::test]
+async fn tls_fixture_delivers_large_body_and_clean_close_under_backpressure() {
+    use tokio_rustls::{
+        TlsConnector,
+        rustls::{ClientConfig, RootCertStore, pki_types::ServerName},
+    };
+    let certificate = include_bytes!("../../../notion/tests/fixtures/ingest-cert.pem");
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(CertificateDer::from_pem_slice(certificate).unwrap())
+        .unwrap();
+    let client = ClientConfig::builder_with_provider(Arc::new(
+        tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let payload: Vec<u8> = (0..5 * 1024 * 1024 + 1).map(|i| (i % 251) as u8).collect();
+    let expected = payload.clone();
+    // One KiB guarantees transport backpressure against larger TLS records.
+    let (client_io, server_io) = tokio::io::duplex(1024);
+    let server = tokio::spawn(async move {
+        let mut tls = TlsAcceptor::from(Arc::new(source_tls_config()))
+            .accept(server_io)
+            .await
+            .unwrap();
+        read_request(&mut tls).await;
+        write_source_response(&mut tls, &payload, 200, false).await;
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut tls = TlsConnector::from(Arc::new(client))
+            .connect(ServerName::try_from("fixture.example").unwrap(), client_io)
+            .await
+            .unwrap();
+        tls.write_all(b"GET /file?token=signed-secret HTTP/1.1\r\nHost: fixture.example\r\n\r\n")
+            .await
+            .unwrap();
+        tls.flush().await.unwrap();
+        let mut wire = Vec::new();
+        let closed = tls.read_to_end(&mut wire).await;
+        let end = wire.windows(4).position(|v| v == b"\r\n\r\n").unwrap() + 4;
+        assert_eq!(
+            wire.len() - end,
+            expected.len(),
+            "complete multipart-sized body must reach the client"
+        );
+        assert!(
+            wire[end..] == expected[..],
+            "every multipart-sized response byte must match"
+        );
+        closed.expect("fixture must deliver clean TLS EOF after all response bytes");
+        server.await.unwrap();
+    })
+    .await
+    .unwrap();
 }
