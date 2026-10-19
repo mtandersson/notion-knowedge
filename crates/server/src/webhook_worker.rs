@@ -375,7 +375,11 @@ pub mod runtime {
                 };
             }
             let state = self.state.clone();
+            let admission_stop = stop.clone();
             let claim = blocking(move || {
+                if admission_stop.is_cancelled() {
+                    return Ok(None);
+                }
                 // Alternate mutation/page admission to avoid starving trusted
                 // post-write refresh work under continuous webhook arrivals.
                 if !page_first

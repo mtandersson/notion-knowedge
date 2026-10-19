@@ -29,6 +29,9 @@ const FOREIGN: &str = "33333333-3333-3333-3333-333333333333";
 const WORKSPACE: &str = "44444444-4444-4444-4444-444444444444";
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+#[path = "support/shutdown_process.rs"]
+mod shutdown_process;
+
 #[derive(Clone)]
 struct Model {
     markdown: String,

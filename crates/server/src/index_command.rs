@@ -52,6 +52,16 @@ pub mod runtime {
             Ok(c) if c.validate_grant_store().is_ok() => c,
             _ => return output("configuration", 2),
         };
+        crate::shutdown::operator(
+            "index",
+            stop.clone(),
+            Duration::from_secs(config.shutdown_timeout_seconds),
+            configured_inner(command, stop, config),
+        )
+        .await
+    }
+
+    async fn configured_inner(command: Command, stop: CancellationToken, config: Config) -> Output {
         let Some(scope) = config.notion_scope else {
             return output("configuration", 2);
         };
