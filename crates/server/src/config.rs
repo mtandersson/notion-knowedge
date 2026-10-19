@@ -24,6 +24,7 @@ pub struct Config {
     pub log_level: notion_knowledge_core::logging::Level,
     /// Fail-closed MCP access mode; enabled unless explicitly opted out.
     pub read_only: bool,
+    pub oauth_writes: bool,
     /// Explicit second gate for destructive operations; defaults disabled.
     pub destructive_writes_enabled: bool,
     pub capability_policy: notion_knowledge_mcp::capabilities::CapabilityPolicy,
@@ -186,6 +187,11 @@ impl Config {
         let mcp_max_streams = concurrency(&mut lookup, "NK_MCP_MAX_STREAMS", "16", 256)?;
         let mcp_stream_max_seconds =
             concurrency(&mut lookup, "NK_MCP_STREAM_MAX_SECONDS", "300", 3600)? as u64;
+        let oauth_writes = match optional(&mut lookup, "NK_OAUTH_WRITES", "false")?.as_str() {
+            "true" => true,
+            "false" => false,
+            _ => return Err(invalid("NK_OAUTH_WRITES", "must be true or false")),
+        };
         let read_only = match optional(&mut lookup, "NK_READ_ONLY", "true")?.as_str() {
             "true" => true,
             "false" => false,
@@ -868,6 +874,20 @@ impl Config {
                 "registered client required for OAuth content",
             ));
         }
+        if oauth_writes
+            && (read_only
+                || oauth_client.is_none()
+                || notion_grant_store.is_none()
+                || notion_scope.is_none()
+                || !matches!(notion_auth, NotionAuth::None))
+        {
+            return Err(invalid(
+                "NK_OAUTH_WRITES",
+                "requires writable mode, complete OAuth registration, sealed grant storage and scope without integration credentials",
+            ));
+        }
+        let oauth_discovery =
+            oauth_discovery.map(|discovery| discovery.with_write_policy(oauth_writes));
         Ok(Self {
             shutdown_timeout_seconds,
             oauth_client,
@@ -891,6 +911,7 @@ impl Config {
             http_bind: SocketAddr::new(host, port),
             log_level,
             read_only,
+            oauth_writes,
             destructive_writes_enabled,
             capability_policy,
             bearer_fallback,
@@ -1079,6 +1100,28 @@ mod tests {
         let configured = parse(&values).unwrap();
         assert!(matches!(configured.notion_auth, NotionAuth::None));
         assert_eq!(configured.notion_scope.unwrap().workspace_id, WORKSPACE);
+        assert!(!configured.oauth_writes);
+        let mut writable = values.clone();
+        writable.extend([("NK_OAUTH_WRITES", "true"), ("NK_READ_ONLY", "false")]);
+        assert!(parse(&writable).unwrap().oauth_writes);
+        for missing in [
+            "NK_READ_ONLY",
+            "NK_OAUTH_CLIENT_ID",
+            "NK_OAUTH_CLIENT_REDIRECT_URI",
+            "NK_NOTION_GRANT_KEY_FILE",
+            "NK_NOTION_GRANT_STATE_FILE",
+            "NK_NOTION_SCOPE_ROOTS",
+            "NK_NOTION_SCOPE_WORKSPACE_ID",
+        ] {
+            let incomplete: Vec<_> = writable
+                .iter()
+                .copied()
+                .filter(|(key, _)| *key != missing)
+                .collect();
+            assert!(parse(&incomplete).is_err(), "missing {missing}");
+        }
+        assert!(parse(&[("NK_OAUTH_WRITES", "true")]).is_err());
+        assert!(parse(&[("NK_OAUTH_WRITES", "TRUE")]).is_err());
         values[11].1 = "cccccccc-cccc-cccc-cccc-cccccccccccc";
         assert_eq!(
             parse(&values).unwrap_err().setting,

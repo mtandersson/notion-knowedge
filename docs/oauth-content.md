@@ -39,8 +39,9 @@ provenance and physical ancestry checks. Root exclusions, live page permissions,
 metadata validation, output limits and read-only scope continue to apply. Missing
 request context fails before content adapters run.
 
-This is read-only content composition. It does not enable indexing/reconciliation,
-uploads or mutations through OAuth. [Local logout and operator reset](oauth-revocation.md) cancel token evidence and
+Shipping content composition remains read-only. Opt-in
+[request-bound mutation authority](oauth-write-authority.md) supplies guarded
+ports without installing OAuth mutations, indexing/reconciliation or uploads. [Local logout and operator reset](oauth-revocation.md) cancel token evidence and
 prevent pending results from disclosing content after revocation. See the
 [joined HTTP acceptance suite](oauth-e2e-tests.md) and
 [production setup](oauth-production-setup.md); a real deployed ChatGPT smoke

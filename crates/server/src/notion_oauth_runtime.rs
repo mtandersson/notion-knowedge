@@ -142,6 +142,10 @@ impl NotionOAuthRuntime {
         }))
     }
 
+    pub(crate) fn now_unix(&self) -> Result<u64, CredentialError> {
+        self.coordinator.now_unix().map_err(map_refresh)
+    }
+
     pub(crate) fn read_client(&self, token: &str) -> Result<NotionClient, BackendError> {
         let client = NotionClient::integration(token)?;
         #[cfg(test)]

@@ -124,6 +124,9 @@ separate registrations, exact callbacks, independently pinned Notion workspace
 and authorizing person, private bootstrap, HTTPS proxy and reauthentication.
 Complete configuration enables Authorization Code + PKCE S256, encrypted Notion
 credentials, request-bound read-only content and immediate local token logout.
+Explicit [OAuth write authority policy](docs/oauth-write-authority.md) can issue
+guarded write permissions; shipping OAuth mutation tools remain disabled pending
+their runtime and confirmation composition.
 Discovery settings alone authenticate nobody. A missing content scope or index
 never grants private data; the feature-built container still requires explicit
 [production role and external asset configuration](docs/container.md).

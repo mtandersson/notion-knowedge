@@ -234,6 +234,7 @@ pub struct AuthorizationFlow {
     client: Client,
     allowed: AllowedNotionIdentity,
     records: Mutex<Records>,
+    writes_enabled: bool,
     clock: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
 impl AuthorizationFlow {
@@ -248,10 +249,19 @@ impl AuthorizationFlow {
             client,
             allowed,
             records: Mutex::new(Records::default()),
+            writes_enabled: false,
             clock: Arc::new(Instant::now),
         }
     }
 
+    pub(crate) fn with_write_policy(mut self, enabled: bool) -> Self {
+        self.writes_enabled = enabled;
+        self
+    }
+    fn permissions(&self, scope: &str) -> Option<notion_knowledge_mcp::OAuthPermissions> {
+        let permissions = notion_knowledge_mcp::OAuthPermissions::parse(scope)?;
+        (!permissions.can_write() || self.writes_enabled).then_some(permissions)
+    }
     #[cfg(test)]
     pub(crate) fn with_clock(mut self, clock: Arc<dyn Fn() -> Instant + Send + Sync>) -> Self {
         self.clock = clock;
@@ -273,7 +283,7 @@ impl AuthorizationFlow {
             || request.code_challenge_method != "S256"
             || !valid_challenge(request.code_challenge)
             || !opaque_identifier(request.state, 16, 256)
-            || request.scope != "knowledge:read"
+            || self.permissions(request.scope).is_none()
         {
             return Err(Error::InvalidRequest);
         }
@@ -296,7 +306,11 @@ impl AuthorizationFlow {
                 redirect_uri: request.redirect_uri.to_owned(),
                 resource: request.resource.to_owned(),
                 state: request.state.to_owned(),
-                scope: request.scope.to_owned(),
+                scope: self
+                    .permissions(request.scope)
+                    .ok_or(Error::InvalidRequest)?
+                    .scope()
+                    .to_owned(),
                 expires: now + CODE_TTL,
             },
         );
@@ -514,7 +528,7 @@ impl AuthorizationFlow {
         if record.cancellation.is_cancelled()
             || record.expires <= now
             || record.resource != self.client.resource
-            || record.scope != "knowledge:read"
+            || self.permissions(&record.scope).is_none()
             || !record.binding.matches(current_grant)
         {
             return None;
@@ -528,6 +542,7 @@ impl AuthorizationFlow {
                 record.binding.owner_user_id.clone(),
                 record.expires,
             )
+            .with_permissions(self.permissions(&record.scope)?)
             .with_cancellation(record.cancellation.clone()),
         )
     }
@@ -548,7 +563,7 @@ impl AuthorizationFlow {
             !record.cancellation.is_cancelled()
                 && record.expires > now
                 && record.resource == self.client.resource
-                && record.scope == "knowledge:read"
+                && self.permissions(&record.scope).is_some()
                 && record.binding.matches(current_grant)
         })
     }
@@ -650,6 +665,85 @@ mod tests {
             redirect_uri: REDIRECT,
             resource: RESOURCE,
             code_verifier: VERIFIER,
+        }
+    }
+
+    #[test]
+    fn write_scope_requires_explicit_policy_and_preserves_read_tokens() {
+        use notion_knowledge_mcp::OAuthPermissions;
+        for scope in [
+            "",
+            "knowledge:write",
+            "knowledge:read knowledge:write admin",
+            "knowledge:read knowledge:read",
+            "knowledge:read  knowledge:write",
+            "knowledge:read\tknowledge:write",
+            "knowledge:read ",
+            &"x".repeat(4096),
+        ] {
+            assert!(
+                flow()
+                    .with_write_policy(true)
+                    .begin(&AuthorizationRequest {
+                        scope,
+                        ..authorization()
+                    })
+                    .is_err()
+            );
+        }
+        assert!(
+            flow()
+                .begin(&AuthorizationRequest {
+                    scope: "knowledge:read knowledge:write",
+                    ..authorization()
+                })
+                .is_err()
+        );
+        // Opt-in never relaxes the exact registered client/resource boundary.
+        for invalid in [
+            AuthorizationRequest {
+                scope: "knowledge:read knowledge:write",
+                client_id: "foreign",
+                ..authorization()
+            },
+            AuthorizationRequest {
+                scope: "knowledge:read knowledge:write",
+                resource: "https://foreign.example.com/mcp",
+                ..authorization()
+            },
+        ] {
+            assert!(flow().with_write_policy(true).begin(&invalid).is_err());
+        }
+        let flow = flow().with_write_policy(true);
+        for (scope, expected) in [
+            ("knowledge:read", OAuthPermissions::Read),
+            (
+                "knowledge:write knowledge:read",
+                OAuthPermissions::ReadWrite,
+            ),
+        ] {
+            let pending = flow
+                .begin(&AuthorizationRequest {
+                    scope,
+                    ..authorization()
+                })
+                .unwrap();
+            let redirect = flow.approve(pending.expose(), &grant()).unwrap();
+            let token = flow
+                .redeem(&exchange(redirect.code.expose()), &grant())
+                .unwrap();
+            assert_eq!(token.scope, expected.scope());
+            let auth = flow
+                .authorize_resource(token.access_token.expose(), &grant())
+                .unwrap();
+            assert_eq!(auth.permissions(), expected);
+            assert!(flow.verify(token.access_token.expose(), &grant()));
+            let mut different_permission =
+                auth.clone().with_permissions(OAuthPermissions::ReadWrite);
+            if expected.can_write() {
+                different_permission = auth.clone().with_permissions(OAuthPermissions::Read);
+            }
+            assert!(!auth.same_session(&different_permission));
         }
     }
 

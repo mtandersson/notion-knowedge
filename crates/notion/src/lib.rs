@@ -33,7 +33,7 @@ pub mod link_graph;
 pub mod replacement;
 
 mod transport;
-pub use transport::RequestMetrics;
+pub use transport::{RequestAuthority, RequestMetrics};
 
 pub mod documents;
 

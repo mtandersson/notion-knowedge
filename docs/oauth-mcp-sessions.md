@@ -26,8 +26,10 @@ slow introspection request. An SSE body's absolute deadline is the earlier of
 its token expiry and configured stream lifetime, including time spent awaiting
 SDK dispatch. Disconnect or expiry drops the stream permit.
 
-The only supported scope is `knowledge:read`: OAuth tool discovery and dispatch
-remain read-only regardless of operator mutation settings. Explicit matching
+OAuth scope issuance defaults to `knowledge:read`. Explicit
+[OAuth write authority policy](oauth-write-authority.md) can issue bounded
+read/write permission evidence; shipping OAuth tool discovery and dispatch
+remain read-only until the remaining runtime and confirmation composition ships. Explicit matching
 scope and compatible existing retrieval state enable
 [request-bound content](oauth-content.md). Missing configuration/context remains
 fail-closed; static integration-backed handlers cannot substitute for these ports.
