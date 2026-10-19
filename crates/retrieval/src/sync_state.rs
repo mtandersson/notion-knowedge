@@ -102,6 +102,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "mutation_refresh",
         include_str!("../migrations/0017_mutation_refresh.sql"),
     ),
+    (
+        18,
+        "mutation_refresh_authority",
+        include_str!("../migrations/0018_mutation_refresh_authority.sql"),
+    ),
 ];
 
 /// A read-only snapshot of durable, identity-free operational state.
