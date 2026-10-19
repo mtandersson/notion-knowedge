@@ -80,6 +80,42 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn operator_timeout_is_structured_unsuccessful_and_clean_output_is_preserved() {
+        for operation in ["index", "reconciliation"] {
+            let stop = CancellationToken::new();
+            stop.cancel();
+            let output = operator(
+                operation,
+                stop,
+                Duration::from_millis(10),
+                std::future::pending(),
+            )
+            .await;
+            assert_eq!(output.exit, 1);
+            assert_eq!(
+                output.json,
+                serde_json::json!({"operation":operation,"status":"shutdown_timeout"})
+            );
+            let expected =
+                serde_json::json!({"operation":operation,"status":"complete","fixture_count":3});
+            let output = operator(
+                operation,
+                CancellationToken::new(),
+                Duration::from_secs(1),
+                async {
+                    crate::reconciliation_command::Output {
+                        json: expected.clone(),
+                        exit: 0,
+                    }
+                },
+            )
+            .await;
+            assert_eq!(output.exit, 0);
+            assert_eq!(output.json, expected);
+        }
+    }
+
+    #[tokio::test]
     async fn shutdown_waits_for_cleanup_but_reports_an_expired_shared_deadline() {
         let stop = CancellationToken::new();
         let stopped = stop.clone();

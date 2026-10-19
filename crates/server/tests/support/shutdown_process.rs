@@ -231,9 +231,9 @@ async fn sigterm_drains_or_rolls_back_native_work_and_preserves_acknowledged_web
         );
         assert_eq!(
             sql.query_row("SELECT count(*) FROM shutdown_fixture", [], |r| r
-                .get::<_, usize>(0))
+                .get::<_, i64>(0))
                 .unwrap(),
-            usize::from(complete)
+            i64::from(complete)
         );
         assert_eq!(sql.query_row("SELECT status FROM index_commit_receipts WHERE operation_id='shutdown-native-effect'",[],|r|r.get::<_,i64>(0)).unwrap(),if complete {1}else{0});
         drop(sql);
@@ -280,7 +280,7 @@ async fn sigterm_drains_or_rolls_back_native_work_and_preserves_acknowledged_web
             .claim(&inbox, recovery_now, 120)
             .unwrap()
             .expect("acknowledged event must remain retryable");
-        assert_eq!(recovered.id, admitted.id);
+        assert_eq!(recovered.event.id, admitted.id);
         let provider = Provider {
             metadata: metadata.clone(),
             count: Arc::new(AtomicUsize::new(0)),
@@ -295,10 +295,13 @@ async fn sigterm_drains_or_rolls_back_native_work_and_preserves_acknowledged_web
             )
             .await
             .unwrap();
-        coordinator
-            .state()
-            .complete(&claim, recovery_now, ProcessingOutcome::Succeeded)
-            .unwrap();
+        WebhookRecovery::complete(
+            coordinator.state().as_ref(),
+            &claim,
+            recovery_now,
+            ProcessingOutcome::Succeeded,
+        )
+        .unwrap();
         coordinator
             .state()
             .release_lease(&lease, recovery_now)
