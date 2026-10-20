@@ -256,6 +256,32 @@ mod tests {
         assert_eq!(semantic_only[0].source.chunk_id, "z");
     }
     #[test]
+    fn zero_weight_paths_are_rejected_at_construction() {
+        struct Empty;
+        impl SemanticSearch for Empty {
+            fn search(&self, _: SemanticQuery) -> SearchFuture<'_> {
+                Box::pin(async { Ok(vec![]) })
+            }
+        }
+        impl LexicalSearch for Empty {
+            fn search(&self, _: LexicalQuery) -> SearchFuture<'_> {
+                Box::pin(async { Ok(vec![]) })
+            }
+        }
+        for config in [
+            ReciprocalRankFusion {
+                lexical_weight: 0.0,
+                ..Default::default()
+            },
+            ReciprocalRankFusion {
+                semantic_weight: 0.0,
+                ..Default::default()
+            },
+        ] {
+            assert!(HybridFusion::new(Arc::new(Empty), Arc::new(Empty), config).is_err());
+        }
+    }
+    #[test]
     fn repeated_candidates_do_not_gain_duplicate_rank_credit() {
         let results = fuse(
             vec![hit("a"), hit("a"), hit("b")],

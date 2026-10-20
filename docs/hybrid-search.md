@@ -15,7 +15,10 @@ and nonnegative; weights finite in `(0, 1]`; candidate limit 1–100. Final
 request limit must not exceed the configured candidate limit. These settings
 are construction-time policy, not MCP client-controlled parameters. Raw BM25
 and vector scores are never compared across paths. Input ordering from each
-ranker determines rank; final ties use page ID then chunk ID.
+ranker determines rank. Exact fused-score ties prefer the better contributing
+lexical rank, with missing lexical evidence last, then page ID and chunk ID.
+This preserves direct lexical evidence when semantic and lexical order disagree
+symmetrically; it never overrides a strictly stronger fused score.
 
 Both paths receive identical query and page/root filters, with the configured
 candidate depth rather than the final output limit. Duplicate entries within
