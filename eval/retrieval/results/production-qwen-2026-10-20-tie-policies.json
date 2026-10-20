@@ -1,0 +1,131 @@
+{
+  "chatgpt_G1": {
+    "recall_at_5": {
+      "actual": 0.9305555555555555,
+      "minimum": 0.8,
+      "passed": true
+    },
+    "mrr": {
+      "actual": 0.7928240740740741,
+      "minimum": 0.8,
+      "passed": false
+    },
+    "ndcg_at_5": {
+      "actual": 0.7614487576107258,
+      "minimum": 0.8,
+      "passed": false
+    }
+  },
+  "primary_gate_1": {
+    "fts": {
+      "recall_at_5": {
+        "actual": 0.7361111111111112,
+        "minimum": 0.95,
+        "passed": false
+      },
+      "mrr": {
+        "actual": 0.7060185185185185,
+        "minimum": 0.9,
+        "passed": false
+      },
+      "ndcg_at_5": {
+        "actual": 0.6296787746449914,
+        "minimum": 0.9,
+        "passed": false
+      }
+    },
+    "hybrid": {
+      "recall_at_5": {
+        "actual": 0.9305555555555555,
+        "minimum": 0.95,
+        "passed": false
+      },
+      "mrr": {
+        "actual": 0.7928240740740741,
+        "minimum": 0.9,
+        "passed": false
+      },
+      "ndcg_at_5": {
+        "actual": 0.7614487576107258,
+        "minimum": 0.9,
+        "passed": false
+      }
+    }
+  },
+  "language_and_category_recall_floor": {
+    "fts": {
+      "language": {
+        "en": {
+          "actual": 0.7638888888888888,
+          "minimum": 0.9,
+          "passed": false
+        },
+        "sv": {
+          "actual": 0.7083333333333334,
+          "minimum": 0.9,
+          "passed": false
+        }
+      },
+      "category": {
+        "semantic": {
+          "actual": 0.4166666666666667,
+          "minimum": 0.9,
+          "passed": false
+        },
+        "exact_name": {
+          "actual": 1.0,
+          "minimum": 0.9,
+          "passed": true
+        },
+        "date_status": {
+          "actual": 0.8611111111111112,
+          "minimum": 0.9,
+          "passed": false
+        },
+        "cross_link": {
+          "actual": 0.6666666666666666,
+          "minimum": 0.9,
+          "passed": false
+        }
+      }
+    },
+    "hybrid": {
+      "language": {
+        "en": {
+          "actual": 0.8888888888888888,
+          "minimum": 0.9,
+          "passed": false
+        },
+        "sv": {
+          "actual": 0.9722222222222222,
+          "minimum": 0.9,
+          "passed": true
+        }
+      },
+      "category": {
+        "semantic": {
+          "actual": 0.8333333333333334,
+          "minimum": 0.9,
+          "passed": false
+        },
+        "exact_name": {
+          "actual": 1.0,
+          "minimum": 0.9,
+          "passed": true
+        },
+        "date_status": {
+          "actual": 0.8888888888888888,
+          "minimum": 0.9,
+          "passed": false
+        },
+        "cross_link": {
+          "actual": 1.0,
+          "minimum": 0.9,
+          "passed": true
+        }
+      }
+    }
+  },
+  "verdict": "FAIL",
+  "graph_boost": "OFF"
+}

@@ -294,9 +294,12 @@ async fn configured_hybrid_fuses_both_ports_and_serializes_path_provenance() {
             .unwrap(),
         &["workspace"]
     );
-    // Equal RRF scores sort by canonical page identity: semantic UUID first.
-    assert_eq!(results[0]["matched_paths"], json!(["semantic"]));
-    assert_eq!(results[1]["matched_paths"], json!(["lexical"]));
+    assert_eq!(results[0]["source"]["chunk_id"], "lexical-chunk");
+    assert_eq!(results[1]["source"]["chunk_id"], "stable-chunk");
+    assert_eq!(results[0]["score"], results[1]["score"]);
+    // Equal RRF scores preserve contributing lexical evidence before canonical IDs.
+    assert_eq!(results[0]["matched_paths"], json!(["lexical"]));
+    assert_eq!(results[1]["matched_paths"], json!(["semantic"]));
     for calls in [
         semantic.calls.lock().unwrap()[0].page_ids.clone(),
         lexical.calls.lock().unwrap()[0].page_ids.clone(),

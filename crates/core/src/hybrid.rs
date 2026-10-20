@@ -100,6 +100,7 @@ fn fuse(
     config: ReciprocalRankFusion,
     limit: usize,
 ) -> Result<Vec<SearchHit>, SearchUnavailable> {
+    let mut lexical_ranks = BTreeMap::new();
     let mut candidates: BTreeMap<(String, String), (SearchHit, f64)> = BTreeMap::new();
     for (hits, path, weight) in [
         (semantic, RetrievalPath::Semantic, config.semantic_weight),
@@ -121,6 +122,9 @@ fn fuse(
             let key = (hit.source.page_id.clone(), hit.source.chunk_id.clone());
             if !seen.insert(key.clone()) {
                 continue;
+            }
+            if path == RetrievalPath::Lexical && weight > 0.0 {
+                lexical_ranks.insert(key.clone(), index);
             }
             let contribution = weight / (config.rank_constant + (index + 1) as f64);
             hit.matched_paths = vec![path];
@@ -147,7 +151,17 @@ fn fuse(
         }
     }
     let mut ranked: Vec<_> = candidates.into_iter().collect();
-    ranked.sort_by(|(ka, (_, sa)), (kb, (_, sb))| sb.total_cmp(sa).then_with(|| ka.cmp(kb)));
+    ranked.sort_by(|(ka, (_, sa)), (kb, (_, sb))| {
+        sb.total_cmp(sa)
+            .then_with(|| {
+                lexical_ranks
+                    .get(ka)
+                    .copied()
+                    .unwrap_or(usize::MAX)
+                    .cmp(&lexical_ranks.get(kb).copied().unwrap_or(usize::MAX))
+            })
+            .then_with(|| ka.cmp(kb))
+    });
     Ok(ranked
         .into_iter()
         .take(limit)
@@ -201,6 +215,89 @@ mod tests {
         assert_eq!(results[1].matched_paths, [RetrievalPath::Lexical]);
         assert_eq!(results[2].matched_paths, [RetrievalPath::Semantic]);
         assert!((results[0].score - 2.0 / 62.0).abs() < 1e-7);
+    }
+    #[test]
+    fn tied_fusion_prefers_lexical_rank_over_canonical_id() {
+        let results = fuse(
+            vec![hit("a"), hit("z")],
+            vec![hit("z"), hit("a")],
+            ReciprocalRankFusion::default(),
+            2,
+        )
+        .unwrap();
+        assert_eq!(results[0].score, results[1].score);
+        assert_eq!(results[0].source.chunk_id, "z");
+        assert_eq!(
+            results[0].matched_paths,
+            [RetrievalPath::Semantic, RetrievalPath::Lexical]
+        );
+    }
+    #[test]
+    fn lexical_rank_does_not_override_a_stronger_fused_score() {
+        let results = fuse(
+            vec![hit("a"), hit("b"), hit("z")],
+            vec![hit("z"), hit("b"), hit("a")],
+            ReciprocalRankFusion {
+                lexical_weight: 0.5,
+                ..Default::default()
+            },
+            3,
+        )
+        .unwrap();
+        assert_eq!(results[0].source.chunk_id, "a");
+        assert!(results[0].score > results[1].score);
+        let semantic_only = fuse(
+            vec![hit("z"), hit("a")],
+            vec![],
+            ReciprocalRankFusion::default(),
+            2,
+        )
+        .unwrap();
+        assert_eq!(semantic_only[0].source.chunk_id, "z");
+    }
+    #[test]
+    fn tied_semantic_only_candidates_use_stable_canonical_identity() {
+        let config = ReciprocalRankFusion {
+            rank_constant: f64::MAX,
+            ..Default::default()
+        };
+        for ids in [["z", "a"], ["a", "z"]] {
+            let results = fuse(ids.into_iter().map(hit).collect(), vec![], config, 2).unwrap();
+            assert_eq!(results[0].score, results[1].score);
+            assert_eq!(results[0].source.chunk_id, "a");
+            assert_eq!(results[1].source.chunk_id, "z");
+            assert!(
+                results
+                    .iter()
+                    .all(|hit| hit.matched_paths == [RetrievalPath::Semantic])
+            );
+        }
+    }
+    #[test]
+    fn zero_weight_paths_are_rejected_at_construction() {
+        struct Empty;
+        impl SemanticSearch for Empty {
+            fn search(&self, _: SemanticQuery) -> SearchFuture<'_> {
+                Box::pin(async { Ok(vec![]) })
+            }
+        }
+        impl LexicalSearch for Empty {
+            fn search(&self, _: LexicalQuery) -> SearchFuture<'_> {
+                Box::pin(async { Ok(vec![]) })
+            }
+        }
+        for config in [
+            ReciprocalRankFusion {
+                lexical_weight: 0.0,
+                ..Default::default()
+            },
+            ReciprocalRankFusion {
+                semantic_weight: 0.0,
+                ..Default::default()
+            },
+        ] {
+            assert!(HybridFusion::new(Arc::new(Empty), Arc::new(Empty), config).is_err());
+        }
     }
     #[test]
     fn repeated_candidates_do_not_gain_duplicate_rank_credit() {
