@@ -6,7 +6,7 @@ repository.workspace = true
 
 [dependencies]
 notion-knowledge-core = { path = "../core" }
-rmcp.workspace = true
+rmcp = { workspace = true, features = ["elicitation"] }
 http = "1"
 tokio-util = { version = "0.7", features = ["rt"] }
 tokio = { workspace = true, features = ["sync"] }
