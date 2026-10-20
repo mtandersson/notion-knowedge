@@ -83,6 +83,7 @@ pub struct KnowledgeServer {
     fresh_source: Option<Arc<dyn notion_knowledge_core::backend::NotionRead>>,
     write_design_preview: bool,
     mutations: Option<Arc<mutations::MutationRuntime>>,
+    request_mutations: Option<Arc<dyn mutations::RequestMutationFactory>>,
     sync_status: Option<Arc<dyn notion_knowledge_core::sync_status::SyncStatusSource>>,
     related_graph: Option<Arc<dyn notion_knowledge_core::graph::GraphEdgeStore>>,
 }
@@ -103,6 +104,7 @@ impl Default for KnowledgeServer {
             fresh_source: None,
             write_design_preview: false,
             mutations: None,
+            request_mutations: None,
             sync_status: None,
             related_graph: None,
             search: None,
@@ -125,6 +127,15 @@ impl KnowledgeServer {
         self.read_only = true;
         self.http_authorization_required = true;
         self.request_scope_required = true;
+        self
+    }
+    /// Explicit production installation; static mutation injection still cannot
+    /// substitute for request-bound authority or disable access controls.
+    pub fn and_request_mutations(
+        mut self,
+        factory: Arc<dyn mutations::RequestMutationFactory>,
+    ) -> Self {
+        self.request_mutations = Some(factory);
         self
     }
     pub fn requires_request_scope(&self) -> bool {
@@ -172,9 +183,21 @@ impl KnowledgeServer {
     /// Enforce the configured access mode before exposing or dispatching MCP tools.
     /// Only explicitly audited read tools are permitted in read-only mode.
     fn tool_permitted(&self, name: &str) -> bool {
-        // Static trusted capabilities cannot bypass request-bound OAuth's
-        // current read-only contract, including through builder ordering.
-        (!(write_contract::is_planned_write(name) && self.http_authorization_required))
+        // HTTP writes require the explicit request-bound factory; static
+        // capabilities and builder ordering never enable files or other writes.
+        (!self.http_authorization_required
+            || matches!(
+                name,
+                "knowledge_search"
+                    | "knowledge_get"
+                    | "knowledge_sync_status"
+                    | "knowledge_related"
+            )
+            || (self.request_scope_required
+                && self
+                    .request_mutations
+                    .as_ref()
+                    .is_some_and(|factory| factory.supports(name))))
             && (!self.read_only
                 || matches!(
                     name,
@@ -960,7 +983,63 @@ impl ServerHandler for KnowledgeServer {
         self.authorize_context(&context)?;
         let _log = EventGuard::new(Operation::McpTool);
         Ok(rmcp::model::ListToolsResult {
-            tools: self.tool_catalog(),
+            tools: {
+                let mut tools = self.tool_catalog();
+                if self.request_scope_required {
+                    tools.retain(|tool| {
+                        matches!(
+                            tool.name.as_ref(),
+                            "knowledge_search"
+                                | "knowledge_get"
+                                | "knowledge_sync_status"
+                                | "knowledge_related"
+                        )
+                    });
+                }
+                if let Some(factory) = &self.request_mutations {
+                    let parts = context
+                        .extensions
+                        .get::<http::request::Parts>()
+                        .ok_or_else(|| {
+                            rmcp::ErrorData::invalid_request("request scope unavailable", None)
+                        })?;
+                    let adapters =
+                        parts
+                            .extensions
+                            .get::<RequestScopeAdapters>()
+                            .ok_or_else(|| {
+                                rmcp::ErrorData::invalid_request("request scope unavailable", None)
+                            })?;
+                    let auth = parts.extensions.get::<HttpAuthorization>().ok_or_else(|| {
+                        rmcp::ErrorData::invalid_request("request scope unavailable", None)
+                    })?;
+                    if !auth.same_session(&adapters.authorization)
+                        || auth.workspace_id() != adapters.scope.workspace_id
+                    {
+                        return Err(rmcp::ErrorData::invalid_request(
+                            "request scope unavailable",
+                            None,
+                        ));
+                    }
+                    adapters.source.validate().await.map_err(|_| {
+                        rmcp::ErrorData::invalid_request("request authorization unavailable", None)
+                    })?;
+                    if auth.permissions().can_write() && adapters.source.mutation_ports().is_some()
+                    {
+                        tools.extend(
+                            [
+                                "knowledge_create_page",
+                                "knowledge_append",
+                                "knowledge_update_section",
+                            ]
+                            .into_iter()
+                            .filter(|name| factory.supports(name) && self.tool_permitted(name))
+                            .map(mutations::tool),
+                        );
+                    }
+                }
+                tools
+            },
             ..Default::default()
         })
     }
@@ -978,7 +1057,11 @@ impl ServerHandler for KnowledgeServer {
             name if self
                 .mutations
                 .as_ref()
-                .is_some_and(|runtime| runtime.supports(name)) =>
+                .is_some_and(|runtime| runtime.supports(name))
+                || self
+                    .request_mutations
+                    .as_ref()
+                    .is_some_and(|factory| factory.supports(name)) =>
             {
                 Some(mutations::tool(name))
             }
@@ -1056,7 +1139,7 @@ impl ServerHandler for KnowledgeServer {
         })?;
         let mut scoped = self
             .clone()
-            .and_authoritative_scope(adapters.source.clone(), adapters.scope)
+            .and_authoritative_scope(adapters.source.clone(), adapters.scope.clone())
             .map_err(|_| {
                 rmcp::ErrorData::invalid_request("request authorization unavailable", None)
             })?
@@ -1067,6 +1150,21 @@ impl ServerHandler for KnowledgeServer {
             scoped = scoped.and_graph_boost(graph.clone(), *boost).map_err(|_| {
                 rmcp::ErrorData::invalid_request("request authorization unavailable", None)
             })?;
+        }
+        if let Some(factory) = &self.request_mutations
+            && factory.supports(request.name.as_ref())
+        {
+            if !auth.permissions().can_write() || adapters.source.mutation_ports().is_none() {
+                return Err(rmcp::ErrorData::invalid_request(
+                    "write authorization required",
+                    None,
+                ));
+            }
+            scoped = scoped.and_mutations(
+                factory
+                    .bind(adapters.clone(), &context, request.name.as_ref())
+                    .await?,
+            );
         }
         let result = scoped.call_tool_authorized(request, context).await;
         if !adapters.authorization.is_active() {

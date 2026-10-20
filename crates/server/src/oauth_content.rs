@@ -84,6 +84,16 @@ impl BoundSource {
     }
 }
 impl RequestBoundSource for BoundSource {
+    fn mutation_source(
+        self: Arc<Self>,
+    ) -> Option<Arc<dyn notion_knowledge_mcp::mutations::MutationSource>> {
+        if self.authorization.permissions().can_write() {
+            Some(self)
+        } else {
+            None
+        }
+    }
+
     fn mutation_ports(&self) -> Option<&dyn notion_knowledge_mcp::RequestBoundMutations> {
         self.authorization.permissions().can_write().then_some(self)
     }
