@@ -1,0 +1,243 @@
+{
+  "schema_version": 1,
+  "dataset_id": "exact-identifiers-fictional-v1",
+  "as_of": "2026-10-01",
+  "top_k": 100,
+  "modes": [
+    "fts"
+  ],
+  "summary": {
+    "fts": {
+      "queries": 8,
+      "queries_with_any_relevant_at_k": 8,
+      "queries_with_direct_answer_at_k": 8,
+      "metrics": {
+        "recall_at_1": 1.0,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    }
+  },
+  "results": [
+    {
+      "mode": "fts",
+      "query_id": "order-en",
+      "language": "en",
+      "category": "exact_name",
+      "ranked_source_ids": [
+        "fixture:chunk:order-good:record",
+        "fixture:chunk:order-near:record",
+        "fixture:chunk:name-near:record",
+        "fixture:chunk:name-good:record",
+        "fixture:chunk:issue-good:record",
+        "fixture:chunk:mixed-good:record"
+      ],
+      "grades": [
+        3,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 1.0,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "fts",
+      "query_id": "order-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "ranked_source_ids": [
+        "fixture:chunk:order-good:record",
+        "fixture:chunk:order-near:record"
+      ],
+      "grades": [
+        3,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 1.0,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "fts",
+      "query_id": "issue-en",
+      "language": "en",
+      "category": "exact_name",
+      "ranked_source_ids": [
+        "fixture:chunk:issue-good:record",
+        "fixture:chunk:issue-near:record"
+      ],
+      "grades": [
+        3,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 1.0,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "fts",
+      "query_id": "issue-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "ranked_source_ids": [
+        "fixture:chunk:issue-good:record",
+        "fixture:chunk:issue-near:record"
+      ],
+      "grades": [
+        3,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 1.0,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "fts",
+      "query_id": "name-en",
+      "language": "en",
+      "category": "exact_name",
+      "ranked_source_ids": [
+        "fixture:chunk:name-good:record",
+        "fixture:chunk:name-near:record",
+        "fixture:chunk:order-good:record",
+        "fixture:chunk:order-near:record",
+        "fixture:chunk:issue-good:record",
+        "fixture:chunk:mixed-good:record"
+      ],
+      "grades": [
+        3,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 1.0,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "fts",
+      "query_id": "name-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "ranked_source_ids": [
+        "fixture:chunk:name-good:record",
+        "fixture:chunk:name-near:record"
+      ],
+      "grades": [
+        3,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 1.0,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "fts",
+      "query_id": "mixed-en",
+      "language": "en",
+      "category": "exact_name",
+      "ranked_source_ids": [
+        "fixture:chunk:mixed-good:record",
+        "fixture:chunk:mixed-near:record"
+      ],
+      "grades": [
+        3,
+        0
+      ],
+      "metrics": {
+        "recall_at_1": 1.0,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    },
+    {
+      "mode": "fts",
+      "query_id": "mixed-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "ranked_source_ids": [
+        "fixture:chunk:mixed-good:record"
+      ],
+      "grades": [
+        3
+      ],
+      "metrics": {
+        "recall_at_1": 1.0,
+        "ndcg_at_1": 1.0,
+        "recall_at_3": 1.0,
+        "ndcg_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "ndcg_at_5": 1.0,
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0
+      }
+    }
+  ]
+}

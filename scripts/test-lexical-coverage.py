@@ -43,9 +43,18 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(result["overall"]["queries"], 1)
         self.assertEqual(result["overall"]["mean_best_recall_at_5_with_observed_candidates"], 0)
 
+    def test_oracle_respects_five_result_capacity_even_with_all_candidates(self):
+        judged = {str(n): 1 for n in range(6)}
+        self.dataset["queries"][0]["relevant"] = [{"source_id": key, "grade": value} for key, value in judged.items()]
+        self.row.update(ranked_source_ids=list(judged), grades=[1] * 6,
+                        metrics=coverage.harness.query_metrics(judged, list(judged), 10))
+        result = coverage.analyze(self.dataset, self.report)
+        self.assertEqual(result["overall"]["mean_best_recall_at_5_with_observed_candidates"], 5 / 6)
+        self.assertEqual(result["overall"]["queries_missing_relevant_candidates"], 0)
+
     def test_invalid_report_identities_and_candidates_fail_closed(self):
         cases = []
-        for field, value in [("dataset_id", "other"), ("modes", ["hybrid"]), ("results", []), ("results", [self.row, self.row])]:
+        for field, value in [("dataset_id", "other"), ("modes", ["hybrid"]), ("results", []), ("results", [0]), ("results", [self.row, self.row])]:
             report = copy.deepcopy(self.report); report[field] = value; cases.append(report)
         for field, value in [("ranked_source_ids", ["unknown"]), ("ranked_source_ids", ["1", "1"]), ("grades", [3, 3]), ("metrics", {}), ("language", "en")]:
             report = copy.deepcopy(self.report); report["results"][0][field] = value; cases.append(report)
