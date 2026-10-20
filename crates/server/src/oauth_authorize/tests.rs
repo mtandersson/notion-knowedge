@@ -1289,3 +1289,7 @@ mod revocation;
 
 #[path = "tests/write_authority.rs"]
 mod write_authority;
+
+#[cfg(all(unix, feature = "webhook-worker"))]
+#[path = "tests/grant_refresh.rs"]
+mod grant_refresh;

@@ -167,6 +167,17 @@ impl NotionOAuthRuntime {
         self.coordinator.ensure_active().await.map_err(map_refresh)
     }
 
+    #[cfg(all(unix, feature = "webhook-worker"))]
+    pub(crate) async fn ensure_active_for(
+        &self,
+        expected: &notion_knowledge_core::write_refresh::GrantRefreshAuthority,
+    ) -> Result<crate::notion_grant_store::StoredGrant, CredentialError> {
+        self.coordinator
+            .ensure_active_for(expected)
+            .await
+            .map_err(map_refresh)
+    }
+
     /// Acquire a fresh verified credential for EVERY server-side Notion
     /// operation. The passed backend client is never cached in the runtime.
     /// No request is made after a failed refresh or a mismatched identity.

@@ -3,6 +3,75 @@ use notion_knowledge_core::write_refresh::{
 };
 use notion_knowledge_retrieval::sync_state::SqliteSyncStateStore;
 const WORKSPACE: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+fn grant(epoch: u64) -> notion_knowledge_core::write_refresh::GrantRefreshAuthority {
+    notion_knowledge_core::write_refresh::GrantRefreshAuthority::new(
+        WORKSPACE.into(),
+        "fixture-grant".into(),
+        epoch,
+        "fixture-owner".into(),
+        "e".repeat(64),
+    )
+    .unwrap()
+}
+
+#[test]
+fn oauth_refresh_cannot_be_claimed_or_reinterpreted_by_another_authority() {
+    use notion_knowledge_retrieval::mutation_refresh::GrantMutationRefreshQueue;
+    let db = std::sync::Arc::new(SqliteSyncStateStore::open_in_memory().unwrap());
+    let queue = GrantMutationRefreshQueue::new(db.clone(), grant(1)).unwrap();
+    queue.admit(&key()).unwrap();
+    assert!(
+        db.claim_mutation_refresh(WORKSPACE, 100, 10)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(db.admit(&key()), Err(RefreshQueueError::Conflict));
+    let replacement = GrantMutationRefreshQueue::new(db.clone(), grant(2)).unwrap();
+    assert_eq!(replacement.admit(&key()), Err(RefreshQueueError::Conflict));
+    assert_eq!(replacement.status(&key()), Err(RefreshQueueError::Conflict));
+    let claim = db
+        .claim_grant_mutation_refresh(WORKSPACE, 100, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.authority, Some(grant(1)));
+    queue.cancel(&key()).unwrap();
+    assert!(!db.mutation_refresh_is_current(&claim, 101).unwrap());
+    assert_eq!(
+        db.complete_mutation_refresh(&claim, 101, true),
+        Err(RefreshQueueError::ClaimLost)
+    );
+    assert_eq!(queue.status(&key()).unwrap(), Some(IndexStatus::Failed));
+    assert_eq!(replacement.retry(&key()), Err(RefreshQueueError::Conflict));
+    queue.retry(&key()).unwrap();
+    let retry = db
+        .claim_grant_mutation_refresh(WORKSPACE, 102, 10)
+        .unwrap()
+        .unwrap();
+    assert!(retry.generation > claim.generation);
+    assert_eq!(retry.authority, Some(grant(1)));
+}
+
+#[test]
+fn integration_refresh_is_never_enrolled_into_an_oauth_grant() {
+    use notion_knowledge_retrieval::mutation_refresh::GrantMutationRefreshQueue;
+    let db = std::sync::Arc::new(SqliteSyncStateStore::open_in_memory().unwrap());
+    db.admit(&key()).unwrap();
+    let queue = GrantMutationRefreshQueue::new(db.clone(), grant(1)).unwrap();
+    assert_eq!(queue.admit(&key()), Err(RefreshQueueError::Conflict));
+    assert!(
+        db.claim_grant_mutation_refresh(WORKSPACE, 100, 10)
+            .unwrap()
+            .is_none()
+    );
+    let claim = db
+        .claim_mutation_refresh(WORKSPACE, 100, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.authority, None);
+    db.complete_mutation_refresh(&claim, 101, true).unwrap();
+    assert_eq!(db.status(&key()).unwrap(), Some(IndexStatus::Completed));
+}
+
 fn key() -> RefreshKey {
     RefreshKey {
         workspace_id: WORKSPACE.into(),
