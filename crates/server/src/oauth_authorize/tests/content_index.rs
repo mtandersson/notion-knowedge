@@ -126,8 +126,18 @@ pub async fn seed(dir: &Path, scope: &LifecycleScope, page_id: &str) -> Seeded {
         content_hash: hash,
         links: vec![],
     };
+    // Refresh validates prior canonical fingerprints, unlike read-only search.
+    let chunks = notion_knowledge_core::fingerprint::identify_chunks(
+        vec![notion_knowledge_core::chunking::ChunkDraft {
+            metadata: chunk.metadata,
+            source_bytes: 0..chunk.text.len(),
+            text: chunk.text,
+        }],
+        &[],
+    )
+    .unwrap();
     let prepared = table
-        .prepare_page(provider.as_ref(), operation, &[chunk])
+        .prepare_page(provider.as_ref(), operation, &chunks)
         .await
         .unwrap();
     assert_eq!(
