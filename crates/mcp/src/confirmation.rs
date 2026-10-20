@@ -33,6 +33,7 @@ impl ElicitationConfirmation {
         if timeout.is_zero() || timeout > Duration::from_secs(300) {
             return Err(ConfirmationError::InvalidRequest);
         }
+        let deadline = Instant::now() + timeout;
         let parts = context
             .extensions
             .get::<http::request::Parts>()
@@ -58,27 +59,39 @@ impl ElicitationConfirmation {
         {
             return Err(ConfirmationError::Disabled);
         }
-        adapters
-            .source
-            .validate()
-            .await
-            .map_err(|_| ConfirmationError::Unavailable)?;
         let scope_identity = confirmation_scope(&adapters.scope)?;
-        Ok(Self {
+        let provider = Self {
             peer: context.peer.clone(),
             adapters,
             authorization: auth,
             scope_identity,
             cancellation: context.ct.clone(),
-            deadline: Instant::now() + timeout,
+            deadline,
             used: AtomicBool::new(false),
-        })
+        };
+        if !provider.active().await {
+            return Err(ConfirmationError::Unavailable);
+        }
+        Ok(provider)
     }
-    async fn active(&self) -> bool {
+    fn locally_active(&self) -> bool {
         self.authorization.is_active()
             && !self.cancellation.is_cancelled()
             && Instant::now() < self.deadline
-            && self.adapters.source.validate().await.is_ok()
+    }
+    async fn active(&self) -> bool {
+        if !self.locally_active() {
+            return false;
+        }
+        let deadline = self.deadline.min(self.authorization.expires_at());
+        let token_cancel = self.authorization.cancellation();
+        let result = tokio::select! {
+            biased;
+            _ = self.cancellation.cancelled() => return false,
+            _ = token_cancel.cancelled() => return false,
+            result = tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), self.adapters.source.validate()) => result,
+        };
+        self.locally_active() && matches!(result, Ok(Ok(())))
     }
 }
 impl ConfirmationProvider for ElicitationConfirmation {
@@ -152,7 +165,7 @@ mod tests {
     use std::sync::Arc;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    struct Source(Arc<AtomicBool>);
+    struct Source(Arc<AtomicBool>, bool, std::sync::atomic::AtomicUsize);
     impl NotionRead for Source {
         fn fetch_page<'a>(&'a self, _: &'a PageId) -> BackendFuture<'a, Page> {
             Box::pin(async { panic!("confirmation must not read or mutate Notion") })
@@ -180,6 +193,9 @@ mod tests {
     impl RequestBoundSource for Source {
         fn validate(&self) -> BackendFuture<'_, ()> {
             Box::pin(async {
+                if self.1 && self.2.fetch_add(1, Ordering::SeqCst) >= 2 {
+                    std::future::pending::<()>().await;
+                }
                 if self.0.load(Ordering::SeqCst) {
                     Ok(())
                 } else {
@@ -197,6 +213,8 @@ mod tests {
     struct Server {
         active: Arc<AtomicBool>,
         mismatch: bool,
+        scenario: &'static str,
+        token_cancel: tokio_util::sync::CancellationToken,
     }
     impl ServerHandler for Server {
         fn get_info(&self) -> rmcp::model::ServerConfig {
@@ -217,9 +235,18 @@ mod tests {
                 1,
                 "workspace".into(),
                 "owner".into(),
-                Instant::now() + Duration::from_secs(60),
+                if self.scenario == "expired" {
+                    Instant::now() - Duration::from_secs(1)
+                } else {
+                    Instant::now() + Duration::from_secs(60)
+                },
             )
-            .with_permissions(OAuthPermissions::ReadWrite);
+            .with_permissions(if self.scenario == "readonly" {
+                OAuthPermissions::Read
+            } else {
+                OAuthPermissions::ReadWrite
+            })
+            .with_cancellation(self.token_cancel.clone());
             let scope = LifecycleScope {
                 workspace_id: "workspace".into(),
                 generation: 1,
@@ -229,7 +256,11 @@ mod tests {
             let mut adapters = RequestScopeAdapters {
                 authorization: auth.clone(),
                 scope: scope.clone(),
-                source: Arc::new(Source(self.active.clone())),
+                source: Arc::new(Source(
+                    self.active.clone(),
+                    self.scenario == "held_validation",
+                    0.into(),
+                )),
             };
             if self.mismatch {
                 adapters.authorization = HttpAuthorization::new(
@@ -246,19 +277,32 @@ mod tests {
             parts.extensions.insert(auth);
             parts.extensions.insert(adapters);
             context.extensions.insert(parts);
-            let provider =
-                match ElicitationConfirmation::bind(&context, Duration::from_secs(5)).await {
-                    Ok(provider) => provider,
-                    Err(_) => {
-                        return Ok(rmcp::model::CallToolResult::success(vec![
-                            rmcp::model::ContentBlock::text("unavailable"),
-                        ])
-                        .into());
-                    }
-                };
+            let provider = match ElicitationConfirmation::bind(
+                &context,
+                if matches!(self.scenario, "timeout" | "held_validation") {
+                    Duration::from_millis(10)
+                } else {
+                    Duration::from_secs(5)
+                },
+            )
+            .await
+            {
+                Ok(provider) => provider,
+                Err(_) => {
+                    return Ok(rmcp::model::CallToolResult::success(vec![
+                        rmcp::model::ContentBlock::text("unavailable"),
+                    ])
+                    .into());
+                }
+            };
+            let intended_scope = confirmation_scope(&scope).unwrap();
             let intended = ConfirmationRequest::new(
                 WriteOperation::UpdateSection,
-                &confirmation_scope(&scope).unwrap(),
+                if self.scenario == "scope" {
+                    "scope-mismatched"
+                } else {
+                    &intended_scope
+                },
                 "page",
                 &"a".repeat(64),
                 "fixture-idempotency-key",
@@ -285,17 +329,33 @@ mod tests {
         }
     }
     async fn exchange(reply: Value, invalidate: bool, mismatch: bool) -> (bool, Value) {
+        exchange_scenario(reply, invalidate, mismatch, "normal").await
+    }
+    async fn exchange_scenario(
+        reply: Value,
+        invalidate: bool,
+        mismatch: bool,
+        scenario: &'static str,
+    ) -> (bool, Value) {
         let active = Arc::new(AtomicBool::new(true));
+        let token_cancel = tokio_util::sync::CancellationToken::new();
         let server = Server {
             active: active.clone(),
             mismatch,
+            scenario,
+            token_cancel: token_cancel.clone(),
         };
         let (client, transport) = tokio::io::duplex(65536);
         let task =
             tokio::spawn(async move { server.serve(transport).await.unwrap().waiting().await });
         let (reader, mut writer) = tokio::io::split(client);
         let mut reader = BufReader::new(reader);
-        writer.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"elicitation":{"form":{}}},"clientInfo":{"name":"confirmation-fixture","version":"1"}}})).as_bytes()).await.unwrap();
+        let capabilities = if scenario == "unsupported" {
+            json!({})
+        } else {
+            json!({"elicitation":{"form":{}}})
+        };
+        writer.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":capabilities,"clientInfo":{"name":"confirmation-fixture","version":"1"}}})).as_bytes()).await.unwrap();
         let mut line = String::new();
         reader.read_line(&mut line).await.unwrap();
         writer
@@ -316,6 +376,12 @@ mod tests {
             );
             if invalidate {
                 active.store(false, Ordering::SeqCst);
+            }
+            if scenario == "revoked" {
+                token_cancel.cancel();
+            }
+            if scenario == "timeout" {
+                tokio::time::sleep(Duration::from_millis(30)).await;
             }
             writer
                 .write_all(
@@ -375,5 +441,50 @@ mod tests {
         .await;
         assert!(!elicited);
         assert_eq!(response["result"]["content"][0]["text"], "unavailable");
+    }
+
+    #[tokio::test]
+    async fn unsupported_expired_readonly_and_changed_scope_never_prompt() {
+        for scenario in ["unsupported", "expired", "readonly", "scope"] {
+            let (elicited, response) = exchange_scenario(
+                json!({"action":"accept","content":{"approve":true}}),
+                false,
+                false,
+                scenario,
+            )
+            .await;
+            assert!(!elicited, "{scenario}");
+            assert_ne!(response["result"]["content"][0]["text"], "Approved");
+        }
+    }
+
+    #[tokio::test]
+    async fn revoked_session_and_expired_prompt_reject_late_acceptance() {
+        for scenario in ["revoked", "timeout", "held_validation"] {
+            let (elicited, response) = exchange_scenario(
+                json!({"action":"accept","content":{"approve":true}}),
+                false,
+                false,
+                scenario,
+            )
+            .await;
+            assert!(elicited);
+            assert_eq!(response["result"]["content"][0]["text"], "Unavailable");
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_sessions_keep_independent_user_decisions() {
+        let (approved, declined) = tokio::join!(
+            exchange(
+                json!({"action":"accept","content":{"approve":true}}),
+                false,
+                false
+            ),
+            exchange(json!({"action":"decline"}), false, false),
+        );
+        assert!(approved.0 && declined.0);
+        assert_eq!(approved.1["result"]["content"][0]["text"], "Approved");
+        assert_eq!(declined.1["result"]["content"][0]["text"], "Declined");
     }
 }

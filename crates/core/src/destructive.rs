@@ -148,11 +148,8 @@ impl ConfirmationRequest {
         if self.operation != WriteOperation::UpdateSection
             || preview.section_anchor.is_empty()
             || preview.section_anchor.len() > 1024
-            || preview
-                .original_body
-                .len()
-                .saturating_add(preview.replacement_body.len())
-                > 128 * 1024
+            || preview.original_body.len() > 1024 * 1024
+            || preview.replacement_body.len() > 200_000
         {
             return Err(ConfirmationError::InvalidRequest);
         }

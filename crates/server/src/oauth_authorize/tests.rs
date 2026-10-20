@@ -1287,5 +1287,6 @@ mod content_index;
 
 mod revocation;
 
+mod confirmation_http;
 #[path = "tests/write_authority.rs"]
 mod write_authority;

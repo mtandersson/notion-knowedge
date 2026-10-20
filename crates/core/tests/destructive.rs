@@ -189,3 +189,95 @@ fn confirmation_scope_changes_when_exclusion_policy_changes() {
         .insert(notion_knowledge_core::discovery::SourceType::Database);
     assert_ne!(fingerprint, confirmation_scope(&changed).unwrap());
 }
+
+#[tokio::test]
+async fn approved_section_permit_cannot_transfer_to_another_effect_or_idempotency_intent() {
+    use notion_knowledge_core::destructive::SectionConfirmationPreview;
+    let original = request(WriteOperation::UpdateSection)
+        .with_section_preview(SectionConfirmationPreview {
+            section_anchor: "## Target".into(),
+            original_body: "Original".into(),
+            replacement_body: "Replacement".into(),
+        })
+        .unwrap();
+    let provider = Provider::new(ConfirmationDecision::Approved);
+    let policy = DestructivePolicy::new(true);
+    for changed in [
+        ConfirmationRequest::new(
+            original.operation(),
+            "other-scope",
+            original.target_id(),
+            original.request_sha256(),
+            original.idempotency_key(),
+        )
+        .unwrap(),
+        ConfirmationRequest::new(
+            original.operation(),
+            original.trusted_scope(),
+            "other-page",
+            original.request_sha256(),
+            original.idempotency_key(),
+        )
+        .unwrap(),
+        ConfirmationRequest::new(
+            original.operation(),
+            original.trusted_scope(),
+            original.target_id(),
+            &"b".repeat(64),
+            original.idempotency_key(),
+        )
+        .unwrap(),
+        ConfirmationRequest::new(
+            original.operation(),
+            original.trusted_scope(),
+            original.target_id(),
+            original.request_sha256(),
+            "another-idempotency-intent",
+        )
+        .unwrap(),
+        original
+            .clone()
+            .with_section_preview(SectionConfirmationPreview {
+                section_anchor: "## Target".into(),
+                original_body: "Original".into(),
+                replacement_body: "Changed payload".into(),
+            })
+            .unwrap(),
+    ] {
+        let permit = policy
+            .require_confirmation(&original, Some(&provider))
+            .await
+            .unwrap();
+        assert_eq!(permit.consume(&changed), Err(ConfirmationError::Mismatch));
+    }
+}
+#[test]
+fn readable_preview_preserves_existing_section_size_bounds() {
+    use notion_knowledge_core::destructive::SectionConfirmationPreview;
+    let preview = SectionConfirmationPreview {
+        section_anchor: "## Target".into(),
+        original_body: "a".repeat(1024 * 1024),
+        replacement_body: "b".repeat(200_000),
+    };
+    assert!(
+        request(WriteOperation::UpdateSection)
+            .with_section_preview(preview.clone())
+            .is_ok()
+    );
+    let mut oversized = preview.clone();
+    oversized.replacement_body.push('b');
+    assert_eq!(
+        request(WriteOperation::UpdateSection)
+            .with_section_preview(oversized)
+            .unwrap_err(),
+        ConfirmationError::InvalidRequest
+    );
+    let mut oversized = preview;
+    oversized.original_body.push('a');
+    assert_eq!(
+        request(WriteOperation::UpdateSection)
+            .with_section_preview(oversized)
+            .unwrap_err(),
+        ConfirmationError::InvalidRequest
+    );
+}
