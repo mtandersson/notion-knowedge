@@ -256,6 +256,24 @@ mod tests {
         assert_eq!(semantic_only[0].source.chunk_id, "z");
     }
     #[test]
+    fn tied_semantic_only_candidates_use_stable_canonical_identity() {
+        let config = ReciprocalRankFusion {
+            rank_constant: f64::MAX,
+            ..Default::default()
+        };
+        for ids in [["z", "a"], ["a", "z"]] {
+            let results = fuse(ids.into_iter().map(hit).collect(), vec![], config, 2).unwrap();
+            assert_eq!(results[0].score, results[1].score);
+            assert_eq!(results[0].source.chunk_id, "a");
+            assert_eq!(results[1].source.chunk_id, "z");
+            assert!(
+                results
+                    .iter()
+                    .all(|hit| hit.matched_paths == [RetrievalPath::Semantic])
+            );
+        }
+    }
+    #[test]
     fn zero_weight_paths_are_rejected_at_construction() {
         struct Empty;
         impl SemanticSearch for Empty {
