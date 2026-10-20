@@ -68,7 +68,7 @@ pub(crate) fn mcp_transport(
     };
     let handler = handler
         .with_tool_capacity(settings.mcp_tool_capacity)
-        .with_read_only(oauth.is_some() || settings.read_only)
+        .with_read_only(settings.read_only || (oauth.is_some() && !settings.oauth_writes))
         .with_destructive_writes_enabled(settings.destructive_writes_enabled)
         .with_capability_policy(settings.capability_policy.clone());
     let bind = settings.http_bind;
@@ -181,18 +181,65 @@ pub async fn serve_installed(
         .map_err(|_| io::Error::other("Notion OAuth credential runtime unavailable"))?;
     let oauth_login = crate::oauth_authorize::Login::from_config(&settings, notion_oauth.as_ref())
         .map_err(|_| io::Error::other("Notion OAuth browser runtime unavailable"))?;
+    serve_with_oauth(
+        settings,
+        handler,
+        #[cfg(all(unix, feature = "webhook-worker"))]
+        worker,
+        shutdown,
+        notion_oauth,
+        oauth_login,
+        #[cfg(all(unix, feature = "webhook-worker"))]
+        None,
+    )
+    .await
+}
+
+/// Shipping lifecycle with typed credentials/model seams for local providers.
+/// Neither dependency can be selected by environment or MCP arguments.
+pub(crate) async fn serve_with_oauth(
+    settings: crate::config::Config,
+    handler: notion_knowledge_mcp::KnowledgeServer,
+    #[cfg(all(unix, feature = "webhook-worker"))] worker: Option<
+        Arc<crate::webhook_worker::runtime::Worker>,
+    >,
+    shutdown: tokio_util::sync::CancellationToken,
+    notion_oauth: Option<crate::notion_oauth_runtime::NotionOAuthRuntime>,
+    oauth_login: Option<Arc<crate::oauth_authorize::Login>>,
+    #[cfg(all(unix, feature = "webhook-worker"))] provider: Option<
+        Arc<dyn notion_knowledge_core::embedding::EmbeddingProvider>,
+    >,
+) -> io::Result<()> {
+    #[cfg(all(unix, feature = "webhook-worker"))]
+    let mut oauth_writes = None;
     let handler = if settings.oauth_discovery.is_some() && settings.notion_scope.is_some() {
         if notion_oauth.is_none() || oauth_login.is_none() {
             return Err(io::Error::other("OAuth content authorization unavailable"));
         }
         let handler = notion_knowledge_mcp::KnowledgeServer::default().with_request_bound_content();
         #[cfg(all(unix, feature = "webhook-worker"))]
-        let handler = crate::retrieval_runtime::configured_oauth(
-            crate::graph_runtime::attach_request(handler, &settings).map_err(io::Error::other)?,
-            &settings,
-        )
-        .await
-        .map_err(io::Error::other)?;
+        let handler = if settings.oauth_writes {
+            let credentials = notion_oauth
+                .clone()
+                .ok_or_else(|| io::Error::other("OAuth runtime unavailable"))?;
+            let runtime = if let Some(provider) = provider {
+                crate::oauth_writes::compose(handler, &settings, credentials, provider).await
+            } else {
+                crate::oauth_writes::configured(handler, &settings, credentials).await
+            }
+            .map_err(io::Error::other)?;
+            let handler = runtime.handler.clone();
+            oauth_writes = Some(Arc::new(runtime));
+            handler
+        } else {
+            crate::retrieval_runtime::configured_oauth(
+                crate::graph_runtime::attach_request(handler, &settings)
+                    .map_err(io::Error::other)?,
+                &settings,
+            )
+            .await
+            .map_err(io::Error::other)?
+        };
         handler
     } else {
         handler
@@ -289,6 +336,18 @@ pub async fn serve_installed(
     #[cfg(all(unix, feature = "webhook-worker"))]
     let owned_coordinator = worker.as_ref().map(|worker| worker.coordinator.clone());
     #[cfg(all(unix, feature = "webhook-worker"))]
+    let oauth_coordinator = oauth_writes
+        .as_ref()
+        .map(|runtime| runtime.coordinator.clone());
+    #[cfg(all(unix, feature = "webhook-worker"))]
+    let oauth_task = oauth_writes.map(|runtime| {
+        let stop = cancellation.clone();
+        tokio::spawn(async move {
+            let _cancel_on_exit = stop.clone().drop_guard();
+            runtime.run(stop).await
+        })
+    });
+    #[cfg(all(unix, feature = "webhook-worker"))]
     let worker_task = worker.map(|worker| {
         let stop = cancellation.clone();
         tokio::spawn(async move {
@@ -306,19 +365,28 @@ pub async fn serve_installed(
             .await;
         stopped.cancel();
         #[cfg(all(unix, feature = "webhook-worker"))]
-        if let Some(task) = worker_task {
-            let worker_result = task
-                .await
-                .map_err(|_| io::Error::other("index worker terminated"))
-                .and_then(|result| result.map_err(io::Error::other));
-            // Never abort an owned native effect or release its live guard.
-            if let Some(coordinator) = owned_coordinator {
-                coordinator
-                    .drain_owned()
-                    .await
-                    .map_err(|_| io::Error::other("index drain failed"))?;
+        {
+            let mut failure = None;
+            // Await every owned worker and native drain even if an earlier one failed.
+            for task in [worker_task, oauth_task].into_iter().flatten() {
+                match task.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        failure.get_or_insert_with(|| io::Error::other(error));
+                    }
+                    Err(_) => {
+                        failure.get_or_insert_with(|| io::Error::other("index worker terminated"));
+                    }
+                }
             }
-            worker_result?;
+            for coordinator in [owned_coordinator, oauth_coordinator].into_iter().flatten() {
+                if coordinator.drain_owned().await.is_err() {
+                    failure.get_or_insert_with(|| io::Error::other("index drain failed"));
+                }
+            }
+            if let Some(error) = failure {
+                return Err(error);
+            }
         }
         result
     })

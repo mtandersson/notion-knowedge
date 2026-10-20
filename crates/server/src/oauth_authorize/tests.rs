@@ -22,6 +22,8 @@ struct Harness {
     client: reqwest::Client,
     calls: Arc<AtomicUsize>,
     available: Arc<AtomicBool>,
+    #[cfg(feature = "webhook-worker")]
+    document: Arc<std::sync::Mutex<Option<(String, u64)>>>,
     mutation_status: Arc<AtomicUsize>,
     mutations: Arc<AtomicUsize>,
     mutation_gate: Arc<tokio::sync::Semaphore>,
@@ -201,23 +203,26 @@ impl Harness {
             .as_ref()
             .map(|scope| scope.roots[0].0.clone())
             .unwrap_or("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".into());
+        let document = Arc::new(std::sync::Mutex::new(None::<(String, u64)>));
+        let page_document = document.clone();
+        let markdown_document = document.clone();
         let provider_router = provider_router.route("/v1/pages/{id}", axum::routing::get(move |axum::extract::Path(id): axum::extract::Path<String>, headers: HeaderMap| {
             let root = root.clone(); let status = page_state.clone(); let reads = reads.clone();
-            let wait = page_wait.clone(); let pause = pause.clone();
+            let wait = page_wait.clone(); let pause = pause.clone(); let document = page_document.clone();
             async move {
                 assert!(matches!(headers["authorization"].to_str().unwrap(), "Bearer provider-access-secret" | "Bearer rotated-access-secret"));
                 reads.fetch_add(1, Ordering::SeqCst);
                 if pause.swap(false, Ordering::SeqCst) { let _hold = wait.acquire().await.unwrap(); }
                 (StatusCode::from_u16(status.load(Ordering::SeqCst) as u16).unwrap(), axum::Json(serde_json::json!({
-                    "object":"page", "id":id, "url":format!("https://www.notion.so/{id}"), "last_edited_time":"2026-10-17T00:00:00.000Z", "in_trash":false,
+                    "object":"page", "id":id, "url":format!("https://www.notion.so/{id}"), "last_edited_time":format!("2026-10-17T00:00:{:02}.000Z", document.lock().unwrap().as_ref().map_or(0,|d|d.1)), "in_trash":false,
                     "parent":if id == root { serde_json::json!({"type":"workspace","workspace":true}) } else { serde_json::json!({"type":"page_id","page_id":root}) },
                     "properties":{"Title":{"id":"title","type":"title","title":[{"plain_text":"Saffron private evidence"}]}}
                 })))
             }
-        })).route("/v1/pages/{id}/markdown", axum::routing::get(|axum::extract::Path(id):axum::extract::Path<String>, headers:HeaderMap| async move {
+        })).route("/v1/pages/{id}/markdown", axum::routing::get(move |axum::extract::Path(id):axum::extract::Path<String>, headers:HeaderMap| { let document = markdown_document.clone(); async move {
             assert!(matches!(headers["authorization"].to_str().unwrap(), "Bearer provider-access-secret" | "Bearer rotated-access-secret"));
-            axum::Json(serde_json::json!({"object":"page_markdown","id":id,"markdown":"Saffron private evidence fresh content", "truncated":false,"unknown_block_ids":[]}))
-        }));
+            axum::Json(serde_json::json!({"object":"page_markdown","id":id,"markdown":document.lock().unwrap().as_ref().map_or_else(|| "Saffron private evidence fresh content".to_owned(), |d| d.0.clone()), "truncated":false,"unknown_block_ids":[]}))
+        }}));
         let mutation_status = Arc::new(AtomicUsize::new(200));
         let mutations = Arc::new(AtomicUsize::new(0));
         let mutation_gate = Arc::new(tokio::sync::Semaphore::new(1));
@@ -226,12 +231,14 @@ impl Harness {
         let held = mutation_gate.clone();
         let signal = mutation_started.clone();
         let effect_status = mutation_status.clone();
+        let patch_document = document.clone();
         let patch = move |axum::extract::Path(id): axum::extract::Path<String>,
                           axum::Json(body): axum::Json<serde_json::Value>| {
             let effects = effects.clone();
             let held = held.clone();
             let signal = signal.clone();
             let status = effect_status.clone();
+            let document = patch_document.clone();
             async move {
                 assert!(matches!(
                     body["type"].as_str(),
@@ -240,6 +247,24 @@ impl Harness {
                 effects.fetch_add(1, Ordering::SeqCst);
                 signal.notify_one();
                 let _permit = held.acquire().await.unwrap();
+                if status.load(Ordering::SeqCst) == 200
+                    && let Some((markdown, revision)) = document.lock().unwrap().as_mut()
+                {
+                    if body["type"] == "insert_content" {
+                        markdown.push_str(body["insert_content"]["content"].as_str().unwrap());
+                    } else {
+                        for update in body["update_content"]["content_updates"]
+                            .as_array()
+                            .unwrap()
+                        {
+                            let old = update["old_str"].as_str().unwrap();
+                            assert_eq!(markdown.matches(old).count(), 1);
+                            *markdown =
+                                markdown.replacen(old, update["new_str"].as_str().unwrap(), 1);
+                        }
+                    }
+                    *revision += 1;
+                }
                 (
                     StatusCode::from_u16(status.load(Ordering::SeqCst) as u16).unwrap(),
                     [("Retry-After", "1")],
@@ -252,13 +277,17 @@ impl Harness {
         let effects = mutations.clone();
         let held = mutation_gate.clone();
         let signal = mutation_started.clone();
+        let create_document = document.clone();
         let provider_router = provider_router.route("/v1/pages/{id}/markdown", axum::routing::patch(patch))
             .route("/v1/pages", axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
-                let effects = effects.clone(); let held = held.clone(); let signal = signal.clone();
+                let effects = effects.clone(); let held = held.clone(); let signal = signal.clone(); let document = create_document.clone();
                 async move {
                     assert!(body["parent"]["page_id"].is_string());
                     effects.fetch_add(1, Ordering::SeqCst); signal.notify_one();
                     let _permit = held.acquire().await.unwrap();
+                    if let Some((markdown,revision)) = document.lock().unwrap().as_mut() {
+                        *markdown = body["markdown"].as_str().unwrap().to_owned(); *revision += 1;
+                    }
                     axum::Json(serde_json::json!({"object":"page","id":"cccccccc-cccc-cccc-cccc-cccccccccccc","url":"https://www.notion.so/cccccccc-cccc-cccc-cccc-cccccccccccc"}))
                 }
             }));
@@ -402,6 +431,8 @@ impl Harness {
                 .unwrap(),
             calls,
             available,
+            #[cfg(feature = "webhook-worker")]
+            document,
             mutation_status,
             mutations,
             mutation_gate,
@@ -1294,3 +1325,7 @@ mod write_authority;
 #[cfg(all(unix, feature = "webhook-worker"))]
 #[path = "tests/grant_refresh.rs"]
 mod grant_refresh;
+
+#[cfg(all(unix, feature = "webhook-worker"))]
+#[path = "tests/installed_writes.rs"]
+mod installed_writes;

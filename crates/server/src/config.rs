@@ -25,6 +25,7 @@ pub struct Config {
     /// Fail-closed MCP access mode; enabled unless explicitly opted out.
     pub read_only: bool,
     pub oauth_writes: bool,
+    pub oauth_write_stores: Option<crate::oauth_writes::Settings>,
     /// Explicit second gate for destructive operations; defaults disabled.
     pub destructive_writes_enabled: bool,
     pub capability_policy: notion_knowledge_mcp::capabilities::CapabilityPolicy,
@@ -886,6 +887,13 @@ impl Config {
                 "requires writable mode, complete OAuth registration, sealed grant storage and scope without integration credentials",
             ));
         }
+        let oauth_write_stores = crate::oauth_writes::Settings::parse(&mut lookup, oauth_writes)?;
+        if oauth_writes && (retrieval.is_none() || webhook_state_file.is_none()) {
+            return Err(invalid(
+                "NK_OAUTH_WRITES",
+                "requires configured retrieval and durable index state",
+            ));
+        }
         let oauth_discovery =
             oauth_discovery.map(|discovery| discovery.with_write_policy(oauth_writes));
         Ok(Self {
@@ -912,6 +920,7 @@ impl Config {
             log_level,
             read_only,
             oauth_writes,
+            oauth_write_stores,
             destructive_writes_enabled,
             capability_policy,
             bearer_fallback,
@@ -1103,7 +1112,9 @@ mod tests {
         assert!(!configured.oauth_writes);
         let mut writable = values.clone();
         writable.extend([("NK_OAUTH_WRITES", "true"), ("NK_READ_ONLY", "false")]);
-        assert!(parse(&writable).unwrap().oauth_writes);
+        // Scope issuance alone is insufficient: installed writes also require
+        // explicit durable mutation stores and compatible retrieval state.
+        assert!(parse(&writable).is_err());
         for missing in [
             "NK_READ_ONLY",
             "NK_OAUTH_CLIENT_ID",

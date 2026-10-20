@@ -132,6 +132,32 @@ async fn run() -> ExitCode {
             Err(_) => { eprintln!("Notion OAuth grant could not be forgotten; stop credential users and check private state."); ExitCode::FAILURE },
         };
     }
+    if all_args == ["--initialize-oauth-write-ledger"] {
+        let Some(settings) = &config.oauth_write_stores else {
+            eprintln!("OAuth write ledger initialization requires complete write configuration.");
+            return ExitCode::from(2);
+        };
+        if notion_knowledge_server::oauth_writes::validate_distinct(&config).is_err() {
+            eprintln!(
+                "OAuth write ledger initialization requires distinct protected durable storage."
+            );
+            return ExitCode::from(2);
+        }
+        return match notion_knowledge_retrieval::idempotency::SqliteIdempotencyStore::initialize_new(
+            &settings.ledger,
+        ) {
+            Ok(_) => {
+                println!("OAuth mutation ledger initialized; preserve it across index rebuilds.");
+                ExitCode::SUCCESS
+            }
+            Err(_) => {
+                eprintln!(
+                    "OAuth mutation ledger initialization failed; existing ledgers are never replaced."
+                );
+                ExitCode::FAILURE
+            }
+        };
+    }
     notion_knowledge_core::logging::set_level(config.log_level);
     // Never start HTTP, stdio, diagnostics or --check with a corrupt or
     // foreign encrypted Notion grant. A missing state means unapproved.
