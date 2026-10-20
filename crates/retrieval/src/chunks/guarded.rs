@@ -341,7 +341,8 @@ impl GuardedChunkTable {
             .into_iter()
             .collect())
     }
-    pub(crate) fn is_bound_to(&self, coordinator: &Arc<IndexCommitCoordinator>) -> bool {
+    /// Verify exact shared commit ownership before composing another worker.
+    pub fn is_bound_to(&self, coordinator: &Arc<IndexCommitCoordinator>) -> bool {
         Arc::ptr_eq(&self.coordinator, coordinator)
     }
     pub fn binding(&self) -> &crate::commit::CommitBinding {
