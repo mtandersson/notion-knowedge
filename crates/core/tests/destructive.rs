@@ -161,3 +161,31 @@ fn malformed_claims_and_nondestructive_confirmation_requests_are_rejected() {
     let req = request(WriteOperation::DeletePage);
     assert!(!format!("{req:?}").contains("workspace-approved"));
 }
+#[test]
+fn confirmation_scope_changes_when_exclusion_policy_changes() {
+    use notion_knowledge_core::{
+        backend::PageId, destructive::confirmation_scope, lifecycle::LifecycleScope,
+    };
+    let original = LifecycleScope {
+        workspace_id: "workspace".into(),
+        generation: 1,
+        roots: vec![PageId("root".into())],
+        exclusions: Default::default(),
+    };
+    let fingerprint = confirmation_scope(&original).unwrap();
+    let mut changed = original.clone();
+    changed.exclusions.page_ids.insert("excluded-page".into());
+    assert_ne!(fingerprint, confirmation_scope(&changed).unwrap());
+    changed = original.clone();
+    changed
+        .exclusions
+        .descendants_of
+        .insert("retained-root".into());
+    assert_ne!(fingerprint, confirmation_scope(&changed).unwrap());
+    changed = original.clone();
+    changed
+        .exclusions
+        .source_types
+        .insert(notion_knowledge_core::discovery::SourceType::Database);
+    assert_ne!(fingerprint, confirmation_scope(&changed).unwrap());
+}
