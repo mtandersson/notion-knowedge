@@ -209,6 +209,25 @@ pub(crate) async fn compose_oauth_queries(
     config: &Config,
     provider: Arc<dyn EmbeddingProvider>,
 ) -> Result<KnowledgeServer, &'static str> {
+    Ok(compose_oauth_index(handler, config, provider, false)
+        .await?
+        .0)
+}
+
+/// One index authority shared by request queries and the grant refresh worker.
+pub(crate) async fn compose_oauth_index(
+    handler: KnowledgeServer,
+    config: &Config,
+    provider: Arc<dyn EmbeddingProvider>,
+    writable: bool,
+) -> Result<
+    (
+        KnowledgeServer,
+        Arc<notion_knowledge_retrieval::commit::IndexCommitCoordinator>,
+        GuardedChunkTable,
+    ),
+    &'static str,
+> {
     use notion_knowledge_retrieval::{
         commit::{CommitBinding, IndexCommitCoordinator},
         planner::production_scope,
@@ -237,7 +256,7 @@ pub(crate) async fn compose_oauth_queries(
             .webhook_state_file
             .as_deref()
             .ok_or("retrieval state unavailable")?,
-        binding,
+        binding.clone(),
     )
     .map_err(|_| "existing index authority unavailable or incompatible")?;
     let table = GuardedChunkTable::bind(
@@ -251,6 +270,28 @@ pub(crate) async fn compose_oauth_queries(
         .search_snapshot()
         .await
         .map_err(|_| "retrieval index unavailable or incompatible")?;
+    let (coordinator, table) = if writable {
+        // Validate existing vector metadata before opening writable authority.
+        let coordinator = IndexCommitCoordinator::open_existing(
+            &settings.index,
+            config
+                .webhook_state_file
+                .as_deref()
+                .ok_or("retrieval state unavailable")?,
+            binding,
+        )
+        .map_err(|_| "existing index authority unavailable or incompatible")?;
+        let table = GuardedChunkTable::bind(
+            &settings.index,
+            "chunks",
+            provider.metadata().clone(),
+            coordinator.clone(),
+        )
+        .map_err(|_| "retrieval binding incompatible")?;
+        (coordinator, table)
+    } else {
+        (coordinator, table)
+    };
     let handler = handler
         .with_request_bound_content()
         .with_root_page_ids(scope.roots.iter().map(|root| root.0.clone()).collect())?
@@ -266,21 +307,25 @@ pub(crate) async fn compose_oauth_queries(
             provider,
         }))
         .and_source_expansion(
-            Arc::new(table),
+            Arc::new(table.clone()),
             scope.roots.iter().map(|root| root.0.clone()).collect(),
         )?;
     if config.graph_index.is_some() || config.graph_boost.enabled {
         if config.graph_index.as_ref() != Some(&settings.index) {
             return Err("graph requires retrieval index binding");
         }
-        Ok(handler.and_request_graph(
-            Arc::new(notion_knowledge_retrieval::graph::CommittedGraph::new(
-                coordinator,
-            )),
-            config.graph_boost,
+        Ok((
+            handler.and_request_graph(
+                Arc::new(notion_knowledge_retrieval::graph::CommittedGraph::new(
+                    coordinator.clone(),
+                )),
+                config.graph_boost,
+            ),
+            coordinator,
+            table,
         ))
     } else {
-        Ok(handler)
+        Ok((handler, coordinator, table))
     }
 }
 

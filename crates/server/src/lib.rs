@@ -3,6 +3,7 @@
 pub mod config;
 pub mod diagnostics;
 pub mod http;
+pub mod oauth_writes;
 pub mod shutdown;
 
 /// Installed SDK session and SSE response lifetime budgets.

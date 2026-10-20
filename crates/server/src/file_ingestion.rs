@@ -137,7 +137,7 @@ impl Settings {
         }))
     }
 }
-fn validate_audit_path(path: &Path) -> Result<(), ConfigError> {
+pub(crate) fn validate_audit_path(path: &Path) -> Result<(), ConfigError> {
     let err = || {
         invalid(
             "NK_FILE_AUDIT_FILE",

@@ -194,6 +194,7 @@ impl KnowledgeServer {
                     | "knowledge_related"
             )
             || (self.request_scope_required
+                && mutations::is_semantic_mutation(name)
                 && self
                     .request_mutations
                     .as_ref()
@@ -1058,10 +1059,11 @@ impl ServerHandler for KnowledgeServer {
                 .mutations
                 .as_ref()
                 .is_some_and(|runtime| runtime.supports(name))
-                || self
-                    .request_mutations
-                    .as_ref()
-                    .is_some_and(|factory| factory.supports(name)) =>
+                || (mutations::is_semantic_mutation(name)
+                    && self
+                        .request_mutations
+                        .as_ref()
+                        .is_some_and(|factory| factory.supports(name))) =>
             {
                 Some(mutations::tool(name))
             }
@@ -1152,6 +1154,7 @@ impl ServerHandler for KnowledgeServer {
             })?;
         }
         if let Some(factory) = &self.request_mutations
+            && mutations::is_semantic_mutation(request.name.as_ref())
             && factory.supports(request.name.as_ref())
         {
             if !auth.permissions().can_write() || adapters.source.mutation_ports().is_none() {
@@ -1192,6 +1195,69 @@ impl ServerHandler for KnowledgeServer {
 #[cfg(test)]
 mod access_mode_tests {
     use super::*;
+
+    struct BroadFactory;
+    impl mutations::RequestMutationFactory for BroadFactory {
+        fn supports(&self, _: &str) -> bool {
+            true
+        }
+        fn bind<'a>(
+            &'a self,
+            _: RequestScopeAdapters,
+            _: &'a rmcp::service::RequestContext<rmcp::RoleServer>,
+            _: &'a str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<Arc<mutations::MutationRuntime>, rmcp::ErrorData>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { panic!("discovery and admission must not bind a mutation") })
+        }
+    }
+    #[test]
+    fn oauth_factory_cannot_admit_files_or_unimplemented_destructive_tools() {
+        for reversed in [false, true] {
+            let handler = KnowledgeServer::default();
+            let handler = if reversed {
+                handler
+                    .and_request_mutations(Arc::new(BroadFactory))
+                    .with_request_bound_content()
+            } else {
+                handler
+                    .with_request_bound_content()
+                    .and_request_mutations(Arc::new(BroadFactory))
+            }
+            .with_read_only(false)
+            .with_destructive_writes_enabled(true);
+            for name in [
+                "knowledge_create_page",
+                "knowledge_append",
+                "knowledge_update_section",
+            ] {
+                assert!(handler.tool_permitted(name), "{name}");
+            }
+            for name in [
+                "knowledge_upload_file",
+                "knowledge_archive_page",
+                "knowledge_replace_page",
+                "future_write",
+            ] {
+                assert!(!handler.tool_permitted(name), "{name}");
+                assert!(handler.get_tool(name).is_none(), "{name}");
+            }
+            let readonly = handler.with_read_only(true);
+            for name in [
+                "knowledge_create_page",
+                "knowledge_append",
+                "knowledge_update_section",
+            ] {
+                assert!(!readonly.tool_permitted(name), "{name}");
+            }
+        }
+    }
 
     #[test]
     fn default_deny_guards_future_mutations_in_both_modes() {

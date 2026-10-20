@@ -1,5 +1,5 @@
-//! Explicit trusted semantic mutation capabilities. No server startup or OAuth
-//! path installs these; later composition must supply live request authority.
+//! Trusted semantic mutation capabilities. Production OAuth composition supplies
+//! live per-request authority, durable stores and explicit operator activation.
 use notion_knowledge_core::{
     append::{AppendError, AppendRequest, append_once_and_refresh},
     audit::{AuditActor, AuditEvent, AuditOutcome, AuditStore, AuditTool},
@@ -456,6 +456,15 @@ pub(crate) fn tool(name: &str) -> rmcp::model::Tool {
         }
     }).as_object().unwrap().clone()));
     tool
+}
+
+/// The installed OAuth write surface is deliberately narrower than all mutation
+/// schemas: file upload, archive and whole-page replacement are separate work.
+pub fn is_semantic_mutation(name: &str) -> bool {
+    matches!(
+        name,
+        "knowledge_create_page" | "knowledge_append" | "knowledge_update_section"
+    )
 }
 
 /// Server-owned request composition. Implementations bind live source authority,

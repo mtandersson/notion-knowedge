@@ -9,13 +9,12 @@ rejected. Either order of the two supported scope tokens is accepted and issuanc
 returns canonical read-then-write order. Existing read-only tokens retain only
 read authority. OAuth metadata advertises the operator-supported scope tokens.
 
-This policy does **not** install semantic mutations into HTTP, stdio or ChatGPT.
-OAuth tool discovery and dispatch retain their read-only guards until the durable
-write/refresh composition (#449), trusted confirmation (#450) and shipping
-acceptance (#451) are complete. Static trusted mutation capabilities cannot
-substitute for request-bound authority. Archive/full-page replacement and file
-installation remain unavailable; the file/image workflow stays #446. Parent
-#441/#83/#10 remain open.
+Scope issuance alone does not install mutations. The explicit complete
+[production OAuth semantic-write configuration](oauth-semantic-writes.md)
+installs create/append and optionally bounded section updates through the
+request-bound factory. Static trusted capabilities cannot substitute for that
+authority. Archive/full-page replacement and OAuth files remain unavailable;
+file/image installation is tracked in #446.
 
 Issued permissions are immutable, non-secret HTTP evidence and part of exact
 session identity. Only trusted issuance supplies them; MCP arguments cannot add

@@ -1,8 +1,8 @@
 # Grant-bound derived refresh (#449)
 
 This contract supports durable refresh after a verified semantic write or a
-future native file attachment. Shipping OAuth write composition remains #451;
-OAuth file effects remain #446. The refresh processor itself has read authority
+future native file attachment. [Production semantic writes](oauth-semantic-writes.md)
+explicitly install this processor; OAuth file effects remain #446. The refresh processor itself has read authority
 and cannot repeat a source mutation.
 
 Admission requires current request-bound OAuth write permission. The queue stores

@@ -26,9 +26,9 @@ workflow rechecks scope and fresh source revision/content before any effect.
 The durable idempotency ledger still determines verified replay behavior.
 
 This provider must be explicitly installed in trusted request composition.
-It does not enable archive, delete or whole-page replacement. Shipping OAuth
-mutation installation and the complete installed write/index acceptance remain
-#451. Default OAuth discovery stays read-only until that composition ships.
+It does not enable archive, delete or whole-page replacement. [Production OAuth semantic writes](oauth-semantic-writes.md) explicitly install
+this provider for bounded section updates when the destructive gate is enabled.
+Default OAuth discovery remains read-only.
 
 Local tests use real MCP request/elicitation messages and Streamable HTTP with
 the production OAuth gate and bounded session manager. They cover explicit

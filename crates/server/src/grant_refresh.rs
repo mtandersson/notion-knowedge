@@ -1,4 +1,4 @@
-//! Grant-bound derived refresh; deliberately not installed by the HTTP server.
+//! Grant-bound derived refresh, explicitly installed by OAuth write composition.
 //! Admission requires live request write authority. Accepted jobs subsequently
 //! use durable grant read authority, independently of the originating bearer.
 #![cfg(all(unix, feature = "webhook-worker"))]
@@ -171,7 +171,7 @@ pub struct GrantRefreshSettings {
     pub timeout: Duration,
 }
 /// A bounded dispatcher over OAuth-only rows. It holds no mutation capability,
-/// never manufactures a webhook identity, and is not shipping composition (#451).
+/// never manufactures a webhook identity; HTTP composition owns its lifecycle.
 pub struct GrantRefreshWorker {
     runtime: NotionOAuthRuntime,
     settings: GrantRefreshSettings,

@@ -86,6 +86,13 @@ an independent policy via `NK_HTTP_HEALTH_AUTH=none|bearer`.
 See [development bearer authentication](docs/development-bearer-auth.md)
 for configuration, security limits and tests.
 
+### Optional production OAuth writes
+
+[OAuth semantic writes](docs/oauth-semantic-writes.md) require explicit complete
+operator configuration and a durable mutation ledger. Read-only is the default;
+section updates additionally require trusted user confirmation. OAuth file/image
+installation remains separate.
+
 ### Payload limits
 
 The Streamable HTTP `/mcp` endpoint accepts at most **4 MiB** per POST body
