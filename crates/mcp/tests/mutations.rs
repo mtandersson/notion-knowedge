@@ -638,6 +638,14 @@ async fn trusted_confirmation_is_required_and_binds_the_complete_section_intent(
     assert_ne!(requests[0].request_sha256(), requests[1].request_sha256());
     assert_eq!(requests[0].target_id(), PAGE);
     assert!(requests[0].trusted_scope().starts_with("scope-"));
+    let original = requests[0].section_preview().unwrap();
+    assert_eq!(original.section_anchor, "## Target");
+    assert_eq!(original.replacement_body, "Replacement.\n\n");
+    assert_ne!(original.original_body, original.replacement_body);
+    assert_eq!(
+        requests[1].section_preview().unwrap().replacement_body,
+        "Different replacement.\n\n"
+    );
     assert_eq!(f.source.effects.load(Ordering::SeqCst), 0);
 }
 

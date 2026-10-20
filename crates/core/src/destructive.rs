@@ -7,6 +7,34 @@
 
 use std::{fmt, future::Future, pin::Pin};
 
+pub fn confirmation_scope(
+    scope: &crate::lifecycle::LifecycleScope,
+) -> Result<String, ConfirmationError> {
+    use crate::discovery::SourceType;
+    let source_types: Vec<_> = scope
+        .exclusions
+        .source_types
+        .iter()
+        .map(|kind| match kind {
+            SourceType::Page => "page",
+            SourceType::Database => "database",
+            SourceType::DataSource => "data_source",
+        })
+        .collect();
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "workspace": scope.workspace_id, "generation": scope.generation,
+        "roots": scope.roots.iter().map(|root| &root.0).collect::<Vec<_>>(),
+        "excluded_pages": scope.exclusions.page_ids,
+        "excluded_descendants": scope.exclusions.descendants_of,
+        "excluded_types": source_types,
+    }))
+    .map_err(|_| ConfirmationError::InvalidRequest)?;
+    Ok(format!(
+        "scope-{}",
+        crate::idempotency::MutationClaim::payload_sha256(&bytes)
+    ))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WriteOperation {
     CreatePage,
@@ -46,6 +74,16 @@ pub struct ConfirmationRequest {
     target_id: String,
     request_sha256: String,
     idempotency_key: String,
+    section_preview: Option<SectionConfirmationPreview>,
+}
+
+/// Server-generated readable effect, displayed alongside the exact fingerprint.
+/// Never populated from a client-supplied approval receipt.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SectionConfirmationPreview {
+    pub section_anchor: String,
+    pub original_body: String,
+    pub replacement_body: String,
 }
 
 impl fmt::Debug for ConfirmationRequest {
@@ -99,7 +137,28 @@ impl ConfirmationRequest {
             target_id: target_id.to_owned(),
             request_sha256: request_sha256.to_ascii_lowercase(),
             idempotency_key: idempotency_key.to_owned(),
+            section_preview: None,
         })
+    }
+
+    pub fn with_section_preview(
+        mut self,
+        preview: SectionConfirmationPreview,
+    ) -> Result<Self, ConfirmationError> {
+        if self.operation != WriteOperation::UpdateSection
+            || preview.section_anchor.is_empty()
+            || preview.section_anchor.len() > 1024
+            || preview.original_body.len() > 1024 * 1024
+            || preview.replacement_body.len() > 200_000
+        {
+            return Err(ConfirmationError::InvalidRequest);
+        }
+        self.section_preview = Some(preview);
+        Ok(self)
+    }
+
+    pub fn section_preview(&self) -> Option<&SectionConfirmationPreview> {
+        self.section_preview.as_ref()
     }
 
     pub fn operation(&self) -> WriteOperation {

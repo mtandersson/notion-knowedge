@@ -16,6 +16,8 @@ use std::{io::Write, sync::Arc};
 mod request_scope;
 pub use request_scope::{RequestBoundMutations, RequestBoundSource, RequestScopeAdapters};
 
+pub mod confirmation;
+
 mod http_authorization;
 pub use http_authorization::{HttpAuthorization, OAuthPermissions};
 

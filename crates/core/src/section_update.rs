@@ -276,14 +276,26 @@ async fn update_section_inner(
 
     if let Some(provider) = confirmation {
         let scope = gate.configured_scope();
-        let scope_digest=MutationClaim::payload_sha256(&serde_json::to_vec(&serde_json::json!({"workspace":scope.workspace_id,"generation":scope.generation,"roots":scope.roots.iter().map(|r|&r.0).collect::<Vec<_>>()})).map_err(|_|SectionUpdateError::InvalidInput)?);
+        let scope_identity = crate::destructive::confirmation_scope(scope)
+            .map_err(|_| SectionUpdateError::InvalidInput)?;
         let intended = ConfirmationRequest::new(
             WriteOperation::UpdateSection,
-            &format!("scope-{scope_digest}"),
+            &scope_identity,
             &request.page_id.0,
             &fingerprint(&request),
             &request.idempotency_key,
         )
+        .and_then(|request_intent| {
+            request_intent.with_section_preview(crate::destructive::SectionConfirmationPreview {
+                section_anchor: format!(
+                    "{} {}",
+                    "#".repeat(request.anchor.level as usize),
+                    request.anchor.heading
+                ),
+                original_body: old.to_owned(),
+                replacement_body: plan.replacement_body().to_owned(),
+            })
+        })
         .map_err(|_| SectionUpdateError::InvalidInput)?;
         DestructivePolicy::new(true)
             .require_confirmation(&intended, Some(provider))
