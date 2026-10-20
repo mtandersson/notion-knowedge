@@ -65,3 +65,7 @@ mod oauth_mcp;
 mod oauth_content;
 
 mod notion_grant_lease;
+
+/// Grant-bound durable refresh building blocks; shipping installation is separate.
+#[cfg(all(unix, feature = "webhook-worker"))]
+pub mod grant_refresh;

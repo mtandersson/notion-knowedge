@@ -119,12 +119,27 @@ impl<'a> NotionRefresh<'a> {
         clock: impl FnOnce() -> Result<u64, RefreshError>,
     ) -> Result<StoredGrant, RefreshError> {
         let _guard = self.serial.lock().await;
+        self.fresh_locked(clock, None).await
+    }
+    async fn fresh_locked(
+        &self,
+        clock: impl FnOnce() -> Result<u64, RefreshError>,
+        expected: Option<&notion_knowledge_core::write_refresh::GrantRefreshAuthority>,
+    ) -> Result<StoredGrant, RefreshError> {
         let now = clock()?;
         let existing = self
             .store
             .load_for_refresh()
             .map_err(map_store)?
             .ok_or(RefreshError::NoGrant)?;
+        if expected.is_some_and(|expected| {
+            expected.grant_id() != existing.grant_id()
+                || expected.epoch() != existing.epoch()
+                || expected.workspace_id() != existing.workspace_id()
+                || expected.owner_user_id() != existing.owner_user_id()
+        }) {
+            return Err(RefreshError::InvalidIdentity);
+        }
         // The coordinator's allowlist is an independent trust boundary from
         // the storage policy. Check it even when no network refresh is needed.
         if !self
@@ -178,6 +193,9 @@ impl<'a> NotionRefresh<'a> {
     }
 
     async fn verify_active(&self, grant: &StoredGrant) -> Result<(), RefreshError> {
+        if !self.store.still_current(grant).map_err(map_store)? {
+            return Err(RefreshError::InvalidIdentity);
+        }
         if !self
             .client
             .is_active(grant.access_token())
@@ -190,6 +208,24 @@ impl<'a> NotionRefresh<'a> {
             return Err(RefreshError::InvalidIdentity);
         }
         Ok(())
+    }
+
+    /// Durable work can renew only its original grant. Check the binding after
+    /// acquiring the shared refresh lock, before any upstream token/probe call.
+    #[cfg(any(test, all(unix, feature = "webhook-worker")))]
+    pub(crate) async fn ensure_active_for(
+        &self,
+        expected: &notion_knowledge_core::write_refresh::GrantRefreshAuthority,
+    ) -> Result<StoredGrant, RefreshError> {
+        expected
+            .validate()
+            .map_err(|_| RefreshError::InvalidIdentity)?;
+        let _guard = self.serial.lock().await;
+        let grant = self
+            .fresh_locked(|| self.now_unix(), Some(expected))
+            .await?;
+        self.verify_active(&grant).await?;
+        Ok(grant)
     }
 
     /// Fresh credentials plus a live provider active-state check, including
@@ -780,5 +816,43 @@ mod tests {
             refresh.ensure_fresh().await,
             Err(RefreshError::NoGrant)
         ));
+    }
+    #[tokio::test]
+    async fn queued_grant_refresh_never_contacts_provider_for_replacement_after_lock_wait() {
+        let (_dir, store, policy, _state) = setup();
+        let original = store
+            .save(&NotionGrant::fixture("workspace-a", "user-a", Some(3600)))
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1/oauth/token", listener.local_addr().unwrap());
+        let http = client(&endpoint);
+        let refresh = NotionRefresh::new(&store, &http, &policy);
+        let expected = notion_knowledge_core::write_refresh::GrantRefreshAuthority::new(
+            "workspace-a".into(),
+            original.grant_id().into(),
+            original.epoch(),
+            "user-a".into(),
+            "a".repeat(64),
+        )
+        .unwrap();
+        let guard = refresh.serial.lock().await;
+        let pending = refresh.ensure_active_for(&expected);
+        tokio::pin!(pending);
+        std::future::poll_fn(|cx| {
+            assert!(pending.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        let replacement = store
+            .save(&NotionGrant::fixture("workspace-a", "user-a", Some(3600)))
+            .unwrap();
+        assert_ne!(replacement.grant_id(), original.grant_id());
+        drop(guard);
+        assert_eq!(pending.await.unwrap_err(), RefreshError::InvalidIdentity);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), listener.accept())
+                .await
+                .is_err()
+        );
     }
 }
