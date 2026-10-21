@@ -1,3 +1,4 @@
+#![cfg(unix)]
 use notion_knowledge_core::write_refresh::{
     GrantRefreshAuthority, MutationRefreshQueue, RefreshKey, RefreshQueueError,
 };

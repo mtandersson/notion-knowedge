@@ -25,6 +25,7 @@ struct Local {
     attempts: usize,
     settling: bool,
     settled: Option<bool>,
+    mutation_attempted: bool,
 }
 struct Attempt(Arc<Mutex<Local>>);
 impl Drop for Attempt {
@@ -170,7 +171,7 @@ impl AuthorizedFileIntent {
     /// released for read-only refresh; a proven no-effect outcome is discarded.
     pub fn settle(&self, possible_effect: bool) -> Result<(), BackendError> {
         let mut local = self.local.lock().map_err(|_| denied())?;
-        if local.attempts != 0 || local.settling {
+        if local.attempts != 0 || local.settling || (!possible_effect && local.mutation_attempted) {
             return Err(denied());
         }
         if let Some(prior) = local.settled {
@@ -214,13 +215,14 @@ impl RequestAuthority for AuthorizedFileIntent {
         }
         self.validate_unlocked()
     }
-    fn start_attempt(&self, _: bool) -> Result<Option<Arc<dyn Send + Sync>>, BackendError> {
+    fn start_attempt(&self, mutation: bool) -> Result<Option<Arc<dyn Send + Sync>>, BackendError> {
         let mut local = self.local.lock().map_err(|_| denied())?;
         if local.settling {
             return Err(denied());
         }
         self.validate_unlocked()?;
         local.attempts = local.attempts.checked_add(1).ok_or_else(denied)?;
+        local.mutation_attempted |= mutation;
         Ok(Some(Arc::new(Attempt(self.local.clone()))))
     }
 }
@@ -242,7 +244,7 @@ pub async fn reconcile_quiescent(
 ) -> Result<(), BackendError> {
     reconcile_clocked(state, runtime, auth, scope, key, now()).await
 }
-async fn reconcile_clocked(
+pub(crate) async fn reconcile_clocked(
     state: &SqliteSyncStateStore,
     runtime: &NotionOAuthRuntime,
     auth: &HttpAuthorization,

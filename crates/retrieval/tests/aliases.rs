@@ -252,7 +252,7 @@ fn alias_projection_migration_is_explicit_and_retains_existing_namespaces() {
         .unwrap();
     drop(store);
     let raw = rusqlite::Connection::open(&path).unwrap();
-    raw.execute_batch("DROP TABLE mutation_refresh; DROP TABLE alias_operation_proposals; DROP TABLE page_alias_projections; DELETE FROM schema_migrations WHERE version>=16;").unwrap();
+    raw.execute_batch("DROP TABLE file_refresh_intents; DROP TABLE mutation_refresh; DROP TABLE alias_operation_proposals; DROP TABLE page_alias_projections; DELETE FROM schema_migrations WHERE version>=16;").unwrap();
     drop(raw);
     let before = fs::read(&path).unwrap();
     assert!(SqliteSyncStateStore::open_read_only(&path).is_err());

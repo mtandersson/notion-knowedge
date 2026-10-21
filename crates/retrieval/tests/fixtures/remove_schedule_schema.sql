@@ -1,4 +1,4 @@
-DROP TABLE mutation_refresh;
+DROP TABLE file_refresh_intents; DROP TABLE mutation_refresh;
 DROP TABLE alias_operation_proposals;
 DROP TABLE page_alias_projections;
 -- Restore a historical fixture before exercising the older additive migrations.
