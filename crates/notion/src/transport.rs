@@ -14,6 +14,15 @@ use tokio::{sync::Mutex, time::Instant};
 /// Mutation attempts are explicitly classified by adapter methods, never HTTP verb.
 pub trait RequestAuthority: Send + Sync {
     fn validate(&self, mutation: bool) -> Result<(), BackendError>;
+    /// Optional locally-live attempt ownership, retained through response-body
+    /// consumption. Default authorities need only the existing validation.
+    fn start_attempt(
+        &self,
+        mutation: bool,
+    ) -> Result<Option<std::sync::Arc<dyn Send + Sync>>, BackendError> {
+        self.validate(mutation)?;
+        Ok(None)
+    }
 }
 
 const INTERVAL: Duration = Duration::from_millis(334);
@@ -252,9 +261,10 @@ impl NotionClient {
                 request.take()
             }
             .ok_or_else(|| error(operation, BackendErrorKind::Internal, None))?;
-            if let Some(authority) = &self.request_authority {
-                authority.validate(mutation)?;
-            }
+            let attempt_guard = match &self.request_authority {
+                Some(authority) => authority.start_attempt(mutation)?,
+                None => None,
+            };
             self.transport.attempts.fetch_add(1, Ordering::Relaxed);
             notion_knowledge_core::metrics::notion_attempt();
             if retry > 0 {
@@ -276,6 +286,11 @@ impl NotionClient {
                     }
                     error
                 })?;
+            }
+            if let Ok(response) = &mut result
+                && let Some(guard) = attempt_guard
+            {
+                response.extensions_mut().insert(guard);
             }
             #[cfg(test)]
             if let Some(clock) = &self.transport.waits {
@@ -732,6 +747,91 @@ mod tests {
                     .all(|&n| n >= u128::from(bound / 2) && n <= u128::from(bound))
             );
             assert!(values.windows(2).any(|p| p[0] != p[1]));
+        }
+    }
+    struct LiveAttempt(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for LiveAttempt {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    struct AttemptAuthority(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    impl RequestAuthority for AttemptAuthority {
+        fn validate(&self, _: bool) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn start_attempt(
+            &self,
+            _: bool,
+        ) -> Result<Option<std::sync::Arc<dyn Send + Sync>>, BackendError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(std::sync::Arc::new(LiveAttempt(self.0.clone()))))
+        }
+    }
+    #[tokio::test]
+    async fn locally_live_attempt_ownership_survives_headers_until_receipt_body_drop() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for cancel in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (release, finish) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut headers = Vec::new();
+                loop {
+                    let mut bytes = [0; 4096];
+                    let n = stream.read(&mut bytes).await.unwrap();
+                    assert!(n > 0);
+                    headers.extend_from_slice(&bytes[..n]);
+                    if headers.windows(4).any(|v| v == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nh",
+                    )
+                    .await
+                    .unwrap();
+                finish.await.unwrap();
+                let _ = stream.write_all(b"ello").await;
+            });
+            let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let client = NotionClient::integration("local-fixture-only")
+                .unwrap()
+                .with_fast_fixture_transport()
+                .with_request_authority(std::sync::Arc::new(AttemptAuthority(count.clone())));
+            let mut response = client
+                .send(
+                    client.http.get(format!("http://{address}")),
+                    true,
+                    "fixture.receipt",
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                1,
+                "HTTP headers do not finish the source operation"
+            );
+            assert_eq!(response.chunk().await.unwrap().unwrap().as_ref(), b"h");
+            assert_eq!(count.load(Ordering::SeqCst), 1);
+            if cancel {
+                drop(response);
+                assert_eq!(count.load(Ordering::SeqCst), 0);
+                release.send(()).unwrap();
+            } else {
+                release.send(()).unwrap();
+                let mut rest = Vec::new();
+                while let Some(bytes) = response.chunk().await.unwrap() {
+                    rest.extend_from_slice(&bytes);
+                }
+                assert_eq!(rest, b"ello");
+                assert_eq!(count.load(Ordering::SeqCst), 1);
+                drop(response);
+                assert_eq!(count.load(Ordering::SeqCst), 0);
+            }
+            server.await.unwrap();
         }
     }
 }

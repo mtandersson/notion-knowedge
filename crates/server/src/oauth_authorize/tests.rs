@@ -1329,3 +1329,6 @@ mod grant_refresh;
 #[cfg(all(unix, feature = "webhook-worker"))]
 #[path = "tests/installed_writes.rs"]
 mod installed_writes;
+
+#[cfg(all(unix, feature = "webhook-worker"))]
+mod file_intents;

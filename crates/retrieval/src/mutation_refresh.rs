@@ -49,7 +49,7 @@ fn state(s: i64) -> Result<IndexStatus, Error> {
         _ => Err(Error::Unavailable),
     }
 }
-fn encoded(authority: Option<&GrantRefreshAuthority>) -> Result<String, Error> {
+pub(crate) fn encoded(authority: Option<&GrantRefreshAuthority>) -> Result<String, Error> {
     match authority {
         None => Ok("integration".into()),
         Some(value) => {
@@ -58,7 +58,7 @@ fn encoded(authority: Option<&GrantRefreshAuthority>) -> Result<String, Error> {
         }
     }
 }
-fn authority_matches(
+pub(crate) fn authority_matches(
     key: &RefreshKey,
     authority: Option<&GrantRefreshAuthority>,
 ) -> Result<(), Error> {
@@ -169,7 +169,7 @@ impl SqliteSyncStateStore {
     ) -> Result<(), Error> {
         authority_matches(key, authority)?;
         let db = self.lock_connection().map_err(|_| Error::Unavailable)?;
-        let changed = db.execute("UPDATE mutation_refresh SET state=0,attempts=0,lease_until=NULL WHERE workspace_id=?1 AND mutation_digest=?2 AND page_id=?3 AND authority=?4 AND state=3",params![key.workspace_id,key.mutation_digest,key.page_id,encoded(authority)?]).map_err(sql)?;
+        let changed = db.execute("UPDATE mutation_refresh SET state=0,attempts=0,lease_until=NULL WHERE workspace_id=?1 AND mutation_digest=?2 AND page_id=?3 AND authority=?4 AND state=3 AND NOT EXISTS(SELECT 1 FROM file_refresh_intents f WHERE f.workspace_id=mutation_refresh.workspace_id AND f.mutation_digest=mutation_refresh.mutation_digest AND f.phase!='released')",params![key.workspace_id,key.mutation_digest,key.page_id,encoded(authority)?]).map_err(sql)?;
         if changed == 1 {
             Ok(())
         } else {
@@ -210,7 +210,7 @@ impl SqliteSyncStateStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql)?;
         tx.execute("UPDATE mutation_refresh SET state=CASE WHEN attempts>=3 THEN 3 ELSE 0 END,lease_until=NULL WHERE workspace_id=?1 AND (authority!='integration')=?3 AND state=1 AND lease_until<=?2",params![workspace,now,oauth]).map_err(sql)?;
-        let row: Option<(String,String,i64,String)> = tx.query_row("SELECT mutation_digest,page_id,generation+1,authority FROM mutation_refresh WHERE workspace_id=?1 AND (authority!='integration')=?2 AND state=0 AND attempts<3 AND generation<9223372036854775807 ORDER BY mutation_digest LIMIT 1",params![workspace,oauth],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(sql)?;
+        let row: Option<(String,String,i64,String)> = tx.query_row("SELECT mutation_digest,page_id,generation+1,authority FROM mutation_refresh WHERE workspace_id=?1 AND (authority!='integration')=?2 AND state=0 AND attempts<3 AND generation<9223372036854775807 AND NOT EXISTS(SELECT 1 FROM file_refresh_intents f WHERE f.workspace_id=mutation_refresh.workspace_id AND f.mutation_digest=mutation_refresh.mutation_digest AND f.phase!='released') ORDER BY mutation_digest LIMIT 1",params![workspace,oauth],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(sql)?;
         let Some((digest, page, generation, stored)) = row else {
             tx.commit().map_err(sql)?;
             return Ok(None);

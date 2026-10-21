@@ -151,15 +151,14 @@ fn populated_pre_authority_schema_migrates_without_enrolling_legacy_work() {
     db.admit(&key).unwrap();
     drop(db);
     let legacy = rusqlite::Connection::open(&path).unwrap();
-    // Undo only the additive authority migration to reconstruct a populated
+    // Remove later file intents and undo the authority migration to reconstruct a populated
     // version-17 database, retaining its actual prior tables and migration names.
-    legacy.execute_batch("DROP INDEX mutation_refresh_authority_pending; ALTER TABLE mutation_refresh DROP COLUMN authority; DELETE FROM schema_migrations WHERE version=18;").unwrap();
+    legacy.execute_batch("DROP TABLE file_refresh_intents; DROP INDEX mutation_refresh_authority_pending; ALTER TABLE mutation_refresh DROP COLUMN authority; DELETE FROM schema_migrations WHERE version>=18;").unwrap();
     drop(legacy);
     let db = Arc::new(SqliteSyncStateStore::open(&path).unwrap());
-    assert_eq!(db.schema_version().unwrap(), 18);
     assert_eq!(
-        notion_knowledge_retrieval::sync_state::LATEST_SCHEMA_VERSION,
-        18
+        db.schema_version().unwrap(),
+        notion_knowledge_retrieval::sync_state::LATEST_SCHEMA_VERSION
     );
     let queue = GrantMutationRefreshQueue::new(db.clone(), authority('d')).unwrap();
     assert_eq!(queue.admit(&key), Err(RefreshQueueError::Conflict));
