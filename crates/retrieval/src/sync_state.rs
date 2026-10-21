@@ -13,7 +13,7 @@ use notion_knowledge_core::sync_state::{
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
-pub const LATEST_SCHEMA_VERSION: i64 = 18;
+pub const LATEST_SCHEMA_VERSION: i64 = 19;
 
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     // Entries below stay append-only and ordered.
@@ -106,6 +106,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         18,
         "mutation_refresh_authority",
         include_str!("../migrations/0018_mutation_refresh_authority.sql"),
+    ),
+    (
+        19,
+        "file_refresh_intents",
+        include_str!("../migrations/0019_file_refresh_intents.sql"),
     ),
 ];
 
@@ -457,6 +462,11 @@ fn migrate(connection: &mut Connection) -> Result<(), SyncStateError> {
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(map_sqlite_error)?;
 
+    apply_migrations(&transaction)?;
+    transaction.commit().map_err(map_sqlite_error)
+}
+
+fn apply_migrations(transaction: &rusqlite::Transaction<'_>) -> Result<(), SyncStateError> {
     transaction
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -508,7 +518,7 @@ fn migrate(connection: &mut Connection) -> Result<(), SyncStateError> {
             .map_err(map_sqlite_error)?;
     }
 
-    transaction.commit().map_err(map_sqlite_error)
+    Ok(())
 }
 
 fn map_sqlite_error(_: rusqlite::Error) -> SyncStateError {
@@ -557,5 +567,272 @@ mod operational_metrics_tests {
         assert_eq!(snapshot.webhook_outstanding, 1);
         assert_eq!(snapshot.oldest_webhook_age_seconds, Some(20));
         assert_eq!(snapshot.index_change_age_seconds, Some(10));
+    }
+}
+
+/// Explicit offline migration; ordinary readers/writers never invoke it.
+impl SqliteSyncStateStore {
+    pub fn migrate_existing_with_backup(path: &Path, backup: &Path) -> Result<(), SyncStateError> {
+        #[cfg(not(unix))]
+        {
+            let _ = (path, backup);
+            Err(SyncStateError::Unavailable)
+        }
+        #[cfg(unix)]
+        {
+            use std::io::{Read, Seek};
+            use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+            let unavailable = || SyncStateError::Unavailable;
+            let metadata = fs::symlink_metadata(path).map_err(|_| unavailable())?;
+            let own = fs::metadata("/proc/self").map_err(|_| unavailable())?.uid();
+            for selected in [path, backup] {
+                if !selected.is_absolute()
+                    || selected.file_name().is_none()
+                    || selected.components().any(|part| {
+                        matches!(
+                            part,
+                            std::path::Component::ParentDir | std::path::Component::CurDir
+                        )
+                    })
+                {
+                    return Err(unavailable());
+                }
+                let parent = selected.parent().ok_or_else(unavailable)?;
+                let private = fs::symlink_metadata(parent).map_err(|_| unavailable())?;
+                if !private.is_dir() || private.uid() != own || private.mode() & 0o077 != 0 {
+                    return Err(unavailable());
+                }
+                for ancestor in parent.ancestors() {
+                    let m = fs::symlink_metadata(ancestor).map_err(|_| unavailable())?;
+                    if !m.is_dir()
+                        || (m.uid() != own && m.uid() != 0)
+                        || (m.mode() & 0o022 != 0 && m.mode() & 0o1000 == 0)
+                    {
+                        return Err(unavailable());
+                    }
+                }
+            }
+            if !metadata.is_file()
+                || metadata.uid() != own
+                || metadata.mode() & 0o077 != 0
+                || metadata.nlink() != 1
+            {
+                return Err(unavailable());
+            }
+            let mut source = fs::File::open(path).map_err(|_| unavailable())?;
+            let opened = source.metadata().map_err(|_| unavailable())?;
+            if opened.dev() != metadata.dev() || opened.ino() != metadata.ino() {
+                return Err(unavailable());
+            }
+            let mut header = [0; 100];
+            source.read_exact(&mut header).map_err(|_| unavailable())?;
+            // Raw backup is safe only under an exclusive rollback-journal lock.
+            if &header[..16] != b"SQLite format 3\0" || header[18] != 1 || header[19] != 1 {
+                return Err(unavailable());
+            }
+            let mut connection = Connection::open_with_flags(
+                path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
+            .map_err(map_sqlite_error)?;
+            connection
+                .busy_timeout(Duration::ZERO)
+                .map_err(map_sqlite_error)?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Exclusive)
+                .map_err(map_sqlite_error)?;
+            let active: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM reconciliation_lease WHERE expires_at>unixepoch())", [], |row|row.get(0)).map_err(map_sqlite_error)?;
+            if active {
+                return Err(unavailable());
+            }
+            let has_intents: bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='file_refresh_intents')",[],|row|row.get(0)).map_err(map_sqlite_error)?;
+            if has_intents {
+                let live:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM file_refresh_intents WHERE phase='held' AND lease_until>unixepoch())",[],|row|row.get(0)).map_err(map_sqlite_error)?;
+                if live {
+                    return Err(unavailable());
+                }
+            }
+            // Verify a recognized existing schema before creating any backup.
+            let applied: Vec<(i64, String)> = {
+                let mut statement = transaction
+                    .prepare("SELECT version,name FROM schema_migrations ORDER BY version")
+                    .map_err(map_sqlite_error)?;
+                statement
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .map_err(map_sqlite_error)?
+                    .collect::<Result<_, _>>()
+                    .map_err(map_sqlite_error)?
+            };
+            if applied.is_empty()
+                || applied.iter().enumerate().any(|(i, (v, n))| {
+                    MIGRATIONS
+                        .get(i)
+                        .is_none_or(|(ev, en, _)| v != ev || n != en)
+                })
+            {
+                return Err(SyncStateError::CorruptState);
+            }
+            let latest = fs::symlink_metadata(path).map_err(|_| unavailable())?;
+            if latest.dev() != opened.dev() || latest.ino() != opened.ino() {
+                return Err(unavailable());
+            }
+            let mut destination = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(backup)
+                .map_err(|_| unavailable())?;
+            source.rewind().map_err(|_| unavailable())?;
+            std::io::copy(&mut source, &mut destination).map_err(|_| unavailable())?;
+            destination.sync_all().map_err(|_| unavailable())?;
+            // Make the recovery copy's directory entry durable before migration.
+            fs::File::open(backup.parent().ok_or_else(unavailable)?)
+                .and_then(|parent| parent.sync_all())
+                .map_err(|_| unavailable())?;
+            apply_migrations(&transaction)?;
+            transaction.commit().map_err(map_sqlite_error)
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod offline_migration_tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    struct PrivateDirectory(std::path::PathBuf);
+    impl PrivateDirectory {
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for PrivateDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    fn old_state() -> (PrivateDirectory, std::path::PathBuf) {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "nk-offline-migration-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir(&path).unwrap();
+        let dir = PrivateDirectory(path);
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.path().join("state.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        connection.execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at_unix INTEGER NOT NULL);").unwrap();
+        for (v, n, sql) in MIGRATIONS.iter().filter(|(v, _, _)| *v <= 18) {
+            connection.execute_batch(sql).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations VALUES(?1,?2,0)",
+                    params![v, n],
+                )
+                .unwrap();
+        }
+        connection
+            .execute("INSERT INTO index_versions VALUES('preserved','v1',0)", [])
+            .unwrap();
+        (dir, path)
+    }
+    #[test]
+    fn upgrade_preserves_original_inode_and_preupgrade_recovery_copy() {
+        let (dir, path) = old_state();
+        let backup = dir.path().join("backup.sqlite");
+        let inode = fs::metadata(&path).unwrap().ino();
+        let before = fs::read(&path).unwrap();
+        SqliteSyncStateStore::migrate_existing_with_backup(&path, &backup).unwrap();
+        assert_eq!(fs::read(&backup).unwrap(), before);
+        assert_eq!(fs::metadata(&backup).unwrap().mode() & 0o777, 0o600);
+        assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+        let store = SqliteSyncStateStore::open_existing(&path).unwrap();
+        let db = store.lock_connection().unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT version FROM index_versions WHERE index_name='preserved'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "v1"
+        );
+        assert_eq!(
+            db.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+    }
+    #[test]
+    fn missing_existing_backup_or_live_lease_never_changes_source() {
+        let (dir, path) = old_state();
+        let backup = dir.path().join("backup.sqlite");
+        assert!(
+            SqliteSyncStateStore::migrate_existing_with_backup(
+                &dir.path().join("missing"),
+                &backup
+            )
+            .is_err()
+        );
+        assert!(!dir.path().join("missing").exists());
+        assert!(!backup.exists());
+        fs::write(&backup, b"retained").unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(SqliteSyncStateStore::migrate_existing_with_backup(&path, &backup).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::read(&backup).unwrap(), b"retained");
+        fs::remove_file(&backup).unwrap();
+        let db = Connection::open(&path).unwrap();
+        db.execute(
+            "UPDATE reconciliation_lease SET fence=1,expires_at=unixepoch()+3600 WHERE singleton=1",
+            [],
+        )
+        .unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(SqliteSyncStateStore::migrate_existing_with_backup(&path, &backup).is_err());
+        assert!(!backup.exists());
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+    #[test]
+    fn live_source_owner_blocks_migration_but_expired_quarantine_is_preserved() {
+        let (dir, path) = old_state();
+        drop(SqliteSyncStateStore::open(&path).unwrap());
+        let db = Connection::open(&path).unwrap();
+        db.execute("INSERT INTO mutation_refresh(workspace_id,mutation_digest,page_id) VALUES('workspace','digest','page')",[]).unwrap();
+        db.execute("INSERT INTO file_refresh_intents VALUES('workspace','digest',zeroblob(32),unixepoch()+3600,unixepoch()+7200,'held')",[]).unwrap();
+        let backup = dir.path().join("backup.sqlite");
+        assert!(SqliteSyncStateStore::migrate_existing_with_backup(&path, &backup).is_err());
+        assert!(!backup.exists());
+        db.execute("UPDATE file_refresh_intents SET lease_until=0", [])
+            .unwrap();
+        SqliteSyncStateStore::migrate_existing_with_backup(&path, &backup).unwrap();
+        assert_eq!(
+            db.query_row("SELECT phase FROM file_refresh_intents", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "held"
+        );
+    }
+    #[test]
+    fn active_writer_wal_or_foreign_schema_is_not_migrated() {
+        let (dir, path) = old_state();
+        let backup = dir.path().join("backup.sqlite");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(SqliteSyncStateStore::migrate_existing_with_backup(&path, &backup).is_err());
+        assert!(!backup.exists());
+        db.execute_batch("ROLLBACK").unwrap();
+        db.execute_batch("PRAGMA journal_mode=WAL").unwrap();
+        assert!(SqliteSyncStateStore::migrate_existing_with_backup(&path, &backup).is_err());
+        assert!(!backup.exists());
+        db.execute_batch("PRAGMA journal_mode=DELETE; UPDATE schema_migrations SET name='foreign' WHERE version=18").unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(SqliteSyncStateStore::migrate_existing_with_backup(&path, &backup).is_err());
+        assert!(!backup.exists());
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
 }

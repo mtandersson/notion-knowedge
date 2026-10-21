@@ -14,6 +14,15 @@ use tokio::{sync::Mutex, time::Instant};
 /// Mutation attempts are explicitly classified by adapter methods, never HTTP verb.
 pub trait RequestAuthority: Send + Sync {
     fn validate(&self, mutation: bool) -> Result<(), BackendError>;
+    /// Optional locally-live attempt ownership, retained through response-body
+    /// consumption. Default authorities need only the existing validation.
+    fn start_attempt(
+        &self,
+        mutation: bool,
+    ) -> Result<Option<std::sync::Arc<dyn Send + Sync>>, BackendError> {
+        self.validate(mutation)?;
+        Ok(None)
+    }
 }
 
 const INTERVAL: Duration = Duration::from_millis(334);
@@ -252,9 +261,10 @@ impl NotionClient {
                 request.take()
             }
             .ok_or_else(|| error(operation, BackendErrorKind::Internal, None))?;
-            if let Some(authority) = &self.request_authority {
-                authority.validate(mutation)?;
-            }
+            let attempt_guard = match &self.request_authority {
+                Some(authority) => authority.start_attempt(mutation)?,
+                None => None,
+            };
             self.transport.attempts.fetch_add(1, Ordering::Relaxed);
             notion_knowledge_core::metrics::notion_attempt();
             if retry > 0 {
@@ -276,6 +286,11 @@ impl NotionClient {
                     }
                     error
                 })?;
+            }
+            if let Ok(response) = &mut result
+                && let Some(guard) = attempt_guard
+            {
+                response.extensions_mut().insert(guard);
             }
             #[cfg(test)]
             if let Some(clock) = &self.transport.waits {

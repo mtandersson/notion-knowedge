@@ -5,6 +5,7 @@ pub mod diagnostics;
 pub mod http;
 pub mod oauth_writes;
 pub mod shutdown;
+pub mod state_migration;
 
 /// Installed SDK session and SSE response lifetime budgets.
 pub mod session_limits;
@@ -70,3 +71,6 @@ mod notion_grant_lease;
 /// Grant-bound durable refresh building blocks; shipping installation is separate.
 #[cfg(all(unix, feature = "webhook-worker"))]
 pub mod grant_refresh;
+
+#[cfg(all(unix, feature = "webhook-worker"))]
+pub mod file_refresh;

@@ -121,6 +121,21 @@ async fn run() -> ExitCode {
     };
     if all_args
         .iter()
+        .any(|arg| arg.starts_with("--migrate-operational-state"))
+    {
+        return match notion_knowledge_server::state_migration::run(&config, &all_args) {
+            Ok(()) => {
+                println!("Operational state migrated; preserve the private backup.");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("Operational migration error: {}", safe_error(&error));
+                ExitCode::from(2)
+            }
+        };
+    }
+    if all_args
+        .iter()
         .any(|arg| arg.starts_with("--notion-oauth-forget"))
     {
         if all_args != ["--notion-oauth-forget"] {

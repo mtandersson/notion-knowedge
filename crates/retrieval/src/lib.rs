@@ -59,3 +59,7 @@ pub mod runner;
 pub mod schedule;
 
 pub mod sync_status;
+
+/// Durable held file-effect intents and explicit quarantine recovery.
+#[cfg(unix)]
+pub mod file_refresh_intents;
