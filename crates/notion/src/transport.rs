@@ -174,7 +174,7 @@ impl NotionClient {
         replay_safe: bool,
         operation: &'static str,
     ) -> Result<Response, BackendError> {
-        self.send_logged(request, replay_safe, operation, false)
+        self.send_logged(request, replay_safe, operation, false, None)
             .await
     }
     async fn send_logged(
@@ -183,11 +183,12 @@ impl NotionClient {
         replay_safe: bool,
         operation: &'static str,
         mutation: bool,
+        effect_started: Option<&mut bool>,
     ) -> Result<Response, BackendError> {
         let id = logging::current_id();
         let started = StdInstant::now();
         let result = self
-            .send_inner(request, replay_safe, operation, mutation)
+            .send_inner(request, replay_safe, operation, mutation, effect_started)
             .await;
         let (outcome, status) = match &result {
             Ok(response) if response.status().is_success() => {
@@ -215,14 +216,34 @@ impl NotionClient {
         request: RequestBuilder,
         operation: &'static str,
     ) -> Result<Response, BackendError> {
-        self.send_logged(request, false, operation, true).await
+        self.send_logged(request, false, operation, true, None)
+            .await
     }
+    /// Accumulate whether a non-replayed provider effect actually reached send.
+    pub(crate) async fn send_effect_tracked(
+        &self,
+        request: RequestBuilder,
+        operation: &'static str,
+        effect_started: &mut bool,
+    ) -> Result<Response, BackendError> {
+        self.send_logged(request, false, operation, true, Some(effect_started))
+            .await
+    }
+
+    pub(crate) fn validate_request_authority(&self, mutation: bool) -> Result<(), BackendError> {
+        match &self.request_authority {
+            Some(authority) => authority.validate(mutation),
+            None => Ok(()),
+        }
+    }
+
     async fn send_inner(
         &self,
         request: RequestBuilder,
         replay_safe: bool,
         operation: &'static str,
         mutation: bool,
+        mut effect_started: Option<&mut bool>,
     ) -> Result<Response, BackendError> {
         let mut retry = 0;
         // Multipart streams cannot be cloned; consume them exactly once while
@@ -251,6 +272,9 @@ impl NotionClient {
             #[cfg(test)]
             if let Some(clock) = &self.transport.waits {
                 let _ = clock.send(crate::test_clock::ClockEvent::RequestStarted);
+            }
+            if let Some(started) = effect_started.as_deref_mut() {
+                *started = true;
             }
             let mut result = attempt.send().await;
             if let Some(authority) = &self.request_authority {

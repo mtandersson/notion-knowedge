@@ -84,6 +84,19 @@ impl NotionClient {
         body: Value,
         operation: &'static str,
     ) -> Result<Value, BackendError> {
+        let mut effect_started = false;
+        self.write_tracked(method, path, body, operation, &mut effect_started)
+            .await
+    }
+
+    pub(crate) async fn write_tracked(
+        &self,
+        method: Method,
+        path: &str,
+        body: Value,
+        operation: &'static str,
+        effect_started: &mut bool,
+    ) -> Result<Value, BackendError> {
         // Notion request payload limit. Reject before a potentially non-idempotent mutation.
         let body = serde_json::to_vec(&body)
             .map_err(|_| failure(operation, BackendErrorKind::InvalidInput))?;
@@ -97,7 +110,9 @@ impl NotionClient {
             .header("Notion-Version", MARKDOWN_VERSION)
             .header("Content-Type", "application/json")
             .body(body);
-        let mut response = self.send_effect(request, operation).await?;
+        let mut response = self
+            .send_effect_tracked(request, operation, effect_started)
+            .await?;
         if response.status().as_u16() != 200 {
             let kind = match response.status().as_u16() {
                 400 => BackendErrorKind::InvalidInput,
