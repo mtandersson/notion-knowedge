@@ -16,6 +16,7 @@ use tokio::{
 const ID: &str = "11111111-1111-1111-1111-111111111111";
 struct Authority {
     active: AtomicBool,
+    writable: AtomicBool,
     last_mutation: AtomicBool,
     checks: AtomicUsize,
     changed: Notify,
@@ -24,6 +25,7 @@ impl Authority {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             active: true.into(),
+            writable: true.into(),
             last_mutation: false.into(),
             checks: 0.into(),
             changed: Notify::new(),
@@ -35,7 +37,8 @@ impl RequestAuthority for Authority {
         self.last_mutation.store(mutation, Ordering::SeqCst);
         self.checks.fetch_add(1, Ordering::SeqCst);
         self.changed.notify_one();
-        if self.active.load(Ordering::SeqCst) {
+        if self.active.load(Ordering::SeqCst) && (!mutation || self.writable.load(Ordering::SeqCst))
+        {
             Ok(())
         } else {
             Err(BackendError {
@@ -232,5 +235,145 @@ async fn multipart_stops_on_lost_part_complete_or_verification_receipt_without_r
         }
         assert_eq!(bounded(server).await.unwrap().len(), steps);
         assert_eq!(client.request_metrics().attempts, steps as u64);
+    }
+}
+
+#[tokio::test]
+async fn write_permission_lost_during_admission_prevents_create_or_stream_send() {
+    use crate::test_clock::TestClock;
+    use tokio::time::Instant;
+    for before_create in [true, false] {
+        let mut clock = TestClock::new().await;
+        let authority = Authority::new();
+        let response = if before_create {
+            ("GET /v1/probe ".into(), json!({}))
+        } else {
+            ("POST /v1/file_uploads ".into(), receipt("pending", 1, 0))
+        };
+        let (mut client, server) = provider(authority.clone(), vec![response], None).await;
+        clock.handle().track(&mut client);
+        if before_create {
+            clock
+                .run(client.send(
+                    client.http.get(format!("{}/probe", client.api_root)),
+                    true,
+                    "fixture.read",
+                ))
+                .await
+                .unwrap();
+        }
+        let file = DownloadedFile::test_fixture(b"notes");
+        let (pending, until) = clock
+            .park_until_wait(client.upload_single_part_detailed(
+                &file,
+                "notes.txt",
+                "text/plain",
+                FileValidationPolicy::default(),
+            ))
+            .await;
+        authority.writable.store(false, Ordering::SeqCst);
+        // It remains a valid read credential: only the mutation grant was lost.
+        authority.validate(false).unwrap();
+        TestClock::advance(until.saturating_duration_since(Instant::now())).await;
+        let failure = pending.await.unwrap_err();
+        assert!(failure.authority_lost);
+        assert_eq!(failure.effect_possible, !before_create);
+        assert_eq!(
+            failure.upload_id.as_deref(),
+            if before_create { None } else { Some(ID) }
+        );
+        assert_eq!(client.request_metrics().attempts, 1);
+        assert_eq!(server.await.unwrap().len(), 1);
+        drop(clock);
+        tokio::time::resume();
+    }
+}
+
+#[tokio::test]
+async fn image_and_file_attachment_receipt_loss_keeps_known_blocks_but_never_verifies() {
+    use crate::file_upload::{UploadStatus, UploadedFile};
+    use notion_knowledge_core::{backend::PageId, lifecycle::LifecycleScope};
+    const PAGE: &str = "22222222-2222-2222-2222-222222222222";
+    const ROOT: &str = "33333333-3333-3333-3333-333333333333";
+    const BLOCK: &str = "44444444-4444-4444-4444-444444444444";
+    for image in [false, true] {
+        for revoked in [None, Some(8), Some(9)] {
+            let authority = Authority::new();
+            let node = |id: &str, parent: Option<&str>| json!({"object":"page","id":id,"last_edited_time":"2026-10-11T09:00:00Z","in_trash":false,"parent":match parent {Some(p)=>json!({"type":"page_id","page_id":p}),None=>json!({"type":"workspace","workspace":true})}});
+            let mut replies = Vec::new();
+            for _ in 0..2 {
+                for (id, parent) in [
+                    (PAGE, Some(ROOT)),
+                    (ROOT, None),
+                    (ROOT, None),
+                    (PAGE, Some(ROOT)),
+                ] {
+                    replies.push((format!("GET /v1/pages/{id} "), node(id, parent)));
+                }
+            }
+            let kind = if image { "image" } else { "file" };
+            let filename = if image { "proof.png" } else { "proof.pdf" };
+            let body =
+                json!({"type":"file_upload","file_upload":{"id":ID},"caption":[],"name":filename});
+            let block = json!({"object":"block","id":BLOCK,"type":kind,"in_trash":false,"parent":{"type":"page_id","page_id":PAGE},kind:body});
+            replies.push((
+                format!("PATCH /v1/blocks/{PAGE}/children "),
+                json!({"object":"list","results":[block.clone()]}),
+            ));
+            if revoked != Some(8) {
+                replies.push((format!("GET /v1/blocks/{BLOCK} "), block));
+            }
+            let steps = replies.len();
+            let (client, server) = provider(authority, replies, revoked).await;
+            let upload = UploadedFile {
+                id: ID.into(),
+                status: UploadStatus::Uploaded,
+                filename: filename.into(),
+                mime_type: if image {
+                    "image/png"
+                } else {
+                    "application/pdf"
+                }
+                .into(),
+                size_bytes: 16,
+            };
+            let scope = LifecycleScope {
+                workspace_id: "55555555-5555-5555-5555-555555555555".into(),
+                generation: 1,
+                roots: vec![PageId(ROOT.into())],
+                exclusions: Default::default(),
+            };
+            let result = if image {
+                bounded(client.attach_uploaded_image_detailed(
+                    &PageId(PAGE.into()),
+                    &upload,
+                    None,
+                    &scope,
+                ))
+                .await
+                .map(|value| value.verified)
+            } else {
+                bounded(client.attach_uploaded_file_detailed(
+                    &PageId(PAGE.into()),
+                    &upload,
+                    None,
+                    &scope,
+                ))
+                .await
+                .map(|value| value.verified)
+            };
+            if revoked.is_some() {
+                let failure = result.unwrap_err();
+                assert!(failure.authority_lost && failure.effect_possible);
+                assert_eq!(failure.upload_id.as_deref(), Some(ID));
+                assert_eq!(failure.block_id.as_deref(), Some(BLOCK));
+            } else {
+                assert!(result.unwrap());
+            }
+            let paths = bounded(server).await.unwrap();
+            assert_eq!(paths.len(), steps);
+            assert_eq!(paths.iter().filter(|p| p.starts_with("PATCH")).count(), 1);
+            assert_eq!(client.request_metrics().attempts, steps as u64);
+        }
     }
 }

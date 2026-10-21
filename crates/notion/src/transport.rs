@@ -211,14 +211,6 @@ impl NotionClient {
         result
     }
 
-    pub(crate) async fn send_effect(
-        &self,
-        request: RequestBuilder,
-        operation: &'static str,
-    ) -> Result<Response, BackendError> {
-        self.send_logged(request, false, operation, true, None)
-            .await
-    }
     /// Accumulate whether a non-replayed provider effect actually reached send.
     pub(crate) async fn send_effect_tracked(
         &self,
@@ -685,13 +677,20 @@ mod tests {
                 });
                 let client = client.with_request_authority(authority.clone());
                 let request = client.http.patch(&client.api_root);
-                let pending = TestClock::park(client.send_effect(request, "notion.test")).await;
+                let mut effect_started = false;
+                let pending = TestClock::park(client.send_effect_tracked(
+                    request,
+                    "notion.test",
+                    &mut effect_started,
+                ))
+                .await;
                 assert_eq!(authority.checks.load(Ordering::SeqCst), 0);
                 authority.active.store(false, Ordering::SeqCst);
                 assert_eq!(
                     pending.await.unwrap_err().kind,
                     BackendErrorKind::Unauthenticated
                 );
+                assert!(!effect_started);
                 assert_eq!(client.request_metrics().attempts, 1);
             })
             .await;
@@ -707,8 +706,12 @@ mod tests {
         });
         let client = client.with_request_authority(authority.clone());
         let request = client.http.patch(&client.api_root);
-        let result = clock.run(client.send_effect(request, "notion.test")).await;
+        let mut effect_started = false;
+        let result = clock
+            .run(client.send_effect_tracked(request, "notion.test", &mut effect_started))
+            .await;
         assert_eq!(result.unwrap_err().kind, BackendErrorKind::Unauthenticated);
+        assert!(effect_started);
         assert_eq!(authority.checks.load(Ordering::SeqCst), 3);
         assert_eq!(server.await.unwrap().len(), 1);
         assert_eq!(client.request_metrics().attempts, 1);

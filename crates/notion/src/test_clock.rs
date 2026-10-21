@@ -66,6 +66,22 @@ impl TestClock {
             sender,
         }
     }
+    /// Hold a real exchange precisely at its next admission/backoff wait.
+    pub(crate) async fn park_until_wait<F: Future>(
+        &mut self,
+        future: F,
+    ) -> (std::pin::Pin<Box<F>>, Instant) {
+        let mut future = Box::pin(future);
+        loop {
+            tokio::select! {
+                _ = &mut future => panic!("exchange completed before admission wait"),
+                event = self.waits.recv() => match event.expect("clock remains live") {
+                    ClockEvent::Sleep(until) => return (future, until),
+                    ClockEvent::RequestStarted | ClockEvent::ResponseReady => {},
+                }
+            }
+        }
+    }
     pub(crate) fn handle(&self) -> ClockHandle {
         ClockHandle {
             sender: self.sender.clone(),

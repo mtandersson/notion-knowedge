@@ -7,3 +7,13 @@ The **`file_ingest_audit`** module exposes only two trusted constructors. `succe
 The existing `AuditStore` is the durable storage contract; producing an event does **not** prove that it was recorded. The [installed ingestion runtime](installed-file-ingestion.md) writes admission and truthful terminal audit and reports whether terminal persistence succeeded. Its trusted local transport boundary remains separate from private ChatGPT OAuth readiness.
 
 Credential-free tests cover success and all explicit error/cancellation paths already in `file_download.rs`, plus Rust unwind, validation rejection, denied scope and audit write failure fixture, and fail-closed typed event construction.
+
+When a trusted request authority is supplied, native file effects require its
+current mutation permission after transport admission and before each actual
+send. Complete upload and attachment read-back receipts are checked again before
+success. Loss of authority stops the ordered batch, retains any already-known
+upload/block IDs and earlier verified items, and records denial without claiming
+that an accepted effect was rolled back. No subsequent source download or
+provider effect is attempted. Local temporary files still follow the cleanup
+contract above; this does not introduce remote upload deletion or install the
+OAuth workflow tracked in #477.
