@@ -814,7 +814,7 @@ impl Config {
         let file_ingestion = crate::file_ingestion::Settings::parse(
             &mut lookup,
             read_only,
-            matches!(notion_auth, NotionAuth::Integration(_)),
+            matches!(notion_auth, NotionAuth::Integration(_)) || oauth_writes,
             notion_scope.is_some(),
         )?;
         let client_id = lookup("NK_OAUTH_CLIENT_ID")
@@ -862,7 +862,7 @@ impl Config {
             && notion_scope.is_some()
             && (webhook_worker.is_some()
                 || reconciliation_schedule.is_some()
-                || file_ingestion.is_some())
+                || (file_ingestion.is_some() && !oauth_writes))
         {
             return Err(invalid(
                 "NK_WEBHOOK_WORKER",

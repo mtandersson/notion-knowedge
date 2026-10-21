@@ -159,6 +159,22 @@ pub fn tool_with_limit(max_files: usize) -> Tool {
     )
 }
 
+/// Explicit composition-owned installation for authenticated HTTP file requests.
+pub trait RequestFileIngestionFactory: Send + Sync {
+    fn bind<'a>(
+        &'a self,
+        adapters: crate::RequestScopeAdapters,
+        context: &'a rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<std::sync::Arc<dyn FileIngestion>, rmcp::ErrorData>,
+                > + Send
+                + 'a,
+        >,
+    >;
+}
+
 /// Trusted application installed by the server composition root.
 /// Requests contain untrusted file metadata; implementations retain authority.
 pub trait FileIngestion: Send + Sync {

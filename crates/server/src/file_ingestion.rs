@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+#[derive(Clone)]
 pub struct Settings {
     pub download: DownloadPolicy,
     pub maximum_bytes: usize,
@@ -24,7 +25,7 @@ impl Settings {
     pub(crate) fn parse(
         lookup: &mut impl FnMut(&str) -> Option<OsString>,
         read_only: bool,
-        integration: bool,
+        authorized: bool,
         scope: bool,
     ) -> Result<Option<Self>, ConfigError> {
         let enabled = match optional(lookup, "NK_FILE_INGESTION", "false")?.as_str() {
@@ -50,10 +51,10 @@ impl Settings {
             }
             return Ok(None);
         }
-        if read_only || !integration || !scope {
+        if read_only || !authorized || !scope {
             return Err(invalid(
                 "NK_FILE_INGESTION",
-                "requires write mode, integration and authoritative physical scope",
+                "requires write mode, authorized provider and authoritative physical scope",
             ));
         }
         let number = |lookup: &mut dyn FnMut(&str) -> Option<OsString>, key, default, maximum| {
@@ -197,6 +198,12 @@ pub(crate) struct Runtime {
     gate: notion_knowledge_core::root_scope::RootScopeGate,
     audit: notion_knowledge_retrieval::audit::SqliteAuditStore,
     policy: notion_knowledge_core::file_ingest::FileBatchPolicy,
+    actor: notion_knowledge_core::audit::AuditActor,
+    refresh: Option<(
+        std::sync::Arc<dyn notion_knowledge_core::write_refresh::MutationRefreshQueue>,
+        String,
+    )>,
+    request_cancel: Option<tokio_util::sync::CancellationToken>,
 }
 impl Runtime {
     pub(crate) fn new(
@@ -204,12 +211,20 @@ impl Runtime {
         settings: &Settings,
         client: notion_knowledge_notion::NotionClient,
     ) -> Result<Self, &'static str> {
-        validate_audit_path(&settings.audit_file)
-            .map_err(|_| "file ingestion audit path unavailable")?;
         let scope = config
             .notion_scope
             .as_ref()
             .ok_or("file ingestion scope unavailable")?;
+        Self::scoped(settings, client, scope, config.max_upload_files)
+    }
+    fn scoped(
+        settings: &Settings,
+        client: notion_knowledge_notion::NotionClient,
+        scope: &notion_knowledge_core::lifecycle::LifecycleScope,
+        maximum_files: usize,
+    ) -> Result<Self, &'static str> {
+        validate_audit_path(&settings.audit_file)
+            .map_err(|_| "file ingestion audit path unavailable")?;
         let validation =
             notion_knowledge_notion::file_validation::FileValidationPolicy::for_single_part(
                 settings
@@ -238,10 +253,11 @@ impl Runtime {
                 settings.retention,
             )
             .map_err(|_| "file ingestion audit unavailable")?,
-            policy: notion_knowledge_core::file_ingest::FileBatchPolicy::new(
-                config.max_upload_files,
-            )
-            .map_err(|_| "file batch policy unavailable")?,
+            actor: notion_knowledge_core::audit::AuditActor::Server,
+            refresh: None,
+            request_cancel: None,
+            policy: notion_knowledge_core::file_ingest::FileBatchPolicy::new(maximum_files)
+                .map_err(|_| "file batch policy unavailable")?,
         })
     }
 }
@@ -277,14 +293,16 @@ impl notion_knowledge_mcp::upload::FileIngestion for Runtime {
             let context = FileIngestContext {
                 gate: &self.gate,
                 audit: &self.audit,
-                actor: notion_knowledge_core::audit::AuditActor::Server,
+                actor: self.actor,
                 correlation_id: correlation,
                 permitted: true,
             };
             // Keep the request-owned batch OUTSIDE this cancellable execution
             // future, so receipts and earlier results survive cancellation.
+            let request_cancel = self.request_cancel.clone().unwrap_or_default();
             let (failure, cancelled) = tokio::select! {
                 biased;
+                _ = request_cancel.cancelled() => (None, true),
                 _ = cancellation => (None, true),
                 result = batch.execute(&self.adapter, &context) => (result.err(), false),
             };
@@ -330,6 +348,46 @@ impl notion_knowledge_mcp::upload::FileIngestion for Runtime {
                     IngestStatus::Failed => "failed", IngestStatus::Denied => "denied", IngestStatus::Indeterminate => "indeterminate", IngestStatus::Verified => "verified", IngestStatus::VerifiedAuditFailed => "verified_audit_failed",
                 },"target":outcome.references.target.as_ref().map(|p| &p.0),"upload_id":outcome.references.upload_id,"block_id":outcome.references.block_id,"terminal_audited":outcome.terminal_audited,"failure":outcome.failure.map(failure_name)}),
             }).collect();
+            let mut results = results;
+            if let Some((queue, workspace)) = &self.refresh {
+                use notion_knowledge_core::write_refresh::{IndexStatus, RefreshKey};
+                use sha2::{Digest, Sha256};
+                for (item, output) in batch.results().iter().zip(&mut results) {
+                    // Upload-only uncertainty is conservatively refreshed too:
+                    // never claim this proves a native block was attached.
+                    let affected = item.outcome.as_ref().is_some_and(|result| {
+                        result.references.upload_id.is_some()
+                            || matches!(
+                                result.status,
+                                IngestStatus::Indeterminate
+                                    | IngestStatus::Verified
+                                    | IngestStatus::VerifiedAuditFailed
+                            )
+                    });
+                    if affected {
+                        let key = RefreshKey {
+                            workspace_id: workspace.clone(),
+                            page_id: input.target.clone(),
+                            mutation_digest: format!(
+                                "{:x}",
+                                Sha256::digest(
+                                    format!(
+                                        "file-refresh:{correlation}:{}:{}",
+                                        input.target, item.index
+                                    )
+                                    .as_bytes()
+                                )
+                            ),
+                        };
+                        let index = queue.admit(&key).unwrap_or(IndexStatus::Unavailable);
+                        output["index_status"] =
+                            serde_json::json!(format!("{index:?}").to_lowercase());
+                        output["refresh"] = serde_json::json!({"workspace_id":key.workspace_id,"page_id":key.page_id,"mutation_digest":key.mutation_digest});
+                    } else {
+                        output["index_status"] = serde_json::json!("not_needed");
+                    }
+                }
+            }
             Ok(
                 serde_json::json!({"files":results,"partial_success":batch.partial_success(),"failure":if cancelled {Some("cancelled")}else{failure.map(failure_name)},"cancelled":cancelled}),
             )
@@ -432,5 +490,93 @@ mod tests {
         assert!(validate_audit_path(&file).is_err());
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(validate_audit_path(&file).is_ok());
+    }
+}
+
+#[cfg(all(unix, feature = "webhook-worker"))]
+pub(crate) struct OAuthFactory {
+    pub runtime: crate::notion_oauth_runtime::NotionOAuthRuntime,
+    pub coordinator: std::sync::Arc<notion_knowledge_retrieval::commit::IndexCommitCoordinator>,
+    pub settings: Settings,
+    pub scope: notion_knowledge_core::lifecycle::LifecycleScope,
+    pub maximum_files: usize,
+}
+#[cfg(all(unix, feature = "webhook-worker"))]
+struct FileAuthority {
+    grant: std::sync::Arc<crate::oauth_content::RequestGrantAuthority>,
+    cancel: tokio_util::sync::CancellationToken,
+}
+#[cfg(all(unix, feature = "webhook-worker"))]
+impl notion_knowledge_notion::RequestAuthority for FileAuthority {
+    fn validate(&self, mutation: bool) -> Result<(), notion_knowledge_core::backend::BackendError> {
+        if self.cancel.is_cancelled() {
+            return Err(notion_knowledge_core::backend::BackendError {
+                kind: notion_knowledge_core::backend::BackendErrorKind::Unauthenticated,
+                operation: "notion.oauth.file",
+                retry_after: None,
+                committed_page_id: None,
+            });
+        }
+        self.grant.validate(mutation)
+    }
+}
+#[cfg(all(unix, feature = "webhook-worker"))]
+impl notion_knowledge_mcp::upload::RequestFileIngestionFactory for OAuthFactory {
+    fn bind<'a>(
+        &'a self,
+        adapters: notion_knowledge_mcp::RequestScopeAdapters,
+        context: &'a rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        std::sync::Arc<dyn notion_knowledge_mcp::upload::FileIngestion>,
+                        rmcp::ErrorData,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let denied =
+                || rmcp::ErrorData::invalid_request("file authorization unavailable", None);
+            if adapters.scope != self.scope
+                || !adapters.authorization.permissions().can_write()
+                || context.ct.is_cancelled()
+            {
+                return Err(denied());
+            }
+            let authority = crate::oauth_content::RequestGrantAuthority::acquire(
+                &self.runtime,
+                &adapters.authorization,
+            )
+            .await
+            .map_err(|_| denied())?;
+            let client = authority
+                .client()
+                .map_err(|_| denied())?
+                .with_request_authority(std::sync::Arc::new(FileAuthority {
+                    grant: authority,
+                    cancel: context.ct.clone(),
+                }));
+            let queue = crate::grant_refresh::AuthorizedRefreshQueue::bind(
+                self.coordinator.state().clone(),
+                &self.runtime,
+                &adapters.authorization,
+                &adapters.scope,
+            )
+            .await
+            .map_err(|_| denied())?;
+            let mut service =
+                Runtime::scoped(&self.settings, client, &adapters.scope, self.maximum_files)
+                    .map_err(|_| denied())?;
+            service.actor = notion_knowledge_core::audit::AuditActor::ApprovedUser;
+            service.refresh = Some((std::sync::Arc::new(queue), adapters.scope.workspace_id));
+            service.request_cancel = Some(adapters.authorization.cancellation());
+            Ok(std::sync::Arc::new(service)
+                as std::sync::Arc<
+                    dyn notion_knowledge_mcp::upload::FileIngestion,
+                >)
+        })
     }
 }

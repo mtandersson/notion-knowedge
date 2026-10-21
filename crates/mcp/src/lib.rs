@@ -67,6 +67,7 @@ pub struct KnowledgeServer {
     snippet_chars: usize,
     max_upload_files: usize,
     file_ingestion: Option<Arc<dyn upload::FileIngestion>>,
+    request_file_ingestion: Option<Arc<dyn upload::RequestFileIngestionFactory>>,
     /// Deny mutation-capable tools unless the operator explicitly disables read-only mode.
     read_only: bool,
     http_authorization_required: bool,
@@ -94,6 +95,7 @@ impl Default for KnowledgeServer {
             snippet_chars: 2000,
             max_upload_files: upload::DEFAULT_MAX_FILES,
             file_ingestion: None,
+            request_file_ingestion: None,
             read_only: true,
             http_authorization_required: false,
             request_scope_required: false,
@@ -136,6 +138,15 @@ impl KnowledgeServer {
         factory: Arc<dyn mutations::RequestMutationFactory>,
     ) -> Self {
         self.request_mutations = Some(factory);
+        self
+    }
+    /// File effects have a distinct factory; semantic write factories cannot
+    /// enable uploads or widen unsupported destructive operations.
+    pub fn and_request_file_ingestion(
+        mut self,
+        factory: Arc<dyn upload::RequestFileIngestionFactory>,
+    ) -> Self {
+        self.request_file_ingestion = Some(factory);
         self
     }
     pub fn requires_request_scope(&self) -> bool {
@@ -193,6 +204,9 @@ impl KnowledgeServer {
                     | "knowledge_sync_status"
                     | "knowledge_related"
             )
+            || (self.request_scope_required
+                && name == "knowledge_upload_file"
+                && self.request_file_ingestion.is_some())
             || (self.request_scope_required
                 && mutations::is_semantic_mutation(name)
                 && self
@@ -997,7 +1011,7 @@ impl ServerHandler for KnowledgeServer {
                         )
                     });
                 }
-                if let Some(factory) = &self.request_mutations {
+                if self.request_mutations.is_some() || self.request_file_ingestion.is_some() {
                     let parts = context
                         .extensions
                         .get::<http::request::Parts>()
@@ -1027,6 +1041,11 @@ impl ServerHandler for KnowledgeServer {
                     })?;
                     if auth.permissions().can_write() && adapters.source.mutation_ports().is_some()
                     {
+                        if self.request_file_ingestion.is_some()
+                            && self.tool_permitted("knowledge_upload_file")
+                        {
+                            tools.push(upload::tool_with_limit(self.max_upload_files));
+                        }
                         tools.extend(
                             [
                                 "knowledge_create_page",
@@ -1034,7 +1053,12 @@ impl ServerHandler for KnowledgeServer {
                                 "knowledge_update_section",
                             ]
                             .into_iter()
-                            .filter(|name| factory.supports(name) && self.tool_permitted(name))
+                            .filter(|name| {
+                                self.request_mutations
+                                    .as_ref()
+                                    .is_some_and(|factory| factory.supports(name))
+                                    && self.tool_permitted(name)
+                            })
                             .map(mutations::tool),
                         );
                     }
@@ -1168,6 +1192,17 @@ impl ServerHandler for KnowledgeServer {
                     .bind(adapters.clone(), &context, request.name.as_ref())
                     .await?,
             );
+        }
+        if request.name == "knowledge_upload_file"
+            && let Some(factory) = &self.request_file_ingestion
+        {
+            if !auth.permissions().can_write() {
+                return Err(rmcp::ErrorData::invalid_request(
+                    "write authorization required",
+                    None,
+                ));
+            }
+            scoped.file_ingestion = Some(factory.bind(adapters.clone(), &context).await?);
         }
         let result = scoped.call_tool_authorized(request, context).await;
         if !adapters.authorization.is_active() {
