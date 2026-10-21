@@ -666,13 +666,15 @@ async fn installed_inflight_attachment_loss_retains_uncertainty_and_never_attemp
         .await;
         let (token, session) = login(&h, &installed.url, "knowledge:read knowledge:write").await;
         h.files.pause_attach.store(true, Ordering::SeqCst);
-        let pending = rpc(
+        let pending = async {
+            rpc(
             &h,
             &installed.url,
             &token,
             Some(&session),
             json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"knowledge_upload_file","arguments":{"target":PAGE,"files":[input("accepted.txt","text/plain"),input("unattempted.txt","text/plain")]}}}),
-        );
+        ).await.bytes().await
+        };
         let invalidate = async {
             tokio::time::timeout(Duration::from_secs(5), h.files.entered.notified())
                 .await
@@ -688,14 +690,19 @@ async fn installed_inflight_attachment_loss_retains_uncertainty_and_never_attemp
                     h.approved_code().await;
                 }
             }
-            h.files.release.add_permits(1);
+            if invalidation != "cancel" {
+                h.files.release.add_permits(1);
+            }
         };
         let (response, ()) = tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(pending, invalidate)
         })
         .await
         .unwrap();
-        if let Ok(body) = response.bytes().await
+        if invalidation == "cancel" {
+            h.files.release.add_permits(1);
+        }
+        if let Ok(body) = response
             && let Ok(reply) = serde_json::from_slice::<Value>(&body)
         {
             assert_ne!(
@@ -710,7 +717,16 @@ async fn installed_inflight_attachment_loss_retains_uncertainty_and_never_attemp
             }
         })
         .await
-        .unwrap();
+        .unwrap_or_else(|_| {
+            panic!(
+                "{invalidation}: blocks={} creates={} sends={} attaches={} downloads={}",
+                h.files.blocks.lock().unwrap().len(),
+                h.files.created.load(Ordering::SeqCst),
+                h.files.sent.load(Ordering::SeqCst),
+                h.files.attached.load(Ordering::SeqCst),
+                source.count.load(Ordering::SeqCst)
+            )
+        });
         assert_eq!(h.files.created.load(Ordering::SeqCst), 1, "{invalidation}");
         assert_eq!(h.files.sent.load(Ordering::SeqCst), 1);
         assert_eq!(h.files.attached.load(Ordering::SeqCst), 1);

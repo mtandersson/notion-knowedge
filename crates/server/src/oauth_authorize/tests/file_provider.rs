@@ -160,30 +160,39 @@ pub(super) fn routes(
                             .unwrap()
                             .clone();
                         assert_eq!(upload.sent, upload.total);
-                        let ordinal = files.attached.fetch_add(1, Ordering::SeqCst) + 1;
-                        if files.pause_attach.swap(false, Ordering::SeqCst) {
-                            files.entered.notify_one();
-                            let _hold = files.release.acquire().await.unwrap();
-                        }
-                        let id = format!("ffffffff-ffff-ffff-ffff-{ordinal:012x}");
-                        let mut value = child.clone();
-                        value["id"] = json!(id);
-                        value["object"] = json!("block");
-                        value["in_trash"] = json!(false);
-                        value["parent"] = json!({"type":"page_id","page_id":page});
-                        value[kind]["name"] = json!(upload.name);
-                        for item in value[kind]["caption"].as_array_mut().unwrap() {
-                            item["plain_text"] = item["text"]["content"].clone();
-                        }
-                        files.blocks.lock().unwrap().insert(id, value.clone());
-                        if let Some((text, revision)) = document.lock().unwrap().as_mut() {
-                            text.push_str(&format!(
-                                "\n[{}](https://files.notion.so/{})",
-                                upload.name, upload_id
-                            ));
-                            *revision += 1;
-                        }
-                        axum::Json(json!({"object":"list","results":[value]}))
+                        let child = child.clone();
+                        let kind = kind.to_owned();
+                        let upload_id = upload_id.to_owned();
+                        // Accepted provider work has its own lifetime. A dropped HTTP
+                        // response must not cancel a mutation already accepted upstream.
+                        tokio::spawn(async move {
+                            let ordinal = files.attached.fetch_add(1, Ordering::SeqCst) + 1;
+                            if files.pause_attach.swap(false, Ordering::SeqCst) {
+                                files.entered.notify_one();
+                                let _hold = files.release.acquire().await.unwrap();
+                            }
+                            let id = format!("ffffffff-ffff-ffff-ffff-{ordinal:012x}");
+                            let mut value = child.clone();
+                            value["id"] = json!(id);
+                            value["object"] = json!("block");
+                            value["in_trash"] = json!(false);
+                            value["parent"] = json!({"type":"page_id","page_id":page});
+                            value[&kind]["name"] = json!(upload.name);
+                            for item in value[&kind]["caption"].as_array_mut().unwrap() {
+                                item["plain_text"] = item["text"]["content"].clone();
+                            }
+                            files.blocks.lock().unwrap().insert(id, value.clone());
+                            if let Some((text, revision)) = document.lock().unwrap().as_mut() {
+                                text.push_str(&format!(
+                                    "\n[{}](https://files.notion.so/{})",
+                                    upload.name, upload_id
+                                ));
+                                *revision += 1;
+                            }
+                            axum::Json(json!({"object":"list","results":[value]}))
+                        })
+                        .await
+                        .unwrap()
                     }
                 },
             ),
@@ -203,4 +212,48 @@ pub(super) fn routes(
             ),
         )
         .layer(axum::extract::DefaultBodyLimit::max(110 * 1024 * 1024))
+}
+
+#[tokio::test]
+async fn accepted_provider_attachment_finishes_after_its_http_client_is_dropped() {
+    let files = Arc::new(Files::default());
+    let upload_id = "eeeeeeee-eeee-eeee-eeee-000000000001";
+    files.uploads.lock().unwrap().insert(
+        upload_id.into(),
+        Upload {
+            name: "accepted.txt".into(),
+            total: 1,
+            sent: 1,
+        },
+    );
+    files.pause_attach.store(true, Ordering::SeqCst);
+    let document = Arc::new(Mutex::new(Some((String::new(), 0))));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = routes(Router::new(), files.clone(), document.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let request = tokio::spawn(async move {
+        reqwest::Client::new().patch(format!("http://{address}/v1/blocks/cccccccc-cccc-cccc-cccc-cccccccccccc/children"))
+            .bearer_auth("provider-access-secret")
+            .json(&json!({"children":[{"object":"block","type":"file","file":{"type":"file_upload","file_upload":{"id":upload_id},"caption":[]}}]}))
+            .send().await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), files.entered.notified())
+        .await
+        .unwrap();
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    files.release.add_permits(1);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while files.blocks.lock().unwrap().len() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(files.attached.load(Ordering::SeqCst), 1);
+    assert_eq!(document.lock().unwrap().as_ref().unwrap().1, 1);
+    server.abort();
 }
