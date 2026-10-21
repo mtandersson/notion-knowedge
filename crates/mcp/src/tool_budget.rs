@@ -38,7 +38,7 @@ impl ToolBudget {
             "knowledge_search" => 4,
             // Uploads and prospective mutation tools must never be timed out
             // or retried by this budget: admission is a *pre-effect* decision.
-            "knowledge_upload_file" => 8,
+            "knowledge_upload_file" | "knowledge_file_refresh" => 8,
             _ => 8,
         }
     }

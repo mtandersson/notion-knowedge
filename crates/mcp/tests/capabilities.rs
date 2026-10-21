@@ -15,6 +15,7 @@ fn default_keeps_only_existing_operations_not_arbitrary_future_names() {
         "knowledge_related",
         "knowledge_sync_status",
         "knowledge_upload_file",
+        "knowledge_file_refresh",
         "knowledge_create_page",
         "knowledge_append",
         "knowledge_update_section",
@@ -114,6 +115,7 @@ fn catalog_and_get_tool_match_for_read_write_and_destructive_previews() {
     for operation in [
         "knowledge_get",
         "knowledge_upload_file",
+        "knowledge_file_refresh",
         "knowledge_create_page",
         "knowledge_update_section",
         "unknown",
@@ -138,4 +140,28 @@ fn category_allowlist_never_bypasses_existing_destructive_mode() {
     assert!(server.get_tool("knowledge_append").is_some());
     assert!(server.get_tool("knowledge_archive_page").is_none());
     assert!(server.get_tool("knowledge_update_section").is_none());
+}
+
+#[test]
+fn file_refresh_obeys_write_category_and_exact_block_precedence() {
+    assert!(policy(Some("write"), None).permits("knowledge_file_refresh"));
+    assert!(!policy(Some("read"), None).permits("knowledge_file_refresh"));
+    assert!(
+        !policy(Some("knowledge_file_refresh"), Some("write")).permits("knowledge_file_refresh")
+    );
+    assert!(
+        !policy(Some("write"), Some("knowledge_file_refresh")).permits("knowledge_file_refresh")
+    );
+    assert!(policy(Some("knowledge_file_refresh"), None).permits("knowledge_file_refresh"));
+    assert!(
+        KnowledgeServer::default()
+            .get_tool("knowledge_file_refresh")
+            .is_none()
+    );
+    assert!(
+        KnowledgeServer::default()
+            .with_read_only(false)
+            .get_tool("knowledge_file_refresh")
+            .is_none()
+    );
 }

@@ -85,6 +85,40 @@ impl SqliteSyncStateStore {
             owner,
         })
     }
+    pub fn file_refresh_index_status(
+        &self,
+        key: &RefreshKey,
+        authority: &GrantRefreshAuthority,
+    ) -> Result<Option<notion_knowledge_core::write_refresh::IndexStatus>, Error> {
+        self.refresh_status(key, Some(authority))
+    }
+    pub fn held_file_refresh_keys(
+        &self,
+        workspace: &str,
+        authority: &GrantRefreshAuthority,
+    ) -> Result<Vec<RefreshKey>, Error> {
+        if authority.workspace_id() != workspace {
+            return Err(Error::Conflict);
+        }
+        authority.validate()?;
+        let db = self.lock_connection().map_err(|_| Error::Unavailable)?;
+        let mut query=db.prepare("SELECT m.mutation_digest,m.page_id FROM file_refresh_intents f JOIN mutation_refresh m USING(workspace_id,mutation_digest) WHERE f.workspace_id=?1 AND m.authority=?2 AND f.phase='held' ORDER BY m.mutation_digest LIMIT 65").map_err(sql)?;
+        let keys = query
+            .query_map(params![workspace, encoded(Some(authority))?], |row| {
+                Ok(RefreshKey {
+                    workspace_id: workspace.into(),
+                    mutation_digest: row.get(0)?,
+                    page_id: row.get(1)?,
+                })
+            })
+            .map_err(sql)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql)?;
+        if keys.len() > MAX_HELD_PER_WORKSPACE as usize {
+            return Err(Error::Unavailable);
+        }
+        Ok(keys)
+    }
     /// Reopen a record for inspection/reconciliation, not source ownership.
     pub fn file_refresh_intent_status(
         &self,

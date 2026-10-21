@@ -205,7 +205,7 @@ impl KnowledgeServer {
                     | "knowledge_related"
             )
             || (self.request_scope_required
-                && name == "knowledge_upload_file"
+                && matches!(name, "knowledge_upload_file" | "knowledge_file_refresh")
                 && self.request_file_ingestion.is_some())
             || (self.request_scope_required
                 && mutations::is_semantic_mutation(name)
@@ -511,6 +511,25 @@ impl KnowledgeServer {
                 Ok(rmcp::model::CallToolResult::structured(value).into())
             }
 
+            "knowledge_file_refresh" => {
+                let input: upload::FileRefreshRequest =
+                    serde_json::from_value(serde_json::Value::Object(arguments)).map_err(|_| {
+                        rmcp::ErrorData::invalid_params("invalid file refresh receipt", None)
+                    })?;
+                let result = match &self.file_ingestion {
+                    Some(service) => service.refresh(input).await,
+                    None => Err("file_refresh_unavailable"),
+                };
+                Ok(match result {
+                    Ok(value) if output_fits_budget(&value) => {
+                        rmcp::model::CallToolResult::structured(value)
+                    }
+                    _ => rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(
+                        "file refresh unavailable",
+                    )]),
+                }
+                .into())
+            }
             "knowledge_upload_file" => {
                 let input: upload::UploadFileRequest =
                     serde_json::from_value(serde_json::Value::Object(arguments)).map_err(|_| {
@@ -1045,6 +1064,7 @@ impl ServerHandler for KnowledgeServer {
                             && self.tool_permitted("knowledge_upload_file")
                         {
                             tools.push(upload::tool_with_limit(self.max_upload_files));
+                            tools.push(upload::refresh_tool());
                         }
                         tools.extend(
                             [
@@ -1079,6 +1099,9 @@ impl ServerHandler for KnowledgeServer {
             "knowledge_related" if self.related_graph.is_some() => Some(related::tool()),
             "knowledge_sync_status" => Some(sync_status::tool()),
             "knowledge_upload_file" => Some(upload::tool_with_limit(self.max_upload_files)),
+            "knowledge_file_refresh" if self.request_file_ingestion.is_some() => {
+                Some(upload::refresh_tool())
+            }
             name if self
                 .mutations
                 .as_ref()
@@ -1193,8 +1216,10 @@ impl ServerHandler for KnowledgeServer {
                     .await?,
             );
         }
-        if request.name == "knowledge_upload_file"
-            && let Some(factory) = &self.request_file_ingestion
+        if matches!(
+            request.name.as_ref(),
+            "knowledge_upload_file" | "knowledge_file_refresh"
+        ) && let Some(factory) = &self.request_file_ingestion
         {
             if !auth.permissions().can_write() {
                 return Err(rmcp::ErrorData::invalid_request(

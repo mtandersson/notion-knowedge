@@ -121,6 +121,21 @@ async fn run() -> ExitCode {
     };
     if all_args
         .iter()
+        .any(|arg| arg.starts_with("--file-recovery"))
+    {
+        return match notion_knowledge_server::file_recovery_command::run(&config, &all_args).await {
+            Ok(report) => {
+                println!("{report}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("File recovery error: {}", safe_error(&error));
+                ExitCode::from(2)
+            }
+        };
+    }
+    if all_args
+        .iter()
         .any(|arg| arg.starts_with("--migrate-operational-state"))
     {
         return match notion_knowledge_server::state_migration::run(&config, &all_args) {
