@@ -174,6 +174,7 @@ impl NotionClient {
                     }
                     body.extend_from_slice(&chunk);
                 }
+                self.validate_request_authority(true)?;
                 let value: Value = serde_json::from_slice(&body)
                     .map_err(|_| failure(operation, BackendErrorKind::Internal))?;
                 if matches(&value) {

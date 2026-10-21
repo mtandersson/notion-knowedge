@@ -171,9 +171,8 @@ impl NotionClient {
             )
             .await
             .map_err(|_| err(CREATE, BackendErrorKind::InvalidInput))?;
-            effect_possible = true;
             let created = self
-                .write(
+                .write_tracked(
                     reqwest::Method::POST,
                     "/file_uploads",
                     json!({
@@ -181,6 +180,7 @@ impl NotionClient {
                         "content_type":valid.mime_type,"number_of_parts":parts
                     }),
                     CREATE,
+                    &mut effect_possible,
                 )
                 .await?;
             *known_upload = created["id"].as_str().and_then(pages::uuid);
@@ -192,6 +192,7 @@ impl NotionClient {
                 return Err(err(CREATE, BackendErrorKind::Conflict));
             }
 
+            self.validate_request_authority(true)?;
             for index in 0..parts {
                 let offset = index * policy.part_bytes;
                 let count = (size - offset).min(policy.part_bytes);
@@ -221,8 +222,11 @@ impl NotionClient {
                             .part("file", part)
                             .text("part_number", (index + 1).to_string()),
                     );
-                let response = self.send(request, false, SEND).await?;
+                let response = self
+                    .send_effect_tracked(request, SEND, &mut effect_possible)
+                    .await?;
                 let sent = receipt(response, SEND).await?;
+                self.validate_request_authority(true)?;
                 if !check_upload(&sent, &id, "pending", parts)
                     || sent["number_of_parts"]["sent"]
                         .as_u64()
@@ -233,13 +237,15 @@ impl NotionClient {
             }
 
             let completed = self
-                .write(
+                .write_tracked(
                     reqwest::Method::POST,
                     &format!("/file_uploads/{id}/complete"),
                     json!({}),
                     COMPLETE,
+                    &mut effect_possible,
                 )
                 .await?;
+            self.validate_request_authority(true)?;
             if !check_upload(&completed, &id, "uploaded", parts) {
                 return Err(err(COMPLETE, BackendErrorKind::Conflict));
             }
@@ -249,6 +255,7 @@ impl NotionClient {
                 .header(AUTHORIZATION, self.authorization.clone())
                 .header("Notion-Version", MARKDOWN_VERSION);
             let returned = receipt(self.send(request, true, VERIFY).await?, VERIFY).await?;
+            self.validate_request_authority(true)?;
             if !check_upload(&returned, &id, "uploaded", parts) {
                 return Err(err(VERIFY, BackendErrorKind::Conflict));
             }
@@ -268,7 +275,7 @@ impl NotionClient {
                 upload_id: known_upload.clone(),
                 block_id: None,
                 effect_possible,
-                authority_lost: false,
+                authority_lost: self.validate_request_authority(true).is_err(),
             },
         )
     }

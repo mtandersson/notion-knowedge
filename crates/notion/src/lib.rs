@@ -84,3 +84,6 @@ pub mod relation_proposal;
 
 #[cfg(test)]
 mod test_clock;
+
+#[cfg(test)]
+mod file_authority_tests;

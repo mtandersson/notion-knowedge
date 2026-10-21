@@ -129,16 +129,17 @@ impl NotionClient {
             .await
             .map_err(|_| error(CREATE, BackendErrorKind::InvalidInput))?;
 
-            effect_possible = true;
-            let created = self.write(
+            let created = self.write_tracked(
             Method::POST,
             "/file_uploads",
             json!({"mode": "single_part", "filename": valid.filename, "content_type": valid.mime_type}),
             CREATE,
+            &mut effect_possible,
         ).await?;
             *known_upload = created["id"].as_str().and_then(pages::uuid);
             let id = upload_id(&created, "pending", CREATE)?;
             *known_upload = Some(id.clone());
+            self.validate_request_authority(true)?;
 
             // Reopen independently: a previous validator or concurrent reader must
             // not share the transfer's file offset. The body is streamed, not buffered.
@@ -161,7 +162,9 @@ impl NotionClient {
                 .multipart(Form::new().part("file", part));
             // One-shot streaming bodies are deliberately not retryable. The shared
             // transport still performs admission and rate-limit accounting.
-            let mut response = self.send(request, false, SEND).await?;
+            let mut response = self
+                .send_effect_tracked(request, SEND, &mut effect_possible)
+                .await?;
             if response.status().as_u16() != 200 {
                 return Err(error(SEND, classify(response.status().as_u16())));
             }
@@ -176,6 +179,7 @@ impl NotionClient {
                 }
                 receipt.extend_from_slice(&chunk);
             }
+            self.validate_request_authority(true)?;
             let result: Value = serde_json::from_slice(&receipt)
                 .map_err(|_| error(SEND, BackendErrorKind::Internal))?;
             if upload_id(&result, "uploaded", SEND)? != id {
@@ -202,7 +206,7 @@ impl NotionClient {
                 upload_id: known_upload.clone(),
                 block_id: None,
                 effect_possible,
-                authority_lost: false,
+                authority_lost: self.validate_request_authority(true).is_err(),
             },
         )
     }

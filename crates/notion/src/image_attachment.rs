@@ -175,9 +175,8 @@ impl NotionClient {
                 scope_error(failure)
             })?;
 
-            effect_possible = true;
             let added = self
-                .write(
+                .write_tracked(
                     reqwest::Method::PATCH,
                     &format!("/blocks/{}/children", target.0),
                     json!({"children":[{
@@ -190,6 +189,7 @@ impl NotionClient {
                         }
                     }]}),
                     ATTACH,
+                    &mut effect_possible,
                 )
                 .await?;
             // A successful HTTP status is not a confirmed attachment: inspect the
@@ -202,6 +202,7 @@ impl NotionClient {
             let block = block_id(&results[0], target)
                 .ok_or_else(|| error(ATTACH, BackendErrorKind::Conflict))?;
             *known_block = Some(block.clone());
+            self.validate_request_authority(true)?;
             let source = AttachmentSource::from_receipt(&upload.id, &results[0]["image"]);
 
             self.verify_attached_block(&block, VERIFY, |value| {
@@ -223,7 +224,7 @@ impl NotionClient {
                 upload_id: Some(upload.id.clone()),
                 block_id: known_block.clone(),
                 effect_possible,
-                authority_lost,
+                authority_lost: authority_lost || self.validate_request_authority(true).is_err(),
             },
         )
     }

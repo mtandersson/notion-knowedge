@@ -1693,3 +1693,106 @@ async fn ordinary_upstream_failure_can_continue_to_next_verified_item_without_re
         1
     );
 }
+
+#[tokio::test]
+async fn request_grant_loss_after_second_upload_stops_batch_and_preserves_audit_and_cleanup() {
+    use notion_knowledge_core::file_ingest::{FileBatchPolicy, FileIngestBatch};
+    struct CurrentGrant(Arc<Requests>);
+    impl crate::RequestAuthority for CurrentGrant {
+        fn validate(&self, _: bool) -> Result<(), notion_knowledge_core::backend::BackendError> {
+            // A provider-observed second send revokes this request's grant while
+            // its receipt is arriving. The completed first item remains real.
+            if self
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(head, _)| head.contains("/send "))
+                .count()
+                >= 2
+            {
+                Err(notion_knowledge_core::backend::BackendError {
+                    kind: notion_knowledge_core::backend::BackendErrorKind::Unauthenticated,
+                    operation: "fixture.revoked_grant",
+                    retry_after: None,
+                    committed_page_id: None,
+                })
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let audit_path = dir.path().join("audit");
+    let audit = audit(&audit_path, None);
+    let (download, count, source_task, paths) = source_many(
+        vec![
+            (b"first document".to_vec(), 200, false),
+            (b"second document".to_vec(), 200, false),
+        ],
+        64,
+    )
+    .await;
+    let mut steps: Vec<_> = chain(ROOT).into_iter().map(|v| (200, v)).collect();
+    steps.extend(full_steps(false, false, false));
+    let mut second = full_steps(false, false, false);
+    second.truncate(10);
+    steps.extend(second);
+    let (client, requests, notion_task) = notion(steps).await;
+    let client = client.with_request_authority(Arc::new(CurrentGrant(requests.clone())));
+    let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+    let adapter =
+        NotionFileIngestAdapter::new(client, download, FileValidationPolicy::default(), scope());
+    let mut batch = FileIngestBatch::new(
+        vec![request(false), request(false), request(false)],
+        FileBatchPolicy::default(),
+    )
+    .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        batch.execute(&adapter, &context(&gate, &audit)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        batch.results()[0].outcome.as_ref().unwrap().status,
+        IngestStatus::Verified
+    );
+    let revoked = batch.results()[1].outcome.as_ref().unwrap();
+    assert_eq!(revoked.status, IngestStatus::Denied);
+    assert_eq!(revoked.failure, Some(IngestFailure::Denied));
+    assert_eq!(revoked.references.upload_id.as_deref(), Some(UPLOAD));
+    assert!(revoked.references.block_id.is_none());
+    assert!(revoked.terminal_audited);
+    assert!(batch.results()[2].outcome.is_none());
+    assert!(batch.partial_success());
+    source_task.await.unwrap();
+    notion_task.await.unwrap();
+    assert_clean(&paths);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|(h, _)| h.contains("/send "))
+            .count(),
+        2
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|(h, _)| h.starts_with("PATCH"))
+            .count(),
+        1
+    );
+    let db = rusqlite::Connection::open(audit_path).unwrap();
+    let outcome: String = db
+        .query_row(
+            "SELECT outcome FROM agent_audit_events ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(outcome, "denied");
+}
