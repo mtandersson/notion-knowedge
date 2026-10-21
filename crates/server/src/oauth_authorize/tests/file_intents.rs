@@ -248,23 +248,74 @@ async fn live_guard_tracks_mutation_attempts_and_refuses_false_no_effect_proofs(
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accepted_original_grant_is_never_adopted_by_replacement_or_revoked_request() {
-    for replacement in [false, true] {
+    for invalidation in [
+        "replacement",
+        "expiry_unrenewable",
+        "expiry_renewable",
+        "missing_state",
+        "logout",
+    ] {
         let h = harness().await;
         let seed = content_index::seed(h._dir.path(), &scope(), PAGE).await;
         let (coordinator, guard) = open(&seed);
-        let auth = authorization(&h).await;
+        let code = h
+            .approved_code_with_scope("knowledge:read knowledge:write")
+            .await;
+        let token = resource::redeem(&h, &code).await;
+        let auth = h.login.local_resource_authorization(&token).unwrap();
         let owner = intent(&h, &auth, &coordinator, Arc::new(AtomicI64::new(0))).await;
         let key = owner.key().clone();
         let authority = owner.authority().clone();
-        if replacement {
-            h.approved_code().await;
-        } else {
-            h.clock.store(4000, Ordering::SeqCst);
+        match invalidation {
+            "replacement" => {
+                h.approved_code().await;
+            }
+            "expiry_unrenewable" => {
+                h.clock.store(4000, Ordering::SeqCst);
+                h.available.store(false, Ordering::SeqCst);
+            }
+            "expiry_renewable" => {
+                h.clock.store(4000, Ordering::SeqCst);
+            }
+            "missing_state" => {
+                fs::remove_file(h._dir.path().join("grant")).unwrap();
+            }
+            _ => {
+                h.login.flow.revoke("chatgpt", &token).unwrap();
+            }
         }
         assert!(owner.client().is_err());
         assert!(owner.renew(10).is_err());
         assert!(owner.settle(true).is_err());
         let reads = h.page_reads.load(Ordering::SeqCst);
+        if invalidation == "expiry_renewable" {
+            reconcile_clocked(
+                coordinator.state(),
+                &h.login.callback.as_ref().unwrap().credentials,
+                &auth,
+                &scope(),
+                &key,
+                10,
+            )
+            .await
+            .unwrap();
+            let current = h.store.load_for_refresh().unwrap().unwrap();
+            assert_eq!(current.grant_id(), authority.grant_id());
+            assert_eq!(current.epoch(), authority.epoch());
+            assert_eq!(current.workspace_id(), authority.workspace_id());
+            assert_eq!(current.owner_user_id(), authority.owner_user_id());
+            assert!(
+                worker(&h, &seed, coordinator.clone(), guard)
+                    .tick(CancellationToken::new())
+                    .await
+                    .unwrap()
+            );
+            let queue =
+                GrantMutationRefreshQueue::new(coordinator.state().clone(), authority).unwrap();
+            assert_eq!(queue.status(&key).unwrap(), Some(IndexStatus::Completed));
+            assert_eq!(h.mutations.load(Ordering::SeqCst), 0);
+            continue;
+        }
         assert!(
             reconcile_clocked(
                 coordinator.state(),
@@ -293,4 +344,92 @@ async fn accepted_original_grant_is_never_adopted_by_replacement_or_revoked_requ
             Some(FileIntentStatus::RecoveryRequired)
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admission_requires_write_grant_exact_workspace_and_physical_root_before_any_journal() {
+    let h = harness().await;
+    let seed = content_index::seed(h._dir.path(), &scope(), PAGE).await;
+    let (coordinator, _) = open(&seed);
+    let code = h.approved_code_with_scope("knowledge:read").await;
+    let token = resource::redeem(&h, &code).await;
+    let read = h.login.local_resource_authorization(&token).unwrap();
+    let runtime = &h.login.callback.as_ref().unwrap().credentials;
+    let before = h.page_reads.load(Ordering::SeqCst);
+    assert!(
+        AuthorizedFileIntent::begin(
+            coordinator.state().clone(),
+            runtime,
+            &read,
+            &scope(),
+            &PageId(PAGE.into()),
+            CancellationToken::new(),
+            10
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(h.page_reads.load(Ordering::SeqCst), before);
+    let auth = authorization(&h).await;
+    let mut wrong = scope();
+    wrong.workspace_id = "dddddddd-dddd-dddd-dddd-dddddddddddd".into();
+    assert!(
+        AuthorizedFileIntent::begin(
+            coordinator.state().clone(),
+            runtime,
+            &auth,
+            &wrong,
+            &PageId(PAGE.into()),
+            CancellationToken::new(),
+            10
+        )
+        .await
+        .is_err()
+    );
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(
+        AuthorizedFileIntent::begin(
+            coordinator.state().clone(),
+            runtime,
+            &auth,
+            &scope(),
+            &PageId(PAGE.into()),
+            cancelled,
+            10
+        )
+        .await
+        .is_err()
+    );
+    let mut excluded = scope();
+    excluded.exclusions.page_ids.insert(PAGE.into());
+    assert!(
+        AuthorizedFileIntent::begin(
+            coordinator.state().clone(),
+            runtime,
+            &auth,
+            &excluded,
+            &PageId(PAGE.into()),
+            CancellationToken::new(),
+            10
+        )
+        .await
+        .is_err()
+    );
+    let db = rusqlite::Connection::open(seed.state).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM file_refresh_intents", [], |row| row
+            .get::<_, i64>(
+            0
+        ))
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM mutation_refresh", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(h.mutations.load(Ordering::SeqCst), 0);
 }
