@@ -319,6 +319,9 @@ mutation workflows must enforce its failure policy. See the
 for current code, negative tests and remaining release gates.
 
 The [audited single-file ingestion application](docs/single-file-ingestion.md) joins secure request-scoped download, validation, native Notion attachment and durable audit behind a reusable core service. [Plan-aware multipart and ordered batches](docs/multipart-batch-ingestion.md) extend the same service with explicit trusted limits and per-file outcomes. The [installed ingestion runtime](docs/installed-file-ingestion.md) composes these services for trusted stdio and authenticated loopback bearer HTTP.
+[OAuth image and file ingestion](docs/oauth-file-ingestion.md) installs the
+request-bound workflow under the original approved grant, with separate source
+and index outcomes and [operator recovery](docs/file-recovery.md).
 
 ## ChatGPT file input
 
@@ -332,7 +335,11 @@ The [startup-owned file ingestion settings](docs/file-ingestion-settings.md) val
 The [`knowledge_upload_file` input contract](docs/chatgpt-file-parameters.md)
 advertises `_meta["openai/fileParams"]` and accepts ChatGPT file references without
 Drive staging. It is hidden by default read-only mode; explicit `NK_READ_ONLY=false` exposes
-the schema; configured `NK_FILE_INGESTION=true` installs the audited application. Missing settings or an unsuitable HTTP transport returns `file_upload_unavailable` before effects.
+the schema for trusted transports. Configured `NK_FILE_INGESTION=true` installs
+the audited application. OAuth HTTP additionally requires the explicit
+[request-bound OAuth configuration](docs/oauth-file-ingestion.md); read-only
+tokens cannot discover or invoke uploads. Missing settings or an unsuitable
+HTTP transport returns `file_upload_unavailable` before effects.
 
 ## Continuous integration
 
@@ -402,7 +409,11 @@ explicitly admitted read tools (`knowledge_search`, `knowledge_get`,
 advertised or dispatched in this mode. Unknown tools, Notion mutations and
 file uploads cannot be invoked through the MCP handler; the access check runs
 before any tool adapter. Set `NK_READ_ONLY=false` **explicitly** only when an
-operator intends to permit implemented mutation tools. File ingestion additionally requires the validated operator settings and trusted transport described in [installed ingestion](docs/installed-file-ingestion.md). Other mutation tools remain unavailable.
+operator intends to permit implemented mutation tools. File ingestion additionally
+requires the validated operator settings and transport described in
+[installed ingestion](docs/installed-file-ingestion.md) or
+[OAuth file ingestion](docs/oauth-file-ingestion.md). OAuth semantic writes use
+their [separate explicit opt-in](docs/oauth-semantic-writes.md).
 Invalid values fail startup instead of enabling writes. `--diagnostics` and
 `GET /health` expose the effective `access.read_only` boolean without
 revealing secrets. This setting controls MCP tool access, not the independent

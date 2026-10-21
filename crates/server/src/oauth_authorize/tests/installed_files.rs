@@ -356,6 +356,40 @@ async fn shipping_http_native_image_file_multipart_and_refresh_restart_retry_pre
     let receipt = output["files"][0]["refresh"].clone();
     assert_eq!(receipt, output["files"][1]["refresh"]);
     wait_status(&h, &installed, &token, &session, &receipt, "failed").await;
+    // A same-grant semantic receipt must not be retried through the file tool.
+    let db = rusqlite::Connection::open(&seed.state).unwrap();
+    let semantic_digest = "f".repeat(64);
+    db.execute("INSERT INTO mutation_refresh(workspace_id,mutation_digest,page_id,authority,state) SELECT workspace_id,?1,page_id,authority,3 FROM mutation_refresh WHERE mutation_digest=?2",rusqlite::params![semantic_digest,receipt["mutation_digest"].as_str().unwrap()]).unwrap();
+    let denied = status(
+        &h,
+        &installed,
+        &token,
+        &session,
+        &json!({"page_id":PAGE,"mutation_digest":semantic_digest}),
+        true,
+    )
+    .await;
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    assert_eq!(
+        db.query_row(
+            "SELECT state FROM mutation_refresh WHERE mutation_digest=?1",
+            [&semantic_digest],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        3
+    );
+    let unknown = status(
+        &h,
+        &installed,
+        &token,
+        &session,
+        &json!({"page_id":PAGE,"mutation_digest":"0".repeat(64)}),
+        true,
+    )
+    .await;
+    assert_eq!(unknown["result"]["isError"], true, "{unknown}");
+    drop(db);
     installed.stop().await;
     model.fail.store(false, Ordering::SeqCst);
     let installed = start(&h, settings(&h, &seed, &source), model.clone()).await;
@@ -432,7 +466,26 @@ async fn installed_file_authority_and_url_denials_never_download_or_mutate() {
     )
     .await;
     assert!(denied["error"].is_object(), "{denied}");
+    let listed = resource::reply(
+        rpc(
+            &h,
+            &installed.url,
+            &readonly,
+            Some(&read_session),
+            json!({"jsonrpc":"2.0","id":9,"method":"tools/list"}),
+        )
+        .await,
+    )
+    .await;
+    assert!(!listed.to_string().contains("knowledge_upload_file"));
+    assert!(!listed.to_string().contains("knowledge_file_refresh"));
     let (token, session) = login(&h, &installed.url, "knowledge:read knowledge:write").await;
+    let denied=rpc(&h,&installed.url,"unknown-invalid-token",Some(&session),json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"knowledge_upload_file","arguments":{"target":PAGE,"file":input("invalid.txt","text/plain")}}})).await;
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    h.clock.store(601, Ordering::SeqCst);
+    let denied=rpc(&h,&installed.url,&token,Some(&session),json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"knowledge_upload_file","arguments":{"target":PAGE,"file":input("expired.txt","text/plain")}}})).await;
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    h.clock.store(0, Ordering::SeqCst);
     for url in [
         "http://fixture.example/file",
         "https://127.0.0.1/file",
@@ -455,7 +508,11 @@ async fn installed_file_authority_and_url_denials_never_download_or_mutate() {
         );
     }
     let outside=call(&h,&installed.url,&token,&session,"knowledge_upload_file",json!({"target":"dddddddd-dddd-dddd-dddd-dddddddddddd","file":input("outside.txt","text/plain")})).await;
-    assert!(outside["result"]["isError"] == true && outside["result"]["content"][0]["text"] == "file_upload_denied", "{outside}");
+    assert!(
+        outside["result"]["isError"] == true
+            && outside["result"]["content"][0]["text"] == "file_upload_denied",
+        "{outside}"
+    );
     h.login.flow.revoke("chatgpt", &token).unwrap();
     let denied=rpc(&h,&installed.url,&token,Some(&session),json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"knowledge_upload_file","arguments":{"target":PAGE,"file":input("revoked.txt","text/plain")}}})).await;
     assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
@@ -485,7 +542,7 @@ async fn installed_cancelled_download_retains_orphan_and_configured_operator_rec
         inner: seed.provider.clone(),
         fail: false.into(),
     });
-    let installed = start(&h, config.clone(), model.clone()).await;
+    let installed = start(&h, config, model.clone()).await;
     let (token, session) = login(&h, &installed.url, "knowledge:read knowledge:write").await;
     let pending = rpc(
         &h,
@@ -509,6 +566,7 @@ async fn installed_cancelled_download_retains_orphan_and_configured_operator_rec
     // Cancellation can close the HTTP response; its receipt is not required for recovery.
     drop(response);
     installed.stop().await;
+    let config = settings(&h, &seed, &source);
     let runtime = h.login.callback.as_ref().unwrap().credentials.clone();
     let list = crate::file_recovery_command::run_fixture(
         &config,
@@ -517,7 +575,9 @@ async fn installed_cancelled_download_retains_orphan_and_configured_operator_rec
     )
     .await
     .unwrap();
-    let receipts = list["held_intents"].as_array().expect("bounded orphan receipt list");
+    let receipts = list["held_intents"]
+        .as_array()
+        .expect("bounded orphan receipt list");
     assert_eq!(receipts.len(), 1, "{list}");
     assert_eq!(receipts[0]["source_intent"], "recovery_required");
     assert_ne!(receipts[0]["index_status"], "completed");
@@ -537,6 +597,16 @@ async fn installed_cancelled_download_retains_orphan_and_configured_operator_rec
             .await
             .unwrap();
     assert_eq!(current["source_intent"], "recovery_required");
+    let mut wrong = settings(&h, &seed, &source);
+    wrong.notion_scope.as_mut().unwrap().generation += 1;
+    let reads = h.page_reads.load(Ordering::SeqCst);
+    assert!(
+        crate::file_recovery_command::run_fixture(&wrong, &args("status"), runtime.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(h.page_reads.load(Ordering::SeqCst), reads);
+
     assert!(
         crate::file_recovery_command::run_fixture(&config, &args("release"), runtime.clone())
             .await
@@ -558,5 +628,260 @@ async fn installed_cancelled_download_retains_orphan_and_configured_operator_rec
     assert_eq!(h.files.attached.load(Ordering::SeqCst), 0);
     assert_eq!(source.count.load(Ordering::SeqCst), 1);
     source.cleaned();
+    installed.stop().await;
+    h.approved_code().await;
+    let reads = h.page_reads.load(Ordering::SeqCst);
+    assert!(
+        crate::file_recovery_command::run_fixture(
+            &config,
+            &args("status"),
+            h.login.callback.as_ref().unwrap().credentials.clone()
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(h.page_reads.load(Ordering::SeqCst), reads);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn installed_inflight_attachment_loss_retains_uncertainty_and_never_attempts_second_file() {
+    for invalidation in ["cancel", "logout", "replacement"] {
+        let h = harness().await;
+        let source = Source::new(vec![
+            (b"accepted file".to_vec(), 200),
+            (b"must remain unattempted".to_vec(), 200),
+        ])
+        .await;
+        let seed = content_index::seed(h._dir.path(), &scope(), PAGE).await;
+        let config = settings(&h, &seed, &source);
+        initialize(&config);
+        let installed = start(
+            &h,
+            config,
+            Arc::new(Model {
+                inner: seed.provider.clone(),
+                fail: false.into(),
+            }),
+        )
+        .await;
+        let (token, session) = login(&h, &installed.url, "knowledge:read knowledge:write").await;
+        h.files.pause_attach.store(true, Ordering::SeqCst);
+        let pending = rpc(
+            &h,
+            &installed.url,
+            &token,
+            Some(&session),
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"knowledge_upload_file","arguments":{"target":PAGE,"files":[input("accepted.txt","text/plain"),input("unattempted.txt","text/plain")]}}}),
+        );
+        let invalidate = async {
+            tokio::time::timeout(Duration::from_secs(5), h.files.entered.notified())
+                .await
+                .unwrap();
+            match invalidation {
+                "cancel" => {
+                    assert!(rpc(&h,&installed.url,&token,Some(&session),json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":3,"reason":"cancel accepted effect"}})).await.status().is_success());
+                }
+                "logout" => {
+                    h.login.flow.revoke("chatgpt", &token).unwrap();
+                }
+                _ => {
+                    h.approved_code().await;
+                }
+            }
+            h.files.release.add_permits(1);
+        };
+        let (response, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(pending, invalidate)
+        })
+        .await
+        .unwrap();
+        if let Ok(body) = response.bytes().await
+            && let Ok(reply) = serde_json::from_slice::<Value>(&body)
+        {
+            assert_ne!(
+                reply["result"]["structuredContent"]["files"][0]["status"], "verified",
+                "{invalidation}: {reply}"
+            );
+        }
+        // An effect accepted while authority was valid can finish after cancellation.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while h.files.blocks.lock().unwrap().len() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(h.files.created.load(Ordering::SeqCst), 1, "{invalidation}");
+        assert_eq!(h.files.sent.load(Ordering::SeqCst), 1);
+        assert_eq!(h.files.attached.load(Ordering::SeqCst), 1);
+        assert_eq!(source.count.load(Ordering::SeqCst), 1);
+        let db = rusqlite::Connection::open(&seed.state).unwrap();
+        let held: i64 = db
+            .query_row(
+                "SELECT count(*) FROM file_refresh_intents WHERE phase='held'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            held, 1,
+            "accepted effect must not be falsely completed: {invalidation}"
+        );
+        source.cleaned();
+        installed.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn installed_partial_batch_preserves_verified_source_and_quarantines_upload_only_uncertainty()
+{
+    let h = harness().await;
+    let source = Source::new(vec![
+        (b"first verified".to_vec(), 200),
+        (b"second ambiguous".to_vec(), 200),
+    ])
+    .await;
+    let seed = content_index::seed(h._dir.path(), &scope(), PAGE).await;
+    let config = settings(&h, &seed, &source);
+    initialize(&config);
+    let installed = start(
+        &h,
+        config,
+        Arc::new(Model {
+            inner: seed.provider.clone(),
+            fail: false.into(),
+        }),
+    )
+    .await;
+    let (token, session) = login(&h, &installed.url, "knowledge:read knowledge:write").await;
+    h.files.fail_send.store(2, Ordering::SeqCst);
+    let response=call(&h,&installed.url,&token,&session,"knowledge_upload_file",json!({"target":PAGE,"files":[input("first.txt","text/plain"),input("ambiguous.txt","text/plain")]})).await;
+    let output = &response["result"]["structuredContent"];
+    assert_eq!(output["files"][0]["status"], "verified", "{response}");
+    assert_eq!(output["files"][0]["index"], 0);
+    assert_eq!(output["files"][1]["index"], 1);
+    assert_eq!(output["files"][1]["status"], "indeterminate", "{response}");
+    assert!(output["files"][1]["upload_id"].is_string());
+    assert!(output["files"][1]["block_id"].is_null());
+    assert_eq!(output["partial_success"], true);
+    assert_eq!(output["files"][0]["index_status"], "held");
+    assert_eq!(output["files"][0]["refresh"], output["files"][1]["refresh"]);
+    assert_eq!(h.files.created.load(Ordering::SeqCst), 2);
+    assert_eq!(h.files.sent.load(Ordering::SeqCst), 2);
+    assert_eq!(h.files.attached.load(Ordering::SeqCst), 1);
+    source.cleaned();
+    installed.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn installed_file_discovery_and_dispatch_respect_each_exact_capability() {
+    for (allow, block, upload, refresh) in [
+        (Some("knowledge_upload_file"), None, true, false),
+        (Some("knowledge_file_refresh"), None, false, true),
+        (Some("write"), Some("knowledge_file_refresh"), true, false),
+    ] {
+        let h = harness().await;
+        let source = Source::new(vec![]).await;
+        let seed = content_index::seed(h._dir.path(), &scope(), PAGE).await;
+        let mut config = settings(&h, &seed, &source);
+        initialize(&config);
+        config.capability_policy =
+            notion_knowledge_mcp::capabilities::CapabilityPolicy::from_lists(allow, block).unwrap();
+        let installed = start(
+            &h,
+            config,
+            Arc::new(Model {
+                inner: seed.provider.clone(),
+                fail: false.into(),
+            }),
+        )
+        .await;
+        let (token, session) = login(&h, &installed.url, "knowledge:read knowledge:write").await;
+        let listed = resource::reply(
+            rpc(
+                &h,
+                &installed.url,
+                &token,
+                Some(&session),
+                json!({"jsonrpc":"2.0","id":9,"method":"tools/list"}),
+            )
+            .await,
+        )
+        .await;
+        let names: Vec<_> = listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names.contains(&"knowledge_upload_file"), upload, "{listed}");
+        assert_eq!(
+            names.contains(&"knowledge_file_refresh"),
+            refresh,
+            "{listed}"
+        );
+        let (name, args) = if !upload {
+            (
+                "knowledge_upload_file",
+                json!({"target":PAGE,"file":input("blocked.txt","text/plain")}),
+            )
+        } else {
+            (
+                "knowledge_file_refresh",
+                json!({"page_id":PAGE,"mutation_digest":"0".repeat(64),"retry":true}),
+            )
+        };
+        let blocked = call(&h, &installed.url, &token, &session, name, args).await;
+        assert!(blocked["error"].is_object(), "{blocked}");
+        assert_eq!(source.count.load(Ordering::SeqCst), 0);
+        assert_eq!(h.files.created.load(Ordering::SeqCst), 0);
+        installed.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn installed_oauth_files_remain_absent_without_explicit_opt_in() {
+    let h = harness().await;
+    let source = Source::new(vec![]).await;
+    let seed = content_index::seed(h._dir.path(), &scope(), PAGE).await;
+    let mut config = settings(&h, &seed, &source);
+    initialize(&config);
+    config.file_ingestion = None;
+    let installed = start(
+        &h,
+        config,
+        Arc::new(Model {
+            inner: seed.provider.clone(),
+            fail: false.into(),
+        }),
+    )
+    .await;
+    let (token, session) = login(&h, &installed.url, "knowledge:read knowledge:write").await;
+    let listed = resource::reply(
+        rpc(
+            &h,
+            &installed.url,
+            &token,
+            Some(&session),
+            json!({"jsonrpc":"2.0","id":9,"method":"tools/list"}),
+        )
+        .await,
+    )
+    .await;
+    for name in ["knowledge_upload_file", "knowledge_file_refresh"] {
+        assert!(!listed.to_string().contains(name), "{listed}");
+    }
+    let denied = call(
+        &h,
+        &installed.url,
+        &token,
+        &session,
+        "knowledge_upload_file",
+        json!({"target":PAGE,"file":input("disabled.txt","text/plain")}),
+    )
+    .await;
+    assert!(denied["error"].is_object(), "{denied}");
+    assert_eq!(source.count.load(Ordering::SeqCst), 0);
+    assert_eq!(h.files.created.load(Ordering::SeqCst), 0);
     installed.stop().await;
 }

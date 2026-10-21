@@ -7,6 +7,33 @@ workspace, physical root policy, and retrieval runtime as
 [OAuth semantic writes](oauth-semantic-writes.md). It does not use an integration
 credential or an integration-only refresh worker.
 
+Build the Unix server with `webhook-worker` and first complete the semantic-write
+configuration, including explicit ledger initialization and the compatible
+operational-state schema. For an existing state database, use the separate
+[offline migration command](operational-state-migration.md). Then add:
+
+```sh
+NK_FILE_INGESTION=true
+NK_FILE_SOURCE_HOSTS=files.example.com
+NK_FILE_AUDIT_FILE=/var/lib/notion-knowledge/writes/file-audit.sqlite
+NK_FILE_MAX_BYTES=5242880
+NK_FILE_TIMEOUT_SECONDS=30
+NK_MAX_UPLOAD_FILES=4
+NK_FILE_AUDIT_RETENTION_DAYS=30
+```
+
+Replace the example source hostname with the exact approved HTTPS download
+hostname; wildcards and arbitrary signed-URL hosts are not permitted. The audit
+parent must already exist with operator ownership and mode 0700; existing audit
+files must be private (0600). The file audit must be distinct from the semantic
+ledger/audit, operational state, sealed credentials and disposable index.
+
+For an operator-verified paid plan, multipart can be configured explicitly, for
+example with `NK_FILE_PLAN=paid`, `NK_FILE_MAX_BYTES=10485760`,
+`NK_FILE_MULTIPART_THRESHOLD_BYTES=5242880` and `NK_FILE_PART_BYTES=5242880`.
+Threshold and part bounds must be paired and compatible with the configured
+maximum. The startup parser rejects unsupported combinations.
+
 The server binds each upload request to middleware authorization. File metadata
 cannot choose the Notion credential, workspace, audit actor, allowed roots, or
 refresh authority. A ChatGPT file reference supplies download metadata; it is
@@ -39,18 +66,33 @@ upload or attachment. When attachment success is uncertain, refresh can be
 conservative and must not be interpreted as proof of source success. Failures
 before any possible page attachment do not establish a changed page.
 
-Admission to this queue still requires current request authority. If authority
-is lost after an upstream effect, refresh may be unavailable. Retain the safe
-audit evidence and reconcile the target after restoring an explicitly approved
-grant. Do not bypass revocation, substitute a replacement grant for old queued
-work, or interpret unavailable indexing as rollback of the source effect.
+Before source effects, the server durably accepts one held refresh intent for
+the ordered batch and its target page. It renews bounded source ownership while
+the request runs. Settled source work releases the intent for indexing; a
+proven no-effect batch discards it. Cancellation or an indeterminate provider
+result leaves the intent held. Expiry reports `recovery_required` and never
+establishes that a remote request has finished.
 
-Preserve operational queue state across restart and index rebuilds. For work
-already admitted, recover or retry the refresh through the existing grant-bound
-worker without repeating source effects. A new grant requires its own approval
-and matching scope; old work must fail closed when its recorded grant no longer
-matches. Keep credential, operational state and audit storage separate from the
-disposable index and from one another, including filesystem aliases.
+Each result retains its ordinal `index` and separate `index_status`. A shared
+batch receipt identifies the target and mutation digest. Held batch recovery
+can also apply to unattempted later items; it does not claim those files were
+uploaded. Upload-only uncertainty may conservatively require a page refresh
+without proving any attachment exists.
+
+Use the installed OAuth tool `knowledge_file_refresh` with the receipt's
+`page_id` and `mutation_digest` to inspect indexing. Add `"retry": true` to retry
+failed derived work after the source intent is released. This tool cannot
+release quarantine or repeat attachments. If a disconnect lost the receipt,
+the operator can list held intents through the configured command. See
+[operator file recovery](file-recovery.md) for list/status and explicit
+stopped-owner/provider-quiescence release.
+
+Preserve operational queue state across restart and index rebuilds. Recovery
+requires the original approved live grant and current physical root policy.
+A replacement grant cannot adopt earlier work. Revocation or missing authority
+fails closed while the durable intent remains available for authorized
+reconciliation. Keep credential, operational state and audit storage separate
+from the disposable index and from one another, including filesystem aliases.
 
 # Privacy and cleanup
 

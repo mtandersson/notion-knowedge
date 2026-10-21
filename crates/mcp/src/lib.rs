@@ -1060,11 +1060,13 @@ impl ServerHandler for KnowledgeServer {
                     })?;
                     if auth.permissions().can_write() && adapters.source.mutation_ports().is_some()
                     {
-                        if self.request_file_ingestion.is_some()
-                            && self.tool_permitted("knowledge_upload_file")
-                        {
-                            tools.push(upload::tool_with_limit(self.max_upload_files));
-                            tools.push(upload::refresh_tool());
+                        if self.request_file_ingestion.is_some() {
+                            if self.tool_permitted("knowledge_upload_file") {
+                                tools.push(upload::tool_with_limit(self.max_upload_files));
+                            }
+                            if self.tool_permitted("knowledge_file_refresh") {
+                                tools.push(upload::refresh_tool());
+                            }
                         }
                         tools.extend(
                             [
