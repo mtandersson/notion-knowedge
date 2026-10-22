@@ -157,6 +157,13 @@ impl AuthorizedFileIntent {
     pub fn authority(&self) -> &GrantRefreshAuthority {
         self.intent.authority()
     }
+    pub fn mutation_attempted(&self) -> Result<bool, BackendError> {
+        Ok(self.local.lock().map_err(|_| denied())?.mutation_attempted)
+    }
+    pub fn status(&self) -> Result<serde_json::Value, BackendError> {
+        self.request.validate(true)?;
+        status_value(&self.state, self.key(), self.authority())
+    }
     pub fn client(self: &Arc<Self>) -> Result<NotionClient, BackendError> {
         self.validate(true)?;
         Ok(self.client.clone().with_request_authority(self.clone()))
@@ -293,4 +300,157 @@ pub(crate) async fn reconcile_clocked(
     state
         .reconcile_quiescent_file_intent(key, &authority, at)
         .map_err(|_| denied())
+}
+
+pub(crate) fn status_value(
+    state: &SqliteSyncStateStore,
+    key: &RefreshKey,
+    authority: &GrantRefreshAuthority,
+) -> Result<serde_json::Value, BackendError> {
+    let phase = state
+        .file_refresh_intent_status(key, authority, now())
+        .map_err(|_| denied())?
+        .ok_or_else(denied)?;
+    let index = state
+        .file_refresh_index_status(key, authority)
+        .map_err(|_| denied())?
+        .ok_or_else(denied)?;
+    Ok(
+        serde_json::json!({"source_intent":match phase {notion_knowledge_retrieval::file_refresh_intents::FileIntentStatus::Held=>"held",notion_knowledge_retrieval::file_refresh_intents::FileIntentStatus::RecoveryRequired=>"recovery_required",notion_knowledge_retrieval::file_refresh_intents::FileIntentStatus::Released=>"released",notion_knowledge_retrieval::file_refresh_intents::FileIntentStatus::Discarded=>"discarded"},"index_status":format!("{index:?}").to_lowercase(),"refresh":{"workspace_id":key.workspace_id,"page_id":key.page_id,"mutation_digest":key.mutation_digest}}),
+    )
+}
+async fn operator_authority(
+    state: &SqliteSyncStateStore,
+    runtime: &NotionOAuthRuntime,
+    scope: &LifecycleScope,
+    key: &RefreshKey,
+) -> Result<Arc<crate::grant_refresh::GrantReadAuthority>, BackendError> {
+    if key.workspace_id != scope.workspace_id {
+        return Err(denied());
+    }
+    let grant = runtime
+        .grant_store()
+        .load_for_refresh()
+        .map_err(|_| denied())?
+        .ok_or_else(denied)?;
+    let policy = production_scope(scope).map_err(|_| denied())?;
+    let expected = GrantRefreshAuthority::new(
+        scope.workspace_id.clone(),
+        grant.grant_id().into(),
+        grant.epoch(),
+        grant.owner_user_id().into(),
+        policy.identity().into(),
+    )
+    .map_err(|_| denied())?;
+    state
+        .file_refresh_intent_status(key, &expected, now())
+        .map_err(|_| denied())?
+        .ok_or_else(denied)?;
+    let read = crate::grant_refresh::GrantReadAuthority::acquire(
+        runtime,
+        &expected,
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+        CancellationToken::new(),
+    )
+    .await?;
+    let gate = RootScopeGate::new(Arc::new(read.client()?), scope.clone()).map_err(|_| denied())?;
+    let permit = gate
+        .authorize(&PageId(key.page_id.clone()))
+        .await
+        .map_err(|_| denied())?;
+    gate.revalidate(&permit, scope)
+        .await
+        .map_err(|_| denied())?;
+    Ok(read)
+}
+pub(crate) async fn operator_status(
+    state: &SqliteSyncStateStore,
+    runtime: &NotionOAuthRuntime,
+    scope: &LifecycleScope,
+    key: &RefreshKey,
+) -> Result<serde_json::Value, BackendError> {
+    let read = operator_authority(state, runtime, scope, key).await?;
+    read.validate(false)?;
+    let grant = runtime
+        .grant_store()
+        .load_for_refresh()
+        .map_err(|_| denied())?
+        .ok_or_else(denied)?;
+    let policy = production_scope(scope).map_err(|_| denied())?;
+    let expected = GrantRefreshAuthority::new(
+        scope.workspace_id.clone(),
+        grant.grant_id().into(),
+        grant.epoch(),
+        grant.owner_user_id().into(),
+        policy.identity().into(),
+    )
+    .map_err(|_| denied())?;
+    status_value(state, key, &expected)
+}
+pub(crate) async fn reconcile_operator_quiescent(
+    state: &SqliteSyncStateStore,
+    runtime: &NotionOAuthRuntime,
+    scope: &LifecycleScope,
+    key: &RefreshKey,
+    _proof: SourceQuiescence,
+) -> Result<(), BackendError> {
+    let local = registry()
+        .lock()
+        .map_err(|_| denied())?
+        .get(&identity(key))
+        .and_then(Weak::upgrade);
+    if let Some(local) = local {
+        let local = local.lock().map_err(|_| denied())?;
+        if local.attempts != 0 || local.settling {
+            return Err(denied());
+        }
+    }
+    let read = operator_authority(state, runtime, scope, key).await?;
+    read.validate(false)?;
+    let grant = runtime
+        .grant_store()
+        .load_for_refresh()
+        .map_err(|_| denied())?
+        .ok_or_else(denied)?;
+    let policy = production_scope(scope).map_err(|_| denied())?;
+    let expected = GrantRefreshAuthority::new(
+        scope.workspace_id.clone(),
+        grant.grant_id().into(),
+        grant.epoch(),
+        grant.owner_user_id().into(),
+        policy.identity().into(),
+    )
+    .map_err(|_| denied())?;
+    state
+        .reconcile_quiescent_file_intent(key, &expected, now())
+        .map_err(|_| denied())
+}
+
+pub(crate) async fn operator_list(
+    state: &SqliteSyncStateStore,
+    runtime: &NotionOAuthRuntime,
+    scope: &LifecycleScope,
+) -> Result<serde_json::Value, BackendError> {
+    let grant = runtime
+        .grant_store()
+        .load_for_refresh()
+        .map_err(|_| denied())?
+        .ok_or_else(denied)?;
+    let policy = production_scope(scope).map_err(|_| denied())?;
+    let authority = GrantRefreshAuthority::new(
+        scope.workspace_id.clone(),
+        grant.grant_id().into(),
+        grant.epoch(),
+        grant.owner_user_id().into(),
+        policy.identity().into(),
+    )
+    .map_err(|_| denied())?;
+    let keys = state
+        .held_file_refresh_keys(&scope.workspace_id, &authority)
+        .map_err(|_| denied())?;
+    let mut receipts = Vec::new();
+    for key in keys {
+        receipts.push(operator_status(state, runtime, scope, &key).await?);
+    }
+    Ok(serde_json::json!({"held_intents":receipts}))
 }

@@ -17,7 +17,7 @@ fn scope() -> LifecycleScope {
         exclusions: Default::default(),
     }
 }
-fn config(h: &Harness, seed: &content_index::Seeded) -> Config {
+pub(super) fn config_values(h: &Harness, seed: &content_index::Seeded) -> BTreeMap<String, String> {
     let mut values = BTreeMap::<String, String>::new();
     for (key, value) in [
         ("NK_OAUTH_ISSUER", "https://auth.example.com"),
@@ -60,6 +60,10 @@ fn config(h: &Harness, seed: &content_index::Seeded) -> Config {
     ] {
         values.insert(key.into(), path.to_str().unwrap().into());
     }
+    values
+}
+pub(super) fn config(h: &Harness, seed: &content_index::Seeded) -> Config {
+    let values = config_values(h, seed);
     for absent in [
         "NK_OAUTH_WRITE_LEDGER_FILE",
         "NK_OAUTH_WRITE_AUDIT_FILE",
@@ -78,7 +82,7 @@ fn config(h: &Harness, seed: &content_index::Seeded) -> Config {
     }
     Config::from_lookup(|key| values.get(key).map(Into::into)).unwrap()
 }
-async fn rpc(
+pub(super) async fn rpc(
     h: &Harness,
     url: &str,
     token: &str,
@@ -97,7 +101,7 @@ async fn rpc(
     }
     request.send().await.unwrap()
 }
-async fn connect(h: &Harness, url: &str, token: &str) -> String {
+pub(super) async fn connect(h: &Harness, url: &str, token: &str) -> String {
     let response = rpc(h,url,token,None,json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{"elicitation":{"form":{}}},"clientInfo":{"name":"installed-oauth-fixture","version":"1"}}})).await;
     assert_eq!(response.status(), StatusCode::OK);
     let session = response.headers()["mcp-session-id"]
@@ -119,7 +123,7 @@ async fn connect(h: &Harness, url: &str, token: &str) -> String {
     );
     session
 }
-async fn call(
+pub(super) async fn call(
     h: &Harness,
     url: &str,
     token: &str,

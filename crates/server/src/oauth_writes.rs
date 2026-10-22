@@ -219,6 +219,7 @@ mod installed {
         let (handler, coordinator, table) =
             crate::retrieval_runtime::compose_oauth_index(handler, config, provider.clone(), true)
                 .await?;
+        let file_scope = scope.clone();
         let worker = GrantRefreshWorker::new(
             runtime.clone(),
             GrantRefreshSettings {
@@ -231,6 +232,17 @@ mod installed {
             coordinator.clone(),
             provider,
         )?;
+        let handler = if let Some(settings) = &config.file_ingestion {
+            handler.and_request_file_ingestion(Arc::new(crate::file_ingestion::OAuthFactory {
+                runtime: runtime.clone(),
+                coordinator: coordinator.clone(),
+                settings: settings.clone(),
+                scope: file_scope,
+                maximum_files: config.max_upload_files,
+            }))
+        } else {
+            handler
+        };
         let handler = handler.and_request_mutations(Arc::new(Factory {
             runtime,
             coordinator: coordinator.clone(),
@@ -255,13 +267,16 @@ pub fn validate_distinct(config: &crate::config::Config) -> Result<(), &'static 
         .as_ref()
         .ok_or("OAuth write stores unavailable")?;
     let mut paths = vec![stores.ledger.as_path(), stores.audit.as_path()];
+    if let Some(files) = &config.file_ingestion {
+        paths.push(files.audit_file.as_path());
+    }
     if let Some(state) = config.webhook_state_file.as_deref() {
         paths.push(state);
     }
     if let Some(grant) = &config.notion_grant_store {
-        for write in [&stores.ledger, &stores.audit] {
+        for write in &paths {
             for secret in [&grant.key_file, &grant.state_file] {
-                if write == secret
+                if *write == secret
                     || std::fs::metadata(write)
                         .ok()
                         .zip(std::fs::metadata(secret).ok())
@@ -287,9 +302,7 @@ pub fn validate_distinct(config: &crate::config::Config) -> Result<(), &'static 
                 return Err("OAuth write stores must be distinct");
             }
         }
-        if i < 2
-            && let Some(settings) = &config.retrieval
-        {
+        if let Some(settings) = &config.retrieval {
             let index = std::fs::canonicalize(&settings.index)
                 .map_err(|_| "existing retrieval index unavailable")?;
             let parent = std::fs::canonicalize(a.parent().ok_or("invalid write store path")?)

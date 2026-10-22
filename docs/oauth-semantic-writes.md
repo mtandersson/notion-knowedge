@@ -5,12 +5,14 @@ The Unix server built with `webhook-worker` can explicitly install
 `knowledge:read knowledge:write`. The default remains read-only. Bounded
 `knowledge_update_section` additionally requires `NK_DESTRUCTIVE_WRITES=true`
 and a client supporting MCP form elicitation. Archive, delete, whole-page
-replacement and OAuth file/image upload are unavailable.
+replacement are unavailable. Image/file upload requires the separate explicit
+[OAuth file-ingestion opt-in](oauth-file-ingestion.md).
 
 Use the existing OAuth registration, sealed Notion grant, allowlisted workspace
 and user, physical root scope, and initialized compatible retrieval/index state.
-Do not configure integration credentials, an integration webhook worker or the
-trusted-stdio file ingestion mode alongside OAuth content.
+Do not configure integration credentials or an integration webhook worker
+alongside OAuth content. OAuth file ingestion uses the request-bound factory
+described in the file-ingestion guide.
 
 Set these additional operator settings:
 

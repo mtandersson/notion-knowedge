@@ -16,6 +16,8 @@ const CLIENT_REDIRECT: &str = "https://chatgpt.example.com/callback?registered=v
 
 struct Harness {
     _dir: tempfile::TempDir,
+    #[cfg(feature = "webhook-worker")]
+    files: Arc<file_provider::Files>,
     login: Arc<Login>,
     store: Arc<GrantStore>,
     base: String,
@@ -215,7 +217,7 @@ impl Harness {
                 if pause.swap(false, Ordering::SeqCst) { let _hold = wait.acquire().await.unwrap(); }
                 (StatusCode::from_u16(status.load(Ordering::SeqCst) as u16).unwrap(), axum::Json(serde_json::json!({
                     "object":"page", "id":id, "url":format!("https://www.notion.so/{id}"), "last_edited_time":format!("2026-10-17T00:00:{:02}.000Z", document.lock().unwrap().as_ref().map_or(0,|d|d.1)), "in_trash":false,
-                    "parent":if id == root { serde_json::json!({"type":"workspace","workspace":true}) } else { serde_json::json!({"type":"page_id","page_id":root}) },
+                    "parent":if id == root || id == "dddddddd-dddd-dddd-dddd-dddddddddddd" { serde_json::json!({"type":"workspace","workspace":true}) } else { serde_json::json!({"type":"page_id","page_id":root}) },
                     "properties":{"Title":{"id":"title","type":"title","title":[{"plain_text":"Saffron private evidence"}]}}
                 })))
             }
@@ -291,6 +293,9 @@ impl Harness {
                     axum::Json(serde_json::json!({"object":"page","id":"cccccccc-cccc-cccc-cccc-cccccccccccc","url":"https://www.notion.so/cccccccc-cccc-cccc-cccc-cccccccccccc"}))
                 }
             }));
+        let files = Arc::new(file_provider::Files::default());
+        let provider_router =
+            file_provider::routes(provider_router, files.clone(), document.clone());
         let provider = tokio::spawn(async move {
             axum::serve(provider_socket, provider_router).await.unwrap();
         });
@@ -419,6 +424,8 @@ impl Harness {
             axum::serve(socket, router).await.unwrap();
         });
         Self {
+            #[cfg(feature = "webhook-worker")]
+            files,
             _dir: dir,
             login,
             store,
@@ -1332,3 +1339,10 @@ mod installed_writes;
 
 #[cfg(all(unix, feature = "webhook-worker"))]
 mod file_intents;
+
+mod file_provider;
+#[cfg(all(unix, feature = "webhook-worker"))]
+mod installed_files;
+
+#[cfg(all(unix, feature = "webhook-worker"))]
+mod file_configuration;
