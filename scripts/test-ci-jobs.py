@@ -158,9 +158,9 @@ class ContainerCachePublication(unittest.TestCase):
         self.workflow = (SCRIPT.parent.parent / '.github/workflows/ci.yml').read_text()
 
     def check_contract(self, workflow):
-        container = workflow.split('\\n  container:\\n', 1)[1].split('\\n  dependencies:\\n', 1)[0]
-        builder = container.split('      - name: Export verified builder root\\n', 1)[1].split('      - name: Export verified final image graph\\n', 1)[0]
-        final = container.split('      - name: Export verified final image graph\\n', 1)[1].split('      - name: Report optional cache publication\\n', 1)[0]
+        container = workflow.split('\n  container:\n', 1)[1].split('\n  dependencies:\n', 1)[0]
+        builder = container.split('      - name: Export verified builder root\n', 1)[1].split('      - name: Export verified final image graph\n', 1)[0]
+        final = container.split('      - name: Export verified final image graph\n', 1)[1].split('      - name: Report optional cache publication\n', 1)[0]
         for block, scope in ((builder, '-builder'), (final, '')):
             self.assertIn('uses: docker/build-push-action@', block)
             self.assertIn('cache-from: ${{ steps.docker-cache-source.outputs.', block)
@@ -177,9 +177,9 @@ class ContainerCachePublication(unittest.TestCase):
                     'Verify production indexing and offline retrieval in final image',
                     'Smoke test local Docker Compose stack')
         for name in required:
-            self.assertLess(container.index('      - name: ' + name + '\\n'),
-                            container.index('      - name: Export verified builder root\\n'))
-            block = container.split('      - name: ' + name + '\\n', 1)[1].split('      - name: ', 1)[0]
+            self.assertLess(container.index('      - name: ' + name + '\n'),
+                            container.index('      - name: Export verified builder root\n'))
+            block = container.split('      - name: ' + name + '\n', 1)[1].split('      - name: ', 1)[0]
             self.assertNotIn('continue-on-error:', block)
             self.assertNotIn('ignore-error=true', block)
         self.assertIn('cache-from: ${{ steps.docker-cache-source.outputs.final-cache-from }}', container)
@@ -198,12 +198,12 @@ class ContainerCachePublication(unittest.TestCase):
         for mutation in (
             self.workflow.replace(',ignore-error=true', '', 1),
             self.workflow.replace(',ignore-error=true', '', 1).replace(',ignore-error=true', ''),
-            self.workflow.replace('      - name: Build and load final runtime image\\n',
-                                  '      - name: Build and load final runtime image\\n'
-                                  '        continue-on-error: true\\n'),
-            self.workflow.replace('      - name: Verify final runtime image\\n',
-                                  '      - name: Verify final runtime image\\n'
-                                  '        continue-on-error: true\\n'),
+            self.workflow.replace('      - name: Build and load final runtime image\n',
+                                  '      - name: Build and load final runtime image\n'
+                                  '        continue-on-error: true\n'),
+            self.workflow.replace('      - name: Verify final runtime image\n',
+                                  '      - name: Verify final runtime image\n'
+                                  '        continue-on-error: true\n'),
         ):
             with self.subTest(mutation=mutation != self.workflow):
                 with self.assertRaises(AssertionError):
