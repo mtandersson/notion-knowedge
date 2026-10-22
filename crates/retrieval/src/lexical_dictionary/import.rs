@@ -218,7 +218,8 @@ pub(super) fn parse_tei(bytes: &[u8]) -> Result<Vec<super::Edge>> {
     loop {
         match reader.read_event().map_err(|_| ImportError::InvalidXml)? {
             Event::DocType(value) => {
-                if doctype || root_seen || value.as_ref() != b"TEI SYSTEM \"freedict-P5.dtd\"" {
+                let declaration: &[u8] = value.as_ref();
+                if doctype || root_seen || declaration != b"TEI SYSTEM \"freedict-P5.dtd\"" {
                     return Err(ImportError::InvalidXml);
                 }
                 doctype = true;
@@ -313,7 +314,8 @@ pub(super) fn parse_tei(bytes: &[u8]) -> Result<Vec<super::Edge>> {
                 {
                     c
                 } else {
-                    match value.as_ref() {
+                    let reference: &[u8] = value.as_ref();
+                    match reference {
                         b"amp" => '&',
                         b"lt" => '<',
                         b"gt" => '>',
