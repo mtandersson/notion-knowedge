@@ -1,9 +1,18 @@
 # Pinned multi-platform image indexes; update both pins deliberately (docs/container.md).
 FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS toolchain
 
+# Fail missing/mismatched OCI versions *before* installing cargo-chef or
+# compiling dependencies. The real negative-version smoke builds use --target
+# builder and must not trigger a cold 30-minute Rust build just to fail.
+FROM toolchain AS version-check
+ARG VERSION
+WORKDIR /build
+COPY Cargo.toml ./
+RUN test "$VERSION" = "$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' Cargo.toml)"
+
 # Keep the same pinned Rust toolchain in chef, planner, and builder. The
 # build-only protobuf compiler is required for Lance; it never reaches runtime.
-FROM toolchain AS chef
+FROM version-check AS chef
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler=3.21.12-3+deb12u1 libprotobuf-dev=3.21.12-3+deb12u1 \
     && rm -rf /var/lib/apt/lists/*
