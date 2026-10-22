@@ -108,6 +108,18 @@ impl Dictionary {
     /// query/ID contract before calling; this boolean is never client policy.
     /// Lookup scans at most 128 positions; no recursive translation is performed.
     pub fn plan(&self, query: &str, exact_identifier: bool) -> Plan {
+        // Bound scanning before trim or quoted-phrase detection, including
+        // direct callers that have not passed the outer query validator.
+        if query.chars().take(4097).count() > 4096 {
+            return Plan {
+                phrases: Vec::new(),
+                counters: Counters {
+                    position_limit: true,
+                    ..Counters::default()
+                },
+                bypass: Bypass::None,
+            };
+        }
         let trimmed = query.trim();
         let quoted = trimmed
             .strip_prefix('"')
@@ -126,12 +138,6 @@ impl Dictionary {
             bypass,
         };
         if bypass != Bypass::None {
-            return plan;
-        }
-        // Existing query validation bounds this to 4096 scalars. Keep this pure
-        // component bounded too, including normalization of direct callers.
-        if query.chars().take(4097).count() > 4096 {
-            plan.counters.position_limit = true;
             return plan;
         }
         let copy = normalized(query);
@@ -285,6 +291,51 @@ mod tests {
             texts(&plan),
             texts(&dictionary.plan("bank light dark", false))
         );
+    }
+    #[test]
+    fn overlong_quoted_and_whitespace_inputs_stop_before_bypass_scanning() {
+        let dictionary = dictionary(&[("island", "ö")]);
+        for query in [
+            " ".repeat(100_000),
+            format!("\"{}\"", "island ".repeat(20_000)),
+        ] {
+            let plan = dictionary.plan(&query, false);
+            assert!(plan.counters.position_limit);
+            assert_eq!(plan.counters.examined_positions, 0);
+            assert_eq!(plan.bypass, Bypass::None);
+            assert!(plan.phrases().is_empty());
+        }
+    }
+    #[test]
+    fn round_robin_phrase_cap_and_ambiguous_units_share_first_eight_unit_budget() {
+        let dictionary = dictionary(&[
+            ("red", "röd"),
+            ("red", "rött"),
+            ("red", "röda"),
+            ("red", "rodnad"),
+            ("blue", "blå"),
+            ("blue", "blått"),
+            ("blue", "blåa"),
+            ("blue", "blånad"),
+            ("green", "grön"),
+            ("green", "grönt"),
+            ("green", "gröna"),
+            ("green", "grönska"),
+            ("bank", "bank"),
+            ("bank", "bänk"),
+            ("bank", "strand"),
+            ("bank", "vall"),
+            ("bank", "lager"),
+        ]);
+        let plan = dictionary.plan("red blue green", false);
+        assert_eq!(plan.phrases().len(), 8);
+        assert!(plan.counters.phrase_limit);
+        assert_eq!(texts(&plan)[..3], ["rodnad", "blå", "grön"]);
+        let plan = dictionary.plan("bank bank bank bank bank bank bank bank red", false);
+        assert_eq!(plan.counters.matched_units, 8);
+        assert_eq!(plan.counters.ambiguous_units, 8);
+        assert!(plan.counters.unit_limit);
+        assert!(plan.phrases().is_empty());
     }
     #[test]
     fn lookup_and_output_caps_are_explicit_without_query_text() {

@@ -4,7 +4,7 @@ use super::{Dictionary, Edge, PLANNER_VERSION, literal};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{File, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::Path,
 };
 const PAYLOAD_MAX: u64 = 128 * 1024 * 1024;
@@ -207,6 +207,8 @@ fn decode(bytes: &[u8], expected: &str) -> Result<Dictionary> {
     let entries_start = cursor.offset;
     let mut resident = bytes
         .len()
+        .checked_add(64 * 1024)
+        .ok_or(ImportError::Bounds)?
         .checked_add(
             count
                 .checked_mul(std::mem::size_of::<Edge>() + 128)
@@ -266,10 +268,20 @@ impl Dictionary {
     /// immutable data. File replacement after load cannot alter this instance.
     pub fn load(path: &Path, expected_sha256: &str) -> Result<Self> {
         let file = regular_file(path)?;
-        if file.metadata().map_err(|_| ImportError::Io)?.len() > PAYLOAD_MAX {
+        let size = file.metadata().map_err(|_| ImportError::Io)?.len();
+        if size > PAYLOAD_MAX {
             return Err(ImportError::Bounds);
         }
-        decode(&read_bounded(file, PAYLOAD_MAX)?, expected_sha256)
+        // Exact-size storage avoids Read::read_to_end's geometric spare capacity
+        // escaping the resident budget. A concurrent size change is a failure.
+        let mut bytes = vec![0; size as usize];
+        let mut file = file;
+        file.read_exact(&mut bytes).map_err(|_| ImportError::Io)?;
+        let mut extra = [0];
+        if file.read(&mut extra).map_err(|_| ImportError::Io)? != 0 {
+            return Err(ImportError::Bounds);
+        }
+        decode(&bytes, expected_sha256)
     }
 }
 
