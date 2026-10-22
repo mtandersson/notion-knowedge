@@ -53,9 +53,15 @@ class DependencyBuildLayers(unittest.TestCase):
 
     def check_contract(self, content):
         self.assertIn('FROM rust:1.98.1-bookworm@sha256:', content)
-        self.assertIn('FROM toolchain AS chef', content)
+        self.assertIn('FROM toolchain AS version-check', content)
+        version_check = content.split('FROM toolchain AS version-check\n', 1)[1].split('FROM version-check AS chef\n', 1)[0]
+        self.assertIn('ARG VERSION', version_check)
+        self.assertIn('COPY Cargo.toml ./', version_check)
+        self.assertIn('RUN test "$VERSION" =', version_check)
+        self.assertNotIn('cargo install cargo-chef', version_check)
+        self.assertNotIn('cargo chef cook', version_check)
         self.assertIn('cargo install cargo-chef --version 0.1.78 --locked', content)
-        chef = content.split('FROM toolchain AS chef\n', 1)[1].split('FROM chef AS planner\n', 1)[0]
+        chef = content.split('FROM version-check AS chef\n', 1)[1].split('FROM chef AS planner\n', 1)[0]
         self.assertIn('protobuf-compiler=3.21.12-3+deb12u1', chef)
         self.assertIn('libprotobuf-dev=3.21.12-3+deb12u1', chef)
         planner = content.split('FROM chef AS planner\n', 1)[1].split('FROM chef AS builder\n', 1)[0]
@@ -99,6 +105,8 @@ class DependencyBuildLayers(unittest.TestCase):
             self.dockerfile.replace('COPY --from=planner /build/recipe.json recipe.json',
                                     'COPY crates ./crates\nCOPY --from=planner /build/recipe.json recipe.json', 1),
             self.dockerfile.replace('RUN cargo chef cook --release --locked', 'RUN cargo chef cook --release', 1),
+            self.dockerfile.replace('FROM version-check AS chef', 'FROM toolchain AS chef', 1),
+            self.dockerfile.replace('FROM toolchain AS version-check\nARG VERSION\nWORKDIR /build\nCOPY Cargo.toml ./\nRUN test "$VERSION"', 'FROM toolchain AS version-check\nARG VERSION\nWORKDIR /build\nCOPY Cargo.toml ./\nRUN true # deleted early validation', 1),
         )
         for mutated in mutations:
             with self.subTest(change=mutated != self.dockerfile):
