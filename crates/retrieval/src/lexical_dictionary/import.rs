@@ -28,28 +28,28 @@ impl std::fmt::Display for ImportError {
 impl std::error::Error for ImportError {}
 
 type Result<T> = std::result::Result<T, ImportError>;
-struct Pins<'a> {
-    archive: &'a str,
+pub(super) struct Pins<'a> {
+    pub(super) archive: &'a str,
     archive_sha512: &'a str,
-    tei: &'a str,
-    license: &'a str,
+    pub(super) tei: &'a str,
+    pub(super) license: &'a str,
 }
-const PINS: Pins<'static> = Pins {
+pub(super) const PINS: Pins<'static> = Pins {
     archive: "3c9f80c800d4810e34a80c82aca4e468fbc3180099d8b24a4fad7c61324015dc",
     archive_sha512: "ba08420434e6cdff8fd9ce697347aa4ecb214fabba7b67e7eafdc88f013d09fea0959a57c59b2b4dfce1664955078d3390111a4be4fd97ce1a946e3a8d408b5d",
     tei: "333a59ee913deabd66f724d404640c73d0dd53fddf681ae20d832e140c69845f",
     license: "41a8f57655bae359bea4a7e99c7a2aed171687d3dfb49614214538ba6dcbe75b",
 };
-fn sha256(bytes: &[u8]) -> String {
+pub(super) fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-struct Members {
-    tei: Vec<u8>,
-    license: Vec<u8>,
+pub(super) struct Members {
+    pub(super) tei: Vec<u8>,
+    pub(super) license: Vec<u8>,
 }
 
-fn read_bounded(reader: impl Read, bound: u64) -> Result<Vec<u8>> {
+pub(super) fn read_bounded(reader: impl Read, bound: u64) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     reader
         .take(bound + 1)
@@ -61,7 +61,7 @@ fn read_bounded(reader: impl Read, bound: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn verified_members(bytes: &[u8], pins: &Pins<'_>) -> Result<Members> {
+pub(super) fn verified_members(bytes: &[u8], pins: &Pins<'_>) -> Result<Members> {
     if bytes.len() as u64 > MAX_COMPRESSED {
         return Err(ImportError::Bounds);
     }
@@ -193,7 +193,7 @@ mod tests {
     }
 }
 
-fn parse_tei(bytes: &[u8]) -> Result<Vec<super::Edge>> {
+pub(super) fn parse_tei(bytes: &[u8]) -> Result<Vec<super::Edge>> {
     use super::{Edge, literal};
     use quick_xml::{Reader, events::Event};
     if bytes.len() as u64 > MAX_DECODED {
@@ -211,6 +211,7 @@ fn parse_tei(bytes: &[u8]) -> Result<Vec<super::Edge>> {
     // hidden inside inline elements into a literal dictionary relation.
     let mut capture: Option<(bool, usize, String, bool)> = None;
     let mut edges = Vec::new();
+    let mut edge_resident = 0usize;
     let mut root_seen = false;
     let mut root_closed = false;
     let mut doctype = false;
@@ -333,14 +334,12 @@ fn parse_tei(bytes: &[u8]) -> Result<Vec<super::Edge>> {
                 if capture.as_ref().is_some_and(|c| c.1 == stack.len()) {
                     let (source, _, text, nested) =
                         capture.take().ok_or(ImportError::InvalidXml)?;
-                    if !nested {
-                        if let Some(text) = literal(&text) {
-                            let destination = if source { &mut sources } else { &mut targets };
-                            if destination.len() >= 1_000_000 {
-                                return Err(ImportError::Bounds);
-                            }
-                            destination.push(text);
+                    if !nested && let Some(text) = literal(&text) {
+                        let destination = if source { &mut sources } else { &mut targets };
+                        if destination.len() >= 1_000_000 {
+                            return Err(ImportError::Bounds);
                         }
+                        destination.push(text);
                     }
                 }
                 if entry_depth == Some(stack.len()) {
@@ -351,6 +350,17 @@ fn parse_tei(bytes: &[u8]) -> Result<Vec<super::Edge>> {
                     for source in &sources {
                         for target in &targets {
                             if edges.len() + 2 > 1_000_000 {
+                                return Err(ImportError::Bounds);
+                            }
+                            edge_resident = edge_resident
+                                .checked_add(
+                                    2 * (source.len()
+                                        + target.len()
+                                        + std::mem::size_of::<Edge>()
+                                        + 128),
+                                )
+                                .ok_or(ImportError::Bounds)?;
+                            if edge_resident > 256 * 1024 * 1024 {
                                 return Err(ImportError::Bounds);
                             }
                             edges.push(Edge {

@@ -4816,6 +4816,7 @@ dependencies = [
  "futures",
  "lance",
  "lancedb",
+ "libc",
  "notion-knowledge-core",
  "notion-knowledge-mcp",
  "notion-knowledge-notion",

@@ -2,8 +2,10 @@
 //!
 //! Construction is private to this module: the offline importer will produce a
 //! verified immutable dictionary. Runtime installation is a separate contract.
-#[cfg(test)]
+mod bundle;
 mod import;
+pub use bundle::{AssetInfo, prepare_archive};
+pub use import::ImportError;
 
 use std::collections::BTreeSet;
 use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
@@ -142,7 +144,7 @@ impl Dictionary {
         let mut units: Vec<Vec<&Edge>> = Vec::new();
         let mut position = 0;
         while position < words.len() {
-            if units.len() == MAX_UNITS {
+            if usize::from(plan.counters.matched_units) == MAX_UNITS {
                 plan.counters.unit_limit = true;
                 break;
             }
@@ -166,12 +168,12 @@ impl Dictionary {
             }
             if let Some((count, edges)) = matched {
                 position += count;
+                plan.counters.matched_units += 1;
                 // Source/target canonicalization leaves one edge per relation.
                 if edges.len() > MAX_TARGETS {
                     plan.counters.ambiguous_units = plan.counters.ambiguous_units.saturating_add(1);
                 } else {
                     units.push(edges.iter().collect());
-                    plan.counters.matched_units += 1;
                 }
             } else {
                 position += 1;
@@ -182,18 +184,18 @@ impl Dictionary {
         let mut seen = BTreeSet::new();
         for target_index in 0..MAX_TARGETS {
             for unit in &units {
-                if let Some(edge) = unit.get(target_index) {
-                    if seen.insert(edge.target.as_ref()) {
-                        if plan.phrases.len() == MAX_PHRASES {
-                            plan.counters.phrase_limit = true;
-                            continue;
-                        }
-                        plan.phrases.push(Phrase {
-                            text: edge.target.clone(),
-                            entry: edge.entry,
-                            ordinal: plan.phrases.len() as u8,
-                        });
+                if let Some(edge) = unit.get(target_index)
+                    && seen.insert(edge.target.as_ref())
+                {
+                    if plan.phrases.len() == MAX_PHRASES {
+                        plan.counters.phrase_limit = true;
+                        continue;
                     }
+                    plan.phrases.push(Phrase {
+                        text: edge.target.clone(),
+                        entry: edge.entry,
+                        ordinal: plan.phrases.len() as u8,
+                    });
                 }
             }
         }
