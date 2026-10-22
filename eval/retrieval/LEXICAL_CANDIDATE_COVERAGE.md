@@ -92,3 +92,7 @@ calculating missing candidates. It labels reports whose top-k is smaller than
 the corpus as `bounded_observation_not_a_ceiling`. That observation does not
 prove unreturned sources are absent. Report JSON alone does not attest how an
 adapter ran; retain the pinned adapter/snapshot provenance with decision evidence.
+
+The proposed [versioned lexical expansion contract](../../docs/design/multilingual-lexical-expansion.md)
+addresses #472. It requires independent review before #473 implementation or
+new decision measurements and does not establish quality acceptance.

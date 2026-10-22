@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "status": "proposed_design_not_a_runtime_manifest",
+  "planner": "literal-en-sv-query-expansion-v1",
+  "asset": {
+    "project": "FreeDict/WikDict",
+    "edition": "2025.11.23",
+    "direction": "eng-swe",
+    "url": "https://download.freedict.org/dictionaries/eng-swe/2025.11.23/freedict-eng-swe-2025.11.23.src.tar.xz",
+    "archive_bytes": 2579240,
+    "archive_sha256": "3c9f80c800d4810e34a80c82aca4e468fbc3180099d8b24a4fad7c61324015dc",
+    "archive_sha512": "ba08420434e6cdff8fd9ce697347aa4ecb214fabba7b67e7eafdc88f013d09fea0959a57c59b2b4dfce1664955078d3390111a4be4fd97ce1a946e3a8d408b5d",
+    "checksum_url": "https://download.freedict.org/dictionaries/eng-swe/2025.11.23/freedict-eng-swe-2025.11.23.src.tar.xz.sha512",
+    "tei_member": "eng-swe/eng-swe.tei",
+    "tei_bytes": 23382047,
+    "tei_sha256": "333a59ee913deabd66f724d404640c73d0dd53fddf681ae20d832e140c69845f",
+    "license_member": "eng-swe/COPYING",
+    "license_sha256": "41a8f57655bae359bea4a7e99c7a2aed171687d3dfb49614214538ba6dcbe75b",
+    "declared_license": "CC-BY-SA-3.0",
+    "license_url": "https://creativecommons.org/licenses/by-sa/3.0/legalcode"
+  },
+  "verification": "Archive hashes compared to upstream SHA512 sidecar; member digests computed from exact regular members without extraction. No retrieval decision measurements.",
+  "implementation_requires": [
+    "pinned importer source and dependency/compiler Unicode identities",
+    "canonical derived artifact digest and validated hard bounds",
+    "approved retrieval-plan and compatible lexical-storage binding"
+  ]
+}
