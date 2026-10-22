@@ -159,9 +159,41 @@ pub fn tool_with_limit(max_files: usize) -> Tool {
     )
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileRefreshRequest {
+    pub page_id: String,
+    pub mutation_digest: String,
+    #[serde(default)]
+    pub retry: bool,
+}
+pub fn refresh_tool() -> Tool {
+    Tool::new("knowledge_file_refresh","Inspect an original-grant file refresh receipt or retry failed derived indexing only. Never repeats upload/attachment and cannot release quarantined source uncertainty.",serde_json::from_value::<serde_json::Map<String,serde_json::Value>>(json!({"type":"object","additionalProperties":false,"required":["page_id","mutation_digest"],"properties":{"page_id":{"type":"string"},"mutation_digest":{"type":"string"},"retry":{"type":"boolean","default":false}}})).expect("static refresh schema"))
+        .with_annotations(ToolAnnotations::new().read_only(false).destructive(false).open_world(true))
+}
+pub type FileFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+pub type FileBindFuture<'a> =
+    FileFuture<'a, Result<std::sync::Arc<dyn FileIngestion>, rmcp::ErrorData>>;
+/// Explicit composition-owned installation for authenticated HTTP file requests.
+pub trait RequestFileIngestionFactory: Send + Sync {
+    fn bind<'a>(
+        &'a self,
+        adapters: crate::RequestScopeAdapters,
+        context: &'a rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> FileBindFuture<'a>;
+}
+
 /// Trusted application installed by the server composition root.
 /// Requests contain untrusted file metadata; implementations retain authority.
 pub trait FileIngestion: Send + Sync {
+    fn refresh<'a>(
+        &'a self,
+        _request: FileRefreshRequest,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<serde_json::Value, &'static str>> + Send + 'a>,
+    > {
+        Box::pin(async { Err("file_refresh_unavailable") })
+    }
     fn ingest<'a>(
         &'a self,
         request: UploadFileRequest,

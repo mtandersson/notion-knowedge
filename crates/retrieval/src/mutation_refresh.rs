@@ -141,7 +141,7 @@ impl SqliteSyncStateStore {
         tx.commit().map_err(sql)?;
         Ok(status)
     }
-    fn refresh_status(
+    pub(crate) fn refresh_status(
         &self,
         key: &RefreshKey,
         authority: Option<&GrantRefreshAuthority>,

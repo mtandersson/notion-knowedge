@@ -77,6 +77,12 @@ impl AuthorizedRefreshQueue {
         request.validate(true)?;
         Ok(Self { request, queue })
     }
+    pub fn retry(&self, key: &RefreshKey) -> Result<(), RefreshQueueError> {
+        self.request
+            .validate(true)
+            .map_err(|_| RefreshQueueError::Unavailable)?;
+        self.queue.retry(key)
+    }
     pub fn authority(&self) -> &GrantRefreshAuthority {
         self.queue.authority()
     }
@@ -96,14 +102,14 @@ impl MutationRefreshQueue for AuthorizedRefreshQueue {
     }
 }
 /// Server-only temporary read credential. It cannot perform provider mutations.
-struct GrantReadAuthority {
+pub(crate) struct GrantReadAuthority {
     runtime: NotionOAuthRuntime,
     grant: StoredGrant,
     deadline: Instant,
     cancel: CancellationToken,
 }
 impl GrantReadAuthority {
-    async fn acquire(
+    pub(crate) async fn acquire(
         runtime: &NotionOAuthRuntime,
         expected: &GrantRefreshAuthority,
         deadline: Instant,
@@ -135,7 +141,7 @@ impl GrantReadAuthority {
         authority.validate(false)?;
         Ok(authority)
     }
-    fn client(self: &Arc<Self>) -> Result<NotionClient, BackendError> {
+    pub(crate) fn client(self: &Arc<Self>) -> Result<NotionClient, BackendError> {
         self.validate(false)?;
         Ok(self
             .runtime

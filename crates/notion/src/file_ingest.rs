@@ -51,7 +51,11 @@ impl FileIngestAdapter for NotionFileIngestAdapter {
     type LocalFile = DownloadedFile;
     type Upload = UploadedFile;
     async fn download(&self, url: &str) -> Result<DownloadedFile, IngestFailure> {
-        self.download
+        self.client
+            .validate_request_authority(true)
+            .map_err(|_| IngestFailure::Denied)?;
+        let file = self
+            .download
             .download(url)
             .await
             .map_err(|error| match error {
@@ -63,7 +67,11 @@ impl FileIngestAdapter for NotionFileIngestAdapter {
                 | DownloadError::SourceRejected
                 | DownloadError::RedirectDenied => IngestFailure::InvalidInput,
                 _ => IngestFailure::DownloadUnavailable,
-            })
+            })?;
+        self.client
+            .validate_request_authority(true)
+            .map_err(|_| IngestFailure::Denied)?;
+        Ok(file)
     }
     async fn validate(
         &self,
@@ -71,7 +79,13 @@ impl FileIngestAdapter for NotionFileIngestAdapter {
         name: Option<&str>,
         mime: Option<&str>,
     ) -> Result<SafeFileFacts, IngestFailure> {
+        self.client
+            .validate_request_authority(true)
+            .map_err(|_| IngestFailure::Denied)?;
         let valid = self.validated(file, name, mime).await?;
+        self.client
+            .validate_request_authority(true)
+            .map_err(|_| IngestFailure::Denied)?;
         Ok(SafeFileFacts::new(
             if valid.mime_type.starts_with("image/") {
                 FileKind::Image

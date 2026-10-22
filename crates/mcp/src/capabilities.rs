@@ -16,12 +16,13 @@ enum Category {
     Write,
 }
 
-const OPERATIONS: [(&str, Category); 9] = [
+const OPERATIONS: [(&str, Category); 10] = [
     ("knowledge_search", Category::Read),
     ("knowledge_get", Category::Read),
     ("knowledge_related", Category::Read),
     ("knowledge_sync_status", Category::Read),
     ("knowledge_upload_file", Category::Write),
+    ("knowledge_file_refresh", Category::Write),
     ("knowledge_create_page", Category::Write),
     ("knowledge_append", Category::Write),
     ("knowledge_update_section", Category::Write),

@@ -67,6 +67,7 @@ pub struct KnowledgeServer {
     snippet_chars: usize,
     max_upload_files: usize,
     file_ingestion: Option<Arc<dyn upload::FileIngestion>>,
+    request_file_ingestion: Option<Arc<dyn upload::RequestFileIngestionFactory>>,
     /// Deny mutation-capable tools unless the operator explicitly disables read-only mode.
     read_only: bool,
     http_authorization_required: bool,
@@ -94,6 +95,7 @@ impl Default for KnowledgeServer {
             snippet_chars: 2000,
             max_upload_files: upload::DEFAULT_MAX_FILES,
             file_ingestion: None,
+            request_file_ingestion: None,
             read_only: true,
             http_authorization_required: false,
             request_scope_required: false,
@@ -136,6 +138,15 @@ impl KnowledgeServer {
         factory: Arc<dyn mutations::RequestMutationFactory>,
     ) -> Self {
         self.request_mutations = Some(factory);
+        self
+    }
+    /// File effects have a distinct factory; semantic write factories cannot
+    /// enable uploads or widen unsupported destructive operations.
+    pub fn and_request_file_ingestion(
+        mut self,
+        factory: Arc<dyn upload::RequestFileIngestionFactory>,
+    ) -> Self {
+        self.request_file_ingestion = Some(factory);
         self
     }
     pub fn requires_request_scope(&self) -> bool {
@@ -193,6 +204,9 @@ impl KnowledgeServer {
                     | "knowledge_sync_status"
                     | "knowledge_related"
             )
+            || (self.request_scope_required
+                && matches!(name, "knowledge_upload_file" | "knowledge_file_refresh")
+                && self.request_file_ingestion.is_some())
             || (self.request_scope_required
                 && mutations::is_semantic_mutation(name)
                 && self
@@ -497,6 +511,25 @@ impl KnowledgeServer {
                 Ok(rmcp::model::CallToolResult::structured(value).into())
             }
 
+            "knowledge_file_refresh" => {
+                let input: upload::FileRefreshRequest =
+                    serde_json::from_value(serde_json::Value::Object(arguments)).map_err(|_| {
+                        rmcp::ErrorData::invalid_params("invalid file refresh receipt", None)
+                    })?;
+                let result = match &self.file_ingestion {
+                    Some(service) => service.refresh(input).await,
+                    None => Err("file_refresh_unavailable"),
+                };
+                Ok(match result {
+                    Ok(value) if output_fits_budget(&value) => {
+                        rmcp::model::CallToolResult::structured(value)
+                    }
+                    _ => rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(
+                        "file refresh unavailable",
+                    )]),
+                }
+                .into())
+            }
             "knowledge_upload_file" => {
                 let input: upload::UploadFileRequest =
                     serde_json::from_value(serde_json::Value::Object(arguments)).map_err(|_| {
@@ -997,7 +1030,7 @@ impl ServerHandler for KnowledgeServer {
                         )
                     });
                 }
-                if let Some(factory) = &self.request_mutations {
+                if self.request_mutations.is_some() || self.request_file_ingestion.is_some() {
                     let parts = context
                         .extensions
                         .get::<http::request::Parts>()
@@ -1027,6 +1060,14 @@ impl ServerHandler for KnowledgeServer {
                     })?;
                     if auth.permissions().can_write() && adapters.source.mutation_ports().is_some()
                     {
+                        if self.request_file_ingestion.is_some() {
+                            if self.tool_permitted("knowledge_upload_file") {
+                                tools.push(upload::tool_with_limit(self.max_upload_files));
+                            }
+                            if self.tool_permitted("knowledge_file_refresh") {
+                                tools.push(upload::refresh_tool());
+                            }
+                        }
                         tools.extend(
                             [
                                 "knowledge_create_page",
@@ -1034,7 +1075,12 @@ impl ServerHandler for KnowledgeServer {
                                 "knowledge_update_section",
                             ]
                             .into_iter()
-                            .filter(|name| factory.supports(name) && self.tool_permitted(name))
+                            .filter(|name| {
+                                self.request_mutations
+                                    .as_ref()
+                                    .is_some_and(|factory| factory.supports(name))
+                                    && self.tool_permitted(name)
+                            })
                             .map(mutations::tool),
                         );
                     }
@@ -1055,6 +1101,9 @@ impl ServerHandler for KnowledgeServer {
             "knowledge_related" if self.related_graph.is_some() => Some(related::tool()),
             "knowledge_sync_status" => Some(sync_status::tool()),
             "knowledge_upload_file" => Some(upload::tool_with_limit(self.max_upload_files)),
+            "knowledge_file_refresh" if self.request_file_ingestion.is_some() => {
+                Some(upload::refresh_tool())
+            }
             name if self
                 .mutations
                 .as_ref()
@@ -1168,6 +1217,19 @@ impl ServerHandler for KnowledgeServer {
                     .bind(adapters.clone(), &context, request.name.as_ref())
                     .await?,
             );
+        }
+        if matches!(
+            request.name.as_ref(),
+            "knowledge_upload_file" | "knowledge_file_refresh"
+        ) && let Some(factory) = &self.request_file_ingestion
+        {
+            if !auth.permissions().can_write() {
+                return Err(rmcp::ErrorData::invalid_request(
+                    "write authorization required",
+                    None,
+                ));
+            }
+            scoped.file_ingestion = Some(factory.bind(adapters.clone(), &context).await?);
         }
         let result = scoped.call_tool_authorized(request, context).await;
         if !adapters.authorization.is_active() {
