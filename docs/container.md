@@ -76,7 +76,12 @@ the **locked release dependency graph for the exact server/webhook-worker
 feature set** before receiving the real application sources. Normal Rust
 source edits rerun the inexpensive recipe computation and final application
 compile without forcing a complete third-party recompile when the cook layer
-is available. The vendored security patch is copied **before** the cook and
+is available. A distinct `version-check` stage rejects a missing/mismatched
+VERSION **before installing cargo-chef or cooking dependencies**, so the two
+mandatory negative-version Docker builds in `smoke-container.py` do not spend
+the remaining CI runtime compiling a fresh dependency graph. This corrects
+the 45-minute timeout observed in [PR #488 run 39848108430](https://github.com/mtandersson/notion-knowedge/actions/runs/39848108430).
+The final real release build retains the original VERSION check as defense in depth. The vendored security patch is copied **before** the cook and
 again before the real build; changing that patch invalidates cached dependencies.
 
 The final executable is still built from the actual sources with
