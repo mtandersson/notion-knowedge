@@ -55,15 +55,15 @@ class DependencyBuildLayers(unittest.TestCase):
         self.assertIn('FROM rust:1.98.1-bookworm@sha256:', content)
         self.assertIn('FROM toolchain AS chef', content)
         self.assertIn('cargo install cargo-chef --version 0.1.78 --locked', content)
-        chef = content.split('FROM toolchain AS chef\\n', 1)[1].split('FROM chef AS planner\\n', 1)[0]
+        chef = content.split('FROM toolchain AS chef\n', 1)[1].split('FROM chef AS planner\n', 1)[0]
         self.assertIn('protobuf-compiler=3.21.12-3+deb12u1', chef)
         self.assertIn('libprotobuf-dev=3.21.12-3+deb12u1', chef)
-        planner = content.split('FROM chef AS planner\\n', 1)[1].split('FROM chef AS builder\\n', 1)[0]
+        planner = content.split('FROM chef AS planner\n', 1)[1].split('FROM chef AS builder\n', 1)[0]
         for item in ('COPY Cargo.toml Cargo.lock ./', 'COPY crates ./crates',
                      'COPY vendor ./vendor', 'cargo chef prepare --recipe-path recipe.json'):
             self.assertIn(item, planner)
 
-        builder = content.split('FROM chef AS builder\\n', 1)[1].split('FROM toolchain AS probe-builder\\n', 1)[0]
+        builder = content.split('FROM chef AS builder\n', 1)[1].split('FROM toolchain AS probe-builder\n', 1)[0]
         recipe = builder.index('COPY --from=planner /build/recipe.json recipe.json')
         vendor_cook = builder.index('COPY vendor ./vendor', recipe)
         cook = builder.index('RUN cargo chef cook --release --locked --package notion-knowledge-server')
@@ -72,6 +72,8 @@ class DependencyBuildLayers(unittest.TestCase):
         self.assertLess(recipe, vendor_cook)
         self.assertLess(vendor_cook, cook)
         self.assertLess(cook, source)
+        self.assertNotIn('COPY crates ./crates', builder[:cook])
+        self.assertNotIn('COPY Cargo.toml Cargo.lock', builder[:cook])
         self.assertLess(source, actual)
         self.assertIn('COPY crates ./crates', builder[source:actual])
         self.assertIn('COPY vendor ./vendor', builder[source:actual])
@@ -95,7 +97,7 @@ class DependencyBuildLayers(unittest.TestCase):
             self.dockerfile.replace('--features webhook-worker --recipe-path recipe.json',
                                     '--recipe-path recipe.json', 1),
             self.dockerfile.replace('COPY --from=planner /build/recipe.json recipe.json',
-                                    'COPY crates ./crates\\nCOPY --from=planner /build/recipe.json recipe.json', 1),
+                                    'COPY crates ./crates\nCOPY --from=planner /build/recipe.json recipe.json', 1),
             self.dockerfile.replace('RUN cargo chef cook --release --locked', 'RUN cargo chef cook --release', 1),
         )
         for mutated in mutations:
