@@ -151,5 +151,64 @@ class Gate(unittest.TestCase):
             self.assertNotEqual(self.gate(needs).returncode, 0)
 
 
+class ContainerCachePublication(unittest.TestCase):
+    """Lock down the optional cache-export boundary, not the required image checks."""
+
+    def setUp(self):
+        self.workflow = (SCRIPT.parent.parent / '.github/workflows/ci.yml').read_text()
+
+    def check_contract(self, workflow):
+        container = workflow.split('\n  container:\n', 1)[1].split('\n  dependencies:\n', 1)[0]
+        builder = container.split('      - name: Export verified builder root\n', 1)[1].split('      - name: Export verified final image graph\n', 1)[0]
+        final = container.split('      - name: Export verified final image graph\n', 1)[1].split('      - name: Report optional cache publication\n', 1)[0]
+        for block, scope in ((builder, '-builder'), (final, '')):
+            self.assertIn('uses: docker/build-push-action@', block)
+            self.assertIn('cache-from: ${{ steps.docker-cache-source.outputs.', block)
+            self.assertIn('cache-to: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}' + scope +
+                          ',mode=max,timeout=10m,ignore-error=true', block)
+            self.assertNotIn('continue-on-error:', block,
+                             'Do not suppress Docker solve/build failures at the step level')
+            self.assertIn("head.repo.full_name == github.repository", block,
+                          'Keep existing fork cache-write isolation')
+
+        required = ('Build and load final runtime image',
+                    'Load pinned builder for permission probe',
+                    'Verify final runtime image',
+                    'Verify production indexing and offline retrieval in final image',
+                    'Smoke test local Docker Compose stack')
+        for name in required:
+            self.assertLess(container.index('      - name: ' + name + '\n'),
+                            container.index('      - name: Export verified builder root\n'))
+            block = container.split('      - name: ' + name + '\n', 1)[1].split('      - name: ', 1)[0]
+            self.assertNotIn('continue-on-error:', block)
+            self.assertNotIn('ignore-error=true', block)
+        self.assertIn('cache-from: ${{ steps.docker-cache-source.outputs.final-cache-from }}', container)
+        self.assertIn('cache-from: ${{ steps.docker-cache-source.outputs.builder-cache-from }}', container)
+        self.assertNotIn('continue-on-error:', container)
+        self.assertIn('GITHUB_STEP_SUMMARY', container)
+        self.assertIn('CI gate', workflow)
+
+    def test_cache_service_errors_are_optional_but_runtime_builds_are_not(self):
+        self.check_contract(self.workflow)
+
+    def test_missing_export_tolerance_and_unconditional_tolerance_are_rejected(self):
+        # Regression fixtures: removing cache-only tolerance or making required
+        # builds optional must be detected rather than accepted as green CI.
+        self.assertEqual(self.workflow.count(',ignore-error=true'), 2)
+        for mutation in (
+            self.workflow.replace(',ignore-error=true', '', 1),
+            self.workflow.replace(',ignore-error=true', '', 1).replace(',ignore-error=true', ''),
+            self.workflow.replace('      - name: Build and load final runtime image\n',
+                                  '      - name: Build and load final runtime image\n'
+                                  '        continue-on-error: true\n'),
+            self.workflow.replace('      - name: Verify final runtime image\n',
+                                  '      - name: Verify final runtime image\n'
+                                  '        continue-on-error: true\n'),
+        ):
+            with self.subTest(mutation=mutation != self.workflow):
+                with self.assertRaises(AssertionError):
+                    self.check_contract(mutation)
+
+
 if __name__ == '__main__':
     unittest.main()

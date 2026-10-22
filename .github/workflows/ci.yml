@@ -405,7 +405,7 @@ jobs:
           target: builder
           build-args: VERSION=${{ steps.identity.outputs.version }}
           cache-from: ${{ steps.docker-cache-source.outputs.builder-cache-from }}
-          cache-to: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}-builder,mode=max,timeout=10m
+          cache-to: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}-builder,mode=max,timeout=10m,ignore-error=true
 
       # Export only after all final-image interactions pass. PR caches are
       # isolated by GitHub's merge-ref scope and cannot poison main restores.
@@ -419,7 +419,21 @@ jobs:
             VERSION=${{ steps.identity.outputs.version }}
             REVISION=${{ github.sha }}
           cache-from: ${{ steps.docker-cache-source.outputs.final-cache-from }}
-          cache-to: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }},mode=max,timeout=10m
+          cache-to: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }},mode=max,timeout=10m,ignore-error=true
+
+      # Only GHA cache publication is best effort. The required build/load,
+      # permission, retrieval and Compose smoke steps above must still pass.
+      # BuildKit keeps export failures in the action logs while the backend's
+      # ignore-error flag prevents transient cache-service failures from failing CI.
+      - name: Report optional cache publication
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          {
+            echo '### Optional Docker cache publication'
+            echo 'The verified builder and final-image cache exports were attempted.'
+            echo 'BuildKit may ignore GitHub Actions cache-service errors (`ignore-error=true`); inspect both export step logs for upload success or warnings.'
+            echo 'A successful CI gate confirms the required image load and smoke checks, **not** successful cache publication.'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   dependencies:
     name: Dependency vulnerabilities
