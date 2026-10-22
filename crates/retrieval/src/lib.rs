@@ -63,3 +63,6 @@ pub mod sync_status;
 /// Durable held file-effect intents and explicit quarantine recovery.
 #[cfg(unix)]
 pub mod file_refresh_intents;
+
+/// Offline literal bilingual assets and deterministic bounded query planning.
+pub mod lexical_dictionary;
