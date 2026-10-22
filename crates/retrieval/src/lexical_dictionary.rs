@@ -2,6 +2,9 @@
 //!
 //! Construction is private to this module: the offline importer will produce a
 //! verified immutable dictionary. Runtime installation is a separate contract.
+#[cfg(test)]
+mod import;
+
 use std::collections::BTreeSet;
 use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 use unicode_segmentation::UnicodeSegmentation;
