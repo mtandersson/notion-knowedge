@@ -416,7 +416,7 @@ async fn provider_errors_and_failed_resource_refresh_never_dispatch_or_change_se
     let calls = h.calls.load(Ordering::SeqCst);
     // The MCP token remains valid; only the provider token crosses its refresh
     // boundary. An unavailable refresh must not issue stale credentials.
-    h.clock.store(61, Ordering::SeqCst);
+    h.set_refresh_clock_at_boundary(stored.expires_at_unix().unwrap());
     let denied = rpc(
         &h,
         &token,

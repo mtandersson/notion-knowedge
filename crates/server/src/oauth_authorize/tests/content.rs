@@ -207,7 +207,7 @@ async fn http_oauth_lifecycle_reads_refreshes_revokes_and_reauthorizes() {
         "{value}"
     );
     let stored = h.store.load_for_refresh().unwrap().unwrap();
-    h.clock.store(61, Ordering::SeqCst);
+    h.set_refresh_clock_at_boundary(stored.expires_at_unix().unwrap());
     let value = reply(rpc(&h, &token, Some(&session), get()).send().await.unwrap()).await;
     assert!(
         value.to_string().contains("Saffron private evidence"),

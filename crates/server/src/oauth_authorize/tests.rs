@@ -39,6 +39,7 @@ struct Harness {
     probe_gate: Arc<tokio::sync::Semaphore>,
     probe_started: Arc<tokio::sync::Notify>,
     clock: Arc<AtomicU64>,
+    refresh_origin_unix: u64,
     server: tokio::task::JoinHandle<()>,
     provider: tokio::task::JoinHandle<()>,
 }
@@ -453,10 +454,24 @@ impl Harness {
             probe_gate,
             probe_started,
             clock,
+            refresh_origin_unix: wall_origin,
             server,
             provider,
         }
     }
+    // The grant is sealed with the provider's real issuance time, which may be
+    // seconds after this fixture captured its fake wall-clock origin on a busy
+    // CI runner. Advance to the actual stored refresh boundary, not +61s.
+    fn set_refresh_clock_at_boundary(&self, expiry_unix: u64) {
+        let boundary = expiry_unix
+            .checked_sub(crate::notion_oauth_refresh::REFRESH_SKEW_SECONDS)
+            .expect("provider expiry is after the refresh skew");
+        let offset = boundary
+            .checked_sub(self.refresh_origin_unix)
+            .expect("grant expiry follows fixture creation");
+        self.clock.store(offset, Ordering::SeqCst);
+    }
+
     fn token_request(&self, body: String) -> reqwest::RequestBuilder {
         self.client
             .post(format!("{}/token", self.base))
