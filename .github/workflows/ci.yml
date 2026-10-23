@@ -150,7 +150,7 @@ jobs:
 
 
       # Only protected main refreshes multi-GB Cargo snapshots. PRs still
-      # restore compatible main snapshots; per-source PR uploads evicted the
+      # restore compatible main snapshots; per-source PR uploads can evict the
       # shared Docker compile roots under the Actions cache quota.
       - name: Save successful refreshed Cargo caches
         if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
@@ -190,7 +190,7 @@ jobs:
         run: nix develop --command cargo check --workspace --all-targets --locked
 
       # Only protected main refreshes multi-GB Cargo snapshots. PRs still
-      # restore compatible main snapshots; per-source PR uploads evicted the
+      # restore compatible main snapshots; per-source PR uploads can evict the
       # shared Docker compile roots under the Actions cache quota.
       - name: Save successful refreshed Cargo caches
         if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
@@ -263,7 +263,7 @@ jobs:
           find target/debug -type f -printf '%s %p\n' | sort -nr | sed -n '1,20p'
 
       # Only protected main refreshes multi-GB Cargo snapshots. PRs still
-      # restore compatible main snapshots; per-source PR uploads evicted the
+      # restore compatible main snapshots; per-source PR uploads can evict the
       # shared Docker compile roots under the Actions cache quota.
       - name: Save successful refreshed Cargo caches
         if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
@@ -319,7 +319,7 @@ jobs:
           retention-days: 7
 
       # Only protected main refreshes multi-GB Cargo snapshots. PRs still
-      # restore compatible main snapshots; per-source PR uploads evicted the
+      # restore compatible main snapshots; per-source PR uploads can evict the
       # shared Docker compile roots under the Actions cache quota.
       - name: Save successful refreshed Cargo caches
         if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
