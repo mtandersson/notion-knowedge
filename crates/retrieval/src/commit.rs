@@ -92,6 +92,9 @@ impl CommitBinding {
     pub fn workspace(&self) -> &str {
         &self.workspace
     }
+    pub fn roots(&self) -> &[String] {
+        &self.roots
+    }
     pub fn scope(&self) -> &str {
         &self.scope
     }

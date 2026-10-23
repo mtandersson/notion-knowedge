@@ -11,6 +11,7 @@ use std::{
     sync::Arc,
 };
 
+use super::lexical_binding::{self, LexicalIndexBinding, LexicalPlanIdentity};
 use super::*;
 use crate::commit::{
     CommitError, CommitOutcome, IndexCommitCoordinator, PageAction, PageOperation,
@@ -29,6 +30,7 @@ pub struct GuardedChunkTable {
     table_name: String,
     embedding: EmbeddingMetadata,
     coordinator: Arc<IndexCommitCoordinator>,
+    lexical_binding: Option<LexicalIndexBinding>,
 }
 
 /// Expand content only from a compatible committed snapshot. Hold the shared
@@ -41,12 +43,17 @@ impl SourceExpansion for GuardedChunkTable {
                 .coordinator
                 .search_guard()
                 .map_err(|_| SourceExpansionError::Unavailable)?;
-            let snapshot = open_current(&self.index_directory, &self.table_name, &self.embedding)
-                .await
-                .map_err(|_| SourceExpansionError::Unavailable)?
-                .read_snapshot()
-                .await
-                .map_err(|_| SourceExpansionError::Unavailable)?;
+            let snapshot = open_current(
+                &self.index_directory,
+                &self.table_name,
+                &self.embedding,
+                &self.lexical_binding,
+            )
+            .await
+            .map_err(|_| SourceExpansionError::Unavailable)?
+            .read_snapshot()
+            .await
+            .map_err(|_| SourceExpansionError::Unavailable)?;
             let result = snapshot.expand(query).await;
             self.coordinator
                 .identities()
@@ -64,6 +71,7 @@ pub struct PreparedPageMutation {
     embedding: EmbeddingMetadata,
     rows: Vec<EmbeddedChunk>,
     metrics: ChunkDiffMetrics,
+    lexical_binding: Option<LexicalIndexBinding>,
 }
 
 impl PreparedPageMutation {
@@ -101,7 +109,9 @@ async fn open_current(
     directory: &Path,
     table_name: &str,
     embedding: &EmbeddingMetadata,
+    lexical: &Option<LexicalIndexBinding>,
 ) -> Result<LanceChunkTable, ChunkTableError> {
+    lexical_binding::verify(directory, lexical)?;
     let uri = local_database_uri(directory)?;
     #[cfg(all(test, unix))]
     let uri = io_tests::test_uri(directory, uri);
@@ -129,6 +139,32 @@ impl GuardedChunkTable {
         embedding: EmbeddingMetadata,
         coordinator: Arc<IndexCommitCoordinator>,
     ) -> Result<Self, ChunkTableError> {
+        Self::bind_inner(directory.as_ref(), table_name, embedding, coordinator, None)
+    }
+
+    /// Require the offline-installed exact plan. Never stamps missing metadata.
+    pub fn bind_with_lexical_plan(
+        directory: impl AsRef<Path>,
+        table_name: &str,
+        embedding: EmbeddingMetadata,
+        coordinator: Arc<IndexCommitCoordinator>,
+        plan: &LexicalPlanIdentity,
+    ) -> Result<Self, ChunkTableError> {
+        Self::bind_inner(
+            directory.as_ref(),
+            table_name,
+            embedding,
+            coordinator,
+            Some(plan),
+        )
+    }
+    fn bind_inner(
+        directory: &Path,
+        table_name: &str,
+        embedding: EmbeddingMetadata,
+        coordinator: Arc<IndexCommitCoordinator>,
+        plan: Option<&LexicalPlanIdentity>,
+    ) -> Result<Self, ChunkTableError> {
         validate_table_name(table_name)?;
         let canonical = std::fs::canonicalize(directory)?;
         if canonical != coordinator.index_directory() || table_name != coordinator.binding().table()
@@ -138,11 +174,30 @@ impl GuardedChunkTable {
             ));
         }
         chunk_schema(&embedding)?;
+        coordinator
+            .identities()
+            .map_err(|_| ChunkTableError::InvalidPath)?;
+        let lexical_binding = lexical_binding::read(&canonical)?;
+        match (&lexical_binding, plan) {
+            (Some(binding), Some(plan)) => {
+                binding.validate(&canonical, &embedding, coordinator.binding(), plan)?
+            }
+            (None, None) => {}
+            _ => {
+                return Err(ChunkTableError::InvalidSchema(
+                    "missing or unexpected lexical plan binding".into(),
+                ));
+            }
+        }
+        coordinator
+            .identities()
+            .map_err(|_| ChunkTableError::InvalidPath)?;
         Ok(Self {
             index_directory: canonical,
             table_name: table_name.to_owned(),
             embedding,
             coordinator,
+            lexical_binding,
         })
     }
 
@@ -157,9 +212,14 @@ impl GuardedChunkTable {
         let directory = self.index_directory.clone();
         let table_name = self.table_name.clone();
         let embedding = self.embedding.clone();
+        let lexical = self.lexical_binding.clone();
         self.coordinator
             .maintain(lease, clock, move |context| async move {
                 context.revalidate().map_err(fence_failure)?;
+                lexical_binding::verify(&directory, &lexical).map_err(failure)?;
+                if lexical.is_some() {
+                    return Err(FailureClass::Conflict);
+                }
                 LanceChunkTable::create(directory, &table_name, embedding)
                     .await
                     .map_err(failure)?;
@@ -177,14 +237,19 @@ impl GuardedChunkTable {
         let directory = self.index_directory.clone();
         let table_name = self.table_name.clone();
         let embedding = self.embedding.clone();
+        let lexical = self.lexical_binding.clone();
         self.coordinator
             .maintain(lease, clock, move |context| async move {
-                let current = open_current(&directory, &table_name, &embedding)
+                let current = open_current(&directory, &table_name, &embedding, &lexical)
                     .await
                     .map_err(failure)?;
                 context.revalidate().map_err(fence_failure)?;
                 current
-                    .ensure_fts_index(&FtsIndexConfig::default())
+                    .ensure_fts_index(&if lexical.is_some() {
+                        FtsIndexConfig::lexical_expansion_v1()
+                    } else {
+                        FtsIndexConfig::default()
+                    })
                     .await
                     .map_err(failure)?;
                 current
@@ -227,9 +292,10 @@ impl GuardedChunkTable {
         let directory = self.index_directory.clone();
         let table_name = self.table_name.clone();
         let embedding = self.embedding.clone();
+        let lexical = self.lexical_binding.clone();
         self.coordinator
             .maintain(lease, clock, move |context| async move {
-                let current = open_current(&directory, &table_name, &embedding)
+                let current = open_current(&directory, &table_name, &embedding, &lexical)
                     .await
                     .map_err(failure)?;
                 context.revalidate().map_err(fence_failure)?;
@@ -288,10 +354,15 @@ impl GuardedChunkTable {
         self.open_search_snapshot().await
     }
     async fn open_search_snapshot(&self) -> Result<LanceChunkTable, ChunkTableError> {
-        let current = open_current(&self.index_directory, &self.table_name, &self.embedding)
-            .await?
-            .read_snapshot()
-            .await?;
+        let current = open_current(
+            &self.index_directory,
+            &self.table_name,
+            &self.embedding,
+            &self.lexical_binding,
+        )
+        .await?
+        .read_snapshot()
+        .await?;
         current.validate_vector_index_layout().await?;
         let indexes = current.table.list_indices().await?;
         if !indexes
@@ -332,6 +403,15 @@ impl GuardedChunkTable {
         C: Future<Output = ()> + Send,
     {
         let operation = async {
+            if !self
+                .lexical_binding
+                .as_ref()
+                .is_some_and(|binding| binding.plan().matches(dictionary))
+            {
+                return Err(ChunkTableError::InvalidSchema(
+                    "expanded lexical plan is not bound".into(),
+                ));
+            }
             let _guard = self
                 .coordinator
                 .search_guard()
@@ -353,19 +433,27 @@ impl GuardedChunkTable {
     }
     /// Read the version of a pinned Lance inventory without startup repair.
     pub async fn inventory_version(&self) -> Result<u64, ChunkTableError> {
-        Ok(
-            open_current(&self.index_directory, &self.table_name, &self.embedding)
-                .await?
-                .table
-                .version()
-                .await?,
+        Ok(open_current(
+            &self.index_directory,
+            &self.table_name,
+            &self.embedding,
+            &self.lexical_binding,
         )
+        .await?
+        .table
+        .version()
+        .await?)
     }
     pub async fn indexed_page_ids(&self) -> Result<Vec<String>, ChunkTableError> {
-        let current = open_current(&self.index_directory, &self.table_name, &self.embedding)
-            .await?
-            .read_snapshot()
-            .await?;
+        let current = open_current(
+            &self.index_directory,
+            &self.table_name,
+            &self.embedding,
+            &self.lexical_binding,
+        )
+        .await?
+        .read_snapshot()
+        .await?;
         let rows = current.rows_matching("true".into()).await?;
         Ok(rows
             .into_iter()
@@ -382,10 +470,15 @@ impl GuardedChunkTable {
         self.coordinator.binding()
     }
     pub async fn page_chunks(&self, page_id: &str) -> Result<Vec<IndexedChunk>, ChunkTableError> {
-        open_current(&self.index_directory, &self.table_name, &self.embedding)
-            .await?
-            .page_chunks(page_id)
-            .await
+        open_current(
+            &self.index_directory,
+            &self.table_name,
+            &self.embedding,
+            &self.lexical_binding,
+        )
+        .await?
+        .page_chunks(page_id)
+        .await
     }
 
     /// Prepare a complete source page snapshot outside the commit guard.
@@ -418,10 +511,15 @@ impl GuardedChunkTable {
                 "source snapshot identity mismatch".into(),
             ));
         }
-        let snapshot = open_current(&self.index_directory, &self.table_name, &self.embedding)
-            .await?
-            .read_snapshot()
-            .await?;
+        let snapshot = open_current(
+            &self.index_directory,
+            &self.table_name,
+            &self.embedding,
+            &self.lexical_binding,
+        )
+        .await?
+        .read_snapshot()
+        .await?;
         let table_version = snapshot.table.version().await?;
         let predicate = format!("page_id = {}", sql_string(page_id));
         let old = snapshot.rows_matching(predicate).await?;
@@ -489,7 +587,12 @@ impl GuardedChunkTable {
             ));
         }
         validate_rows(&rows, self.embedding.dimension())?;
+        lexical_binding::verify(&self.index_directory, &self.lexical_binding)?;
+        self.coordinator
+            .identities()
+            .map_err(|_| ChunkTableError::InvalidPath)?;
         Ok(PreparedPageMutation {
+            lexical_binding: self.lexical_binding.clone(),
             operation,
             table_version,
             embedding: self.embedding.clone(),
@@ -537,15 +640,19 @@ impl GuardedChunkTable {
         let directory = self.index_directory.clone();
         let table_name = self.table_name.clone();
         let embedding = self.embedding.clone();
+        let lexical = self.lexical_binding.clone();
         let operation = prepared.operation.clone();
         self.coordinator
             .submit_with_authority(operation, lease, clock, move |context| async move {
-                if prepared.embedding != embedding || context.binding().table() != table_name {
+                if prepared.embedding != embedding
+                    || prepared.lexical_binding != lexical
+                    || context.binding().table() != table_name
+                {
                     return Err(FailureClass::Conflict);
                 }
                 // Always reopen under the guard: a retained Table handle is not
                 // proof of the actual current version after another process wrote.
-                let current = open_current(&directory, &table_name, &embedding)
+                let current = open_current(&directory, &table_name, &embedding, &lexical)
                     .await
                     .map_err(failure)?;
                 let version = current
@@ -576,6 +683,7 @@ impl GuardedChunkTable {
                 context.revalidate().map_err(fence_failure)?;
                 let authority = precommit_source_check().await?;
                 context.revalidate().map_err(fence_failure)?;
+                lexical_binding::verify(&directory, &lexical).map_err(failure)?;
                 let predicate = format!(
                     "page_id = {}",
                     sql_string(prepared.operation.checkpoint().page_id())
@@ -605,7 +713,11 @@ impl GuardedChunkTable {
                 // No detached maintenance: serialization extends to the end of
                 // both index families' real on-disk mutations.
                 current
-                    .ensure_fts_index(&FtsIndexConfig::default())
+                    .ensure_fts_index(&if lexical.is_some() {
+                        FtsIndexConfig::lexical_expansion_v1()
+                    } else {
+                        FtsIndexConfig::default()
+                    })
                     .await
                     .map_err(failure)?;
                 current.optimize_fts_index().await.map_err(failure)?;

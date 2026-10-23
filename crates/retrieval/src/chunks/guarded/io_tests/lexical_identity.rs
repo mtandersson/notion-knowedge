@@ -1,0 +1,218 @@
+use super::*;
+use crate::chunks::{
+    FtsIndexConfig,
+    lexical_binding::{self, LexicalIndexBinding, LexicalPlanIdentity},
+};
+
+fn dictionary() -> crate::lexical_dictionary::Dictionary {
+    crate::lexical_dictionary::tests::dictionary(&[("cinnamon", "kanel")])
+}
+fn enabled(
+    f: &Fixture,
+    plan: &LexicalPlanIdentity,
+) -> Result<GuardedChunkTable, crate::chunks::ChunkTableError> {
+    GuardedChunkTable::bind_with_lexical_plan(
+        &f.index,
+        "chunks",
+        f.embedding.clone(),
+        f.coordinator.clone(),
+        plan,
+    )
+}
+// Explicit test-only fixture installation. Production has no stamping API; the
+// later offline candidate builder must verify all unchanged rows and vectors.
+async fn install(f: &Fixture, plan: LexicalPlanIdentity) -> Vec<u8> {
+    let binding = LexicalIndexBinding::for_candidate(
+        &f.index,
+        f.embedding.clone(),
+        f.coordinator.binding(),
+        plan,
+        &"a".repeat(64),
+    )
+    .unwrap();
+    let bytes = binding.canonical_bytes().unwrap();
+    let path = f.index.join(lexical_binding::FILE);
+    let copy = bytes.clone();
+    let index = f.index.clone();
+    let embedding = f.embedding.clone();
+    f.coordinator
+        .maintain(f.lease.clone(), clock(), move |_| async move {
+            let table = LanceChunkTable::open(&index, "chunks", embedding)
+                .await
+                .map_err(|_| FailureClass::Index)?;
+            table
+                .rebuild_fts_index(&FtsIndexConfig::lexical_expansion_v1())
+                .await
+                .map_err(|_| FailureClass::Index)?;
+            fs::write(path, copy).unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    bytes
+}
+
+#[tokio::test]
+async fn lexical_identity_requires_explicit_binding_without_runtime_stamping() {
+    let f = Fixture::new();
+    f.create().await;
+    let dictionary = dictionary();
+    let plan = LexicalPlanIdentity::verified(&dictionary).unwrap();
+    let raw = f.guarded();
+    assert!(enabled(&f, &plan).is_err());
+    assert!(!f.index.join(lexical_binding::FILE).exists());
+    let provider = CountingProvider::new(f.embedding.clone());
+    let before = raw
+        .prepare_page(
+            &provider,
+            operation("before", "before", false),
+            &[chunk("one", "cinnamon", "Spice")],
+        )
+        .await
+        .unwrap();
+    let bytes = install(&f, plan.clone()).await;
+    assert!(
+        GuardedChunkTable::bind(
+            &f.index,
+            "chunks",
+            f.embedding.clone(),
+            f.coordinator.clone()
+        )
+        .is_err()
+    );
+    assert!(raw.page_chunks("page").await.is_err());
+    assert!(
+        raw.prepare_page(&provider, operation("stale", "stale", false), &[])
+            .await
+            .is_err()
+    );
+    let current = enabled(&f, &plan).unwrap();
+    assert!(current.page_chunks("page").await.unwrap().is_empty());
+    // New coordinator/process-equivalent open retains the trusted physical and
+    // operational authority; binding is read/validated, never recreated.
+    let reopened = IndexCommitCoordinator::open(
+        &f.index,
+        f.root.join("state.sqlite"),
+        f.coordinator.binding().clone(),
+    )
+    .unwrap();
+    let restarted = GuardedChunkTable::bind_with_lexical_plan(
+        &f.index,
+        "chunks",
+        f.embedding.clone(),
+        reopened,
+        &plan,
+    )
+    .unwrap();
+    assert!(restarted.page_chunks("page").await.unwrap().is_empty());
+    assert_eq!(
+        fs::read(f.index.join(lexical_binding::FILE)).unwrap(),
+        bytes
+    );
+    assert!(
+        raw.commit_page(before, f.lease.clone(), clock(), || async {
+            panic!("stale preparation must fail before source effects")
+        })
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn lexical_identity_rejects_changed_plan_authority_storage_and_physical_metadata() {
+    let f = Fixture::new();
+    f.create().await;
+    let plan = LexicalPlanIdentity::verified(&dictionary()).unwrap();
+    let bytes = install(&f, plan.clone()).await;
+    let current = enabled(&f, &plan).unwrap();
+    let path = f.index.join(lexical_binding::FILE);
+    let other = crate::lexical_dictionary::tests::dictionary(&[("pepper", "peppar")]);
+    assert!(enabled(&f, &LexicalPlanIdentity::verified(&other).unwrap()).is_err());
+    // Canonically serialize each mismatch so rejection tests semantic identity,
+    // not merely JSON whitespace/order validation.
+    for field in [
+        "version",
+        "workspace",
+        "roots",
+        "scope",
+        "generation",
+        "epoch",
+        "device",
+        "inode",
+        "table",
+        "source_snapshot_sha256",
+        "embedding",
+        "storage",
+        "plan",
+    ] {
+        let mut wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        match field {
+            "version" | "epoch" | "device" | "inode" => {
+                wire[field] = serde_json::json!(wire[field].as_u64().unwrap() + 1)
+            }
+            "roots" => wire[field] = serde_json::json!(["other-root"]),
+            "embedding" => wire[field]["model_version"] = serde_json::json!("other-model"),
+            "storage" => wire[field]["profile"]["with_positions"] = serde_json::json!(false),
+            "plan" => wire[field]["asset_sha256"] = serde_json::json!("b".repeat(64)),
+            "source_snapshot_sha256" => wire[field] = serde_json::json!("invalid"),
+            _ => wire[field] = serde_json::json!("mismatch"),
+        }
+        let changed: LexicalIndexBinding = serde_json::from_value(wire).unwrap();
+        fs::write(&path, changed.canonical_bytes().unwrap()).unwrap();
+        assert!(enabled(&f, &plan).is_err(), "{field}");
+        assert!(current.page_chunks("page").await.is_err(), "{field}");
+    }
+    fs::write(&path, &bytes).unwrap();
+    let provider = CountingProvider::new(f.embedding.clone());
+    let prepared = current
+        .prepare_page(
+            &provider,
+            operation("prepared", "prepared", false),
+            &[chunk("one", "cinnamon", "Spice")],
+        )
+        .await
+        .unwrap();
+    fs::remove_file(&path).unwrap();
+    assert!(enabled(&f, &plan).is_err());
+    assert!(current.page_chunks("page").await.is_err());
+    assert!(
+        current
+            .commit_page(prepared, f.lease.clone(), clock(), || async {
+                panic!("removed binding must fail before effects")
+            })
+            .await
+            .is_err()
+    );
+    assert!(
+        !path.exists(),
+        "reads/commits must not repair missing binding"
+    );
+}
+
+#[tokio::test]
+async fn lexical_identity_rejects_corruption_links_and_unbounded_metadata() {
+    let f = Fixture::new();
+    f.create().await;
+    let plan = LexicalPlanIdentity::verified(&dictionary()).unwrap();
+    let bytes = install(&f, plan.clone()).await;
+    let current = enabled(&f, &plan).unwrap();
+    let path = f.index.join(lexical_binding::FILE);
+    for invalid in [
+        b"{}".to_vec(),
+        [bytes.clone(), b"\n".to_vec()].concat(),
+        vec![b' '; 32769],
+    ] {
+        fs::write(&path, invalid).unwrap();
+        assert!(enabled(&f, &plan).is_err());
+        assert!(current.page_chunks("page").await.is_err());
+    }
+    fs::remove_file(&path).unwrap();
+    let target = f.root.join("binding");
+    fs::write(&target, &bytes).unwrap();
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    assert!(enabled(&f, &plan).is_err());
+    fs::remove_file(&path).unwrap();
+    fs::hard_link(&target, &path).unwrap();
+    assert!(enabled(&f, &plan).is_err());
+    assert_eq!(fs::read(&target).unwrap(), bytes);
+}

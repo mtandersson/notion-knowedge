@@ -37,6 +37,8 @@ use notion_knowledge_core::{
 };
 
 pub mod bounded;
+#[cfg(unix)]
+pub mod lexical_binding;
 
 #[cfg(unix)]
 mod guarded;
@@ -156,7 +158,8 @@ pub struct ChunkDiffMetrics {
     pub removed: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FtsIndexConfig {
     /// Token positions for opt-in literal dictionary phrase execution. Existing
     /// raw-only default stays false; changing this requires explicit rebuild.
