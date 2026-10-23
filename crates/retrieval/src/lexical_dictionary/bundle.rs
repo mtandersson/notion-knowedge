@@ -261,6 +261,7 @@ fn decode(bytes: &[u8], expected: &str) -> Result<Dictionary> {
     }
     Ok(Dictionary {
         edges: edges.into_boxed_slice(),
+        manifest_digest: expected.into(),
     })
 }
 impl Dictionary {

@@ -31,6 +31,13 @@ struct Edge {
 #[derive(Debug)]
 pub struct Dictionary {
     edges: Box<[Edge]>,
+    manifest_digest: Box<str>,
+}
+impl Dictionary {
+    /// Verified complete asset digest used by trusted binding and match evidence.
+    pub fn manifest_digest(&self) -> &str {
+        &self.manifest_digest
+    }
 }
 
 /// Public-asset provenance; generated text is for the native literal FTS executor.
@@ -210,9 +217,9 @@ impl Dictionary {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    fn dictionary(pairs: &[(&str, &str)]) -> Dictionary {
+    pub(crate) fn dictionary(pairs: &[(&str, &str)]) -> Dictionary {
         let mut edges = Vec::new();
         for (i, (source, target)) in pairs.iter().enumerate() {
             let source = literal(source).unwrap();
@@ -232,6 +239,7 @@ mod tests {
         edges.dedup_by(|a, b| a.source == b.source && a.target == b.target);
         Dictionary {
             edges: edges.into_boxed_slice(),
+            manifest_digest: "test-only-independent-dictionary".into(),
         }
     }
     fn texts(plan: &Plan) -> Vec<&str> {

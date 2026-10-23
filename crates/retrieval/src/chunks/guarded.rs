@@ -285,6 +285,9 @@ impl GuardedChunkTable {
             .coordinator
             .search_guard()
             .map_err(|_| ChunkTableError::InvalidPath)?;
+        self.open_search_snapshot().await
+    }
+    async fn open_search_snapshot(&self) -> Result<LanceChunkTable, ChunkTableError> {
         let current = open_current(&self.index_directory, &self.table_name, &self.embedding)
             .await?
             .read_snapshot()
@@ -319,6 +322,39 @@ impl GuardedChunkTable {
     /// metadata, stable identities and the old verified content fingerprints.
     /// This is local preparation input only, never source scope evidence.
     /// Read the union input from a pinned Lance snapshot, with no startup repair.
+    /// Execute under one directory/authority fence. Installation additionally
+    /// requires the versioned binding introduced by the explicit transition.
+    pub async fn expanded_lexical_search<C>(
+        &self,
+        query: LexicalQuery,
+        dictionary: &crate::lexical_dictionary::Dictionary,
+        pool: &super::bounded::CandidateBudget,
+        deadline: tokio::time::Instant,
+        cancel: C,
+    ) -> Result<super::bounded::BoundedLexicalResult, ChunkTableError>
+    where
+        C: Future<Output = ()> + Send,
+    {
+        let operation = async {
+            let _guard = self
+                .coordinator
+                .search_guard()
+                .map_err(|_| ChunkTableError::InvalidPath)?;
+            let snapshot = self.open_search_snapshot().await?;
+            let result = snapshot
+                .expanded_lexical_inner(query, dictionary, pool)
+                .await;
+            self.coordinator
+                .identities()
+                .map_err(|_| ChunkTableError::InvalidPath)?;
+            result
+        };
+        tokio::select! {biased;
+            _ = cancel => Err(ChunkTableError::InvalidRows("lexical request cancelled".into())),
+            _ = tokio::time::sleep_until(deadline) => Err(ChunkTableError::InvalidRows("lexical deadline exceeded".into())),
+            result = operation => result,
+        }
+    }
     pub async fn inventory_version(&self) -> Result<u64, ChunkTableError> {
         Ok(
             open_current(&self.index_directory, &self.table_name, &self.embedding)

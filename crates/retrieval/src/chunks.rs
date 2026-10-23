@@ -158,6 +158,9 @@ pub struct ChunkDiffMetrics {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FtsIndexConfig {
+    /// Token positions for opt-in literal dictionary phrase execution. Existing
+    /// raw-only default stays false; changing this requires explicit rebuild.
+    pub with_positions: bool,
     pub language: String,
     pub stem: bool,
     pub remove_stop_words: bool,
@@ -165,9 +168,18 @@ pub struct FtsIndexConfig {
     pub block_size: usize,
 }
 
+impl FtsIndexConfig {
+    pub fn lexical_expansion_v1() -> Self {
+        Self {
+            with_positions: true,
+            ..Self::default()
+        }
+    }
+}
 impl Default for FtsIndexConfig {
     fn default() -> Self {
         Self {
+            with_positions: false,
             language: "Swedish".into(),
             stem: true,
             remove_stop_words: true,
@@ -694,6 +706,7 @@ impl LanceChunkTable {
                 .map_err(|_| ChunkTableError::InvalidSchema("invalid FTS block size".into()))?
         } else {
             FtsIndexBuilder::default()
+                .with_position(config.with_positions)
                 .language(&config.language)
                 .map_err(|_| ChunkTableError::InvalidSchema("unsupported FTS language".into()))?
                 .stem(config.stem)
