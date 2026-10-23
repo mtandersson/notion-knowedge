@@ -168,8 +168,8 @@ class ContainerCachePublication(unittest.TestCase):
                           ',mode=max,timeout=10m,ignore-error=true', block)
             self.assertNotIn('continue-on-error:', block,
                              'Do not suppress Docker solve/build failures at the step level')
-            self.assertIn("head.repo.full_name == github.repository", block,
-                          'Keep existing fork cache-write isolation')
+            self.assertIn("if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'", block,
+                          'Docker cache export is main-only, including same-repository PRs')
 
         required = ('Build and load final runtime image',
                     'Load pinned builder for permission probe',
@@ -190,6 +190,31 @@ class ContainerCachePublication(unittest.TestCase):
 
     def test_cache_service_errors_are_optional_but_runtime_builds_are_not(self):
         self.check_contract(self.workflow)
+
+    def test_all_large_cache_writes_are_main_only(self):
+        # Four source-save steps cover check, build, clippy and the test matrix.
+        self.assertEqual(self.workflow.count(
+            "if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'"), 4)
+        # Builder, final and the cache publication report share the same rule.
+        container = self.workflow.split('\n  container:\n', 1)[1].split('\n  dependencies:\n', 1)[0]
+        self.assertEqual(container.count(
+            "if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'"), 3)
+        self.assertNotIn('github.event.pull_request.head.repo.full_name == github.repository',
+                         self.workflow)
+
+    def test_pr_cache_publication_regressions_are_rejected(self):
+        self.check_contract(self.workflow)
+        for mutation in (
+            self.workflow.replace(
+                "if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'",
+                "if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository", 1),
+            self.workflow.replace(
+                "if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'",
+                "if: success()", 1),
+        ):
+            with self.subTest(mutation=mutation != self.workflow):
+                with self.assertRaises(AssertionError):
+                    self.check_contract(mutation)
 
     def test_missing_export_tolerance_and_unconditional_tolerance_are_rejected(self):
         # Regression fixtures: removing cache-only tolerance or making required
