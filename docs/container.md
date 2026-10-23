@@ -67,6 +67,42 @@ files, keys, model weights, derived indexes, Git metadata and build outputs are
 excluded. When adding other required source assets, review the allowlist rather
 than broadening it to local runtime data.
 
+## Docker Rust dependency layers
+
+The Dockerfile uses pinned `cargo-chef 0.1.78` atop the same immutable
+Rust 1.98.1 toolchain. A planner sees the full allowlisted workspace, lockfile,
+and local Candle patch, and computes `recipe.json`. The builder then cooks
+the **locked release dependency graph for the exact server/webhook-worker
+feature set** before receiving the real application sources. Normal Rust
+source edits rerun the inexpensive recipe computation and final application
+compile without forcing a complete third-party recompile when the cook layer
+is available. A distinct `version-check` stage rejects a missing/mismatched
+VERSION **before installing cargo-chef or cooking dependencies**, so the two
+mandatory negative-version Docker builds in `smoke-container.py` do not spend
+the remaining CI runtime compiling a fresh dependency graph. This corrects
+the 45-minute timeout observed in [PR #488 run 39848108430](https://github.com/mtandersson/notion-knowedge/actions/runs/39848108430).
+The final real release build retains the original VERSION check as defense in depth. The vendored security patch is copied **before** the cook and
+again before the real build; changing that patch invalidates cached dependencies.
+
+The final executable is still built from the actual sources with
+`cargo build --release --locked -p notion-knowledge-server --features webhook-worker`.
+`ldd`, VERSION checks, image identity, non-root runtime, final-image indexing,
+transport/permission/health, and Compose smoke remain mandatory. The chef tool,
+protobuf compiler, and Cargo build output never enter the final distroless image;
+the disposable mount probe still uses the unchanged pinned Rust base.
+Changes to manifests, Cargo.lock, vendor code, cook flags, or toolchain can
+invalidate dependencies deliberately. A new Rust tool/toolchain stage requires
+an initial cold build and fresh cache exports, and GitHub cache eviction or
+cache-service errors can still cause another cold build.
+
+**Performance evidence requirement:** Compare distinct hosted runs with a
+real source edit and a second source edit that keeps manifests/lock/vendor
+unchanged. Capture `cargo chef cook` `CACHED` versus actual `Compiling`
+events, final binary build time, export time and size, and complete smoke/gate
+outcomes. A recipe's stability alone is not proof of a cache hit or speedup.
+See [#487](https://github.com/mtandersson/notion-knowedge/issues/487)
+for the new benchmark and prior [#185 cache-root investigation](docker-cache-causal-evidence.md).
+
 ## CI layer cache
 
 CI uses pinned Buildx/build-push actions to import GitHub Actions layers and
