@@ -172,11 +172,11 @@ async fn source_many(
     .with_safe_default_protocol_versions()
     .unwrap()
     .with_no_client_auth()
-        .with_single_cert(
-            vec![CertificateDer::from_pem_slice(certificate).unwrap()],
-            key,
-        )
-        .unwrap();
+    .with_single_cert(
+        vec![CertificateDer::from_pem_slice(certificate).unwrap()],
+        key,
+    )
+    .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let paths = Arc::new(Mutex::new(Vec::new()));
     let policy = DownloadPolicy::new(&["fixture.example"], maximum, Duration::from_secs(20))
