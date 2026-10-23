@@ -36,6 +36,8 @@ use notion_knowledge_core::{
     },
 };
 
+pub mod bounded;
+
 #[cfg(unix)]
 mod guarded;
 #[cfg(unix)]
@@ -156,6 +158,9 @@ pub struct ChunkDiffMetrics {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FtsIndexConfig {
+    /// Token positions for opt-in literal dictionary phrase execution. Existing
+    /// raw-only default stays false; changing this requires explicit rebuild.
+    pub with_positions: bool,
     pub language: String,
     pub stem: bool,
     pub remove_stop_words: bool,
@@ -163,9 +168,18 @@ pub struct FtsIndexConfig {
     pub block_size: usize,
 }
 
+impl FtsIndexConfig {
+    pub fn lexical_expansion_v1() -> Self {
+        Self {
+            with_positions: true,
+            ..Self::default()
+        }
+    }
+}
 impl Default for FtsIndexConfig {
     fn default() -> Self {
         Self {
+            with_positions: false,
             language: "Swedish".into(),
             stem: true,
             remove_stop_words: true,
@@ -692,6 +706,7 @@ impl LanceChunkTable {
                 .map_err(|_| ChunkTableError::InvalidSchema("invalid FTS block size".into()))?
         } else {
             FtsIndexBuilder::default()
+                .with_position(config.with_positions)
                 .language(&config.language)
                 .map_err(|_| ChunkTableError::InvalidSchema("unsupported FTS language".into()))?
                 .stem(config.stem)
@@ -1909,7 +1924,7 @@ mod tests {
 
     use super::*;
 
-    fn embedding(revision: &str, dimension: usize) -> EmbeddingMetadata {
+    pub(super) fn embedding(revision: &str, dimension: usize) -> EmbeddingMetadata {
         EmbeddingMetadata::new(
             "test-provider".into(),
             "test-model".into(),
@@ -1944,7 +1959,7 @@ mod tests {
         }
     }
 
-    fn temp_database(name: &str) -> PathBuf {
+    pub(super) fn temp_database(name: &str) -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time after epoch")
@@ -2009,7 +2024,12 @@ mod tests {
         value
     }
 
-    fn fts_chunk(page_id: &str, chunk_id: &str, title: &str, text: &str) -> IndexedChunk {
+    pub(super) fn fts_chunk(
+        page_id: &str,
+        chunk_id: &str,
+        title: &str,
+        text: &str,
+    ) -> IndexedChunk {
         let mut value = chunk("root", title, text);
         value.chunk_id = chunk_id.into();
         value.metadata.page_id = page_id.into();
