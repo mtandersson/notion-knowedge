@@ -640,9 +640,7 @@ impl notion_knowledge_mcp::upload::FileIngestion for OAuthService {
         Box<dyn std::future::Future<Output = Result<serde_json::Value, &'static str>> + Send + 'a>,
     > {
         Box::pin(async move {
-            use notion_knowledge_core::audit::{
-                AuditActor, AuditEvent, AuditOutcome, AuditStore, AuditTool,
-            };
+            use notion_knowledge_core::audit::{AuditActor, AuditOutcome};
             input
                 .validate_with_limit(self.factory.maximum_files)
                 .map_err(|_| "file_upload_invalid_input")?;
@@ -652,22 +650,16 @@ impl notion_knowledge_mcp::upload::FileIngestion for OAuthService {
             )
             .map_err(|_| "file_upload_audit_unavailable")?;
             let correlation = notion_knowledge_core::logging::CorrelationId::new();
-            let event = |outcome| {
-                AuditEvent::new(
-                    crate::webhook_worker::runtime::now_ms() / 1000,
-                    AuditActor::ApprovedUser,
-                    AuditTool::FileAttach,
-                    Some(input.target.clone()),
+            let record = |outcome| {
+                record_oauth_file_audit(
+                    &audit,
+                    &input.target,
+                    correlation.as_str(),
                     outcome,
-                    correlation.as_str().into(),
-                    None,
+                    || crate::webhook_worker::runtime::now_ms() / 1000,
                 )
-                .map_err(|_| "file_upload_audit_unavailable")
             };
-            let at = crate::webhook_worker::runtime::now_ms() / 1000;
-            audit
-                .record(&event(AuditOutcome::Attempted)?, at)
-                .map_err(|_| "file_upload_audit_unavailable")?;
+            record(AuditOutcome::Attempted)?;
             let begin = async {
                 #[cfg(test)]
                 if let Some(clock) = &self.factory.settings.source_clock {
@@ -697,9 +689,7 @@ impl notion_knowledge_mcp::upload::FileIngestion for OAuthService {
             let owner = match begin.await {
                 Ok(owner) => owner,
                 Err(_) => {
-                    audit
-                        .record(&event(AuditOutcome::Denied)?, at)
-                        .map_err(|_| "file_upload_audit_unavailable")?;
+                    record(AuditOutcome::Denied)?;
                     return Err("file_upload_denied");
                 }
             };
@@ -714,5 +704,122 @@ impl notion_knowledge_mcp::upload::FileIngestion for OAuthService {
             service.request_cancel = Some(self.authorization.cancellation());
             service.ingest(input, cancellation).await
         })
+    }
+}
+
+/// Each record gets one fresh trusted instant, shared by event construction and
+/// store validation. In particular, a terminal denial after an await must never
+/// reuse the earlier attempted event's timestamp.
+#[cfg(all(unix, feature = "webhook-worker"))]
+fn record_oauth_file_audit(
+    audit: &dyn notion_knowledge_core::audit::AuditStore,
+    target: &str,
+    correlation: &str,
+    outcome: notion_knowledge_core::audit::AuditOutcome,
+    clock: impl FnOnce() -> i64,
+) -> Result<(), &'static str> {
+    use notion_knowledge_core::audit::{AuditActor, AuditEvent, AuditTool};
+    let at = clock();
+    let event = AuditEvent::new(
+        at,
+        AuditActor::ApprovedUser,
+        AuditTool::FileAttach,
+        Some(target.into()),
+        outcome,
+        correlation.into(),
+        None,
+    )
+    .map_err(|_| "file_upload_audit_unavailable")?;
+    audit
+        .record(&event, at)
+        .map_err(|_| "file_upload_audit_unavailable")
+}
+
+#[cfg(all(test, unix, feature = "webhook-worker"))]
+mod audit_clock_tests {
+    use super::record_oauth_file_audit;
+    use notion_knowledge_core::audit::{
+        AuditActor, AuditEvent, AuditOutcome, AuditRetention, AuditStore, AuditTool,
+    };
+    use notion_knowledge_retrieval::audit::SqliteAuditStore;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    const TARGET: &str = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+    const CORRELATION: &str = "server-audit-clock-boundary";
+
+    #[test]
+    fn attempted_and_later_denied_records_each_use_one_fresh_trusted_instant() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("audit.sqlite");
+        let audit = SqliteAuditStore::open(&path, AuditRetention::days(1).unwrap()).unwrap();
+        // The clock advances a whole second on every sample. Separate reads for
+        // event creation/store validation would deterministically disagree.
+        let clock = AtomicI64::new(100);
+        record_oauth_file_audit(&audit, TARGET, CORRELATION, AuditOutcome::Attempted, || {
+            clock.fetch_add(1, Ordering::SeqCst)
+        })
+        .unwrap();
+        assert_eq!(clock.load(Ordering::SeqCst), 101);
+        // Represents elapsed authorization work; no wall time or sleeps needed.
+        clock.store(107, Ordering::SeqCst);
+        record_oauth_file_audit(&audit, TARGET, CORRELATION, AuditOutcome::Denied, || {
+            clock.fetch_add(1, Ordering::SeqCst)
+        })
+        .unwrap();
+        assert_eq!(clock.load(Ordering::SeqCst), 108);
+        let db = rusqlite::Connection::open(&path).unwrap();
+        let mut statement = db
+            .prepare("SELECT occurred_at_unix,outcome FROM agent_audit_events ORDER BY id")
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![(100, "attempted".into()), (107, "denied".into())]
+        );
+        // The real store's future-event rejection is deliberately unchanged.
+        let future = AuditEvent::new(
+            109,
+            AuditActor::ApprovedUser,
+            AuditTool::FileAttach,
+            Some(TARGET.into()),
+            AuditOutcome::Denied,
+            CORRELATION.into(),
+            None,
+        )
+        .unwrap();
+        assert!(audit.record(&future, 108).is_err());
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM agent_audit_events", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
+    #[test]
+    fn invalid_clock_or_unavailable_audit_storage_still_fails_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("audit.sqlite");
+        let audit = SqliteAuditStore::open(&path, AuditRetention::days(1).unwrap()).unwrap();
+        assert_eq!(
+            record_oauth_file_audit(&audit, TARGET, CORRELATION, AuditOutcome::Attempted, || -1),
+            Err("file_upload_audit_unavailable")
+        );
+        let db = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM agent_audit_events", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        db.execute_batch("DROP TABLE agent_audit_events").unwrap();
+        assert_eq!(
+            record_oauth_file_audit(&audit, TARGET, CORRELATION, AuditOutcome::Attempted, || 100),
+            Err("file_upload_audit_unavailable")
+        );
     }
 }
