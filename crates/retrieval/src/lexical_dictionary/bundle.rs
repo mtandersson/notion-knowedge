@@ -331,6 +331,7 @@ mod tests {
         let bytes = std::fs::read(&a).unwrap();
         assert_eq!(bytes, std::fs::read(&b).unwrap());
         let dictionary = Dictionary::load(&a, &first.sha256).unwrap();
+        assert_eq!(dictionary.manifest_digest(), first.sha256);
         assert!(dictionary.edges.len() > 100_000);
         assert!(Dictionary::load(&a, &"0".repeat(64)).is_err());
         assert!(prepare_archive(Path::new(&archive), &a).is_err()); // no overwrite
