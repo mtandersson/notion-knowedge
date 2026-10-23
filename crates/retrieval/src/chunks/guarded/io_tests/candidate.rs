@@ -155,6 +155,54 @@ fn offline_candidate_preserves_rows_vectors_pending_work_and_original_generation
         f.coordinator.state().status(&pending).unwrap(),
         Some(IndexStatus::Queued)
     );
+    // A wrong native FTS profile is incompatible even though source rows,
+    // vectors, exact-ID indices and the declared binding are unchanged.
+    runtime.block_on(async {
+        let binding = lexical_binding::read(&candidate).unwrap().unwrap();
+        let table = super::super::open_current(&candidate, "chunks", &f.embedding, &Some(binding))
+            .await
+            .unwrap();
+        table
+            .rebuild_fts_index(&crate::chunks::FtsIndexConfig::default())
+            .await
+            .unwrap();
+    });
+    assert!(
+        guarded
+            .verify_lexical_candidate(
+                &candidate,
+                &backup,
+                &next,
+                &dictionary,
+                12,
+                CandidateLimits::default()
+            )
+            .is_err()
+    );
+    runtime.block_on(async {
+        let binding = lexical_binding::read(&candidate).unwrap().unwrap();
+        let table = super::super::open_current(&candidate, "chunks", &f.embedding, &Some(binding))
+            .await
+            .unwrap();
+        table
+            .rebuild_fts_index(&crate::chunks::FtsIndexConfig::lexical_expansion_v1())
+            .await
+            .unwrap();
+    });
+    assert_eq!(
+        guarded
+            .verify_lexical_candidate(
+                &candidate,
+                &backup,
+                &next,
+                &dictionary,
+                12,
+                CandidateLimits::default()
+            )
+            .unwrap(),
+        prepared
+    );
+
     assert_eq!(fs::read(&backup).unwrap(), original);
     assert_eq!(fs::read(f.root.join("state.sqlite")).unwrap(), original);
     assert_eq!(f.coordinator.binding().generation(), "v1");
@@ -468,7 +516,7 @@ fn offline_process_fixture() -> Fixture {
 fn offline_candidate_process_child() {
     let root = PathBuf::from(std::env::var_os("NK_LEXICAL_PREP_TEST_ROOT").unwrap());
     let scope = ReconciliationScope::new(vec!["root".into()], vec![], "policy", "v1").unwrap();
-    let coordinator = IndexCommitCoordinator::open(
+    let coordinator = IndexCommitCoordinator::open_existing(
         root.join("index"),
         root.join("state.sqlite"),
         CommitBinding::new("chunks", "workspace", &scope, "v1", 1).unwrap(),
@@ -548,7 +596,7 @@ fn offline_candidate_process_interruption_never_activates_or_publishes_incomplet
                 .exists(),
             "{phase}"
         );
-        let reopened = IndexCommitCoordinator::open(
+        let reopened = IndexCommitCoordinator::open_existing(
             &f.index,
             f.root.join("state.sqlite"),
             f.coordinator.binding().clone(),
@@ -612,4 +660,114 @@ fn offline_candidate_process_interruption_never_activates_or_publishes_incomplet
             1
         );
     }
+}
+
+#[test]
+fn offline_candidate_native_preflight_rejects_oversized_persisted_rows_before_copy() {
+    let f = offline_process_fixture();
+    let table = runtime().block_on(f.readable());
+    runtime().block_on(async {
+        table.upsert(&f.embedding,&[crate::chunks::EmbeddedChunk::new(chunk("oversized",&"x".repeat(100_000),"Large source"),vec![1.0,1.0,0.0])]).await.unwrap();
+        let result=super::super::candidate::preflight_rows(&table,CandidateLimits::default()).await;
+        assert!(matches!(result,Err(crate::chunks::ChunkTableError::InvalidRows(message)) if message=="offline row exceeds preflight materialization budget"));
+    });
+    let source = crate::chunks::OfflineLexicalSource::bind(
+        &f.index,
+        "chunks",
+        f.embedding.clone(),
+        f.coordinator.clone(),
+    )
+    .unwrap();
+    let dictionary = crate::lexical_dictionary::tests::dictionary(&[("cinnamon", "kanel")]);
+    let candidate = f.root.join("candidate");
+    let backup = f.root.join("backup.sqlite");
+    assert!(
+        source
+            .prepare(
+                &candidate,
+                &backup,
+                &next_binding(),
+                &dictionary,
+                12,
+                CandidateLimits::default()
+            )
+            .is_err()
+    );
+    assert!(
+        !candidate.exists(),
+        "full source copy must not begin after rejected native metadata preflight"
+    );
+    assert!(backup.exists());
+}
+
+#[test]
+fn offline_candidate_rejects_backup_inside_candidate_before_creating_recovery_file() {
+    let f = offline_process_fixture();
+    let source = crate::chunks::OfflineLexicalSource::bind(
+        &f.index,
+        "chunks",
+        f.embedding.clone(),
+        f.coordinator.clone(),
+    )
+    .unwrap();
+    let dictionary = crate::lexical_dictionary::tests::dictionary(&[("cinnamon", "kanel")]);
+    let candidate = f.root.join("candidate");
+    fs::create_dir(&candidate).unwrap();
+    fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700)).unwrap();
+    let backup = candidate.join("recovery.sqlite");
+    assert_eq!(
+        source.prepare(
+            &candidate,
+            &backup,
+            &next_binding(),
+            &dictionary,
+            12,
+            CandidateLimits::default()
+        ),
+        Err(CommitError::InvalidInput)
+    );
+    assert!(!backup.exists());
+}
+
+#[test]
+fn offline_candidate_empty_source_has_verifiable_native_profiles_without_relabeling() {
+    let f = Fixture::new();
+    fs::set_permissions(&f.root, fs::Permissions::from_mode(0o700)).unwrap();
+    runtime().block_on(f.create());
+    f.coordinator.state().release_lease(&f.lease, 11).unwrap();
+    let source = crate::chunks::OfflineLexicalSource::bind(
+        &f.index,
+        "chunks",
+        f.embedding.clone(),
+        f.coordinator.clone(),
+    )
+    .unwrap();
+    let dictionary = crate::lexical_dictionary::tests::dictionary(&[("cinnamon", "kanel")]);
+    let candidate = f.root.join("candidate");
+    let backup = f.root.join("backup.sqlite");
+    let prepared = source
+        .prepare(
+            &candidate,
+            &backup,
+            &next_binding(),
+            &dictionary,
+            12,
+            CandidateLimits::default(),
+        )
+        .unwrap();
+    assert_eq!(prepared.rows, 0);
+    assert_eq!(
+        source
+            .verify(
+                &candidate,
+                &backup,
+                &next_binding(),
+                &dictionary,
+                12,
+                CandidateLimits::default()
+            )
+            .unwrap(),
+        prepared
+    );
+    assert_eq!(f.coordinator.binding().generation(), "v1");
 }

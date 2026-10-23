@@ -87,8 +87,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         &config.next_generation,
         config.next_epoch,
     )?;
-    let coordinator =
-        IndexCommitCoordinator::open(&config.index_directory, &config.state_file, current)?;
+    let coordinator = IndexCommitCoordinator::open_existing(
+        &config.index_directory,
+        &config.state_file,
+        current,
+    )?;
     let source = OfflineLexicalSource::bind(
         &config.index_directory,
         &config.table,

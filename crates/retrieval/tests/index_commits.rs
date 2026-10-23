@@ -944,3 +944,18 @@ fn offline_backup_rejects_live_lease_and_retains_verified_copy_after_preparation
     drop(reader);
     IndexCommitCoordinator::open(&fixture.index, &fixture.state, binding("v1", 1)).unwrap();
 }
+
+#[test]
+fn offline_backup_never_places_operational_state_inside_disposable_index() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    fs::set_permissions(&f.root, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&f.index, fs::Permissions::from_mode(0o700)).unwrap();
+    let coordinator = f.coordinator();
+    let backup = f.index.join("recovery.sqlite");
+    assert_eq!(
+        coordinator.with_offline_backup(&backup, 100, |_| Ok(())),
+        Err(CommitError::InvalidInput)
+    );
+    assert!(!backup.exists());
+}

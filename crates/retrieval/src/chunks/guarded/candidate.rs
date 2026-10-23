@@ -163,6 +163,31 @@ async fn verify_profile(table: &LanceChunkTable) -> Result<(), ChunkTableError> 
             return Err(bad());
         }
     }
+    for (name, column) in CHUNK_FTS_INDEXES {
+        let index = indices
+            .iter()
+            .find(|index| index.name == name)
+            .ok_or_else(bad)?;
+        let details = index.index_details.as_deref().ok_or_else(bad)?;
+        if details.len() > 16384 {
+            return Err(bad());
+        }
+        let actual: serde_json::Value = serde_json::from_str(details)?;
+        let mut expected = serde_json::to_value(fts_parameters(
+            column,
+            &FtsIndexConfig::lexical_expansion_v1(),
+        )?)?;
+        // Native scalar-string indices resolve document extraction to text.
+        // The stored physical settings omit logical row granularity, which is
+        // fixed by our exact scalar Utf8 schema (never a list/JSON document).
+        expected
+            .as_object_mut()
+            .ok_or_else(bad)?
+            .insert("lance_tokenizer".into(), serde_json::json!("text"));
+        if actual != expected {
+            return Err(bad());
+        }
+    }
     table.validate_vector_index_layout().await
 }
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), ChunkTableError> {
@@ -349,12 +374,73 @@ impl SnapshotDigest {
         format!("{:x}", hash.finalize())
     }
 }
+pub(super) async fn preflight_rows(
+    table: &LanceChunkTable,
+    limits: CandidateLimits,
+) -> Result<u64, ChunkTableError> {
+    const BATCH_ROWS: usize = 64;
+    let row_budget = limits.batch_bytes.checked_div(BATCH_ROWS).ok_or_else(bad)?;
+    let fixed = table
+        .embedding
+        .dimension()
+        .checked_mul(4)
+        .and_then(|n| n.checked_add(8192))
+        .ok_or_else(bad)?;
+    if fixed > row_budget {
+        return Err(bad());
+    }
+    let schema = chunk_schema(&table.embedding)?;
+    let lengths = schema
+        .fields()
+        .iter()
+        .filter(|field| field.data_type() == &DataType::Utf8)
+        .map(|field| format!("coalesce(CAST(char_length({}) AS BIGINT),0)", field.name()))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    let nulls = schema
+        .fields()
+        .iter()
+        .filter(|field| !field.is_nullable())
+        .map(|field| format!("{} IS NULL", field.name()))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let expression = format!("({nulls}) OR ((({lengths}) * 4 + {fixed}) > {row_budget})");
+    let mut options = QueryExecutionOptions::default();
+    options.max_batch_length = 64;
+    let count_limit =
+        usize::try_from(limits.rows.checked_add(1).ok_or_else(bad)?).map_err(|_| bad())?;
+    let mut stream = table
+        .table
+        .query()
+        .select(Select::Dynamic(vec![("_oversized".into(), expression)]))
+        .limit(count_limit)
+        .execute_with_options(options)
+        .await?;
+    let mut count = 0u64;
+    while let Some(batch) = stream.try_next().await? {
+        count = count.checked_add(batch.num_rows() as u64).ok_or_else(bad)?;
+        if count > limits.rows {
+            return Err(bad());
+        }
+        let overflow = batch
+            .column_by_name("_oversized")
+            .and_then(|column| column.as_any().downcast_ref::<arrow_array::BooleanArray>())
+            .ok_or_else(bad)?;
+        if overflow.null_count() != 0 || overflow.iter().flatten().any(|value| value) {
+            return Err(ChunkTableError::InvalidRows(
+                "offline row exceeds preflight materialization budget".into(),
+            ));
+        }
+    }
+    Ok(count)
+}
 async fn verify_rows(
     table: &LanceChunkTable,
     authority: &crate::commit::CommitBinding,
     limits: CandidateLimits,
     probe: bool,
 ) -> Result<SnapshotDigest, ChunkTableError> {
+    let preflight_count = preflight_rows(table, limits).await?;
     let mut options = QueryExecutionOptions::default();
     options.max_batch_length = 64;
     let mut stream = table.table.query().execute_with_options(options).await?;
@@ -410,7 +496,7 @@ async fn verify_rows(
             digest.row(&batch, row_index)?;
         }
     }
-    if digest.rows != table.table.count_rows(None).await? as u64 {
+    if digest.rows != preflight_count || digest.rows != table.table.count_rows(None).await? as u64 {
         return Err(bad());
     }
     Ok(digest)
@@ -512,6 +598,7 @@ impl GuardedChunkTable {
         limits: CandidateLimits,
     ) -> Result<PreparedLexicalCandidate, CommitError> {
         if tokio::runtime::Handle::try_current().is_ok()
+            || backup.starts_with(candidate)
             || limits.files == 0
             || limits.file_bytes == 0
             || limits.rows == 0
@@ -629,6 +716,7 @@ impl GuardedChunkTable {
                         preparation_checkpoint(candidate, "before-ready");
                         write_new(&candidate.join(READY), &serde_json::to_vec(&ready)?)?;
                         fs::File::open(candidate)?.sync_all()?;
+                        fs::File::open(candidate.parent().ok_or_else(bad)?)?.sync_all()?;
                         Ok::<_, ChunkTableError>(ready)
                     })
                     .map_err(|e| CommitError::Operation(failure(e)))

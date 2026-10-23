@@ -10,8 +10,9 @@ Stop the serving process and every index/operational writer before running it.
 The operation obtains the existing physical directory's exclusive advisory lock
 and an exclusive SQLite transaction for its entire lifetime. New guarded reads
 and writes cannot enter; live reconciliation or held-file leases reject the
-operation. Operational SQLite must be outside the derived directory, with a
-private owner directory. The old derived index stays in place. Grant stores,
+operation. Operational SQLite and its recovery backup must be outside both disposable
+derived directories, with private owner directories. The operator opens only
+existing authority; missing state is never initialized. The old derived index stays in place. Grant stores,
 write/idempotency ledgers, audits and source effects are never reset or replayed.
 Acknowledged pending refresh work remains byte-identical in the operational DB.
 
@@ -24,13 +25,16 @@ explicit Notion-authoritative normal rebuild/re-embedding path in that case.
 Changing persisted identity fields to force compatibility is not a rebuild.
 
 The derived directory is copied with regular-file/no-link checks and bounded
-streaming. Every source and copied row is validated against the same workspace,
+streaming. Before any full-row query, a bounded native length/null metadata
+projection checks the conservative UTF-8/vector/row envelope and total row cap. Every source and copied row is validated against the same workspace,
 roots, schema and embedding identity. Complete typed field bytes, original JSON
 source fields and exact f32 vector bits are compared by an order-independent
 multiset digest before and after rebuilding all four native FTS indexes. All
-stable page/chunk IDs receive native exact-ID probes. All copied and rebuilt
+stable page/chunk IDs receive native exact-ID probes. Verification compares the
+actual persisted native tokenizer/position/filter settings against the same
+approved parameter builder used to create the indexes. All copied and rebuilt
 files and directories are synced before publishing canonical binding and ready
-metadata. Source and operational identities are revalidated before publication.
+metadata; the sibling parent is synced before preparation reports success. Source and operational identities are revalidated before publication.
 
 The default limits are 100,000 filesystem entries, 32 directory levels, 128 GiB
 of files, one million rows, 16 MiB per returned Arrow batch, and 256 MiB of

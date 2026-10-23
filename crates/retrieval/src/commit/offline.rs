@@ -136,6 +136,11 @@ impl IndexCommitCoordinator {
             return Err(CommitError::InvalidInput);
         }
         private_parent(backup)?;
+        let backup_parent =
+            fs::canonicalize(backup.parent().ok_or(CommitError::InvalidInput)?).map_err(io)?;
+        if backup_parent.starts_with(&self.index_path) {
+            return Err(CommitError::InvalidInput);
+        }
         private_parent(&self.state_path)?;
         if self.state_path.starts_with(&self.index_path) {
             return Err(CommitError::InvalidInput);
