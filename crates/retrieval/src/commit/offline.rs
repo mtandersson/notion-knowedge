@@ -60,7 +60,64 @@ fn private_parent(path: &Path) -> Result<(), CommitError> {
     }
     Ok(())
 }
+impl OfflineBackup {
+    /// Verify a retained regular private recovery file without opening SQL writable.
+    pub fn verify(&self, path: &Path) -> Result<(), CommitError> {
+        private_parent(path)?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .map_err(io)?;
+        let metadata = file.metadata().map_err(io)?;
+        if !metadata.is_file()
+            || metadata.nlink() != 1
+            || metadata.mode() & 0o077 != 0
+            || metadata.len() != self.bytes
+        {
+            return Err(CommitError::BindingMismatch);
+        }
+        if hash_file(&mut file)? != *self {
+            return Err(CommitError::BindingMismatch);
+        }
+        Ok(())
+    }
+}
 impl IndexCommitCoordinator {
+    /// Read-only offline verification under the same index/SQL exclusion used
+    /// during preparation. No backup, schema migration, lease or receipt writes.
+    pub fn with_offline_inspection<T>(
+        &self,
+        now: i64,
+        inspect: impl FnOnce() -> Result<T, CommitError>,
+    ) -> Result<T, CommitError> {
+        if now < 0 {
+            return Err(CommitError::InvalidInput);
+        }
+        private_parent(&self.state_path)?;
+        if self.state_path.starts_with(&self.index_path) {
+            return Err(CommitError::InvalidInput);
+        }
+        let _index = self.try_acquire()?;
+        self.identities()?;
+        let mut db = self
+            .state
+            .lock_connection()
+            .map_err(|_| CommitError::Unavailable)?;
+        let transaction = db
+            .transaction_with_behavior(TransactionBehavior::Exclusive)
+            .map_err(sql)?;
+        self.validate_binding(&transaction)?;
+        let active: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM reconciliation_lease WHERE expires_at>?1) OR EXISTS(SELECT 1 FROM file_refresh_intents WHERE phase='held' AND lease_until>?1)", [now], |r|r.get(0)).map_err(sql)?;
+        if active {
+            return Err(CommitError::Conflict);
+        }
+        let result = inspect()?;
+        self.identities()?;
+        self.validate_binding(&transaction)?;
+        transaction.commit().map_err(sql)?;
+        Ok(result)
+    }
     /// Synchronous trusted offline boundary; caller must stop the serving runtime.
     /// A nonblocking exclusive index lock prevents new guarded reads/writes, and
     /// an exclusive SQLite transaction excludes all participating operational
@@ -80,6 +137,9 @@ impl IndexCommitCoordinator {
         }
         private_parent(backup)?;
         private_parent(&self.state_path)?;
+        if self.state_path.starts_with(&self.index_path) {
+            return Err(CommitError::InvalidInput);
+        }
         let _index = self.try_acquire()?;
         self.identities()?;
         let mut db = self

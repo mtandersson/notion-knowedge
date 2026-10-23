@@ -1,0 +1,129 @@
+# Offline lexical candidate preparation
+
+The `lexical-candidate` operator example prepares and verifies a **sibling**
+derived index. It never activates a generation, changes coordinator authority,
+renames the active directory, calls Notion, or loads credentials. Activation,
+interrupted-transition reconciliation and rollback remain #504. Production
+installation and complete quality measurement remain #492/#493.
+
+Stop the serving process and every index/operational writer before running it.
+The operation obtains the existing physical directory's exclusive advisory lock
+and an exclusive SQLite transaction for its entire lifetime. New guarded reads
+and writes cannot enter; live reconciliation or held-file leases reject the
+operation. Operational SQLite must be outside the derived directory, with a
+private owner directory. The old derived index stays in place. Grant stores,
+write/idempotency ledgers, audits and source effects are never reset or replayed.
+Acknowledged pending refresh work remains byte-identical in the operational DB.
+
+Preparation retains a create-new 0600 SQLite backup, verifies its complete digest
+and SQLite integrity under the exclusive rollback-journal transaction, and only
+then creates a private sibling directory. WAL databases are rejected by this
+backup protocol. Existing outputs are never overwritten. Reads and preparation
+fail closed on physical authority or schema/vector incompatibility; use the
+explicit Notion-authoritative normal rebuild/re-embedding path in that case.
+Changing persisted identity fields to force compatibility is not a rebuild.
+
+The derived directory is copied with regular-file/no-link checks and bounded
+streaming. Every source and copied row is validated against the same workspace,
+roots, schema and embedding identity. Complete typed field bytes, original JSON
+source fields and exact f32 vector bits are compared by an order-independent
+multiset digest before and after rebuilding all four native FTS indexes. All
+stable page/chunk IDs receive native exact-ID probes. All copied and rebuilt
+files and directories are synced before publishing canonical binding and ready
+metadata. Source and operational identities are revalidated before publication.
+
+The default limits are 100,000 filesystem entries, 32 directory levels, 128 GiB
+of files, one million rows, 16 MiB per returned Arrow batch, and 256 MiB of
+conservatively charged retained chunk identifiers. Limit exhaustion fails the
+whole preparation; it never publishes a partial ready generation. These are
+trusted offline bounds, independent of installed per-request retrieval budgets.
+
+`OfflineLexicalSource` is a source-only migration handle. It can read a prior
+plan/storage implementation digest only when the known schema, backend,
+tokenizer profile, embedding text contract, workspace/roots and physical
+coordinator generation remain compatible. It never executes the old plan and
+cannot serve searches or commit page writes. Normal runtime binding remains
+exact and rejects that older plan. New asset/plan versions follow the same
+candidate workflow; the new asset must load as an immutable verified bundle.
+
+## Operator commands
+
+Build the importer and candidate tool from the same checkout revision. Prepare
+and pin the public dictionary bundle as described in [lexical assets](lexical-assets.md).
+Use its actual SHA-256, and supply the existing trusted source identity in a
+local configuration file. The configured embedding identity must exactly match
+the table; no embedding provider runs during copying.
+
+```json
+{
+  "index_directory": "/private/nk/index",
+  "state_file": "/private/nk/operational.sqlite",
+  "table": "chunks",
+  "workspace": "configured-workspace-id",
+  "roots": ["configured-root-id"],
+  "exclusions": [],
+  "policy": "existing-policy-identity",
+  "scope_generation": "existing-scope-generation",
+  "generation": "existing-index-generation",
+  "epoch": 1,
+  "next_generation": "lexical-candidate-2",
+  "next_epoch": 2,
+  "embedding": {
+    "schema_version": "1",
+    "provider_id": "existing-provider",
+    "model_id": "existing-model",
+    "model_version": "existing-model-version",
+    "dimension": 1024
+  },
+  "asset": "/private/nk/eng-swe.bundle",
+  "asset_sha256": "replace-with-the-verified-bundle-sha256",
+  "candidate": "/private/nk/lexical-candidate-2",
+  "backup": "/private/nk/operational-before-lexical-2.sqlite"
+}
+```
+
+The candidate must be a new sibling of the active derived directory. Choose a
+fresh, never-used next generation and larger epoch. The configuration is local
+operator input and is never accepted from an MCP request.
+
+```sh
+nix develop .#spike --command cargo run -p notion-knowledge-retrieval \
+  --features local-lancedb --example lexical-candidate --locked --offline -- \
+  prepare /private/nk/lexical-preparation.json
+
+nix develop .#spike --command cargo run -p notion-knowledge-retrieval \
+  --features local-lancedb --example lexical-candidate --locked --offline -- \
+  verify /private/nk/lexical-preparation.json
+```
+
+`verify` is read-only under offline ownership: it reopens the ready marker,
+checks canonical binding/plan/physical authority and the actual retained backup,
+reopens the complete source/candidate rows and indexes, compares every vector and
+citation field again, and rejects changed/missing/corrupt state. A ready marker
+alone is not activation permission. Activation must revalidate under its own
+fence before admission; a successful earlier verification is not that fence.
+Output contains operational counts and digests, not source text or credentials.
+
+## Interrupted preparation
+
+Missing ready metadata means incomplete preparation. Keep the old index and
+retained backup; no new generation has been adopted. Inspect the incomplete
+sibling and retry with fresh candidate/backup names after recovering ownership.
+The tool never removes or overwrites recovery copies or incomplete siblings.
+Do not rename a candidate over the active directory or edit the coordinator
+binding manually. A corrupt ready candidate also remains unavailable; verification
+never repairs it or silently uses another generation.
+
+Real process tests terminate preparation before copy, after copy, and immediately
+before ready publication. They verify unchanged SQLite/backup bytes, rejection
+of the incomplete candidate, continued old-generation reads, and successful
+fresh preparation/verification. Separate process restart tests reopen completed
+candidates. Corruption tests cover missing/noncanonical ready metadata, changed
+assets/backups and actual vector mutation.
+
+```sh
+nix develop .#spike --command cargo test -p notion-knowledge-retrieval \
+  --features local-lancedb --lib offline_candidate --locked --offline
+nix develop .#spike --command cargo test -p notion-knowledge-retrieval \
+  --test index_commits offline_backup --locked --offline
+```

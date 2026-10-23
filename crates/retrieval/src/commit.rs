@@ -51,7 +51,7 @@ fn io(_: std::io::Error) -> CommitError {
 }
 
 /// Trusted operator configuration, never inferred from an incoming webhook.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CommitBinding {
     table: String,
     workspace: String,

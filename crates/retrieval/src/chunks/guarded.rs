@@ -17,7 +17,7 @@ mod candidate;
 use crate::commit::{
     CommitError, CommitOutcome, IndexCommitCoordinator, PageAction, PageOperation,
 };
-pub use candidate::{CandidateLimits, PreparedLexicalCandidate};
+pub use candidate::{CandidateLimits, OfflineLexicalSource, PreparedLexicalCandidate};
 use notion_knowledge_core::{
     embedding::{self, EmbeddingMetadata, EmbeddingProvider},
     indexed::IndexedChunk,

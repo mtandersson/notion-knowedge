@@ -35,13 +35,135 @@ impl Default for CandidateLimits {
 pub struct PreparedLexicalCandidate {
     pub version: u32,
     pub source_version: u64,
+    pub source_authority_sha256: String,
     pub rows: u64,
     pub snapshot_sha256: String,
     pub binding_sha256: String,
     pub backup: OfflineBackup,
 }
+/// Source-only offline handle. It cannot search, embed, prepare page writes, or
+/// commit; older plan binaries/assets are never executed or relabeled by it.
+pub struct OfflineLexicalSource {
+    table: GuardedChunkTable,
+}
+impl OfflineLexicalSource {
+    pub fn bind(
+        directory: &Path,
+        table_name: &str,
+        embedding: EmbeddingMetadata,
+        coordinator: Arc<IndexCommitCoordinator>,
+    ) -> Result<Self, ChunkTableError> {
+        validate_table_name(table_name)?;
+        let directory = fs::canonicalize(directory)?;
+        if directory != coordinator.index_directory() || table_name != coordinator.binding().table()
+        {
+            return Err(bad());
+        }
+        coordinator.identities().map_err(|_| bad())?;
+        chunk_schema(&embedding)?;
+        let lexical_binding = lexical_binding::read(&directory)?;
+        if let Some(binding) = &lexical_binding {
+            binding.validate_offline_source(&directory, &embedding, coordinator.binding())?;
+        }
+        coordinator.identities().map_err(|_| bad())?;
+        Ok(Self {
+            table: GuardedChunkTable {
+                index_directory: directory,
+                table_name: table_name.into(),
+                embedding,
+                coordinator,
+                lexical_binding,
+            },
+        })
+    }
+    pub fn prepare(
+        &self,
+        candidate: &Path,
+        backup: &Path,
+        next: &crate::commit::CommitBinding,
+        dictionary: &crate::lexical_dictionary::Dictionary,
+        now: i64,
+        limits: CandidateLimits,
+    ) -> Result<PreparedLexicalCandidate, CommitError> {
+        self.table
+            .prepare_lexical_candidate(candidate, backup, next, dictionary, now, limits)
+    }
+    pub fn verify(
+        &self,
+        candidate: &Path,
+        backup: &Path,
+        next: &crate::commit::CommitBinding,
+        dictionary: &crate::lexical_dictionary::Dictionary,
+        now: i64,
+        limits: CandidateLimits,
+    ) -> Result<PreparedLexicalCandidate, CommitError> {
+        self.table
+            .verify_lexical_candidate(candidate, backup, next, dictionary, now, limits)
+    }
+}
+// Child-process crash observations exist only in unit-test binaries. Production
+// builds have no environment switch, pause, or interruption injection.
+#[cfg(test)]
+fn preparation_checkpoint(candidate: &Path, phase: &str) {
+    let Some(root) = std::env::var_os("NK_LEXICAL_PREP_TEST_ROOT").map(PathBuf::from) else {
+        return;
+    };
+    if candidate.parent() != Some(root.as_path())
+        || std::env::var("NK_LEXICAL_PREP_TEST_PHASE").ok().as_deref() != Some(phase)
+    {
+        return;
+    }
+    fs::write(root.join("observed-phase"), phase).unwrap();
+    loop {
+        std::thread::park();
+    }
+}
 fn bad() -> ChunkTableError {
     ChunkTableError::InvalidRows("offline lexical candidate verification failed; authoritative rebuild required for incompatible source".into())
+}
+fn source_authority(table: &GuardedChunkTable) -> Result<String, ChunkTableError> {
+    let metadata = fs::metadata(&table.index_directory)?;
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&(
+            table.coordinator.binding(),
+            metadata.dev(),
+            metadata.ino()
+        ))?)
+    ))
+}
+fn read_ready(candidate: &Path) -> Result<(PreparedLexicalCandidate, Vec<u8>), ChunkTableError> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(candidate.join(READY))?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.nlink() != 1 || metadata.len() > 32768 {
+        return Err(bad());
+    }
+    let mut bytes = Vec::new();
+    file.take(32769).read_to_end(&mut bytes)?;
+    if bytes.len() > 32768 {
+        return Err(bad());
+    }
+    let ready: PreparedLexicalCandidate = serde_json::from_slice(&bytes)?;
+    if ready.version != 1 || ready.source_version == 0 || serde_json::to_vec(&ready)? != bytes {
+        return Err(bad());
+    }
+    Ok((ready, bytes))
+}
+async fn verify_profile(table: &LanceChunkTable) -> Result<(), ChunkTableError> {
+    let indices = table.table.list_indices().await?;
+    for (name, column) in CHUNK_FTS_INDEXES {
+        if !indices.iter().any(|index| {
+            index.name == name
+                && index.index_type == IndexType::FTS
+                && index.columns == vec![column.to_string()]
+        }) {
+            return Err(bad());
+        }
+    }
+    table.validate_vector_index_layout().await
 }
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), ChunkTableError> {
     let mut file = fs::OpenOptions::new()
@@ -117,6 +239,47 @@ fn copy_tree(
         }
     }
     fs::File::open(target)?.sync_all()?;
+    Ok(())
+}
+fn sync_tree(
+    path: &Path,
+    limits: CandidateLimits,
+    entries: &mut usize,
+    bytes: &mut u64,
+    depth: usize,
+) -> Result<(), ChunkTableError> {
+    if depth > 32 {
+        return Err(bad());
+    }
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        *entries = entries.checked_add(1).ok_or_else(bad)?;
+        if *entries > limits.files {
+            return Err(bad());
+        }
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.is_dir() {
+            sync_tree(&entry.path(), limits, entries, bytes, depth + 1)?;
+        } else if metadata.is_file() && metadata.nlink() == 1 {
+            *bytes = bytes.checked_add(metadata.len()).ok_or_else(bad)?;
+            if *bytes > limits.file_bytes {
+                return Err(bad());
+            }
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(entry.path())?;
+            let actual = file.metadata()?;
+            if !actual.is_file() || actual.dev() != metadata.dev() || actual.ino() != metadata.ino()
+            {
+                return Err(bad());
+            }
+            file.sync_all()?;
+        } else {
+            return Err(bad());
+        }
+    }
+    fs::File::open(path)?.sync_all()?;
     Ok(())
 }
 // Order-independent multiset digest: two 256-bit accumulators plus row count.
@@ -253,6 +416,89 @@ async fn verify_rows(
     Ok(digest)
 }
 impl GuardedChunkTable {
+    /// Reopen a completed sibling without repairs, under offline source
+    /// ownership. A returned manifest is evidence only while that ownership and
+    /// candidate immutability persist; activation must revalidate under its fence.
+    pub fn verify_lexical_candidate(
+        &self,
+        candidate: &Path,
+        backup: &Path,
+        next: &crate::commit::CommitBinding,
+        dictionary: &crate::lexical_dictionary::Dictionary,
+        now: i64,
+        limits: CandidateLimits,
+    ) -> Result<PreparedLexicalCandidate, CommitError> {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(CommitError::InvalidInput);
+        }
+        let plan =
+            LexicalPlanIdentity::verified(dictionary).map_err(|_| CommitError::BindingMismatch)?;
+        self.coordinator.with_offline_inspection(now, || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| CommitError::Unavailable)?;
+            runtime
+                .block_on(async {
+                    let (ready, ready_bytes) = read_ready(candidate)?;
+                    if ready.source_authority_sha256 != source_authority(self)? {
+                        return Err(bad());
+                    }
+                    ready.backup.verify(backup).map_err(|_| bad())?;
+                    let binding = lexical_binding::read(candidate)?.ok_or_else(bad)?;
+                    binding.validate(candidate, &self.embedding, next, &plan)?;
+                    if format!("{:x}", Sha256::digest(binding.canonical_bytes()?))
+                        != ready.binding_sha256
+                    {
+                        return Err(bad());
+                    }
+                    let source = open_current(
+                        &self.index_directory,
+                        &self.table_name,
+                        &self.embedding,
+                        &self.lexical_binding,
+                    )
+                    .await?
+                    .read_snapshot()
+                    .await?;
+                    if source.table.version().await? != ready.source_version {
+                        return Err(bad());
+                    }
+                    let old =
+                        verify_rows(&source, self.coordinator.binding(), limits, false).await?;
+                    let reopened = open_current(
+                        candidate,
+                        &self.table_name,
+                        &self.embedding,
+                        &Some(binding.clone()),
+                    )
+                    .await?
+                    .read_snapshot()
+                    .await?;
+                    let version = reopened.table.version().await?;
+                    verify_profile(&reopened).await?;
+                    let actual = verify_rows(&reopened, next, limits, true).await?;
+                    if actual.rows != ready.rows
+                        || actual.finish() != ready.snapshot_sha256
+                        || old.finish() != ready.snapshot_sha256
+                    {
+                        return Err(bad());
+                    }
+                    lexical_binding::verify(candidate, &Some(binding.clone()))?;
+                    let fresh =
+                        open_current(candidate, &self.table_name, &self.embedding, &Some(binding))
+                            .await?;
+                    if fresh.table.version().await? != version
+                        || read_ready(candidate)?.1 != ready_bytes
+                    {
+                        return Err(bad());
+                    }
+                    ready.backup.verify(backup).map_err(|_| bad())?;
+                    Ok::<_, ChunkTableError>(ready)
+                })
+                .map_err(|e| CommitError::Operation(failure(e)))
+        })
+    }
     /// Run outside a Tokio runtime, after stopping the serving process. Retains
     /// verified operational backup and old index; failed siblings have no READY
     /// marker and cannot be activated. This never changes current authority.
@@ -332,9 +578,13 @@ impl GuardedChunkTable {
                         .await?;
                         let source_version = source.table.version().await?;
                         let before = verify_rows(&source, old, limits, false).await?;
+                        #[cfg(test)]
+                        preparation_checkpoint(candidate, "before-copy");
                         fs::create_dir(candidate)?;
                         fs::set_permissions(candidate, fs::Permissions::from_mode(0o700))?;
                         copy_tree(&self.index_directory, candidate, limits, &mut 0, &mut 0, 0)?;
+                        #[cfg(test)]
+                        preparation_checkpoint(candidate, "after-copy");
                         let copied =
                             open_current(candidate, &self.table_name, &self.embedding, &None)
                                 .await?;
@@ -348,7 +598,7 @@ impl GuardedChunkTable {
                         let reopened =
                             open_current(candidate, &self.table_name, &self.embedding, &None)
                                 .await?;
-                        reopened.validate_vector_index_layout().await?;
+                        verify_profile(&reopened).await?;
                         let after = verify_rows(&reopened, old, limits, true).await?;
                         if before.finish() != after.finish() {
                             return Err(bad());
@@ -364,13 +614,19 @@ impl GuardedChunkTable {
                         let ready = PreparedLexicalCandidate {
                             version: 1,
                             source_version,
+                            source_authority_sha256: source_authority(self)?,
                             rows: before.rows,
                             snapshot_sha256: before.finish(),
                             binding_sha256: format!("{:x}", Sha256::digest(&binding_bytes)),
                             backup: verified.clone(),
                         };
+                        sync_tree(candidate, limits, &mut 0, &mut 0, 0)?;
+                        self.coordinator.identities().map_err(|_| bad())?;
+                        lexical_binding::verify(&self.index_directory, &self.lexical_binding)?;
                         write_new(&candidate.join(lexical_binding::FILE), &binding_bytes)?;
                         lexical_binding::verify(candidate, &Some(binding))?;
+                        #[cfg(test)]
+                        preparation_checkpoint(candidate, "before-ready");
                         write_new(&candidate.join(READY), &serde_json::to_vec(&ready)?)?;
                         fs::File::open(candidate)?.sync_all()?;
                         Ok::<_, ChunkTableError>(ready)
