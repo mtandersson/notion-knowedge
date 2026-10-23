@@ -128,15 +128,17 @@ PRs also restore compatible Cargo snapshots without publishing multi-gigabyte
 per-source PR snapshots. This reduces the shared GitHub Actions cache churn that
 can evict a working dependency-cook layer shortly after publication. It trades
 away same-PR upload reuse across repeated source edits; it does not guarantee
-retention if main updates or other caches still exceed the repository quota. For each
-builder export, the read-only local action selects the available own builder
+retention if main updates or other caches still exceed the repository quota.
+
+For each builder export, the read-only local action selects the available own builder
 index, otherwise the trusted main builder index, otherwise no remote import.
 The final-image solve selects own final, own builder, trusted main final,
 trusted main builder, then no remote import. A builder index can retain the
 compiler result even when its final-image index is evicted. It never configures
 overlapping logical cache sources in one solve. Lookup errors and eviction can cause a
 local rebuild; they never skip production checks. Forks can restore authorized
-main caches but never export. GitHub isolates PR writes to their merge ref.
+main caches but never export. Existing PR-scoped cache roots remain readable
+when authorized; new cache roots are published only from `main`.
 
 After all final-image smoke succeeds **on main**, CI exports the builder target to its own
 `-builder` scope and the final target to its own ordinary scope, both `mode=max`
