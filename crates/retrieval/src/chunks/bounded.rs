@@ -364,6 +364,16 @@ fn earliest(candidate: &LexicalCandidate) -> u8 {
         .min()
         .unwrap_or(0)
 }
+fn compare_candidates(a: &LexicalCandidate, b: &LexicalCandidate) -> std::cmp::Ordering {
+    b.hit
+        .score
+        .total_cmp(&a.hit.score)
+        .then_with(|| has_raw(b).cmp(&has_raw(a)))
+        .then_with(|| generated_count(a).cmp(&generated_count(b)))
+        .then_with(|| earliest(a).cmp(&earliest(b)))
+        .then_with(|| a.hit.source.page_id.cmp(&b.hit.source.page_id))
+        .then_with(|| a.hit.source.chunk_id.cmp(&b.hit.source.chunk_id))
+}
 fn merge_hit(
     best: &mut HashMap<(String, String), LexicalCandidate>,
     hit: FtsIndexHit,
@@ -410,6 +420,14 @@ fn merge_hit(
     }
     Ok(())
 }
+fn syntactic_identifier(query: &str) -> bool {
+    notion_knowledge_notion::pages::page_id(query).is_ok()
+        || query.strip_prefix("nk-chunk-v1:").is_some_and(|suffix| {
+            !suffix.is_empty()
+                && query.len() <= 128
+                && !suffix.chars().any(|c| c.is_whitespace() || c.is_control())
+        })
+}
 impl LanceChunkTable {
     /// Trusted internal execution primitive. Runtime installation/binding is
     /// deliberately separate. The caller's existing tool permit stays held;
@@ -445,7 +463,7 @@ impl LanceChunkTable {
             .await?;
         let limit = query.limit.saturating_mul(4).min(400);
         let mut best = HashMap::new();
-        let mut exact_identifier = false;
+        let mut exact_identifier = syntactic_identifier(query.query.trim());
         for (field, band) in [
             ("chunk_id", 4.0),
             ("page_id", 4.0),
@@ -518,16 +536,7 @@ impl LanceChunkTable {
         }
         let start = Instant::now();
         let mut candidates: Vec<_> = best.into_values().collect();
-        candidates.sort_by(|a, b| {
-            b.hit
-                .score
-                .total_cmp(&a.hit.score)
-                .then_with(|| has_raw(b).cmp(&has_raw(a)))
-                .then_with(|| generated_count(a).cmp(&generated_count(b)))
-                .then_with(|| earliest(a).cmp(&earliest(b)))
-                .then_with(|| a.hit.source.page_id.cmp(&b.hit.source.page_id))
-                .then_with(|| a.hit.source.chunk_id.cmp(&b.hit.source.chunk_id))
-        });
+        candidates.sort_by(compare_candidates);
         candidates.truncate(query.limit);
         reservation.account_cpu(start)?;
         Ok(BoundedLexicalResult {
@@ -650,7 +659,12 @@ mod execution_tests {
         let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
             .await
             .unwrap();
-        let mut excluded = fts_chunk("excluded", "excluded-chunk", "Hamn", "Får aldrig lämnas ut");
+        let mut excluded = fts_chunk(
+            "bbbbbbbb-bbbb-bbbb-cafe-bbbbbbbbbbbb",
+            "excluded-chunk",
+            "Hamn",
+            "Får aldrig lämnas ut",
+        );
         excluded.metadata.source.root_page_id = "private-root".into();
         let chunks = [
             fts_chunk(
@@ -665,6 +679,7 @@ mod execution_tests {
                 "Hamn",
                 "Original svensk text om båtar.",
             ),
+            fts_chunk("coffee", "coffee-chunk", "Kafé", "Originala kaffebetyg."),
             fts_chunk(
                 "phrase",
                 "phrase-chunk",
@@ -688,6 +703,7 @@ mod execution_tests {
         let dictionary = crate::lexical_dictionary::tests::dictionary(&[
             ("harbour", "hamn"),
             ("safe harbour", "skyddad hamn"),
+            ("cafe", "kafé"),
         ]);
         let pool = CandidateBudget::new(1).unwrap();
         // An old non-positioned index cannot complete a dictionary phrase
@@ -721,7 +737,7 @@ mod execution_tests {
             !forward
                 .candidates
                 .iter()
-                .any(|c| c.hit.source.page_id == "excluded")
+                .any(|c| c.hit.source.page_id == "bbbbbbbb-bbbb-bbbb-cafe-bbbbbbbbbbbb")
         );
         let reverse = run(&table, "hamn", &dictionary, &pool).await;
         assert!(
@@ -754,6 +770,20 @@ mod execution_tests {
                 .iter()
                 .any(|c| c.hit.source.page_id == "swedish")
         );
+        for identifier in [
+            "aaaaaaaa-aaaa-aaaa-cafe-aaaaaaaaaaaa",
+            "bbbbbbbb-bbbb-bbbb-cafe-bbbbbbbbbbbb",
+            "nk-chunk-v1:cafe",
+        ] {
+            let missing_or_excluded = run(&table, identifier, &dictionary, &pool).await;
+            assert_eq!(missing_or_excluded.planning.matched_units, 0);
+            assert!(!missing_or_excluded.candidates.iter().any(|candidate| {
+                candidate
+                    .matches
+                    .iter()
+                    .any(|e| matches!(e, LexicalMatch::LexicalDictionaryV1 { .. }))
+            }));
+        }
         let repeated = run(&table, "harbour", &dictionary, &pool).await;
         let ids = |r: &BoundedLexicalResult| {
             r.candidates
@@ -763,6 +793,31 @@ mod execution_tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(ids(&forward), ids(&repeated));
+        // Raw English candidates succeed first; a later translated title branch
+        // overflows metadata. No earlier partial result is returned.
+        let bad = fts_chunk(
+            "oversized-derived",
+            "oversized-derived-chunk",
+            &"hamn ".repeat(300),
+            "Original source",
+        );
+        table
+            .upsert(&metadata, &[EmbeddedChunk::new(bad, vec![1.0, 0.0, 0.0])])
+            .await
+            .unwrap();
+        table.optimize_fts_index().await.unwrap();
+        assert!(
+            table
+                .expanded_lexical_search(
+                    query("harbour"),
+                    &dictionary,
+                    &pool,
+                    tokio::time::Instant::now() + Duration::from_secs(30),
+                    std::future::pending()
+                )
+                .await
+                .is_err()
+        );
         drop(table);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -816,5 +871,227 @@ mod execution_tests {
         assert!(pool.try_reserve().is_ok());
         drop(table);
         std::fs::remove_dir_all(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::super::tests::{embedding, fts_chunk, temp_database};
+    use super::*;
+    use notion_knowledge_core::search_filters::{DateRange, PropertyFilter};
+    #[tokio::test]
+    async fn metadata_filters_precede_candidate_limits_and_phrase_checks_use_complete_source() {
+        let path = temp_database("expanded-metadata");
+        let embedding = embedding("expanded-metadata-v1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", embedding.clone())
+            .await
+            .unwrap();
+        let mut chunks = Vec::new();
+        for ordinal in 0..12 {
+            let mut chunk = fts_chunk(
+                &format!("wrong-{ordinal}"),
+                &format!("wrong-chunk-{ordinal}"),
+                "Harbour hamn",
+                "harbour hamn",
+            );
+            chunk.metadata.last_edited_time = "2025-01-01T00:00:00Z".into();
+            chunk
+                .metadata
+                .properties
+                .insert("state".into(), PropertyValue::Text("closed".into()));
+            chunks.push(chunk);
+        }
+        let mut allowed = fts_chunk(
+            "allowed",
+            "allowed-chunk",
+            "Pier notes",
+            "En hamn vid kusten.",
+        );
+        allowed
+            .metadata
+            .properties
+            .insert("state".into(), PropertyValue::Text("ready".into()));
+        chunks.push(allowed);
+        let mut oversized = fts_chunk("out-of-root", "out-of-root-chunk", "Harbour", "hamn");
+        oversized.metadata.source.root_page_id = "excluded-root".into();
+        oversized
+            .metadata
+            .properties
+            .insert("large".into(), PropertyValue::Text("x".repeat(5000)));
+        chunks.push(oversized.clone());
+        let long = fts_chunk(
+            "long-source",
+            "long-chunk",
+            "Late phrase",
+            &format!("{}safe harbour", "z ".repeat(1500)),
+        );
+        chunks.push(long);
+        let rows: Vec<_> = chunks
+            .into_iter()
+            .map(|c| EmbeddedChunk::new(c, vec![1.0, 0.0, 0.0]))
+            .collect();
+        table.upsert(&embedding, &rows).await.unwrap();
+        table
+            .rebuild_fts_index(&FtsIndexConfig::lexical_expansion_v1())
+            .await
+            .unwrap();
+        let dictionary = crate::lexical_dictionary::tests::dictionary(&[("harbour", "hamn")]);
+        let pool = CandidateBudget::new(1).unwrap();
+        let mut query = LexicalQuery {
+            query: "harbour".into(),
+            limit: 1,
+            page_ids: None,
+            root_page_ids: Some(vec!["root".into()]),
+            metadata: Default::default(),
+        };
+        query.metadata.edited = Some(DateRange {
+            from: Some("2026-01-01T00:00:00Z".into()),
+            until: None,
+        });
+        query.metadata.properties = Some(vec![PropertyFilter::Equals {
+            property_id: "state".into(),
+            value: PropertyValue::Text("ready".into()),
+        }]);
+        let result = table
+            .expanded_lexical_search(
+                query.clone(),
+                &dictionary,
+                &pool,
+                tokio::time::Instant::now() + Duration::from_secs(30),
+                std::future::pending(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(result.candidates[0].hit.source.page_id, "allowed");
+        let quote = LexicalQuery {
+            query: "\"safe harbour\"".into(),
+            limit: 1,
+            page_ids: Some(vec!["long-source".into()]),
+            root_page_ids: Some(vec!["root".into()]),
+            metadata: Default::default(),
+        };
+        let result = table
+            .expanded_lexical_search(
+                quote,
+                &dictionary,
+                &pool,
+                tokio::time::Instant::now() + Duration::from_secs(30),
+                std::future::pending(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(result.candidates[0].hit.source.page_id, "long-source");
+        assert_eq!(result.candidates[0].hit.text.chars().count(), 2000);
+        assert!(!result.candidates[0].hit.text.contains("harbour"));
+        oversized.metadata.source.root_page_id = "root".into();
+        table
+            .upsert(
+                &embedding,
+                &[EmbeddedChunk::new(oversized, vec![1.0, 0.0, 0.0])],
+            )
+            .await
+            .unwrap();
+        table.optimize_fts_index().await.unwrap();
+        assert!(
+            table
+                .expanded_lexical_search(
+                    query,
+                    &dictionary,
+                    &pool,
+                    tokio::time::Instant::now() + Duration::from_secs(30),
+                    std::future::pending()
+                )
+                .await
+                .is_err()
+        );
+        drop(table);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod ranking_tests {
+    use super::*;
+    fn hit(page: &str) -> FtsIndexHit {
+        FtsIndexHit {
+            page_id: page.into(),
+            chunk_id: format!("chunk-{page}"),
+            root_page_id: "root".into(),
+            block_id: None,
+            url: format!("https://example.invalid/{page}"),
+            title: "Original title".into(),
+            heading_path: vec![],
+            last_edited_time: "2026-10-01T00:00:00Z".into(),
+            text: "Original source text".into(),
+            score: 1.0,
+        }
+    }
+    fn derived(ordinal: u8) -> LexicalMatch {
+        LexicalMatch::LexicalDictionaryV1 {
+            manifest_digest: "public-asset-digest".into(),
+            field: "title".into(),
+            planner_ordinal: ordinal,
+        }
+    }
+    #[test]
+    fn equal_scores_prefer_raw_then_fewer_generated_queries_then_ordinal_and_ids() {
+        let mut best = HashMap::new();
+        merge_hit(
+            &mut best,
+            hit("z-raw"),
+            2.0,
+            LexicalMatch::Raw {
+                field: "title".into(),
+            },
+        )
+        .unwrap();
+        merge_hit(&mut best, hit("a-many"), 2.0, derived(0)).unwrap();
+        merge_hit(&mut best, hit("a-many"), 2.0, derived(1)).unwrap();
+        merge_hit(&mut best, hit("b-later"), 2.0, derived(1)).unwrap();
+        merge_hit(&mut best, hit("c-early"), 2.0, derived(0)).unwrap();
+        merge_hit(&mut best, hit("d-early"), 2.0, derived(0)).unwrap();
+        let mut candidates: Vec<_> = best.into_values().collect();
+        candidates.sort_by(compare_candidates);
+        let pages: Vec<_> = candidates
+            .iter()
+            .map(|c| c.hit.source.page_id.as_str())
+            .collect();
+        assert_eq!(pages, ["z-raw", "c-early", "d-early", "b-later", "a-many"]);
+        assert!(candidates.iter().all(|c| c.hit.score == 2.5));
+    }
+    #[test]
+    fn repeated_polysemous_evidence_never_adds_scores_or_replaces_source_citations() {
+        let mut best = HashMap::new();
+        merge_hit(&mut best, hit("source"), 2.0, derived(0)).unwrap();
+        merge_hit(&mut best, hit("source"), 2.0, derived(0)).unwrap();
+        merge_hit(&mut best, hit("source"), 2.0, derived(1)).unwrap();
+        merge_hit(
+            &mut best,
+            hit("source"),
+            1.0,
+            LexicalMatch::Raw {
+                field: "text".into(),
+            },
+        )
+        .unwrap();
+        let candidate = best.into_values().next().unwrap();
+        assert_eq!(candidate.hit.score, 2.5);
+        assert_eq!(candidate.matches.len(), 3);
+        assert_eq!(candidate.hit.text, "Original source text");
+        assert_eq!(candidate.hit.source.url, "https://example.invalid/source");
+        assert!(has_raw(&candidate));
+    }
+    #[test]
+    fn expansion_cpu_overflow_fails_and_releases_admission() {
+        let pool = CandidateBudget::new(1).unwrap();
+        let mut reservation = pool.try_reserve().unwrap();
+        let earlier = Instant::now()
+            .checked_sub(Duration::from_millis(51))
+            .unwrap();
+        assert!(reservation.account_cpu(earlier).is_err());
+        drop(reservation);
+        assert!(pool.try_reserve().is_ok());
     }
 }

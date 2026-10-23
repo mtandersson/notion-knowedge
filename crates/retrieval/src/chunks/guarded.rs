@@ -318,10 +318,6 @@ impl GuardedChunkTable {
             .map_err(|_| ChunkTableError::InvalidPath)?;
         Ok(current)
     }
-    /// Read persisted canonical chunks for one selected page, preserving
-    /// metadata, stable identities and the old verified content fingerprints.
-    /// This is local preparation input only, never source scope evidence.
-    /// Read the union input from a pinned Lance snapshot, with no startup repair.
     /// Execute under one directory/authority fence. Installation additionally
     /// requires the versioned binding introduced by the explicit transition.
     pub async fn expanded_lexical_search<C>(
@@ -355,6 +351,7 @@ impl GuardedChunkTable {
             result = operation => result,
         }
     }
+    /// Read the version of a pinned Lance inventory without startup repair.
     pub async fn inventory_version(&self) -> Result<u64, ChunkTableError> {
         Ok(
             open_current(&self.index_directory, &self.table_name, &self.embedding)
