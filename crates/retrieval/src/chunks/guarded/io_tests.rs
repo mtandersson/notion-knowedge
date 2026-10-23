@@ -734,7 +734,7 @@ fn failed_real_index_write_is_unacknowledged_and_new_fence_replay_repairs_search
     rt.block_on(async {
         // Read raw persisted rows through a preparation handle, whose opening
         // cannot perform startup repairs, proving apply preceded index failure.
-        let current = super::open_current(&f.index, "chunks", &f.embedding)
+        let current = super::open_current(&f.index, "chunks", &f.embedding, &None)
             .await
             .unwrap();
         assert_eq!(current.count_rows().await.unwrap(), 1);
@@ -1420,7 +1420,7 @@ async fn guarded_source_expansion_preserves_scope_budget_and_read_only_storage()
         .commit_page(prepared, f.lease.clone(), clock(), || async { Ok(()) })
         .await
         .unwrap();
-    let before = super::open_current(&f.index, "chunks", &f.embedding)
+    let before = super::open_current(&f.index, "chunks", &f.embedding, &None)
         .await
         .unwrap();
     let removed = super::CHUNK_FTS_INDEXES[0].0.to_owned();
@@ -1468,7 +1468,7 @@ async fn guarded_source_expansion_preserves_scope_budget_and_read_only_storage()
             .await,
         Err(SourceExpansionError::Missing)
     );
-    let after = super::open_current(&f.index, "chunks", &f.embedding)
+    let after = super::open_current(&f.index, "chunks", &f.embedding, &None)
         .await
         .unwrap();
     assert_eq!(after.table.version().await.unwrap(), version);
@@ -1674,3 +1674,5 @@ async fn guarded_index_maintenance_rechecks_lease_after_index_inspection_before_
         assert!(table.search_snapshot().await.is_err());
     }
 }
+
+mod lexical_identity;

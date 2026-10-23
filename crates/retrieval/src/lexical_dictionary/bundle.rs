@@ -55,6 +55,9 @@ fn identity() -> Identity {
         attribution: ATTRIBUTION.into(),
     }
 }
+pub(super) fn importer_identity_sha256() -> String {
+    sha256(&serde_json::to_vec(&identity()).expect("fixed importer identity serializes"))
+}
 /// Public reproducibility data, never corpus/query content. Persist the digest in
 /// trusted index binding; a digest supplied by a tool caller is not authority.
 #[derive(Debug, Serialize)]
