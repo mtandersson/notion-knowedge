@@ -164,8 +164,14 @@ async fn source_many(
             .to_vec()
             .into(),
     );
-    let tls = ServerConfig::builder()
-        .with_no_client_auth()
+    // Specify the crypto provider locally: feature-unified workspace tests can
+    // enable both aws-lc-rs and ring, so rustls cannot infer a global default.
+    let tls = ServerConfig::builder_with_provider(Arc::new(
+        tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
         .with_single_cert(
             vec![CertificateDer::from_pem_slice(certificate).unwrap()],
             key,
