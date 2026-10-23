@@ -124,6 +124,7 @@ async fn open_current(
     let table = builder.execute().await?;
     // Keep the reopened handle writable. Only preparation pins a read snapshot.
     validate_table_schema(&table, embedding).await?;
+    lexical_binding::verify(directory, lexical)?;
     Ok(LanceChunkTable {
         table,
         embedding: embedding.clone(),

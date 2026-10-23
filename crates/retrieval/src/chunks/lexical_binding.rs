@@ -214,5 +214,11 @@ pub(crate) fn verify(
     if &read(directory)? != expected {
         return Err(incompatible());
     }
+    if let Some(binding) = expected {
+        let metadata = std::fs::metadata(directory)?;
+        if metadata.dev() != binding.device || metadata.ino() != binding.inode {
+            return Err(incompatible());
+        }
+    }
     Ok(())
 }

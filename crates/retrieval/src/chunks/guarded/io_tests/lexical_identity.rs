@@ -216,3 +216,136 @@ async fn lexical_identity_rejects_corruption_links_and_unbounded_metadata() {
     assert!(enabled(&f, &plan).is_err());
     assert_eq!(fs::read(&target).unwrap(), bytes);
 }
+
+#[tokio::test]
+async fn lexical_identity_enabled_commit_and_bilingual_search_preserve_vectors_and_citations() {
+    use crate::chunks::bounded::{CandidateBudget, LexicalMatch};
+    use notion_knowledge_core::search::LexicalQuery;
+    let f = Fixture::new();
+    f.create().await;
+    let original = chunk("one", "cinnamon", "Spice");
+    let raw = f.guarded();
+    let provider = CountingProvider::new(f.embedding.clone());
+    let prepared = raw
+        .prepare_page(
+            &provider,
+            operation("seed", "seed", false),
+            &[original.clone()],
+        )
+        .await
+        .unwrap();
+    raw.commit_page(prepared, f.lease.clone(), clock(), || async { Ok(()) })
+        .await
+        .unwrap();
+    raw.ensure_vector_index(
+        VectorIndexConfig {
+            num_partitions: Some(1),
+            sample_rate: 8,
+            max_iterations: 20,
+            ..Default::default()
+        },
+        f.lease.clone(),
+        clock(),
+    )
+    .await
+    .unwrap();
+    let before = f
+        .readable()
+        .await
+        .rows_matching("true".into())
+        .await
+        .unwrap();
+    let dictionary = dictionary();
+    let plan = LexicalPlanIdentity::verified(&dictionary).unwrap();
+    install(&f, plan.clone()).await;
+    let table = enabled(&f, &plan).unwrap();
+    let unchanged = CountingProvider::new(f.embedding.clone());
+    let prepared = table
+        .prepare_page(
+            &unchanged,
+            operation("enabled", "enabled", false),
+            &[original.clone()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(prepared.metrics().skipped, 1);
+    assert_eq!(
+        unchanged.total(),
+        0,
+        "query expansion must not re-embed compatible chunks"
+    );
+    table
+        .commit_page(prepared, f.lease.clone(), clock(), || async { Ok(()) })
+        .await
+        .unwrap();
+    assert_eq!(
+        table.page_chunks("page").await.unwrap(),
+        vec![original.clone()]
+    );
+    let snapshot = table.search_snapshot().await.unwrap();
+    assert_eq!(snapshot.embedding_metadata(), &f.embedding);
+    let after = snapshot.rows_matching("true".into()).await.unwrap();
+    assert_eq!(before.len(), after.len());
+    assert_eq!(before[0].vector, after[0].vector);
+    let query = || LexicalQuery {
+        query: "kanel".into(),
+        limit: 5,
+        page_ids: None,
+        root_page_ids: Some(vec!["root".into()]),
+        metadata: Default::default(),
+    };
+    let pool = CandidateBudget::new(1).unwrap();
+    let results = table
+        .expanded_lexical_search(
+            query(),
+            &dictionary,
+            &pool,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(results.candidates.len(), 1);
+    let result = &results.candidates[0];
+    assert_eq!(result.hit.text, original.text);
+    assert_eq!(result.hit.source.page_id, original.metadata.page_id);
+    assert_eq!(result.hit.source.chunk_id, original.chunk_id);
+    assert_eq!(result.hit.source.url, original.metadata.url);
+    assert_eq!(result.hit.source.title, original.metadata.title);
+    assert_eq!(
+        result.hit.source.heading_path,
+        original.metadata.heading_path
+    );
+    assert_eq!(
+        result.hit.source.last_edited_time,
+        original.metadata.last_edited_time
+    );
+    assert!(result.matches.iter().any(|m| matches!(m, LexicalMatch::LexicalDictionaryV1 { manifest_digest, .. } if manifest_digest == dictionary.manifest_digest())));
+    let changed = crate::lexical_dictionary::tests::dictionary(&[("pepper", "peppar")]);
+    assert!(
+        table
+            .expanded_lexical_search(
+                query(),
+                &changed,
+                &pool,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+                std::future::pending()
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn lexical_identity_retained_handle_rejects_physical_directory_replacement() {
+    let f = Fixture::new();
+    f.create().await;
+    let plan = LexicalPlanIdentity::verified(&dictionary()).unwrap();
+    let bytes = install(&f, plan.clone()).await;
+    let table = enabled(&f, &plan).unwrap();
+    fs::rename(&f.index, f.root.join("old-index")).unwrap();
+    fs::create_dir(&f.index).unwrap();
+    fs::write(f.index.join(lexical_binding::FILE), bytes).unwrap();
+    assert!(table.page_chunks("page").await.is_err());
+    assert!(enabled(&f, &plan).is_err());
+}
