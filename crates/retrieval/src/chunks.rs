@@ -43,7 +43,9 @@ pub mod lexical_binding;
 #[cfg(unix)]
 mod guarded;
 #[cfg(unix)]
-pub use guarded::{GuardedChunkTable, PreparedPageMutation};
+pub use guarded::{
+    CandidateLimits, GuardedChunkTable, PreparedLexicalCandidate, PreparedPageMutation,
+};
 
 pub const CHUNK_TABLE_SCHEMA_VERSION: &str = "1";
 const CANONICAL_CHUNK_SCHEMA_VERSION: &str = "1";

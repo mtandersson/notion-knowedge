@@ -13,9 +13,11 @@ use std::{
 
 use super::lexical_binding::{self, LexicalIndexBinding, LexicalPlanIdentity};
 use super::*;
+mod candidate;
 use crate::commit::{
     CommitError, CommitOutcome, IndexCommitCoordinator, PageAction, PageOperation,
 };
+pub use candidate::{CandidateLimits, PreparedLexicalCandidate};
 use notion_knowledge_core::{
     embedding::{self, EmbeddingMetadata, EmbeddingProvider},
     indexed::IndexedChunk,
