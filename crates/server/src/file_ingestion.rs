@@ -17,6 +17,8 @@ pub struct Settings {
     pub retention: AuditRetention,
     #[cfg(test)]
     pub source_clock: Option<std::sync::Arc<dyn Fn() -> i64 + Send + Sync>>,
+    #[cfg(test)]
+    pub request_completion: Option<std::sync::Arc<tokio::sync::Notify>>,
 }
 impl std::fmt::Debug for Settings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -139,6 +141,8 @@ impl Settings {
             retention,
             #[cfg(test)]
             source_clock: None,
+            #[cfg(test)]
+            request_completion: None,
         }))
     }
 }
@@ -640,6 +644,9 @@ impl notion_knowledge_mcp::upload::FileIngestion for OAuthService {
         Box<dyn std::future::Future<Output = Result<serde_json::Value, &'static str>> + Send + 'a>,
     > {
         Box::pin(async move {
+            #[cfg(test)]
+            let _completion =
+                FileRequestCompletion(self.factory.settings.request_completion.clone());
             use notion_knowledge_core::audit::{AuditActor, AuditOutcome};
             input
                 .validate_with_limit(self.factory.maximum_files)
@@ -821,5 +828,18 @@ mod audit_clock_tests {
             record_oauth_file_audit(&audit, TARGET, CORRELATION, AuditOutcome::Attempted, || 100),
             Err("file_upload_audit_unavailable")
         );
+    }
+}
+
+// Test-only lifetime observation, never a production wait or cleanup mechanism.
+// It fires when the actual request future completes or is dropped/cancelled.
+#[cfg(all(test, unix, feature = "webhook-worker"))]
+struct FileRequestCompletion(Option<std::sync::Arc<tokio::sync::Notify>>);
+#[cfg(all(test, unix, feature = "webhook-worker"))]
+impl Drop for FileRequestCompletion {
+    fn drop(&mut self) {
+        if let Some(completion) = &self.0 {
+            completion.notify_one();
+        }
     }
 }

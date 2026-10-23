@@ -38,6 +38,7 @@ struct Source {
     pause: Arc<AtomicBool>,
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Semaphore>,
+    completed: Arc<tokio::sync::Notify>,
 }
 impl Drop for Source {
     fn drop(&mut self) {
@@ -127,12 +128,35 @@ impl Source {
             pause,
             entered,
             release,
+            completed: Arc::new(tokio::sync::Notify::new()),
         }
     }
-    fn cleaned(&self) {
+    async fn cleaned(&self) {
+        await_temporary_cleanup(&self.paths, Duration::from_secs(5))
+            .await
+            .expect("request-owned temporary files did not finish cleanup");
         assert!(self.paths.lock().unwrap().iter().all(|path| !path.exists()));
     }
 }
+
+// Observing a completed fake-provider effect does not prove its client future
+// has resumed and dropped the request file. Wait for the actual cleanup state,
+// without sleeping, deleting files, or hiding a retained-file leak.
+async fn await_temporary_cleanup(
+    paths: &Mutex<Vec<std::path::PathBuf>>,
+    deadline: Duration,
+) -> Result<(), tokio::time::error::Elapsed> {
+    tokio::time::timeout(deadline, async {
+        loop {
+            if paths.lock().unwrap().iter().all(|path| !path.exists()) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+}
+
 struct Model {
     inner: Arc<dyn EmbeddingProvider>,
     fail: AtomicBool,
@@ -188,6 +212,7 @@ fn settings(h: &Harness, seed: &content_index::Seeded, source: &Source) -> Confi
     );
     let mut settings = Config::from_lookup(|key| values.get(key).map(Into::into)).unwrap();
     settings.file_ingestion.as_mut().unwrap().download = source.policy.clone();
+    settings.file_ingestion.as_mut().unwrap().request_completion = Some(source.completed.clone());
     settings
 }
 struct Installed {
@@ -426,7 +451,7 @@ async fn shipping_http_native_image_file_multipart_and_refresh_restart_retry_pre
     assert_eq!(h.files.completed.load(Ordering::SeqCst), 1);
     assert_eq!(h.files.attached.load(Ordering::SeqCst), 3);
     assert_eq!(source.count.load(Ordering::SeqCst), 3);
-    source.cleaned();
+    source.cleaned().await;
     let audit = rusqlite::Connection::open(h._dir.path().join("file-audit.sqlite")).unwrap();
     assert_eq!(
         audit
@@ -519,7 +544,7 @@ async fn installed_file_authority_and_url_denials_never_download_or_mutate() {
     assert_eq!(source.count.load(Ordering::SeqCst), 0);
     assert_eq!(h.files.created.load(Ordering::SeqCst), 0);
     assert_eq!(h.files.attached.load(Ordering::SeqCst), 0);
-    source.cleaned();
+    source.cleaned().await;
     installed.stop().await;
 }
 
@@ -627,7 +652,7 @@ async fn installed_cancelled_download_retains_orphan_and_configured_operator_rec
     assert_eq!(h.files.created.load(Ordering::SeqCst), 0);
     assert_eq!(h.files.attached.load(Ordering::SeqCst), 0);
     assert_eq!(source.count.load(Ordering::SeqCst), 1);
-    source.cleaned();
+    source.cleaned().await;
     installed.stop().await;
     h.approved_code().await;
     let reads = h.page_reads.load(Ordering::SeqCst);
@@ -727,6 +752,12 @@ async fn installed_inflight_attachment_loss_retains_uncertainty_and_never_attemp
                 source.count.load(Ordering::SeqCst)
             )
         });
+        // Provider visibility alone is not request quiescence. Observe actual
+        // future completion/drop before asserting cleanup and final counters.
+        tokio::time::timeout(Duration::from_secs(5), source.completed.notified())
+            .await
+            .expect("file request did not finish after invalidation");
+        source.cleaned().await;
         assert_eq!(h.files.created.load(Ordering::SeqCst), 1, "{invalidation}");
         assert_eq!(h.files.sent.load(Ordering::SeqCst), 1);
         assert_eq!(h.files.attached.load(Ordering::SeqCst), 1);
@@ -743,7 +774,6 @@ async fn installed_inflight_attachment_loss_retains_uncertainty_and_never_attemp
             held, 1,
             "accepted effect must not be falsely completed: {invalidation}"
         );
-        source.cleaned();
         installed.stop().await;
     }
 }
@@ -785,7 +815,7 @@ async fn installed_partial_batch_preserves_verified_source_and_quarantines_uploa
     assert_eq!(h.files.created.load(Ordering::SeqCst), 2);
     assert_eq!(h.files.sent.load(Ordering::SeqCst), 2);
     assert_eq!(h.files.attached.load(Ordering::SeqCst), 1);
-    source.cleaned();
+    source.cleaned().await;
     installed.stop().await;
 }
 
@@ -900,4 +930,39 @@ async fn installed_oauth_files_remain_absent_without_explicit_opt_in() {
     assert_eq!(source.count.load(Ordering::SeqCst), 0);
     assert_eq!(h.files.created.load(Ordering::SeqCst), 0);
     installed.stop().await;
+}
+
+#[tokio::test]
+async fn cleanup_completion_waits_for_real_request_file_drop() {
+    use std::future::Future;
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let path = file.path().to_owned();
+    let paths = Mutex::new(vec![path.clone()]);
+    let mut completion = Box::pin(await_temporary_cleanup(&paths, Duration::from_secs(5)));
+    std::future::poll_fn(|context| {
+        assert!(completion.as_mut().poll(context).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert!(path.exists());
+    drop(file); // Real NamedTempFile RAII cleanup, as in the downloaded owner.
+    completion.await.unwrap();
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn cleanup_deadline_reports_retained_file_without_removing_it() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let path = file.path().to_owned();
+    let paths = Mutex::new(vec![path.clone()]);
+    assert!(
+        await_temporary_cleanup(&paths, Duration::ZERO)
+            .await
+            .is_err()
+    );
+    assert!(
+        path.exists(),
+        "the observer must never perform cleanup itself"
+    );
+    drop(file);
 }
