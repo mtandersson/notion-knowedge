@@ -149,8 +149,11 @@ jobs:
         run: nix develop .#spike --command cargo clippy -p notion-knowledge-retrieval --all-targets --features local-lancedb --locked -- -D warnings
 
 
+      # Only protected main refreshes multi-GB Cargo snapshots. PRs still
+      # restore compatible main snapshots; per-source PR uploads can evict the
+      # shared Docker compile roots under the Actions cache quota.
       - name: Save successful refreshed Cargo caches
-        if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: ./.github/actions/cargo-cache-save
         with:
           key: ${{ steps.cargo-cache.outputs.key }}
@@ -186,8 +189,11 @@ jobs:
       - name: Run cargo check
         run: nix develop --command cargo check --workspace --all-targets --locked
 
+      # Only protected main refreshes multi-GB Cargo snapshots. PRs still
+      # restore compatible main snapshots; per-source PR uploads can evict the
+      # shared Docker compile roots under the Actions cache quota.
       - name: Save successful refreshed Cargo caches
-        if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: ./.github/actions/cargo-cache-save
         with:
           key: ${{ steps.cargo-cache.outputs.key }}
@@ -256,8 +262,11 @@ jobs:
           du -h --max-depth=2 target/debug
           find target/debug -type f -printf '%s %p\n' | sort -nr | sed -n '1,20p'
 
+      # Only protected main refreshes multi-GB Cargo snapshots. PRs still
+      # restore compatible main snapshots; per-source PR uploads can evict the
+      # shared Docker compile roots under the Actions cache quota.
       - name: Save successful refreshed Cargo caches
-        if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: ./.github/actions/cargo-cache-save
         with:
           key: ${{ steps.cargo-cache.outputs.key }}
@@ -309,8 +318,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      # Only protected main refreshes multi-GB Cargo snapshots. PRs still
+      # restore compatible main snapshots; per-source PR uploads can evict the
+      # shared Docker compile roots under the Actions cache quota.
       - name: Save successful refreshed Cargo caches
-        if: success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: ./.github/actions/cargo-cache-save
         with:
           key: ${{ steps.cargo-cache.outputs.key }}
@@ -395,9 +407,12 @@ jobs:
           docker tag notion-knowledge:smoke notion-knowledge:local
           python3 scripts/smoke-compose.py --prebuilt
 
+      # PRs may read trusted main caches but must not publish large per-PR
+      # Docker roots. GitHub's shared cache quota can otherwise evict main's
+      # expensive cargo-chef cook layers within minutes.
       # Keep compilation as an export root; a cached final image can skip it.
       - name: Export verified builder root
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -410,7 +425,7 @@ jobs:
       # Export only after all final-image interactions pass. PR caches are
       # isolated by GitHub's merge-ref scope and cannot poison main restores.
       - name: Export verified final image graph
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -426,7 +441,7 @@ jobs:
       # BuildKit keeps export failures in the action logs while the backend's
       # ignore-error flag prevents transient cache-service failures from failing CI.
       - name: Report optional cache publication
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         run: |
           {
             echo '### Optional Docker cache publication'
