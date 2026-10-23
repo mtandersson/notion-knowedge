@@ -230,7 +230,7 @@ async fn lexical_identity_enabled_commit_and_bilingual_search_preserve_vectors_a
         .prepare_page(
             &provider,
             operation("seed", "seed", false),
-            &[original.clone()],
+            std::slice::from_ref(&original),
         )
         .await
         .unwrap();
@@ -264,7 +264,7 @@ async fn lexical_identity_enabled_commit_and_bilingual_search_preserve_vectors_a
         .prepare_page(
             &unchanged,
             operation("enabled", "enabled", false),
-            &[original.clone()],
+            std::slice::from_ref(&original),
         )
         .await
         .unwrap();
