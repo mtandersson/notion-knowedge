@@ -856,3 +856,91 @@ async fn page_work_ownership_requires_current_generation_page_and_non_superseded
     assert!(next.owns_page_work("page").unwrap());
     assert_eq!(c.owns_page_work("page"), Err(CommitError::BindingMismatch));
 }
+
+#[test]
+fn offline_backup_excludes_readers_and_sql_writers_and_retains_pending_source_work() {
+    use notion_knowledge_core::write_refresh::{IndexStatus, MutationRefreshQueue, RefreshKey};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let fixture = Fixture::new();
+    fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o700)).unwrap();
+    let coordinator = fixture.coordinator();
+    let key = RefreshKey {
+        workspace_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into(),
+        mutation_digest: "b".repeat(64),
+        page_id: "cccccccc-cccc-cccc-cccc-cccccccccccc".into(),
+    };
+    coordinator.state().admit(&key).unwrap();
+    let before = fs::read(&fixture.state).unwrap();
+    let backup = fixture.root.join("retained.sqlite");
+    let digest = coordinator
+        .with_offline_backup(&backup, 100, |verified| {
+            assert_eq!(verified.bytes, before.len() as u64);
+            let reader = fs::File::open(&fixture.index).unwrap();
+            assert!(
+                reader.try_lock_shared().is_err(),
+                "offline preparation must block new index admission"
+            );
+            let writer = Connection::open(&fixture.state).unwrap();
+            writer.busy_timeout(Duration::ZERO).unwrap();
+            assert!(
+                writer
+                    .execute("UPDATE reconciliation_lease SET fence=fence+1", [])
+                    .is_err()
+            );
+            let retained = Connection::open(&backup).unwrap();
+            let pending: i64 = retained
+                .query_row("SELECT COUNT(*) FROM mutation_refresh", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(pending, 1);
+            Ok(verified.clone())
+        })
+        .unwrap();
+    assert_eq!(digest.bytes, before.len() as u64);
+    assert_eq!(fs::read(&backup).unwrap(), before);
+    assert_eq!(fs::read(&fixture.state).unwrap(), before);
+    assert_eq!(fs::metadata(&backup).unwrap().mode() & 0o777, 0o600);
+    assert_eq!(
+        coordinator.state().status(&key).unwrap(),
+        Some(IndexStatus::Queued)
+    );
+    assert!(
+        coordinator
+            .with_offline_backup(&backup, 100, |_| Ok(()))
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(&backup).unwrap(),
+        before,
+        "existing recovery copy must never be overwritten"
+    );
+}
+
+#[test]
+fn offline_backup_rejects_live_lease_and_retains_verified_copy_after_preparation_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o700)).unwrap();
+    let coordinator = fixture.coordinator();
+    let lease = coordinator.state().acquire_lease(10, 100).unwrap();
+    let backup = fixture.root.join("retained.sqlite");
+    assert_eq!(
+        coordinator.with_offline_backup(&backup, 11, |_| Ok(())),
+        Err(CommitError::Conflict)
+    );
+    assert!(!backup.exists());
+    coordinator.state().release_lease(&lease, 12).unwrap();
+    let before = fs::read(&fixture.state).unwrap();
+    assert_eq!(
+        coordinator.with_offline_backup(&backup, 13, |_| Err::<(), _>(CommitError::Operation(
+            FailureClass::Index
+        ))),
+        Err(CommitError::Operation(FailureClass::Index))
+    );
+    assert_eq!(fs::read(&fixture.state).unwrap(), before);
+    assert_eq!(fs::read(&backup).unwrap(), before);
+    // Locks released even on failure, while original physical authority survives.
+    let reader = fs::File::open(&fixture.index).unwrap();
+    reader.try_lock_shared().unwrap();
+    drop(reader);
+    IndexCommitCoordinator::open(&fixture.index, &fixture.state, binding("v1", 1)).unwrap();
+}
