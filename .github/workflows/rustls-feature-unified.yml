@@ -1,0 +1,49 @@
+name: Rustls feature-unified fixture regression
+
+# Only the TLS fixture or this dedicated regression workflow triggers the
+# expensive combined-feature test. Regular CI retains its isolated matrices.
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - crates/notion/src/file_ingest/tests.rs
+      - .github/workflows/rustls-feature-unified.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rustls-feature-unified-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  feature-unified-rustls:
+    name: Unified Rustls provider fixture
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: target
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # Reuse the existing webhook-worker download/build cache read-only.
+      - name: Restore pinned Cargo caches
+        uses: ./.github/actions/cargo-cache-restore
+        with:
+          job: test-webhook-worker
+          profile: debug
+
+      - name: Test the complete feature-unified workspace
+        run: nix develop .#spike --command cargo test --workspace --features notion-knowledge-server/webhook-worker --locked
