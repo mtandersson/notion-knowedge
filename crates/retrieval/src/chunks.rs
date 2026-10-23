@@ -36,6 +36,8 @@ use notion_knowledge_core::{
     },
 };
 
+pub mod bounded;
+
 #[cfg(unix)]
 mod guarded;
 #[cfg(unix)]
@@ -1909,7 +1911,7 @@ mod tests {
 
     use super::*;
 
-    fn embedding(revision: &str, dimension: usize) -> EmbeddingMetadata {
+    pub(super) fn embedding(revision: &str, dimension: usize) -> EmbeddingMetadata {
         EmbeddingMetadata::new(
             "test-provider".into(),
             "test-model".into(),
@@ -1944,7 +1946,7 @@ mod tests {
         }
     }
 
-    fn temp_database(name: &str) -> PathBuf {
+    pub(super) fn temp_database(name: &str) -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time after epoch")
@@ -2009,7 +2011,12 @@ mod tests {
         value
     }
 
-    fn fts_chunk(page_id: &str, chunk_id: &str, title: &str, text: &str) -> IndexedChunk {
+    pub(super) fn fts_chunk(
+        page_id: &str,
+        chunk_id: &str,
+        title: &str,
+        text: &str,
+    ) -> IndexedChunk {
         let mut value = chunk("root", title, text);
         value.chunk_id = chunk_id.into();
         value.metadata.page_id = page_id.into();
