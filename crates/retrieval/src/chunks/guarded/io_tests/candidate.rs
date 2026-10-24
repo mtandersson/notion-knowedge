@@ -10,11 +10,12 @@ fn transition_native_verification_checks_pinned_pair_before_and_after_installati
     use crate::commit::transition::*;
     use sha2::Digest;
     use std::os::unix::fs::MetadataExt;
-    for (source_head_changes, publication_side_effect, resume_published) in [
-        (false, false, false),
-        (false, false, true),
-        (true, false, false),
-        (false, true, false),
+    for (source_head_changes, publication_side_effect, resume_published, unsupported_work) in [
+        (false, false, false, false),
+        (false, false, true, false),
+        (true, false, false, false),
+        (false, true, false, false),
+        (false, false, false, true),
     ] {
         let f = Fixture::new();
         for path in [&f.root, &f.index] {
@@ -69,6 +70,11 @@ fn transition_native_verification_checks_pinned_pair_before_and_after_installati
             .unwrap();
         let ready_bytes = fs::read(candidate.join(".nk-lexical-candidate-ready-v1.json")).unwrap();
         let state_path = f.root.join("state.sqlite");
+        if unsupported_work {
+            rusqlite::Connection::open(&state_path).unwrap().execute(
+                "INSERT INTO page_relation_projections VALUES('page','v1',1,'relation-v1:invalid')", []
+            ).unwrap();
+        }
         if publication_side_effect {
             rusqlite::Connection::open(&state_path).unwrap().execute_batch(
                 "CREATE TABLE opaque_state(value TEXT); INSERT INTO opaque_state VALUES('retained');
@@ -163,6 +169,33 @@ fn transition_native_verification_checks_pinned_pair_before_and_after_installati
         assert!(verified.1 > 0);
         assert_eq!(verified.2, TransitionPhase::Prepared);
         assert_eq!(fs::read(&state_path).unwrap(), before);
+        let preview = publication::preview_publication(
+            &owner,
+            12,
+            TransitionCandidateInputs {
+                source: &source,
+                target: &next,
+                embedding: &f.embedding,
+                dictionary: &dictionary,
+                preparation_backup: &preparation_backup,
+                limits: CandidateLimits::default(),
+            },
+            adoption::AdoptionLimits::default(),
+            manifest::ManifestLimits::default(),
+            1 << 30,
+        );
+        assert_eq!(fs::read(&state_path).unwrap(), before);
+        assert_eq!(
+            TransitionRecord::read(&state_path).unwrap().unwrap().phase,
+            TransitionPhase::Prepared
+        );
+        if unsupported_work {
+            assert!(preview.is_err());
+            drop(owner);
+            assert!(IndexCommitCoordinator::open_existing(&f.index, &state_path, source).is_ok());
+            continue;
+        }
+        preview.unwrap();
         let wrong = crate::lexical_dictionary::tests::dictionary(&[("bread", "bröd")]);
         assert!(verify(&wrong).is_err());
         fs::write(candidate.join(".nk-lexical-candidate-ready-v1.json"), b"{}").unwrap();
@@ -1251,6 +1284,27 @@ fn transition_process_child() {
     };
     let current = TransitionRecord::read(&state).unwrap().unwrap();
     if current.phase == TransitionPhase::Prepared {
+        // SQL may already be quarantined if the journal advance was killed.
+        // Preview is for the unchanged source, not a recovery-phase shortcut.
+        let unchanged_source: bool = rusqlite::Connection::open(&state)
+            .unwrap()
+            .query_row(
+                "SELECT generation='v1' FROM index_commit_binding",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if unchanged_source {
+            publication::preview_publication(
+                &owner,
+                12,
+                candidate,
+                adoption::AdoptionLimits::default(),
+                manifest::ManifestLimits::default(),
+                1 << 30,
+            )
+            .unwrap();
+        }
         owner
             .with_exclusive_sql(12, |tx| {
                 crate::chunks::verify_transition_candidate(&owner, tx, candidate)?;

@@ -73,6 +73,48 @@ pub fn adopt_derived_work(
     if !quarantine {
         return Err(CommitError::BindingMismatch);
     }
+    transfer_sql(
+        owner,
+        transaction,
+        source,
+        target,
+        target_index_version,
+        limits,
+        false,
+    )?
+    .ok_or(CommitError::InvalidInput)
+}
+
+pub(super) fn preview_derived_work(
+    owner: &TransitionOwnership,
+    transaction: &mut rusqlite::Transaction<'_>,
+    source: &CommitBinding,
+    target: &CommitBinding,
+    target_index_version: u64,
+    limits: AdoptionLimits,
+) -> Result<(), CommitError> {
+    transfer_sql(
+        owner,
+        transaction,
+        source,
+        target,
+        target_index_version,
+        limits,
+        true,
+    )?;
+    Ok(())
+}
+
+fn transfer_sql(
+    owner: &TransitionOwnership,
+    transaction: &mut rusqlite::Transaction<'_>,
+    source: &CommitBinding,
+    target: &CommitBinding,
+    target_index_version: u64,
+    limits: AdoptionLimits,
+    preview: bool,
+) -> Result<Option<AdoptionReport>, CommitError> {
+    owner.validate_owned_transaction(transaction)?;
     if source.table() != target.table()
         || source.workspace() != target.workspace()
         || source.roots() != target.roots()
@@ -136,7 +178,7 @@ pub fn adopt_derived_work(
         .map_err(sql)?;
     savepoint.execute("INSERT INTO nk_adoption_owned_pages SELECT DISTINCT page_id FROM index_commit_receipts WHERE generation=?1 AND status IN(0,1,2)",[source.generation()]).map_err(sql)?;
     let reserved: bool = savepoint.query_row("SELECT EXISTS(SELECT 1 FROM index_commit_generations WHERE generation=?1 AND scope=?2 AND epoch=?3)",params![target.generation(),target.scope(),i64::try_from(target.epoch()).map_err(|_|CommitError::InvalidInput)?],|r|r.get(0)).map_err(sql)?;
-    if !reserved {
+    if reserved == preview {
         return Err(CommitError::BindingMismatch);
     }
     let source_reserved: bool = savepoint.query_row("SELECT EXISTS(SELECT 1 FROM index_commit_generations WHERE generation=?1 AND scope=?2 AND epoch=?3)",params![source.generation(),source.scope(),i64::try_from(source.epoch()).map_err(|_|CommitError::InvalidInput)?],|r|r.get(0)).map_err(sql)?;
@@ -321,6 +363,12 @@ pub fn adopt_derived_work(
             plans.push((run, encoded));
         }
     }
+    if preview {
+        // Dropping the savepoint rolls back the temporary ownership table.
+        // No operational table or receipt has been changed.
+        owner.validate_owned_transaction(&savepoint)?;
+        return Ok(None);
+    }
     let update = |table: &str| {
         savepoint
             .execute(
@@ -365,5 +413,5 @@ pub fn adopt_derived_work(
     owner.revalidate()?;
     owner.validate_sql(&savepoint)?;
     savepoint.commit().map_err(sql)?;
-    Ok(report)
+    Ok(Some(report))
 }

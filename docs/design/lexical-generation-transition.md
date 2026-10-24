@@ -139,6 +139,17 @@ complete known effect encodings and prepared-operation schemas before updates;
 retain their bytes. This helper does not publish physical authority or replace
 native-pair and adoption-manifest verification in the same outer transaction.
 
+Before quarantine, `preview_publication` obtains fresh native verification and
+compares the complete Prepared SQL state with the activation backup. It shares
+the adoption validator for bounded projections, receipts, schedules, durable
+plans and prepared work, then rolls back its temporary ownership set without
+changing operational rows. A second complete comparison verifies preservation.
+Unsupported work therefore fails while the old source remains admissible.
+Preview is not durable authorization: publication repeats validation and checks
+the resulting state and resource bounds in its actual transaction. Recovery
+checks SQL authority before repeating a Prepared preview, because quarantine SQL
+may already have committed before its journal advance.
+
 Whole-database manifests read the main schema through a retained transaction;
 TEMP tables cannot shadow their schemas, metadata or payload. Include persisted
 schemas, internal sequence tables, typed values and observable row IDs. Preserve

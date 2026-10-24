@@ -8,6 +8,43 @@ use manifest::{
     comparison::{ComparisonInputs, ComparisonStage, verify_backup_comparison},
 };
 
+/// Validate all retained derived work before quarantine, without changing
+/// operational rows. The temporary ownership set is rolled back on success.
+pub fn preview_publication(
+    owner: &TransitionOwnership,
+    now: i64,
+    candidate: TransitionCandidateInputs<'_>,
+    adoption: AdoptionLimits,
+    limits: ManifestLimits,
+    backup_bytes: u64,
+) -> Result<(), CommitError> {
+    owner.with_exclusive_sql(now, |transaction| {
+        let verified = verify_transition_candidate(owner, transaction, candidate)?;
+        if verified.record().phase != TransitionPhase::Prepared {
+            return Err(CommitError::Conflict);
+        }
+        let comparison = ComparisonInputs {
+            source: candidate.source,
+            target: candidate.target,
+            target_version: verified.target_version(),
+            plan_bytes: adoption.plan_bytes,
+            backup_bytes,
+            limits,
+        };
+        verify_backup_comparison(owner, transaction, &comparison, ComparisonStage::Prepared)?;
+        adoption::preview_derived_work(
+            owner,
+            transaction,
+            candidate.source,
+            candidate.target,
+            verified.target_version(),
+            adoption,
+        )?;
+        verify_backup_comparison(owner, transaction, &comparison, ComparisonStage::Prepared)?;
+        Ok(())
+    })
+}
+
 fn install_anchor(owner: &TransitionOwnership) -> Result<(), CommitError> {
     owner.revalidate()?;
     let directory = &owner.record.target.path;
