@@ -175,3 +175,7 @@ sanitation does not produce a new valid OCI artifact.
 
 No unrelated cache is deleted, no cold state is fabricated, and no credentials,
 Cargo artifacts, weaker smoke checks or relaxed scan coverage manufacture reuse.
+
+## October 2026 migration to GHCR
+
+After repeated cold misses of the Actions cache service in #507/#508, the active workflow migrates builder and final OCI cache manifests to GHCR. The earlier preflight and scope-selection comparisons above remain an archived diagnosis, not the current implementation. PRs use package-read permissions; the independent main-only cache publisher uses package-write permissions and runs only after the same mandatory smoke steps. See [container documentation](container.md) and the migration PR for live design and CI measurements. GHCR import/export and reliable cache retention remain subject to hosted verification.
