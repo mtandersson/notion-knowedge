@@ -319,14 +319,11 @@ pub fn reopen(root: &Path, dictionary: Option<&Dictionary>) -> Result<ProbeRepor
         authority.clone(),
     )
     .map_err(err)?;
+    let _guard = coordinator.search_guard().map_err(err)?;
     let table = bind_table(root, coordinator, dictionary)?;
-    let rt = runtime()?;
-    rt.block_on(async {
-        if table.page_chunks(PAGE).await.map_err(err)? != vec![chunk()] {
-            return Err(RuntimeError);
-        }
-        Ok(())
-    })?;
+    // Bound every row/file before the fixture comparison materializes source
+    // content. Keep the shared native guard across both reads so a participating
+    // writer cannot replace the verified small snapshot in between.
     let snapshot = crate::chunks::inspect_runtime_source(
         &root.join("index"),
         &embedding()?,
@@ -337,6 +334,13 @@ pub fn reopen(root: &Path, dictionary: Option<&Dictionary>) -> Result<ProbeRepor
     if snapshot.rows != 1 {
         return Err(RuntimeError);
     }
+    let rt = runtime()?;
+    rt.block_on(async {
+        if table.page_chunks(PAGE).await.map_err(err)? != vec![chunk()] {
+            return Err(RuntimeError);
+        }
+        Ok(())
+    })?;
     Ok(ProbeReport {
         version: 1,
         descriptor: RuntimeDescriptor::current(dictionary).map_err(err)?,
@@ -398,6 +402,39 @@ mod tests {
             assert!(reopen(&root, wrong_mode).is_err());
             assert_eq!(bytes(&root), before);
         }
+    }
+    #[test]
+    fn native_probe_reopen_refuses_oversized_persisted_fixture_rows_without_repair() {
+        let parent = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let root = parent.path().join("oversized");
+        create(&root, None).unwrap();
+        runtime().unwrap().block_on(async {
+            let native = crate::chunks::LanceChunkTable::open(
+                root.join("index"),
+                "probe_chunks",
+                embedding().unwrap(),
+            )
+            .await
+            .unwrap();
+            let mut oversized = chunk();
+            oversized.text = "x".repeat(1024 * 1024);
+            native
+                .upsert(
+                    &embedding().unwrap(),
+                    &[crate::chunks::EmbeddedChunk::new(
+                        oversized,
+                        vec![1.0, 0.0, 0.0],
+                    )],
+                )
+                .await
+                .unwrap();
+        });
+        let before = bytes(&root);
+        assert!(reopen(&root, None).is_err());
+        assert_eq!(bytes(&root), before);
     }
     fn normal_binary_case(archive: Option<&Path>) {
         let binary = std::env::var_os("NK_LEXICAL_RUNTIME").expect("freshly built normal runtime");
