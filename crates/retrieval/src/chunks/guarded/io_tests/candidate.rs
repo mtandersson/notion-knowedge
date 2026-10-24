@@ -10,7 +10,9 @@ fn transition_native_verification_checks_pinned_pair_before_and_after_installati
     use crate::commit::transition::*;
     use sha2::Digest;
     use std::os::unix::fs::MetadataExt;
-    for source_head_changes in [false, true] {
+    for (source_head_changes, publication_side_effect) in
+        [(false, false), (true, false), (false, true)]
+    {
         let f = Fixture::new();
         for path in [&f.root, &f.index] {
             fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
@@ -63,17 +65,24 @@ fn transition_native_verification_checks_pinned_pair_before_and_after_installati
             )
             .unwrap();
         let ready_bytes = fs::read(candidate.join(".nk-lexical-candidate-ready-v1.json")).unwrap();
+        let state_path = f.root.join("state.sqlite");
+        if publication_side_effect {
+            rusqlite::Connection::open(&state_path).unwrap().execute_batch(
+                "CREATE TABLE opaque_state(value TEXT); INSERT INTO opaque_state VALUES('retained');
+                 CREATE TRIGGER unexpected_publication_effect AFTER UPDATE OF generation ON index_commit_binding
+                 WHEN NEW.generation='v2' BEGIN UPDATE opaque_state SET value='changed'; END;"
+            ).unwrap();
+        }
         let activation_backup = f.root.join("activation.sqlite");
         let backup = f
             .coordinator
             .with_offline_backup(&activation_backup, 12, |backup| Ok(backup.clone()))
             .unwrap();
-        let state_path = f.root.join("state.sqlite");
         let state = fs::metadata(&state_path).unwrap();
         let old_index = fs::metadata(&f.index).unwrap();
         let new_index = fs::metadata(&candidate).unwrap();
         let sql = rusqlite::Connection::open(&state_path).unwrap();
-        let record = TransitionRecord {
+        let mut record = TransitionRecord {
             version: 1,
             phase: TransitionPhase::Prepared,
             state_device: state.dev(),
@@ -108,6 +117,20 @@ fn transition_native_verification_checks_pinned_pair_before_and_after_installati
             backup_path: activation_backup.clone(),
             backup,
         };
+        record.adoption_sha256 = manifest::comparison::capture_backup_manifest(
+            &record,
+            &manifest::comparison::ComparisonInputs {
+                source: &source,
+                target: &next,
+                // This fixture has no active durable plan to rewrite.
+                target_version: 1,
+                plan_bytes: adoption::AdoptionLimits::default().plan_bytes,
+                backup_bytes: 1024 * 1024 * 1024,
+                limits: manifest::ManifestLimits::default(),
+            },
+        )
+        .unwrap()
+        .sha256;
         let owner = TransitionOwnership::acquire(&state_path, &record).unwrap();
         record.persist(&owner, None).unwrap();
         let verify = |dictionary: &crate::lexical_dictionary::Dictionary| {
@@ -177,6 +200,23 @@ fn transition_native_verification_checks_pinned_pair_before_and_after_installati
             .unwrap(),
             "quarantine"
         );
+        let publish = || {
+            publication::publish_derived_state(
+                &owner,
+                12,
+                TransitionCandidateInputs {
+                    source: &source,
+                    target: &next,
+                    embedding: &f.embedding,
+                    dictionary: &dictionary,
+                    preparation_backup: &preparation_backup,
+                    limits: CandidateLimits::default(),
+                },
+                adoption::AdoptionLimits::default(),
+                manifest::ManifestLimits::default(),
+                1024 * 1024 * 1024,
+            )
+        };
         if source_head_changes {
             runtime.block_on(async {
                 let source =
@@ -195,6 +235,49 @@ fn transition_native_verification_checks_pinned_pair_before_and_after_installati
                     .unwrap();
             });
             assert!(verify(&dictionary).is_err());
+            assert!(publish().is_err());
+        } else if publication_side_effect {
+            assert!(publish().is_err());
+            assert_eq!(
+                sql.query_row("SELECT generation FROM index_commit_binding", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+                "quarantine"
+            );
+            assert_eq!(
+                sql.query_row("SELECT value FROM opaque_state", [], |r| r
+                    .get::<_, String>(0))
+                    .unwrap(),
+                "retained"
+            );
+            assert_eq!(
+                sql.query_row(
+                    "SELECT COUNT(*) FROM index_commit_receipts WHERE generation='v2'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+        } else {
+            publish().unwrap();
+            assert_eq!(
+                sql.query_row("SELECT generation FROM index_commit_binding", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+                "v2"
+            );
+            assert_eq!(
+                TransitionRecord::read(&state_path).unwrap().unwrap().phase,
+                TransitionPhase::TargetInstalled
+            );
+            assert!(
+                IndexCommitCoordinator::open_existing(&f.index, &state_path, next.clone()).is_err()
+            );
+            // Repeating publication cannot adopt or replay work a second time.
+            assert!(publish().is_err());
         }
     }
 }
