@@ -530,6 +530,367 @@ fn operation(c: &IndexCommitCoordinator, page: &str, action: PageAction) -> Page
     )
     .unwrap()
 }
+
+#[test]
+fn backup_comparison_allows_only_complete_authority_adoption_and_preserves_opaque_state() {
+    use notion_knowledge_retrieval::commit::transition::{
+        adoption::*, manifest::comparison::*, manifest::*, *,
+    };
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    for scenario in [
+        "preserved",
+        "queue-tamper",
+        "receipt-status",
+        "progress-tamper",
+        "history-tamper",
+        "plan-format",
+        "partial-adoption",
+        "wrong-target-version",
+        "missing-reservation",
+        "backup-corrupt",
+        "sequence-tamper",
+        "backup-budget",
+        "reserved-source-name",
+        "reserved-source-epoch",
+        "wrong-manifest",
+        "same-file-backup",
+    ] {
+        let f = Fixture::new();
+        for path in [&f.root, &f.index] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let c = f.coordinator();
+        let source = plan();
+        let lease = start(&c, &source);
+        c.prepare_reconciliation_operation(
+            &lease,
+            10,
+            "run",
+            &operation(&c, "new", PageAction::Refresh),
+            &allowed(),
+            false,
+        )
+        .unwrap();
+        c.state().release_lease(&lease, 11).unwrap();
+        fs::set_permissions(&f.state, fs::Permissions::from_mode(0o600)).unwrap();
+        let mut db = Connection::open(&f.state).unwrap();
+        db.execute_batch("INSERT INTO index_commit_receipts VALUES('pending','1','new','revision',0,'hash',NULL,0,NULL,2); INSERT INTO index_commit_receipts VALUES('completed','1','done','revision',0,'done',NULL,1,NULL,1); INSERT INTO index_commit_receipts VALUES('superseded','1','old','revision',0,'old',NULL,3,2,1); INSERT INTO page_sync_state VALUES('new','hash',NULL,0,0); INSERT INTO mutation_refresh(workspace_id,mutation_digest,page_id) VALUES('workspace','mutation','new'); CREATE TABLE opaque_ledger(id INTEGER PRIMARY KEY AUTOINCREMENT,value BLOB); INSERT INTO opaque_ledger(value) VALUES(x'0001ff'); DELETE FROM opaque_ledger;").unwrap();
+        db.execute(
+            "INSERT INTO page_metadata_identity VALUES('new','1',?1)",
+            ["a".repeat(64)],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO page_alias_projections VALUES('new','1',1,?1)",
+            [format!("alias-v1:{}", "b".repeat(64))],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO page_relation_projections VALUES('new','1',1,'relation-v1:0:')",
+            [],
+        )
+        .unwrap();
+        db.execute("INSERT INTO reconciliation_schedules VALUES('schedule','chunks','workspace',?1,'1',1,60,3,1,60,100,'run',0,1,1)",[scope().identity()]).unwrap();
+        db.execute(
+            "INSERT INTO reconciliation_runs(run_id,scope,fence,phase) VALUES('historical',?1,1,2)",
+            [scope().identity()],
+        )
+        .unwrap();
+        let historical = format!(
+            "  {}\n",
+            serde_json::to_string(&DurablePlan::from_planner("historical", &source).unwrap())
+                .unwrap()
+        );
+        db.execute(
+            "INSERT INTO reconciliation_plans VALUES('historical',1,?1)",
+            [&historical],
+        )
+        .unwrap();
+        db.execute("INSERT INTO reconciliation_success VALUES('historical','chunks','workspace',?1,'1',1,10)",[scope().identity()]).unwrap();
+        let active: String = db
+            .query_row(
+                "SELECT document FROM reconciliation_plans WHERE run_id='run'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        db.execute(
+            "UPDATE reconciliation_plans SET document=?1 WHERE run_id='run'",
+            [format!("\n {active} \n")],
+        )
+        .unwrap();
+        if scenario == "reserved-source-name" {
+            db.execute(
+                "INSERT INTO index_commit_generations VALUES('lexical-v2',?1,99)",
+                [scope().identity()],
+            )
+            .unwrap();
+        }
+        if scenario == "reserved-source-epoch" {
+            db.execute(
+                "INSERT INTO index_commit_generations VALUES('used',?1,3)",
+                [scope().identity()],
+            )
+            .unwrap();
+        }
+        let candidate = f.root.join("candidate");
+        fs::create_dir(&candidate).unwrap();
+        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700)).unwrap();
+        let backup_path = f.root.join("activation.sqlite");
+        fs::copy(&f.state, &backup_path).unwrap();
+        fs::set_permissions(&backup_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let bytes = fs::read(&backup_path).unwrap();
+        let old = fs::metadata(&f.index).unwrap();
+        let new = fs::metadata(&candidate).unwrap();
+        let state = fs::metadata(&f.state).unwrap();
+        let target = CommitBinding::new("chunks", "workspace", &scope(), "lexical-v2", 3).unwrap();
+        let source_binding = binding();
+        let input = ComparisonInputs {
+            source: &source_binding,
+            target: &target,
+            target_version: 71,
+            plan_bytes: 16 * 1024 * 1024,
+            backup_bytes: 2 * 1024 * 1024 * 1024,
+            limits: ManifestLimits::default(),
+        };
+        let mut record = TransitionRecord {
+            version: 1,
+            phase: TransitionPhase::Prepared,
+            state_device: state.dev(),
+            state_inode: state.ino(),
+            state_token: db
+                .query_row(
+                    "SELECT identity FROM index_commit_state_identity",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap(),
+            source: TransitionEndpoint {
+                path: f.index.clone(),
+                device: old.dev(),
+                inode: old.ino(),
+                binding: serde_json::to_string(&source_binding).unwrap(),
+            },
+            target: TransitionEndpoint {
+                path: f.index.clone(),
+                device: new.dev(),
+                inode: new.ino(),
+                binding: serde_json::to_string(&target).unwrap(),
+            },
+            candidate_path: candidate,
+            archive_path: f.root.join("archive"),
+            quarantine_generation: "quarantine".into(),
+            quarantine_epoch: 2,
+            snapshot_sha256: "a".repeat(64),
+            asset_sha256: "b".repeat(64),
+            ready_sha256: "c".repeat(64),
+            adoption_sha256: "0".repeat(64),
+            backup_path: backup_path.clone(),
+            backup: OfflineBackup {
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+                bytes: bytes.len() as u64,
+            },
+        };
+        if matches!(
+            scenario,
+            "reserved-source-name" | "reserved-source-epoch" | "same-file-backup"
+        ) {
+            if scenario == "same-file-backup" {
+                record.backup_path = f.state.clone();
+            }
+            assert!(capture_backup_manifest(&record, &input).is_err());
+            assert_eq!(
+                db.query_row("SELECT generation FROM index_commit_binding", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+                "1"
+            );
+            continue;
+        }
+        let sealed = capture_backup_manifest(&record, &input).unwrap();
+        record.adoption_sha256 = sealed.sha256.clone();
+        if scenario == "wrong-manifest" {
+            record.adoption_sha256 = "f".repeat(64);
+        }
+        let owner = TransitionOwnership::acquire(&f.state, &record).unwrap();
+        record.persist(&owner, None).unwrap();
+        if scenario == "wrong-manifest" {
+            assert!(
+                owner
+                    .with_exclusive_sql(12, |tx| verify_backup_comparison(
+                        &owner,
+                        tx,
+                        &input,
+                        ComparisonStage::Prepared
+                    ))
+                    .is_err()
+            );
+            assert_eq!(
+                db.query_row("SELECT generation FROM index_commit_binding", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+                "1"
+            );
+            continue;
+        }
+        assert_eq!(
+            owner
+                .with_exclusive_sql(12, |tx| verify_backup_comparison(
+                    &owner,
+                    tx,
+                    &input,
+                    ComparisonStage::Prepared
+                ))
+                .unwrap(),
+            sealed
+        );
+        owner.quarantine(12).unwrap();
+        owner.install_candidate(12).unwrap();
+        assert_eq!(
+            owner
+                .with_exclusive_sql(12, |tx| verify_backup_comparison(
+                    &owner,
+                    tx,
+                    &input,
+                    ComparisonStage::BeforePublication
+                ))
+                .unwrap(),
+            sealed
+        );
+        if scenario == "queue-tamper" {
+            db.execute("UPDATE main.mutation_refresh SET state=2", [])
+                .unwrap();
+            assert!(
+                owner
+                    .with_exclusive_sql(12, |tx| verify_backup_comparison(
+                        &owner,
+                        tx,
+                        &input,
+                        ComparisonStage::BeforePublication
+                    ))
+                    .is_err()
+            );
+            continue;
+        }
+        if scenario == "backup-corrupt" {
+            fs::write(&backup_path, b"corrupt").unwrap();
+            assert!(
+                owner
+                    .with_exclusive_sql(12, |tx| verify_backup_comparison(
+                        &owner,
+                        tx,
+                        &input,
+                        ComparisonStage::BeforePublication
+                    ))
+                    .is_err()
+            );
+            fs::write(&backup_path, &bytes).unwrap();
+            assert!(
+                owner
+                    .with_exclusive_sql(12, |tx| verify_backup_comparison(
+                        &owner,
+                        tx,
+                        &input,
+                        ComparisonStage::BeforePublication
+                    ))
+                    .is_ok()
+            );
+            continue;
+        }
+        if scenario == "backup-budget" {
+            let small = ComparisonInputs {
+                backup_bytes: 1,
+                ..input
+            };
+            assert!(
+                owner
+                    .with_exclusive_sql(12, |tx| verify_backup_comparison(
+                        &owner,
+                        tx,
+                        &small,
+                        ComparisonStage::BeforePublication
+                    ))
+                    .is_err()
+            );
+            continue;
+        }
+        let mut tx = db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)
+            .unwrap();
+        adopt_derived_work(
+            &owner,
+            &mut tx,
+            &source_binding,
+            &target,
+            71,
+            AdoptionLimits::default(),
+        )
+        .unwrap();
+        tx.execute("UPDATE main.index_commit_binding SET index_device=?1,index_inode=?2,generation='lexical-v2',epoch=3",rusqlite::params![new.dev().to_string(),new.ino().to_string()]).unwrap();
+        match scenario {
+            "receipt-status" => {
+                tx.execute(
+                    "UPDATE main.index_commit_receipts SET status=1 WHERE operation_id='pending'",
+                    [],
+                )
+                .unwrap();
+            }
+            "progress-tamper" => {
+                tx.execute("UPDATE main.reconciliation_plan_progress SET failure='changed',status=2 WHERE page_id='new'",[]).unwrap();
+            }
+            "history-tamper" => {
+                tx.execute("UPDATE main.reconciliation_plans SET document=document||' ' WHERE run_id='historical'",[]).unwrap();
+            }
+            "plan-format" => {
+                tx.execute("UPDATE main.reconciliation_plans SET document=document||' ' WHERE run_id='run'",[]).unwrap();
+            }
+            "partial-adoption" => {
+                tx.execute("UPDATE main.page_metadata_identity SET generation='1'", [])
+                    .unwrap();
+            }
+            "missing-reservation" => {
+                tx.execute(
+                    "DELETE FROM main.index_commit_generations WHERE generation='quarantine'",
+                    [],
+                )
+                .unwrap();
+            }
+            "sequence-tamper" => {
+                tx.execute(
+                    "UPDATE main.sqlite_sequence SET seq=2 WHERE name='opaque_ledger'",
+                    [],
+                )
+                .unwrap();
+            }
+            _ => {}
+        }
+        let wrong = ComparisonInputs {
+            target_version: 72,
+            ..input
+        };
+        let result = verify_backup_comparison(
+            &owner,
+            &tx,
+            if scenario == "wrong-target-version" {
+                &wrong
+            } else {
+                &input
+            },
+            ComparisonStage::AfterPublication,
+        );
+        if scenario == "preserved" {
+            assert_eq!(result.unwrap(), sealed);
+        } else {
+            assert!(result.is_err(), "{scenario}");
+        }
+        tx.rollback().unwrap();
+        assert_eq!(fs::metadata(&f.state).unwrap().ino(), state.ino());
+        assert_eq!(fs::read(&backup_path).unwrap(), bytes);
+    }
+}
 #[test]
 fn physical_adoption_preserves_plan_work_and_rejects_policy_changes() {
     let source = binding();

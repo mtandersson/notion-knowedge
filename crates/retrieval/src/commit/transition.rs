@@ -30,6 +30,34 @@ fn exclusive(file: &File) -> Result<(), CommitError> {
     }
 }
 
+pub(crate) fn validate_connection_file(
+    db: &Connection,
+    file: &File,
+    path: &Path,
+) -> Result<(), CommitError> {
+    let database = db.path().ok_or(CommitError::BindingMismatch)?;
+    if fs::canonicalize(database).map_err(io)? != fs::canonicalize(path).map_err(io)?
+        || Identity::read(path)? != Identity::file(file)?
+    {
+        return Err(CommitError::BindingMismatch);
+    }
+    let mut moved: i32 = 0;
+    // Check SQLite's own VFS descriptor as well as our retained descriptor, so
+    // opening a transient replacement and restoring the path cannot pass.
+    let result = unsafe {
+        rusqlite::ffi::sqlite3_file_control(
+            db.handle(),
+            c"main".as_ptr(),
+            rusqlite::ffi::SQLITE_FCNTL_HAS_MOVED,
+            (&mut moved as *mut i32).cast(),
+        )
+    };
+    if result != rusqlite::ffi::SQLITE_OK || moved != 0 {
+        return Err(CommitError::BindingMismatch);
+    }
+    Ok(())
+}
+
 fn owned_directory(path: &Path) -> Result<File, CommitError> {
     let file = OpenOptions::new()
         .read(true)
@@ -134,12 +162,7 @@ impl TransitionOwnership {
 
     pub(crate) fn validate_owned_transaction(&self, db: &Connection) -> Result<(), CommitError> {
         self.revalidate()?;
-        let database = db.path().ok_or(CommitError::BindingMismatch)?;
-        if fs::canonicalize(database).map_err(io)? != self.state_path
-            || Identity::read(Path::new(database))? != Identity::file(&self.state)?
-        {
-            return Err(CommitError::BindingMismatch);
-        }
+        validate_connection_file(db, &self.state, &self.state_path)?;
         self.validate_sql(db)
     }
 
