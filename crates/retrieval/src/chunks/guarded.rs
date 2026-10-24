@@ -18,8 +18,9 @@ use crate::commit::{
     CommitError, CommitOutcome, IndexCommitCoordinator, PageAction, PageOperation,
 };
 pub use candidate::{
-    CandidateLimits, OfflineLexicalSource, PreparedLexicalCandidate, TransitionCandidateInputs,
-    VerifiedTransitionCandidate, verify_transition_candidate,
+    CandidateLimits, OfflineLexicalSource, PreparedLexicalCandidate, RuntimeSourceSnapshot,
+    TransitionCandidateInputs, VerifiedTransitionCandidate, inspect_runtime_source,
+    verify_transition_candidate,
 };
 use notion_knowledge_core::{
     embedding::{self, EmbeddingMetadata, EmbeddingProvider},
