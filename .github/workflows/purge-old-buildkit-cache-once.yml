@@ -5,6 +5,11 @@
 name: Purge obsolete BuildKit GHA cache once
 
 on:
+  pull_request:
+    paths:
+      - .github/workflows/purge-old-buildkit-cache-once.yml
+      - scripts/prune-buildkit-gha-cache.py
+      - scripts/test-prune-buildkit-gha-cache.py
   push:
     branches:
       - main
@@ -19,6 +24,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  test:
+    name: Verify one-shot cache cleanup selection (read only)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout without persisting credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Exercise selection, pagination and authorization guards
+        run: python3 scripts/test-prune-buildkit-gha-cache.py -v
+
   purge:
     if: >-
       github.ref == 'refs/heads/main' &&
