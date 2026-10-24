@@ -92,6 +92,37 @@ class CargoSnapshots(unittest.TestCase):
         self.assertEqual(len({entry['prefix'] for entry in snapshots}), len(suites))
         self.assertEqual(len({entry['downloads-key'] for entry in snapshots}), 1)
 
+    def test_actions_save_only_when_no_compatible_target_was_restored(self):
+        """Source-only edits must not publish another multi-GB immutable target."""
+        root = Path(cache.__file__).resolve().parents[1]
+        restore = (root / '.github/actions/cargo-cache-restore/action.yml').read_text()
+        save = (root / '.github/actions/cargo-cache-save/action.yml').read_text()
+        workflow = (root / '.github/workflows/ci.yml').read_text()
+        self.assertIn('value: ${{ steps.target.outputs.cache-matched-key }}', restore)
+        self.assertIn('value: ${{ steps.keys.outputs.prefix }}', restore)
+        self.assertIn('matched-key:', save)
+        self.assertIn('prefix:', save)
+        guard = 'if: ${{ !startsWith(inputs.matched-key, inputs.prefix) }}'
+        self.assertEqual(save.count(guard), 2)
+        self.assertNotIn("inputs.hit != 'true'", save,
+                         'an older compatible snapshot is not an exact source-key hit')
+        self.assertEqual(workflow.count(
+            'matched-key: ${{ steps.cargo-cache.outputs.matched-key }}'), 4)
+        self.assertEqual(workflow.count(
+            'prefix: ${{ steps.cargo-cache.outputs.prefix }}'), 4)
+        # Semantics of the guarded expression. A legacy/incompatible fallback
+        # never blocks seeding the current job/dependency/toolchain prefix.
+        prefix = 'nk-cargo-v1-Linux-X64-build-release-compatible-'
+        for matched, should_save in [
+            ('', True),
+            ('unrelated-legacy-cache', True),
+            (prefix + 'previous-source', False),
+            (prefix + 'current-source', False),
+            ('nk-cargo-v1-Linux-X64-clippy-debug-other-', True),
+        ]:
+            with self.subTest(matched=matched):
+                self.assertEqual(not matched.startswith(prefix), should_save)
+
     def test_credentials_do_not_enter_keys_or_output(self):
         sentinel = 'never-print-this-value'
         result = self.key(environment={'NOTION_TOKEN': sentinel, 'CARGO_REGISTRIES_OTHER_TOKEN': sentinel})

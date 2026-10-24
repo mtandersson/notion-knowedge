@@ -36,10 +36,17 @@ use notion_knowledge_core::{
     },
 };
 
+pub mod bounded;
+#[cfg(unix)]
+pub mod lexical_binding;
+
 #[cfg(unix)]
 mod guarded;
 #[cfg(unix)]
-pub use guarded::{GuardedChunkTable, PreparedPageMutation};
+pub use guarded::{
+    CandidateLimits, GuardedChunkTable, OfflineLexicalSource, PreparedLexicalCandidate,
+    PreparedPageMutation,
+};
 
 pub const CHUNK_TABLE_SCHEMA_VERSION: &str = "1";
 const CANONICAL_CHUNK_SCHEMA_VERSION: &str = "1";
@@ -154,8 +161,12 @@ pub struct ChunkDiffMetrics {
     pub removed: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FtsIndexConfig {
+    /// Token positions for opt-in literal dictionary phrase execution. Existing
+    /// raw-only default stays false; changing this requires explicit rebuild.
+    pub with_positions: bool,
     pub language: String,
     pub stem: bool,
     pub remove_stop_words: bool,
@@ -163,9 +174,43 @@ pub struct FtsIndexConfig {
     pub block_size: usize,
 }
 
+impl FtsIndexConfig {
+    pub fn lexical_expansion_v1() -> Self {
+        Self {
+            with_positions: true,
+            ..Self::default()
+        }
+    }
+}
+fn fts_parameters(
+    column: &str,
+    config: &FtsIndexConfig,
+) -> Result<FtsIndexBuilder, ChunkTableError> {
+    Ok(if matches!(column, "page_id" | "chunk_id") {
+        FtsIndexBuilder::default()
+            .base_tokenizer("raw".to_string())
+            .lower_case(false)
+            .stem(false)
+            .remove_stop_words(false)
+            .ascii_folding(false)
+            .block_size(config.block_size)
+            .map_err(|_| ChunkTableError::InvalidSchema("invalid FTS block size".into()))?
+    } else {
+        FtsIndexBuilder::default()
+            .with_position(config.with_positions)
+            .language(&config.language)
+            .map_err(|_| ChunkTableError::InvalidSchema("unsupported FTS language".into()))?
+            .stem(config.stem)
+            .remove_stop_words(config.remove_stop_words)
+            .ascii_folding(config.ascii_folding)
+            .block_size(config.block_size)
+            .map_err(|_| ChunkTableError::InvalidSchema("invalid FTS block size".into()))?
+    })
+}
 impl Default for FtsIndexConfig {
     fn default() -> Self {
         Self {
+            with_positions: false,
             language: "Swedish".into(),
             stem: true,
             remove_stop_words: true,
@@ -681,25 +726,7 @@ impl LanceChunkTable {
         config: &FtsIndexConfig,
         replace: bool,
     ) -> Result<(), ChunkTableError> {
-        let params = if matches!(column, "page_id" | "chunk_id") {
-            FtsIndexBuilder::default()
-                .base_tokenizer("raw".to_string())
-                .lower_case(false)
-                .stem(false)
-                .remove_stop_words(false)
-                .ascii_folding(false)
-                .block_size(config.block_size)
-                .map_err(|_| ChunkTableError::InvalidSchema("invalid FTS block size".into()))?
-        } else {
-            FtsIndexBuilder::default()
-                .language(&config.language)
-                .map_err(|_| ChunkTableError::InvalidSchema("unsupported FTS language".into()))?
-                .stem(config.stem)
-                .remove_stop_words(config.remove_stop_words)
-                .ascii_folding(config.ascii_folding)
-                .block_size(config.block_size)
-                .map_err(|_| ChunkTableError::InvalidSchema("invalid FTS block size".into()))?
-        };
+        let params = fts_parameters(column, config)?;
         let train = self.table.count_rows(None).await? != 0;
         self.table
             .create_index(&[column], Index::FTS(params))
@@ -1909,7 +1936,7 @@ mod tests {
 
     use super::*;
 
-    fn embedding(revision: &str, dimension: usize) -> EmbeddingMetadata {
+    pub(super) fn embedding(revision: &str, dimension: usize) -> EmbeddingMetadata {
         EmbeddingMetadata::new(
             "test-provider".into(),
             "test-model".into(),
@@ -1944,7 +1971,7 @@ mod tests {
         }
     }
 
-    fn temp_database(name: &str) -> PathBuf {
+    pub(super) fn temp_database(name: &str) -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time after epoch")
@@ -2009,7 +2036,12 @@ mod tests {
         value
     }
 
-    fn fts_chunk(page_id: &str, chunk_id: &str, title: &str, text: &str) -> IndexedChunk {
+    pub(super) fn fts_chunk(
+        page_id: &str,
+        chunk_id: &str,
+        title: &str,
+        text: &str,
+    ) -> IndexedChunk {
         let mut value = chunk("root", title, text);
         value.chunk_id = chunk_id.into();
         value.metadata.page_id = page_id.into();

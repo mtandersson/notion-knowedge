@@ -31,6 +31,17 @@ struct Edge {
 #[derive(Debug)]
 pub struct Dictionary {
     edges: Box<[Edge]>,
+    manifest_digest: Box<str>,
+}
+impl Dictionary {
+    /// Canonical identity verified by the loader, including importer and Unicode tables.
+    pub fn importer_identity_sha256(&self) -> String {
+        bundle::importer_identity_sha256()
+    }
+    /// Verified complete asset digest used by trusted binding and match evidence.
+    pub fn manifest_digest(&self) -> &str {
+        &self.manifest_digest
+    }
 }
 
 /// Public-asset provenance; generated text is for the native literal FTS executor.
@@ -210,9 +221,9 @@ impl Dictionary {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    fn dictionary(pairs: &[(&str, &str)]) -> Dictionary {
+    pub(crate) fn dictionary(pairs: &[(&str, &str)]) -> Dictionary {
         let mut edges = Vec::new();
         for (i, (source, target)) in pairs.iter().enumerate() {
             let source = literal(source).unwrap();
@@ -230,8 +241,10 @@ mod tests {
         }
         edges.sort_by(|a, b| (&a.source, &a.target, a.entry).cmp(&(&b.source, &b.target, b.entry)));
         edges.dedup_by(|a, b| a.source == b.source && a.target == b.target);
+        let manifest_digest = import::sha256(format!("{edges:?}").as_bytes()).into();
         Dictionary {
             edges: edges.into_boxed_slice(),
+            manifest_digest,
         }
     }
     fn texts(plan: &Plan) -> Vec<&str> {

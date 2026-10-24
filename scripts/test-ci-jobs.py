@@ -111,12 +111,35 @@ class Gate(unittest.TestCase):
         needs = {'changes': {'result': 'success', 'outputs': {
             job: 'true' if job in selected else 'false' for job in ALL}}}
         needs.update({job: {'result': 'success' if job in selected else 'skipped'} for job in ALL})
+        needs['container-main'] = {'result': 'skipped'}
         return needs
 
     def gate(self, needs):
         return subprocess.run(['python3', str(SCRIPT), 'gate'], text=True,
                               capture_output=True,
                               env={**os.environ, 'CI_NEEDS': json.dumps(needs)})
+
+    def test_alternate_main_registry_job_satisfies_gate_and_both_are_required(self):
+        for selected in (ALL, SECURITY | {'container'}):
+            pr = self.needs(selected)
+            pr['container-main'] = {'result': 'skipped'}
+            self.assertEqual(self.gate(pr).returncode, 0)
+            main = self.needs(selected)
+            main['container-main'] = {'result': 'success'}
+            main['container']['result'] = 'skipped'
+            self.assertEqual(self.gate(main).returncode, 0)
+            for r1, r2 in [('skipped', 'skipped'), ('success', 'success'),
+                           ('skipped', 'failure'), ('failure', 'skipped')]:
+                invalid = self.needs(selected)
+                invalid['container']['result'] = r1
+                invalid['container-main'] = {'result': r2}
+                with self.subTest(container=r1, main=r2):
+                    self.assertNotEqual(self.gate(invalid).returncode, 0)
+        disabled = self.needs(SECURITY)
+        disabled['container-main'] = {'result': 'skipped'}
+        self.assertEqual(self.gate(disabled).returncode, 0)
+        disabled['container-main'] = {'result': 'success'}
+        self.assertNotEqual(self.gate(disabled).returncode, 0)
 
     def test_full_success_and_intentional_skips_pass(self):
         for selected in (ALL, SECURITY, SECURITY | {'test'}, SECURITY | {'container'}):
@@ -151,63 +174,82 @@ class Gate(unittest.TestCase):
             self.assertNotEqual(self.gate(needs).returncode, 0)
 
 
-class ContainerCachePublication(unittest.TestCase):
-    """Lock down the optional cache-export boundary, not the required image checks."""
+class ContainerRegistryCachePublication(unittest.TestCase):
+    """Registry manifests are published only by trusted main, after smoke."""
 
     def setUp(self):
         self.workflow = (SCRIPT.parent.parent / '.github/workflows/ci.yml').read_text()
 
     def check_contract(self, workflow):
-        container = workflow.split('\n  container:\n', 1)[1].split('\n  dependencies:\n', 1)[0]
-        builder = container.split('      - name: Export verified builder root\n', 1)[1].split('      - name: Export verified final image graph\n', 1)[0]
-        final = container.split('      - name: Export verified final image graph\n', 1)[1].split('      - name: Report optional cache publication\n', 1)[0]
-        for block, scope in ((builder, '-builder'), (final, '')):
+        pr = workflow.split('\n  container:\n', 1)[1].split('\n  container-main:\n', 1)[0]
+        main = workflow.split('\n  container-main:\n', 1)[1].split('\n  dependencies:\n', 1)[0]
+        self.assertIn('packages: read', pr)
+        self.assertNotIn('packages: write', pr)
+        self.assertIn('packages: write', main)
+        self.assertNotIn('packages: read', main)
+        self.assertIn('steps: &container_smoke_steps', pr)
+        self.assertIn('steps: *container_smoke_steps', main)
+        self.assertIn("github.event_name == 'pull_request' || github.ref != 'refs/heads/main'", pr)
+        self.assertIn("github.event_name != 'pull_request' && github.ref == 'refs/heads/main'", main)
+        self.assertIn('docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6', pr)
+        self.assertIn('registry: ghcr.io', pr)
+        self.assertIn('username: ${{ github.actor }}', pr)
+        self.assertIn('password: ${{ secrets.GITHUB_TOKEN }}', pr)
+        self.assertNotIn('DOCKER_CACHE_ROOT', workflow)
+        self.assertNotIn('docker-cache-source', pr)
+        self.assertNotIn('type=gha', pr)
+        tag = 'ghcr.io/${{ github.repository }}:buildcache-main-amd64'
+        builder_tag = tag + '-builder'
+        build = pr.split('      - name: Build and load final runtime image\n', 1)[1].split('      - name: ', 1)[0]
+        self.assertIn('cache-from: type=registry,ref=' + tag, build)
+        builder = pr.split('      - name: Export verified builder root\n', 1)[1].split('      - name: Export verified final image graph\n', 1)[0]
+        final = pr.split('      - name: Export verified final image graph\n', 1)[1].split('      - name: Report optional cache publication\n', 1)[0]
+        for block, export_tag, import_tag in (
+            (builder, builder_tag, builder_tag), (final, tag, tag)):
             self.assertIn('uses: docker/build-push-action@', block)
-            self.assertIn('cache-from: ${{ steps.docker-cache-source.outputs.', block)
-            self.assertIn('cache-to: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}' + scope +
-                          ',mode=max,timeout=10m,ignore-error=true', block)
-            self.assertNotIn('continue-on-error:', block,
-                             'Do not suppress Docker solve/build failures at the step level')
-            self.assertIn("head.repo.full_name == github.repository", block,
-                          'Keep existing fork cache-write isolation')
-
+            self.assertIn('cache-from: type=registry,ref=' + import_tag, block)
+            self.assertIn('cache-to: type=registry,ref=' + export_tag +
+                          ',mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true', block)
+            self.assertIn("if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'", block)
+            self.assertNotIn('continue-on-error:', block)
         required = ('Build and load final runtime image',
                     'Load pinned builder for permission probe',
                     'Verify final runtime image',
                     'Verify production indexing and offline retrieval in final image',
                     'Smoke test local Docker Compose stack')
         for name in required:
-            self.assertLess(container.index('      - name: ' + name + '\n'),
-                            container.index('      - name: Export verified builder root\n'))
-            block = container.split('      - name: ' + name + '\n', 1)[1].split('      - name: ', 1)[0]
-            self.assertNotIn('continue-on-error:', block)
-            self.assertNotIn('ignore-error=true', block)
-        self.assertIn('cache-from: ${{ steps.docker-cache-source.outputs.final-cache-from }}', container)
-        self.assertIn('cache-from: ${{ steps.docker-cache-source.outputs.builder-cache-from }}', container)
-        self.assertNotIn('continue-on-error:', container)
-        self.assertIn('GITHUB_STEP_SUMMARY', container)
+            self.assertLess(pr.index('      - name: ' + name + '\n'),
+                            pr.index('      - name: Export verified builder root\n'))
+            required_block = pr.split('      - name: ' + name + '\n', 1)[1].split('      - name: ', 1)[0]
+            self.assertNotIn('continue-on-error:', required_block)
+            self.assertNotIn('ignore-error=true', required_block)
+        self.assertNotIn('continue-on-error:', pr)
+        self.assertIn('GITHUB_STEP_SUMMARY', pr)
         self.assertIn('CI gate', workflow)
 
-    def test_cache_service_errors_are_optional_but_runtime_builds_are_not(self):
+    def test_registry_export_is_main_only_and_required_smoke_is_not_optional(self):
         self.check_contract(self.workflow)
+        self.assertEqual(self.workflow.count(
+            "if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'"), 4)
+        pr = self.workflow.split('\n  container:\n', 1)[1].split('\n  container-main:\n', 1)[0]
+        self.assertEqual(pr.count(
+            "if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'"), 3)
+        self.assertEqual(pr.count(',ignore-error=true'), 2)
 
-    def test_missing_export_tolerance_and_unconditional_tolerance_are_rejected(self):
-        # Regression fixtures: removing cache-only tolerance or making required
-        # builds optional must be detected rather than accepted as green CI.
-        self.assertEqual(self.workflow.count(',ignore-error=true'), 2)
+    def test_broken_permissions_or_exports_or_checks_are_rejected(self):
+        self.check_contract(self.workflow)
         for mutation in (
-            self.workflow.replace(',ignore-error=true', '', 1),
-            self.workflow.replace(',ignore-error=true', '', 1).replace(',ignore-error=true', ''),
-            self.workflow.replace('      - name: Build and load final runtime image\n',
-                                  '      - name: Build and load final runtime image\n'
-                                  '        continue-on-error: true\n'),
+            self.workflow.replace('      packages: read', '      packages: write', 1),
+            self.workflow.replace('      packages: write', '      packages: read', 1),
+            self.workflow.replace('mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true',
+                                  'mode=max,oci-mediatypes=true,image-manifest=true', 1),
+            self.workflow.replace("if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'",
+                                  'if: success()', 1),
             self.workflow.replace('      - name: Verify final runtime image\n',
-                                  '      - name: Verify final runtime image\n'
-                                  '        continue-on-error: true\n'),
+                                  '      - name: Verify final runtime image\n        continue-on-error: true\n', 1),
         ):
-            with self.subTest(mutation=mutation != self.workflow):
-                with self.assertRaises(AssertionError):
-                    self.check_contract(mutation)
+            with self.subTest(mutation=mutation != self.workflow), self.assertRaises(AssertionError):
+                self.check_contract(mutation)
 
 
 if __name__ == '__main__':

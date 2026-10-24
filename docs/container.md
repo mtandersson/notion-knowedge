@@ -121,26 +121,53 @@ configuration, diagnostics, MCP/session/health and shutdown checks remain.
 `--builder-image` uses the loaded builder for the disposable permission probe.
 The default command still builds both images for local development.
 
-Successful main runs warm `nk-container-v1-Linux-X64-main` and its `-builder`
-companion. Each same-repository PR has the equivalent numbered pair. For each
-builder export, the read-only local action selects the available own builder
-index, otherwise the trusted main builder index, otherwise no remote import.
-The final-image solve selects own final, own builder, trusted main final,
-trusted main builder, then no remote import. A builder index can retain the
-compiler result even when its final-image index is evicted. It never configures
-overlapping logical cache sources in one solve. Lookup errors and eviction can cause a
-local rebuild; they never skip production checks. Forks can restore authorized
-main caches but never export. GitHub isolates PR writes to their merge ref.
+BuildKit's external CI cache is stored in **GitHub Container Registry (GHCR)**,
+not the GitHub Actions cache service shared with large Cargo snapshots.
+The two stable OCI cache tags are:
 
-After all final-image smoke succeeds, CI exports the builder target to its own
-`-builder` scope and the final target to its own ordinary scope, both `mode=max`
-with ten-minute timeouts. Two roots preserve expensive compilation and runtime
-COPY results through lazy warm solves. BuildKit's exact engine digest is pinned;
-the index lookup protocol is coupled to that version and must be reviewed when
-upgrading. Index presence is an availability snapshot, not proof that every blob
-remains available or that a changed input is compatible. Versioned indices and
-shared content-addressed blobs remain subject to repository quota/LRU eviction
-and seven-day unused-cache eviction; there are two logical roots per active PR.
+- `ghcr.io/mtandersson/notion-knowedge:buildcache-main-amd64-builder`
+  (retain the expensive `cargo chef cook` dependency and compiler root).
+- `ghcr.io/mtandersson/notion-knowedge:buildcache-main-amd64`
+  (reuse final application and runtime image layers).
+
+Cargo snapshots remain in GitHub Actions Cache, but [PR #509](https://github.com/mtandersson/notion-knowedge/pull/509)
+limits their churn: PRs only restore them, and protected `main` only seeds a new
+Cargo `target` snapshot when no existing cache matches the same pinned toolchain,
+dependency graph, profile and job. A normal source edit may recompile changed
+local crates instead of replacing several gigabytes of compatible target archives.
+Dependency downloads are maintained independently. This is complementary to
+the separate GHCR Docker cache and does not guarantee registry retention.
+
+The repository is public. Every pull request (including forks) uses a separate
+`Container smoke` job with `contents:read` / `packages:read` permissions.
+Only a protected `main` push or `workflow_dispatch` on `main` uses the
+mutually exclusive writer job with `packages:write`; both jobs share exactly
+the same Buildx, production build and required smoke steps via a YAML steps
+anchor. The GHCR login uses the job-scoped `GITHUB_TOKEN`; no PAT is required.
+The package must remain linked to the repository so that `GITHUB_TOKEN` has
+the intended package permissions. Verify package visibility/read permission
+before assuming a fork can restore a private package.
+
+Final-image compilation first restores only the main final cache manifest.
+After full runtime, retrieval and Compose smoke passes, `main` exports a
+builder manifest and then a final manifest, both `mode=max`, with OCI image
+manifests. Previous hosted experiments showed that a lazy final-only export
+may lose reusable intermediate compile results, and that overlapping BuildKit
+cache managers in one solve can suppress valid results. Hence the separate
+builder export and no simultaneous fallback sources in a single solve.
+Export errors are explicitly best-effort (`ignore-error=true`), and cannot
+mask failed mandatory validation. When the GHCR tags do not exist yet, the
+first run builds cold and seeds them on main; PRs never create or overwrite
+them. Stable tags avoid producing a new immutable Actions cache entry per
+commit, but layers still occupy GHCR storage and can be garbage collected
+according to package retention policy. A successful CI gate does **not**
+prove the registry upload completed: inspect both export-step logs for pushed
+manifests and later run logs for `CACHED` on `cargo chef cook`.
+
+The old `type=gha` preflight implementation and logical cache scopes are
+retired from active CI; previous investigations in
+[Docker PR cache investigation](docker-cache-causal-evidence.md) remain
+historical evidence for the two-manifest policy.
 
 Docker's content-addressed build keys invalidate compilation for changed Rust,
 Cargo manifests/lockfile, VERSION, or the pinned builder/Dockerfile. REVISION is

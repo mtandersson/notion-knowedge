@@ -1,0 +1,68 @@
+# One-shot GHCR migration hygiene. PR #510 replaced the BuildKit GHA backend.
+# This only fires when this file is first merged to protected main with the
+# exact reviewed commit title below, matching the established #266 pattern.
+# No --all: unrelated Cargo/Actions caches must remain untouched.
+name: Purge obsolete BuildKit GHA cache once
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/purge-old-buildkit-cache-once.yml
+      - scripts/prune-buildkit-gha-cache.py
+      - scripts/test-prune-buildkit-gha-cache.py
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/purge-old-buildkit-cache-once.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: obsolete-buildkit-gha-cache-one-shot
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Verify one-shot cache cleanup selection (read only)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout without persisting credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Exercise selection, pagination and authorization guards
+        run: python3 scripts/test-prune-buildkit-gha-cache.py -v
+
+  purge:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      startsWith(github.event.head_commit.message, 'chore(ci): purge obsolete BuildKit GHA caches once')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Checkout reviewed source without persisting credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Test strict cache selection before API mutation
+        run: python3 scripts/test-prune-buildkit-gha-cache.py -v
+
+      - name: Snapshot and dry-run only obsolete BuildKit caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/prune-buildkit-gha-cache.py
+
+      - name: Remove only reviewed obsolete BuildKit cache IDs and verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/prune-buildkit-gha-cache.py --apply

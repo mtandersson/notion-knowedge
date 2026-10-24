@@ -55,6 +55,9 @@ fn identity() -> Identity {
         attribution: ATTRIBUTION.into(),
     }
 }
+pub(super) fn importer_identity_sha256() -> String {
+    sha256(&serde_json::to_vec(&identity()).expect("fixed importer identity serializes"))
+}
 /// Public reproducibility data, never corpus/query content. Persist the digest in
 /// trusted index binding; a digest supplied by a tool caller is not authority.
 #[derive(Debug, Serialize)]
@@ -261,6 +264,7 @@ fn decode(bytes: &[u8], expected: &str) -> Result<Dictionary> {
     }
     Ok(Dictionary {
         edges: edges.into_boxed_slice(),
+        manifest_digest: expected.into(),
     })
 }
 impl Dictionary {
@@ -330,6 +334,7 @@ mod tests {
         let bytes = std::fs::read(&a).unwrap();
         assert_eq!(bytes, std::fs::read(&b).unwrap());
         let dictionary = Dictionary::load(&a, &first.sha256).unwrap();
+        assert_eq!(dictionary.manifest_digest(), first.sha256);
         assert!(dictionary.edges.len() > 100_000);
         assert!(Dictionary::load(&a, &"0".repeat(64)).is_err());
         assert!(prepare_archive(Path::new(&archive), &a).is_err()); // no overwrite
