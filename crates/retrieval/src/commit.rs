@@ -21,7 +21,9 @@ use tokio::sync::oneshot;
 
 use crate::sync_state::SqliteSyncStateStore;
 mod alias_projection;
+mod offline;
 pub use alias_projection::AliasProjection;
+pub use offline::OfflineBackup;
 pub(crate) mod projection;
 pub use projection::RelationProjection;
 
@@ -49,7 +51,7 @@ fn io(_: std::io::Error) -> CommitError {
 }
 
 /// Trusted operator configuration, never inferred from an incoming webhook.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CommitBinding {
     table: String,
     workspace: String,
