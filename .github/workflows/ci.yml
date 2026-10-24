@@ -332,13 +332,14 @@ jobs:
 
   container:
     needs: changes
-    if: needs.changes.outputs.container == 'true'
+    if: needs.changes.outputs.container == 'true' && (github.event_name == 'pull_request' || github.ref != 'refs/heads/main')
     name: Container smoke
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    env:
-      DOCKER_CACHE_SCOPE: nk-container-v1-Linux-X64-${{ github.event.pull_request.number || github.ref_name }}
-    steps:
+    permissions:
+      contents: read
+      packages: read
+    steps: &container_smoke_steps
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -350,12 +351,12 @@ jobs:
           # Verified BuildKit v0.33.1 and its GHA index protocol.
           driver-opts: image=moby/buildkit:buildx-stable-1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
 
-      - name: Choose available Docker cache roots
-        id: docker-cache-source
-        uses: ./.github/actions/docker-cache-source
-
-      - name: Test Docker cache root selection
-        run: node --test scripts/test-docker-cache-source.cjs
+      - name: Log in to GHCR with job-scoped package permissions
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Test cached image identity rejection
         run: python3 scripts/test-container-smoke.py
@@ -384,7 +385,7 @@ jobs:
           build-args: |
             VERSION=${{ steps.identity.outputs.version }}
             REVISION=${{ github.sha }}
-          cache-from: ${{ steps.docker-cache-source.outputs.final-cache-from }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-main-amd64
 
       - name: Load pinned builder for permission probe
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -407,10 +408,9 @@ jobs:
           docker tag notion-knowledge:smoke notion-knowledge:local
           python3 scripts/smoke-compose.py --prebuilt
 
-      # PRs may read trusted main caches but must not publish large per-PR
-      # Docker roots. GitHub's shared cache quota can otherwise evict main's
-      # expensive cargo-chef cook layers within minutes.
-      # Keep compilation as an export root; a cached final image can skip it.
+      # Keep an independent, pinned compiler cache manifest in GHCR: previous
+      # hosted evidence showed that lazy final-image exports can lose builder
+      # results. PR jobs have packages:read and cannot publish cache tags.
       - name: Export verified builder root
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -419,11 +419,11 @@ jobs:
           platforms: linux/amd64
           target: builder
           build-args: VERSION=${{ steps.identity.outputs.version }}
-          cache-from: ${{ steps.docker-cache-source.outputs.builder-cache-from }}
-          cache-to: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}-builder,mode=max,timeout=10m,ignore-error=true
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-main-amd64-builder
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-main-amd64-builder,mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true
 
-      # Export only after all final-image interactions pass. PR caches are
-      # isolated by GitHub's merge-ref scope and cannot poison main restores.
+      # Only trusted main exports after production, retrieval and Compose smoke.
+      # PR jobs lack packages:write and cannot overwrite these shared tags.
       - name: Export verified final image graph
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -433,22 +433,31 @@ jobs:
           build-args: |
             VERSION=${{ steps.identity.outputs.version }}
             REVISION=${{ github.sha }}
-          cache-from: ${{ steps.docker-cache-source.outputs.final-cache-from }}
-          cache-to: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }},mode=max,timeout=10m,ignore-error=true
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-main-amd64
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-main-amd64,mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true
 
-      # Only GHA cache publication is best effort. The required build/load,
-      # permission, retrieval and Compose smoke steps above must still pass.
-      # BuildKit keeps export failures in the action logs while the backend's
-      # ignore-error flag prevents transient cache-service failures from failing CI.
+      # Only optional registry cache publication is best effort. Mandatory
+      # build/load, retrieval, permission and Compose checks must still pass.
       - name: Report optional cache publication
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         run: |
           {
-            echo '### Optional Docker cache publication'
-            echo 'The verified builder and final-image cache exports were attempted.'
-            echo 'BuildKit may ignore GitHub Actions cache-service errors (`ignore-error=true`); inspect both export step logs for upload success or warnings.'
-            echo 'A successful CI gate confirms the required image load and smoke checks, **not** successful cache publication.'
+            echo '### Optional GHCR BuildKit cache publication'
+            echo 'The verified builder and final-image GHCR registry cache exports were attempted.'
+            echo 'BuildKit may ignore registry upload failures (`ignore-error=true`); check both export logs for pushed manifests or warnings.'
+            echo 'A successful CI gate validates the image and smoke tests, **not** GHCR cache publication.'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  container-main:
+    needs: changes
+    if: needs.changes.outputs.container == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    name: Container smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps: *container_smoke_steps
 
   dependencies:
     name: Dependency vulnerabilities
