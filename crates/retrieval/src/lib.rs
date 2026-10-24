@@ -66,3 +66,7 @@ pub mod file_refresh_intents;
 
 /// Offline literal bilingual assets and deterministic bounded query planning.
 pub mod lexical_dictionary;
+
+/// Pinned local executable transport for offline rollback verification.
+#[cfg(target_os = "linux")]
+pub mod rollback_runtime;

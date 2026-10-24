@@ -70,3 +70,7 @@ required-features = ["local-qwen", "local-lancedb"]
 [[example]]
 name = "lexical-candidate"
 required-features = ["local-lancedb"]
+
+[[example]]
+name = "lexical-runtime"
+required-features = ["local-lancedb"]

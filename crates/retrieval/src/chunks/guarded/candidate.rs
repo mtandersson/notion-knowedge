@@ -297,6 +297,12 @@ fn read_ready(candidate: &Path) -> Result<(PreparedLexicalCandidate, Vec<u8>), C
     Ok((ready, bytes))
 }
 async fn verify_profile(table: &LanceChunkTable) -> Result<(), ChunkTableError> {
+    verify_profile_config(table, &FtsIndexConfig::lexical_expansion_v1()).await
+}
+async fn verify_profile_config(
+    table: &LanceChunkTable,
+    config: &FtsIndexConfig,
+) -> Result<(), ChunkTableError> {
     let indices = table.table.list_indices().await?;
     for (name, column) in CHUNK_FTS_INDEXES {
         if !indices.iter().any(|index| {
@@ -317,10 +323,7 @@ async fn verify_profile(table: &LanceChunkTable) -> Result<(), ChunkTableError> 
             return Err(bad());
         }
         let actual: serde_json::Value = serde_json::from_str(details)?;
-        let mut expected = serde_json::to_value(fts_parameters(
-            column,
-            &FtsIndexConfig::lexical_expansion_v1(),
-        )?)?;
+        let mut expected = serde_json::to_value(fts_parameters(column, config)?)?;
         // Native scalar-string indices resolve document extraction to text.
         // The stored physical settings omit logical row granularity, which is
         // fixed by our exact scalar Utf8 schema (never a list/JSON document).
@@ -918,4 +921,107 @@ impl GuardedChunkTable {
                     .map_err(|e| CommitError::Operation(failure(e)))
             })
     }
+}
+
+/// Complete bounded native observation, not permanent compatibility authority.
+/// Includes exact canonical row/vector bytes and the original lexical binding.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSourceSnapshot {
+    pub version: u32,
+    pub authority_sha256: String,
+    pub source_version: u64,
+    pub rows: u64,
+    pub snapshot_sha256: String,
+    pub lexical: Option<LexicalIndexBinding>,
+}
+
+/// Observe known storage without executing an older lexical plan. Caller must
+/// retain exclusive index/SQL ownership across this observation, the selected
+/// runtime's verification and a final identical recheck. This function never
+/// opens operational SQL, repairs FTS, or constructs verified runtime authority.
+pub fn inspect_runtime_source(
+    directory: &Path,
+    embedding: &EmbeddingMetadata,
+    authority: &crate::commit::CommitBinding,
+    limits: CandidateLimits,
+) -> Result<RuntimeSourceSnapshot, ChunkTableError> {
+    if tokio::runtime::Handle::try_current().is_ok()
+        || limits.files == 0
+        || limits.file_bytes == 0
+        || limits.rows == 0
+        || limits.batch_bytes == 0
+        || limits.identifier_bytes == 0
+    {
+        return Err(bad());
+    }
+    fn preflight(
+        path: &Path,
+        limits: CandidateLimits,
+        files: &mut usize,
+        bytes: &mut u64,
+        depth: usize,
+    ) -> Result<(), ChunkTableError> {
+        if depth > 32 {
+            return Err(bad());
+        }
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            *files = files.checked_add(1).ok_or_else(bad)?;
+            if *files > limits.files {
+                return Err(bad());
+            }
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if metadata.is_dir() {
+                preflight(&entry.path(), limits, files, bytes, depth + 1)?;
+            } else if metadata.is_file() && metadata.nlink() == 1 {
+                *bytes = bytes.checked_add(metadata.len()).ok_or_else(bad)?;
+                if *bytes > limits.file_bytes {
+                    return Err(bad());
+                }
+            } else {
+                return Err(bad());
+            }
+        }
+        Ok(())
+    }
+    if !fs::symlink_metadata(directory)?.is_dir() {
+        return Err(bad());
+    }
+    preflight(directory, limits, &mut 0, &mut 0, 0)?;
+    let lexical = lexical_binding::read(directory)?;
+    if let Some(binding) = &lexical {
+        binding.validate_offline_source(directory, embedding, authority)?;
+    }
+    let authority_sha256 = source_authority_at(directory, authority)?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let (source_version, digest) = rt.block_on(async {
+        let source = open_current(directory, authority.table(), embedding, &lexical)
+            .await?
+            .read_snapshot()
+            .await?;
+        let config = lexical
+            .as_ref()
+            .map(|b| b.storage_profile())
+            .unwrap_or_default();
+        verify_profile_config(&source, &config).await?;
+        Ok::<_, ChunkTableError>((
+            source.table.version().await?,
+            verify_rows(&source, authority, limits, true).await?,
+        ))
+    })?;
+    lexical_binding::verify(directory, &lexical)?;
+    if source_authority_at(directory, authority)? != authority_sha256 {
+        return Err(bad());
+    }
+    Ok(RuntimeSourceSnapshot {
+        version: 1,
+        authority_sha256,
+        source_version,
+        rows: digest.rows,
+        snapshot_sha256: digest.finish(),
+        lexical,
+    })
 }
