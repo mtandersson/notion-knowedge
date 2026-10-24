@@ -7,6 +7,228 @@ use std::os::unix::fs::OpenOptionsExt;
 
 const MAX_RECORD_BYTES: u64 = 65_536;
 
+/// Stable ownership across directory renames. This excludes other transition
+/// operators and guarded index consumers; an exclusive SQLite transaction is
+/// still required to exclude operational writers before any durable effects.
+pub struct TransitionOwnership {
+    state_path: PathBuf,
+    state: File,
+    source: File,
+    target: File,
+    record: TransitionRecord,
+}
+
+fn exclusive(file: &File) -> Result<(), CommitError> {
+    match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(std::fs::TryLockError::WouldBlock) => Err(CommitError::Conflict),
+        Err(std::fs::TryLockError::Error(error)) => Err(io(error)),
+    }
+}
+
+fn owned_directory(path: &Path) -> Result<File, CommitError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(io)?;
+    let metadata = file.metadata().map_err(io)?;
+    if !metadata.is_dir()
+        || metadata.mode() & 0o077 != 0
+        || metadata.uid() != fs::metadata("/proc/self").map_err(io)?.uid()
+    {
+        return Err(CommitError::BindingMismatch);
+    }
+    Ok(file)
+}
+
+fn locate(record: &TransitionRecord, source: bool) -> Result<File, CommitError> {
+    let endpoint = if source {
+        &record.source
+    } else {
+        &record.target
+    };
+    let alternate = if source {
+        &record.archive_path
+    } else {
+        &record.candidate_path
+    };
+    let expected = Identity {
+        device: endpoint.device,
+        inode: endpoint.inode,
+    };
+    let mut found = None;
+    for path in [&endpoint.path, alternate] {
+        match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io(error)),
+            Ok(metadata) if !metadata.is_dir() => return Err(CommitError::BindingMismatch),
+            Ok(_) => {}
+        }
+        let file = owned_directory(path)?;
+        if Identity::file(&file)? == expected {
+            if found.is_some() {
+                return Err(CommitError::BindingMismatch);
+            }
+            found = Some(file);
+        } else if path == alternate {
+            return Err(CommitError::BindingMismatch);
+        } else {
+            let other = if source {
+                &record.target
+            } else {
+                &record.source
+            };
+            if Identity::file(&file)?
+                != (Identity {
+                    device: other.device,
+                    inode: other.inode,
+                })
+            {
+                return Err(CommitError::BindingMismatch);
+            }
+        }
+    }
+    found.ok_or(CommitError::BindingMismatch)
+}
+
+impl TransitionOwnership {
+    /// Acquire in stable state/source/target order without waiting. Recovery
+    /// validates the original state token directly; it never opens a coordinator
+    /// that could admit a quarantined generation or initialize missing state.
+    pub fn acquire(state_path: &Path, record: &TransitionRecord) -> Result<Self, CommitError> {
+        canonical(record)?;
+        super::offline::private_parent(state_path)?;
+        for path in [
+            &record.source.path,
+            &record.candidate_path,
+            &record.archive_path,
+        ] {
+            super::offline::private_parent(path)?;
+            if state_path.starts_with(path) {
+                return Err(CommitError::InvalidInput);
+            }
+        }
+        let state = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(state_path)
+            .map_err(io)?;
+        let metadata = state.metadata().map_err(io)?;
+        if !metadata.is_file()
+            || metadata.nlink() != 1
+            || metadata.mode() & 0o077 != 0
+            || metadata.uid() != fs::metadata("/proc/self").map_err(io)?.uid()
+            || Identity::file(&state)?
+                != (Identity {
+                    device: record.state_device,
+                    inode: record.state_inode,
+                })
+        {
+            return Err(CommitError::BindingMismatch);
+        }
+        exclusive(&state)?;
+        let source = locate(record, true)?;
+        exclusive(&source)?;
+        let target = locate(record, false)?;
+        exclusive(&target)?;
+        let store = SqliteSyncStateStore::open_read_only(state_path)
+            .map_err(|_| CommitError::Unavailable)?;
+        let token: String = store
+            .lock_connection()
+            .map_err(|_| CommitError::Unavailable)?
+            .query_row(
+                "SELECT identity FROM index_commit_state_identity WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(sql)?;
+        if token != record.state_token {
+            return Err(CommitError::BindingMismatch);
+        }
+        let owned = Self {
+            state_path: state_path.to_owned(),
+            state,
+            source,
+            target,
+            record: record.clone(),
+        };
+        owned.revalidate()?;
+        Ok(owned)
+    }
+
+    pub fn revalidate(&self) -> Result<(), CommitError> {
+        for path in [
+            &self.state_path,
+            &self.record.source.path,
+            &self.record.candidate_path,
+            &self.record.archive_path,
+        ] {
+            super::offline::private_parent(path)?;
+        }
+        let metadata = fs::symlink_metadata(&self.state_path).map_err(io)?;
+        if !metadata.is_file()
+            || metadata.nlink() != 1
+            || metadata.mode() & 0o077 != 0
+            || metadata.uid() != fs::metadata("/proc/self").map_err(io)?.uid()
+            || Identity::read(&self.state_path)? != Identity::file(&self.state)?
+            || Identity::file(&locate(&self.record, true)?)? != Identity::file(&self.source)?
+            || Identity::file(&locate(&self.record, false)?)? != Identity::file(&self.target)?
+        {
+            return Err(CommitError::BindingMismatch);
+        }
+        Ok(())
+    }
+
+    /// Own the operational database without reconstructing a serving
+    /// coordinator. The caller still verifies native state before publication.
+    pub fn with_exclusive_sql<T>(
+        &self,
+        now: i64,
+        operation: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, CommitError>,
+    ) -> Result<T, CommitError> {
+        if now < 0 {
+            return Err(CommitError::InvalidInput);
+        }
+        self.revalidate()?;
+        let store = SqliteSyncStateStore::open_existing(&self.state_path)
+            .map_err(|_| CommitError::Unavailable)?;
+        let mut db = store
+            .lock_connection()
+            .map_err(|_| CommitError::Unavailable)?;
+        db.busy_timeout(std::time::Duration::ZERO).map_err(sql)?;
+        let transaction = db
+            .transaction_with_behavior(TransactionBehavior::Exclusive)
+            .map_err(sql)?;
+        self.validate_sql(&transaction)?;
+        let live: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM reconciliation_lease WHERE expires_at>?1) OR EXISTS(SELECT 1 FROM file_refresh_intents WHERE phase='held' AND lease_until>?1)", [now], |r| r.get(0)).map_err(sql)?;
+        if live {
+            return Err(CommitError::Conflict);
+        }
+        let result = operation(&transaction)?;
+        self.revalidate()?;
+        self.validate_sql(&transaction)?;
+        transaction.commit().map_err(sql)?;
+        Ok(result)
+    }
+
+    fn validate_sql(&self, db: &Connection) -> Result<(), CommitError> {
+        let source: RecordedBinding = serde_json::from_str(&self.record.source.binding)
+            .map_err(|_| CommitError::InvalidInput)?;
+        let target: RecordedBinding = serde_json::from_str(&self.record.target.binding)
+            .map_err(|_| CommitError::InvalidInput)?;
+        let quarantine_epoch =
+            i64::try_from(self.record.quarantine_epoch).map_err(|_| CommitError::InvalidInput)?;
+        let valid: bool = db.query_row("SELECT identity=?1 AND state_device=?2 AND state_inode=?3 AND table_name=?4 AND workspace=?5 AND scope=?6 AND ((index_device=?7 AND index_inode=?8 AND ((generation=?9 AND epoch=?10) OR (generation=?11 AND epoch=?12))) OR (index_device=?13 AND index_inode=?14 AND generation=?15 AND epoch=?16)) FROM index_commit_binding CROSS JOIN index_commit_state_identity WHERE index_commit_binding.singleton=1 AND index_commit_state_identity.singleton=1",
+            params![self.record.state_token,self.record.state_device.to_string(),self.record.state_inode.to_string(),source.table,source.workspace,source.scope,self.record.source.device.to_string(),self.record.source.inode.to_string(),source.generation,source.epoch,self.record.quarantine_generation,quarantine_epoch,self.record.target.device.to_string(),self.record.target.inode.to_string(),target.generation,target.epoch], |r|r.get(0)).optional().map_err(sql)?.unwrap_or(false);
+        if valid {
+            Ok(())
+        } else {
+            Err(CommitError::BindingMismatch)
+        }
+    }
+}
+
 // Decoded journal data never becomes a runtime CommitBinding.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -201,10 +423,22 @@ impl TransitionRecord {
 
     /// Atomically persist a complete record and sync its directory. `previous`
     /// is the exact record expected by the exclusive offline owner; None permits
-    /// only initial Prepared publication. This does not acquire transition locks.
+    /// only initial Prepared publication. Requires retained transition ownership;
+    /// the caller must additionally hold exclusive SQL ownership during effects.
     /// An I/O error after publication can mean the new record already exists;
     /// reread actual state before recovery instead of retrying a predecessor.
-    pub fn persist(&self, state: &Path, previous: Option<&Self>) -> Result<(), CommitError> {
+    pub fn persist(
+        &self,
+        owner: &TransitionOwnership,
+        previous: Option<&Self>,
+    ) -> Result<(), CommitError> {
+        owner.revalidate()?;
+        let mut expected = owner.record.clone();
+        expected.phase = self.phase;
+        if expected != *self {
+            return Err(CommitError::BindingMismatch);
+        }
+        let state = &owner.state_path;
         let path = journal_path(state)?;
         super::offline::private_parent(&path)?;
         let bytes = canonical(self)?;

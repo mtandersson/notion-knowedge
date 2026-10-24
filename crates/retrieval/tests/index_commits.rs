@@ -82,6 +82,21 @@ fn transition_admission_child() {
 }
 
 #[test]
+#[ignore = "subprocess helper invoked by transition ownership test"]
+fn transition_ownership_child() {
+    use notion_knowledge_retrieval::commit::transition::*;
+    let state = PathBuf::from(std::env::var_os("NK_TRANSITION_STATE").unwrap());
+    let expected = std::env::var("NK_TRANSITION_OWNED").unwrap() == "yes";
+    let record = TransitionRecord::read(&state).unwrap().unwrap();
+    let result = TransitionOwnership::acquire(&state, &record);
+    if expected {
+        result.unwrap().revalidate().unwrap();
+    } else {
+        assert!(matches!(result, Err(CommitError::Conflict)));
+    }
+}
+
+#[test]
 fn durable_transition_phases_fence_reopened_admission_and_reject_unsafe_records() {
     use notion_knowledge_retrieval::commit::transition::*;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
@@ -134,7 +149,74 @@ fn durable_transition_phases_fence_reopened_admission_and_reject_unsafe_records(
             bytes: 4096,
         },
     };
-    record.persist(&f.state, None).unwrap();
+    fs::set_permissions(&f.index, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&record.candidate_path, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&f.state, fs::Permissions::from_mode(0o600)).unwrap();
+    let ownership = TransitionOwnership::acquire(&f.state, &record).unwrap();
+    assert!(matches!(
+        TransitionOwnership::acquire(&f.state, &record),
+        Err(CommitError::Conflict)
+    ));
+    record.persist(&ownership, None).unwrap();
+    sql.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let contended: Result<(), CommitError> = ownership.with_exclusive_sql(10, |_| {
+        panic!("independent SQL writer must reject transition effects")
+    });
+    assert!(contended.is_err());
+    sql.execute_batch("ROLLBACK").unwrap();
+    ownership
+        .with_exclusive_sql(10, |transaction| {
+            sql.busy_timeout(Duration::ZERO).unwrap();
+            assert!(
+                sql.execute("UPDATE index_commit_binding SET epoch=epoch", [])
+                    .is_err()
+            );
+            transaction
+                .execute(
+                    "INSERT INTO page_sync_state VALUES('retained','hash',NULL,0,0)",
+                    [],
+                )
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let failed: Result<(), CommitError> = ownership.with_exclusive_sql(10, |transaction| {
+        transaction
+            .execute("DELETE FROM page_sync_state WHERE page_id='retained'", [])
+            .unwrap();
+        Err(CommitError::Conflict)
+    });
+    assert_eq!(failed, Err(CommitError::Conflict));
+    assert!(c.state().page_state("retained").unwrap().is_some());
+    let invalid: Result<(), CommitError> = ownership.with_exclusive_sql(10, |transaction| {
+        transaction
+            .execute("UPDATE index_commit_binding SET workspace='different'", [])
+            .unwrap();
+        Ok(())
+    });
+    assert_eq!(invalid, Err(CommitError::BindingMismatch));
+    fs::set_permissions(&f.root, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(ownership.revalidate().is_err());
+    fs::set_permissions(&f.root, fs::Permissions::from_mode(0o700)).unwrap();
+    ownership.revalidate().unwrap();
+    let _lease = c.state().acquire_lease(10, 5).unwrap();
+    let leased: Result<(), CommitError> = ownership.with_exclusive_sql(10, |_| {
+        panic!("live source lease must reject transition effects")
+    });
+    assert_eq!(leased, Err(CommitError::Conflict));
+    ownership.with_exclusive_sql(15, |_| Ok(())).unwrap();
+    let another_operator = |owned: bool| {
+        assert!(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "transition_ownership_child", "--ignored"])
+                .env("NK_TRANSITION_STATE", &f.state)
+                .env("NK_TRANSITION_OWNED", if owned { "yes" } else { "no" })
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    another_operator(false);
     let journal = journal_path(&f.state).unwrap();
     let reopen = |admitted: bool| {
         let status = Command::new(std::env::current_exe().unwrap())
@@ -176,7 +258,7 @@ fn durable_transition_phases_fence_reopened_admission_and_reject_unsafe_records(
     let mut skipped = record.clone();
     skipped.phase = TransitionPhase::Published;
     assert_eq!(
-        skipped.persist(&f.state, Some(&record)),
+        skipped.persist(&ownership, Some(&record)),
         Err(CommitError::InvalidInput)
     );
     for phase in [
@@ -188,7 +270,7 @@ fn durable_transition_phases_fence_reopened_admission_and_reject_unsafe_records(
     ] {
         let previous = record.clone();
         record.phase = phase;
-        record.persist(&f.state, Some(&previous)).unwrap();
+        record.persist(&ownership, Some(&previous)).unwrap();
         assert_eq!(
             TransitionRecord::read(&f.state).unwrap(),
             Some(record.clone())
@@ -196,7 +278,7 @@ fn durable_transition_phases_fence_reopened_admission_and_reject_unsafe_records(
         reopen(false); // Complete still cannot admit the old physical inode/binding.
         assert!(c.owned_page_ids().is_err());
         assert_eq!(
-            previous.persist(&f.state, Some(&record)),
+            previous.persist(&ownership, Some(&record)),
             Err(CommitError::InvalidInput)
         );
     }
@@ -228,7 +310,34 @@ fn durable_transition_phases_fence_reopened_admission_and_reject_unsafe_records(
         [target.dev().to_string(), target.ino().to_string()],
     )
     .unwrap();
+    ownership.revalidate().unwrap();
     assert!(IndexCommitCoordinator::open_existing(&f.index, &f.state, next).is_ok());
+    assert!(matches!(
+        TransitionOwnership::acquire(&f.state, &record),
+        Err(CommitError::Conflict)
+    ));
+    drop(ownership);
+    let recovered = TransitionOwnership::acquire(&f.state, &record).unwrap();
+    recovered.revalidate().unwrap();
+    another_operator(false);
+    let retained_state = f.root.join("retained-state.sqlite");
+    fs::rename(&f.state, &retained_state).unwrap();
+    fs::copy(&retained_state, &f.state).unwrap();
+    assert!(recovered.revalidate().is_err());
+    assert!(TransitionOwnership::acquire(&f.state, &record).is_err());
+    fs::remove_file(&f.state).unwrap();
+    fs::rename(&retained_state, &f.state).unwrap();
+    recovered.revalidate().unwrap();
+    let retained_index = f.root.join("retained-index");
+    fs::rename(&f.index, &retained_index).unwrap();
+    fs::create_dir(&f.index).unwrap();
+    fs::set_permissions(&f.index, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(recovered.revalidate().is_err());
+    fs::remove_dir(&f.index).unwrap();
+    fs::rename(&retained_index, &f.index).unwrap();
+    recovered.revalidate().unwrap();
+    drop(recovered);
+    another_operator(true);
     reopen(false);
 }
 fn wait_for(mut condition: impl FnMut() -> bool) {
