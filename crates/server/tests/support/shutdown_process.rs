@@ -194,16 +194,7 @@ async fn sigterm_drains_or_rolls_back_native_work_and_preserves_acknowledged_web
             rustix::process::Signal::TERM,
         )
         .unwrap();
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .is_ok()
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        super::listener_shutdown::wait_listener_closed(port).await;
         assert!(child.try_wait().unwrap().is_none());
         assert!(
             guard.try_lock().is_err(),
