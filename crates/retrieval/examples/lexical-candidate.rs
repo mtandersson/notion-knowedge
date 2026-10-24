@@ -283,6 +283,26 @@ mod tests {
             "config.json",
             "--all-source-processes-stopped"
         ]));
+        assert!(parse(&[
+            "abort-prepared",
+            "config.json",
+            "--all-source-processes-stopped",
+            "--history",
+            "retained.history"
+        ]));
+        assert!(!parse(&[
+            "abort-prepared",
+            "config.json",
+            "--all-source-processes-stopped",
+            "--history"
+        ]));
+        assert!(!parse(&[
+            "prepare-activation",
+            "config.json",
+            "--all-source-processes-stopped",
+            "--history",
+            "retained.history"
+        ]));
         assert!(!parse(&["prepare-activation", "config.json"]));
         assert!(!parse(&["prepare-activation", "config.json", "--yes"]));
         assert!(parse(&[

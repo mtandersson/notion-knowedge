@@ -145,6 +145,44 @@ retry. Activation, explicit interrupted-transition reconciliation and rollback
 commands remain incomplete under #504, including rollback-compatible artifact
 verification. See the [transition protocol](design/lexical-generation-transition.md).
 
+### Abort an unchanged Prepared transition
+
+Keep all source processes stopped and use the same private configuration:
+
+```sh
+nix develop .#spike --command cargo run -p notion-knowledge-retrieval \
+  --features local-lancedb --example lexical-candidate --locked --offline -- \
+  abort-prepared /private/nk/lexical-preparation.json \
+  --all-source-processes-stopped
+```
+
+Abort requires the original source SQL authority and original directory inodes
+at their captured locations. It retains the complete Prepared journal as
+hash-named `.prepared-aborted.history` before removing the active journal.
+SQLite, its newer acknowledgements, receipts and queues remain untouched; no
+backup is restored, source effect replayed, index renamed or generation reused.
+Candidates and backups remain available for diagnosis. The command does not load
+a dictionary or execute an old plan merely to cancel preparation.
+
+If interruption left only aborted history, explicitly select that retained file:
+
+```sh
+nix develop .#spike --command cargo run -p notion-knowledge-retrieval \
+  --features local-lancedb --example lexical-candidate --locked --offline -- \
+  abort-prepared /private/nk/lexical-preparation.json \
+  --all-source-processes-stopped \
+  --history /private/nk/operational.sqlite.lexical-transition-v1.json.HASH.prepared-aborted.history
+```
+
+Use the actual hash-named file retained by this transition. The tool validates
+its canonical bytes, hash-derived filename, private ownership, no-link metadata
+and exact configured/current authority. It never scans for or guesses a history
+record. Retry accepts both an identical active Prepared record and history alone;
+a different active record is an error. Quarantine or final SQL always rejects
+abort, even when an interrupted journal advance still says Prepared. Recovery
+after quarantine remains separate work under #519; do not edit a journal or
+restore a backup to bypass it.
+
 ## Interrupted preparation
 
 Missing ready metadata means incomplete preparation. Keep the old index and
