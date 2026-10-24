@@ -110,6 +110,21 @@ fn transition_quarantine_child() {
 }
 
 #[test]
+#[ignore = "subprocess helper invoked by physical install recovery test"]
+fn transition_install_child() {
+    use notion_knowledge_retrieval::commit::transition::*;
+    let state = PathBuf::from(std::env::var_os("NK_TRANSITION_STATE").unwrap());
+    let record = TransitionRecord::read(&state).unwrap().unwrap();
+    let result =
+        TransitionOwnership::acquire(&state, &record).and_then(|owner| owner.install_candidate(15));
+    if std::env::var("NK_TRANSITION_INSTALL_FAIL").is_ok() {
+        assert!(result.is_err());
+    } else {
+        assert_eq!(result.unwrap().phase, TransitionPhase::TargetInstalled);
+    }
+}
+
+#[test]
 fn quarantine_reserves_fresh_generations_and_retains_work_across_restart() {
     use notion_knowledge_retrieval::commit::transition::*;
     use sha2::{Digest, Sha256};
@@ -120,12 +135,23 @@ fn quarantine_reserves_fresh_generations_and_retains_work_across_restart() {
         "epoch-collision",
         "stale-backup",
         "sql-committed",
+        "source-renamed",
+        "source-journaled",
+        "target-renamed",
+        "target-journaled",
+        "archive-conflict",
+        "active-conflict",
     ] {
         let f = Fixture::new();
         fs::set_permissions(&f.root, fs::Permissions::from_mode(0o700)).unwrap();
         let c = f.coordinator();
         let candidate = f.root.join("candidate");
         fs::create_dir(&candidate).unwrap();
+        fs::write(
+            candidate.join("candidate-marker"),
+            b"retained candidate bytes",
+        )
+        .unwrap();
         for path in [&candidate, &f.index] {
             fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
         }
@@ -288,6 +314,76 @@ fn quarantine_reserves_fresh_generations_and_retains_work_across_restart() {
                 .unwrap(),
                 3
             );
+            if matches!(
+                scenario,
+                "source-renamed"
+                    | "source-journaled"
+                    | "target-renamed"
+                    | "target-journaled"
+                    | "active-conflict"
+            ) {
+                fs::rename(&f.index, &record.archive_path).unwrap();
+            }
+            let mut current = quarantined;
+            if matches!(
+                scenario,
+                "source-journaled" | "target-renamed" | "target-journaled" | "active-conflict"
+            ) {
+                let previous = current.clone();
+                current.phase = TransitionPhase::SourceRetained;
+                current.persist(&recovered, Some(&previous)).unwrap();
+            }
+            if matches!(scenario, "target-renamed" | "target-journaled") {
+                fs::rename(&record.candidate_path, &f.index).unwrap();
+            }
+            if scenario == "target-journaled" {
+                let previous = current.clone();
+                current.phase = TransitionPhase::TargetInstalled;
+                current.persist(&recovered, Some(&previous)).unwrap();
+            }
+            let foreign = match scenario {
+                "archive-conflict" => Some(&record.archive_path),
+                "active-conflict" => Some(&f.index),
+                _ => None,
+            };
+            if let Some(path) = foreign {
+                fs::create_dir(path).unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+                fs::write(path.join("foreign-marker"), b"must survive").unwrap();
+            }
+            drop(recovered);
+            let mut process = Command::new(std::env::current_exe().unwrap());
+            process
+                .args(["--exact", "transition_install_child", "--ignored"])
+                .env("NK_TRANSITION_STATE", &f.state);
+            if foreign.is_some() {
+                process.env("NK_TRANSITION_INSTALL_FAIL", "yes");
+            }
+            assert!(process.status().unwrap().success());
+            if let Some(path) = foreign {
+                assert_eq!(
+                    fs::read(path.join("foreign-marker")).unwrap(),
+                    b"must survive"
+                );
+                assert_eq!(TransitionRecord::read(&f.state).unwrap(), Some(current));
+                assert!(record.candidate_path.is_dir());
+            } else {
+                let installed = TransitionRecord::read(&f.state).unwrap().unwrap();
+                let owner = TransitionOwnership::acquire(&f.state, &installed).unwrap();
+                assert_eq!(owner.install_candidate(15).unwrap(), installed);
+                assert_eq!(installed.phase, TransitionPhase::TargetInstalled);
+                assert_eq!(fs::metadata(&f.index).unwrap().ino(), target.ino());
+                assert_eq!(
+                    fs::metadata(&record.archive_path).unwrap().ino(),
+                    source.ino()
+                );
+                assert_eq!(
+                    fs::read(f.index.join("candidate-marker")).unwrap(),
+                    b"retained candidate bytes"
+                );
+                assert!(!record.candidate_path.exists());
+            }
+            assert!(IndexCommitCoordinator::open_existing(&f.index, &f.state, next).is_err());
         }
         assert_eq!(sql.query_row("SELECT generation,status,attempts FROM index_commit_receipts WHERE operation_id='pending'",[],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?))).unwrap(),("v1".into(),0,2));
         assert_eq!(sql.query_row("SELECT state,generation,attempts FROM mutation_refresh WHERE mutation_digest='mutation'",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?))).unwrap(),(0,0,0));

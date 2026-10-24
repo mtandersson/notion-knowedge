@@ -42,6 +42,36 @@ fn owned_directory(path: &Path) -> Result<File, CommitError> {
     Ok(file)
 }
 
+#[cfg(target_os = "linux")]
+fn rename_unused(source: &Path, target: &Path) -> Result<(), CommitError> {
+    use std::os::unix::ffi::OsStrExt;
+    let source = std::ffi::CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| CommitError::InvalidInput)?;
+    let target = std::ffi::CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| CommitError::InvalidInput)?;
+    // Both complete paths are owned private siblings. RENAME_NOREPLACE keeps
+    // even an unexpected existing recovery artifact intact atomically.
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            target.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io(std::io::Error::last_os_error()))
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn rename_unused(_source: &Path, _target: &Path) -> Result<(), CommitError> {
+    Err(CommitError::Unavailable)
+}
+
 fn locate(record: &TransitionRecord, source: bool) -> Result<File, CommitError> {
     let endpoint = if source {
         &record.source
@@ -285,6 +315,71 @@ impl TransitionOwnership {
         next.phase = TransitionPhase::Quarantined;
         next.persist(self, Some(&previous))?;
         Ok(next)
+    }
+
+    /// Retain the old physical index and install the candidate while SQL remains
+    /// quarantined. Restart uses captured inodes to recognize each completed
+    /// rename before advancing its durable phase. This does not publish serving
+    /// authority, create an anchor, or replace full installed native validation.
+    pub fn install_candidate(&self, now: i64) -> Result<TransitionRecord, CommitError> {
+        let mut current = TransitionRecord::read(&self.state_path)?.ok_or(CommitError::Conflict)?;
+        let mut expected = self.record.clone();
+        expected.phase = current.phase;
+        if expected != current
+            || !matches!(
+                current.phase,
+                TransitionPhase::Quarantined
+                    | TransitionPhase::SourceRetained
+                    | TransitionPhase::TargetInstalled
+            )
+        {
+            return Err(CommitError::Conflict);
+        }
+        self.with_exclusive_sql(now, |transaction| {
+            if TransitionRecord::read(&self.state_path)?.as_ref() != Some(&current) { return Err(CommitError::Conflict); }
+            current.backup.verify(&current.backup_path)?;
+            let target: RecordedBinding = serde_json::from_str(&current.target.binding).map_err(|_| CommitError::InvalidInput)?;
+            let quarantine_epoch = i64::try_from(current.quarantine_epoch).map_err(|_| CommitError::InvalidInput)?;
+            let quarantined: bool = transaction.query_row("SELECT generation=?1 AND epoch=?2 FROM index_commit_binding WHERE singleton=1", params![current.quarantine_generation,quarantine_epoch], |r|r.get(0)).map_err(sql)?;
+            let reserved: i64 = transaction.query_row("SELECT COUNT(*) FROM index_commit_generations WHERE scope=?1 AND ((generation=?2 AND epoch=?3) OR (generation=?4 AND epoch=?5))", params![target.scope,current.quarantine_generation,quarantine_epoch,target.generation,target.epoch], |r|r.get(0)).map_err(sql)?;
+            if !quarantined || reserved != 2 { return Err(CommitError::BindingMismatch); }
+            match fs::symlink_metadata(&current.archive_path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if current.phase != TransitionPhase::Quarantined { return Err(CommitError::BindingMismatch); }
+                    self.revalidate()?;
+                    rename_unused(&current.source.path, &current.archive_path)?;
+                }
+                Err(error) => return Err(io(error)),
+                Ok(_) => {}
+            }
+            self.revalidate()?;
+            File::open(current.source.path.parent().ok_or(CommitError::InvalidInput)?).map_err(io)?.sync_all().map_err(io)?;
+            if current.phase == TransitionPhase::Quarantined {
+                let previous = current.clone();
+                current.phase = TransitionPhase::SourceRetained;
+                current.persist(self, Some(&previous))?;
+            }
+            match fs::symlink_metadata(&current.candidate_path) {
+                Ok(_) => {
+                    if current.phase != TransitionPhase::SourceRetained { return Err(CommitError::BindingMismatch); }
+                    self.revalidate()?;
+                    rename_unused(&current.candidate_path, &current.target.path)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(io(error)),
+            }
+            self.revalidate()?;
+            if Identity::file(&owned_directory(&current.target.path)?)? != Identity::file(&self.target)? {
+                return Err(CommitError::BindingMismatch);
+            }
+            File::open(current.target.path.parent().ok_or(CommitError::InvalidInput)?).map_err(io)?.sync_all().map_err(io)?;
+            if current.phase == TransitionPhase::SourceRetained {
+                let previous = current.clone();
+                current.phase = TransitionPhase::TargetInstalled;
+                current.persist(self, Some(&previous))?;
+            }
+            Ok(current.clone())
+        })
     }
 }
 
