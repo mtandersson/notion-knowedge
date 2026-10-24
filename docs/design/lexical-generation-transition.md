@@ -139,6 +139,16 @@ complete known effect encodings and prepared-operation schemas before updates;
 retain their bytes. This helper does not publish physical authority or replace
 native-pair and adoption-manifest verification in the same outer transaction.
 
+Native transition verification runs without a serving coordinator under the
+retained owner and its original SQLite transaction. It resolves the source and
+target by inode before quarantine and after renames, checks the original source
+anchor through its retained directory descriptor, and verifies both preparation
+and activation backups. Reopen the complete canonical rows/vectors and target
+native FTS profiles and ID probes, then recheck both native heads, bindings,
+Ready bytes, pinned asset and journal. Returned evidence borrows the owner and
+records its phase and target version. Publication must obtain fresh evidence in
+its actual transaction; retaining a value does not establish permanent freshness.
+
 ## Explicit reconciliation
 
 Reconciliation acquires the same ownership and compares actual SQL authority,

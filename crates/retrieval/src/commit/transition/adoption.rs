@@ -46,13 +46,7 @@ pub fn adopt_derived_work(
     target_index_version: u64,
     limits: AdoptionLimits,
 ) -> Result<AdoptionReport, CommitError> {
-    owner.revalidate()?;
-    let database = transaction.path().ok_or(CommitError::BindingMismatch)?;
-    if fs::canonicalize(database).map_err(io)? != owner.state_path
-        || Identity::read(Path::new(database))? != Identity::file(&owner.state)?
-    {
-        return Err(CommitError::BindingMismatch);
-    }
+    owner.validate_owned_transaction(transaction)?;
     let mut expected = owner.record.clone();
     expected.phase = TransitionPhase::TargetInstalled;
     if TransitionRecord::read(&owner.state_path)?.as_ref() != Some(&expected)

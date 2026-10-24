@@ -45,7 +45,8 @@ mod guarded;
 #[cfg(unix)]
 pub use guarded::{
     CandidateLimits, GuardedChunkTable, OfflineLexicalSource, PreparedLexicalCandidate,
-    PreparedPageMutation,
+    PreparedPageMutation, TransitionCandidateInputs, VerifiedTransitionCandidate,
+    verify_transition_candidate,
 };
 
 pub const CHUNK_TABLE_SCHEMA_VERSION: &str = "1";

@@ -125,6 +125,50 @@ fn locate(record: &TransitionRecord, source: bool) -> Result<File, CommitError> 
 }
 
 impl TransitionOwnership {
+    /// Immutable identity captured when this owner acquired its physical locks.
+    pub fn record(&self) -> &TransitionRecord {
+        &self.record
+    }
+
+    pub(crate) fn validate_owned_transaction(&self, db: &Connection) -> Result<(), CommitError> {
+        self.revalidate()?;
+        let database = db.path().ok_or(CommitError::BindingMismatch)?;
+        if fs::canonicalize(database).map_err(io)? != self.state_path
+            || Identity::read(Path::new(database))? != Identity::file(&self.state)?
+        {
+            return Err(CommitError::BindingMismatch);
+        }
+        self.validate_sql(db)
+    }
+
+    /// Resolve captured physical identities, including rename-before-journal
+    /// windows. Returned paths are usable only while this owner remains held.
+    pub fn physical_paths(&self) -> Result<(PathBuf, PathBuf), CommitError> {
+        self.revalidate()?;
+        let find = |file: &File, paths: [&Path; 2]| -> Result<PathBuf, CommitError> {
+            for path in paths {
+                match owned_directory(path) {
+                    Ok(current) if Identity::file(&current)? == Identity::file(file)? => {
+                        return Ok(path.to_owned());
+                    }
+                    Ok(_) => {}
+                    Err(_) if !path.try_exists().map_err(io)? => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(CommitError::BindingMismatch)
+        };
+        let source = find(
+            &self.source,
+            [&self.record.source.path, &self.record.archive_path],
+        )?;
+        let target = find(
+            &self.target,
+            [&self.record.target.path, &self.record.candidate_path],
+        )?;
+        self.revalidate()?;
+        Ok((source, target))
+    }
     /// Acquire in stable state/source/target order without waiting. Recovery
     /// validates the original state token directly; it never opens a coordinator
     /// that could admit a quarantined generation or initialize missing state.
@@ -210,6 +254,39 @@ impl TransitionOwnership {
         {
             return Err(CommitError::BindingMismatch);
         }
+        self.verify_source_anchor()?;
+        Ok(())
+    }
+
+    fn verify_source_anchor(&self) -> Result<(), CommitError> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let name = std::ffi::CString::new(ANCHOR).map_err(|_| CommitError::InvalidInput)?;
+        // Resolve through the retained directory descriptor, including after a
+        // rename, and never follow a replaceable anchor symlink.
+        let fd = unsafe {
+            libc::openat(
+                self.source.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+            )
+        };
+        if fd < 0 {
+            return Err(io(std::io::Error::last_os_error()));
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        let metadata = file.metadata().map_err(io)?;
+        if !metadata.is_file() || metadata.nlink() != 1 || metadata.len() > 128 {
+            return Err(CommitError::BindingMismatch);
+        }
+        let mut actual = String::new();
+        file.take(129).read_to_string(&mut actual).map_err(io)?;
+        let expected = format!(
+            "nk-index-binding-v1\n{}\n{}\n{}\n",
+            self.record.state_device, self.record.state_inode, self.record.state_token
+        );
+        if actual != expected {
+            return Err(CommitError::BindingMismatch);
+        }
         Ok(())
     }
 
@@ -233,14 +310,14 @@ impl TransitionOwnership {
         let mut transaction = db
             .transaction_with_behavior(TransactionBehavior::Exclusive)
             .map_err(sql)?;
-        self.validate_sql(&transaction)?;
+        self.validate_owned_transaction(&transaction)?;
         let live: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM reconciliation_lease WHERE expires_at>?1) OR EXISTS(SELECT 1 FROM file_refresh_intents WHERE phase='held' AND lease_until>?1)", [now], |r| r.get(0)).map_err(sql)?;
         if live {
             return Err(CommitError::Conflict);
         }
         let result = operation(&mut transaction)?;
         self.revalidate()?;
-        self.validate_sql(&transaction)?;
+        self.validate_owned_transaction(&transaction)?;
         transaction.commit().map_err(sql)?;
         Ok(result)
     }

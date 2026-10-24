@@ -5,6 +5,201 @@ use notion_knowledge_core::write_refresh::{IndexStatus, MutationRefreshQueue, Re
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
+fn transition_native_verification_checks_pinned_pair_before_and_after_installation() {
+    use crate::chunks::{EmbeddedChunk, TransitionCandidateInputs, verify_transition_candidate};
+    use crate::commit::transition::*;
+    use sha2::Digest;
+    use std::os::unix::fs::MetadataExt;
+    for source_head_changes in [false, true] {
+        let f = Fixture::new();
+        for path in [&f.root, &f.index] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            f.create().await;
+            let table = f.guarded();
+            let prepared = table
+                .prepare_page(
+                    &CountingProvider::new(f.embedding.clone()),
+                    operation("seed", "seed", false),
+                    &[
+                        chunk("one", "NK-1234 cinnamon roll", "Baking notes"),
+                        chunk("two", "cardamom bun", "Spice notes"),
+                    ],
+                )
+                .await
+                .unwrap();
+            table
+                .commit_page(prepared, f.lease.clone(), clock(), || async { Ok(()) })
+                .await
+                .unwrap();
+        });
+        f.coordinator.state().release_lease(&f.lease, 11).unwrap();
+        let source = f.coordinator.binding().clone();
+        let next = CommitBinding::new(
+            "chunks",
+            "workspace",
+            &ReconciliationScope::new(vec!["root".into()], vec![], "policy", "v1").unwrap(),
+            "v2",
+            3,
+        )
+        .unwrap();
+        let dictionary = crate::lexical_dictionary::tests::dictionary(&[("cinnamon", "kanel")]);
+        let candidate = f.root.join("candidate");
+        let preparation_backup = f.root.join("preparation.sqlite");
+        let prepared = f
+            .guarded()
+            .prepare_lexical_candidate(
+                &candidate,
+                &preparation_backup,
+                &next,
+                &dictionary,
+                12,
+                CandidateLimits::default(),
+            )
+            .unwrap();
+        let ready_bytes = fs::read(candidate.join(".nk-lexical-candidate-ready-v1.json")).unwrap();
+        let activation_backup = f.root.join("activation.sqlite");
+        let backup = f
+            .coordinator
+            .with_offline_backup(&activation_backup, 12, |backup| Ok(backup.clone()))
+            .unwrap();
+        let state_path = f.root.join("state.sqlite");
+        let state = fs::metadata(&state_path).unwrap();
+        let old_index = fs::metadata(&f.index).unwrap();
+        let new_index = fs::metadata(&candidate).unwrap();
+        let sql = rusqlite::Connection::open(&state_path).unwrap();
+        let record = TransitionRecord {
+            version: 1,
+            phase: TransitionPhase::Prepared,
+            state_device: state.dev(),
+            state_inode: state.ino(),
+            state_token: sql
+                .query_row(
+                    "SELECT identity FROM index_commit_state_identity",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap(),
+            source: TransitionEndpoint {
+                path: f.index.clone(),
+                device: old_index.dev(),
+                inode: old_index.ino(),
+                binding: serde_json::to_string(&source).unwrap(),
+            },
+            target: TransitionEndpoint {
+                path: f.index.clone(),
+                device: new_index.dev(),
+                inode: new_index.ino(),
+                binding: serde_json::to_string(&next).unwrap(),
+            },
+            candidate_path: candidate.clone(),
+            archive_path: f.root.join("archive"),
+            quarantine_generation: "quarantine".into(),
+            quarantine_epoch: 2,
+            snapshot_sha256: prepared.snapshot_sha256.clone(),
+            asset_sha256: dictionary.manifest_digest().into(),
+            ready_sha256: format!("{:x}", sha2::Sha256::digest(&ready_bytes)),
+            adoption_sha256: "d".repeat(64),
+            backup_path: activation_backup.clone(),
+            backup,
+        };
+        let owner = TransitionOwnership::acquire(&state_path, &record).unwrap();
+        record.persist(&owner, None).unwrap();
+        let verify = |dictionary: &crate::lexical_dictionary::Dictionary| {
+            owner.with_exclusive_sql(12, |transaction| {
+                let verified = verify_transition_candidate(
+                    &owner,
+                    transaction,
+                    TransitionCandidateInputs {
+                        source: &source,
+                        target: &next,
+                        embedding: &f.embedding,
+                        dictionary,
+                        preparation_backup: &preparation_backup,
+                        limits: CandidateLimits::default(),
+                    },
+                )?;
+                Ok((
+                    verified.prepared().clone(),
+                    verified.target_version(),
+                    verified.record().phase,
+                ))
+            })
+        };
+        let before = fs::read(&state_path).unwrap();
+        let verified = verify(&dictionary).unwrap();
+        assert_eq!(verified.0, prepared);
+        assert!(verified.1 > 0);
+        assert_eq!(verified.2, TransitionPhase::Prepared);
+        assert_eq!(fs::read(&state_path).unwrap(), before);
+        let wrong = crate::lexical_dictionary::tests::dictionary(&[("bread", "bröd")]);
+        assert!(verify(&wrong).is_err());
+        fs::write(candidate.join(".nk-lexical-candidate-ready-v1.json"), b"{}").unwrap();
+        assert!(verify(&dictionary).is_err());
+        fs::write(
+            candidate.join(".nk-lexical-candidate-ready-v1.json"),
+            &ready_bytes,
+        )
+        .unwrap();
+        let moved_backup = f.root.join("retained-preparation.sqlite");
+        fs::rename(&preparation_backup, &moved_backup).unwrap();
+        assert!(verify(&dictionary).is_err());
+        fs::rename(&moved_backup, &preparation_backup).unwrap();
+        owner.quarantine(12).unwrap();
+        owner.install_candidate(12).unwrap();
+        let installed = verify(&dictionary).unwrap();
+        assert_eq!(installed.0, prepared);
+        assert_eq!(installed.1, verified.1);
+        assert_eq!(installed.2, TransitionPhase::TargetInstalled);
+        assert!(
+            IndexCommitCoordinator::open_existing(&f.index, &state_path, next.clone()).is_err()
+        );
+        let binding_path = f.index.join(lexical_binding::FILE);
+        let binding_bytes = fs::read(&binding_path).unwrap();
+        fs::write(&binding_path, b"{}").unwrap();
+        assert!(verify(&dictionary).is_err());
+        fs::write(&binding_path, &binding_bytes).unwrap();
+        let anchor_path = record.archive_path.join(".nk-operational-binding");
+        let anchor = fs::read(&anchor_path).unwrap();
+        fs::write(&anchor_path, b"wrong").unwrap();
+        assert!(verify(&dictionary).is_err());
+        fs::write(&anchor_path, anchor).unwrap();
+        assert!(verify(&dictionary).is_ok());
+        assert_eq!(
+            sql.query_row("SELECT generation FROM index_commit_binding", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            "quarantine"
+        );
+        if source_head_changes {
+            runtime.block_on(async {
+                let source =
+                    LanceChunkTable::open(&record.archive_path, "chunks", f.embedding.clone())
+                        .await
+                        .unwrap();
+                source
+                    .upsert(
+                        &f.embedding,
+                        &[EmbeddedChunk::new(
+                            chunk("new", "changed", "changed"),
+                            vec![1., 0., 0.],
+                        )],
+                    )
+                    .await
+                    .unwrap();
+            });
+            assert!(verify(&dictionary).is_err());
+        }
+    }
+}
+
+#[test]
 fn offline_candidate_preserves_rows_vectors_pending_work_and_original_generation() {
     let f = Fixture::new();
     fs::set_permissions(&f.root, fs::Permissions::from_mode(0o700)).unwrap();
