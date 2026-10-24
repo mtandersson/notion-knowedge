@@ -104,6 +104,17 @@ unsupported projection formats abort before quarantine; there is no deferred
 repreparation escape path that could wedge the one-active-run constraint.
 Never replay an already acknowledged Notion mutation or attachment.
 
+Alias v1 effects include their original physical generation. Preserve those
+opaque proposal hashes during adoption. Runtime comparison first requires
+current receipt/marker authority, then reconstructs the complete fresh effect
+while varying only an earlier generation under the identical policy. Current
+hashes take the direct path. Historical comparison uses the offline-created
+`(scope, epoch)` index, at most 1,024 earlier generations, bounded generation
+strings and at most 64 MiB of hash input per comparison. Exceeding a bound fails
+closed. Quarantine creates and validates the derived lookup index atomically;
+ordinary serving never creates it. Changed aliases, configuration, namespace,
+tombstone or cleanup semantics cannot match through generation compatibility.
+
 In particular, `DurablePlan.authority` contains table/workspace/scope/generation/
 epoch, and its operation IDs were originally hashed with that authority. Preserve
 those IDs and the original plan in the retained backup/history; validate every

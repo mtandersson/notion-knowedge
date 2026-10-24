@@ -291,6 +291,7 @@ impl TransitionOwnership {
                     let reserved: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM index_commit_generations WHERE generation=?1 AND scope=?2 AND epoch=?3)", params![name,source.scope,epoch], |r|r.get(0)).map_err(sql)?;
                     if !reserved { return Err(CommitError::BindingMismatch); }
                 }
+                super::alias_projection::ensure_history_index(transaction)?;
                 return Ok(());
             }
             if previous.phase != TransitionPhase::Prepared || generation != source.generation || epoch != source.epoch {
@@ -302,6 +303,7 @@ impl TransitionOwnership {
             if journal != "delete" { return Err(CommitError::InvalidInput); }
             let collision: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM index_commit_generations WHERE generation IN (?1,?2) OR epoch IN (?3,?4))", params![previous.quarantine_generation,target.generation,quarantine_epoch,target.epoch], |r|r.get(0)).map_err(sql)?;
             if collision { return Err(CommitError::Conflict); }
+            super::alias_projection::ensure_history_index(transaction)?;
             for (name, epoch) in [(&previous.quarantine_generation, quarantine_epoch), (&target.generation, target.epoch)] {
                 transaction.execute("INSERT INTO index_commit_generations VALUES(?1,?2,?3)", params![name,source.scope,epoch]).map_err(sql)?;
             }

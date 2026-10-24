@@ -57,6 +57,252 @@ fn operation(id: &str) -> PageOperation {
 fn clock(now: i64) -> Arc<dyn Fn() -> i64 + Send + Sync> {
     Arc::new(move || now)
 }
+
+#[tokio::test]
+async fn adopted_alias_effects_replay_without_source_effects_and_keep_exact_policy() {
+    use notion_knowledge_core::{
+        aliases::AliasSources,
+        indexed::{IndexedMetadata, SourceMetadata},
+    };
+    let f = Fixture::new();
+    let policy = ReconciliationScope::new(
+        vec!["root".into(), "root-two".into()],
+        vec![],
+        "policy",
+        "source",
+    )
+    .unwrap();
+    let original = CommitBinding::new("chunks", "workspace", &policy, "v1", 1).unwrap();
+    let c = IndexCommitCoordinator::initialize(&f.index, &f.state, original.clone()).unwrap();
+    let lease = c.state().acquire_lease(10, 100).unwrap();
+    let sources = AliasSources::new(true, vec![]).unwrap();
+    let metadata = |title: &str, root: &str| IndexedMetadata {
+        page_id: "page".into(),
+        block_id: None,
+        title: title.into(),
+        url: "https://notion.so/page".into(),
+        heading_path: vec![],
+        last_edited_time: "edited-v1".into(),
+        source: SourceMetadata {
+            workspace_id: "workspace".into(),
+            root_page_id: root.into(),
+            database_id: None,
+            data_source_id: None,
+        },
+        properties: Default::default(),
+    };
+    let source_projection =
+        AliasProjection::from_indexed(&original, &metadata("Öresund", "root"), &sources).unwrap();
+    let first = operation("adopted-alias")
+        .with_alias_projection(source_projection)
+        .unwrap();
+    assert_eq!(
+        c.submit(first, lease.clone(), clock(10), |_| async { Ok(()) })
+            .await
+            .unwrap(),
+        CommitOutcome::Applied
+    );
+    let sql = Connection::open(&f.state).unwrap();
+    let old_effect: String = sql
+        .query_row(
+            "SELECT effect FROM alias_operation_proposals WHERE operation_id='adopted-alias'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let target = CommitBinding::new("chunks", "workspace", &policy, "v2", 3000).unwrap();
+    let next = c.change_scope(target.clone(), &lease, 10).unwrap();
+    let projection =
+        AliasProjection::from_indexed(&target, &metadata("Öresund", "root"), &sources).unwrap();
+    assert!(!next.alias_projection_complete(&projection).unwrap());
+    let replay = || {
+        operation("adopted-alias")
+            .with_alias_projection(projection.clone())
+            .unwrap()
+    };
+    assert_eq!(
+        next.submit(replay(), lease.clone(), clock(10), |_| async {
+            panic!("unadopted work cannot run")
+        })
+        .await
+        .unwrap_err(),
+        CommitError::Conflict
+    );
+
+    // Emulate only the authority rewrites of the forthcoming atomic adoption.
+    // Proposal and projection effect bytes remain immutable.
+    sql.execute_batch("CREATE INDEX index_commit_generations_policy_epoch ON index_commit_generations(scope,epoch)").unwrap();
+    sql.execute(
+        "UPDATE index_commit_receipts SET generation='v2' WHERE operation_id='adopted-alias'",
+        [],
+    )
+    .unwrap();
+    sql.execute(
+        "UPDATE page_alias_projections SET generation='v2' WHERE page_id='page'",
+        [],
+    )
+    .unwrap();
+    assert!(next.alias_projection_complete(&projection).unwrap());
+    assert_eq!(
+        next.submit(replay(), lease.clone(), clock(10), |_| async {
+            panic!("completed source work must not replay")
+        })
+        .await
+        .unwrap(),
+        CommitOutcome::AlreadyApplied
+    );
+    for incompatible in [
+        AliasProjection::from_indexed(&target, &metadata("Changed", "root"), &sources).unwrap(),
+        AliasProjection::from_indexed(&target, &metadata("Öresund", "root-two"), &sources).unwrap(),
+        AliasProjection::tombstone(&target, "root", "page", &sources).unwrap(),
+        AliasProjection::from_indexed(
+            &target,
+            &metadata("Öresund", "root"),
+            &AliasSources::new(true, vec!["names".into()]).unwrap(),
+        )
+        .unwrap(),
+        projection.clone().with_owned_root_cleanup(),
+    ] {
+        assert!(!next.alias_projection_complete(&incompatible).unwrap());
+    }
+    sql.execute(
+        "UPDATE index_commit_generations SET epoch=5000 WHERE generation='v1'",
+        [],
+    )
+    .unwrap();
+    assert!(!next.alias_projection_complete(&projection).unwrap());
+    sql.execute(
+        "UPDATE index_commit_generations SET epoch=1 WHERE generation='v1'",
+        [],
+    )
+    .unwrap();
+    sql.execute(
+        "UPDATE index_commit_generations SET scope='other-policy' WHERE generation='v1'",
+        [],
+    )
+    .unwrap();
+    assert!(!next.alias_projection_complete(&projection).unwrap());
+    sql.execute(
+        "UPDATE index_commit_generations SET scope=?1 WHERE generation='v1'",
+        [policy.identity()],
+    )
+    .unwrap();
+    for index in 0..1025 {
+        sql.execute(
+            "INSERT INTO index_commit_generations VALUES(?1,?2,?3)",
+            rusqlite::params![format!("history-{index}"), policy.identity(), 100 + index],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        next.alias_projection_complete(&projection),
+        Err(CommitError::ProjectionRepairRequired)
+    );
+    sql.execute(
+        "DELETE FROM index_commit_generations WHERE generation LIKE 'history-%'",
+        [],
+    )
+    .unwrap();
+    assert!(next.alias_projection_complete(&projection).unwrap());
+    sql.execute(
+        "INSERT INTO index_commit_generations VALUES(?1,?2,2)",
+        rusqlite::params!["x".repeat(4097), policy.identity()],
+    )
+    .unwrap();
+    assert!(next.alias_projection_complete(&projection).is_err());
+    sql.execute("DELETE FROM index_commit_generations WHERE epoch=2", [])
+        .unwrap();
+    assert!(next.alias_projection_complete(&projection).unwrap());
+    sql.execute_batch("DROP INDEX index_commit_generations_policy_epoch; CREATE INDEX index_commit_generations_policy_epoch ON index_commit_generations(scope COLLATE NOCASE,epoch)").unwrap();
+    assert_eq!(
+        next.alias_projection_complete(&projection),
+        Err(CommitError::BindingMismatch)
+    );
+    sql.execute_batch("DROP INDEX index_commit_generations_policy_epoch; CREATE INDEX index_commit_generations_policy_epoch ON index_commit_generations(scope,epoch)").unwrap();
+    assert!(next.alias_projection_complete(&projection).unwrap());
+    assert_eq!(
+        sql.query_row(
+            "SELECT effect FROM alias_operation_proposals WHERE operation_id='adopted-alias'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        old_effect
+    );
+    assert_eq!(
+        sql.query_row(
+            "SELECT status,attempts FROM index_commit_receipts WHERE operation_id='adopted-alias'",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        )
+        .unwrap(),
+        (1, 1)
+    );
+    sql.execute("INSERT INTO index_commit_receipts VALUES('pending-alias','v2','page','revision-v1',0,'hash-v1','edited-v1',2,2,1)",[]).unwrap();
+    sql.execute(
+        "INSERT INTO alias_operation_proposals VALUES('pending-alias',?1)",
+        [&old_effect],
+    )
+    .unwrap();
+    let incompatible = AliasProjection::from_indexed(
+        &target,
+        &metadata("Öresund", "root"),
+        &AliasSources::new(true, vec!["names".into()]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        next.submit(
+            operation("pending-alias")
+                .with_alias_projection(incompatible)
+                .unwrap(),
+            lease.clone(),
+            clock(10),
+            |_| async { panic!("changed pending proposal must not execute") }
+        )
+        .await
+        .unwrap_err(),
+        CommitError::Conflict
+    );
+    let pending = || {
+        operation("pending-alias")
+            .with_alias_projection(projection.clone())
+            .unwrap()
+    };
+    assert_eq!(
+        next.submit(pending(), lease.clone(), clock(10), |context| async move {
+            context.revalidate().map_err(|_| FailureClass::Conflict)
+        })
+        .await
+        .unwrap(),
+        CommitOutcome::Applied
+    );
+    assert_eq!(
+        next.submit(pending(), lease, clock(10), |_| async {
+            panic!("resumed proposal must remain idempotent")
+        })
+        .await
+        .unwrap(),
+        CommitOutcome::AlreadyApplied
+    );
+    assert_eq!(
+        sql.query_row(
+            "SELECT effect FROM alias_operation_proposals WHERE operation_id='pending-alias'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        old_effect
+    );
+    assert_eq!(
+        sql.query_row(
+            "SELECT status,attempts FROM index_commit_receipts WHERE operation_id='pending-alias'",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        )
+        .unwrap(),
+        (1, 2)
+    );
+}
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -134,6 +380,8 @@ fn quarantine_reserves_fresh_generations_and_retains_work_across_restart() {
         "name-collision",
         "epoch-collision",
         "stale-backup",
+        "bad-history-index",
+        "bad-history-collation",
         "sql-committed",
         "source-renamed",
         "source-journaled",
@@ -157,6 +405,11 @@ fn quarantine_reserves_fresh_generations_and_retains_work_across_restart() {
         }
         fs::set_permissions(&f.state, fs::Permissions::from_mode(0o600)).unwrap();
         let sql = Connection::open(&f.state).unwrap();
+        if scenario == "bad-history-index" {
+            sql.execute_batch("CREATE INDEX index_commit_generations_policy_epoch ON index_commit_generations(generation)").unwrap();
+        } else if scenario == "bad-history-collation" {
+            sql.execute_batch("CREATE INDEX index_commit_generations_policy_epoch ON index_commit_generations(scope COLLATE NOCASE,epoch)").unwrap();
+        }
         sql.execute_batch("INSERT INTO index_commit_receipts VALUES('pending','v1','page','revision',0,'hash',NULL,0,NULL,2); INSERT INTO mutation_refresh(workspace_id,mutation_digest,page_id) VALUES('workspace','mutation','page')").unwrap();
         if scenario == "name-collision" {
             sql.execute(
@@ -257,7 +510,11 @@ fn quarantine_reserves_fresh_generations_and_retains_work_across_restart() {
         }
         if matches!(
             scenario,
-            "name-collision" | "epoch-collision" | "stale-backup"
+            "name-collision"
+                | "epoch-collision"
+                | "stale-backup"
+                | "bad-history-index"
+                | "bad-history-collation"
         ) {
             assert!(owner.quarantine(15).is_err(), "{scenario}");
             assert_eq!(
