@@ -139,6 +139,16 @@ complete known effect encodings and prepared-operation schemas before updates;
 retain their bytes. This helper does not publish physical authority or replace
 native-pair and adoption-manifest verification in the same outer transaction.
 
+Whole-database manifests read the main schema through a retained transaction;
+TEMP tables cannot shadow their schemas, metadata or payload. Include persisted
+schemas, internal sequence tables, typed values and observable row IDs. Preserve
+duplicate multiplicity using sorted fixed-size row digests. Preflight schema,
+column and row bytes and row/digest-buffer counts before payload materialization
+or sorting. Exclude the derived history index only after validating its exact
+main-schema profile. This raw snapshot is the basis for the backup comparison;
+normalization must still check only the exact permitted transition deltas and
+retain original document bytes for every untouched field and historical record.
+
 Native transition verification runs without a serving coordinator under the
 retained owner and its original SQLite transaction. It resolves the source and
 target by inode before quarantine and after renames, checks the original source

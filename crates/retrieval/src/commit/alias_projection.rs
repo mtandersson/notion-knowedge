@@ -12,13 +12,13 @@ const MAX_COMPATIBILITY_HASH_BYTES: usize = 64 * 1024 * 1024;
 
 /// Explicit offline transition maintenance, never a serving-time schema write.
 pub(super) fn ensure_history_index(db: &Connection) -> Result<(), CommitError> {
-    db.execute_batch("CREATE INDEX IF NOT EXISTS index_commit_generations_policy_epoch ON index_commit_generations(scope,epoch)").map_err(sql)?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS main.index_commit_generations_policy_epoch ON index_commit_generations(scope,epoch)").map_err(sql)?;
     validate_history_index(db)
 }
-fn validate_history_index(db: &Connection) -> Result<(), CommitError> {
-    let complete: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_index_list('index_commit_generations') WHERE name='index_commit_generations_policy_epoch' AND partial=0)", [], |r|r.get(0)).map_err(sql)?;
+pub(super) fn validate_history_index(db: &Connection) -> Result<(), CommitError> {
+    let complete: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_index_list('index_commit_generations','main') WHERE name='index_commit_generations_policy_epoch' AND partial=0)", [], |r|r.get(0)).map_err(sql)?;
     let mut statement = db
-        .prepare("SELECT name,coll FROM pragma_index_xinfo('index_commit_generations_policy_epoch') WHERE key=1 ORDER BY seqno LIMIT 3")
+        .prepare("SELECT name,coll FROM pragma_index_xinfo('index_commit_generations_policy_epoch','main') WHERE key=1 ORDER BY seqno LIMIT 3")
         .map_err(sql)?;
     let mut columns = statement.query([]).map_err(sql)?;
     for expected in ["scope", "epoch"] {
@@ -200,16 +200,16 @@ impl AliasProjection {
         if effect.len() != 73 || !effect.starts_with("alias-v1:") {
             return Ok(false);
         }
-        let indexed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index' AND name='index_commit_generations_policy_epoch')", [], |r|r.get(0)).map_err(sql)?;
+        let indexed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='index' AND name='index_commit_generations_policy_epoch')", [], |r|r.get(0)).map_err(sql)?;
         if !indexed {
             return Ok(false);
         }
         validate_history_index(db)?;
-        let count: i64 = db.query_row("SELECT COUNT(*) FROM (SELECT 1 FROM index_commit_generations INDEXED BY index_commit_generations_policy_epoch WHERE scope=?1 AND epoch<?2 LIMIT ?3)", params![self.binding.scope,self.binding.epoch,MAX_COMPATIBLE_GENERATIONS+1], |r|r.get(0)).map_err(sql)?;
+        let count: i64 = db.query_row("SELECT COUNT(*) FROM (SELECT 1 FROM main.index_commit_generations INDEXED BY index_commit_generations_policy_epoch WHERE scope=?1 AND epoch<?2 LIMIT ?3)", params![self.binding.scope,self.binding.epoch,MAX_COMPATIBLE_GENERATIONS+1], |r|r.get(0)).map_err(sql)?;
         if count > MAX_COMPATIBLE_GENERATIONS {
             return Err(CommitError::ProjectionRepairRequired);
         }
-        let mut statement = db.prepare("SELECT CASE WHEN length(CAST(generation AS BLOB)) BETWEEN 1 AND 4096 THEN generation ELSE NULL END FROM index_commit_generations INDEXED BY index_commit_generations_policy_epoch WHERE scope=?1 AND epoch<?2 ORDER BY epoch DESC LIMIT ?3").map_err(sql)?;
+        let mut statement = db.prepare("SELECT CASE WHEN length(CAST(generation AS BLOB)) BETWEEN 1 AND 4096 THEN generation ELSE NULL END FROM main.index_commit_generations INDEXED BY index_commit_generations_policy_epoch WHERE scope=?1 AND epoch<?2 ORDER BY epoch DESC LIMIT ?3").map_err(sql)?;
         let mut charged = 0usize;
         for generation in statement
             .query_map(

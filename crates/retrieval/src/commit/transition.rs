@@ -6,6 +6,8 @@ use super::*;
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(feature = "local-lancedb")]
 pub mod adoption;
+#[cfg(feature = "local-lancedb")]
+pub mod manifest;
 
 const MAX_RECORD_BYTES: u64 = 65_536;
 
