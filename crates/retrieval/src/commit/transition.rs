@@ -749,6 +749,24 @@ fn canonical(record: &TransitionRecord) -> Result<Vec<u8>, CommitError> {
 }
 
 impl TransitionRecord {
+    /// Exact recovery filename, not permission to retire this record.
+    pub fn aborted_history_path(&self, state: &Path) -> Result<PathBuf, CommitError> {
+        if self.phase != TransitionPhase::Prepared {
+            return Err(CommitError::BindingMismatch);
+        }
+        retained_history_path(state, self, true)
+    }
+
+    /// Read only explicitly selected canonical aborted history. Its filename,
+    /// contents and state location must agree; never discover history by scan.
+    pub fn read_aborted(state: &Path, path: &Path) -> Result<Self, CommitError> {
+        let record = Self::read_path(state, path)?.ok_or(CommitError::BindingMismatch)?;
+        if record.aborted_history_path(state)? != path {
+            return Err(CommitError::BindingMismatch);
+        }
+        Ok(record)
+    }
+
     /// Bounded no-follow read. Unknown fields, noncanonical bytes and unsafe
     /// ownership are errors; an absent record is distinct from a corrupt one.
     pub fn read(state: &Path) -> Result<Option<Self>, CommitError> {
@@ -881,7 +899,6 @@ impl TransitionOwnership {
         now: i64,
         previous: &TransitionRecord,
     ) -> Result<PathBuf, CommitError> {
-        use sha2::{Digest, Sha256};
         if previous.phase != TransitionPhase::Complete
             || previous.state_device != self.record.state_device
             || previous.state_inode != self.record.state_inode
@@ -890,14 +907,27 @@ impl TransitionOwnership {
         {
             return Err(CommitError::BindingMismatch);
         }
+        self.retain_record(now, previous, false)
+    }
+
+    /// Abort only an unchanged Prepared source, retaining its journal and all
+    /// backups/candidates as evidence. Quarantine or final SQL must reconcile;
+    /// this never resets SQL or grants permission to reuse a fenced generation.
+    pub fn abort_prepared(&self, now: i64) -> Result<PathBuf, CommitError> {
+        let mut prepared = self.record.clone();
+        prepared.phase = TransitionPhase::Prepared;
+        self.retain_record(now, &prepared, true)
+    }
+
+    fn retain_record(
+        &self,
+        now: i64,
+        previous: &TransitionRecord,
+        aborted: bool,
+    ) -> Result<PathBuf, CommitError> {
         let bytes = canonical(previous)?;
         let active = journal_path(&self.state_path)?;
-        let mut name = active
-            .file_name()
-            .ok_or(CommitError::InvalidInput)?
-            .to_os_string();
-        name.push(format!(".{:x}.history", Sha256::digest(&bytes)));
-        let history = active.with_file_name(name);
+        let history = retained_history_path(&self.state_path, previous, aborted)?;
         if history == self.record.backup_path
             || history == previous.backup_path
             || [
@@ -911,6 +941,8 @@ impl TransitionOwnership {
             return Err(CommitError::InvalidInput);
         }
         self.with_exclusive_sql(now, |transaction| {
+            let expected_paths = (self.record.source.path.clone(), self.record.candidate_path.clone());
+            if self.physical_paths()? != expected_paths { return Err(CommitError::BindingMismatch); }
             let source: RecordedBinding = serde_json::from_str(&self.record.source.binding).map_err(|_| CommitError::InvalidInput)?;
             let exact_source: bool = transaction.query_row(
                 "SELECT index_device=?1 AND index_inode=?2 AND generation=?3 AND epoch=?4 FROM main.index_commit_binding WHERE singleton=1",
@@ -932,14 +964,39 @@ impl TransitionOwnership {
             }
             let parent = File::open(active.parent().ok_or(CommitError::InvalidInput)?).map_err(io)?;
             parent.sync_all().map_err(io)?;
+            #[cfg(test)]
+            if aborted { transition_checkpoint(self, "abort-history-retained"); }
             if TransitionRecord::read_path(&self.state_path,&history)?.as_ref() != Some(previous)
                 || TransitionRecord::read(&self.state_path)? != current { return Err(CommitError::Conflict); }
             self.revalidate()?;
+            if self.physical_paths()? != expected_paths { return Err(CommitError::BindingMismatch); }
             if current.is_some() { fs::remove_file(&active).map_err(io)?; }
             parent.sync_all().map_err(io)?;
+            #[cfg(test)]
+            if aborted { transition_checkpoint(self, "abort-history-unlinked"); }
             Ok(history.clone())
         })
     }
+}
+
+fn retained_history_path(
+    state: &Path,
+    record: &TransitionRecord,
+    aborted: bool,
+) -> Result<PathBuf, CommitError> {
+    use sha2::{Digest, Sha256};
+    let active = journal_path(state)?;
+    let mut name = active
+        .file_name()
+        .ok_or(CommitError::InvalidInput)?
+        .to_os_string();
+    let suffix = if aborted {
+        ".prepared-aborted.history"
+    } else {
+        ".history"
+    };
+    name.push(format!(".{:x}{suffix}", Sha256::digest(canonical(record)?)));
+    Ok(active.with_file_name(name))
 }
 
 pub(super) fn check_admission(coordinator: &IndexCommitCoordinator) -> Result<(), CommitError> {
