@@ -149,15 +149,17 @@ jobs:
         run: nix develop .#spike --command cargo clippy -p notion-knowledge-retrieval --all-targets --features local-lancedb --locked -- -D warnings
 
 
-      # Only protected main refreshes multi-GB Cargo snapshots. PRs still
-      # restore compatible main snapshots; per-source PR uploads can evict the
-      # shared Docker compile roots under the Actions cache quota.
+      # Only protected main can seed a missing pinned Cargo snapshot. PRs
+      # restore compatible main snapshots; neither PRs nor source-only main
+      # edits publish new multi-GB targets that can evict Docker roots.
       - name: Save successful refreshed Cargo caches
         if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: ./.github/actions/cargo-cache-save
         with:
           key: ${{ steps.cargo-cache.outputs.key }}
           hit: ${{ steps.cargo-cache.outputs.hit }}
+          matched-key: ${{ steps.cargo-cache.outputs.matched-key }}
+          prefix: ${{ steps.cargo-cache.outputs.prefix }}
           downloads-key: ${{ steps.cargo-cache.outputs.downloads-key }}
           downloads-hit: ${{ steps.cargo-cache.outputs.downloads-hit }}
 
@@ -189,15 +191,17 @@ jobs:
       - name: Run cargo check
         run: nix develop --command cargo check --workspace --all-targets --locked
 
-      # Only protected main refreshes multi-GB Cargo snapshots. PRs still
-      # restore compatible main snapshots; per-source PR uploads can evict the
-      # shared Docker compile roots under the Actions cache quota.
+      # Only protected main can seed a missing pinned Cargo snapshot. PRs
+      # restore compatible main snapshots; neither PRs nor source-only main
+      # edits publish new multi-GB targets that can evict Docker roots.
       - name: Save successful refreshed Cargo caches
         if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: ./.github/actions/cargo-cache-save
         with:
           key: ${{ steps.cargo-cache.outputs.key }}
           hit: ${{ steps.cargo-cache.outputs.hit }}
+          matched-key: ${{ steps.cargo-cache.outputs.matched-key }}
+          prefix: ${{ steps.cargo-cache.outputs.prefix }}
           downloads-key: ${{ steps.cargo-cache.outputs.downloads-key }}
           downloads-hit: ${{ steps.cargo-cache.outputs.downloads-hit }}
 
@@ -262,15 +266,17 @@ jobs:
           du -h --max-depth=2 target/debug
           find target/debug -type f -printf '%s %p\n' | sort -nr | sed -n '1,20p'
 
-      # Only protected main refreshes multi-GB Cargo snapshots. PRs still
-      # restore compatible main snapshots; per-source PR uploads can evict the
-      # shared Docker compile roots under the Actions cache quota.
+      # Only protected main can seed a missing pinned Cargo snapshot. PRs
+      # restore compatible main snapshots; neither PRs nor source-only main
+      # edits publish new multi-GB targets that can evict Docker roots.
       - name: Save successful refreshed Cargo caches
         if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: ./.github/actions/cargo-cache-save
         with:
           key: ${{ steps.cargo-cache.outputs.key }}
           hit: ${{ steps.cargo-cache.outputs.hit }}
+          matched-key: ${{ steps.cargo-cache.outputs.matched-key }}
+          prefix: ${{ steps.cargo-cache.outputs.prefix }}
           downloads-key: ${{ steps.cargo-cache.outputs.downloads-key }}
           downloads-hit: ${{ steps.cargo-cache.outputs.downloads-hit }}
 
@@ -318,15 +324,17 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      # Only protected main refreshes multi-GB Cargo snapshots. PRs still
-      # restore compatible main snapshots; per-source PR uploads can evict the
-      # shared Docker compile roots under the Actions cache quota.
+      # Only protected main can seed a missing pinned Cargo snapshot. PRs
+      # restore compatible main snapshots; neither PRs nor source-only main
+      # edits publish new multi-GB targets that can evict Docker roots.
       - name: Save successful refreshed Cargo caches
         if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: ./.github/actions/cargo-cache-save
         with:
           key: ${{ steps.cargo-cache.outputs.key }}
           hit: ${{ steps.cargo-cache.outputs.hit }}
+          matched-key: ${{ steps.cargo-cache.outputs.matched-key }}
+          prefix: ${{ steps.cargo-cache.outputs.prefix }}
           downloads-key: ${{ steps.cargo-cache.outputs.downloads-key }}
           downloads-hit: ${{ steps.cargo-cache.outputs.downloads-hit }}
 
