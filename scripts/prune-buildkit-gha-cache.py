@@ -29,8 +29,10 @@ def gh_api(endpoint, *, delete=False):
     return None if delete else json.loads(result.stdout)
 
 
-def collect_caches(api=gh_api):
+def collect_caches(api=None):
     """Snapshot *all* pages before deletion; deleting during pagination skips IDs."""
+    if api is None:
+        api = gh_api
     found = {}
     for page in range(1, LIMIT // PAGE_SIZE + 2):
         body = api(f"/repos/{REPOSITORY}/actions/caches?per_page={PAGE_SIZE}&page={page}")
