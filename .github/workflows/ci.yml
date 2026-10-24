@@ -261,7 +261,7 @@ jobs:
         if: matrix.suite == 'local-lancedb'
         run: |
           nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --example lexical-candidate --locked
-          nix develop .#spike --command cargo build -p notion-knowledge-retrieval --features local-lancedb --example lexical-candidate --locked
+          CARGO_PROFILE_DEV_DEBUG="$CARGO_PROFILE_TEST_DEBUG" nix develop .#spike --command cargo build -p notion-knowledge-retrieval --features local-lancedb --example lexical-candidate --locked
           NK_LEXICAL_OPERATOR="$GITHUB_WORKSPACE/target/debug/examples/lexical-candidate" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib prepared_abort_operator_retries_real_crash_states --locked -- --ignored
 
       - name: Test production evaluation storage and authorization boundaries
