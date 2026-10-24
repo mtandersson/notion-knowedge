@@ -415,6 +415,9 @@ impl Fixture {
         Self::with_scope(authority())
     }
     fn with_scope(scope: LifecycleScope) -> Self {
+        Self::with_physical_generation(scope, "1", 1)
+    }
+    fn with_physical_generation(scope: LifecycleScope, generation: &str, epoch: u64) -> Self {
         notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Off);
         let root = std::env::temp_dir().join(format!(
             "nk-refresh-{}-{}",
@@ -425,7 +428,8 @@ impl Fixture {
         let db = root.join("state.sqlite");
         fs::create_dir_all(&index).unwrap();
         let journal_scope = notion_knowledge_retrieval::planner::production_scope(&scope).unwrap();
-        let binding = CommitBinding::new("chunks", WORKSPACE, &journal_scope, "1", 1).unwrap();
+        let binding =
+            CommitBinding::new("chunks", WORKSPACE, &journal_scope, generation, epoch).unwrap();
         let coordinator = IndexCommitCoordinator::initialize(&index, &db, binding).unwrap();
         let lease = coordinator.state().acquire_lease(10, 100).unwrap();
         let embed =
@@ -1013,13 +1017,14 @@ async fn original_event_recovers_after_index_apply_before_ack_and_changed_source
     );
     // Unchanged content is insufficient to acknowledge an event identity
     // owned by an older scope generation, even when its earlier effect applied.
-    let next_scope = ReconciliationScope::new(vec![ROOT.into()], vec![], "phase3", "2").unwrap();
+    let mut lifecycle_scope = authority();
+    lifecycle_scope.generation = 2;
+    let next_scope =
+        notion_knowledge_retrieval::planner::production_scope(&lifecycle_scope).unwrap();
     let next_binding = CommitBinding::new("chunks", WORKSPACE, &next_scope, "2", 2).unwrap();
     let next = reopened
         .change_scope(next_binding, &index.lease, 10)
         .unwrap();
-    let mut lifecycle_scope = authority();
-    lifecycle_scope.generation = 2;
     let next_handler = AuthoritativePageRefresh::new(
         source.client(),
         GuardedChunkTable::bind(&index.index, "chunks", index.embed.clone(), next.clone()).unwrap(),
@@ -1281,12 +1286,12 @@ async fn lifecycle_current_authority_removes_restores_and_preserves_unrelated_pa
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lifecycle_move_between_allowed_roots_preserves_ids_and_vectors() {
-    let index = Fixture::new();
+    let mut scope = authority();
+    scope.roots.push(PageId(FOREIGN.into()));
+    let index = Fixture::with_scope(scope.clone());
     index.create().await;
     let source = HttpNotion::start().await;
     let provider = CountingProvider::new(index.embed.clone());
-    let mut scope = authority();
-    scope.roots.push(PageId(FOREIGN.into()));
     let handler = AuthoritativePageRefresh::new(
         source.client(),
         index.guarded(),
@@ -1784,12 +1789,12 @@ async fn concurrent_canonical_refresh_cannot_resurrect_authoritatively_removed_p
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lifecycle_excluded_ancestry_removes_and_changed_scope_generation_fences_old_handler() {
     use notion_knowledge_core::lifecycle::{LifecycleStatus, PageLifecycle};
-    let index = Fixture::new();
+    let mut scope = authority();
+    scope.exclusions.descendants_of.insert(FOREIGN.into());
+    let index = Fixture::with_scope(scope.clone());
     index.create().await;
     let source = HttpNotion::start().await;
     let provider = CountingProvider::new(index.embed.clone());
-    let mut scope = authority();
-    scope.exclusions.descendants_of.insert(FOREIGN.into());
     let client = source.client();
     let handler = AuthoritativePageRefresh::new(
         client.clone(),
@@ -2447,6 +2452,42 @@ fn record_plan(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconciliation_and_refresh_keep_source_policy_across_physical_generations() {
+    for (generation, epoch) in [("lexical-v2", 3), ("rollback-v1", 5)] {
+        let index = Fixture::with_physical_generation(authority(), generation, epoch);
+        index.create().await;
+        let source = HttpNotion::start().await;
+        let provider = CountingProvider::new(index.embed.clone());
+        let service = runner(&index, &source);
+        let first = service
+            .apply("first", index.lease.clone(), clock(), &provider)
+            .await
+            .unwrap();
+        assert_eq!(
+            (first.scanned, first.changed, first.failed_pages()),
+            (3, 3, 0)
+        );
+        let before = index.guarded().page_chunks(PAGE).await.unwrap();
+        assert!(!before.is_empty());
+        let embeddings = provider.embeddings();
+        service.complete("first", &index.lease, 10).unwrap();
+        let second = service
+            .apply("second", index.lease.clone(), clock(), &provider)
+            .await
+            .unwrap();
+        assert_eq!(
+            (second.changed, second.unchanged, second.failed_pages()),
+            (0, 3, 0)
+        );
+        assert_eq!(provider.embeddings(), embeddings);
+        assert_eq!(index.scope.generation, 1);
+        assert_eq!(index.coordinator.binding().generation(), generation);
+        assert_eq!(index.coordinator.binding().epoch(), epoch);
+        assert_eq!(index.guarded().page_chunks(PAGE).await.unwrap(), before);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconciliation_dry_run_real_apply_and_unchanged_resume_have_exact_receipts_and_counts() {
     let index = Fixture::new();
     index.create().await;
@@ -3075,7 +3116,6 @@ async fn reconciliation_owned_source_poll_expires_lease_and_new_fence_resumes_wi
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconciliation_generation_policy_and_expired_fence_reject_pending_plan_without_effects() {
-    use notion_knowledge_retrieval::runner::{AuthoritativeReconciliationRunner, RunnerError};
     let index = Fixture::new();
     index.create().await;
     let source = HttpNotion::start().await;
@@ -3092,16 +3132,10 @@ async fn reconciliation_generation_policy_and_expired_fence_reject_pending_plan_
         changed,
         &index.journal_scope,
         chunk_config(),
-    )
-    .unwrap();
+    );
     assert!(matches!(
-        AuthoritativeReconciliationRunner::new(
-            planner(&index, &source),
-            incompatible,
-            index.coordinator.clone(),
-            index.journal_scope.clone()
-        ),
-        Err(RunnerError::InvalidConfiguration)
+        incompatible,
+        Err(RefreshError::InvalidConfiguration)
     ));
     let sql = rusqlite::Connection::open(&index.db).unwrap();
     for statement in [

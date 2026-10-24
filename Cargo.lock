@@ -4827,6 +4827,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tar",
+ "tempfile",
  "tokenizers 0.23.2",
  "tokio",
  "unicode-normalization",

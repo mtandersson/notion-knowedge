@@ -240,7 +240,13 @@ async fn sigterm_drains_or_rolls_back_native_work_and_preserves_acknowledged_web
         // Restart opens the actual same Lance/SQLite binding, then reclaims
         // authority after the crashed lease expires using the public clocked API.
         let source = HttpNotion::start().await;
-        let journal = ReconciliationScope::new(vec![ROOT.into()], vec![], "fixture", "1").unwrap();
+        let scope = LifecycleScope {
+            workspace_id: WORKSPACE.into(),
+            generation: 1,
+            roots: vec![PageId(ROOT.into())],
+            exclusions: ExclusionRules::default(),
+        };
+        let journal = notion_knowledge_retrieval::planner::production_scope(&scope).unwrap();
         let binding = CommitBinding::new("chunks", WORKSPACE, &journal, "1", 1).unwrap();
         let coordinator = IndexCommitCoordinator::open_existing(&index, &db, binding).unwrap();
         let metadata =
@@ -248,12 +254,6 @@ async fn sigterm_drains_or_rolls_back_native_work_and_preserves_acknowledged_web
         let table =
             GuardedChunkTable::bind(&index, "chunks", metadata.clone(), coordinator.clone())
                 .unwrap();
-        let scope = LifecycleScope {
-            workspace_id: WORKSPACE.into(),
-            generation: 1,
-            roots: vec![PageId(ROOT.into())],
-            exclusions: ExclusionRules::default(),
-        };
         let handler = AuthoritativePageRefresh::new(
             source.client(),
             table,

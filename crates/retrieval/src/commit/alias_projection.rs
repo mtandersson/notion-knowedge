@@ -7,6 +7,36 @@ use notion_knowledge_core::{
 use sha2::{Digest, Sha256};
 
 const VERSION: i64 = 1;
+const MAX_COMPATIBLE_GENERATIONS: i64 = 1024;
+const MAX_COMPATIBILITY_HASH_BYTES: usize = 64 * 1024 * 1024;
+
+/// Explicit offline transition maintenance, never a serving-time schema write.
+pub(super) fn ensure_history_index(db: &Connection) -> Result<(), CommitError> {
+    db.execute_batch("CREATE INDEX IF NOT EXISTS main.index_commit_generations_policy_epoch ON index_commit_generations(scope,epoch)").map_err(sql)?;
+    validate_history_index(db)
+}
+pub(super) fn validate_history_index(db: &Connection) -> Result<(), CommitError> {
+    let complete: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_index_list('index_commit_generations','main') WHERE name='index_commit_generations_policy_epoch' AND partial=0)", [], |r|r.get(0)).map_err(sql)?;
+    let mut statement = db
+        .prepare("SELECT name,coll FROM pragma_index_xinfo('index_commit_generations_policy_epoch','main') WHERE key=1 ORDER BY seqno LIMIT 3")
+        .map_err(sql)?;
+    let mut columns = statement.query([]).map_err(sql)?;
+    for expected in ["scope", "epoch"] {
+        let row = columns
+            .next()
+            .map_err(sql)?
+            .ok_or(CommitError::BindingMismatch)?;
+        if row.get::<_, String>(0).map_err(sql)? != expected
+            || row.get::<_, String>(1).map_err(sql)? != "BINARY"
+        {
+            return Err(CommitError::BindingMismatch);
+        }
+    }
+    if !complete || columns.next().map_err(sql)?.is_some() {
+        return Err(CommitError::BindingMismatch);
+    }
+    Ok(())
+}
 
 /// Exact replacement in one trusted workspace/root namespace. Configuration,
 /// empty extraction and tombstone status are all part of the durable effect.
@@ -131,13 +161,16 @@ impl AliasProjection {
         &self.aliases
     }
     fn identity(&self) -> String {
+        self.identity_for_generation(&self.binding.generation)
+    }
+    fn identity_for_generation(&self, generation: &str) -> String {
         let mut hash = Sha256::new();
         // Length-prefix every field: no ambiguous concatenation or plaintext
         // source names in receipts/proposal identities.
         for field in [
             self.binding.workspace.as_str(),
             self.binding.scope.as_str(),
-            self.binding.generation.as_str(),
+            generation,
             self.root.as_str(),
             self.page.as_str(),
             self.configuration.as_str(),
@@ -157,6 +190,76 @@ impl AliasProjection {
         }
         format!("alias-v1:{:x}", hash.finalize())
     }
+    /// Adopted receipts retain their exact old proposal hashes. Only the
+    /// physical generation may vary; current receipt/marker fences are checked
+    /// by callers before this comparison. No stored hash grants source access.
+    fn matches_effect(&self, db: &Connection, effect: &str) -> Result<bool, CommitError> {
+        if effect == self.effect {
+            return Ok(true);
+        }
+        if effect.len() != 73 || !effect.starts_with("alias-v1:") {
+            return Ok(false);
+        }
+        let indexed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='index' AND name='index_commit_generations_policy_epoch')", [], |r|r.get(0)).map_err(sql)?;
+        if !indexed {
+            return Ok(false);
+        }
+        validate_history_index(db)?;
+        let count: i64 = db.query_row("SELECT COUNT(*) FROM (SELECT 1 FROM main.index_commit_generations INDEXED BY index_commit_generations_policy_epoch WHERE scope=?1 AND epoch<?2 LIMIT ?3)", params![self.binding.scope,self.binding.epoch,MAX_COMPATIBLE_GENERATIONS+1], |r|r.get(0)).map_err(sql)?;
+        if count > MAX_COMPATIBLE_GENERATIONS {
+            return Err(CommitError::ProjectionRepairRequired);
+        }
+        let mut statement = db.prepare("SELECT CASE WHEN length(CAST(generation AS BLOB)) BETWEEN 1 AND 4096 THEN generation ELSE NULL END FROM main.index_commit_generations INDEXED BY index_commit_generations_policy_epoch WHERE scope=?1 AND epoch<?2 ORDER BY epoch DESC LIMIT ?3").map_err(sql)?;
+        let mut charged = 0usize;
+        for generation in statement
+            .query_map(
+                params![
+                    self.binding.scope,
+                    self.binding.epoch,
+                    MAX_COMPATIBLE_GENERATIONS
+                ],
+                |r| r.get::<_, String>(0),
+            )
+            .map_err(sql)?
+        {
+            let generation = generation.map_err(sql)?;
+            validate(&generation).map_err(|_| CommitError::ProjectionRepairRequired)?;
+            let fields = [
+                &self.binding.workspace[..],
+                &self.binding.scope,
+                &generation,
+                &self.root,
+                &self.page,
+                &self.configuration,
+            ];
+            let mut bytes = 1usize
+                + if self.clean_owned_roots {
+                    b"owned-root-cleanup-v1".len()
+                } else {
+                    0
+                };
+            for field in fields.into_iter().chain(
+                self.aliases
+                    .iter()
+                    .flat_map(|alias| [alias.key(), alias.display(), alias.provenance()]),
+            ) {
+                bytes = bytes
+                    .checked_add(8)
+                    .and_then(|n| n.checked_add(field.len()))
+                    .ok_or(CommitError::ProjectionRepairRequired)?;
+            }
+            charged = charged
+                .checked_add(bytes)
+                .ok_or(CommitError::ProjectionRepairRequired)?;
+            if charged > MAX_COMPATIBILITY_HASH_BYTES {
+                return Err(CommitError::ProjectionRepairRequired);
+            }
+            if self.identity_for_generation(&generation) == effect {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     pub(super) fn matches_operation(
         &self,
         binding: &CommitBinding,
@@ -175,12 +278,12 @@ impl AliasProjection {
             )
             .optional()
             .map_err(sql)?;
-        if marker
-            != Some((
-                self.binding.generation.clone(),
-                VERSION,
-                self.effect.clone(),
-            ))
+        let Some((generation, version, effect)) = marker else {
+            return Ok(false);
+        };
+        if generation != self.binding.generation
+            || version != VERSION
+            || !self.matches_effect(db, &effect)?
         {
             return Ok(false);
         }
@@ -277,11 +380,7 @@ pub(super) fn validate_applied(
     operation: &PageOperation,
 ) -> Result<(), CommitError> {
     let previous = proposal(db, &operation.id)?;
-    let expected = operation
-        .alias_projection
-        .as_ref()
-        .map(|p| p.effect.as_str());
-    if previous.as_deref() != expected || unfinished(db, &operation.id)? {
+    if !proposal_matches(db, operation, previous.as_deref())? || unfinished(db, &operation.id)? {
         return Err(CommitError::ProjectionRepairRequired);
     }
     if let Some(projection) = &operation.alias_projection
@@ -290,6 +389,20 @@ pub(super) fn validate_applied(
         return Err(CommitError::ProjectionRepairRequired);
     }
     Ok(())
+}
+fn proposal_matches(
+    db: &Connection,
+    operation: &PageOperation,
+    previous: Option<&str>,
+) -> Result<bool, CommitError> {
+    match (&operation.alias_projection, previous) {
+        (None, None) => Ok(true),
+        (Some(projection), Some(effect)) => {
+            let current: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM index_commit_receipts WHERE operation_id=?1 AND generation=?2 AND page_id=?3 AND status IN(0,1,2))", params![operation.id,projection.binding.generation,projection.page], |r|r.get(0)).map_err(sql)?;
+            Ok(current && projection.matches_effect(db, effect)?)
+        }
+        _ => Ok(false),
+    }
 }
 pub(super) fn persist_proposal(
     db: &Connection,
@@ -301,9 +414,11 @@ pub(super) fn persist_proposal(
         .alias_projection
         .as_ref()
         .map(|p| p.effect.as_str());
-    if previous.as_deref() != expected
-        && existing
-        && !(operation.retry_latest_refresh || operation.retry_latest_lifecycle)
+    let matches = proposal_matches(db, operation, previous.as_deref())?;
+    if matches {
+        return Ok(());
+    }
+    if !matches && existing && !(operation.retry_latest_refresh || operation.retry_latest_lifecycle)
     {
         return Err(CommitError::Conflict);
     }
@@ -507,4 +622,46 @@ fn current_complete(
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn historical_alias_hashing_enforces_total_byte_budget() {
+        let store = SqliteSyncStateStore::open_in_memory().unwrap();
+        let db = store.lock_connection().unwrap();
+        ensure_history_index(&db).unwrap();
+        let policy =
+            ReconciliationScope::new(vec!["root".into()], vec![], "policy", "source").unwrap();
+        let binding = CommitBinding::new("chunks", "workspace", &policy, "target", 3000).unwrap();
+        for epoch in 1..=501 {
+            db.execute(
+                "INSERT INTO index_commit_generations VALUES(?1,?2,?3)",
+                params![format!("generation-{epoch}"), policy.identity(), epoch],
+            )
+            .unwrap();
+        }
+        let aliases = (0..128)
+            .map(|i| {
+                PageAlias::new(&format!("{i:03}{}", "𐐀".repeat(250)), "property:names").unwrap()
+            })
+            .collect();
+        let projection = AliasProjection::new(
+            &binding,
+            "root",
+            "page",
+            false,
+            &AliasSources::new(false, vec!["names".into()]).unwrap(),
+            aliases,
+        )
+        .unwrap();
+        let old = projection.identity_for_generation("generation-1");
+        assert_eq!(
+            projection.matches_effect(&db, &old),
+            Err(CommitError::ProjectionRepairRequired)
+        );
+        assert_eq!(projection.matches_effect(&db, &projection.effect), Ok(true));
+    }
 }

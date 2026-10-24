@@ -57,11 +57,855 @@ fn operation(id: &str) -> PageOperation {
 fn clock(now: i64) -> Arc<dyn Fn() -> i64 + Send + Sync> {
     Arc::new(move || now)
 }
+
+#[tokio::test]
+async fn adopted_alias_effects_replay_without_source_effects_and_keep_exact_policy() {
+    use notion_knowledge_core::{
+        aliases::AliasSources,
+        indexed::{IndexedMetadata, SourceMetadata},
+    };
+    let f = Fixture::new();
+    let policy = ReconciliationScope::new(
+        vec!["root".into(), "root-two".into()],
+        vec![],
+        "policy",
+        "source",
+    )
+    .unwrap();
+    let original = CommitBinding::new("chunks", "workspace", &policy, "v1", 1).unwrap();
+    let c = IndexCommitCoordinator::initialize(&f.index, &f.state, original.clone()).unwrap();
+    let lease = c.state().acquire_lease(10, 100).unwrap();
+    let sources = AliasSources::new(true, vec![]).unwrap();
+    let metadata = |title: &str, root: &str| IndexedMetadata {
+        page_id: "page".into(),
+        block_id: None,
+        title: title.into(),
+        url: "https://notion.so/page".into(),
+        heading_path: vec![],
+        last_edited_time: "edited-v1".into(),
+        source: SourceMetadata {
+            workspace_id: "workspace".into(),
+            root_page_id: root.into(),
+            database_id: None,
+            data_source_id: None,
+        },
+        properties: Default::default(),
+    };
+    let source_projection =
+        AliasProjection::from_indexed(&original, &metadata("Öresund", "root"), &sources).unwrap();
+    let first = operation("adopted-alias")
+        .with_alias_projection(source_projection)
+        .unwrap();
+    assert_eq!(
+        c.submit(first, lease.clone(), clock(10), |_| async { Ok(()) })
+            .await
+            .unwrap(),
+        CommitOutcome::Applied
+    );
+    let sql = Connection::open(&f.state).unwrap();
+    let old_effect: String = sql
+        .query_row(
+            "SELECT effect FROM alias_operation_proposals WHERE operation_id='adopted-alias'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let target = CommitBinding::new("chunks", "workspace", &policy, "v2", 3000).unwrap();
+    let next = c.change_scope(target.clone(), &lease, 10).unwrap();
+    let projection =
+        AliasProjection::from_indexed(&target, &metadata("Öresund", "root"), &sources).unwrap();
+    assert!(!next.alias_projection_complete(&projection).unwrap());
+    let replay = || {
+        operation("adopted-alias")
+            .with_alias_projection(projection.clone())
+            .unwrap()
+    };
+    assert_eq!(
+        next.submit(replay(), lease.clone(), clock(10), |_| async {
+            panic!("unadopted work cannot run")
+        })
+        .await
+        .unwrap_err(),
+        CommitError::Conflict
+    );
+
+    // Emulate only the authority rewrites of the forthcoming atomic adoption.
+    // Proposal and projection effect bytes remain immutable.
+    sql.execute_batch("CREATE INDEX index_commit_generations_policy_epoch ON index_commit_generations(scope,epoch)").unwrap();
+    sql.execute(
+        "UPDATE index_commit_receipts SET generation='v2' WHERE operation_id='adopted-alias'",
+        [],
+    )
+    .unwrap();
+    sql.execute(
+        "UPDATE page_alias_projections SET generation='v2' WHERE page_id='page'",
+        [],
+    )
+    .unwrap();
+    assert!(next.alias_projection_complete(&projection).unwrap());
+    assert_eq!(
+        next.submit(replay(), lease.clone(), clock(10), |_| async {
+            panic!("completed source work must not replay")
+        })
+        .await
+        .unwrap(),
+        CommitOutcome::AlreadyApplied
+    );
+    for incompatible in [
+        AliasProjection::from_indexed(&target, &metadata("Changed", "root"), &sources).unwrap(),
+        AliasProjection::from_indexed(&target, &metadata("Öresund", "root-two"), &sources).unwrap(),
+        AliasProjection::tombstone(&target, "root", "page", &sources).unwrap(),
+        AliasProjection::from_indexed(
+            &target,
+            &metadata("Öresund", "root"),
+            &AliasSources::new(true, vec!["names".into()]).unwrap(),
+        )
+        .unwrap(),
+        projection.clone().with_owned_root_cleanup(),
+    ] {
+        assert!(!next.alias_projection_complete(&incompatible).unwrap());
+    }
+    sql.execute(
+        "UPDATE index_commit_generations SET epoch=5000 WHERE generation='v1'",
+        [],
+    )
+    .unwrap();
+    assert!(!next.alias_projection_complete(&projection).unwrap());
+    sql.execute(
+        "UPDATE index_commit_generations SET epoch=1 WHERE generation='v1'",
+        [],
+    )
+    .unwrap();
+    sql.execute(
+        "UPDATE index_commit_generations SET scope='other-policy' WHERE generation='v1'",
+        [],
+    )
+    .unwrap();
+    assert!(!next.alias_projection_complete(&projection).unwrap());
+    sql.execute(
+        "UPDATE index_commit_generations SET scope=?1 WHERE generation='v1'",
+        [policy.identity()],
+    )
+    .unwrap();
+    for index in 0..1025 {
+        sql.execute(
+            "INSERT INTO index_commit_generations VALUES(?1,?2,?3)",
+            rusqlite::params![format!("history-{index}"), policy.identity(), 100 + index],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        next.alias_projection_complete(&projection),
+        Err(CommitError::ProjectionRepairRequired)
+    );
+    sql.execute(
+        "DELETE FROM index_commit_generations WHERE generation LIKE 'history-%'",
+        [],
+    )
+    .unwrap();
+    assert!(next.alias_projection_complete(&projection).unwrap());
+    sql.execute(
+        "INSERT INTO index_commit_generations VALUES(?1,?2,2)",
+        rusqlite::params!["x".repeat(4097), policy.identity()],
+    )
+    .unwrap();
+    assert!(next.alias_projection_complete(&projection).is_err());
+    sql.execute("DELETE FROM index_commit_generations WHERE epoch=2", [])
+        .unwrap();
+    assert!(next.alias_projection_complete(&projection).unwrap());
+    sql.execute_batch("DROP INDEX index_commit_generations_policy_epoch; CREATE INDEX index_commit_generations_policy_epoch ON index_commit_generations(scope COLLATE NOCASE,epoch)").unwrap();
+    assert_eq!(
+        next.alias_projection_complete(&projection),
+        Err(CommitError::BindingMismatch)
+    );
+    sql.execute_batch("DROP INDEX index_commit_generations_policy_epoch; CREATE INDEX index_commit_generations_policy_epoch ON index_commit_generations(scope,epoch)").unwrap();
+    assert!(next.alias_projection_complete(&projection).unwrap());
+    assert_eq!(
+        sql.query_row(
+            "SELECT effect FROM alias_operation_proposals WHERE operation_id='adopted-alias'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        old_effect
+    );
+    assert_eq!(
+        sql.query_row(
+            "SELECT status,attempts FROM index_commit_receipts WHERE operation_id='adopted-alias'",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        )
+        .unwrap(),
+        (1, 1)
+    );
+    sql.execute("INSERT INTO index_commit_receipts VALUES('pending-alias','v2','page','revision-v1',0,'hash-v1','edited-v1',2,2,1)",[]).unwrap();
+    sql.execute(
+        "INSERT INTO alias_operation_proposals VALUES('pending-alias',?1)",
+        [&old_effect],
+    )
+    .unwrap();
+    let incompatible = AliasProjection::from_indexed(
+        &target,
+        &metadata("Öresund", "root"),
+        &AliasSources::new(true, vec!["names".into()]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        next.submit(
+            operation("pending-alias")
+                .with_alias_projection(incompatible)
+                .unwrap(),
+            lease.clone(),
+            clock(10),
+            |_| async { panic!("changed pending proposal must not execute") }
+        )
+        .await
+        .unwrap_err(),
+        CommitError::Conflict
+    );
+    let pending = || {
+        operation("pending-alias")
+            .with_alias_projection(projection.clone())
+            .unwrap()
+    };
+    assert_eq!(
+        next.submit(pending(), lease.clone(), clock(10), |context| async move {
+            context.revalidate().map_err(|_| FailureClass::Conflict)
+        })
+        .await
+        .unwrap(),
+        CommitOutcome::Applied
+    );
+    assert_eq!(
+        next.submit(pending(), lease, clock(10), |_| async {
+            panic!("resumed proposal must remain idempotent")
+        })
+        .await
+        .unwrap(),
+        CommitOutcome::AlreadyApplied
+    );
+    assert_eq!(
+        sql.query_row(
+            "SELECT effect FROM alias_operation_proposals WHERE operation_id='pending-alias'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        old_effect
+    );
+    assert_eq!(
+        sql.query_row(
+            "SELECT status,attempts FROM index_commit_receipts WHERE operation_id='pending-alias'",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        )
+        .unwrap(),
+        (1, 2)
+    );
+}
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
+}
+
+#[test]
+#[ignore = "subprocess helper invoked by transition journal test"]
+fn transition_admission_child() {
+    let index = std::env::var_os("NK_TRANSITION_INDEX").unwrap();
+    let state = std::env::var_os("NK_TRANSITION_STATE").unwrap();
+    let admitted = std::env::var("NK_TRANSITION_ADMITTED").unwrap() == "yes";
+    assert_eq!(
+        IndexCommitCoordinator::open_existing(
+            PathBuf::from(index),
+            PathBuf::from(state),
+            binding("v1", 1)
+        )
+        .is_ok(),
+        admitted
+    );
+}
+
+#[test]
+#[ignore = "subprocess helper invoked by transition ownership test"]
+fn transition_ownership_child() {
+    use notion_knowledge_retrieval::commit::transition::*;
+    let state = PathBuf::from(std::env::var_os("NK_TRANSITION_STATE").unwrap());
+    let expected = std::env::var("NK_TRANSITION_OWNED").unwrap() == "yes";
+    let record = TransitionRecord::read(&state).unwrap().unwrap();
+    let result = TransitionOwnership::acquire(&state, &record);
+    if expected {
+        result.unwrap().revalidate().unwrap();
+    } else {
+        assert!(matches!(result, Err(CommitError::Conflict)));
+    }
+}
+
+#[test]
+#[ignore = "subprocess helper invoked by quarantine recovery test"]
+fn transition_quarantine_child() {
+    use notion_knowledge_retrieval::commit::transition::*;
+    let state = PathBuf::from(std::env::var_os("NK_TRANSITION_STATE").unwrap());
+    let record = TransitionRecord::read(&state).unwrap().unwrap();
+    let owner = TransitionOwnership::acquire(&state, &record).unwrap();
+    assert_eq!(
+        owner.quarantine(15).unwrap().phase,
+        TransitionPhase::Quarantined
+    );
+}
+
+#[test]
+#[ignore = "subprocess helper invoked by physical install recovery test"]
+fn transition_install_child() {
+    use notion_knowledge_retrieval::commit::transition::*;
+    let state = PathBuf::from(std::env::var_os("NK_TRANSITION_STATE").unwrap());
+    let record = TransitionRecord::read(&state).unwrap().unwrap();
+    let result =
+        TransitionOwnership::acquire(&state, &record).and_then(|owner| owner.install_candidate(15));
+    if std::env::var("NK_TRANSITION_INSTALL_FAIL").is_ok() {
+        assert!(result.is_err());
+    } else {
+        assert_eq!(result.unwrap().phase, TransitionPhase::TargetInstalled);
+    }
+}
+
+#[test]
+fn quarantine_reserves_fresh_generations_and_retains_work_across_restart() {
+    use notion_knowledge_retrieval::commit::transition::*;
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    for scenario in [
+        "clean",
+        "name-collision",
+        "epoch-collision",
+        "stale-backup",
+        "bad-history-index",
+        "bad-history-collation",
+        "sql-committed",
+        "source-renamed",
+        "source-journaled",
+        "target-renamed",
+        "target-journaled",
+        "archive-conflict",
+        "active-conflict",
+    ] {
+        let f = Fixture::new();
+        fs::set_permissions(&f.root, fs::Permissions::from_mode(0o700)).unwrap();
+        let c = f.coordinator();
+        let candidate = f.root.join("candidate");
+        fs::create_dir(&candidate).unwrap();
+        fs::write(
+            candidate.join("candidate-marker"),
+            b"retained candidate bytes",
+        )
+        .unwrap();
+        for path in [&candidate, &f.index] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::set_permissions(&f.state, fs::Permissions::from_mode(0o600)).unwrap();
+        let sql = Connection::open(&f.state).unwrap();
+        if scenario == "bad-history-index" {
+            sql.execute_batch("CREATE INDEX index_commit_generations_policy_epoch ON index_commit_generations(generation)").unwrap();
+        } else if scenario == "bad-history-collation" {
+            sql.execute_batch("CREATE INDEX index_commit_generations_policy_epoch ON index_commit_generations(scope COLLATE NOCASE,epoch)").unwrap();
+        }
+        sql.execute_batch("INSERT INTO index_commit_receipts VALUES('pending','v1','page','revision',0,'hash',NULL,0,NULL,2); INSERT INTO mutation_refresh(workspace_id,mutation_digest,page_id) VALUES('workspace','mutation','page')").unwrap();
+        if scenario == "name-collision" {
+            sql.execute(
+                "INSERT INTO index_commit_generations VALUES('v2',?1,99)",
+                [scope("v1").identity()],
+            )
+            .unwrap();
+        } else if scenario == "epoch-collision" {
+            sql.execute(
+                "INSERT INTO index_commit_generations VALUES('unrelated',?1,3)",
+                [scope("v1").identity()],
+            )
+            .unwrap();
+        }
+        let backup_path = f.root.join("activation.sqlite");
+        fs::copy(&f.state, &backup_path).unwrap();
+        fs::set_permissions(&backup_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let bytes = fs::read(&backup_path).unwrap();
+        let source = fs::metadata(&f.index).unwrap();
+        let target = fs::metadata(&candidate).unwrap();
+        let state = fs::metadata(&f.state).unwrap();
+        let next = CommitBinding::new("chunks", "workspace", &scope("v1"), "v2", 3).unwrap();
+        let record = TransitionRecord {
+            version: 1,
+            phase: TransitionPhase::Prepared,
+            state_device: state.dev(),
+            state_inode: state.ino(),
+            state_token: sql
+                .query_row(
+                    "SELECT identity FROM index_commit_state_identity",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap(),
+            source: TransitionEndpoint {
+                path: f.index.clone(),
+                device: source.dev(),
+                inode: source.ino(),
+                binding: serde_json::to_string(c.binding()).unwrap(),
+            },
+            target: TransitionEndpoint {
+                path: f.index.clone(),
+                device: target.dev(),
+                inode: target.ino(),
+                binding: serde_json::to_string(&next).unwrap(),
+            },
+            candidate_path: candidate,
+            archive_path: f.root.join("archive"),
+            quarantine_generation: "quarantine".into(),
+            quarantine_epoch: 2,
+            snapshot_sha256: "a".repeat(64),
+            asset_sha256: "b".repeat(64),
+            ready_sha256: "c".repeat(64),
+            adoption_sha256: "d".repeat(64),
+            backup_path,
+            backup: OfflineBackup {
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+                bytes: bytes.len() as u64,
+            },
+        };
+        let owner = TransitionOwnership::acquire(&f.state, &record).unwrap();
+        record.persist(&owner, None).unwrap();
+        let original_count: i64 = sql
+            .query_row("SELECT COUNT(*) FROM index_commit_generations", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        if scenario == "stale-backup" {
+            sql.execute(
+                "INSERT INTO page_sync_state VALUES('later','later-hash',NULL,0,0)",
+                [],
+            )
+            .unwrap();
+        }
+        if scenario == "sql-committed" {
+            // Simulate interruption after the atomic SQL commit, before the
+            // journal phase update. Recovery must not reserve identities twice.
+            owner
+                .with_exclusive_sql(15, |tx| {
+                    tx.execute(
+                        "INSERT INTO index_commit_generations VALUES('quarantine',?1,2)",
+                        [scope("v1").identity()],
+                    )
+                    .unwrap();
+                    tx.execute(
+                        "INSERT INTO index_commit_generations VALUES('v2',?1,3)",
+                        [scope("v1").identity()],
+                    )
+                    .unwrap();
+                    tx.execute(
+                        "UPDATE index_commit_binding SET generation='quarantine',epoch=2",
+                        [],
+                    )
+                    .unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        }
+        if matches!(
+            scenario,
+            "name-collision"
+                | "epoch-collision"
+                | "stale-backup"
+                | "bad-history-index"
+                | "bad-history-collation"
+        ) {
+            assert!(owner.quarantine(15).is_err(), "{scenario}");
+            assert_eq!(
+                TransitionRecord::read(&f.state).unwrap(),
+                Some(record.clone())
+            );
+            assert_eq!(
+                sql.query_row("SELECT COUNT(*) FROM index_commit_generations", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+                original_count
+            );
+            assert_eq!(
+                sql.query_row("SELECT generation FROM index_commit_binding", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+                "v1"
+            );
+        } else {
+            drop(owner);
+            assert!(
+                Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "transition_quarantine_child", "--ignored"])
+                    .env("NK_TRANSITION_STATE", &f.state)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let quarantined = TransitionRecord::read(&f.state).unwrap().unwrap();
+            let recovered = TransitionOwnership::acquire(&f.state, &quarantined).unwrap();
+            assert_eq!(recovered.quarantine(15).unwrap(), quarantined);
+            assert_eq!(
+                sql.query_row(
+                    "SELECT generation,epoch FROM index_commit_binding",
+                    [],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                )
+                .unwrap(),
+                ("quarantine".into(), 2)
+            );
+            assert!(
+                IndexCommitCoordinator::open_existing(&f.index, &f.state, binding("v1", 1))
+                    .is_err()
+            );
+            assert!(c.owned_page_ids().is_err());
+            assert_eq!(
+                sql.query_row("SELECT COUNT(*) FROM index_commit_generations", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+                3
+            );
+            if matches!(
+                scenario,
+                "source-renamed"
+                    | "source-journaled"
+                    | "target-renamed"
+                    | "target-journaled"
+                    | "active-conflict"
+            ) {
+                fs::rename(&f.index, &record.archive_path).unwrap();
+            }
+            let mut current = quarantined;
+            if matches!(
+                scenario,
+                "source-journaled" | "target-renamed" | "target-journaled" | "active-conflict"
+            ) {
+                let previous = current.clone();
+                current.phase = TransitionPhase::SourceRetained;
+                current.persist(&recovered, Some(&previous)).unwrap();
+            }
+            if matches!(scenario, "target-renamed" | "target-journaled") {
+                fs::rename(&record.candidate_path, &f.index).unwrap();
+            }
+            if scenario == "target-journaled" {
+                let previous = current.clone();
+                current.phase = TransitionPhase::TargetInstalled;
+                current.persist(&recovered, Some(&previous)).unwrap();
+            }
+            let foreign = match scenario {
+                "archive-conflict" => Some(&record.archive_path),
+                "active-conflict" => Some(&f.index),
+                _ => None,
+            };
+            if let Some(path) = foreign {
+                fs::create_dir(path).unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+                fs::write(path.join("foreign-marker"), b"must survive").unwrap();
+            }
+            drop(recovered);
+            let mut process = Command::new(std::env::current_exe().unwrap());
+            process
+                .args(["--exact", "transition_install_child", "--ignored"])
+                .env("NK_TRANSITION_STATE", &f.state);
+            if foreign.is_some() {
+                process.env("NK_TRANSITION_INSTALL_FAIL", "yes");
+            }
+            assert!(process.status().unwrap().success());
+            if let Some(path) = foreign {
+                assert_eq!(
+                    fs::read(path.join("foreign-marker")).unwrap(),
+                    b"must survive"
+                );
+                assert_eq!(TransitionRecord::read(&f.state).unwrap(), Some(current));
+                assert!(record.candidate_path.is_dir());
+            } else {
+                let installed = TransitionRecord::read(&f.state).unwrap().unwrap();
+                let owner = TransitionOwnership::acquire(&f.state, &installed).unwrap();
+                assert_eq!(owner.install_candidate(15).unwrap(), installed);
+                assert_eq!(installed.phase, TransitionPhase::TargetInstalled);
+                assert_eq!(fs::metadata(&f.index).unwrap().ino(), target.ino());
+                assert_eq!(
+                    fs::metadata(&record.archive_path).unwrap().ino(),
+                    source.ino()
+                );
+                assert_eq!(
+                    fs::read(f.index.join("candidate-marker")).unwrap(),
+                    b"retained candidate bytes"
+                );
+                assert!(!record.candidate_path.exists());
+            }
+            assert!(IndexCommitCoordinator::open_existing(&f.index, &f.state, next).is_err());
+        }
+        assert_eq!(sql.query_row("SELECT generation,status,attempts FROM index_commit_receipts WHERE operation_id='pending'",[],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?))).unwrap(),("v1".into(),0,2));
+        assert_eq!(sql.query_row("SELECT state,generation,attempts FROM mutation_refresh WHERE mutation_digest='mutation'",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?))).unwrap(),(0,0,0));
+        assert_eq!(fs::metadata(&f.state).unwrap().ino(), state.ino());
+        assert_eq!(fs::read(&record.backup_path).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn durable_transition_phases_fence_reopened_admission_and_reject_unsafe_records() {
+    use notion_knowledge_retrieval::commit::transition::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+    let f = Fixture::new();
+    fs::set_permissions(&f.root, fs::Permissions::from_mode(0o700)).unwrap();
+    let c = f.coordinator();
+    let target_path = f.root.join("candidate");
+    fs::create_dir(&target_path).unwrap();
+    let source = fs::metadata(&f.index).unwrap();
+    let target = fs::metadata(&target_path).unwrap();
+    let state = fs::metadata(&f.state).unwrap();
+    let sql = Connection::open(&f.state).unwrap();
+    let token: String = sql
+        .query_row(
+            "SELECT identity FROM index_commit_state_identity",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let next = CommitBinding::new("chunks", "workspace", &scope("v1"), "v2", 3).unwrap();
+    let mut record = TransitionRecord {
+        version: 1,
+        phase: TransitionPhase::Prepared,
+        state_device: state.dev(),
+        state_inode: state.ino(),
+        state_token: token,
+        source: TransitionEndpoint {
+            path: f.index.clone(),
+            device: source.dev(),
+            inode: source.ino(),
+            binding: serde_json::to_string(c.binding()).unwrap(),
+        },
+        target: TransitionEndpoint {
+            path: f.index.clone(),
+            device: target.dev(),
+            inode: target.ino(),
+            binding: serde_json::to_string(&next).unwrap(),
+        },
+        candidate_path: target_path,
+        archive_path: f.root.join("archive"),
+        quarantine_generation: "transition-quarantine".into(),
+        quarantine_epoch: 2,
+        snapshot_sha256: "a".repeat(64),
+        asset_sha256: "b".repeat(64),
+        ready_sha256: "c".repeat(64),
+        adoption_sha256: "d".repeat(64),
+        backup_path: f.root.join("activation-backup.sqlite"),
+        backup: OfflineBackup {
+            sha256: "e".repeat(64),
+            bytes: 4096,
+        },
+    };
+    fs::set_permissions(&f.index, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&record.candidate_path, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&f.state, fs::Permissions::from_mode(0o600)).unwrap();
+    for unsafe_backup in [
+        f.state.clone(),
+        journal_path(&f.state).unwrap(),
+        f.index.join("not-a-backup.sqlite"),
+        record.candidate_path.join("not-a-backup.sqlite"),
+        record.archive_path.join("not-a-backup.sqlite"),
+    ] {
+        let mut unsafe_record = record.clone();
+        unsafe_record.backup_path = unsafe_backup;
+        assert!(matches!(
+            TransitionOwnership::acquire(&f.state, &unsafe_record),
+            Err(CommitError::InvalidInput)
+        ));
+    }
+    let ownership = TransitionOwnership::acquire(&f.state, &record).unwrap();
+    assert!(matches!(
+        TransitionOwnership::acquire(&f.state, &record),
+        Err(CommitError::Conflict)
+    ));
+    record.persist(&ownership, None).unwrap();
+    sql.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let contended: Result<(), CommitError> = ownership.with_exclusive_sql(10, |_| {
+        panic!("independent SQL writer must reject transition effects")
+    });
+    assert!(contended.is_err());
+    sql.execute_batch("ROLLBACK").unwrap();
+    ownership
+        .with_exclusive_sql(10, |transaction| {
+            sql.busy_timeout(Duration::ZERO).unwrap();
+            assert!(
+                sql.execute("UPDATE index_commit_binding SET epoch=epoch", [])
+                    .is_err()
+            );
+            transaction
+                .execute(
+                    "INSERT INTO page_sync_state VALUES('retained','hash',NULL,0,0)",
+                    [],
+                )
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let failed: Result<(), CommitError> = ownership.with_exclusive_sql(10, |transaction| {
+        transaction
+            .execute("DELETE FROM page_sync_state WHERE page_id='retained'", [])
+            .unwrap();
+        Err(CommitError::Conflict)
+    });
+    assert_eq!(failed, Err(CommitError::Conflict));
+    assert!(c.state().page_state("retained").unwrap().is_some());
+    let invalid: Result<(), CommitError> = ownership.with_exclusive_sql(10, |transaction| {
+        transaction
+            .execute("UPDATE index_commit_binding SET workspace='different'", [])
+            .unwrap();
+        Ok(())
+    });
+    assert_eq!(invalid, Err(CommitError::BindingMismatch));
+    fs::set_permissions(&f.root, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(ownership.revalidate().is_err());
+    fs::set_permissions(&f.root, fs::Permissions::from_mode(0o700)).unwrap();
+    ownership.revalidate().unwrap();
+    let _lease = c.state().acquire_lease(10, 5).unwrap();
+    let leased: Result<(), CommitError> = ownership.with_exclusive_sql(10, |_| {
+        panic!("live source lease must reject transition effects")
+    });
+    assert_eq!(leased, Err(CommitError::Conflict));
+    ownership.with_exclusive_sql(15, |_| Ok(())).unwrap();
+    let another_operator = |owned: bool| {
+        assert!(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "transition_ownership_child", "--ignored"])
+                .env("NK_TRANSITION_STATE", &f.state)
+                .env("NK_TRANSITION_OWNED", if owned { "yes" } else { "no" })
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    another_operator(false);
+    let journal = journal_path(&f.state).unwrap();
+    let reopen = |admitted: bool| {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "transition_admission_child", "--ignored"])
+            .env("NK_TRANSITION_INDEX", &f.index)
+            .env("NK_TRANSITION_STATE", &f.state)
+            .env(
+                "NK_TRANSITION_ADMITTED",
+                if admitted { "yes" } else { "no" },
+            )
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+    reopen(true);
+    assert!(TransitionRecord::read(&f.state).unwrap().as_ref() == Some(&record));
+    let bytes = fs::read(&journal).unwrap();
+    fs::write(&journal, b"{}").unwrap();
+    reopen(false);
+    fs::write(&journal, &bytes).unwrap();
+    for damaged in [[bytes.as_slice(), b"\n"].concat(), vec![b' '; 65_537], {
+        let mut wrong = record.clone();
+        wrong.state_token = "0".repeat(32);
+        serde_json::to_vec(&wrong).unwrap()
+    }] {
+        fs::write(&journal, damaged).unwrap();
+        reopen(false);
+    }
+    fs::write(&journal, &bytes).unwrap();
+    let link = f.root.join("linked-record");
+    fs::hard_link(&journal, &link).unwrap();
+    assert!(TransitionRecord::read(&f.state).is_err());
+    fs::remove_file(&link).unwrap();
+    fs::rename(&journal, &link).unwrap();
+    symlink(&link, &journal).unwrap();
+    assert!(TransitionRecord::read(&f.state).is_err());
+    fs::remove_file(&journal).unwrap();
+    fs::rename(&link, &journal).unwrap();
+    let mut skipped = record.clone();
+    skipped.phase = TransitionPhase::Published;
+    assert_eq!(
+        skipped.persist(&ownership, Some(&record)),
+        Err(CommitError::InvalidInput)
+    );
+    for phase in [
+        TransitionPhase::Quarantined,
+        TransitionPhase::SourceRetained,
+        TransitionPhase::TargetInstalled,
+        TransitionPhase::Published,
+        TransitionPhase::Complete,
+    ] {
+        let previous = record.clone();
+        record.phase = phase;
+        record.persist(&ownership, Some(&previous)).unwrap();
+        assert_eq!(
+            TransitionRecord::read(&f.state).unwrap(),
+            Some(record.clone())
+        );
+        reopen(false); // Complete still cannot admit the old physical inode/binding.
+        assert!(c.owned_page_ids().is_err());
+        assert_eq!(
+            previous.persist(&ownership, Some(&record)),
+            Err(CommitError::InvalidInput)
+        );
+    }
+    assert_eq!(fs::metadata(&f.state).unwrap().ino(), state.ino());
+    assert_eq!(c.binding().generation(), "v1");
+    assert_eq!(
+        sql.query_row("SELECT generation FROM index_commit_binding", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap(),
+        "v1"
+    );
+    // Emulate a separately verified publication to test positive Complete
+    // admission. This tests coordinator identity, not native table validation.
+    fs::copy(
+        f.index.join(".nk-operational-binding"),
+        record.candidate_path.join(".nk-operational-binding"),
+    )
+    .unwrap();
+    fs::rename(&f.index, &record.archive_path).unwrap();
+    fs::rename(&record.candidate_path, &f.index).unwrap();
+    sql.execute(
+        "INSERT INTO index_commit_generations VALUES('v2',?1,3)",
+        [scope("v1").identity()],
+    )
+    .unwrap();
+    sql.execute(
+        "UPDATE index_commit_binding SET index_device=?1,index_inode=?2,generation='v2',epoch=3",
+        [target.dev().to_string(), target.ino().to_string()],
+    )
+    .unwrap();
+    ownership.revalidate().unwrap();
+    assert!(IndexCommitCoordinator::open_existing(&f.index, &f.state, next).is_ok());
+    assert!(matches!(
+        TransitionOwnership::acquire(&f.state, &record),
+        Err(CommitError::Conflict)
+    ));
+    drop(ownership);
+    let recovered = TransitionOwnership::acquire(&f.state, &record).unwrap();
+    recovered.revalidate().unwrap();
+    another_operator(false);
+    let retained_state = f.root.join("retained-state.sqlite");
+    fs::rename(&f.state, &retained_state).unwrap();
+    fs::copy(&retained_state, &f.state).unwrap();
+    assert!(recovered.revalidate().is_err());
+    assert!(TransitionOwnership::acquire(&f.state, &record).is_err());
+    fs::remove_file(&f.state).unwrap();
+    fs::rename(&retained_state, &f.state).unwrap();
+    recovered.revalidate().unwrap();
+    let retained_index = f.root.join("retained-index");
+    fs::rename(&f.index, &retained_index).unwrap();
+    fs::create_dir(&f.index).unwrap();
+    fs::set_permissions(&f.index, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(recovered.revalidate().is_err());
+    fs::remove_dir(&f.index).unwrap();
+    fs::rename(&retained_index, &f.index).unwrap();
+    recovered.revalidate().unwrap();
+    drop(recovered);
+    another_operator(true);
+    reopen(false);
 }
 fn wait_for(mut condition: impl FnMut() -> bool) {
     let start = Instant::now();
@@ -872,6 +1716,17 @@ fn offline_backup_excludes_readers_and_sql_writers_and_retains_pending_source_wo
     coordinator.state().admit(&key).unwrap();
     let before = fs::read(&fixture.state).unwrap();
     let backup = fixture.root.join("retained.sqlite");
+    for limit in [0, before.len() as u64 - 1] {
+        assert!(
+            coordinator
+                .with_offline_backup_bounded(&backup, 100, limit, |_| -> Result<(), CommitError> {
+                    panic!("oversized state must be rejected before backup preparation")
+                })
+                .is_err()
+        );
+        assert!(!backup.exists());
+        assert_eq!(fs::read(&fixture.state).unwrap(), before);
+    }
     let digest = coordinator
         .with_offline_backup(&backup, 100, |verified| {
             assert_eq!(verified.bytes, before.len() as u64);

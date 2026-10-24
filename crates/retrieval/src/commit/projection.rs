@@ -199,6 +199,120 @@ fn effect_identity(tombstone: bool, edges: &[GraphEdge]) -> String {
     }
     result
 }
+/// Validate the complete bounded persisted grammar without trusting it as an
+/// authoritative graph snapshot. Adoption preserves these bytes unchanged.
+#[cfg(any(feature = "local-lancedb", test))]
+pub(crate) fn valid_effect_encoding(effect: &str) -> bool {
+    fn field<'a>(input: &mut &'a str) -> Option<&'a str> {
+        let (length, rest) = input.split_once(':')?;
+        let size: usize = length.parse().ok()?;
+        if size.to_string() != length {
+            return None;
+        }
+        let value = rest.get(..size)?;
+        *input = rest.get(size..)?;
+        Some(value)
+    }
+    fn edge(input: &str) -> Option<GraphEdge> {
+        let mut rest = input;
+        let kind = field(&mut rest)?;
+        let provenance = field(&mut rest)?;
+        let tag = rest.get(..1)?;
+        rest = rest.get(1..)?;
+        let target = field(&mut rest)?.to_owned();
+        let target = match tag {
+            "p" => GraphTarget::Page { page_id: target },
+            "u" => GraphTarget::Unresolved { reference: target },
+            _ => return None,
+        };
+        let mut result = GraphEdge::new(
+            "validation-page".into(),
+            target,
+            kind.into(),
+            provenance.into(),
+        )
+        .ok()?;
+        let tag = rest.get(..1)?;
+        rest = rest.get(1..)?;
+        match tag {
+            "s" => {
+                result = result
+                    .with_display_name(field(&mut rest)?.to_owned())
+                    .ok()?
+            }
+            "n" => {}
+            _ => return None,
+        }
+        if !rest.is_empty() || edge_identity(&result) != input {
+            return None;
+        }
+        Some(result)
+    }
+    let (combined, mut body) = if let Some(body) = effect.strip_prefix("relation-v1:") {
+        (false, body)
+    } else if let Some(body) = effect.strip_prefix("graph-v2:") {
+        (true, body)
+    } else {
+        return false;
+    };
+    let tombstone = if let Some(rest) = body.strip_prefix("0:") {
+        body = rest;
+        false
+    } else if let Some(rest) = body.strip_prefix("1:") {
+        body = rest;
+        true
+    } else {
+        return false;
+    };
+    if tombstone {
+        return body.is_empty();
+    }
+    let mut links = false;
+    let mut previous_relation = None;
+    let mut previous_link = None;
+    while !body.is_empty() {
+        let Some(encoded) = field(&mut body) else {
+            return false;
+        };
+        let Some(edge) = edge(encoded) else {
+            return false;
+        };
+        if let Some(property) = edge.relation_type().strip_prefix("relation:") {
+            let identity = edge_identity_without_label(&edge);
+            if links
+                || edge.provenance().strip_prefix("property:") != Some(property)
+                || previous_relation
+                    .as_ref()
+                    .is_some_and(|previous| previous >= &identity)
+            {
+                return false;
+            }
+            previous_relation = Some(identity);
+        } else {
+            if !combined
+                || !matches!(
+                    edge.relation_type(),
+                    "link:page" | "link:block" | "link:invalid"
+                )
+                || edge
+                    .provenance()
+                    .strip_prefix("markdown:")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .is_none()
+                || edge.display_name().is_some()
+                || previous_link
+                    .as_ref()
+                    .is_some_and(|previous: &String| previous.as_str() >= encoded)
+            {
+                return false;
+            }
+            links = true;
+            previous_link = Some(encoded.to_owned());
+        }
+    }
+    true
+}
+
 impl IndexCommitCoordinator {
     /// Receipt IDs cannot cross page or generation authority, even on a no-op.
     pub fn validate_page_receipt_authority(&self, id: &str, page: &str) -> Result<(), CommitError> {
@@ -449,5 +563,56 @@ impl CommitContext {
             .validate_fence(&tx, &self.lease, (self.clock)())?;
         tx.commit().map_err(sql)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod effect_encoding_tests {
+    use super::*;
+    #[test]
+    fn persisted_effect_grammar_accepts_complete_families_and_rejects_malformed_fields() {
+        let scope = ReconciliationScope::new(vec!["root".into()], vec![], "policy", "1").unwrap();
+        let binding = CommitBinding::new("chunks", "workspace", &scope, "1", 1).unwrap();
+        let relation = GraphEdge::new(
+            "page".into(),
+            GraphTarget::Page {
+                page_id: "target".into(),
+            },
+            "relation:names".into(),
+            "property:names".into(),
+        )
+        .unwrap()
+        .with_display_name("Öresund".into())
+        .unwrap();
+        let link = GraphEdge::new(
+            "page".into(),
+            GraphTarget::Unresolved {
+                reference: "reference".into(),
+            },
+            "link:page".into(),
+            "markdown:12".into(),
+        )
+        .unwrap();
+        let projection =
+            RelationProjection::new(&binding, "page", false, vec![relation.clone()]).unwrap();
+        assert!(valid_effect_encoding(&projection.effect));
+        assert!(valid_effect_encoding(
+            &projection.with_links(vec![link]).unwrap().effect
+        ));
+        assert!(valid_effect_encoding("relation-v1:1:"));
+        assert!(valid_effect_encoding("graph-v2:0:"));
+        for malformed in [
+            "relation-v1:garbage",
+            "graph-v2:garbage",
+            "graph-v2:1:0:",
+            "relation-v1:0:1:x",
+            "relation-v1:0:999999999999999999999999999999:x",
+        ] {
+            assert!(!valid_effect_encoding(malformed));
+        }
+        assert!(!valid_effect_encoding(&effect_identity(
+            false,
+            &[relation.clone(), relation]
+        )));
     }
 }

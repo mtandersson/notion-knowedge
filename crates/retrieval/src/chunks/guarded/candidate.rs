@@ -41,6 +41,143 @@ pub struct PreparedLexicalCandidate {
     pub binding_sha256: String,
     pub backup: OfflineBackup,
 }
+
+#[derive(Clone, Copy)]
+pub struct TransitionCandidateInputs<'a> {
+    pub source: &'a crate::commit::CommitBinding,
+    pub target: &'a crate::commit::CommitBinding,
+    pub embedding: &'a EmbeddingMetadata,
+    pub dictionary: &'a crate::lexical_dictionary::Dictionary,
+    pub preparation_backup: &'a Path,
+    pub limits: CandidateLimits,
+}
+
+/// Full native verification evidence pinned to retained transition ownership.
+/// This does not authorize serving or publish operational authority.
+/// Publication must reverify inside its actual publishing transaction; this
+/// value records a verification moment rather than permanent SQL freshness.
+pub struct VerifiedTransitionCandidate<'owner> {
+    prepared: PreparedLexicalCandidate,
+    target_version: u64,
+    record: crate::commit::transition::TransitionRecord,
+    _owner: &'owner crate::commit::transition::TransitionOwnership,
+}
+impl VerifiedTransitionCandidate<'_> {
+    pub fn prepared(&self) -> &PreparedLexicalCandidate {
+        &self.prepared
+    }
+    pub fn target_version(&self) -> u64 {
+        self.target_version
+    }
+    pub fn record(&self) -> &crate::commit::transition::TransitionRecord {
+        &self.record
+    }
+}
+
+/// Verify a physical pair within the owner's existing SQL transaction, both
+/// before quarantine and after installation/recovery.
+/// No coordinator admission, schema repair, anchor creation or source effects.
+pub fn verify_transition_candidate<'owner>(
+    owner: &'owner crate::commit::transition::TransitionOwnership,
+    transaction: &rusqlite::Transaction<'_>,
+    input: TransitionCandidateInputs<'_>,
+) -> Result<VerifiedTransitionCandidate<'owner>, CommitError> {
+    use crate::commit::transition::{TransitionPhase, TransitionRecord};
+    if tokio::runtime::Handle::try_current().is_ok()
+        || input.limits.files == 0
+        || input.limits.file_bytes == 0
+        || input.limits.rows == 0
+        || input.limits.batch_bytes == 0
+        || input.limits.identifier_bytes == 0
+    {
+        return Err(CommitError::InvalidInput);
+    }
+    owner.validate_owned_transaction(transaction)?;
+    let record = TransitionRecord::read(Path::new(
+        transaction.path().ok_or(CommitError::BindingMismatch)?,
+    ))?
+    .ok_or(CommitError::BindingMismatch)?;
+    let mut expected = owner.record().clone();
+    expected.phase = record.phase;
+    if expected != record
+        || record.phase == TransitionPhase::Complete
+        || serde_json::to_string(input.source).map_err(|_| CommitError::InvalidInput)?
+            != record.source.binding
+        || serde_json::to_string(input.target).map_err(|_| CommitError::InvalidInput)?
+            != record.target.binding
+        || input.dictionary.manifest_digest() != record.asset_sha256
+    {
+        return Err(CommitError::BindingMismatch);
+    }
+    let (source, target) = owner.physical_paths()?;
+    let paths_valid = match record.phase {
+        TransitionPhase::Prepared => {
+            source == record.source.path && target == record.candidate_path
+        }
+        TransitionPhase::Quarantined => true, // Locations resolved by retained inodes.
+        TransitionPhase::SourceRetained => source == record.archive_path,
+        TransitionPhase::TargetInstalled | TransitionPhase::Published => {
+            source == record.archive_path && target == record.target.path
+        }
+        TransitionPhase::Complete => false,
+    };
+    if !paths_valid {
+        return Err(CommitError::BindingMismatch);
+    }
+    record.backup.verify(&record.backup_path)?;
+    let (ready, bytes) =
+        read_ready(&target).map_err(|error| CommitError::Operation(failure(error)))?;
+    if format!("{:x}", Sha256::digest(&bytes)) != record.ready_sha256
+        || ready.snapshot_sha256 != record.snapshot_sha256
+    {
+        return Err(CommitError::BindingMismatch);
+    }
+    let source_lexical =
+        lexical_binding::read(&source).map_err(|error| CommitError::Operation(failure(error)))?;
+    let plan = LexicalPlanIdentity::verified(input.dictionary)
+        .map_err(|_| CommitError::BindingMismatch)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| CommitError::Unavailable)?;
+    let (prepared, target_version) = runtime
+        .block_on(verify_candidate_owned(CandidateVerification {
+            source_directory: &source,
+            candidate: &target,
+            backup: input.preparation_backup,
+            source_binding: input.source,
+            target_binding: input.target,
+            embedding: input.embedding,
+            source_lexical: &source_lexical,
+            plan: &plan,
+            limits: input.limits,
+        }))
+        .map_err(|error| CommitError::Operation(failure(error)))?;
+    if prepared != ready
+        || read_ready(&target)
+            .map_err(|error| CommitError::Operation(failure(error)))?
+            .1
+            != bytes
+    {
+        return Err(CommitError::BindingMismatch);
+    }
+    record.backup.verify(&record.backup_path)?;
+    owner.validate_owned_transaction(transaction)?;
+    if TransitionRecord::read(Path::new(
+        transaction.path().ok_or(CommitError::BindingMismatch)?,
+    ))?
+    .as_ref()
+        != Some(&record)
+    {
+        return Err(CommitError::BindingMismatch);
+    }
+    Ok(VerifiedTransitionCandidate {
+        prepared,
+        target_version,
+        record,
+        _owner: owner,
+    })
+}
 /// Source-only offline handle. It cannot search, embed, prepare page writes, or
 /// commit; older plan binaries/assets are never executed or relabeled by it.
 pub struct OfflineLexicalSource {
@@ -122,16 +259,23 @@ fn bad() -> ChunkTableError {
     ChunkTableError::InvalidRows("offline lexical candidate verification failed; authoritative rebuild required for incompatible source".into())
 }
 fn source_authority(table: &GuardedChunkTable) -> Result<String, ChunkTableError> {
-    let metadata = fs::metadata(&table.index_directory)?;
+    source_authority_at(&table.index_directory, table.coordinator.binding())
+}
+fn source_authority_at(
+    directory: &Path,
+    binding: &crate::commit::CommitBinding,
+) -> Result<String, ChunkTableError> {
+    let metadata = fs::metadata(directory)?;
     Ok(format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&(
-            table.coordinator.binding(),
+            binding,
             metadata.dev(),
             metadata.ino()
         ))?)
     ))
 }
+
 fn read_ready(candidate: &Path) -> Result<(PreparedLexicalCandidate, Vec<u8>), ChunkTableError> {
     let file = fs::OpenOptions::new()
         .read(true)
@@ -501,6 +645,100 @@ async fn verify_rows(
     }
     Ok(digest)
 }
+struct CandidateVerification<'a> {
+    source_directory: &'a Path,
+    candidate: &'a Path,
+    backup: &'a Path,
+    source_binding: &'a crate::commit::CommitBinding,
+    target_binding: &'a crate::commit::CommitBinding,
+    embedding: &'a EmbeddingMetadata,
+    source_lexical: &'a Option<LexicalIndexBinding>,
+    plan: &'a LexicalPlanIdentity,
+    limits: CandidateLimits,
+}
+async fn verify_candidate_owned(
+    input: CandidateVerification<'_>,
+) -> Result<(PreparedLexicalCandidate, u64), ChunkTableError> {
+    if let Some(binding) = input.source_lexical {
+        binding.validate_offline_source(
+            input.source_directory,
+            input.embedding,
+            input.source_binding,
+        )?;
+    }
+    let (ready, ready_bytes) = read_ready(input.candidate)?;
+    if ready.source_authority_sha256
+        != source_authority_at(input.source_directory, input.source_binding)?
+    {
+        return Err(bad());
+    }
+    ready.backup.verify(input.backup).map_err(|_| bad())?;
+    let binding = lexical_binding::read(input.candidate)?.ok_or_else(bad)?;
+    binding.validate(
+        input.candidate,
+        input.embedding,
+        input.target_binding,
+        input.plan,
+    )?;
+    if format!("{:x}", Sha256::digest(binding.canonical_bytes()?)) != ready.binding_sha256 {
+        return Err(bad());
+    }
+    let source = open_current(
+        input.source_directory,
+        input.source_binding.table(),
+        input.embedding,
+        input.source_lexical,
+    )
+    .await?
+    .read_snapshot()
+    .await?;
+    if source.table.version().await? != ready.source_version {
+        return Err(bad());
+    }
+    let old = verify_rows(&source, input.source_binding, input.limits, false).await?;
+    let reopened = open_current(
+        input.candidate,
+        input.source_binding.table(),
+        input.embedding,
+        &Some(binding.clone()),
+    )
+    .await?
+    .read_snapshot()
+    .await?;
+    let version = reopened.table.version().await?;
+    verify_profile(&reopened).await?;
+    let actual = verify_rows(&reopened, input.target_binding, input.limits, true).await?;
+    if actual.rows != ready.rows
+        || actual.finish() != ready.snapshot_sha256
+        || old.finish() != ready.snapshot_sha256
+    {
+        return Err(bad());
+    }
+    lexical_binding::verify(input.candidate, &Some(binding.clone()))?;
+    let fresh = open_current(
+        input.candidate,
+        input.source_binding.table(),
+        input.embedding,
+        &Some(binding),
+    )
+    .await?;
+    if fresh.table.version().await? != version || read_ready(input.candidate)?.1 != ready_bytes {
+        return Err(bad());
+    }
+    ready.backup.verify(input.backup).map_err(|_| bad())?;
+    let fresh_source = open_current(
+        input.source_directory,
+        input.source_binding.table(),
+        input.embedding,
+        input.source_lexical,
+    )
+    .await?;
+    if fresh_source.table.version().await? != ready.source_version {
+        return Err(bad());
+    }
+    Ok((ready, version))
+}
+
 impl GuardedChunkTable {
     /// Reopen a completed sibling without repairs, under offline source
     /// ownership. A returned manifest is evidence only while that ownership and
@@ -526,61 +764,19 @@ impl GuardedChunkTable {
                 .map_err(|_| CommitError::Unavailable)?;
             runtime
                 .block_on(async {
-                    let (ready, ready_bytes) = read_ready(candidate)?;
-                    if ready.source_authority_sha256 != source_authority(self)? {
-                        return Err(bad());
-                    }
-                    ready.backup.verify(backup).map_err(|_| bad())?;
-                    let binding = lexical_binding::read(candidate)?.ok_or_else(bad)?;
-                    binding.validate(candidate, &self.embedding, next, &plan)?;
-                    if format!("{:x}", Sha256::digest(binding.canonical_bytes()?))
-                        != ready.binding_sha256
-                    {
-                        return Err(bad());
-                    }
-                    let source = open_current(
-                        &self.index_directory,
-                        &self.table_name,
-                        &self.embedding,
-                        &self.lexical_binding,
-                    )
-                    .await?
-                    .read_snapshot()
-                    .await?;
-                    if source.table.version().await? != ready.source_version {
-                        return Err(bad());
-                    }
-                    let old =
-                        verify_rows(&source, self.coordinator.binding(), limits, false).await?;
-                    let reopened = open_current(
+                    verify_candidate_owned(CandidateVerification {
+                        source_directory: &self.index_directory,
                         candidate,
-                        &self.table_name,
-                        &self.embedding,
-                        &Some(binding.clone()),
-                    )
-                    .await?
-                    .read_snapshot()
-                    .await?;
-                    let version = reopened.table.version().await?;
-                    verify_profile(&reopened).await?;
-                    let actual = verify_rows(&reopened, next, limits, true).await?;
-                    if actual.rows != ready.rows
-                        || actual.finish() != ready.snapshot_sha256
-                        || old.finish() != ready.snapshot_sha256
-                    {
-                        return Err(bad());
-                    }
-                    lexical_binding::verify(candidate, &Some(binding.clone()))?;
-                    let fresh =
-                        open_current(candidate, &self.table_name, &self.embedding, &Some(binding))
-                            .await?;
-                    if fresh.table.version().await? != version
-                        || read_ready(candidate)?.1 != ready_bytes
-                    {
-                        return Err(bad());
-                    }
-                    ready.backup.verify(backup).map_err(|_| bad())?;
-                    Ok::<_, ChunkTableError>(ready)
+                        backup,
+                        source_binding: self.coordinator.binding(),
+                        target_binding: next,
+                        embedding: &self.embedding,
+                        source_lexical: &self.lexical_binding,
+                        plan: &plan,
+                        limits,
+                    })
+                    .await
+                    .map(|(ready, _)| ready)
                 })
                 .map_err(|e| CommitError::Operation(failure(e)))
         })

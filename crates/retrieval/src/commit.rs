@@ -22,6 +22,7 @@ use tokio::sync::oneshot;
 use crate::sync_state::SqliteSyncStateStore;
 mod alias_projection;
 mod offline;
+pub mod transition;
 pub use alias_projection::AliasProjection;
 pub use offline::OfflineBackup;
 pub(crate) mod projection;
@@ -99,6 +100,11 @@ impl CommitBinding {
     }
     pub fn scope(&self) -> &str {
         &self.scope
+    }
+    /// Source policy is independent of the physical index fencing generation.
+    /// The scope digest already commits to roots, exclusions and policy version.
+    pub fn matches_policy(&self, workspace: &str, scope: &ReconciliationScope) -> bool {
+        self.workspace == workspace && self.scope == scope.identity() && self.roots == scope.roots()
     }
     pub fn generation(&self) -> &str {
         &self.generation
@@ -649,6 +655,7 @@ impl IndexCommitCoordinator {
         Ok(guard)
     }
     pub(crate) fn validate_binding(&self, db: &Connection) -> Result<(), CommitError> {
+        transition::check_admission(self)?;
         let token: String = db
             .query_row(
                 "SELECT identity FROM index_commit_state_identity WHERE singleton=1",

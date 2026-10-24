@@ -102,9 +102,11 @@ impl AuthoritativePageRefresh {
         chunk_config: ChunkConfig,
     ) -> Result<Self, RefreshError> {
         let binding: &CommitBinding = coordinator.binding();
-        if binding.workspace() != scope.workspace_id
-            || binding.generation() != scope.generation.to_string()
-            || binding.scope() != journal_scope.identity()
+        let expected = crate::planner::production_scope(&scope)
+            .map_err(|_| RefreshError::InvalidConfiguration)?;
+        if !binding.matches_policy(&scope.workspace_id, &expected)
+            || journal_scope != &expected
+            || !guard.is_bound_to(&coordinator)
             || scope.roots.is_empty()
             || chunk_config.target_chars == 0
             || chunk_config.overlap_chars >= chunk_config.target_chars
@@ -823,9 +825,11 @@ impl AuthoritativePageRefresh {
     pub(crate) fn is_bound_to(&self, coordinator: &Arc<IndexCommitCoordinator>) -> bool {
         Arc::ptr_eq(&self.coordinator, coordinator)
             && self.guard.is_bound_to(coordinator)
-            && self.coordinator.binding().epoch() == self.scope.generation
-            && crate::planner::production_scope(&self.scope)
-                .is_ok_and(|s| s.identity() == self.coordinator.binding().scope())
+            && crate::planner::production_scope(&self.scope).is_ok_and(|s| {
+                self.coordinator
+                    .binding()
+                    .matches_policy(&self.scope.workspace_id, &s)
+            })
     }
 
     /// Complete local snapshot and exact metadata, independently of extraction.
