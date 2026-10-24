@@ -44,6 +44,14 @@ fn transition_native_verification_checks_pinned_pair_before_and_after_installati
                 .await
                 .unwrap();
         });
+        let stale_table = f.guarded();
+        let stale_work = runtime
+            .block_on(stale_table.prepare_page(
+                &CountingProvider::new(f.embedding.clone()),
+                operation("prepared-before-transition", "stale", false),
+                &[chunk("one", "stale prepared replacement", "Old worker")],
+            ))
+            .unwrap();
         f.coordinator.state().release_lease(&f.lease, 11).unwrap();
         let source = f.coordinator.binding().clone();
         let next = CommitBinding::new(
@@ -355,9 +363,64 @@ fn transition_native_verification_checks_pinned_pair_before_and_after_installati
                 fs::read(&anchor_path).unwrap()
             );
             drop(owner);
-            assert!(
-                IndexCommitCoordinator::open_existing(&f.index, &state_path, next.clone()).is_ok()
+            let current_coordinator =
+                IndexCommitCoordinator::open_existing(&f.index, &state_path, next.clone()).unwrap();
+            let fresh_lease = current_coordinator.state().acquire_lease(12, 100).unwrap();
+            let current_table = GuardedChunkTable::bind_with_lexical_plan(
+                &f.index,
+                "chunks",
+                f.embedding.clone(),
+                current_coordinator.clone(),
+                &LexicalPlanIdentity::verified(&dictionary).unwrap(),
+            )
+            .unwrap();
+            let before_version = runtime.block_on(current_table.inventory_version()).unwrap();
+            let source_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let stale_calls = source_calls.clone();
+            let stale_result = runtime.block_on(stale_table.commit_page(
+                stale_work,
+                fresh_lease.clone(),
+                Arc::new(|| 12),
+                move || async move {
+                    stale_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            ));
+            assert!(stale_result.is_err());
+            assert_eq!(source_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                runtime.block_on(current_table.inventory_version()).unwrap(),
+                before_version
             );
+            let fresh_work = runtime
+                .block_on(current_table.prepare_page(
+                    &CountingProvider::new(f.embedding.clone()),
+                    operation("acknowledged-after-transition", "fresh", false),
+                    &[chunk("one", "latest acknowledged content", "New worker")],
+                ))
+                .unwrap();
+            let fresh_calls = source_calls.clone();
+            runtime
+                .block_on(current_table.commit_page(
+                    fresh_work,
+                    fresh_lease.clone(),
+                    Arc::new(|| 12),
+                    move || async move {
+                        fresh_calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    },
+                ))
+                .unwrap();
+            assert_eq!(source_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                runtime.block_on(current_table.page_chunks("page")).unwrap()[0].text,
+                "latest acknowledged content"
+            );
+            current_coordinator
+                .state()
+                .release_lease(&fresh_lease, 12)
+                .unwrap();
+            assert_eq!(sql.query_row("SELECT generation FROM index_commit_receipts WHERE operation_id='acknowledged-after-transition' AND status=1",[],|r|r.get::<_,String>(0)).unwrap(),"v2");
             assert!(
                 IndexCommitCoordinator::open_existing(&f.index, &state_path, source.clone())
                     .is_err()
@@ -408,6 +471,11 @@ fn transition_native_verification_checks_pinned_pair_before_and_after_installati
                 IndexCommitCoordinator::open_existing(&f.index, &state_path, next.clone()).is_ok()
             );
             assert!(completed.backup_path.exists());
+            assert_eq!(sql.query_row("SELECT generation FROM index_commit_receipts WHERE operation_id='acknowledged-after-transition' AND status=1",[],|r|r.get::<_,String>(0)).unwrap(),"v2");
+            assert_eq!(
+                runtime.block_on(current_table.page_chunks("page")).unwrap()[0].text,
+                "latest acknowledged content"
+            );
         }
     }
 }

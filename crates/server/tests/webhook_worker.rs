@@ -340,7 +340,7 @@ struct TestRuntime {
 }
 impl TestRuntime {
     async fn new() -> Self {
-        Self::with_scope_policy("fixture").await
+        Self::with_scope_policy("webhook-v1").await
     }
     async fn with_scope_policy(policy: &str) -> Self {
         Self::with_scope_exclusions(policy, ExclusionRules::default()).await
@@ -891,7 +891,7 @@ async fn debounce_and_lifecycle_follow_authority_and_recover_effects_before_inbo
         roots: vec![PageId(ROOT.into())],
         exclusions: ExclusionRules::default(),
     };
-    let journal = ReconciliationScope::new(vec![ROOT.into()], vec![], "fixture", "1").unwrap();
+    let journal = notion_knowledge_retrieval::planner::production_scope(&scope).unwrap();
     let restarted = Worker {
         webhook_enabled: true,
         scheduled: None,
