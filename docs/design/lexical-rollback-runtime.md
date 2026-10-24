@@ -102,3 +102,42 @@ comparison. #525 consumes the pair and candidate through fresh fencing and the
 existing whole-SQL publication/recovery protocol. #517 exposes the complete
 operator workflow. No activation command may become available without this
 prerequisite, and no completed rollback claim follows from this document.
+
+## Implemented probe boundary
+
+The Linux `lexical-runtime` example currently exposes descriptive metadata and
+an executable protocol probe. Build with `local-lancedb` and the `.#spike`
+toolchain. These commands accept no serving configuration or credentials:
+
+```sh
+lexical-runtime describe legacy
+lexical-runtime describe expansion EXACT_BUNDLE EXACT_SHA256
+lexical-runtime probe-create NEW_PRIVATE_ROOT legacy
+lexical-runtime probe-reopen EXISTING_PROBE_ROOT legacy
+lexical-runtime probe-create NEW_PRIVATE_ROOT expansion EXACT_BUNDLE EXACT_SHA256
+lexical-runtime probe-reopen EXISTING_PROBE_ROOT expansion EXACT_BUNDLE EXACT_SHA256
+```
+
+The new root's parent must be private and operator-owned. Creation refuses an
+existing root. The runtime uses fixed fixture identities, separates policy from
+physical generation, attempts stale prepared work, commits a native row and
+reopens it. Expansion additionally runs the existing candidate/publication
+protocol and performs a changed-row commit under the newly installed plan.
+Reopen verifies every native profile and bounded canonical row/vector evidence
+without startup repair or operational writes. Tests compare all file bytes
+before and after reopen and refusal paths.
+
+`PinnedRuntime` authenticates a trusted ELF executable into sealed memory before
+execution, clears its environment/stdin, bounds time and combined output, and
+terminates descendants before releasing the group leader's PID. The executable
+limit is 1 GiB; use a bounded shipping artifact rather than a multi-gigabyte
+native test binary with debug data. The selected binary and its dependencies
+must already be trusted; pinning does not establish that trust.
+
+These components do not yet construct verified prior-source compatibility.
+Retained owned-source evidence and its selected-runtime verification remain
+required before #523 can close. Probe reports and parsed descriptors remain
+metadata, and must not be accepted as activation authority. The normal compiled
+legacy probe runs explicitly in CI through sealed execution. The bound normal
+executable test additionally accepts `NK_LEXICAL_TEST_ARCHIVE` pointing to the
+local pinned public archive; it never downloads data or uses Notion credentials.

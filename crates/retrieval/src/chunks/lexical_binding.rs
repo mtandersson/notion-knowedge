@@ -158,6 +158,9 @@ impl LexicalIndexBinding {
         }
         Ok(bytes)
     }
+    pub(crate) fn storage_profile(&self) -> FtsIndexConfig {
+        self.storage.profile.clone()
+    }
     pub fn plan(&self) -> &LexicalPlanIdentity {
         &self.plan
     }

@@ -17,6 +17,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(feature = "local-lancedb")]
+pub mod probe;
+
 /// No subprocess output, paths or credentials are included in errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeError;
