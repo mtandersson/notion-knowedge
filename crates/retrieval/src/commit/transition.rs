@@ -227,6 +227,65 @@ impl TransitionOwnership {
             Err(CommitError::BindingMismatch)
         }
     }
+
+    /// Reserve quarantine and final generation identities atomically before any
+    /// rename. The caller must first verify the complete candidate under this
+    /// ownership. Prepared must already contain a fresh activation-time backup.
+    /// Recovery may repeat this after SQL committed but journal fsync failed.
+    pub fn quarantine(&self, now: i64) -> Result<TransitionRecord, CommitError> {
+        let previous = TransitionRecord::read(&self.state_path)?.ok_or(CommitError::Conflict)?;
+        let mut expected = self.record.clone();
+        expected.phase = previous.phase;
+        if expected != previous
+            || !matches!(
+                previous.phase,
+                TransitionPhase::Prepared | TransitionPhase::Quarantined
+            )
+        {
+            return Err(CommitError::Conflict);
+        }
+        let source: RecordedBinding = serde_json::from_str(&previous.source.binding)
+            .map_err(|_| CommitError::InvalidInput)?;
+        let target: RecordedBinding = serde_json::from_str(&previous.target.binding)
+            .map_err(|_| CommitError::InvalidInput)?;
+        let quarantine_epoch =
+            i64::try_from(previous.quarantine_epoch).map_err(|_| CommitError::InvalidInput)?;
+        self.with_exclusive_sql(now, |transaction| {
+            if TransitionRecord::read(&self.state_path)?.as_ref() != Some(&previous) {
+                return Err(CommitError::Conflict);
+            }
+            previous.backup.verify(&previous.backup_path)?;
+            let (generation, epoch): (String, i64) = transaction.query_row("SELECT generation,epoch FROM index_commit_binding WHERE singleton=1", [], |r| Ok((r.get(0)?,r.get(1)?))).map_err(sql)?;
+            if generation == previous.quarantine_generation && epoch == quarantine_epoch {
+                for (name, epoch) in [(&previous.quarantine_generation, quarantine_epoch), (&target.generation, target.epoch)] {
+                    let reserved: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM index_commit_generations WHERE generation=?1 AND scope=?2 AND epoch=?3)", params![name,source.scope,epoch], |r|r.get(0)).map_err(sql)?;
+                    if !reserved { return Err(CommitError::BindingMismatch); }
+                }
+                return Ok(());
+            }
+            if previous.phase != TransitionPhase::Prepared || generation != source.generation || epoch != source.epoch {
+                return Err(CommitError::BindingMismatch);
+            }
+            let current = super::offline::hash_file(&mut self.state.try_clone().map_err(io)?)?;
+            if current != previous.backup { return Err(CommitError::BindingMismatch); }
+            let journal: String = transaction.query_row("PRAGMA journal_mode", [], |r|r.get(0)).map_err(sql)?;
+            if journal != "delete" { return Err(CommitError::InvalidInput); }
+            let collision: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM index_commit_generations WHERE generation IN (?1,?2) OR epoch IN (?3,?4))", params![previous.quarantine_generation,target.generation,quarantine_epoch,target.epoch], |r|r.get(0)).map_err(sql)?;
+            if collision { return Err(CommitError::Conflict); }
+            for (name, epoch) in [(&previous.quarantine_generation, quarantine_epoch), (&target.generation, target.epoch)] {
+                transaction.execute("INSERT INTO index_commit_generations VALUES(?1,?2,?3)", params![name,source.scope,epoch]).map_err(sql)?;
+            }
+            transaction.execute("UPDATE index_commit_binding SET generation=?1,epoch=?2 WHERE singleton=1", params![previous.quarantine_generation,quarantine_epoch]).map_err(sql)?;
+            Ok(())
+        })?;
+        if previous.phase == TransitionPhase::Quarantined {
+            return Ok(previous);
+        }
+        let mut next = previous.clone();
+        next.phase = TransitionPhase::Quarantined;
+        next.persist(self, Some(&previous))?;
+        Ok(next)
+    }
 }
 
 // Decoded journal data never becomes a runtime CommitBinding.

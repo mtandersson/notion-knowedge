@@ -97,6 +97,206 @@ fn transition_ownership_child() {
 }
 
 #[test]
+#[ignore = "subprocess helper invoked by quarantine recovery test"]
+fn transition_quarantine_child() {
+    use notion_knowledge_retrieval::commit::transition::*;
+    let state = PathBuf::from(std::env::var_os("NK_TRANSITION_STATE").unwrap());
+    let record = TransitionRecord::read(&state).unwrap().unwrap();
+    let owner = TransitionOwnership::acquire(&state, &record).unwrap();
+    assert_eq!(
+        owner.quarantine(15).unwrap().phase,
+        TransitionPhase::Quarantined
+    );
+}
+
+#[test]
+fn quarantine_reserves_fresh_generations_and_retains_work_across_restart() {
+    use notion_knowledge_retrieval::commit::transition::*;
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    for scenario in [
+        "clean",
+        "name-collision",
+        "epoch-collision",
+        "stale-backup",
+        "sql-committed",
+    ] {
+        let f = Fixture::new();
+        fs::set_permissions(&f.root, fs::Permissions::from_mode(0o700)).unwrap();
+        let c = f.coordinator();
+        let candidate = f.root.join("candidate");
+        fs::create_dir(&candidate).unwrap();
+        for path in [&candidate, &f.index] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::set_permissions(&f.state, fs::Permissions::from_mode(0o600)).unwrap();
+        let sql = Connection::open(&f.state).unwrap();
+        sql.execute_batch("INSERT INTO index_commit_receipts VALUES('pending','v1','page','revision',0,'hash',NULL,0,NULL,2); INSERT INTO mutation_refresh(workspace_id,mutation_digest,page_id) VALUES('workspace','mutation','page')").unwrap();
+        if scenario == "name-collision" {
+            sql.execute(
+                "INSERT INTO index_commit_generations VALUES('v2',?1,99)",
+                [scope("v1").identity()],
+            )
+            .unwrap();
+        } else if scenario == "epoch-collision" {
+            sql.execute(
+                "INSERT INTO index_commit_generations VALUES('unrelated',?1,3)",
+                [scope("v1").identity()],
+            )
+            .unwrap();
+        }
+        let backup_path = f.root.join("activation.sqlite");
+        fs::copy(&f.state, &backup_path).unwrap();
+        fs::set_permissions(&backup_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let bytes = fs::read(&backup_path).unwrap();
+        let source = fs::metadata(&f.index).unwrap();
+        let target = fs::metadata(&candidate).unwrap();
+        let state = fs::metadata(&f.state).unwrap();
+        let next = CommitBinding::new("chunks", "workspace", &scope("v1"), "v2", 3).unwrap();
+        let record = TransitionRecord {
+            version: 1,
+            phase: TransitionPhase::Prepared,
+            state_device: state.dev(),
+            state_inode: state.ino(),
+            state_token: sql
+                .query_row(
+                    "SELECT identity FROM index_commit_state_identity",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap(),
+            source: TransitionEndpoint {
+                path: f.index.clone(),
+                device: source.dev(),
+                inode: source.ino(),
+                binding: serde_json::to_string(c.binding()).unwrap(),
+            },
+            target: TransitionEndpoint {
+                path: f.index.clone(),
+                device: target.dev(),
+                inode: target.ino(),
+                binding: serde_json::to_string(&next).unwrap(),
+            },
+            candidate_path: candidate,
+            archive_path: f.root.join("archive"),
+            quarantine_generation: "quarantine".into(),
+            quarantine_epoch: 2,
+            snapshot_sha256: "a".repeat(64),
+            asset_sha256: "b".repeat(64),
+            ready_sha256: "c".repeat(64),
+            adoption_sha256: "d".repeat(64),
+            backup_path,
+            backup: OfflineBackup {
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+                bytes: bytes.len() as u64,
+            },
+        };
+        let owner = TransitionOwnership::acquire(&f.state, &record).unwrap();
+        record.persist(&owner, None).unwrap();
+        let original_count: i64 = sql
+            .query_row("SELECT COUNT(*) FROM index_commit_generations", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        if scenario == "stale-backup" {
+            sql.execute(
+                "INSERT INTO page_sync_state VALUES('later','later-hash',NULL,0,0)",
+                [],
+            )
+            .unwrap();
+        }
+        if scenario == "sql-committed" {
+            // Simulate interruption after the atomic SQL commit, before the
+            // journal phase update. Recovery must not reserve identities twice.
+            owner
+                .with_exclusive_sql(15, |tx| {
+                    tx.execute(
+                        "INSERT INTO index_commit_generations VALUES('quarantine',?1,2)",
+                        [scope("v1").identity()],
+                    )
+                    .unwrap();
+                    tx.execute(
+                        "INSERT INTO index_commit_generations VALUES('v2',?1,3)",
+                        [scope("v1").identity()],
+                    )
+                    .unwrap();
+                    tx.execute(
+                        "UPDATE index_commit_binding SET generation='quarantine',epoch=2",
+                        [],
+                    )
+                    .unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        }
+        if matches!(
+            scenario,
+            "name-collision" | "epoch-collision" | "stale-backup"
+        ) {
+            assert!(owner.quarantine(15).is_err(), "{scenario}");
+            assert_eq!(
+                TransitionRecord::read(&f.state).unwrap(),
+                Some(record.clone())
+            );
+            assert_eq!(
+                sql.query_row("SELECT COUNT(*) FROM index_commit_generations", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+                original_count
+            );
+            assert_eq!(
+                sql.query_row("SELECT generation FROM index_commit_binding", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+                "v1"
+            );
+        } else {
+            drop(owner);
+            assert!(
+                Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "transition_quarantine_child", "--ignored"])
+                    .env("NK_TRANSITION_STATE", &f.state)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let quarantined = TransitionRecord::read(&f.state).unwrap().unwrap();
+            let recovered = TransitionOwnership::acquire(&f.state, &quarantined).unwrap();
+            assert_eq!(recovered.quarantine(15).unwrap(), quarantined);
+            assert_eq!(
+                sql.query_row(
+                    "SELECT generation,epoch FROM index_commit_binding",
+                    [],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                )
+                .unwrap(),
+                ("quarantine".into(), 2)
+            );
+            assert!(
+                IndexCommitCoordinator::open_existing(&f.index, &f.state, binding("v1", 1))
+                    .is_err()
+            );
+            assert!(c.owned_page_ids().is_err());
+            assert_eq!(
+                sql.query_row("SELECT COUNT(*) FROM index_commit_generations", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+                3
+            );
+        }
+        assert_eq!(sql.query_row("SELECT generation,status,attempts FROM index_commit_receipts WHERE operation_id='pending'",[],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?))).unwrap(),("v1".into(),0,2));
+        assert_eq!(sql.query_row("SELECT state,generation,attempts FROM mutation_refresh WHERE mutation_digest='mutation'",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?))).unwrap(),(0,0,0));
+        assert_eq!(fs::metadata(&f.state).unwrap().ino(), state.ino());
+        assert_eq!(fs::read(&record.backup_path).unwrap(), bytes);
+    }
+}
+
+#[test]
 fn durable_transition_phases_fence_reopened_admission_and_reject_unsafe_records() {
     use notion_knowledge_retrieval::commit::transition::*;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};

@@ -11,7 +11,7 @@ pub struct OfflineBackup {
     pub sha256: String,
     pub bytes: u64,
 }
-fn hash_file(file: &mut File) -> Result<OfflineBackup, CommitError> {
+pub(super) fn hash_file(file: &mut File) -> Result<OfflineBackup, CommitError> {
     file.rewind().map_err(io)?;
     let mut hash = Sha256::new();
     let mut bytes = 0u64;
