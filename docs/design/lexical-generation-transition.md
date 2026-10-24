@@ -186,6 +186,15 @@ acknowledgements because the final journal write was interrupted. Verify every
 rename and every SQL commit crash window with a separate killed process and a
 fresh recovery process.
 
+The library's `reconcile_forward` coordinates the forward choice under retained
+ownership. Each bounded step freshly verifies the native pair and inspects the
+exact SQL authority tuple before selecting an operation. It distinguishes
+Prepared source SQL from quarantine already committed before a journal advance,
+and final SQL from an adoption that still needs publication. Impossible
+phase/authority combinations fail closed. A Complete generation uses ordinary
+runtime admission: later acknowledged updates need not match its original
+activation backup. The killed-process fixture calls this coordinator directly.
+
 ## Rollback and asset updates
 
 Rollback restores the previous plan and storage semantics over the latest

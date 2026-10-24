@@ -8,6 +8,82 @@ use manifest::{
     comparison::{ComparisonInputs, ComparisonStage, verify_backup_comparison},
 };
 
+#[derive(Clone, Copy)]
+enum Authority {
+    Source,
+    Quarantine,
+    Target,
+}
+
+/// Explicit offline forward activation/reconciliation. The caller must stop all
+/// source processes before acquiring the owner. Every step inspects actual SQL
+/// authority and freshly verifies the retained native pair; journal phase alone
+/// cannot authorize adoption. Completed generations use ordinary runtime
+/// admission, because later acknowledged work need not match the old snapshot.
+pub fn reconcile_forward(
+    owner: &TransitionOwnership,
+    now: i64,
+    candidate: TransitionCandidateInputs<'_>,
+    adoption: AdoptionLimits,
+    limits: ManifestLimits,
+    backup_bytes: u64,
+) -> Result<TransitionRecord, CommitError> {
+    for _ in 0..6 {
+        let (phase, authority) = owner.with_exclusive_sql(now, |transaction| {
+            let verified = verify_transition_candidate(owner, transaction, candidate)?;
+            let generation: String = transaction
+                .query_row(
+                    "SELECT generation FROM main.index_commit_binding WHERE singleton=1",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(sql)?;
+            // validate_owned_transaction (inside native verification) already
+            // checks the exact physical identity, scope, token and epoch tuple.
+            let authority = if generation == candidate.source.generation() {
+                Authority::Source
+            } else if generation == owner.record.quarantine_generation {
+                Authority::Quarantine
+            } else if generation == candidate.target.generation() {
+                Authority::Target
+            } else {
+                return Err(CommitError::BindingMismatch);
+            };
+            Ok((verified.record().phase, authority))
+        })?;
+        match (phase, authority) {
+            (TransitionPhase::Prepared, Authority::Source) => {
+                preview_publication(owner, now, candidate, adoption, limits, backup_bytes)?;
+                owner.quarantine(now)?;
+            }
+            (TransitionPhase::Prepared, Authority::Quarantine) => {
+                owner.quarantine(now)?;
+            }
+            (
+                TransitionPhase::Quarantined | TransitionPhase::SourceRetained,
+                Authority::Quarantine,
+            ) => {
+                owner.install_candidate(now)?;
+            }
+            (TransitionPhase::TargetInstalled, Authority::Quarantine) => {
+                publish_derived_state(owner, now, candidate, adoption, limits, backup_bytes)?;
+            }
+            (TransitionPhase::TargetInstalled | TransitionPhase::Published, Authority::Target) => {
+                return complete_publication(
+                    owner,
+                    now,
+                    candidate,
+                    adoption.plan_bytes,
+                    limits,
+                    backup_bytes,
+                );
+            }
+            _ => return Err(CommitError::BindingMismatch),
+        }
+    }
+    Err(CommitError::Conflict)
+}
+
 /// Validate all retained derived work before quarantine, without changing
 /// operational rows. The temporary ownership set is rolled back on success.
 pub fn preview_publication(

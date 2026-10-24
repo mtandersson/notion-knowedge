@@ -1328,68 +1328,11 @@ fn transition_process_child() {
         preparation_backup: &preparation_backup,
         limits: CandidateLimits::default(),
     };
-    let current = TransitionRecord::read(&state).unwrap().unwrap();
-    if current.phase == TransitionPhase::Prepared {
-        // SQL may already be quarantined if the journal advance was killed.
-        // Preview is for the unchanged source, not a recovery-phase shortcut.
-        let unchanged_source: bool = rusqlite::Connection::open(&state)
-            .unwrap()
-            .query_row(
-                "SELECT generation='v1' FROM index_commit_binding",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        if unchanged_source {
-            publication::preview_publication(
-                &owner,
-                12,
-                candidate,
-                adoption::AdoptionLimits::default(),
-                manifest::ManifestLimits::default(),
-                1 << 30,
-            )
-            .unwrap();
-        }
-        owner
-            .with_exclusive_sql(12, |tx| {
-                crate::chunks::verify_transition_candidate(&owner, tx, candidate)?;
-                Ok(())
-            })
-            .unwrap();
-        owner.quarantine(12).unwrap();
-    }
-    let current = TransitionRecord::read(&state).unwrap().unwrap();
-    if matches!(
-        current.phase,
-        TransitionPhase::Quarantined | TransitionPhase::SourceRetained
-    ) {
-        owner.install_candidate(12).unwrap();
-    }
-    let final_sql: bool = rusqlite::Connection::open(&state)
-        .unwrap()
-        .query_row(
-            "SELECT generation='v2' FROM index_commit_binding",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    if !final_sql {
-        publication::publish_derived_state(
-            &owner,
-            12,
-            candidate,
-            adoption::AdoptionLimits::default(),
-            manifest::ManifestLimits::default(),
-            1 << 30,
-        )
-        .unwrap();
-    }
-    publication::complete_publication(
+    publication::reconcile_forward(
         &owner,
         12,
         candidate,
-        adoption::AdoptionLimits::default().plan_bytes,
+        adoption::AdoptionLimits::default(),
         manifest::ManifestLimits::default(),
         1 << 30,
     )
