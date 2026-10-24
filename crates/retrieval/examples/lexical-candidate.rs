@@ -47,27 +47,45 @@ struct ActivationConfig {
 }
 
 #[cfg(unix)]
+struct Arguments {
+    action: std::ffi::OsString,
+    configuration: std::path::PathBuf,
+    history: Option<std::path::PathBuf>,
+}
+
+#[cfg(unix)]
 fn arguments(
     mut args: impl Iterator<Item = std::ffi::OsString>,
-) -> Result<(std::ffi::OsString, std::ffi::OsString), Box<dyn std::error::Error>> {
-    let action = args
-        .next()
-        .ok_or("expected prepare|verify|prepare-activation and trusted configuration path")?;
+) -> Result<Arguments, Box<dyn std::error::Error>> {
+    let action = args.next().ok_or(
+        "expected prepare|verify|prepare-activation|abort-prepared and trusted configuration path",
+    )?;
     let path = args.next().ok_or("expected configuration path")?;
-    if action == "prepare-activation" {
+    if action == "prepare-activation" || action == "abort-prepared" {
         if args.next().as_deref() != Some(std::ffi::OsStr::new("--all-source-processes-stopped")) {
             return Err(
-                "activation preparation requires explicit source-process shutdown acknowledgement"
+                "transition preparation/recovery requires explicit source-process shutdown acknowledgement"
                     .into(),
             );
         }
     } else if action != "prepare" && action != "verify" {
         return Err("invalid action".into());
     }
+    let history = match args.next() {
+        Some(flag) if action == "abort-prepared" && flag == "--history" => Some(
+            std::path::PathBuf::from(args.next().ok_or("missing explicit history path")?),
+        ),
+        None => None,
+        _ => return Err("unexpected arguments".into()),
+    };
     if args.next().is_some() {
         return Err("unexpected arguments".into());
     }
-    Ok((action, path))
+    Ok(Arguments {
+        action,
+        configuration: path.into(),
+        history,
+    })
 }
 #[cfg(unix)]
 fn open_configuration(
@@ -110,8 +128,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         lexical_dictionary::Dictionary,
     };
     use std::io::Read;
-    let (action, path) = arguments(std::env::args_os().skip(1))?;
-    let file = open_configuration(std::path::Path::new(&path), action == "prepare-activation")?;
+    let Arguments {
+        action,
+        configuration: path,
+        history,
+    } = arguments(std::env::args_os().skip(1))?;
+    let file = open_configuration(
+        std::path::Path::new(&path),
+        action == "prepare-activation" || action == "abort-prepared",
+    )?;
     let mut bytes = Vec::new();
     file.take(65537).read_to_end(&mut bytes)?;
     if bytes.len() > 65536 {
@@ -139,6 +164,47 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         &config.next_generation,
         config.next_epoch,
     )?;
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs(),
+    )?;
+    if action == "abort-prepared" {
+        use notion_knowledge_retrieval::commit::transition::{
+            TransitionOwnership, TransitionRecord,
+        };
+        let active = TransitionRecord::read(&config.state_file)?;
+        let record = if let Some(history) = history {
+            let retained = TransitionRecord::read_aborted(&config.state_file, &history)?;
+            if active.as_ref().is_some_and(|record| record != &retained) {
+                return Err("history does not match the active transition".into());
+            }
+            retained
+        } else {
+            active.ok_or("no active transition; supply explicit aborted history for retry")?
+        };
+        let activation = config
+            .activation
+            .as_ref()
+            .ok_or("missing activation configuration")?;
+        if record.source.binding != serde_json::to_string(&current)?
+            || record.target.binding != serde_json::to_string(&next)?
+            || record.source.path != config.index_directory
+            || record.candidate_path != config.candidate
+            || record.archive_path != activation.archive
+            || record.backup_path != activation.backup
+            || record.quarantine_generation != activation.quarantine_generation
+        {
+            return Err("configuration does not match the retained transition".into());
+        }
+        let owner = TransitionOwnership::acquire(&config.state_file, &record)?;
+        let history = owner.abort_prepared(now)?;
+        println!(
+            "{}",
+            serde_json::json!({"history":history,"source_generation":current.generation()})
+        );
+        return Ok(());
+    }
     let coordinator = IndexCommitCoordinator::open_existing(
         &config.index_directory,
         &config.state_file,
@@ -152,11 +218,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let dictionary = Dictionary::load(&config.asset, &config.asset_sha256)
         .map_err(|_| "incompatible verified asset")?;
-    let now = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs(),
-    )?;
     if action == "prepare-activation" {
         let activation = config
             .activation
@@ -216,6 +277,32 @@ mod tests {
     }
     #[test]
     fn activation_preparation_requires_exact_shutdown_acknowledgement() {
+        assert!(!parse(&["abort-prepared", "config.json"]));
+        assert!(parse(&[
+            "abort-prepared",
+            "config.json",
+            "--all-source-processes-stopped"
+        ]));
+        assert!(parse(&[
+            "abort-prepared",
+            "config.json",
+            "--all-source-processes-stopped",
+            "--history",
+            "retained.history"
+        ]));
+        assert!(!parse(&[
+            "abort-prepared",
+            "config.json",
+            "--all-source-processes-stopped",
+            "--history"
+        ]));
+        assert!(!parse(&[
+            "prepare-activation",
+            "config.json",
+            "--all-source-processes-stopped",
+            "--history",
+            "retained.history"
+        ]));
         assert!(!parse(&["prepare-activation", "config.json"]));
         assert!(!parse(&["prepare-activation", "config.json", "--yes"]));
         assert!(parse(&[

@@ -199,6 +199,27 @@ fn transition_native_verification_checks_pinned_pair_before_and_after_installati
         );
         if unsupported_work {
             assert!(preview.is_err());
+            sql.execute_batch("CREATE TABLE post_preparation_ack(value TEXT); INSERT INTO post_preparation_ack VALUES('acknowledged');").unwrap();
+            let latest = fs::read(&state_path).unwrap();
+            let history = owner.abort_prepared(12).unwrap();
+            assert_eq!(owner.abort_prepared(12).unwrap(), history);
+            assert_eq!(fs::read(&state_path).unwrap(), latest);
+            assert_eq!(
+                sql.query_row("SELECT value FROM post_preparation_ack", [], |r| r
+                    .get::<_, String>(0))
+                    .unwrap(),
+                "acknowledged"
+            );
+            assert!(
+                history
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .ends_with(".prepared-aborted.history")
+            );
+            assert!(TransitionRecord::read(&state_path).unwrap().is_none());
+            assert!(candidate.exists());
+            assert!(activation_backup.exists());
             drop(owner);
             assert!(IndexCommitCoordinator::open_existing(&f.index, &state_path, source).is_ok());
             continue;
@@ -218,6 +239,18 @@ fn transition_native_verification_checks_pinned_pair_before_and_after_installati
         assert!(verify(&dictionary).is_err());
         fs::rename(&moved_backup, &preparation_backup).unwrap();
         owner.quarantine(12).unwrap();
+        assert!(owner.abort_prepared(12).is_err());
+        // A crash can leave Prepared journal bytes after quarantine SQL commits.
+        // The old generation is fenced even though the label still says Prepared.
+        let journal_file = journal_path(&state_path).unwrap();
+        let quarantined = fs::read(&journal_file).unwrap();
+        fs::write(&journal_file, serde_json::to_vec(&record).unwrap()).unwrap();
+        assert!(owner.abort_prepared(12).is_err());
+        assert_eq!(
+            TransitionRecord::read(&state_path).unwrap().unwrap().phase,
+            TransitionPhase::Prepared
+        );
+        fs::write(&journal_file, quarantined).unwrap();
         owner.install_candidate(12).unwrap();
         let installed = verify(&dictionary).unwrap();
         assert_eq!(installed.0, prepared);
@@ -1249,6 +1282,9 @@ fn offline_candidate_empty_source_has_verifiable_native_profiles_without_relabel
 }
 
 fn transition_child(f: &Fixture, phase: &str) -> CandidateChild {
+    transition_child_action(f, phase, "forward")
+}
+fn transition_child_action(f: &Fixture, phase: &str, action: &str) -> CandidateChild {
     CandidateChild(
         std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -1259,6 +1295,7 @@ fn transition_child(f: &Fixture, phase: &str) -> CandidateChild {
             ])
             .env("NK_TRANSITION_TEST_ROOT", &f.root)
             .env("NK_TRANSITION_TEST_PHASE", phase)
+            .env("NK_TRANSITION_TEST_ACTION", action)
             .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap(),
@@ -1280,6 +1317,15 @@ fn transition_process_child() {
     let dictionary = crate::lexical_dictionary::tests::dictionary(&[("cinnamon", "kanel")]);
     let preparation_backup = root.join("preparation.sqlite");
     let journal = TransitionRecord::read(&state).unwrap();
+    if std::env::var("NK_TRANSITION_TEST_ACTION").ok().as_deref() == Some("abort") {
+        let record = journal.unwrap_or_else(|| {
+            serde_json::from_slice(&fs::read(root.join("abort-record.json")).unwrap()).unwrap()
+        });
+        let owner = TransitionOwnership::acquire(&state, &record).unwrap();
+        owner.abort_prepared(12).unwrap();
+        return;
+    }
+
     if journal
         .as_ref()
         .is_some_and(|record| record.phase == TransitionPhase::Complete)
@@ -1544,4 +1590,221 @@ fn activation_preparation_rejects_occupied_archive_without_creating_backup() {
         assert!(TransitionRecord::read(&state).unwrap().is_none());
         assert_eq!(fs::read(&state).unwrap(), original);
     }
+}
+
+#[test]
+fn killed_prepared_abort_retains_history_and_current_sql_across_restart() {
+    for phase in ["abort-history-retained", "abort-history-unlinked"] {
+        prepared_abort_case(phase, None);
+    }
+}
+
+#[test]
+#[ignore = "requires the freshly built lexical-candidate operator binary"]
+fn prepared_abort_operator_retries_real_crash_states() {
+    let operator =
+        PathBuf::from(std::env::var_os("NK_LEXICAL_OPERATOR").expect("built operator path"));
+    assert!(operator.is_absolute() && operator.is_file());
+    for phase in [
+        "direct",
+        "abort-history-retained",
+        "abort-history-unlinked",
+        "quarantine-sql",
+    ] {
+        prepared_abort_case(phase, Some(&operator));
+    }
+}
+
+fn prepared_abort_case(phase: &str, operator: Option<&std::path::Path>) {
+    use crate::commit::transition::*;
+    let f = offline_process_fixture();
+    fs::set_permissions(&f.index, fs::Permissions::from_mode(0o700)).unwrap();
+    let state = f.root.join("state.sqlite");
+    let initial_phase = if phase == "quarantine-sql" {
+        phase
+    } else {
+        "prepared"
+    };
+    let mut preparing = transition_child(&f, initial_phase);
+    wait_for(|| f.root.join("observed-transition").exists());
+    preparing.0.kill().unwrap();
+    preparing.0.wait().unwrap();
+    fs::remove_file(f.root.join("observed-transition")).unwrap();
+    let record = TransitionRecord::read(&state).unwrap().unwrap();
+    let history = record.aborted_history_path(&state).unwrap();
+    let retained_record = f.root.join("abort-record.json");
+    fs::write(&retained_record, serde_json::to_vec(&record).unwrap()).unwrap();
+    fs::set_permissions(&retained_record, fs::Permissions::from_mode(0o600)).unwrap();
+    let config = f.root.join("operator.json");
+    fs::write(&config, serde_json::to_vec(&serde_json::json!({
+        "index_directory":f.index,"state_file":state,"table":"chunks","workspace":"workspace",
+        "roots":["root"],"exclusions":[],"policy":"policy","scope_generation":"v1",
+        "generation":"v1","epoch":1,"next_generation":"v2","next_epoch":3,
+        "embedding":f.embedding,"asset":f.root.join("missing.bundle"),"asset_sha256":record.asset_sha256,
+        "candidate":record.candidate_path,"backup":f.root.join("preparation.sqlite"),
+        "activation":{"archive":record.archive_path,"backup":record.backup_path,"quarantine_generation":"quarantine"}
+    })).unwrap()).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    let run_operator = |history: Option<&std::path::Path>| {
+        let mut command = std::process::Command::new(operator.unwrap());
+        command
+            .arg("abort-prepared")
+            .arg(&config)
+            .arg("--all-source-processes-stopped");
+        if let Some(history) = history {
+            command.arg("--history").arg(history);
+        }
+        command.output().unwrap()
+    };
+    if phase == "quarantine-sql" {
+        let before = fs::read(&state).unwrap();
+        assert!(!run_operator(None).status.success());
+        assert_eq!(fs::read(&state).unwrap(), before);
+        assert_eq!(
+            TransitionRecord::read(&state).unwrap().unwrap().phase,
+            TransitionPhase::Prepared
+        );
+        return;
+    }
+    if operator.is_some() {
+        // A real acknowledged native update after Prepared must remain present.
+        let lease = f.coordinator.state().acquire_lease(12, 100).unwrap();
+        let table = f.guarded();
+        let work = runtime()
+            .block_on(table.prepare_page(
+                &CountingProvider::new(f.embedding.clone()),
+                operation("newer-than-preparation", "latest", false),
+                &[chunk("one", "latest content", "Latest")],
+            ))
+            .unwrap();
+        runtime()
+            .block_on(table.commit_page(work, lease.clone(), Arc::new(|| 12), || async { Ok(()) }))
+            .unwrap();
+        f.coordinator.state().release_lease(&lease, 12).unwrap();
+        // Cancellation must not need a functioning candidate or dictionary.
+        fs::remove_file(
+            record
+                .candidate_path
+                .join(".nk-lexical-candidate-ready-v1.json"),
+        )
+        .unwrap();
+    }
+    let sql = rusqlite::Connection::open(&state).unwrap();
+    sql.execute_batch("CREATE TABLE after_preparation(value TEXT); INSERT INTO after_preparation VALUES('new acknowledgement');").unwrap();
+    drop(sql);
+    let latest = fs::read(&state).unwrap();
+    if phase == "direct" {
+        let held = fs::File::open(&f.index).unwrap();
+        held.try_lock().unwrap();
+        assert!(!run_operator(None).status.success());
+        drop(held);
+        let moved = f.root.join("moved-index");
+        fs::rename(&f.index, &moved).unwrap();
+        fs::create_dir(&f.index).unwrap();
+        fs::set_permissions(&f.index, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!run_operator(None).status.success());
+        fs::remove_dir(&f.index).unwrap();
+        fs::rename(&moved, &f.index).unwrap();
+        assert_eq!(fs::read(&state).unwrap(), latest);
+    }
+    if phase == "direct" {
+        let result = run_operator(None);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    } else {
+        let mut aborting = transition_child_action(&f, phase, "abort");
+        wait_for(|| f.root.join("observed-transition").exists());
+        assert_eq!(
+            fs::read_to_string(f.root.join("observed-transition")).unwrap(),
+            phase
+        );
+        aborting.0.kill().unwrap();
+        aborting.0.wait().unwrap();
+    }
+    assert!(
+        IndexCommitCoordinator::open_existing(&f.index, &state, f.coordinator.binding().clone())
+            .is_ok()
+    );
+    if operator.is_some() {
+        for _ in 0..2 {
+            let result = run_operator(Some(&history));
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        let bytes = fs::read(&history).unwrap();
+        let wrong_name = f.root.join("wrong.history");
+        fs::copy(&history, &wrong_name).unwrap();
+        assert!(!run_operator(Some(&wrong_name)).status.success());
+        fs::remove_file(&wrong_name).unwrap();
+        let saved = f.root.join("history-content");
+        fs::rename(&history, &saved).unwrap();
+        std::os::unix::fs::symlink(&saved, &history).unwrap();
+        assert!(!run_operator(Some(&history)).status.success());
+        fs::remove_file(&history).unwrap();
+        fs::rename(&saved, &history).unwrap();
+        fs::hard_link(&history, &wrong_name).unwrap();
+        assert!(!run_operator(Some(&history)).status.success());
+        fs::remove_file(&wrong_name).unwrap();
+        for invalid in [b"corrupt".as_slice(), b"{}".as_slice()] {
+            fs::write(&history, invalid).unwrap();
+            assert!(!run_operator(Some(&history)).status.success());
+        }
+        fs::write(&history, vec![b' '; 65537]).unwrap();
+        assert!(!run_operator(Some(&history)).status.success());
+        fs::write(&history, &bytes).unwrap();
+        let mut unrelated = record.clone();
+        unrelated.state_token = "f".repeat(32);
+        let unrelated_path = unrelated.aborted_history_path(&state).unwrap();
+        fs::write(&unrelated_path, serde_json::to_vec(&unrelated).unwrap()).unwrap();
+        fs::set_permissions(&unrelated_path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(!run_operator(Some(&unrelated_path)).status.success());
+        fs::remove_file(&unrelated_path).unwrap();
+        let mut different = record.clone();
+        different.asset_sha256 = "b".repeat(64);
+        assert_ne!(different, record);
+        let active = journal_path(&state).unwrap();
+        fs::write(&active, serde_json::to_vec(&different).unwrap()).unwrap();
+        fs::set_permissions(&active, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(!run_operator(Some(&history)).status.success());
+        assert_eq!(TransitionRecord::read(&state).unwrap().unwrap(), different);
+        fs::remove_file(active).unwrap();
+        assert_eq!(
+            runtime().block_on(f.guarded().page_chunks("page")).unwrap()[0].text,
+            "latest content"
+        );
+        assert_eq!(rusqlite::Connection::open(&state).unwrap().query_row(
+            "SELECT generation FROM index_commit_receipts WHERE operation_id='newer-than-preparation' AND status=1",[],|r|r.get::<_,String>(0)).unwrap(),"v1");
+    } else {
+        finish_candidate_child(&mut transition_child_action(&f, "", "abort"));
+    }
+    assert_eq!(fs::read(&state).unwrap(), latest);
+    assert!(TransitionRecord::read(&state).unwrap().is_none());
+    let identity = fs::metadata(&state).unwrap();
+    assert_eq!(
+        std::os::unix::fs::MetadataExt::ino(&identity),
+        record.state_inode
+    );
+    assert_eq!(
+        std::os::unix::fs::MetadataExt::dev(&identity),
+        record.state_device
+    );
+    assert!(record.candidate_path.exists());
+    record.backup.verify(&record.backup_path).unwrap();
+    assert_eq!(
+        fs::read_dir(&f.root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".prepared-aborted.history"))
+            .count(),
+        1
+    );
 }

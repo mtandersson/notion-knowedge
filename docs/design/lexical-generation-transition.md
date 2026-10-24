@@ -3,6 +3,8 @@
 Status: implementation in progress for #504. Activation-journal preparation is
 available through `lexical-candidate prepare-activation`; activation,
 reconciliation and rollback commands remain incomplete.
+Pre-quarantine cancellation is available through `abort-prepared`, with explicit
+retained-history retry. It cannot undo committed quarantine or publication.
 The multilingual lexical expansion contract remains binding. This document
 specifies activation ownership and recovery; it does not enable the runtime.
 
