@@ -1716,6 +1716,17 @@ fn offline_backup_excludes_readers_and_sql_writers_and_retains_pending_source_wo
     coordinator.state().admit(&key).unwrap();
     let before = fs::read(&fixture.state).unwrap();
     let backup = fixture.root.join("retained.sqlite");
+    for limit in [0, before.len() as u64 - 1] {
+        assert!(
+            coordinator
+                .with_offline_backup_bounded(&backup, 100, limit, |_| -> Result<(), CommitError> {
+                    panic!("oversized state must be rejected before backup preparation")
+                })
+                .is_err()
+        );
+        assert!(!backup.exists());
+        assert_eq!(fs::read(&fixture.state).unwrap(), before);
+    }
     let digest = coordinator
         .with_offline_backup(&backup, 100, |verified| {
             assert_eq!(verified.bytes, before.len() as u64);

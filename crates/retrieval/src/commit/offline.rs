@@ -12,12 +12,19 @@ pub struct OfflineBackup {
     pub bytes: u64,
 }
 pub(super) fn hash_file(file: &mut File) -> Result<OfflineBackup, CommitError> {
+    hash_file_bounded(file, u64::MAX)
+}
+fn hash_file_bounded(file: &mut File, limit: u64) -> Result<OfflineBackup, CommitError> {
     file.rewind().map_err(io)?;
     let mut hash = Sha256::new();
     let mut bytes = 0u64;
     let mut buffer = [0u8; 65536];
     loop {
-        let count = file.read(&mut buffer).map_err(io)?;
+        let remaining = limit
+            .saturating_sub(bytes)
+            .saturating_add(1)
+            .min(buffer.len() as u64) as usize;
+        let count = file.read(&mut buffer[..remaining]).map_err(io)?;
         if count == 0 {
             break;
         }
@@ -25,6 +32,9 @@ pub(super) fn hash_file(file: &mut File) -> Result<OfflineBackup, CommitError> {
         bytes = bytes
             .checked_add(count as u64)
             .ok_or(CommitError::Unavailable)?;
+        if bytes > limit {
+            return Err(CommitError::InvalidInput);
+        }
     }
     Ok(OfflineBackup {
         sha256: format!("{:x}", hash.finalize()),
@@ -132,7 +142,19 @@ impl IndexCommitCoordinator {
         now: i64,
         prepare: impl FnOnce(&OfflineBackup) -> Result<T, CommitError>,
     ) -> Result<T, CommitError> {
-        if now < 0 {
+        self.with_offline_backup_bounded(backup, now, u64::MAX, prepare)
+    }
+
+    /// Refuse oversized state before creating a backup, while holding the same
+    /// index and SQL ownership used by the ordinary offline snapshot path.
+    pub fn with_offline_backup_bounded<T>(
+        &self,
+        backup: &Path,
+        now: i64,
+        max_bytes: u64,
+        prepare: impl FnOnce(&OfflineBackup) -> Result<T, CommitError>,
+    ) -> Result<T, CommitError> {
+        if now < 0 || max_bytes == 0 {
             return Err(CommitError::InvalidInput);
         }
         private_parent(backup)?;
@@ -185,6 +207,9 @@ impl IndexCommitCoordinator {
         {
             return Err(CommitError::BindingMismatch);
         }
+        if opened.len() > max_bytes {
+            return Err(CommitError::InvalidInput);
+        }
         let mut header = [0u8; 100];
         source.read_exact(&mut header).map_err(io)?;
         if &header[..16] != b"SQLite format 3\0" || header[18] != 1 || header[19] != 1 {
@@ -198,13 +223,20 @@ impl IndexCommitCoordinator {
             .mode(0o600)
             .open(backup)
             .map_err(io)?;
-        std::io::copy(&mut source, &mut destination).map_err(io)?;
+        let copied = std::io::copy(
+            &mut (&mut source).take(max_bytes.saturating_add(1)),
+            &mut destination,
+        )
+        .map_err(io)?;
+        if copied != opened.len() {
+            return Err(CommitError::BindingMismatch);
+        }
         destination.sync_all().map_err(io)?;
         File::open(backup.parent().ok_or(CommitError::InvalidInput)?)
             .and_then(|f| f.sync_all())
             .map_err(io)?;
-        let digest = hash_file(&mut source)?;
-        if hash_file(&mut destination)? != digest {
+        let digest = hash_file_bounded(&mut source, max_bytes)?;
+        if hash_file_bounded(&mut destination, max_bytes)? != digest {
             return Err(CommitError::Unavailable);
         }
         let retained = Connection::open_with_flags(
@@ -223,7 +255,7 @@ impl IndexCommitCoordinator {
         // Uncooperative physical replacement cannot turn preparation into authority.
         self.identities()?;
         self.validate_binding(&transaction)?;
-        if hash_file(&mut source)? != digest {
+        if hash_file_bounded(&mut source, max_bytes)? != digest {
             return Err(CommitError::BindingMismatch);
         }
         transaction.commit().map_err(sql)?;

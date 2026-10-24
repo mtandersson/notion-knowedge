@@ -37,6 +37,16 @@ their shared lock before the transition can start.
 
 ## Durable record and phases
 
+The library's `prepare_activation` builds a Prepared journal from a verified
+sibling and a fresh activation-time SQLite backup. It validates artifact
+locations before creating a backup, bounds backup bytes under SQL ownership,
+and captures original state identity, exact binding bytes and canonical Ready
+metadata. Under the transition owner it retains any previous completed history,
+seals the source SQL manifest, and runs the read-only adoption preview. It does
+not quarantine or activate. Errors retain artifacts for diagnosis; a valid
+unchanged Prepared source remains admissible. The explicit operator command and
+rollback-compatible artifact checks remain required before shipping activation.
+
 A private, bounded, canonical JSON journal adjacent to SQLite records the state
 inode/token, source and target directory identities, paths, complete binding
 bytes and digests, source snapshot and ready-marker identities, asset digest,

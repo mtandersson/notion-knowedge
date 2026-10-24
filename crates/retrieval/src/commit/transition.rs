@@ -9,6 +9,8 @@ pub mod adoption;
 #[cfg(feature = "local-lancedb")]
 pub mod manifest;
 #[cfg(feature = "local-lancedb")]
+pub mod preparation;
+#[cfg(feature = "local-lancedb")]
 pub mod publication;
 
 const MAX_RECORD_BYTES: u64 = 65_536;
@@ -635,18 +637,30 @@ pub fn journal_path(state: &Path) -> Result<PathBuf, CommitError> {
 /// transition journal and either physical index generation. A misplaced
 /// "backup" must never become a recovery authority for those live artifacts.
 fn validate_artifact_paths(state: &Path, record: &TransitionRecord) -> Result<(), CommitError> {
+    validate_artifact_locations(
+        state,
+        [
+            &record.source.path,
+            &record.candidate_path,
+            &record.archive_path,
+        ],
+        &record.backup_path,
+    )
+}
+
+fn validate_artifact_locations(
+    state: &Path,
+    directories: [&Path; 3],
+    backup: &Path,
+) -> Result<(), CommitError> {
     let journal = journal_path(state)?;
-    if record.backup_path == state || record.backup_path == journal {
+    if backup == state || backup == journal {
         return Err(CommitError::InvalidInput);
     }
-    for directory in [
-        &record.source.path,
-        &record.candidate_path,
-        &record.archive_path,
-    ] {
+    for directory in directories {
         if state.starts_with(directory)
             || journal.starts_with(directory)
-            || record.backup_path.starts_with(directory)
+            || backup.starts_with(directory)
         {
             return Err(CommitError::InvalidInput);
         }

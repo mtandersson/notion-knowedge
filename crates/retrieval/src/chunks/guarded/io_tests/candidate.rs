@@ -1201,8 +1201,6 @@ fn transition_child(f: &Fixture, phase: &str) -> CandidateChild {
 #[ignore = "only launched by transition process tests"]
 fn transition_process_child() {
     use crate::commit::transition::*;
-    use sha2::Digest;
-    use std::os::unix::fs::MetadataExt;
     let root = PathBuf::from(std::env::var_os("NK_TRANSITION_TEST_ROOT").unwrap());
     let state = root.join("state.sqlite");
     let index = root.join("index");
@@ -1243,7 +1241,7 @@ fn transition_process_child() {
             coordinator.clone(),
         )
         .unwrap();
-        let prepared = offline
+        offline
             .prepare(
                 &root.join("candidate"),
                 &preparation_backup,
@@ -1253,68 +1251,28 @@ fn transition_process_child() {
                 CandidateLimits::default(),
             )
             .unwrap();
-        let backup_path = root.join("activation.sqlite");
-        let backup = coordinator
-            .with_offline_backup(&backup_path, 12, |backup| Ok(backup.clone()))
-            .unwrap();
-        let state_identity = fs::metadata(&state).unwrap();
-        let old = fs::metadata(&index).unwrap();
-        let new = fs::metadata(root.join("candidate")).unwrap();
-        let sql = rusqlite::Connection::open(&state).unwrap();
-        let mut record = TransitionRecord {
-            version: 1,
-            phase: TransitionPhase::Prepared,
-            state_device: state_identity.dev(),
-            state_inode: state_identity.ino(),
-            state_token: sql
-                .query_row(
-                    "SELECT identity FROM index_commit_state_identity",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap(),
-            source: TransitionEndpoint {
-                path: index.clone(),
-                device: old.dev(),
-                inode: old.ino(),
-                binding: serde_json::to_string(&source).unwrap(),
-            },
-            target: TransitionEndpoint {
-                path: index.clone(),
-                device: new.dev(),
-                inode: new.ino(),
-                binding: serde_json::to_string(&target).unwrap(),
-            },
-            candidate_path: root.join("candidate"),
-            archive_path: root.join("archive"),
-            quarantine_generation: "quarantine".into(),
-            quarantine_epoch: 2,
-            snapshot_sha256: prepared.snapshot_sha256,
-            asset_sha256: dictionary.manifest_digest().into(),
-            ready_sha256: format!(
-                "{:x}",
-                sha2::Sha256::digest(
-                    fs::read(root.join("candidate/.nk-lexical-candidate-ready-v1.json")).unwrap()
-                )
-            ),
-            adoption_sha256: "0".repeat(64),
-            backup_path,
-            backup,
-        };
-        record.adoption_sha256 = manifest::comparison::capture_backup_manifest(
-            &record,
-            &manifest::comparison::ComparisonInputs {
+        preparation::prepare_activation(
+            &coordinator,
+            12,
+            crate::chunks::TransitionCandidateInputs {
                 source: &source,
                 target: &target,
-                target_version: 1,
-                plan_bytes: adoption::AdoptionLimits::default().plan_bytes,
-                backup_bytes: 1 << 30,
-                limits: manifest::ManifestLimits::default(),
+                embedding: &embedding,
+                dictionary: &dictionary,
+                preparation_backup: &preparation_backup,
+                limits: CandidateLimits::default(),
             },
+            preparation::ActivationPaths {
+                candidate: &root.join("candidate"),
+                archive: &root.join("archive"),
+                backup: &root.join("activation.sqlite"),
+                quarantine_generation: "quarantine",
+            },
+            adoption::AdoptionLimits::default(),
+            manifest::ManifestLimits::default(),
+            1 << 30,
         )
         .unwrap()
-        .sha256;
-        record
     });
     let owner = TransitionOwnership::acquire(&state, &record).unwrap();
     if TransitionRecord::read(&state).unwrap().is_none() {
@@ -1423,5 +1381,99 @@ fn killed_transition_recovers_every_durable_phase_in_a_fresh_process() {
             .unwrap(),
             3
         );
+    }
+}
+
+#[test]
+fn activation_preparation_rejects_occupied_archive_without_creating_backup() {
+    use crate::commit::transition::*;
+    let f = offline_process_fixture();
+    let target = CommitBinding::new(
+        "chunks",
+        "workspace",
+        &ReconciliationScope::new(vec!["root".into()], vec![], "policy", "v1").unwrap(),
+        "v2",
+        3,
+    )
+    .unwrap();
+    let dictionary = crate::lexical_dictionary::tests::dictionary(&[("cinnamon", "kanel")]);
+    let candidate = f.root.join("candidate");
+    let preparation_backup = f.root.join("preparation.sqlite");
+    f.guarded()
+        .prepare_lexical_candidate(
+            &candidate,
+            &preparation_backup,
+            &target,
+            &dictionary,
+            12,
+            CandidateLimits::default(),
+        )
+        .unwrap();
+    let archive = f.root.join("occupied-archive");
+    fs::write(&archive, b"retain this artifact").unwrap();
+    let backup = f.root.join("activation.sqlite");
+    let state = f.root.join("state.sqlite");
+    let original = fs::read(&state).unwrap();
+    assert!(
+        preparation::prepare_activation(
+            &f.coordinator,
+            12,
+            crate::chunks::TransitionCandidateInputs {
+                source: f.coordinator.binding(),
+                target: &target,
+                embedding: &f.embedding,
+                dictionary: &dictionary,
+                preparation_backup: &preparation_backup,
+                limits: CandidateLimits::default()
+            },
+            preparation::ActivationPaths {
+                candidate: &candidate,
+                archive: &archive,
+                backup: &backup,
+                quarantine_generation: "quarantine"
+            },
+            adoption::AdoptionLimits::default(),
+            manifest::ManifestLimits::default(),
+            1 << 30
+        )
+        .is_err()
+    );
+    assert!(!backup.exists());
+    assert!(TransitionRecord::read(&state).unwrap().is_none());
+    assert_eq!(fs::read(&state).unwrap(), original);
+    assert_eq!(fs::read(&archive).unwrap(), b"retain this artifact");
+    for bad_backup in [
+        candidate.join("forbidden-state.sqlite"),
+        f.root.join("unused-archive"),
+    ] {
+        let unused_archive = f.root.join("unused-archive");
+        assert!(
+            preparation::prepare_activation(
+                &f.coordinator,
+                12,
+                crate::chunks::TransitionCandidateInputs {
+                    source: f.coordinator.binding(),
+                    target: &target,
+                    embedding: &f.embedding,
+                    dictionary: &dictionary,
+                    preparation_backup: &preparation_backup,
+                    limits: CandidateLimits::default()
+                },
+                preparation::ActivationPaths {
+                    candidate: &candidate,
+                    archive: &unused_archive,
+                    backup: &bad_backup,
+                    quarantine_generation: "quarantine"
+                },
+                adoption::AdoptionLimits::default(),
+                manifest::ManifestLimits::default(),
+                1 << 30
+            )
+            .is_err()
+        );
+        assert!(!bad_backup.exists());
+        assert!(!unused_archive.exists());
+        assert!(TransitionRecord::read(&state).unwrap().is_none());
+        assert_eq!(fs::read(&state).unwrap(), original);
     }
 }
