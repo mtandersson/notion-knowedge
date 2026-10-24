@@ -362,6 +362,52 @@ fn transition_native_verification_checks_pinned_pair_before_and_after_installati
                 IndexCommitCoordinator::open_existing(&f.index, &state_path, source.clone())
                     .is_err()
             );
+            // A later transition retains immutable history before replacing
+            // the completed active journal; the source remains v2 throughout.
+            let completed = TransitionRecord::read(&state_path).unwrap().unwrap();
+            let history_bytes = fs::read(journal_path(&state_path).unwrap()).unwrap();
+            let future_candidate = f.root.join("future-candidate");
+            fs::create_dir(&future_candidate).unwrap();
+            fs::set_permissions(&future_candidate, fs::Permissions::from_mode(0o700)).unwrap();
+            let identity = fs::metadata(&future_candidate).unwrap();
+            let third = CommitBinding::new(
+                "chunks",
+                "workspace",
+                &ReconciliationScope::new(vec!["root".into()], vec![], "policy", "v1").unwrap(),
+                "v3",
+                5,
+            )
+            .unwrap();
+            let mut future = completed.clone();
+            future.phase = TransitionPhase::Prepared;
+            future.source = completed.target.clone();
+            future.target = TransitionEndpoint {
+                path: f.index.clone(),
+                device: identity.dev(),
+                inode: identity.ino(),
+                binding: serde_json::to_string(&third).unwrap(),
+            };
+            future.candidate_path = future_candidate;
+            future.archive_path = f.root.join("future-archive");
+            future.quarantine_generation = "future-quarantine".into();
+            future.quarantine_epoch = 4;
+            let owner = TransitionOwnership::acquire(&state_path, &future).unwrap();
+            let history = owner.retire_completed(12, &completed).unwrap();
+            assert_eq!(fs::read(&history).unwrap(), history_bytes);
+            assert!(TransitionRecord::read(&state_path).unwrap().is_none());
+            // Simulate a retained history copy with the old active record still
+            // present, then the remove-before-return retry window.
+            fs::copy(&history, journal_path(&state_path).unwrap()).unwrap();
+            assert_eq!(owner.retire_completed(12, &completed).unwrap(), history);
+            assert_eq!(owner.retire_completed(12, &completed).unwrap(), history);
+            fs::write(&history, b"corrupt").unwrap();
+            assert!(owner.retire_completed(12, &completed).is_err());
+            fs::write(&history, &history_bytes).unwrap();
+            drop(owner);
+            assert!(
+                IndexCommitCoordinator::open_existing(&f.index, &state_path, next.clone()).is_ok()
+            );
+            assert!(completed.backup_path.exists());
         }
     }
 }

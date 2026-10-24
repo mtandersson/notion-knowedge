@@ -739,16 +739,20 @@ impl TransitionRecord {
     /// ownership are errors; an absent record is distinct from a corrupt one.
     pub fn read(state: &Path) -> Result<Option<Self>, CommitError> {
         let path = journal_path(state)?;
+        Self::read_path(state, &path)
+    }
+
+    fn read_path(state: &Path, path: &Path) -> Result<Option<Self>, CommitError> {
         let mut file = match OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(&path)
+            .open(path)
         {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(io(error)),
         };
-        super::offline::private_parent(&path)?;
+        super::offline::private_parent(path)?;
         let metadata = file.metadata().map_err(io)?;
         let owner = fs::metadata("/proc/self").map_err(io)?.uid();
         if !metadata.is_file()
@@ -766,7 +770,7 @@ impl TransitionRecord {
             .map_err(io)?;
         let record: Self =
             serde_json::from_slice(&bytes).map_err(|_| CommitError::BindingMismatch)?;
-        if canonical(&record)? != bytes || Identity::read(&path)? != Identity::file(&file)? {
+        if canonical(&record)? != bytes || Identity::read(path)? != Identity::file(&file)? {
             return Err(CommitError::BindingMismatch);
         }
         validate_artifact_paths(state, &record)?;
@@ -851,6 +855,76 @@ impl TransitionRecord {
             },
         );
         Ok(())
+    }
+}
+
+impl TransitionOwnership {
+    /// Retain the previous completed record before this owner's next Prepared
+    /// record is created. Copy/fsync history before removing the active record;
+    /// retry accepts only identical already-retained history. No SQL is changed.
+    pub fn retire_completed(
+        &self,
+        now: i64,
+        previous: &TransitionRecord,
+    ) -> Result<PathBuf, CommitError> {
+        use sha2::{Digest, Sha256};
+        if previous.phase != TransitionPhase::Complete
+            || previous.state_device != self.record.state_device
+            || previous.state_inode != self.record.state_inode
+            || previous.state_token != self.record.state_token
+            || previous.target != self.record.source
+        {
+            return Err(CommitError::BindingMismatch);
+        }
+        let bytes = canonical(previous)?;
+        let active = journal_path(&self.state_path)?;
+        let mut name = active
+            .file_name()
+            .ok_or(CommitError::InvalidInput)?
+            .to_os_string();
+        name.push(format!(".{:x}.history", Sha256::digest(&bytes)));
+        let history = active.with_file_name(name);
+        if history == self.record.backup_path
+            || history == previous.backup_path
+            || [
+                &self.record.source.path,
+                &self.record.candidate_path,
+                &self.record.archive_path,
+            ]
+            .iter()
+            .any(|directory| history.starts_with(directory))
+        {
+            return Err(CommitError::InvalidInput);
+        }
+        self.with_exclusive_sql(now, |transaction| {
+            let source: RecordedBinding = serde_json::from_str(&self.record.source.binding).map_err(|_| CommitError::InvalidInput)?;
+            let exact_source: bool = transaction.query_row(
+                "SELECT index_device=?1 AND index_inode=?2 AND generation=?3 AND epoch=?4 FROM main.index_commit_binding WHERE singleton=1",
+                params![self.record.source.device.to_string(),self.record.source.inode.to_string(),source.generation,source.epoch], |r|r.get(0)).map_err(sql)?;
+            if !exact_source { return Err(CommitError::BindingMismatch); }
+            let current = TransitionRecord::read(&self.state_path)?;
+            if current.as_ref().is_some_and(|record| record != previous) { return Err(CommitError::Conflict); }
+            match TransitionRecord::read_path(&self.state_path, &history)? {
+                Some(record) if record == *previous => {},
+                Some(_) => return Err(CommitError::BindingMismatch),
+                None => {
+                    if current.is_none() { return Err(CommitError::BindingMismatch); }
+                    let temporary = tempfile::Builder::new().prefix(".nk-history-")
+                        .tempfile_in(active.parent().ok_or(CommitError::InvalidInput)?).map_err(io)?;
+                    temporary.as_file().write_all(&bytes).map_err(io)?;
+                    temporary.as_file().sync_all().map_err(io)?;
+                    temporary.persist_noclobber(&history).map_err(|error| io(error.error))?;
+                }
+            }
+            let parent = File::open(active.parent().ok_or(CommitError::InvalidInput)?).map_err(io)?;
+            parent.sync_all().map_err(io)?;
+            if TransitionRecord::read_path(&self.state_path,&history)?.as_ref() != Some(previous)
+                || TransitionRecord::read(&self.state_path)? != current { return Err(CommitError::Conflict); }
+            self.revalidate()?;
+            if current.is_some() { fs::remove_file(&active).map_err(io)?; }
+            parent.sync_all().map_err(io)?;
+            Ok(history.clone())
+        })
     }
 }
 
