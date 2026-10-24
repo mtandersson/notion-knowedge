@@ -7,6 +7,12 @@ inputs:
   hit:
     required: false
     description: Exact build cache hit
+  matched-key:
+    required: false
+    description: Actual key restored from target, empty on miss
+  prefix:
+    required: true
+    description: Verified compatible target key prefix
   downloads-key:
     required: true
     description: Current dependency download key
@@ -16,12 +22,15 @@ inputs:
 runs:
   using: composite
   steps:
+    # A compatible source snapshot already contains reusable compiled dependencies.
+    # Do not create a fresh multi-GB immutable cache after every source-only edit.
+    # Still publish the first pinned snapshot when no compatible prefix was restored.
     - name: Record successful source fingerprints
-      if: inputs.hit != 'true'
+      if: ${{ !startsWith(inputs.matched-key, inputs.prefix) }}
       shell: bash
       run: python3 scripts/cargo-cache.py snapshot
     - name: Save refreshed Cargo build snapshot
-      if: inputs.hit != 'true'
+      if: ${{ !startsWith(inputs.matched-key, inputs.prefix) }}
       uses: actions/cache/save@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
       with:
         path: target
