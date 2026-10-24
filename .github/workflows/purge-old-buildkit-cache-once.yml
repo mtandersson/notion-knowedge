@@ -1,0 +1,48 @@
+# One-shot GHCR migration hygiene. PR #510 replaced the BuildKit GHA backend.
+# This only fires when this file is first merged to protected main with the
+# exact reviewed commit title below, matching the established #266 pattern.
+# No --all: unrelated Cargo/Actions caches must remain untouched.
+name: Purge obsolete BuildKit GHA cache once
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/purge-old-buildkit-cache-once.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: obsolete-buildkit-gha-cache-one-shot
+  cancel-in-progress: false
+
+jobs:
+  purge:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      startsWith(github.event.head_commit.message, 'chore(ci): purge obsolete BuildKit GHA caches once')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Checkout reviewed source without persisting credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Test strict cache selection before API mutation
+        run: python3 scripts/test-prune-buildkit-gha-cache.py -v
+
+      - name: Snapshot and dry-run only obsolete BuildKit caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/prune-buildkit-gha-cache.py
+
+      - name: Remove only reviewed obsolete BuildKit cache IDs and verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/prune-buildkit-gha-cache.py --apply
