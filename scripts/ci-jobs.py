@@ -83,6 +83,16 @@ def validate(needs):
     for job in JOBS:
         selected = outputs.get(job)
         result = needs.get(job, {}).get('result')
+        if job == 'container' and selected in {'true', 'false'}:
+            # Exactly one of the read-only PR job and trusted main publisher
+            # must succeed for a selected container check. Their mutually
+            # exclusive permissions are a security boundary, not optional CI.
+            other = needs.get('container-main', {}).get('result')
+            outcomes = sorted((str(result), str(other)))
+            allowed = ['skipped', 'success'] if selected == 'true' else ['skipped', 'skipped']
+            if outcomes != allowed:
+                errors.append(f'container: expected {allowed}, got {outcomes}')
+            continue
         if selected not in {'true', 'false'}:
             errors.append(f'{job}: invalid selection')
         elif job in SECURITY and selected != 'true':
