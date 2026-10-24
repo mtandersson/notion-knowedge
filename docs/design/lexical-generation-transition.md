@@ -1,6 +1,8 @@
 # Offline lexical generation transition
 
-Status: implementation proposal for #504; not an available operator command.
+Status: implementation in progress for #504. Activation-journal preparation is
+available through `lexical-candidate prepare-activation`; activation,
+reconciliation and rollback commands remain incomplete.
 The multilingual lexical expansion contract remains binding. This document
 specifies activation ownership and recovery; it does not enable the runtime.
 

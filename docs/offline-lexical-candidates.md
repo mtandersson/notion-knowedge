@@ -1,7 +1,7 @@
 # Offline lexical candidate preparation
 
 The `lexical-candidate` operator example prepares and verifies a **sibling**
-derived index. It never activates a generation, changes coordinator authority,
+derived index and can seal a Prepared activation journal. It never activates a generation, changes coordinator authority,
 renames the active directory, calls Notion, or loads credentials. Activation,
 interrupted-transition reconciliation and rollback remain #504. Production
 installation and complete quality measurement remain #492/#493.
@@ -71,7 +71,7 @@ the table; no embedding provider runs during copying.
   "generation": "existing-index-generation",
   "epoch": 1,
   "next_generation": "lexical-candidate-2",
-  "next_epoch": 2,
+  "next_epoch": 3,
   "embedding": {
     "schema_version": "1",
     "provider_id": "existing-provider",
@@ -82,13 +82,21 @@ the table; no embedding provider runs during copying.
   "asset": "/private/nk/eng-swe.bundle",
   "asset_sha256": "replace-with-the-verified-bundle-sha256",
   "candidate": "/private/nk/lexical-candidate-2",
-  "backup": "/private/nk/operational-before-lexical-2.sqlite"
+  "backup": "/private/nk/operational-before-lexical-2.sqlite",
+  "activation": {
+    "archive": "/private/nk/index-before-lexical-2",
+    "backup": "/private/nk/operational-at-activation-2.sqlite",
+    "quarantine_generation": "lexical-quarantine-2"
+  }
 }
 ```
 
 The candidate must be a new sibling of the active derived directory. Choose a
 fresh, never-used next generation and larger epoch. The configuration is local
 operator input and is never accepted from an MCP request.
+Preparing an activation journal requires a next epoch at least two greater than
+the current epoch, leaving the intervening epoch for quarantine. Candidate-only
+commands also accept configurations without the optional `activation` object.
 
 ```sh
 nix develop .#spike --command cargo run -p notion-knowledge-retrieval \
@@ -106,7 +114,36 @@ reopens the complete source/candidate rows and indexes, compares every vector an
 citation field again, and rejects changed/missing/corrupt state. A ready marker
 alone is not activation permission. Activation must revalidate under its own
 fence before admission; a successful earlier verification is not that fence.
-Output contains operational counts and digests, not source text or credentials.
+Output contains local operational metadata and digests, not source text or credentials.
+
+### Prepare an activation journal
+
+After candidate preparation and verification, keep every server, webhook,
+reconciliation, file and mutation process stopped. Make the configuration private
+and explicitly acknowledge that shutdown:
+
+```sh
+chmod 600 /private/nk/lexical-preparation.json
+nix develop .#spike --command cargo run -p notion-knowledge-retrieval \
+  --features local-lancedb --example lexical-candidate --locked --offline -- \
+  prepare-activation /private/nk/lexical-preparation.json \
+  --all-source-processes-stopped
+```
+
+The tool requires an operator-owned, singly linked regular configuration file
+with no group/other permissions. It re-verifies the sibling, creates a fresh
+activation-time SQLite backup capped at 2 GiB, seals the complete SQL manifest,
+retains any prior completed transition history, and validates retained derived
+work. The activation backup and unused archive paths are distinct from the
+candidate, preparation backup and operational state. Invalid containment or
+archive aliases fail before a backup is created.
+
+Success leaves a durable **Prepared** journal and the unchanged source remains
+admissible. This command does not quarantine, rename or activate a generation.
+Failures retain artifacts; do not edit a journal or restore a backup to force a
+retry. Activation, explicit interrupted-transition reconciliation and rollback
+commands remain incomplete under #504, including rollback-compatible artifact
+verification. See the [transition protocol](design/lexical-generation-transition.md).
 
 ## Interrupted preparation
 
