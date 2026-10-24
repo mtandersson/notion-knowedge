@@ -33,6 +33,8 @@ fn install_anchor(owner: &TransitionOwnership) -> Result<(), CommitError> {
     }
     owner.verify_anchor(&owner.target)?;
     owner.target.sync_all().map_err(io)?;
+    #[cfg(test)]
+    transition_checkpoint(owner, "anchor-installed");
     owner.revalidate()
 }
 
@@ -97,7 +99,7 @@ pub fn publish_derived_state(
     backup_bytes: u64,
 ) -> Result<AdoptionReport, CommitError> {
     const PUBLISH: &str = "UPDATE main.index_commit_binding SET index_device=?1,index_inode=?2,generation=?3,epoch=?4 WHERE singleton=1 AND generation=?5 AND epoch=?6";
-    owner.with_exclusive_sql(now, |transaction| {
+    let report = owner.with_exclusive_sql(now, |transaction| {
         let source = candidate.source;
         let target = candidate.target;
         let verified = verify_transition_candidate(owner, transaction, candidate)?;
@@ -150,6 +152,23 @@ pub fn publish_derived_state(
             &comparison,
             ComparisonStage::AfterPublication,
         )?;
+        #[cfg(test)]
+        {
+            if std::env::var("NK_TRANSITION_TEST_PHASE").ok().as_deref()
+                == Some("sql-before-commit")
+            {
+                // Force dirty pages into the original file, producing a hot
+                // rollback journal when the subprocess is killed below.
+                let flushed = unsafe { rusqlite::ffi::sqlite3_db_cacheflush(transaction.handle()) };
+                if flushed != rusqlite::ffi::SQLITE_OK {
+                    return Err(CommitError::Unavailable);
+                }
+            }
+            transition_checkpoint(owner, "sql-before-commit");
+        }
         Ok(report)
-    })
+    })?;
+    #[cfg(test)]
+    transition_checkpoint(owner, "sql-published");
+    Ok(report)
 }

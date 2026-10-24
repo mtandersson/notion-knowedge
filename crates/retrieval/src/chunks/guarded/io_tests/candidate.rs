@@ -1100,3 +1100,285 @@ fn offline_candidate_empty_source_has_verifiable_native_profiles_without_relabel
     );
     assert_eq!(f.coordinator.binding().generation(), "v1");
 }
+
+fn transition_child(f: &Fixture, phase: &str) -> CandidateChild {
+    CandidateChild(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "chunks::guarded::io_tests::candidate::transition_process_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("NK_TRANSITION_TEST_ROOT", &f.root)
+            .env("NK_TRANSITION_TEST_PHASE", phase)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    )
+}
+
+#[test]
+#[ignore = "only launched by transition process tests"]
+fn transition_process_child() {
+    use crate::commit::transition::*;
+    use sha2::Digest;
+    use std::os::unix::fs::MetadataExt;
+    let root = PathBuf::from(std::env::var_os("NK_TRANSITION_TEST_ROOT").unwrap());
+    let state = root.join("state.sqlite");
+    let index = root.join("index");
+    let scope = ReconciliationScope::new(vec!["root".into()], vec![], "policy", "v1").unwrap();
+    let source = CommitBinding::new("chunks", "workspace", &scope, "v1", 1).unwrap();
+    let target = CommitBinding::new("chunks", "workspace", &scope, "v2", 3).unwrap();
+    let embedding =
+        EmbeddingMetadata::new("count".into(), "test-model".into(), "v1".into(), 3).unwrap();
+    let dictionary = crate::lexical_dictionary::tests::dictionary(&[("cinnamon", "kanel")]);
+    let preparation_backup = root.join("preparation.sqlite");
+    let journal = TransitionRecord::read(&state).unwrap();
+    if journal
+        .as_ref()
+        .is_some_and(|record| record.phase == TransitionPhase::Complete)
+    {
+        let coordinator = IndexCommitCoordinator::open_existing(&index, &state, target).unwrap();
+        let table = GuardedChunkTable::bind_with_lexical_plan(
+            &index,
+            "chunks",
+            embedding,
+            coordinator,
+            &LexicalPlanIdentity::verified(&dictionary).unwrap(),
+        )
+        .unwrap();
+        runtime().block_on(async {
+            assert_eq!(table.page_chunks("page").await.unwrap().len(), 1);
+            assert_eq!(table.indexed_page_ids().await.unwrap(), vec!["page"]);
+        });
+        return;
+    }
+    let record = journal.unwrap_or_else(|| {
+        let coordinator =
+            IndexCommitCoordinator::open_existing(&index, &state, source.clone()).unwrap();
+        let offline = crate::chunks::OfflineLexicalSource::bind(
+            &index,
+            "chunks",
+            embedding.clone(),
+            coordinator.clone(),
+        )
+        .unwrap();
+        let prepared = offline
+            .prepare(
+                &root.join("candidate"),
+                &preparation_backup,
+                &target,
+                &dictionary,
+                12,
+                CandidateLimits::default(),
+            )
+            .unwrap();
+        let backup_path = root.join("activation.sqlite");
+        let backup = coordinator
+            .with_offline_backup(&backup_path, 12, |backup| Ok(backup.clone()))
+            .unwrap();
+        let state_identity = fs::metadata(&state).unwrap();
+        let old = fs::metadata(&index).unwrap();
+        let new = fs::metadata(root.join("candidate")).unwrap();
+        let sql = rusqlite::Connection::open(&state).unwrap();
+        let mut record = TransitionRecord {
+            version: 1,
+            phase: TransitionPhase::Prepared,
+            state_device: state_identity.dev(),
+            state_inode: state_identity.ino(),
+            state_token: sql
+                .query_row(
+                    "SELECT identity FROM index_commit_state_identity",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap(),
+            source: TransitionEndpoint {
+                path: index.clone(),
+                device: old.dev(),
+                inode: old.ino(),
+                binding: serde_json::to_string(&source).unwrap(),
+            },
+            target: TransitionEndpoint {
+                path: index.clone(),
+                device: new.dev(),
+                inode: new.ino(),
+                binding: serde_json::to_string(&target).unwrap(),
+            },
+            candidate_path: root.join("candidate"),
+            archive_path: root.join("archive"),
+            quarantine_generation: "quarantine".into(),
+            quarantine_epoch: 2,
+            snapshot_sha256: prepared.snapshot_sha256,
+            asset_sha256: dictionary.manifest_digest().into(),
+            ready_sha256: format!(
+                "{:x}",
+                sha2::Sha256::digest(
+                    fs::read(root.join("candidate/.nk-lexical-candidate-ready-v1.json")).unwrap()
+                )
+            ),
+            adoption_sha256: "0".repeat(64),
+            backup_path,
+            backup,
+        };
+        record.adoption_sha256 = manifest::comparison::capture_backup_manifest(
+            &record,
+            &manifest::comparison::ComparisonInputs {
+                source: &source,
+                target: &target,
+                target_version: 1,
+                plan_bytes: adoption::AdoptionLimits::default().plan_bytes,
+                backup_bytes: 1 << 30,
+                limits: manifest::ManifestLimits::default(),
+            },
+        )
+        .unwrap()
+        .sha256;
+        record
+    });
+    let owner = TransitionOwnership::acquire(&state, &record).unwrap();
+    if TransitionRecord::read(&state).unwrap().is_none() {
+        record.persist(&owner, None).unwrap();
+    }
+    let candidate = crate::chunks::TransitionCandidateInputs {
+        source: &source,
+        target: &target,
+        embedding: &embedding,
+        dictionary: &dictionary,
+        preparation_backup: &preparation_backup,
+        limits: CandidateLimits::default(),
+    };
+    let current = TransitionRecord::read(&state).unwrap().unwrap();
+    if current.phase == TransitionPhase::Prepared {
+        owner
+            .with_exclusive_sql(12, |tx| {
+                crate::chunks::verify_transition_candidate(&owner, tx, candidate)?;
+                Ok(())
+            })
+            .unwrap();
+        owner.quarantine(12).unwrap();
+    }
+    let current = TransitionRecord::read(&state).unwrap().unwrap();
+    if matches!(
+        current.phase,
+        TransitionPhase::Quarantined | TransitionPhase::SourceRetained
+    ) {
+        owner.install_candidate(12).unwrap();
+    }
+    let final_sql: bool = rusqlite::Connection::open(&state)
+        .unwrap()
+        .query_row(
+            "SELECT generation='v2' FROM index_commit_binding",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    if !final_sql {
+        publication::publish_derived_state(
+            &owner,
+            12,
+            candidate,
+            adoption::AdoptionLimits::default(),
+            manifest::ManifestLimits::default(),
+            1 << 30,
+        )
+        .unwrap();
+    }
+    publication::complete_publication(
+        &owner,
+        12,
+        candidate,
+        adoption::AdoptionLimits::default().plan_bytes,
+        manifest::ManifestLimits::default(),
+        1 << 30,
+    )
+    .unwrap();
+}
+
+#[test]
+fn killed_transition_recovers_every_durable_phase_in_a_fresh_process() {
+    use crate::commit::transition::*;
+    for phase in [
+        "prepared",
+        "quarantine-sql",
+        "quarantined",
+        "source-renamed",
+        "source-retained",
+        "target-renamed",
+        "target-installed",
+        "sql-before-commit",
+        "sql-published",
+        "anchor-installed",
+        "published",
+        "complete",
+    ] {
+        let f = offline_process_fixture();
+        fs::set_permissions(&f.index, fs::Permissions::from_mode(0o700)).unwrap();
+        let original_inode = std::os::unix::fs::MetadataExt::ino(
+            &fs::metadata(f.root.join("state.sqlite")).unwrap(),
+        );
+        let mut child = transition_child(&f, phase);
+        wait_for(|| f.root.join("observed-transition").exists());
+        assert_eq!(
+            fs::read_to_string(f.root.join("observed-transition")).unwrap(),
+            phase
+        );
+        child.0.kill().unwrap();
+        assert!(!child.0.wait().unwrap().success());
+        if phase == "sql-before-commit" {
+            let journal = fs::read(f.root.join("state.sqlite-journal")).unwrap();
+            assert!(journal.len() > 512);
+            assert_eq!(
+                &journal[..8],
+                &[0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7]
+            );
+        }
+        // Avoid another writable opener recovering the hot journal before the
+        // transition operator itself has demonstrated that recovery.
+        if !matches!(phase, "prepared" | "complete" | "sql-before-commit") {
+            assert!(
+                IndexCommitCoordinator::open_existing(
+                    &f.index,
+                    f.root.join("state.sqlite"),
+                    f.coordinator.binding().clone()
+                )
+                .is_err(),
+                "{phase}"
+            );
+        }
+        finish_candidate_child(&mut transition_child(&f, ""));
+        finish_candidate_child(&mut transition_child(&f, ""));
+        assert_eq!(
+            TransitionRecord::read(&f.root.join("state.sqlite"))
+                .unwrap()
+                .unwrap()
+                .phase,
+            TransitionPhase::Complete
+        );
+        assert_eq!(
+            std::os::unix::fs::MetadataExt::ino(
+                &fs::metadata(f.root.join("state.sqlite")).unwrap()
+            ),
+            original_inode
+        );
+        let sql = rusqlite::Connection::open(f.root.join("state.sqlite")).unwrap();
+        assert_eq!(
+            sql.query_row(
+                "SELECT COUNT(*) FROM index_commit_receipts WHERE generation='v2' AND status=1",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            sql.query_row("SELECT COUNT(*) FROM index_commit_generations", [], |r| r
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            3
+        );
+    }
+}

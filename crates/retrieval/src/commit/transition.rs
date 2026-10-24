@@ -1,5 +1,5 @@
-//! Durable transition record storage and ordinary coordinator admission.
-//! These primitives do not verify a native candidate or activate an index.
+//! Durable transition ownership, record storage and coordinator admission.
+//! Native publication and forward completion live in `publication`.
 //! The offline transition owner must hold state/index/SQL exclusion throughout
 //! publication; recovery must inspect physical and SQL authority, not phase alone.
 use super::*;
@@ -12,6 +12,22 @@ pub mod manifest;
 pub mod publication;
 
 const MAX_RECORD_BYTES: u64 = 65_536;
+
+#[cfg(test)]
+pub(super) fn transition_checkpoint(owner: &TransitionOwnership, phase: &str) {
+    let Some(root) = std::env::var_os("NK_TRANSITION_TEST_ROOT").map(PathBuf::from) else {
+        return;
+    };
+    if owner.state_path.parent() != Some(root.as_path())
+        || std::env::var("NK_TRANSITION_TEST_PHASE").ok().as_deref() != Some(phase)
+    {
+        return;
+    }
+    fs::write(root.join("observed-transition"), phase).unwrap();
+    loop {
+        std::thread::park();
+    }
+}
 
 /// Stable ownership across directory renames. This excludes other transition
 /// operators and guarded index consumers; an exclusive SQLite transaction is
@@ -236,11 +252,57 @@ impl TransitionOwnership {
         exclusive(&source)?;
         let target = locate(record, false)?;
         exclusive(&target)?;
+        let owned = Self {
+            state_path: state_path.to_owned(),
+            state,
+            source,
+            target,
+            record: record.clone(),
+        };
+        owned.revalidate()?;
+        // An interrupted publication can leave a hot rollback journal. SQLite
+        // must recover that journal before reading identity/schema. Only allow
+        // its ordinary pager recovery after all physical locks are retained;
+        // never restore an application backup or migrate/create a database.
+        let mut header = [0u8; 20];
+        std::os::unix::fs::FileExt::read_exact_at(&owned.state, &mut header, 0).map_err(io)?;
+        if &header[..16] != b"SQLite format 3\0" || header[18] != 1 || header[19] != 1 {
+            return Err(CommitError::BindingMismatch);
+        }
+        let mut recovery = Connection::open_with_flags(
+            state_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(sql)?;
+        recovery
+            .busy_timeout(std::time::Duration::ZERO)
+            .map_err(sql)?;
+        validate_connection_file(&recovery, &owned.state, state_path)?;
+        let transaction = recovery
+            .transaction_with_behavior(TransactionBehavior::Exclusive)
+            .map_err(sql)?;
+        validate_connection_file(&transaction, &owned.state, state_path)?;
+        let recovered_token: String = transaction
+            .query_row(
+                "SELECT identity FROM index_commit_state_identity WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(sql)?;
+        if recovered_token != record.state_token {
+            return Err(CommitError::BindingMismatch);
+        }
+        transaction.commit().map_err(sql)?;
+        drop(recovery);
         let store = SqliteSyncStateStore::open_read_only(state_path)
             .map_err(|_| CommitError::Unavailable)?;
-        let token: String = store
+        let db = store
             .lock_connection()
-            .map_err(|_| CommitError::Unavailable)?
+            .map_err(|_| CommitError::Unavailable)?;
+        validate_connection_file(&db, &owned.state, state_path)?;
+        let token: String = db
             .query_row(
                 "SELECT identity FROM index_commit_state_identity WHERE singleton=1",
                 [],
@@ -250,13 +312,6 @@ impl TransitionOwnership {
         if token != record.state_token {
             return Err(CommitError::BindingMismatch);
         }
-        let owned = Self {
-            state_path: state_path.to_owned(),
-            state,
-            source,
-            target,
-            record: record.clone(),
-        };
         owned.revalidate()?;
         Ok(owned)
     }
@@ -421,6 +476,8 @@ impl TransitionOwnership {
             transaction.execute("UPDATE index_commit_binding SET generation=?1,epoch=?2 WHERE singleton=1", params![previous.quarantine_generation,quarantine_epoch]).map_err(sql)?;
             Ok(())
         })?;
+        #[cfg(test)]
+        transition_checkpoint(self, "quarantine-sql");
         if previous.phase == TransitionPhase::Quarantined {
             return Ok(previous);
         }
@@ -467,6 +524,8 @@ impl TransitionOwnership {
             }
             self.revalidate()?;
             File::open(current.source.path.parent().ok_or(CommitError::InvalidInput)?).map_err(io)?.sync_all().map_err(io)?;
+            #[cfg(test)]
+            transition_checkpoint(self, "source-renamed");
             if current.phase == TransitionPhase::Quarantined {
                 let previous = current.clone();
                 current.phase = TransitionPhase::SourceRetained;
@@ -486,6 +545,8 @@ impl TransitionOwnership {
                 return Err(CommitError::BindingMismatch);
             }
             File::open(current.target.path.parent().ok_or(CommitError::InvalidInput)?).map_err(io)?.sync_all().map_err(io)?;
+            #[cfg(test)]
+            transition_checkpoint(self, "target-renamed");
             if current.phase == TransitionPhase::SourceRetained {
                 let previous = current.clone();
                 current.phase = TransitionPhase::TargetInstalled;
@@ -776,7 +837,20 @@ impl TransitionRecord {
         File::open(path.parent().ok_or(CommitError::InvalidInput)?)
             .map_err(io)?
             .sync_all()
-            .map_err(io)
+            .map_err(io)?;
+        #[cfg(test)]
+        transition_checkpoint(
+            owner,
+            match self.phase {
+                TransitionPhase::Prepared => "prepared",
+                TransitionPhase::Quarantined => "quarantined",
+                TransitionPhase::SourceRetained => "source-retained",
+                TransitionPhase::TargetInstalled => "target-installed",
+                TransitionPhase::Published => "published",
+                TransitionPhase::Complete => "complete",
+            },
+        );
+        Ok(())
     }
 }
 
