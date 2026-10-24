@@ -196,10 +196,7 @@ impl GrantRefreshWorker {
         let scope = production_scope(&settings.scope).map_err(|_| "invalid refresh scope")?;
         let binding = coordinator.binding();
         if !guard.is_bound_to(&coordinator)
-            || binding.epoch() != settings.scope.generation
-            || binding.workspace() != settings.scope.workspace_id
-            || binding.scope() != scope.identity()
-            || binding.generation() != settings.scope.generation.to_string()
+            || !binding.matches_policy(&settings.scope.workspace_id, &scope)
             || settings.timeout.is_zero()
             || settings.timeout > Duration::from_secs(3570)
             || settings.chunk_config.target_chars == 0

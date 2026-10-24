@@ -170,10 +170,7 @@ impl AuthoritativeReconciliationPlanner {
         let expected = production_scope(&scope)?;
         if !guard.is_bound_to(&coordinator)
             || guard.binding() != binding
-            || binding.workspace() != scope.workspace_id
-            || binding.scope() != expected.identity()
-            || binding.generation() != scope.generation.to_string()
-            || binding.epoch() != scope.generation
+            || !binding.matches_policy(&scope.workspace_id, &expected)
         {
             return Err(PlanError::Ownership);
         }

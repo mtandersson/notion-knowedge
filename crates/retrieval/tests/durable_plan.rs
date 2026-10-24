@@ -138,6 +138,61 @@ fn operation(c: &IndexCommitCoordinator, page: &str, action: PageAction) -> Page
     .unwrap()
 }
 #[tokio::test]
+async fn physical_generation_preserves_source_policy_and_receipt_authority_on_reopen() {
+    let f = Fixture::new();
+    let physical = CommitBinding::new("chunks", "workspace", &scope(), "lexical-v2", 3).unwrap();
+    let c = IndexCommitCoordinator::initialize(&f.index, &f.state, physical.clone()).unwrap();
+    let mut source = plan();
+    source.binding = physical.clone();
+    let lease = start(&c, &source);
+    let op = operation(&c, "new", PageAction::Refresh);
+
+    for changed in ["workspace", "roots", "generation", "exclusions"] {
+        let mut wrong = allowed();
+        match changed {
+            "workspace" => wrong.scope.workspace_id = "other".into(),
+            "roots" => wrong.scope.roots = vec![PageId("other-root".into())],
+            "generation" => wrong.scope.generation += 1,
+            "exclusions" => {
+                wrong.scope.exclusions.page_ids.insert("excluded".into());
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            c.prepare_reconciliation_operation(&lease, 10, "run", &op, &wrong, false),
+            Err(JournalError::ScopeMismatch),
+            "changed source policy: {changed}"
+        );
+    }
+    c.prepare_reconciliation_operation(&lease, 10, "run", &op, &allowed(), false)
+        .unwrap();
+    c.submit(
+        op.clone(),
+        lease.clone(),
+        Arc::new(|| 10),
+        |context| async move { context.revalidate().map_err(|_| FailureClass::Conflict) },
+    )
+    .await
+    .unwrap();
+    drop(c);
+
+    assert!(IndexCommitCoordinator::open_existing(&f.index, &f.state, binding()).is_err());
+    let c = IndexCommitCoordinator::open_existing(&f.index, &f.state, physical).unwrap();
+    assert_eq!(
+        c.submit(op, lease.clone(), Arc::new(|| 10), |_| async {
+            panic!("an acknowledged source effect must not replay")
+        })
+        .await
+        .unwrap(),
+        CommitOutcome::AlreadyApplied
+    );
+    assert_eq!(
+        c.acknowledge_reconciliation_receipt(&lease, 10, "run", "new")
+            .unwrap(),
+        ActualOutcome::Refreshed
+    );
+}
+#[tokio::test]
 async fn committed_outcomes_survive_reopen_and_duplicate_ack_without_proposed_action_counts() {
     let f = Fixture::new();
     let c = f.coordinator();

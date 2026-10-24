@@ -344,9 +344,10 @@ impl IndexCommitCoordinator {
         self.progress_transition(lease,now,run,|db| {
             let plan=load(db,run,self.binding())?;
             let p=plan.pages.get(operation.checkpoint().page_id()).ok_or(JournalError::InvalidInput)?;
-            if p.operation_id!=operation.id() || evidence.scope.workspace_id!=self.binding().workspace()
-                || crate::planner::production_scope(&evidence.scope).map_err(|_|JournalError::ScopeMismatch)?.identity()!=self.binding().scope()
-                || evidence.scope.generation!=self.binding().epoch() {return Err(JournalError::ScopeMismatch);}
+            if p.operation_id!=operation.id()
+                || !self.binding().matches_policy(&evidence.scope.workspace_id,
+                    &crate::planner::production_scope(&evidence.scope).map_err(|_|JournalError::ScopeMismatch)?)
+                {return Err(JournalError::ScopeMismatch);}
             let allowed=matches!(evidence.status,LifecycleStatus::Allowed{..});
             if (operation.action()==PageAction::Delete)==allowed
                 || (operation.action()==PageAction::Delete && !plan.traversal_complete) {

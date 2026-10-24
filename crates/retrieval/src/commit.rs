@@ -100,6 +100,11 @@ impl CommitBinding {
     pub fn scope(&self) -> &str {
         &self.scope
     }
+    /// Source policy is independent of the physical index fencing generation.
+    /// The scope digest already commits to roots, exclusions and policy version.
+    pub fn matches_policy(&self, workspace: &str, scope: &ReconciliationScope) -> bool {
+        self.workspace == workspace && self.scope == scope.identity() && self.roots == scope.roots()
+    }
     pub fn generation(&self) -> &str {
         &self.generation
     }
