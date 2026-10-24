@@ -1,4 +1,6 @@
 #![cfg(unix)]
+#[path = "support/listener_shutdown.rs"]
+mod listener_shutdown;
 use std::{process::Stdio, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -96,16 +98,7 @@ async fn shutdown_closes_listener_before_deadline_and_reports_incomplete_request
     );
     held.write_all(b"{").await.unwrap();
     signal(&child, rustix::process::Signal::TERM);
-    timeout(Duration::from_secs(1), async {
-        while tokio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .is_ok()
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    listener_shutdown::wait_listener_closed(port).await;
     assert!(
         child.try_wait().unwrap().is_none(),
         "listener must close before waiting for unfinished work"
