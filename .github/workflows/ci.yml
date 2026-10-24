@@ -451,7 +451,7 @@ jobs:
   container-main:
     needs: changes
     if: needs.changes.outputs.container == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    name: Container smoke
+    name: Container smoke (main cache publisher)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
