@@ -85,6 +85,7 @@ impl From<Difference> for ProposedDifference {
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DurablePage {
     pub page_id: String,
     pub operation_id: String,
@@ -96,6 +97,7 @@ pub struct DurablePage {
     pub local_digest: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Authority {
     table: String,
     workspace: String,
@@ -115,6 +117,7 @@ impl From<&CommitBinding> for Authority {
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DurablePlan {
     version: u32,
     run_id: String,
@@ -127,6 +130,36 @@ pub struct DurablePlan {
     pub run_failures: Vec<DurableFailure>,
 }
 impl DurablePlan {
+    /// Translate derived authority after an offline transition has verified that
+    /// the target contains the identical canonical rows and vectors. This only
+    /// transforms a value: the transition owner must atomically persist it with
+    /// receipt adoption and physical publication. Original operation IDs remain
+    /// stable so acknowledged work cannot become a new source operation.
+    pub fn adopt_physical_generation(
+        &self,
+        source: &CommitBinding,
+        target: &CommitBinding,
+        target_index_version: u64,
+    ) -> Result<Self, JournalError> {
+        if target_index_version == 0 {
+            return Err(JournalError::InvalidInput);
+        }
+        if self.version != 1
+            || self.authority != Authority::from(source)
+            || source.table() != target.table()
+            || source.workspace() != target.workspace()
+            || source.scope() != target.scope()
+            || source.roots() != target.roots()
+            || source.generation() == target.generation()
+            || source.epoch() >= target.epoch()
+        {
+            return Err(JournalError::ScopeMismatch);
+        }
+        let mut adopted = self.clone();
+        adopted.authority = Authority::from(target);
+        adopted.index_version = target_index_version;
+        Ok(adopted)
+    }
     pub fn from_planner(run_id: &str, plan: &ReconciliationPlan) -> Result<Self, JournalError> {
         notion_knowledge_core::reconciliation::validate(run_id)?;
         if plan.scanned != plan.inspected_ids.len() {

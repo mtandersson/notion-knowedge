@@ -137,6 +137,66 @@ fn operation(c: &IndexCommitCoordinator, page: &str, action: PageAction) -> Page
     )
     .unwrap()
 }
+#[test]
+fn physical_adoption_preserves_plan_work_and_rejects_policy_changes() {
+    let source = binding();
+    let target = CommitBinding::new("chunks", "workspace", &scope(), "lexical-v2", 3).unwrap();
+    let original = DurablePlan::from_planner("run", &plan()).unwrap();
+    assert_eq!(
+        original.adopt_physical_generation(&source, &target, 0),
+        Err(JournalError::InvalidInput)
+    );
+    let adopted = original
+        .adopt_physical_generation(&source, &target, 71)
+        .unwrap();
+    assert_eq!(adopted.pages, original.pages);
+    assert_eq!(adopted.inspected_ids, original.inspected_ids);
+    assert_eq!(adopted.planning_failures, original.planning_failures);
+    assert_eq!(adopted.run_failures, original.run_failures);
+    assert_eq!(adopted.traversal_complete, original.traversal_complete);
+    assert_eq!(adopted.index_version, 71);
+    assert_eq!(original.index_version, 42);
+    for location in ["plan", "authority", "page"] {
+        let mut unknown = serde_json::to_value(&original).unwrap();
+        let object = match location {
+            "plan" => &mut unknown,
+            "authority" => &mut unknown["authority"],
+            "page" => &mut unknown["pages"]["new"],
+            _ => unreachable!(),
+        };
+        object
+            .as_object_mut()
+            .unwrap()
+            .insert("future_contract".into(), true.into());
+        assert!(serde_json::from_value::<DurablePlan>(unknown).is_err());
+    }
+    assert_eq!(
+        adopted.adopt_physical_generation(&source, &target, 71),
+        Err(JournalError::ScopeMismatch)
+    );
+    let rollback = CommitBinding::new("chunks", "workspace", &scope(), "rollback-v1", 5).unwrap();
+    let rolled_back = adopted
+        .adopt_physical_generation(&target, &rollback, 82)
+        .unwrap();
+    assert_eq!(rolled_back.pages, original.pages);
+    assert_eq!(rolled_back.index_version, 82);
+
+    let changed =
+        ReconciliationScope::new(vec!["other-root".into()], vec![], "webhook-v1", "1").unwrap();
+    for incompatible in [
+        source.clone(),
+        CommitBinding::new("chunks", "workspace", &scope(), "stale", 0).unwrap(),
+        CommitBinding::new("chunks", "workspace", &scope(), "1", 4).unwrap(),
+        CommitBinding::new("other", "workspace", &scope(), "next", 4).unwrap(),
+        CommitBinding::new("chunks", "other-workspace", &scope(), "next", 4).unwrap(),
+        CommitBinding::new("chunks", "workspace", &changed, "next", 4).unwrap(),
+    ] {
+        assert_eq!(
+            original.adopt_physical_generation(&source, &incompatible, 71),
+            Err(JournalError::ScopeMismatch)
+        );
+    }
+}
 #[tokio::test]
 async fn physical_generation_preserves_source_policy_and_receipt_authority_on_reopen() {
     let f = Fixture::new();
