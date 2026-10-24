@@ -14,6 +14,12 @@ outputs:
   hit:
     value: ${{ steps.target.outputs.cache-hit }}
     description: Exact current source snapshot restored
+  matched-key:
+    value: ${{ steps.target.outputs.cache-matched-key }}
+    description: Actual restored target key; empty if no snapshot was restored
+  prefix:
+    value: ${{ steps.keys.outputs.prefix }}
+    description: Pinned compatible Cargo snapshot prefix (job, profile, deps and toolchain)
   downloads-key:
     value: ${{ steps.keys.outputs.downloads-key }}
     description: Dependency download key

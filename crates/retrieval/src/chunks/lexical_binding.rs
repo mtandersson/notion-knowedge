@@ -159,6 +159,65 @@ impl LexicalIndexBinding {
     pub fn plan(&self) -> &LexicalPlanIdentity {
         &self.plan
     }
+    /// Offline migration may read an earlier approved plan/storage build without
+    /// executing it. Admit only known schema/backend/tokenizer and the unchanged
+    /// embedding text contract, authority and physical generation. Complete rows
+    /// and vectors are subsequently verified; runtime validation remains exact.
+    pub(crate) fn validate_offline_source(
+        &self,
+        directory: &Path,
+        embedding: &EmbeddingMetadata,
+        authority: &CommitBinding,
+    ) -> Result<(), ChunkTableError> {
+        let current = StorageIdentity::current();
+        if self.storage.schema != current.schema
+            || self.storage.canonical_schema != current.canonical_schema
+            || self.storage.fields != current.fields
+            || self.storage.backend != current.backend
+            || self.storage.raw_identifier_profile != current.raw_identifier_profile
+            || ![
+                FtsIndexConfig::default(),
+                FtsIndexConfig::lexical_expansion_v1(),
+            ]
+            .contains(&self.storage.profile)
+            || !valid_digest(&self.storage.implementation_sha256)
+            || ![
+                &self.plan.asset_sha256,
+                &self.plan.importer_sha256,
+                &self.plan.executor_sha256,
+                &self.plan.lock_sha256,
+            ]
+            .into_iter()
+            .all(|value| valid_digest(value))
+            || self.plan.embedding_text_contract
+                != "canonical-indexed-chunk-v1;embedding-input=chunk.text;unchanged-vector-space"
+        {
+            return Err(incompatible());
+        }
+        let expected = Self::for_candidate(
+            directory,
+            embedding.clone(),
+            authority,
+            self.plan.clone(),
+            &self.source_snapshot_sha256,
+        )?;
+        // Older implementation digests are evidence about the source generation,
+        // never new runtime compatibility or permission to relabel its vectors.
+        if self.version != expected.version
+            || self.embedding != expected.embedding
+            || self.table != expected.table
+            || self.workspace != expected.workspace
+            || self.roots != expected.roots
+            || self.scope != expected.scope
+            || self.generation != expected.generation
+            || self.epoch != expected.epoch
+            || self.device != expected.device
+            || self.inode != expected.inode
+        {
+            return Err(incompatible());
+        }
+        Ok(())
+    }
     pub(crate) fn validate(
         &self,
         directory: &Path,

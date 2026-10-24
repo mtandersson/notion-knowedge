@@ -43,7 +43,10 @@ pub mod lexical_binding;
 #[cfg(unix)]
 mod guarded;
 #[cfg(unix)]
-pub use guarded::{GuardedChunkTable, PreparedPageMutation};
+pub use guarded::{
+    CandidateLimits, GuardedChunkTable, OfflineLexicalSource, PreparedLexicalCandidate,
+    PreparedPageMutation,
+};
 
 pub const CHUNK_TABLE_SCHEMA_VERSION: &str = "1";
 const CANONICAL_CHUNK_SCHEMA_VERSION: &str = "1";
@@ -178,6 +181,31 @@ impl FtsIndexConfig {
             ..Self::default()
         }
     }
+}
+fn fts_parameters(
+    column: &str,
+    config: &FtsIndexConfig,
+) -> Result<FtsIndexBuilder, ChunkTableError> {
+    Ok(if matches!(column, "page_id" | "chunk_id") {
+        FtsIndexBuilder::default()
+            .base_tokenizer("raw".to_string())
+            .lower_case(false)
+            .stem(false)
+            .remove_stop_words(false)
+            .ascii_folding(false)
+            .block_size(config.block_size)
+            .map_err(|_| ChunkTableError::InvalidSchema("invalid FTS block size".into()))?
+    } else {
+        FtsIndexBuilder::default()
+            .with_position(config.with_positions)
+            .language(&config.language)
+            .map_err(|_| ChunkTableError::InvalidSchema("unsupported FTS language".into()))?
+            .stem(config.stem)
+            .remove_stop_words(config.remove_stop_words)
+            .ascii_folding(config.ascii_folding)
+            .block_size(config.block_size)
+            .map_err(|_| ChunkTableError::InvalidSchema("invalid FTS block size".into()))?
+    })
 }
 impl Default for FtsIndexConfig {
     fn default() -> Self {
@@ -698,26 +726,7 @@ impl LanceChunkTable {
         config: &FtsIndexConfig,
         replace: bool,
     ) -> Result<(), ChunkTableError> {
-        let params = if matches!(column, "page_id" | "chunk_id") {
-            FtsIndexBuilder::default()
-                .base_tokenizer("raw".to_string())
-                .lower_case(false)
-                .stem(false)
-                .remove_stop_words(false)
-                .ascii_folding(false)
-                .block_size(config.block_size)
-                .map_err(|_| ChunkTableError::InvalidSchema("invalid FTS block size".into()))?
-        } else {
-            FtsIndexBuilder::default()
-                .with_position(config.with_positions)
-                .language(&config.language)
-                .map_err(|_| ChunkTableError::InvalidSchema("unsupported FTS language".into()))?
-                .stem(config.stem)
-                .remove_stop_words(config.remove_stop_words)
-                .ascii_folding(config.ascii_folding)
-                .block_size(config.block_size)
-                .map_err(|_| ChunkTableError::InvalidSchema("invalid FTS block size".into()))?
-        };
+        let params = fts_parameters(column, config)?;
         let train = self.table.count_rows(None).await? != 0;
         self.table
             .create_index(&[column], Index::FTS(params))

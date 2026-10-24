@@ -130,6 +130,14 @@ The two stable OCI cache tags are:
 - `ghcr.io/mtandersson/notion-knowedge:buildcache-main-amd64`
   (reuse final application and runtime image layers).
 
+Cargo snapshots remain in GitHub Actions Cache, but [PR #509](https://github.com/mtandersson/notion-knowedge/pull/509)
+limits their churn: PRs only restore them, and protected `main` only seeds a new
+Cargo `target` snapshot when no existing cache matches the same pinned toolchain,
+dependency graph, profile and job. A normal source edit may recompile changed
+local crates instead of replacing several gigabytes of compatible target archives.
+Dependency downloads are maintained independently. This is complementary to
+the separate GHCR Docker cache and does not guarantee registry retention.
+
 The repository is public. Every pull request (including forks) uses a separate
 `Container smoke` job with `contents:read` / `packages:read` permissions.
 Only a protected `main` push or `workflow_dispatch` on `main` uses the

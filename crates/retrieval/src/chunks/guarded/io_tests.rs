@@ -1676,3 +1676,5 @@ async fn guarded_index_maintenance_rechecks_lease_after_index_inspection_before_
 }
 
 mod lexical_identity;
+
+mod candidate;
