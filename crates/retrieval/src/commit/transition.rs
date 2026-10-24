@@ -130,6 +130,7 @@ impl TransitionOwnership {
     /// that could admit a quarantined generation or initialize missing state.
     pub fn acquire(state_path: &Path, record: &TransitionRecord) -> Result<Self, CommitError> {
         canonical(record)?;
+        validate_artifact_paths(state_path, record)?;
         super::offline::private_parent(state_path)?;
         for path in [
             &record.source.path,
@@ -461,6 +462,29 @@ pub fn journal_path(state: &Path) -> Result<PathBuf, CommitError> {
     Ok(state.with_file_name(name))
 }
 
+/// Keep the retained SQLite backup distinct from operational state, the
+/// transition journal and either physical index generation. A misplaced
+/// "backup" must never become a recovery authority for those live artifacts.
+fn validate_artifact_paths(state: &Path, record: &TransitionRecord) -> Result<(), CommitError> {
+    let journal = journal_path(state)?;
+    if record.backup_path == state || record.backup_path == journal {
+        return Err(CommitError::InvalidInput);
+    }
+    for directory in [
+        &record.source.path,
+        &record.candidate_path,
+        &record.archive_path,
+    ] {
+        if state.starts_with(directory)
+            || journal.starts_with(directory)
+            || record.backup_path.starts_with(directory)
+        {
+            return Err(CommitError::InvalidInput);
+        }
+    }
+    Ok(())
+}
+
 fn canonical(record: &TransitionRecord) -> Result<Vec<u8>, CommitError> {
     let source: RecordedBinding =
         serde_json::from_str(&record.source.binding).map_err(|_| CommitError::InvalidInput)?;
@@ -576,6 +600,7 @@ impl TransitionRecord {
         if canonical(&record)? != bytes || Identity::read(&path)? != Identity::file(&file)? {
             return Err(CommitError::BindingMismatch);
         }
+        validate_artifact_paths(state, &record)?;
         Ok(Some(record))
     }
 
@@ -600,6 +625,7 @@ impl TransitionRecord {
         let path = journal_path(state)?;
         super::offline::private_parent(&path)?;
         let bytes = canonical(self)?;
+        validate_artifact_paths(state, self)?;
         if Self::read(state)?.as_ref() != previous {
             return Err(CommitError::Conflict);
         }

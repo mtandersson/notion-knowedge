@@ -705,6 +705,20 @@ fn durable_transition_phases_fence_reopened_admission_and_reject_unsafe_records(
     fs::set_permissions(&f.index, fs::Permissions::from_mode(0o700)).unwrap();
     fs::set_permissions(&record.candidate_path, fs::Permissions::from_mode(0o700)).unwrap();
     fs::set_permissions(&f.state, fs::Permissions::from_mode(0o600)).unwrap();
+    for unsafe_backup in [
+        f.state.clone(),
+        journal_path(&f.state).unwrap(),
+        f.index.join("not-a-backup.sqlite"),
+        record.candidate_path.join("not-a-backup.sqlite"),
+        record.archive_path.join("not-a-backup.sqlite"),
+    ] {
+        let mut unsafe_record = record.clone();
+        unsafe_record.backup_path = unsafe_backup;
+        assert!(matches!(
+            TransitionOwnership::acquire(&f.state, &unsafe_record),
+            Err(CommitError::InvalidInput)
+        ));
+    }
     let ownership = TransitionOwnership::acquire(&f.state, &record).unwrap();
     assert!(matches!(
         TransitionOwnership::acquire(&f.state, &record),
