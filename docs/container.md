@@ -125,10 +125,16 @@ Successful `main` runs warm `nk-container-v1-Linux-X64-main` and its `-builder`
 companion. PRs may read trusted main cache roots and previously published
 own numbered roots, but **only protected `main` writes new Docker cache roots**.
 PRs also restore compatible Cargo snapshots without publishing multi-gigabyte
-per-source PR snapshots. This reduces the shared GitHub Actions cache churn that
-can evict a working dependency-cook layer shortly after publication. It trades
-away same-PR upload reuse across repeated source edits; it does not guarantee
-retention if main updates or other caches still exceed the repository quota.
+per-source PR snapshots. On `main`, Cargo now **seeds a new target snapshot only
+when none was restored for the same toolchain, dependency graph, profile and job**.
+A normal source-only edit can reuse an older compatible target and must recompile
+changed local sources, but it no longer emits another multi-GB immutable cache
+entry. A new dependency/toolchain compatibility prefix still seeds a new snapshot;
+Cargo download caches are saved independently if missing. This protects scarce
+repository cache capacity for the Docker dependency-cook layers. The tradeoff is
+that repeat source edits may have more application compilation (no constantly
+refreshed Cargo source snapshot). It does not guarantee retention under further
+external cache churn or GitHub service failures.
 
 For each builder export, the read-only local action selects the available own builder
 index, otherwise the trusted main builder index, otherwise no remote import.
