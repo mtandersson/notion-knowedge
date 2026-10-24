@@ -128,6 +128,17 @@ stay historical. Matching active schedules retain their run IDs, deadlines,
 retry counts and statuses while adopting the fresh physical authority. No
 abandon-and-restart shortcut is permitted.
 
+The SQL adoption helper requires retained transition ownership, the exact
+installed target record and quarantined binding, and the original operational
+database connection. It uses a savepoint so an error cannot leave partial
+receipt/projection/schedule changes. Defaults bound scanned rows across affected
+tables to one million, a plan plus prepared work to 16 MiB, each projection
+effect to 1 MiB, aggregate effects to 64 MiB and ownership keys to 64 MiB.
+An indexed temporary ownership set avoids repeated receipt scans. Validate
+complete known effect encodings and prepared-operation schemas before updates;
+retain their bytes. This helper does not publish physical authority or replace
+native-pair and adoption-manifest verification in the same outer transaction.
+
 ## Explicit reconciliation
 
 Reconciliation acquires the same ownership and compares actual SQL authority,

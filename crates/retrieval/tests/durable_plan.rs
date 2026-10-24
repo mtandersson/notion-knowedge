@@ -122,6 +122,399 @@ fn start(c: &IndexCommitCoordinator, plan: &ReconciliationPlan) -> Lease {
     c.record_reconciliation_plan(&l, 10, "run", plan).unwrap();
     l
 }
+
+#[test]
+fn derived_adoption_is_atomic_and_retains_pending_and_historical_work() {
+    use notion_knowledge_retrieval::commit::transition::{adoption::*, *};
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    for scenario in [
+        "success",
+        "row-budget",
+        "plan-budget",
+        "unknown-plan",
+        "projection-version",
+        "effect-budget",
+        "late-failure",
+        "unknown-effect",
+        "wrong-policy",
+        "missing-reservation",
+        "orphan-projection",
+        "two-active-runs",
+        "malformed-known-effect",
+        "identity-budget",
+        "total-effect-budget",
+        "historical-source",
+        "unknown-prepared",
+        "malformed-prepared",
+        "wrong-database",
+    ] {
+        let f = Fixture::new();
+        let c = f.coordinator();
+        let source = plan();
+        let _lease = start(&c, &source);
+        let prepared_operation = operation(&c, "new", PageAction::Refresh);
+        c.prepare_reconciliation_operation(
+            &_lease,
+            10,
+            "run",
+            &prepared_operation,
+            &allowed(),
+            false,
+        )
+        .unwrap();
+        let original = c.reconciliation_plan("run").unwrap();
+        let target = CommitBinding::new("chunks", "workspace", &scope(), "lexical-v2", 3).unwrap();
+        let mut db = Connection::open(&f.state).unwrap();
+        db.execute_batch("INSERT INTO index_commit_receipts VALUES('pending','1','new','revision',0,'hash',NULL,0,NULL,2); INSERT INTO index_commit_receipts VALUES('completed','1','done','revision',0,'done-hash',NULL,1,NULL,1); INSERT INTO index_commit_receipts VALUES('superseded','1','old','revision',0,'old-hash',NULL,3,2,1);").unwrap();
+        db.execute(
+            "INSERT INTO page_metadata_identity VALUES('new','1',?1)",
+            ["a".repeat(64)],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO page_relation_projections VALUES('new','1',1,'relation-v1:0:')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO page_alias_projections VALUES('new','1',1,?1)",
+            [format!("alias-v1:{}", "b".repeat(64))],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO alias_operation_proposals VALUES('pending',?1)",
+            [format!("alias-v1:{}", "b".repeat(64))],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO relation_operation_proposals VALUES('pending','relation-v1:0:')",
+            [],
+        )
+        .unwrap();
+        db.execute("INSERT INTO reconciliation_schedules VALUES('schedule','chunks','workspace',?1,'1',1,60,3,1,60,100,'run',0,1,1)",[scope().identity()]).unwrap();
+        db.execute(
+            "INSERT INTO reconciliation_runs(run_id,scope,fence,phase) VALUES('historical',?1,1,2)",
+            [scope().identity()],
+        )
+        .unwrap();
+        let historical =
+            serde_json::to_string(&DurablePlan::from_planner("historical", &source).unwrap())
+                .unwrap();
+        db.execute(
+            "INSERT INTO reconciliation_plans VALUES('historical',1,?1)",
+            [&historical],
+        )
+        .unwrap();
+        db.execute("INSERT INTO reconciliation_success VALUES('historical','chunks','workspace',?1,'1',1,10)",[scope().identity()]).unwrap();
+        let mut limits = AdoptionLimits::default();
+        match scenario {
+            "row-budget" => limits.rows = 1,
+            "plan-budget" => limits.plan_bytes = 1,
+            "effect-budget" => limits.effect_bytes = 1,
+            "identity-budget" => limits.identity_bytes = 1,
+            "total-effect-budget" => limits.total_effect_bytes = 1,
+            "malformed-known-effect" => {
+                db.execute(
+                    "UPDATE relation_operation_proposals SET effect='relation-v1:garbage'",
+                    [],
+                )
+                .unwrap();
+            }
+            "unknown-prepared" => {
+                let value: String = db
+                    .query_row(
+                        "SELECT prepared FROM reconciliation_plan_progress WHERE page_id='new'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                let mut value: serde_json::Value = serde_json::from_str(&value).unwrap();
+                value["unknown_contract"] = true.into();
+                db.execute(
+                    "UPDATE reconciliation_plan_progress SET prepared=?1 WHERE page_id='new'",
+                    [serde_json::to_string(&value).unwrap()],
+                )
+                .unwrap();
+            }
+            "malformed-prepared" => {
+                let value: String = db
+                    .query_row(
+                        "SELECT prepared FROM reconciliation_plan_progress WHERE page_id='new'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                let mut value: serde_json::Value = serde_json::from_str(&value).unwrap();
+                value["action"] = 99.into();
+                db.execute(
+                    "UPDATE reconciliation_plan_progress SET prepared=?1 WHERE page_id='new'",
+                    [serde_json::to_string(&value).unwrap()],
+                )
+                .unwrap();
+            }
+            "unknown-plan" => {
+                let mut document = serde_json::to_value(&original).unwrap();
+                document["unknown_contract"] = true.into();
+                db.execute(
+                    "UPDATE reconciliation_plans SET document=?1 WHERE run_id='run'",
+                    [serde_json::to_string(&document).unwrap()],
+                )
+                .unwrap();
+            }
+            "projection-version" => {
+                db.execute("UPDATE page_relation_projections SET version=2", [])
+                    .unwrap();
+            }
+            "late-failure" => {
+                db.execute_batch("CREATE TRIGGER fail_adoption BEFORE UPDATE OF document ON reconciliation_plans BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+            }
+            "unknown-effect" => {
+                db.execute(
+                    "UPDATE alias_operation_proposals SET effect='unsupported-v2'",
+                    [],
+                )
+                .unwrap();
+            }
+            "orphan-projection" => {
+                db.execute(
+                    "INSERT INTO page_metadata_identity VALUES('unowned','1',?1)",
+                    ["c".repeat(64)],
+                )
+                .unwrap();
+            }
+            "two-active-runs" => {
+                db.execute_batch("DROP INDEX reconciliation_one_active;")
+                    .unwrap();
+                db.execute("INSERT INTO reconciliation_runs(run_id,scope,fence,phase) VALUES('unexpected',?1,1,0)",[scope().identity()]).unwrap();
+            }
+            _ => {}
+        }
+        for path in [&f.root, &f.index] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::set_permissions(&f.state, fs::Permissions::from_mode(0o600)).unwrap();
+        let candidate = f.root.join("candidate");
+        fs::create_dir(&candidate).unwrap();
+        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700)).unwrap();
+        let backup_path = f.root.join("activation.sqlite");
+        fs::copy(&f.state, &backup_path).unwrap();
+        fs::set_permissions(&backup_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let bytes = fs::read(&backup_path).unwrap();
+        let source_identity = fs::metadata(&f.index).unwrap();
+        let target_identity = fs::metadata(&candidate).unwrap();
+        let state_identity = fs::metadata(&f.state).unwrap();
+        let record = TransitionRecord {
+            version: 1,
+            phase: TransitionPhase::Prepared,
+            state_device: state_identity.dev(),
+            state_inode: state_identity.ino(),
+            state_token: db
+                .query_row(
+                    "SELECT identity FROM index_commit_state_identity",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap(),
+            source: TransitionEndpoint {
+                path: f.index.clone(),
+                device: source_identity.dev(),
+                inode: source_identity.ino(),
+                binding: serde_json::to_string(&binding()).unwrap(),
+            },
+            target: TransitionEndpoint {
+                path: f.index.clone(),
+                device: target_identity.dev(),
+                inode: target_identity.ino(),
+                binding: serde_json::to_string(&target).unwrap(),
+            },
+            candidate_path: candidate,
+            archive_path: f.root.join("archive"),
+            quarantine_generation: "quarantine".into(),
+            quarantine_epoch: 2,
+            snapshot_sha256: "a".repeat(64),
+            asset_sha256: "b".repeat(64),
+            ready_sha256: "c".repeat(64),
+            adoption_sha256: "d".repeat(64),
+            backup_path,
+            backup: OfflineBackup {
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+                bytes: bytes.len() as u64,
+            },
+        };
+        let owner = TransitionOwnership::acquire(&f.state, &record).unwrap();
+        record.persist(&owner, None).unwrap();
+        owner.quarantine(15).unwrap();
+        owner.install_candidate(15).unwrap();
+        if scenario == "wrong-policy" {
+            db.execute("UPDATE index_commit_binding SET workspace='other'", [])
+                .unwrap();
+        }
+        if scenario == "missing-reservation" {
+            db.execute(
+                "DELETE FROM index_commit_generations WHERE generation='lexical-v2'",
+                [],
+            )
+            .unwrap();
+        }
+        let before_plan: String = db
+            .query_row(
+                "SELECT document FROM reconciliation_plans WHERE run_id='run'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let before_progress:Vec<(String,i64,Option<String>)> = db.prepare("SELECT operation_id,status,prepared FROM reconciliation_plan_progress ORDER BY page_id").unwrap().query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap().collect::<Result<_,_>>().unwrap();
+        let supplied_source = if scenario == "historical-source" {
+            CommitBinding::new("chunks", "workspace", &scope(), "unrelated", 0).unwrap()
+        } else {
+            binding()
+        };
+        if scenario == "historical-source" {
+            db.execute(
+                "INSERT INTO index_commit_generations VALUES('unrelated',?1,0)",
+                [scope().identity()],
+            )
+            .unwrap();
+        }
+        let mut detached = if scenario == "wrong-database" {
+            let path = f.root.join("detached.sqlite");
+            fs::copy(&f.state, &path).unwrap();
+            Some(Connection::open(path).unwrap())
+        } else {
+            None
+        };
+        let connection = detached.as_mut().unwrap_or(&mut db);
+        let mut transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)
+            .unwrap();
+        let result = adopt_derived_work(
+            &owner,
+            &mut transaction,
+            &supplied_source,
+            &target,
+            71,
+            limits,
+        );
+        // Commit even on error to verify the helper's own savepoint rollback.
+        transaction.commit().unwrap();
+        let expected_generation = if scenario == "success" {
+            assert_eq!(
+                result.unwrap(),
+                AdoptionReport {
+                    receipts: 2,
+                    metadata: 1,
+                    relations: 1,
+                    aliases: 1,
+                    schedules: 1,
+                    plans: 1
+                }
+            );
+            let actual: DurablePlan = serde_json::from_str(
+                &db.query_row::<String, _, _>(
+                    "SELECT document FROM reconciliation_plans WHERE run_id='run'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                actual,
+                original
+                    .adopt_physical_generation(&binding(), &target, 71)
+                    .unwrap()
+            );
+            "lexical-v2"
+        } else {
+            assert!(result.is_err(), "{scenario}");
+            assert_eq!(
+                db.query_row::<String, _, _>(
+                    "SELECT document FROM reconciliation_plans WHERE run_id='run'",
+                    [],
+                    |r| r.get(0)
+                )
+                .unwrap(),
+                before_plan
+            );
+            "1"
+        };
+        assert_eq!(db.query_row("SELECT generation,status,attempts FROM index_commit_receipts WHERE operation_id='pending'",[],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?))).unwrap(),(expected_generation.into(),0,2));
+        assert_eq!(
+            db.query_row(
+                "SELECT generation FROM index_commit_receipts WHERE operation_id='completed'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            expected_generation
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT generation FROM index_commit_receipts WHERE operation_id='superseded'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "1"
+        );
+        assert_eq!(
+            db.query_row("SELECT generation FROM page_metadata_identity", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            expected_generation
+        );
+        assert_eq!(
+            db.query_row("SELECT generation FROM page_alias_projections", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            expected_generation
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT generation,next_deadline,active_run,attempts FROM reconciliation_schedules",
+                [],
+                |r| Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?
+                ))
+            )
+            .unwrap(),
+            (expected_generation.into(), 100, "run".into(), 1)
+        );
+        let after_progress:Vec<(String,i64,Option<String>)> = db.prepare("SELECT operation_id,status,prepared FROM reconciliation_plan_progress ORDER BY page_id").unwrap().query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap().collect::<Result<_,_>>().unwrap();
+        assert_eq!(after_progress, before_progress);
+        assert_eq!(
+            db.query_row(
+                "SELECT document FROM reconciliation_plans WHERE run_id='historical'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            historical
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT generation,completed_at_seconds FROM reconciliation_success",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            )
+            .unwrap(),
+            ("1".into(), 10)
+        );
+        assert_eq!(
+            db.query_row("SELECT generation FROM index_commit_binding", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            "quarantine"
+        );
+    }
+}
 fn operation(c: &IndexCommitCoordinator, page: &str, action: PageAction) -> PageOperation {
     let p = c.reconciliation_plan("run").unwrap();
     let checkpoint = if action == PageAction::Delete {

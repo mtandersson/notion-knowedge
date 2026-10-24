@@ -4,6 +4,8 @@
 //! publication; recovery must inspect physical and SQL authority, not phase alone.
 use super::*;
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(feature = "local-lancedb")]
+pub mod adoption;
 
 const MAX_RECORD_BYTES: u64 = 65_536;
 
@@ -215,7 +217,7 @@ impl TransitionOwnership {
     pub fn with_exclusive_sql<T>(
         &self,
         now: i64,
-        operation: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, CommitError>,
+        operation: impl FnOnce(&mut rusqlite::Transaction<'_>) -> Result<T, CommitError>,
     ) -> Result<T, CommitError> {
         if now < 0 {
             return Err(CommitError::InvalidInput);
@@ -227,7 +229,7 @@ impl TransitionOwnership {
             .lock_connection()
             .map_err(|_| CommitError::Unavailable)?;
         db.busy_timeout(std::time::Duration::ZERO).map_err(sql)?;
-        let transaction = db
+        let mut transaction = db
             .transaction_with_behavior(TransactionBehavior::Exclusive)
             .map_err(sql)?;
         self.validate_sql(&transaction)?;
@@ -235,7 +237,7 @@ impl TransitionOwnership {
         if live {
             return Err(CommitError::Conflict);
         }
-        let result = operation(&transaction)?;
+        let result = operation(&mut transaction)?;
         self.revalidate()?;
         self.validate_sql(&transaction)?;
         transaction.commit().map_err(sql)?;

@@ -587,6 +587,43 @@ impl IndexCommitCoordinator {
     }
 }
 
+fn current_complete(
+    db: &Connection,
+    binding: &CommitBinding,
+    page: &str,
+    sources: &AliasSources,
+) -> Result<bool, CommitError> {
+    let tombstone: Option<bool> = db
+        .query_row(
+            "SELECT tombstoned FROM page_sync_state WHERE page_id=?1",
+            [page],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql)?;
+    let Some(tombstone) = tombstone else {
+        return Ok(false);
+    };
+    for root in &binding.roots {
+        let mut statement = db.prepare("SELECT display_name,provenance FROM graph_aliases WHERE workspace_id=?1 AND root_page_id=?2 AND page_id=?3 ORDER BY alias_key,display_name,provenance").map_err(sql)?;
+        let aliases = statement
+            .query_map(params![binding.workspace, root, page], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(sql)?
+            .map(|r| {
+                let (name, provenance) = r.map_err(sql)?;
+                PageAlias::new(&name, &provenance).map_err(|_| CommitError::InvalidInput)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let projection = AliasProjection::new(binding, root, page, tombstone, sources, aliases)?;
+        if projection.clone().with_owned_root_cleanup().complete(db)? || projection.complete(db)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 #[cfg(test)]
 mod compatibility_tests {
     use super::*;
@@ -627,41 +664,4 @@ mod compatibility_tests {
         );
         assert_eq!(projection.matches_effect(&db, &projection.effect), Ok(true));
     }
-}
-
-fn current_complete(
-    db: &Connection,
-    binding: &CommitBinding,
-    page: &str,
-    sources: &AliasSources,
-) -> Result<bool, CommitError> {
-    let tombstone: Option<bool> = db
-        .query_row(
-            "SELECT tombstoned FROM page_sync_state WHERE page_id=?1",
-            [page],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(sql)?;
-    let Some(tombstone) = tombstone else {
-        return Ok(false);
-    };
-    for root in &binding.roots {
-        let mut statement = db.prepare("SELECT display_name,provenance FROM graph_aliases WHERE workspace_id=?1 AND root_page_id=?2 AND page_id=?3 ORDER BY alias_key,display_name,provenance").map_err(sql)?;
-        let aliases = statement
-            .query_map(params![binding.workspace, root, page], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })
-            .map_err(sql)?
-            .map(|r| {
-                let (name, provenance) = r.map_err(sql)?;
-                PageAlias::new(&name, &provenance).map_err(|_| CommitError::InvalidInput)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let projection = AliasProjection::new(binding, root, page, tombstone, sources, aliases)?;
-        if projection.clone().with_owned_root_cleanup().complete(db)? || projection.complete(db)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }

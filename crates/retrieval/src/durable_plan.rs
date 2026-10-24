@@ -262,6 +262,7 @@ impl DurableProgress {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PreparedOperation {
     revision: String,
     action: i64,
