@@ -22,6 +22,7 @@ use tokio::sync::oneshot;
 use crate::sync_state::SqliteSyncStateStore;
 mod alias_projection;
 mod offline;
+pub mod transition;
 pub use alias_projection::AliasProjection;
 pub use offline::OfflineBackup;
 pub(crate) mod projection;
@@ -654,6 +655,7 @@ impl IndexCommitCoordinator {
         Ok(guard)
     }
     pub(crate) fn validate_binding(&self, db: &Connection) -> Result<(), CommitError> {
+        transition::check_admission(self)?;
         let token: String = db
             .query_row(
                 "SELECT identity FROM index_commit_state_identity WHERE singleton=1",

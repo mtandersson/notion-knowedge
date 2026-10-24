@@ -31,7 +31,7 @@ fn hash_file(file: &mut File) -> Result<OfflineBackup, CommitError> {
         bytes,
     })
 }
-fn private_parent(path: &Path) -> Result<(), CommitError> {
+pub(super) fn private_parent(path: &Path) -> Result<(), CommitError> {
     if !path.is_absolute()
         || path.file_name().is_none()
         || path.components().any(|c| {

@@ -63,6 +63,174 @@ fn now() -> i64 {
         .unwrap()
         .as_secs() as i64
 }
+
+#[test]
+#[ignore = "subprocess helper invoked by transition journal test"]
+fn transition_admission_child() {
+    let index = std::env::var_os("NK_TRANSITION_INDEX").unwrap();
+    let state = std::env::var_os("NK_TRANSITION_STATE").unwrap();
+    let admitted = std::env::var("NK_TRANSITION_ADMITTED").unwrap() == "yes";
+    assert_eq!(
+        IndexCommitCoordinator::open_existing(
+            PathBuf::from(index),
+            PathBuf::from(state),
+            binding("v1", 1)
+        )
+        .is_ok(),
+        admitted
+    );
+}
+
+#[test]
+fn durable_transition_phases_fence_reopened_admission_and_reject_unsafe_records() {
+    use notion_knowledge_retrieval::commit::transition::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+    let f = Fixture::new();
+    fs::set_permissions(&f.root, fs::Permissions::from_mode(0o700)).unwrap();
+    let c = f.coordinator();
+    let target_path = f.root.join("candidate");
+    fs::create_dir(&target_path).unwrap();
+    let source = fs::metadata(&f.index).unwrap();
+    let target = fs::metadata(&target_path).unwrap();
+    let state = fs::metadata(&f.state).unwrap();
+    let sql = Connection::open(&f.state).unwrap();
+    let token: String = sql
+        .query_row(
+            "SELECT identity FROM index_commit_state_identity",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let next = CommitBinding::new("chunks", "workspace", &scope("v1"), "v2", 3).unwrap();
+    let mut record = TransitionRecord {
+        version: 1,
+        phase: TransitionPhase::Prepared,
+        state_device: state.dev(),
+        state_inode: state.ino(),
+        state_token: token,
+        source: TransitionEndpoint {
+            path: f.index.clone(),
+            device: source.dev(),
+            inode: source.ino(),
+            binding: serde_json::to_string(c.binding()).unwrap(),
+        },
+        target: TransitionEndpoint {
+            path: f.index.clone(),
+            device: target.dev(),
+            inode: target.ino(),
+            binding: serde_json::to_string(&next).unwrap(),
+        },
+        candidate_path: target_path,
+        archive_path: f.root.join("archive"),
+        quarantine_generation: "transition-quarantine".into(),
+        quarantine_epoch: 2,
+        snapshot_sha256: "a".repeat(64),
+        asset_sha256: "b".repeat(64),
+        ready_sha256: "c".repeat(64),
+        adoption_sha256: "d".repeat(64),
+        backup_path: f.root.join("activation-backup.sqlite"),
+        backup: OfflineBackup {
+            sha256: "e".repeat(64),
+            bytes: 4096,
+        },
+    };
+    record.persist(&f.state, None).unwrap();
+    let journal = journal_path(&f.state).unwrap();
+    let reopen = |admitted: bool| {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "transition_admission_child", "--ignored"])
+            .env("NK_TRANSITION_INDEX", &f.index)
+            .env("NK_TRANSITION_STATE", &f.state)
+            .env(
+                "NK_TRANSITION_ADMITTED",
+                if admitted { "yes" } else { "no" },
+            )
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+    reopen(true);
+    assert!(TransitionRecord::read(&f.state).unwrap().as_ref() == Some(&record));
+    let bytes = fs::read(&journal).unwrap();
+    fs::write(&journal, b"{}").unwrap();
+    reopen(false);
+    fs::write(&journal, &bytes).unwrap();
+    for damaged in [[bytes.as_slice(), b"\n"].concat(), vec![b' '; 65_537], {
+        let mut wrong = record.clone();
+        wrong.state_token = "0".repeat(32);
+        serde_json::to_vec(&wrong).unwrap()
+    }] {
+        fs::write(&journal, damaged).unwrap();
+        reopen(false);
+    }
+    fs::write(&journal, &bytes).unwrap();
+    let link = f.root.join("linked-record");
+    fs::hard_link(&journal, &link).unwrap();
+    assert!(TransitionRecord::read(&f.state).is_err());
+    fs::remove_file(&link).unwrap();
+    fs::rename(&journal, &link).unwrap();
+    symlink(&link, &journal).unwrap();
+    assert!(TransitionRecord::read(&f.state).is_err());
+    fs::remove_file(&journal).unwrap();
+    fs::rename(&link, &journal).unwrap();
+    let mut skipped = record.clone();
+    skipped.phase = TransitionPhase::Published;
+    assert_eq!(
+        skipped.persist(&f.state, Some(&record)),
+        Err(CommitError::InvalidInput)
+    );
+    for phase in [
+        TransitionPhase::Quarantined,
+        TransitionPhase::SourceRetained,
+        TransitionPhase::TargetInstalled,
+        TransitionPhase::Published,
+        TransitionPhase::Complete,
+    ] {
+        let previous = record.clone();
+        record.phase = phase;
+        record.persist(&f.state, Some(&previous)).unwrap();
+        assert_eq!(
+            TransitionRecord::read(&f.state).unwrap(),
+            Some(record.clone())
+        );
+        reopen(false); // Complete still cannot admit the old physical inode/binding.
+        assert!(c.owned_page_ids().is_err());
+        assert_eq!(
+            previous.persist(&f.state, Some(&record)),
+            Err(CommitError::InvalidInput)
+        );
+    }
+    assert_eq!(fs::metadata(&f.state).unwrap().ino(), state.ino());
+    assert_eq!(c.binding().generation(), "v1");
+    assert_eq!(
+        sql.query_row("SELECT generation FROM index_commit_binding", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap(),
+        "v1"
+    );
+    // Emulate a separately verified publication to test positive Complete
+    // admission. This tests coordinator identity, not native table validation.
+    fs::copy(
+        f.index.join(".nk-operational-binding"),
+        record.candidate_path.join(".nk-operational-binding"),
+    )
+    .unwrap();
+    fs::rename(&f.index, &record.archive_path).unwrap();
+    fs::rename(&record.candidate_path, &f.index).unwrap();
+    sql.execute(
+        "INSERT INTO index_commit_generations VALUES('v2',?1,3)",
+        [scope("v1").identity()],
+    )
+    .unwrap();
+    sql.execute(
+        "UPDATE index_commit_binding SET index_device=?1,index_inode=?2,generation='v2',epoch=3",
+        [target.dev().to_string(), target.ino().to_string()],
+    )
+    .unwrap();
+    assert!(IndexCommitCoordinator::open_existing(&f.index, &f.state, next).is_ok());
+    reopen(false);
+}
 fn wait_for(mut condition: impl FnMut() -> bool) {
     let start = Instant::now();
     while !condition() {

@@ -44,6 +44,11 @@ retained backup identity, receipt adoption digest, and reserved generation/epoch
 values. Atomic journal replacement fsyncs both the new file and parent. Validate
 the journal itself without following links; paths alone never establish trust.
 Retain completed journals as immutable transition history.
+Before another transition, durably rotate the completed record into history
+under the same stable ownership, preserving its backup and adoption references.
+An error after rename or parent fsync may already have published a new record;
+recovery rereads actual journal and SQL state rather than retrying an assumed
+predecessor phase.
 
 1. **Prepared.** Under ownership, reverify the entire candidate and its asset;
    create and verify a fresh activation-time SQLite backup. Preparation's older
