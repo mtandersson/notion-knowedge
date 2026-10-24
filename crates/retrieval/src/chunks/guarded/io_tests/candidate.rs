@@ -10,9 +10,12 @@ fn transition_native_verification_checks_pinned_pair_before_and_after_installati
     use crate::commit::transition::*;
     use sha2::Digest;
     use std::os::unix::fs::MetadataExt;
-    for (source_head_changes, publication_side_effect) in
-        [(false, false), (true, false), (false, true)]
-    {
+    for (source_head_changes, publication_side_effect, resume_published) in [
+        (false, false, false),
+        (false, false, true),
+        (true, false, false),
+        (false, true, false),
+    ] {
         let f = Fixture::new();
         for path in [&f.root, &f.index] {
             fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
@@ -217,6 +220,25 @@ fn transition_native_verification_checks_pinned_pair_before_and_after_installati
                 1024 * 1024 * 1024,
             )
         };
+        let complete = |owner: &TransitionOwnership| {
+            publication::complete_publication(
+                owner,
+                12,
+                TransitionCandidateInputs {
+                    source: &source,
+                    target: &next,
+                    embedding: &f.embedding,
+                    dictionary: &dictionary,
+                    preparation_backup: &preparation_backup,
+                    limits: CandidateLimits::default(),
+                },
+                adoption::AdoptionLimits::default().plan_bytes,
+                manifest::ManifestLimits::default(),
+                1024 * 1024 * 1024,
+            )
+        };
+        // Quarantine SQL cannot be treated as an already committed publication.
+        assert!(complete(&owner).is_err());
         if source_head_changes {
             runtime.block_on(async {
                 let source =
@@ -278,6 +300,35 @@ fn transition_native_verification_checks_pinned_pair_before_and_after_installati
             );
             // Repeating publication cannot adopt or replay work a second time.
             assert!(publish().is_err());
+            drop(owner);
+            let mut recovered = TransitionRecord::read(&state_path).unwrap().unwrap();
+            let owner = TransitionOwnership::acquire(&state_path, &recovered).unwrap();
+            if resume_published {
+                let previous = recovered.clone();
+                recovered.phase = TransitionPhase::Published;
+                recovered.persist(&owner, Some(&previous)).unwrap();
+            }
+            let target_anchor = f.index.join(".nk-operational-binding");
+            fs::write(&target_anchor, b"foreign").unwrap();
+            assert!(complete(&owner).is_err());
+            assert_eq!(
+                TransitionRecord::read(&state_path).unwrap().unwrap().phase,
+                recovered.phase
+            );
+            fs::remove_file(&target_anchor).unwrap();
+            assert_eq!(complete(&owner).unwrap().phase, TransitionPhase::Complete);
+            assert_eq!(
+                fs::read(&target_anchor).unwrap(),
+                fs::read(&anchor_path).unwrap()
+            );
+            drop(owner);
+            assert!(
+                IndexCommitCoordinator::open_existing(&f.index, &state_path, next.clone()).is_ok()
+            );
+            assert!(
+                IndexCommitCoordinator::open_existing(&f.index, &state_path, source.clone())
+                    .is_err()
+            );
         }
     }
 }

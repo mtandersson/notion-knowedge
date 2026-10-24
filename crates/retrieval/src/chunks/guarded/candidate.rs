@@ -42,6 +42,7 @@ pub struct PreparedLexicalCandidate {
     pub backup: OfflineBackup,
 }
 
+#[derive(Clone, Copy)]
 pub struct TransitionCandidateInputs<'a> {
     pub source: &'a crate::commit::CommitBinding,
     pub target: &'a crate::commit::CommitBinding,

@@ -8,6 +8,82 @@ use manifest::{
     comparison::{ComparisonInputs, ComparisonStage, verify_backup_comparison},
 };
 
+fn install_anchor(owner: &TransitionOwnership) -> Result<(), CommitError> {
+    owner.revalidate()?;
+    let directory = &owner.record.target.path;
+    let destination = directory.join(ANCHOR);
+    if !destination.try_exists().map_err(io)? {
+        let temporary = tempfile::Builder::new()
+            .prefix(".nk-binding-")
+            .tempfile_in(directory)
+            .map_err(io)?;
+        let expected = format!(
+            "nk-index-binding-v1\n{}\n{}\n{}\n",
+            owner.record.state_device, owner.record.state_inode, owner.record.state_token
+        );
+        temporary
+            .as_file()
+            .write_all(expected.as_bytes())
+            .map_err(io)?;
+        temporary.as_file().sync_all().map_err(io)?;
+        owner.revalidate()?;
+        temporary
+            .persist_noclobber(&destination)
+            .map_err(|error| io(error.error))?;
+    }
+    owner.verify_anchor(&owner.target)?;
+    owner.target.sync_all().map_err(io)?;
+    owner.revalidate()
+}
+
+/// Finish a committed SQL publication, including recovery when the journal
+/// still says TargetInstalled. Never re-adopt work or restore the backup.
+/// A fresh complete native/SQL comparison precedes each journal advance.
+pub fn complete_publication(
+    owner: &TransitionOwnership,
+    now: i64,
+    candidate: TransitionCandidateInputs<'_>,
+    plan_bytes: u64,
+    limits: ManifestLimits,
+    backup_bytes: u64,
+) -> Result<TransitionRecord, CommitError> {
+    owner.with_exclusive_sql(now, |transaction| {
+        let verify = || {
+            let verified = verify_transition_candidate(owner, transaction, candidate)?;
+            let comparison = ComparisonInputs {
+                source: candidate.source,
+                target: candidate.target,
+                target_version: verified.target_version(),
+                plan_bytes,
+                backup_bytes,
+                limits,
+            };
+            verify_backup_comparison(
+                owner,
+                transaction,
+                &comparison,
+                ComparisonStage::AfterPublication,
+            )?;
+            Ok::<_, CommitError>(verified.record().clone())
+        };
+        let mut current = verify()?;
+        install_anchor(owner)?;
+        if current.phase == TransitionPhase::TargetInstalled {
+            let previous = current.clone();
+            current.phase = TransitionPhase::Published;
+            current.persist(owner, Some(&previous))?;
+        }
+        if verify()? != current || current.phase != TransitionPhase::Published {
+            return Err(CommitError::Conflict);
+        }
+        owner.verify_anchor(&owner.target)?;
+        let previous = current.clone();
+        current.phase = TransitionPhase::Complete;
+        current.persist(owner, Some(&previous))?;
+        Ok(current)
+    })
+}
+
 /// Reverify the native pair inside the actual exclusive transaction, then
 /// transfer authority and compare the entire resulting SQL state. This owns
 /// the transaction and rolls it back on any error. It leaves the journal at

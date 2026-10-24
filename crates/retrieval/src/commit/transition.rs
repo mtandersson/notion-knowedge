@@ -286,13 +286,17 @@ impl TransitionOwnership {
     }
 
     fn verify_source_anchor(&self) -> Result<(), CommitError> {
+        self.verify_anchor(&self.source)
+    }
+
+    fn verify_anchor(&self, directory: &File) -> Result<(), CommitError> {
         use std::os::fd::{AsRawFd, FromRawFd};
         let name = std::ffi::CString::new(ANCHOR).map_err(|_| CommitError::InvalidInput)?;
         // Resolve through the retained directory descriptor, including after a
         // rename, and never follow a replaceable anchor symlink.
         let fd = unsafe {
             libc::openat(
-                self.source.as_raw_fd(),
+                directory.as_raw_fd(),
                 name.as_ptr(),
                 libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
             )
