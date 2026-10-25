@@ -197,6 +197,23 @@ pub fn publish(
     owner: &OwnedOfflineInspection<'_>,
     proof: &VerifiedPriorRuntime<'_>,
 ) -> Result<RetainedEvidence> {
+    publish_inner(path, owner, proof, false)
+}
+/// Freshly verify and reuse an explicitly retained file. A missing record is
+/// always refused, including disappearance during executable verification.
+pub fn reuse(
+    path: &Path,
+    owner: &OwnedOfflineInspection<'_>,
+    proof: &VerifiedPriorRuntime<'_>,
+) -> Result<RetainedEvidence> {
+    publish_inner(path, owner, proof, true)
+}
+fn publish_inner(
+    path: &Path,
+    owner: &OwnedOfflineInspection<'_>,
+    proof: &VerifiedPriorRuntime<'_>,
+    retained: bool,
+) -> Result<RetainedEvidence> {
     let directory = parent(path)?;
     if path
         .parent()
@@ -208,6 +225,8 @@ pub fn publish(
     let fresh = proof.refresh(owner)?;
     let evidence = RetainedEvidence::from_proof(&fresh);
     let filename = path.file_name().ok_or(RuntimeError)?;
+    #[cfg(test)]
+    checkpoint("verified");
     match std::fs::symlink_metadata(path) {
         Ok(_) => {
             let (existing, file) = read_at(&directory, filename)?;
@@ -220,7 +239,7 @@ pub fn publish(
             owner.revalidate().map_err(err)?;
             return Ok(existing);
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !retained => (),
         Err(_) => return Err(RuntimeError),
     }
     // Anchor the stage in the retained directory, rather than a re-resolved
@@ -236,6 +255,8 @@ pub fn publish(
     directory.sync_all()?;
     check_parent(&directory, path)?;
     owner.revalidate().map_err(err)?;
+    #[cfg(test)]
+    checkpoint("stage-synced");
     let from = name(stage_path.file_name().ok_or(RuntimeError)?)?;
     let to = name(filename)?;
     // SAFETY: both names are single components relative to the retained private
@@ -252,6 +273,8 @@ pub fn publish(
     {
         return Err(RuntimeError);
     }
+    #[cfg(test)]
+    checkpoint("renamed");
     directory.sync_all()?;
     let (actual, _) = read_at(&directory, filename)?;
     if actual != evidence {
@@ -259,5 +282,22 @@ pub fn publish(
     }
     owner.revalidate().map_err(err)?;
     check_parent(&directory, path)?;
+    #[cfg(test)]
+    checkpoint("published");
     Ok(evidence)
+}
+
+#[cfg(test)]
+type CheckpointHook = std::cell::RefCell<Option<Box<dyn Fn(&str)>>>;
+#[cfg(test)]
+thread_local! {
+    pub(super) static CHECKPOINT: CheckpointHook = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+fn checkpoint(phase: &str) {
+    CHECKPOINT.with(|hook| {
+        if let Some(hook) = hook.borrow().as_ref() {
+            hook(phase);
+        }
+    });
 }

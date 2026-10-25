@@ -199,3 +199,56 @@ for authority. All source processes must remain stopped.
 This primitive does not provide the operator command or killed-process retry
 workflow tracked by #533. Activation, rollback publication and aggregate
 acceptance remain gated by their subsequent units.
+
+### Explicit verification command
+
+After stopping **all** source processes, build `lexical-verify` with
+`cargo build -p notion-knowledge-retrieval --features local-lancedb --example lexical-verify`
+in the documented Nix spike shell. Select the exact trusted runtime ELF and,
+for bound sources, its exact matching immutable asset. No historical executable
+or bundle becomes compatible merely because its digest was supplied.
+
+Use an absolute private canonical configuration file (operator-owned regular
+single-link file, mode 0600, at most 64 KiB). Its version-1 fields are
+`index_directory`, `state_file`, `authority_json` (the exact canonical original
+`CommitBinding` JSON from trusted configuration), `embedding`, `runtime`,
+`runtime_sha256`, and `asset` (`null` for legacy, otherwise an object with
+`path` and `sha256`). Unknown fields and noncanonical bytes are refused; all
+paths select existing artifacts explicitly. Serialize the configuration through
+`VerificationConfig` to preserve canonical field order. Never infer authority
+from a directory scan.
+
+```sh
+lexical-verify /absolute/config.json --all-source-processes-stopped --evidence /private/evidence.json
+lexical-verify /absolute/config.json --all-source-processes-stopped --retained /private/evidence.json
+```
+
+The first command requires an unused evidence path; the retry requires the
+explicit retained file. Both freshly verify the original ownership, SQL, native
+source and real executable/asset behavior before publication or identical reuse.
+Refusal never rewrites stale evidence or restores a backup. Retain orphaned
+`.runtime-evidence-*` stages as diagnostics after interruption; they grant no
+authority and must never be selected automatically. If interruption preceded
+publication, rerun with the explicitly chosen unused `--evidence` path. If the
+published file exists, retry with `--retained`. New acknowledged source state
+requires fresh verification and a new unused evidence path.
+
+This command does not activate, serve, rebuild a candidate or publish rollback.
+
+### Compatibility acceptance evidence (#530 / #528 / #523)
+
+The following maps the original aggregate requirements to implementation and
+behavioral checks. Aggregates may close only after the command delivery merges
+with its required CI; the candidate and publication requirements remain open.
+
+| Original requirement | Evidence boundary and behavioral check |
+| --- | --- |
+| Actual original authority, SQL identity/token and physical directory; complete prior binding or legacy absence; native profiles, current rows and exact vectors | `with_owned_offline_inspection`, `inspect_runtime_source`, and `verification::verify` retain original ownership and independently compare the selected runtime's complete actual-source observation before and after real probes. Both `verified_prior_runtime_*` normal-runtime tests check bound/legacy cases and unchanged original bytes. |
+| Exact immutable runtime/asset pair and separate source-policy/physical fencing; retained prior semantics | `PinnedRuntime` executes a sealed exact-byte ELF; `PinnedAsset` retains and rechecks the selected asset. Descriptor/binding equality and actual native source/probe checks require matching storage/executor/importer/lock/asset identities. `probe-create` and fresh `probe-reopen` perform real native writes, reject revoked authority and exercise distinct physical generations. |
+| Refuse incompatible or coupled generations, malformed/oversized reports and replacements | `refusal_and_freshness_cases` runs compiled refusing/coupled executables and real post-probe source/index/SQL/asset replacement cases. The coupled fixture forwards actual-source inspection before rejecting the distinct-generation probe. Transport tests cover output/deadline/process cleanup and hash mismatch. A replacement of the original ELF pathname cannot alter the already sealed selected executable. |
+| Legacy compatibility without synthesizing a binding; no old-plan/current-storage stamp, incompatible bundle execution or backport relabeling | Explicit legacy mode uses `RuntimeDescriptor::current(None)` and requires actual binding absence. Bound mode requires complete prior binding equality. The host treats the selected asset as opaque; only the selected trusted runtime loads it. No backport or historical artifact is claimed compatible by these tests; any such pair must independently pass the same exact implementation/asset/source checks. |
+| Reusable, non-deserializable ownership-bound proof; no nested SQL ownership | `VerifiedPriorRuntime` has no public constructor/deserializer. Compile-fail lifetime checks prevent escape from the retained owner. The actual-source subprocess never opens original operational SQL. Candidate rebuilding and eventual activation enforcement remain #524/#525. |
+| Durable bounded private canonical evidence; strict readback, no clobber or inferred authority | `evidence::publish` freshly verifies before exact retry, uses retained staged files, file/parent fsync and atomic no-replace rename outside the source inventory. `RetainedEvidence::read` is descriptive only. Normal-runtime tests reject aliases, nonprivate/corrupt/oversized/noncanonical/unsupported nested-schema inputs without rewriting them. |
+| Explicit shutdown-acknowledged operator, real interruption and fresh-process retry | `lexical-verify` requires explicit configuration and new/retained paths. Both `offline_verification_command_*` cases SIGKILL at staged-file fsync, rename-before-parent-fsync and completed publication, then retry with fresh normal command processes. Orphaned diagnostic stages remain unchanged and are never scanned for authority. |
+| New acknowledged state, held leases/locks and original-store preservation | Command tests refuse missing acknowledgement/evidence, held index locks and active reconciliation leases. They commit a real newer native row and receipt through the production guard, refuse stale evidence, retain the latest source/SQL bytes and accept fresh evidence at a new explicit path. Original source/store byte inventories are compared after every crash retry and refusal. Existing ownership tests cover exclusive SQL and held file-effect leases. |
+| Serving/activation and dependent acceptance remain gated | This command creates descriptive evidence only. #524 owns latest-row prior-semantics candidates; #525 owns fenced rollback publication/crash proof; #517 owns the complete operator workflow and parent audits. No graph enablement, source effects, credential use, corpus changes or quality/cutover claim is established here. |
