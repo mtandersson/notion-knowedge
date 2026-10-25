@@ -121,7 +121,7 @@ pub fn preview_publication(
     })
 }
 
-fn install_anchor(owner: &TransitionOwnership) -> Result<(), CommitError> {
+pub(crate) fn install_anchor(owner: &TransitionOwnership) -> Result<(), CommitError> {
     owner.revalidate()?;
     let directory = &owner.record.target.path;
     let destination = directory.join(ANCHOR);
@@ -211,7 +211,6 @@ pub fn publish_derived_state(
     manifest: ManifestLimits,
     backup_bytes: u64,
 ) -> Result<AdoptionReport, CommitError> {
-    const PUBLISH: &str = "UPDATE main.index_commit_binding SET index_device=?1,index_inode=?2,generation=?3,epoch=?4 WHERE singleton=1 AND generation=?5 AND epoch=?6";
     let report = owner.with_exclusive_sql(now, |transaction| {
         let source = candidate.source;
         let target = candidate.target;
@@ -219,51 +218,17 @@ pub fn publish_derived_state(
         if verified.record().phase != TransitionPhase::TargetInstalled {
             return Err(CommitError::Conflict);
         }
-        let comparison = ComparisonInputs {
-            source,
-            target,
-            target_version: verified.target_version(),
-            plan_bytes: adoption.plan_bytes,
-            backup_bytes,
-            limits: manifest,
-        };
-        verify_backup_comparison(
+        let report = publish_derived_owned(
             owner,
             transaction,
-            &comparison,
-            ComparisonStage::BeforePublication,
-        )?;
-        let report = adopt_derived_work(
-            owner,
-            transaction,
-            source,
-            target,
-            verified.target_version(),
-            adoption,
-        )?;
-        let record = verified.record();
-        let changed = transaction
-            .execute(
-                PUBLISH,
-                params![
-                    record.target.device.to_string(),
-                    record.target.inode.to_string(),
-                    target.generation(),
-                    i64::try_from(target.epoch()).map_err(|_| CommitError::InvalidInput)?,
-                    record.quarantine_generation,
-                    i64::try_from(record.quarantine_epoch)
-                        .map_err(|_| CommitError::InvalidInput)?,
-                ],
-            )
-            .map_err(sql)?;
-        if changed != 1 {
-            return Err(CommitError::BindingMismatch);
-        }
-        verify_backup_comparison(
-            owner,
-            transaction,
-            &comparison,
-            ComparisonStage::AfterPublication,
+            SqlPublication {
+                source,
+                target,
+                target_version: verified.target_version(),
+                adoption,
+                manifest,
+                backup_bytes,
+            },
         )?;
         #[cfg(test)]
         {
@@ -283,5 +248,82 @@ pub fn publish_derived_state(
     })?;
     #[cfg(test)]
     transition_checkpoint(owner, "sql-published");
+    Ok(report)
+}
+
+pub(crate) struct SqlPublication<'a> {
+    pub source: &'a CommitBinding,
+    pub target: &'a CommitBinding,
+    pub target_version: u64,
+    pub adoption: AdoptionLimits,
+    pub manifest: ManifestLimits,
+    pub backup_bytes: u64,
+}
+/// Called only after actual native verification in this same transaction.
+pub(crate) fn publish_derived_owned(
+    owner: &TransitionOwnership,
+    transaction: &mut rusqlite::Transaction<'_>,
+    input: SqlPublication<'_>,
+) -> Result<AdoptionReport, CommitError> {
+    const PUBLISH: &str = "UPDATE main.index_commit_binding SET index_device=?1,index_inode=?2,generation=?3,epoch=?4 WHERE singleton=1 AND generation=?5 AND epoch=?6";
+    owner.validate_owned_transaction(transaction)?;
+    let record = owner
+        .current_record()?
+        .ok_or(CommitError::BindingMismatch)?;
+    let source = input.source;
+    let target = input.target;
+    if record.phase != TransitionPhase::TargetInstalled
+        || serde_json::to_string(source).map_err(|_| CommitError::InvalidInput)?
+            != record.source.binding
+        || serde_json::to_string(target).map_err(|_| CommitError::InvalidInput)?
+            != record.target.binding
+    {
+        return Err(CommitError::BindingMismatch);
+    }
+    let comparison = ComparisonInputs {
+        source,
+        target,
+        target_version: input.target_version,
+        plan_bytes: input.adoption.plan_bytes,
+        backup_bytes: input.backup_bytes,
+        limits: input.manifest,
+    };
+    verify_backup_comparison(
+        owner,
+        transaction,
+        &comparison,
+        ComparisonStage::BeforePublication,
+    )?;
+    let report = adopt_derived_work(
+        owner,
+        transaction,
+        source,
+        target,
+        input.target_version,
+        input.adoption,
+    )?;
+    let record = &record;
+    let changed = transaction
+        .execute(
+            PUBLISH,
+            params![
+                record.target.device.to_string(),
+                record.target.inode.to_string(),
+                target.generation(),
+                i64::try_from(target.epoch()).map_err(|_| CommitError::InvalidInput)?,
+                record.quarantine_generation,
+                i64::try_from(record.quarantine_epoch).map_err(|_| CommitError::InvalidInput)?,
+            ],
+        )
+        .map_err(sql)?;
+    if changed != 1 {
+        return Err(CommitError::BindingMismatch);
+    }
+    verify_backup_comparison(
+        owner,
+        transaction,
+        &comparison,
+        ComparisonStage::AfterPublication,
+    )?;
     Ok(report)
 }

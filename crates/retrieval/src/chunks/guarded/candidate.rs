@@ -12,6 +12,8 @@ use std::{
 #[cfg(target_os = "linux")]
 pub mod runtime_builder;
 #[cfg(target_os = "linux")]
+pub mod runtime_refence;
+#[cfg(target_os = "linux")]
 pub mod transfer;
 
 const READY: &str = ".nk-lexical-candidate-ready-v1.json";

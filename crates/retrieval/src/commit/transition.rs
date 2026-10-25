@@ -12,11 +12,13 @@ pub mod manifest;
 pub mod preparation;
 #[cfg(feature = "local-lancedb")]
 pub mod publication;
+#[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+pub mod runtime_journal;
 
 const MAX_RECORD_BYTES: u64 = 65_536;
 
 #[cfg(test)]
-pub(super) fn transition_checkpoint(owner: &TransitionOwnership, phase: &str) {
+pub(crate) fn transition_checkpoint(owner: &TransitionOwnership, phase: &str) {
     let Some(root) = std::env::var_os("NK_TRANSITION_TEST_ROOT").map(PathBuf::from) else {
         return;
     };
@@ -31,6 +33,23 @@ pub(super) fn transition_checkpoint(owner: &TransitionOwnership, phase: &str) {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn sql_checkpoint(
+    owner: &TransitionOwnership,
+    transaction: &rusqlite::Transaction<'_>,
+    phase: &str,
+) -> Result<(), CommitError> {
+    if std::env::var("NK_TRANSITION_TEST_PHASE").ok().as_deref() == Some(phase) {
+        // Exercise SQLite's real hot rollback journal, not a simulated phase.
+        let flushed = unsafe { rusqlite::ffi::sqlite3_db_cacheflush(transaction.handle()) };
+        if flushed != rusqlite::ffi::SQLITE_OK {
+            return Err(CommitError::Unavailable);
+        }
+    }
+    transition_checkpoint(owner, phase);
+    Ok(())
+}
+
 /// Stable ownership across directory renames. This excludes other transition
 /// operators and guarded index consumers; an exclusive SQLite transaction is
 /// still required to exclude operational writers before any durable effects.
@@ -40,6 +59,10 @@ pub struct TransitionOwnership {
     source: File,
     target: File,
     record: TransitionRecord,
+    #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+    runtime: Option<runtime_journal::RuntimeJournalRecord>,
+    #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+    runtime_history: Option<PathBuf>,
 }
 
 fn exclusive(file: &File) -> Result<(), CommitError> {
@@ -186,6 +209,36 @@ impl TransitionOwnership {
         self.validate_sql(db)
     }
 
+    /// Read this owner's actual journal dialect. Runtime metadata is projected
+    /// only for the shared physical/SQL engine; it is never serialized as v1.
+    pub(crate) fn current_record(&self) -> Result<Option<TransitionRecord>, CommitError> {
+        #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+        if self.runtime_history.is_some() {
+            return self.runtime_record()?.layout().map(Some);
+        }
+        #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+        if let Some(base) = &self.runtime {
+            return runtime_journal::RuntimeJournalRecord::read_active(&self.state_path)?
+                .map(|record| {
+                    record.same_operation(base)?;
+                    record.layout()
+                })
+                .transpose();
+        }
+        TransitionRecord::read(&self.state_path)
+    }
+    fn persist_record(
+        &self,
+        record: &TransitionRecord,
+        previous: &TransitionRecord,
+    ) -> Result<(), CommitError> {
+        #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+        if self.runtime.is_some() {
+            return runtime_journal::advance_layout(self, record, previous);
+        }
+        record.persist(self, Some(previous))
+    }
+
     /// Resolve captured physical identities, including rename-before-journal
     /// windows. Returned paths are usable only while this owner remains held.
     pub fn physical_paths(&self) -> Result<(PathBuf, PathBuf), CommitError> {
@@ -260,6 +313,10 @@ impl TransitionOwnership {
             source,
             target,
             record: record.clone(),
+            #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+            runtime: None,
+            #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+            runtime_history: None,
         };
         owned.revalidate()?;
         // An interrupted publication can leave a hot rollback journal. SQLite
@@ -431,7 +488,22 @@ impl TransitionOwnership {
     /// ownership. Prepared must already contain a fresh activation-time backup.
     /// Recovery may repeat this after SQL committed but journal fsync failed.
     pub fn quarantine(&self, now: i64) -> Result<TransitionRecord, CommitError> {
-        let previous = TransitionRecord::read(&self.state_path)?.ok_or(CommitError::Conflict)?;
+        self.quarantine_inner(now, |_| Ok(()))
+    }
+    #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+    pub(crate) fn quarantine_checked(
+        &self,
+        now: i64,
+        verify: impl FnMut(&rusqlite::Transaction<'_>) -> Result<(), CommitError>,
+    ) -> Result<TransitionRecord, CommitError> {
+        self.quarantine_inner(now, verify)
+    }
+    fn quarantine_inner(
+        &self,
+        now: i64,
+        mut verify: impl FnMut(&rusqlite::Transaction<'_>) -> Result<(), CommitError>,
+    ) -> Result<TransitionRecord, CommitError> {
+        let previous = self.current_record()?.ok_or(CommitError::Conflict)?;
         let mut expected = self.record.clone();
         expected.phase = previous.phase;
         if expected != previous
@@ -449,7 +521,8 @@ impl TransitionOwnership {
         let quarantine_epoch =
             i64::try_from(previous.quarantine_epoch).map_err(|_| CommitError::InvalidInput)?;
         self.with_exclusive_sql(now, |transaction| {
-            if TransitionRecord::read(&self.state_path)?.as_ref() != Some(&previous) {
+            verify(transaction)?;
+            if self.current_record()?.as_ref() != Some(&previous) {
                 return Err(CommitError::Conflict);
             }
             previous.backup.verify(&previous.backup_path)?;
@@ -476,6 +549,9 @@ impl TransitionOwnership {
                 transaction.execute("INSERT INTO index_commit_generations VALUES(?1,?2,?3)", params![name,source.scope,epoch]).map_err(sql)?;
             }
             transaction.execute("UPDATE index_commit_binding SET generation=?1,epoch=?2 WHERE singleton=1", params![previous.quarantine_generation,quarantine_epoch]).map_err(sql)?;
+            verify(transaction)?;
+            #[cfg(test)]
+            sql_checkpoint(self, transaction, "runtime-quarantine-before-commit")?;
             Ok(())
         })?;
         #[cfg(test)]
@@ -485,7 +561,7 @@ impl TransitionOwnership {
         }
         let mut next = previous.clone();
         next.phase = TransitionPhase::Quarantined;
-        next.persist(self, Some(&previous))?;
+        self.persist_record(&next, &previous)?;
         Ok(next)
     }
 
@@ -494,7 +570,31 @@ impl TransitionOwnership {
     /// rename before advancing its durable phase. This does not publish serving
     /// authority, create an anchor, or replace full installed native validation.
     pub fn install_candidate(&self, now: i64) -> Result<TransitionRecord, CommitError> {
-        let mut current = TransitionRecord::read(&self.state_path)?.ok_or(CommitError::Conflict)?;
+        self.install_candidate_inner(now, false, |_| Ok(()))
+    }
+    #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+    pub(crate) fn retain_source_checked(
+        &self,
+        now: i64,
+        verify: impl FnMut(&rusqlite::Transaction<'_>) -> Result<(), CommitError>,
+    ) -> Result<TransitionRecord, CommitError> {
+        self.install_candidate_inner(now, true, verify)
+    }
+    #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+    pub(crate) fn install_candidate_checked(
+        &self,
+        now: i64,
+        verify: impl FnMut(&rusqlite::Transaction<'_>) -> Result<(), CommitError>,
+    ) -> Result<TransitionRecord, CommitError> {
+        self.install_candidate_inner(now, false, verify)
+    }
+    fn install_candidate_inner(
+        &self,
+        now: i64,
+        retain_only: bool,
+        mut verify: impl FnMut(&rusqlite::Transaction<'_>) -> Result<(), CommitError>,
+    ) -> Result<TransitionRecord, CommitError> {
+        let mut current = self.current_record()?.ok_or(CommitError::Conflict)?;
         let mut expected = self.record.clone();
         expected.phase = current.phase;
         if expected != current
@@ -508,7 +608,8 @@ impl TransitionOwnership {
             return Err(CommitError::Conflict);
         }
         self.with_exclusive_sql(now, |transaction| {
-            if TransitionRecord::read(&self.state_path)?.as_ref() != Some(&current) { return Err(CommitError::Conflict); }
+            verify(transaction)?;
+            if self.current_record()?.as_ref() != Some(&current) { return Err(CommitError::Conflict); }
             current.backup.verify(&current.backup_path)?;
             let target: RecordedBinding = serde_json::from_str(&current.target.binding).map_err(|_| CommitError::InvalidInput)?;
             let quarantine_epoch = i64::try_from(current.quarantine_epoch).map_err(|_| CommitError::InvalidInput)?;
@@ -531,7 +632,16 @@ impl TransitionOwnership {
             if current.phase == TransitionPhase::Quarantined {
                 let previous = current.clone();
                 current.phase = TransitionPhase::SourceRetained;
-                current.persist(self, Some(&previous))?;
+                self.persist_record(&current, &previous)?;
+            }
+            verify(transaction)?;
+            if retain_only { return Ok(current.clone()); }
+            #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+            if self.runtime.is_some() {
+                let actual = runtime_journal::RuntimeJournalRecord::read_active(&self.state_path)?.ok_or(CommitError::Conflict)?;
+                if !matches!(actual.phase, runtime_journal::RuntimePhase::TargetRefenced | runtime_journal::RuntimePhase::TargetInstalled) {
+                    return Err(CommitError::Conflict);
+                }
             }
             match fs::symlink_metadata(&current.candidate_path) {
                 Ok(_) => {
@@ -549,10 +659,11 @@ impl TransitionOwnership {
             File::open(current.target.path.parent().ok_or(CommitError::InvalidInput)?).map_err(io)?.sync_all().map_err(io)?;
             #[cfg(test)]
             transition_checkpoint(self, "target-renamed");
+            verify(transaction)?;
             if current.phase == TransitionPhase::SourceRetained {
                 let previous = current.clone();
                 current.phase = TransitionPhase::TargetInstalled;
-                current.persist(self, Some(&previous))?;
+                self.persist_record(&current, &previous)?;
             }
             Ok(current.clone())
         })
@@ -835,6 +946,10 @@ impl TransitionRecord {
         owner: &TransitionOwnership,
         previous: Option<&Self>,
     ) -> Result<(), CommitError> {
+        #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+        if owner.runtime.is_some() {
+            return Err(CommitError::InvalidInput);
+        }
         owner.revalidate()?;
         let mut expected = owner.record.clone();
         expected.phase = self.phase;

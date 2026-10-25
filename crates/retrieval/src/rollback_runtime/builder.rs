@@ -101,6 +101,25 @@ pub(super) fn verify_fencing(
     limits: crate::chunks::CandidateLimits,
     budget: Duration,
 ) -> Result<()> {
+    probe_runtime(runtime, asset, descriptor, limits, budget, false)
+}
+pub(super) fn verify_publication_runtime(
+    runtime: &PinnedRuntime,
+    asset: Option<&PinnedAsset>,
+    descriptor: &crate::chunks::lexical_binding::runtime::RuntimeDescriptor,
+    limits: crate::chunks::CandidateLimits,
+    budget: Duration,
+) -> Result<()> {
+    probe_runtime(runtime, asset, descriptor, limits, budget, true)
+}
+fn probe_runtime(
+    runtime: &PinnedRuntime,
+    asset: Option<&PinnedAsset>,
+    descriptor: &crate::chunks::lexical_binding::runtime::RuntimeDescriptor,
+    limits: crate::chunks::CandidateLimits,
+    budget: Duration,
+    admission: bool,
+) -> Result<()> {
     let started = Instant::now();
     let scratch = tempfile::Builder::new()
         .permissions(std::fs::Permissions::from_mode(0o700))
@@ -127,6 +146,33 @@ pub(super) fn verify_fencing(
     let reopened = probe::verify_report(&run("probe-reopen")?, descriptor, &root, limits)?;
     if created != reopened {
         return Err(RuntimeError);
+    }
+    if admission {
+        let path = scratch.path().join("admission.json");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
+        file.write_all(&probe::admission_request(
+            &root,
+            descriptor.is_legacy(),
+            limits,
+        )?)?;
+        drop(file);
+        let bytes = runtime.run(
+            &[
+                vec!["inspect-admission".into(), path.as_os_str().to_owned()],
+                mode,
+            ]
+            .concat(),
+            budget
+                .checked_sub(started.elapsed())
+                .filter(|d| !d.is_zero())
+                .ok_or(RuntimeError)?,
+            65536,
+        )?;
+        probe::verify_admission_report(&bytes, &created)?;
     }
     Ok(())
 }
