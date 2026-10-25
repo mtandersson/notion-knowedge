@@ -4041,3 +4041,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(target_os = "linux")]
+pub use guarded::canonical_transfer;

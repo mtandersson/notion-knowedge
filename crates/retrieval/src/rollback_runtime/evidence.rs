@@ -90,7 +90,7 @@ impl RetainedEvidence {
         Ok(value)
     }
 }
-fn parent(path: &Path) -> Result<File> {
+pub(crate) fn parent(path: &Path) -> Result<File> {
     let directory = path.parent().ok_or(RuntimeError)?;
     if !path.is_absolute()
         || path.file_name().is_none()
@@ -119,7 +119,7 @@ fn parent(path: &Path) -> Result<File> {
     check_parent(&file, path)?;
     Ok(file)
 }
-fn check_parent(file: &File, path: &Path) -> Result<()> {
+pub(crate) fn check_parent(file: &File, path: &Path) -> Result<()> {
     let retained = file.metadata()?;
     let current = std::fs::symlink_metadata(path.parent().ok_or(RuntimeError)?)?;
     if !current.is_dir()
