@@ -91,6 +91,12 @@ pub fn build(
     {
         return Err(RuntimeError);
     }
+    if crate::chunks::runtime_builder::DirectoryIdentity::capture(&request.candidate)
+        .map_err(|_| RuntimeError)?
+        != reopen.candidate
+    {
+        return Err(RuntimeError);
+    }
     if let Some(asset) = asset {
         asset.revalidate()?;
     }

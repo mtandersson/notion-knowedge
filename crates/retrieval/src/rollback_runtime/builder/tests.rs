@@ -10,6 +10,7 @@ use crate::{
     rollback_runtime::probe,
 };
 use sha2::{Digest, Sha256};
+use std::os::unix::fs::DirBuilderExt;
 use std::{
     ffi::OsString,
     fs,
@@ -181,6 +182,50 @@ fn run_case(bound: bool) {
             guard.try_lock().unwrap();
             assert!(run("candidate-reopen").is_err());
             drop(guard);
+            fs::set_permissions(&config, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(run("candidate-reopen").is_err());
+            fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+            let mut malformed = request.canonical_bytes().unwrap();
+            malformed.push(b'\n');
+            fs::write(&config, malformed).unwrap();
+            assert!(run("candidate-reopen").is_err());
+            fs::write(&config, request.canonical_bytes().unwrap()).unwrap();
+            let moved = root.join("retained-output");
+            fs::rename(&request.candidate, &moved).unwrap();
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&request.candidate)
+                .unwrap();
+            assert!(run("candidate-reopen").is_err());
+            fs::remove_dir(&request.candidate).unwrap();
+            fs::rename(&moved, &request.candidate).unwrap();
+            let moved = root.join("retained-current");
+            fs::rename(&request.source.path, &moved).unwrap();
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&request.source.path)
+                .unwrap();
+            assert!(run("candidate-reopen").is_err());
+            fs::remove_dir(&request.source.path).unwrap();
+            fs::rename(&moved, &request.source.path).unwrap();
+            if bound {
+                assert!(build(&runtime, None, &request, Duration::from_secs(10)).is_err());
+                let missing = parent.path().join("missing.bundle");
+                assert!(PinnedAsset::pin(&missing, &"0".repeat(64)).is_err());
+                let actual = parent.path().join("prior.bundle");
+                let original = fs::read(&actual).unwrap();
+                fs::write(&actual, b"corrupt asset").unwrap();
+                assert!(
+                    build(
+                        &runtime,
+                        pinned_asset.as_ref(),
+                        &request,
+                        Duration::from_secs(10)
+                    )
+                    .is_err()
+                );
+                fs::write(&actual, original).unwrap();
+            }
             if !bound {
                 coupled_runtime_refused(&binary, parent.path(), &request);
             }
@@ -191,6 +236,12 @@ fn run_case(bound: bool) {
             assert!(run("candidate-create").is_err());
             assert!(!request.candidate.exists());
             request.target_authority_json = result.target_authority_json.clone();
+            let original_limits = request.limits;
+            request.limits.bytes = request.transfer.bytes - 1;
+            fs::write(&config, request.canonical_bytes().unwrap()).unwrap();
+            assert!(run("candidate-create").is_err());
+            assert!(!request.candidate.exists());
+            request.limits = original_limits;
             fs::write(&path, b"corrupt transfer").unwrap();
             fs::write(&config, request.canonical_bytes().unwrap()).unwrap();
             assert!(run("candidate-create").is_err());

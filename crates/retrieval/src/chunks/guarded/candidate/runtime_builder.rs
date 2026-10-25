@@ -78,11 +78,34 @@ impl CandidateReport {
         if report.version != 1
             || report.protocol != PROTOCOL
             || report.snapshot.version != 2
+            || report.snapshot.source_version == 0
             || json(&report)? != bytes
         {
             return Err(bad());
         }
         RuntimeDescriptor::parse_metadata(&report.runtime.canonical_bytes()?)?;
+        crate::commit::CommitBinding::parse_retained(report.target_authority_json.as_bytes())
+            .map_err(|_| bad())?;
+        for hash in [
+            &report.transfer_sha256,
+            &report.snapshot.authority_sha256,
+            &report.snapshot.snapshot_sha256,
+        ] {
+            if hash.len() != 64
+                || !hash
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(bad());
+            }
+        }
+        match &report.snapshot.lexical {
+            Some(binding) if report.runtime.describes_bound_source(binding) => {
+                binding.validate_metadata()?
+            }
+            None if report.runtime.is_legacy() => (),
+            _ => return Err(bad()),
+        }
         Ok(report)
     }
 }
