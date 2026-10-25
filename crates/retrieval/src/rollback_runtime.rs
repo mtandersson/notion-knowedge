@@ -30,6 +30,8 @@ pub mod prepared;
 #[cfg(feature = "local-lancedb")]
 pub mod probe;
 #[cfg(feature = "local-lancedb")]
+pub mod publication;
+#[cfg(feature = "local-lancedb")]
 pub mod source;
 #[cfg(feature = "local-lancedb")]
 pub mod verification;

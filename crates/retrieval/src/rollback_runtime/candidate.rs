@@ -335,7 +335,7 @@ fn with_request<T>(bytes: &[u8], run: impl FnOnce(&Path) -> Result<T>) -> Result
     drop(file);
     run(&path)
 }
-fn observe(
+pub(super) fn observe(
     runtime: &PinnedRuntime,
     asset: Option<&PinnedAsset>,
     path: &Path,

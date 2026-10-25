@@ -2,7 +2,7 @@
 use super::*;
 use crate::commit::transition::TransitionRecord;
 
-/// Internal live ownership result; never constructible from retained metadata.
+/// Resolved provenance; the caller must retain and revalidate actual ownership.
 pub(crate) struct PriorArchive {
     pub binding: CommitBinding,
     pub path: PathBuf,
@@ -18,54 +18,84 @@ impl OwnedOfflineInspection<'_> {
     /// connect exactly. No directory scan or operational backup is used.
     pub(crate) fn prior_archive(&self, paths: &[PathBuf]) -> Result<PriorArchive, CommitError> {
         self.revalidate()?;
-        if paths.is_empty() || paths.len() > 64 {
-            return Err(CommitError::InvalidInput);
-        }
         let c = self.coordinator;
-        let mut binding = c.binding.clone();
-        let mut device = c.index_identity.device;
-        let mut inode = c.index_identity.inode;
-        let mut records = Vec::new();
-        for path in paths {
-            let record = TransitionRecord::read_completed(&c.state_path, path)?;
-            if record.state_device != c.state_identity.device
-                || record.state_inode != c.state_identity.inode
-                || record.state_token != c.state_token
-                || record.target.path != c.index_path
-                || record.target.device != device
-                || record.target.inode != inode
-                || record.target.binding
-                    != serde_json::to_string(&binding).map_err(|_| CommitError::InvalidInput)?
-            {
-                return Err(CommitError::BindingMismatch);
-            }
-            binding = CommitBinding::parse_retained(record.source.binding.as_bytes())?;
-            device = record.source.device;
-            inode = record.source.inode;
-            records.push(record);
-        }
-        let prior = records.last().ok_or(CommitError::InvalidInput)?;
-        let bytes = serde_json::to_vec(&(
-            &binding,
-            &prior.source.path,
-            &c.state_path,
-            device,
-            inode,
-            c.state_identity.device,
-            c.state_identity.inode,
-            &c.state_token,
-        ))
-        .map_err(|_| CommitError::InvalidInput)?;
-        let lineage = serde_json::to_vec(&records).map_err(|_| CommitError::InvalidInput)?;
+        let result = resolve_archive_lineage(
+            LineageContext {
+                binding: &c.binding,
+                index_path: &c.index_path,
+                index_device: c.index_identity.device,
+                index_inode: c.index_identity.inode,
+                state_path: &c.state_path,
+                state_device: c.state_identity.device,
+                state_inode: c.state_identity.inode,
+                state_token: &c.state_token,
+            },
+            paths,
+        )?;
         self.revalidate()?;
-        Ok(PriorArchive {
-            binding,
-            path: prior.archive_path.clone(),
-            device,
-            inode,
-            ownership_sha256: format!("{:x}", Sha256::digest(bytes)),
-            snapshot_sha256: prior.snapshot_sha256.clone(),
-            lineage_sha256: format!("{:x}", Sha256::digest(lineage)),
-        })
+        Ok(result)
     }
+}
+/// Inputs must come from a retained physical/SQL owner, never solely a file.
+pub(crate) struct LineageContext<'a> {
+    pub binding: &'a CommitBinding,
+    pub index_path: &'a Path,
+    pub index_device: u64,
+    pub index_inode: u64,
+    pub state_path: &'a Path,
+    pub state_device: u64,
+    pub state_inode: u64,
+    pub state_token: &'a str,
+}
+pub(crate) fn resolve_archive_lineage(
+    c: LineageContext<'_>,
+    paths: &[PathBuf],
+) -> Result<PriorArchive, CommitError> {
+    if paths.is_empty() || paths.len() > 64 {
+        return Err(CommitError::InvalidInput);
+    }
+    let mut binding = c.binding.clone();
+    let mut device = c.index_device;
+    let mut inode = c.index_inode;
+    let mut records = Vec::new();
+    for path in paths {
+        let record = TransitionRecord::read_completed(c.state_path, path)?;
+        if record.state_device != c.state_device
+            || record.state_inode != c.state_inode
+            || record.state_token != c.state_token
+            || record.target.path != c.index_path
+            || record.target.device != device
+            || record.target.inode != inode
+            || record.target.binding
+                != serde_json::to_string(&binding).map_err(|_| CommitError::InvalidInput)?
+        {
+            return Err(CommitError::BindingMismatch);
+        }
+        binding = CommitBinding::parse_retained(record.source.binding.as_bytes())?;
+        device = record.source.device;
+        inode = record.source.inode;
+        records.push(record);
+    }
+    let prior = records.last().ok_or(CommitError::InvalidInput)?;
+    let bytes = serde_json::to_vec(&(
+        &binding,
+        &prior.source.path,
+        &c.state_path,
+        device,
+        inode,
+        c.state_device,
+        c.state_inode,
+        &c.state_token,
+    ))
+    .map_err(|_| CommitError::InvalidInput)?;
+    let lineage = serde_json::to_vec(&records).map_err(|_| CommitError::InvalidInput)?;
+    Ok(PriorArchive {
+        binding,
+        path: prior.archive_path.clone(),
+        device,
+        inode,
+        ownership_sha256: format!("{:x}", Sha256::digest(bytes)),
+        snapshot_sha256: prior.snapshot_sha256.clone(),
+        lineage_sha256: format!("{:x}", Sha256::digest(lineage)),
+    })
 }

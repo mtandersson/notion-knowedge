@@ -4,6 +4,8 @@
 mod prepared;
 #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
 mod prior;
+#[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+pub(crate) use prior::{LineageContext, resolve_archive_lineage};
 
 use super::*;
 use sha2::{Digest, Sha256};

@@ -6,6 +6,7 @@ use std::{cell::Cell, os::unix::fs::OpenOptionsExt};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComparisonStage {
     Prepared,
+    BeforeInstallation,
     BeforePublication,
     AfterPublication,
 }
@@ -251,7 +252,9 @@ impl<'a> Context<'a> {
             return Err(CommitError::BindingMismatch);
         }
         match self.stage {
-            ComparisonStage::Prepared | ComparisonStage::BeforePublication
+            ComparisonStage::Prepared
+            | ComparisonStage::BeforeInstallation
+            | ComparisonStage::BeforePublication
                 if generation == self.input.target.generation() =>
             {
                 return Err(CommitError::BindingMismatch);
@@ -312,7 +315,7 @@ impl Normalizer for Context<'_> {
                     self.source_device.as_str(),
                     self.source_inode.as_str(),
                 ),
-                ComparisonStage::BeforePublication => (
+                ComparisonStage::BeforeInstallation | ComparisonStage::BeforePublication => (
                     self.record.quarantine_generation.as_str(),
                     i64::try_from(self.record.quarantine_epoch)
                         .map_err(|_| CommitError::InvalidInput)?,
@@ -471,12 +474,18 @@ pub fn verify_backup_comparison(
     stage: ComparisonStage,
 ) -> Result<SqlManifest, CommitError> {
     owner.validate_owned_transaction(transaction)?;
-    let record = TransitionRecord::read(&owner.state_path)?.ok_or(CommitError::BindingMismatch)?;
+    let record = owner
+        .current_record()?
+        .ok_or(CommitError::BindingMismatch)?;
     let mut expected = owner.record().clone();
     expected.phase = record.phase;
     check_input(&record, input)?;
     let valid_phase = match stage {
         ComparisonStage::Prepared => record.phase == TransitionPhase::Prepared,
+        ComparisonStage::BeforeInstallation => matches!(
+            record.phase,
+            TransitionPhase::Quarantined | TransitionPhase::SourceRetained
+        ),
         ComparisonStage::BeforePublication => record.phase == TransitionPhase::TargetInstalled,
         ComparisonStage::AfterPublication => matches!(
             record.phase,
@@ -489,6 +498,11 @@ pub fn verify_backup_comparison(
     let (source_path, target_path) = owner.physical_paths()?;
     let valid_paths = if stage == ComparisonStage::Prepared {
         source_path == record.source.path && target_path == record.candidate_path
+    } else if stage == ComparisonStage::BeforeInstallation {
+        (source_path == record.source.path || source_path == record.archive_path)
+            && (target_path == record.candidate_path
+                || (record.phase == TransitionPhase::SourceRetained
+                    && target_path == record.target.path))
     } else {
         source_path == record.archive_path && target_path == record.target.path
     };
@@ -509,9 +523,7 @@ pub fn verify_backup_comparison(
         let actual = capture_normalized(transaction, input.limits, &context)?;
         backup_guard(&record, file, backup)?;
         owner.validate_owned_transaction(transaction)?;
-        if actual != original
-            || TransitionRecord::read(&owner.state_path)?.as_ref() != Some(&record)
-        {
+        if actual != original || owner.current_record()?.as_ref() != Some(&record) {
             return Err(CommitError::BindingMismatch);
         }
         Ok(original)

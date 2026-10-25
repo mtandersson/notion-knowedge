@@ -24,6 +24,8 @@ mod alias_projection;
 mod offline;
 pub mod transition;
 pub use alias_projection::AliasProjection;
+#[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+pub(crate) use offline::{LineageContext, resolve_archive_lineage};
 pub use offline::{OfflineBackup, OwnedOfflineInspection};
 pub(crate) mod projection;
 pub use projection::RelationProjection;

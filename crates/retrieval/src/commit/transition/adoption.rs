@@ -49,7 +49,7 @@ pub fn adopt_derived_work(
     owner.validate_owned_transaction(transaction)?;
     let mut expected = owner.record.clone();
     expected.phase = TransitionPhase::TargetInstalled;
-    if TransitionRecord::read(&owner.state_path)?.as_ref() != Some(&expected)
+    if owner.current_record()?.as_ref() != Some(&expected)
         || serde_json::to_string(source).map_err(|_| CommitError::InvalidInput)?
             != expected.source.binding
         || serde_json::to_string(target).map_err(|_| CommitError::InvalidInput)?
