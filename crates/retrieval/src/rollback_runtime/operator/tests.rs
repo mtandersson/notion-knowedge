@@ -142,10 +142,23 @@ fn command_case(bound: bool) {
     assert!(!run(&direct, false, false).status.success());
     assert!(!direct.exists());
     assert!(!run(&direct, true, true).status.success());
+    let config_bytes = fs::read(&config_path).unwrap();
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(!run(&direct, false, true).status.success());
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        &config_path,
+        [config_bytes.clone(), b"\n".to_vec()].concat(),
+    )
+    .unwrap();
+    assert!(!run(&direct, false, true).status.success());
+    fs::write(&config_path, &config_bytes).unwrap();
+    assert_eq!(snapshot(&root), before);
     let held = fs::File::open(&config.index_directory).unwrap();
     held.try_lock().unwrap();
     assert!(!run(&direct, false, true).status.success());
     drop(held);
+    assert_eq!(snapshot(&root), before);
     let coordinator =
         IndexCommitCoordinator::open_existing(&config.index_directory, &config.state_file, binding)
             .unwrap();
@@ -154,7 +167,9 @@ fn command_case(bound: bool) {
         .unwrap()
         .as_secs() as i64;
     let lease = coordinator.state().acquire_lease(now, 100).unwrap();
+    let leased = snapshot(&root);
     assert!(!run(&direct, false, true).status.success());
+    assert_eq!(snapshot(&root), leased);
     coordinator.state().release_lease(&lease, now).unwrap();
     let baseline = snapshot(&root);
     assert_ne!(before, baseline); // lease bookkeeping is deliberately acknowledged before verification
@@ -165,9 +180,41 @@ fn command_case(bound: bool) {
         String::from_utf8_lossy(&ok.stderr)
     );
     let original = fs::read(&direct).unwrap();
+    // Select wrong immutable runtime bytes explicitly: never fall back to a
+    // different executable or the host implementation.
+    let mut wrong: VerificationConfig = serde_json::from_slice(&config_bytes).unwrap();
+    wrong.runtime_sha256 = "0".repeat(64);
+    fs::write(&config_path, canonical(&wrong, 65536).unwrap()).unwrap();
+    assert!(!run(&direct, true, true).status.success());
+    fs::write(&config_path, &config_bytes).unwrap();
+    for artifact in [&config.index_directory, &config.state_file]
+        .into_iter()
+        .chain(config.asset.as_ref().map(|a| &a.path))
+    {
+        let moved = parent.path().join("temporarily-missing");
+        fs::rename(artifact, &moved).unwrap();
+        assert!(!run(&direct, true, true).status.success());
+        fs::rename(&moved, artifact).unwrap();
+        assert_eq!(fs::read(&direct).unwrap(), original);
+        assert_eq!(snapshot(&root), baseline);
+    }
+
     assert!(!run(&direct, false, true).status.success());
     assert!(run(&direct, true, true).status.success());
     assert_eq!(fs::read(&direct).unwrap(), original);
+    let disappearing = direct.clone();
+    evidence::CHECKPOINT.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |phase| {
+            if phase == "verified" {
+                fs::remove_file(&disappearing).unwrap();
+            }
+        }))
+    });
+    assert!(verify(&config_path, &direct, true, true).is_err());
+    evidence::CHECKPOINT.with(|hook| *hook.borrow_mut() = None);
+    assert!(!direct.exists()); // explicit retry must never recreate missing input
+    store(&direct, &original);
+    assert_eq!(snapshot(&root), baseline);
     for phase in ["stage-synced", "renamed", "published"] {
         let output = parent.path().join(format!("{phase}.json"));
         let marker = parent.path().join(format!("{phase}.marker"));

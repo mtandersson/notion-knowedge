@@ -127,8 +127,12 @@ pub fn verify(
                 VerificationLimits::default(),
             )
             .map_err(|_| CommitError::BindingMismatch)?;
-            let result = evidence::publish(evidence_path, owner, &proof)
-                .map_err(|_| CommitError::BindingMismatch)?;
+            let result = if retained {
+                evidence::reuse(evidence_path, owner, &proof)
+            } else {
+                evidence::publish(evidence_path, owner, &proof)
+            }
+            .map_err(|_| CommitError::BindingMismatch)?;
             if previous.as_ref().is_some_and(|p| *p != result) {
                 return Err(CommitError::BindingMismatch);
             }
