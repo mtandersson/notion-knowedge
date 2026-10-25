@@ -1082,7 +1082,9 @@ fn offline_candidate_process_interruption_never_activates_or_publishes_incomplet
         let f = offline_process_fixture();
         let original = fs::read(f.root.join("state.sqlite")).unwrap();
         let mut child = candidate_child(&f, "prepare", phase);
-        wait_for(|| f.root.join("observed-phase").exists());
+        wait_for(|| {
+            fs::read_to_string(f.root.join("observed-phase")).is_ok_and(|value| value == phase)
+        });
         assert_eq!(
             fs::read_to_string(f.root.join("observed-phase")).unwrap(),
             phase
@@ -1434,7 +1436,9 @@ fn killed_transition_recovers_every_durable_phase_in_a_fresh_process() {
             &fs::metadata(f.root.join("state.sqlite")).unwrap(),
         );
         let mut child = transition_child(&f, phase);
-        wait_for(|| f.root.join("observed-transition").exists());
+        wait_for(|| {
+            fs::read_to_string(f.root.join("observed-transition")).is_ok_and(|value| value == phase)
+        });
         assert_eq!(
             fs::read_to_string(f.root.join("observed-transition")).unwrap(),
             phase
@@ -1626,7 +1630,10 @@ fn prepared_abort_case(phase: &str, operator: Option<&std::path::Path>) {
         "prepared"
     };
     let mut preparing = transition_child(&f, initial_phase);
-    wait_for(|| f.root.join("observed-transition").exists());
+    wait_for(|| {
+        fs::read_to_string(f.root.join("observed-transition"))
+            .is_ok_and(|value| value == initial_phase)
+    });
     preparing.0.kill().unwrap();
     preparing.0.wait().unwrap();
     fs::remove_file(f.root.join("observed-transition")).unwrap();
@@ -1716,7 +1723,9 @@ fn prepared_abort_case(phase: &str, operator: Option<&std::path::Path>) {
         );
     } else {
         let mut aborting = transition_child_action(&f, phase, "abort");
-        wait_for(|| f.root.join("observed-transition").exists());
+        wait_for(|| {
+            fs::read_to_string(f.root.join("observed-transition")).is_ok_and(|value| value == phase)
+        });
         assert_eq!(
             fs::read_to_string(f.root.join("observed-transition")).unwrap(),
             phase
