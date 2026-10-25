@@ -1919,6 +1919,8 @@ fn rows_to_batch(
 
 #[cfg(target_os = "linux")]
 pub use guarded::canonical_transfer;
+#[cfg(target_os = "linux")]
+pub use guarded::runtime_builder;
 
 #[cfg(test)]
 mod tests {
