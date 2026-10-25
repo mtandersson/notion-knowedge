@@ -20,6 +20,8 @@ use std::{
 #[cfg(feature = "local-lancedb")]
 pub mod builder;
 #[cfg(feature = "local-lancedb")]
+pub mod candidate;
+#[cfg(feature = "local-lancedb")]
 pub mod evidence;
 #[cfg(feature = "local-lancedb")]
 pub mod operator;
