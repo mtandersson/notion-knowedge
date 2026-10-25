@@ -9,7 +9,11 @@ use crate::{
     },
 };
 use serde::{Deserialize, Serialize};
-use std::{fs::OpenOptions, io::Read, os::unix::fs::DirBuilderExt};
+use std::{
+    fs::OpenOptions,
+    io::Read,
+    os::{fd::AsRawFd, unix::fs::DirBuilderExt},
+};
 const MAX_METADATA: usize = 131072;
 const PROTOCOL: &str = "canonical-runtime-candidate-v1;policy-independent-physical-fencing";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,19 +256,16 @@ pub fn execute(
             return Err(bad());
         }
         if let Some(dictionary) = dictionary {
-            let binding = LexicalIndexBinding::for_candidate(
-                &request.candidate,
+            write_candidate_binding(
+                &guard,
                 request.transfer.metadata.embedding.clone(),
                 &target,
-                LexicalPlanIdentity::verified(dictionary)?,
+                dictionary,
                 &request.transfer.metadata.source.snapshot_sha256,
             )?;
-            write_new(
-                &request.candidate.join(lexical_binding::FILE),
-                &binding.canonical_bytes()?,
-            )?;
         }
-        sync_tree(&request.candidate, request.limits.native, &mut 0, &mut 0, 0)?;
+        let anchored = PathBuf::from(format!("/proc/self/fd/{}", guard.as_raw_fd()));
+        sync_tree(&anchored, request.limits.native, &mut 0, &mut 0, 0)?;
         parent.sync_all()?;
     }
     if request.candidate.join(READY).exists()
@@ -322,4 +323,88 @@ pub fn execute(
         target_authority_json: request.target_authority_json,
         snapshot,
     })
+}
+
+// Both physical identity capture and publication resolve through the retained
+// directory descriptor. A replaced external pathname can only cause refusal;
+// it cannot redirect this write into the original source or another directory.
+fn write_candidate_binding(
+    guard: &fs::File,
+    embedding: EmbeddingMetadata,
+    target: &crate::commit::CommitBinding,
+    dictionary: &crate::lexical_dictionary::Dictionary,
+    snapshot: &str,
+) -> Result<(), ChunkTableError> {
+    let anchored = PathBuf::from(format!("/proc/self/fd/{}", guard.as_raw_fd()));
+    let binding = LexicalIndexBinding::for_candidate(
+        &anchored,
+        embedding,
+        target,
+        LexicalPlanIdentity::verified(dictionary)?,
+        snapshot,
+    )?;
+    write_new(
+        &anchored.join(lexical_binding::FILE),
+        &binding.canonical_bytes()?,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn binding_write_keeps_retained_candidate_identity_after_path_replacement() {
+        let root = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let candidate = root.path().join("candidate");
+        let retained = root.path().join("retained");
+        let source = root.path().join("legacy-source");
+        for path in [&candidate, &source] {
+            fs::DirBuilder::new().mode(0o700).create(path).unwrap();
+        }
+        fs::write(source.join("original"), b"unchanged original source").unwrap();
+        let identity = DirectoryIdentity::capture(&candidate).unwrap();
+        let guard = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(&candidate)
+            .unwrap();
+        // Deterministic replacement immediately before the production binding
+        // publication boundary, after the candidate identity was checked.
+        fs::rename(&candidate, &retained).unwrap();
+        std::os::unix::fs::symlink(&source, &candidate).unwrap();
+        let (target, embedding) =
+            crate::rollback_runtime::probe::fixture_configuration(false).unwrap();
+        let dictionary = crate::lexical_dictionary::tests::dictionary(&[("coffee", "kaffe")]);
+        write_candidate_binding(
+            &guard,
+            embedding.clone(),
+            &target,
+            &dictionary,
+            &"a".repeat(64),
+        )
+        .unwrap();
+        assert!(DirectoryIdentity::capture(&candidate).is_err());
+        assert_eq!(fs::read_dir(&source).unwrap().count(), 1);
+        assert_eq!(
+            fs::read(source.join("original")).unwrap(),
+            b"unchanged original source"
+        );
+        let binding = lexical_binding::read(&retained).unwrap().unwrap();
+        binding
+            .validate(
+                &retained,
+                &embedding,
+                &target,
+                &LexicalPlanIdentity::verified(&dictionary).unwrap(),
+            )
+            .unwrap();
+        let actual = DirectoryIdentity::capture(&retained).unwrap();
+        assert_eq!(
+            (actual.device, actual.inode),
+            (identity.device, identity.inode)
+        );
+    }
 }
