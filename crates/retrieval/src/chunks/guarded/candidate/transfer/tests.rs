@@ -172,6 +172,10 @@ fn owned_transfer_preserves_latest_native_rows_raw_strings_and_exact_vector_bits
         })
         .unwrap();
         assert_eq!(observed, 1);
+        streamed_consumption(parent.path(), &fresh_path, &fresh, limits);
+        if bound {
+            opaque_native_description(&fresh_path, &fresh, limits);
+        }
         assert_eq!(bytes(&root), latest);
         refusals(&fresh_path, &fresh, limits);
         assert_eq!(bytes(&root), latest);
@@ -284,4 +288,134 @@ fn refusals(path: &Path, record: &TransferRecord, limits: TransferLimits) {
     fs::remove_file(path).unwrap();
     fs::rename(old, path).unwrap();
     assert_eq!(fs::read(path).unwrap(), original);
+}
+
+fn streamed_consumption(
+    parent: &Path,
+    path: &Path,
+    record: &TransferRecord,
+    limits: TransferLimits,
+) {
+    let mut callback = Vec::new();
+    read(path, record, limits, |b| {
+        callback.push(json(&row(b, 0)?, limits.frame())?);
+        Ok(())
+    })
+    .unwrap();
+    let streamed = Reader::open(path, record, limits)
+        .unwrap()
+        .map(|b| json(&row(&b.unwrap(), 0).unwrap(), limits.frame()).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(streamed, callback);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let database_path = parent.join("stream-ingestion");
+    let db = rt
+        .block_on(lancedb::connect(&local_database_uri(&database_path).unwrap()).execute())
+        .unwrap();
+    let reader = Reader::open(path, record, limits).unwrap();
+    let table = rt
+        .block_on(
+            db.create_table(
+                "complete",
+                Box::new(reader) as Box<dyn arrow_array::RecordBatchReader + Send>,
+            )
+            .execute(),
+        )
+        .unwrap();
+    assert_eq!(
+        rt.block_on(table.count_rows(None)).unwrap() as u64,
+        record.metadata.source.rows
+    );
+    let batches = rt.block_on(async {
+        table
+            .query()
+            .execute()
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+    });
+    let stored = batches
+        .iter()
+        .flat_map(|b| {
+            (0..b.num_rows()).map(move |i| json(&row(b, i).unwrap(), limits.frame()).unwrap())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(stored, callback);
+    // Correct complete-file SHA does not excuse a bad trailing frame/digest.
+    // The Arrow consumer must receive the final error, not a successful EOF.
+    let original = fs::read(path).unwrap();
+    let bad = rewrite(path, record, &[original.clone(), vec![0]].concat());
+    let mut reader = Reader::open(path, &bad, limits).unwrap();
+    assert!(reader.next().unwrap().is_ok());
+    assert!(reader.next().unwrap().is_err());
+    assert!(reader.next().is_none());
+    let reader = Reader::open(path, &bad, limits).unwrap();
+    assert!(
+        rt.block_on(
+            db.create_table(
+                "incomplete",
+                Box::new(reader) as Box<dyn arrow_array::RecordBatchReader + Send>
+            )
+            .execute()
+        )
+        .is_err()
+    );
+    fs::write(path, original).unwrap();
+}
+fn opaque_native_description(path: &Path, record: &TransferRecord, limits: TransferLimits) {
+    let original = fs::read(path).unwrap();
+    let header_len = u32::from_le_bytes(original[8..12].try_into().unwrap()) as usize;
+    let original_binding =
+        serde_json::to_value(record.metadata.source.lexical.as_ref().unwrap()).unwrap();
+    for case in [
+        "opaque",
+        "version",
+        "embedding",
+        "policy",
+        "physical",
+        "embedding-contract",
+        "canonical",
+    ] {
+        let mut binding = original_binding.clone();
+        match case {
+            "opaque" => {
+                binding["storage"]["backend"] = "another-native-backend".into();
+                binding["storage"]["schema"] = "another-native-layout".into();
+                binding["storage"]["profile"]["language"] = "opaque-tokenizer-language".into();
+                binding["plan"]["executor_sha256"] = "e".repeat(64).into();
+            }
+            "version" => binding["version"] = 99.into(),
+            "embedding" => binding["embedding"]["model_id"] = "other-model".into(),
+            "policy" => binding["scope"] = "f".repeat(64).into(),
+            "physical" => binding["generation"] = "other-generation".into(),
+            "embedding-contract" => {
+                binding["plan"]["embedding_text_contract"] = "unsupported".into()
+            }
+            _ => binding["storage"]["canonical_schema"] = "unsupported".into(),
+        }
+        let mut expected = record.clone();
+        expected.metadata.source.lexical = Some(serde_json::from_value(binding).unwrap());
+        let mut data = MAGIC.to_vec();
+        frame(&mut data, &expected.metadata, HEADER_BYTES).unwrap();
+        data.extend_from_slice(&original[12 + header_len..]);
+        let expected = rewrite(path, &expected, &data);
+        let mut count = 0;
+        let result = read(path, &expected, limits, |_| {
+            count += 1;
+            Ok(())
+        });
+        assert_eq!(result.is_ok(), case == "opaque", "{case}");
+        assert_eq!(count, if case == "opaque" { 1 } else { 0 });
+        let result = Reader::open(path, &expected, limits)
+            .and_then(|reader| reader.collect::<Result<Vec<_>, _>>().map_err(|_| bad()));
+        assert_eq!(result.is_ok(), case == "opaque", "{case}");
+    }
+    // This exercises an untrusted descriptive envelope, not a verified source
+    // on that backend. Both source ownership and runtime proof remain separate.
+    fs::write(path, original).unwrap();
 }

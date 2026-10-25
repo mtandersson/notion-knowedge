@@ -299,3 +299,18 @@ no source, SQL or candidate authority; restarted reuse needs fresh ownership
 and comparison. This unit does not build/select a candidate or publish rollback:
 #539 owns the prior-runtime builder and #540 owns the integrated candidate and
 archive-freshness proof. #524 remains open for its full acceptance.
+
+`canonical_transfer::Reader` exposes the same validated transfer as an Arrow
+`RecordBatchReader` for bounded native streaming ingestion. The callback API
+uses this reader too. Consumers must exhaust the iterator and propagate any
+error, including the final digest/EOF and file-identity checks; a partial read
+never establishes complete validation or authority.
+
+The transfer's current-source native backend, layout, profile and plan identities
+remain descriptive and opaque to a prior consumer. Reader validation enforces
+the known envelope/canonical version, embedding/text contract, logical policy,
+physical generation/epoch and digest shapes without trying to open that native
+backend or execute that plan. Actual native source/provenance verification still
+belongs to the owning current host. This does not certify an unfamiliar backend
+or historical pair. Candidate construction and integrated proof remain #539 and
+#540; #524 remains open.
