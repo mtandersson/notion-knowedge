@@ -15,7 +15,8 @@ use std::{
 };
 const MAGIC: &[u8; 8] = b"NKROWS\0\x01";
 const HEADER_BYTES: usize = 65536;
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TransferLimits {
     pub native: CandidateLimits,
     pub sql_bytes: u64,
@@ -318,90 +319,162 @@ pub fn read(
     limits: TransferLimits,
     mut visit: impl FnMut(&RecordBatch) -> Result<(), ChunkTableError>,
 ) -> Result<(), ChunkTableError> {
-    limits.validate(&expected.metadata.embedding)?;
-    let directory = parent(path).map_err(|_| bad())?;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)?;
-    let before = file.metadata()?;
-    if !before.is_file()
-        || before.nlink() != 1
-        || before.uid() != fs::metadata("/proc/self")?.uid()
-        || before.mode() & 0o077 != 0
-        || before.len() != expected.bytes
-        || before.len() > limits.bytes
-    {
-        return Err(bad());
+    let mut reader = Reader::open(path, expected, limits)?;
+    while let Some(batch) = reader.next_native()? {
+        visit(&batch)?;
     }
-    let mut hash = Sha256::new();
-    let mut offset = 0;
-    let mut buffer = [0; 65536];
-    loop {
-        let n = file.read_at(&mut buffer, offset)?;
-        if n == 0 {
-            break;
-        }
-        offset = offset.checked_add(n as u64).ok_or_else(bad)?;
-        if offset > expected.bytes {
-            return Err(bad());
-        }
-        hash.update(&buffer[..n]);
-    }
-    if offset != expected.bytes || format!("{:x}", hash.finalize()) != expected.sha256 {
-        return Err(bad());
-    }
-    same_file(&file, path, &before)?;
-    let mut magic = [0; 8];
-    file.read_exact(&mut magic)?;
-    if &magic != MAGIC {
-        return Err(bad());
-    }
-    let metadata: TransferMetadata = read_frame(&mut file, HEADER_BYTES)?;
-    if metadata != expected.metadata
-        || metadata.version != 1
-        || metadata.canonical_schema != CANONICAL_CHUNK_SCHEMA_VERSION
-        || metadata.source.version != 2
-        || metadata.source.source_version == 0
-        || metadata.operational.bytes == 0
-        || metadata.operational.bytes > limits.sql_bytes
-        || metadata.source.rows > limits.native.rows
-    {
-        return Err(bad());
-    }
-    for hash in [
-        &metadata.ownership_sha256,
-        &metadata.operational.sha256,
-        &metadata.source.authority_sha256,
-        &metadata.source.snapshot_sha256,
-    ] {
-        if hash.len() != 64
-            || !hash
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    Ok(())
+}
+/// Bounded Arrow reader for a selected runtime's native streaming writer.
+/// All batches and final EOF must be consumed; this is never source authority.
+pub struct Reader {
+    file: File,
+    directory: File,
+    path: PathBuf,
+    before: fs::Metadata,
+    metadata: TransferMetadata,
+    authority: crate::commit::CommitBinding,
+    limits: TransferLimits,
+    validation: RowValidation,
+    finished: bool,
+    schema: SchemaRef,
+}
+impl Reader {
+    pub fn open(
+        path: &Path,
+        expected: &TransferRecord,
+        limits: TransferLimits,
+    ) -> Result<Self, ChunkTableError> {
+        limits.validate(&expected.metadata.embedding)?;
+        let directory = parent(path).map_err(|_| bad())?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)?;
+        let before = file.metadata()?;
+        if !before.is_file()
+            || before.nlink() != 1
+            || before.uid() != fs::metadata("/proc/self")?.uid()
+            || before.mode() & 0o077 != 0
+            || before.len() != expected.bytes
+            || before.len() > limits.bytes
         {
             return Err(bad());
         }
+        let mut hash = Sha256::new();
+        let mut offset = 0;
+        let mut buffer = [0; 65536];
+        loop {
+            let n = file.read_at(&mut buffer, offset)?;
+            if n == 0 {
+                break;
+            }
+            offset = offset.checked_add(n as u64).ok_or_else(bad)?;
+            if offset > expected.bytes {
+                return Err(bad());
+            }
+            hash.update(&buffer[..n]);
+        }
+        if offset != expected.bytes || format!("{:x}", hash.finalize()) != expected.sha256 {
+            return Err(bad());
+        }
+        same_file(&file, path, &before)?;
+        let mut magic = [0; 8];
+        file.read_exact(&mut magic)?;
+        if &magic != MAGIC {
+            return Err(bad());
+        }
+        let metadata: TransferMetadata = read_frame(&mut file, HEADER_BYTES)?;
+        if metadata != expected.metadata
+            || metadata.version != 1
+            || metadata.canonical_schema != CANONICAL_CHUNK_SCHEMA_VERSION
+            || metadata.source.version != 2
+            || metadata.source.source_version == 0
+            || metadata.operational.bytes == 0
+            || metadata.operational.bytes > limits.sql_bytes
+            || metadata.source.rows > limits.native.rows
+        {
+            return Err(bad());
+        }
+        for hash in [
+            &metadata.ownership_sha256,
+            &metadata.operational.sha256,
+            &metadata.source.authority_sha256,
+            &metadata.source.snapshot_sha256,
+        ] {
+            if hash.len() != 64
+                || !hash
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(bad());
+            }
+        }
+        let authority =
+            crate::commit::CommitBinding::parse_retained(metadata.authority_json.as_bytes())
+                .map_err(|_| bad())?;
+        if let Some(binding) = &metadata.source.lexical {
+            binding.validate_transfer_metadata(&metadata.embedding, &authority)?;
+        }
+        let schema = chunk_schema(&metadata.embedding)?;
+        Ok(Self {
+            file,
+            directory,
+            path: path.into(),
+            before,
+            metadata,
+            authority,
+            limits,
+            validation: RowValidation::default(),
+            finished: false,
+            schema,
+        })
     }
-    if let Some(binding) = &metadata.source.lexical {
-        binding.validate_metadata()?;
+    fn next_native(&mut self) -> Result<Option<RecordBatch>, ChunkTableError> {
+        if self.finished {
+            return Ok(None);
+        }
+        if self.validation.digest.rows < self.metadata.source.rows {
+            let row: Row = read_frame(&mut self.file, self.limits.frame())?;
+            let batch = batch(row, &self.metadata.embedding)?;
+            self.validation.batch(
+                &batch,
+                &self.authority,
+                &self.metadata.embedding,
+                self.limits.native,
+            )?;
+            return Ok(Some(batch));
+        }
+        self.finished = true;
+        if self.file.read(&mut [0])? != 0
+            || self.validation.digest.finish() != self.metadata.source.snapshot_sha256
+        {
+            return Err(bad());
+        }
+        same_file(&self.file, &self.path, &self.before)?;
+        check_parent(&self.directory, &self.path).map_err(|_| bad())?;
+        Ok(None)
     }
-    let authority =
-        crate::commit::CommitBinding::parse_retained(metadata.authority_json.as_bytes())
-            .map_err(|_| bad())?;
-    let mut validation = RowValidation::default();
-    for _ in 0..metadata.source.rows {
-        let row: Row = read_frame(&mut file, limits.frame())?;
-        let batch = batch(row, &metadata.embedding)?;
-        validation.batch(&batch, &authority, &metadata.embedding, limits.native)?;
-        visit(&batch)?;
+}
+impl Iterator for Reader {
+    type Item = Result<RecordBatch, arrow_schema::ArrowError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.next_native() {
+            Ok(Some(batch)) => Some(Ok(batch)),
+            Ok(None) => None,
+            Err(_) => {
+                self.finished = true;
+                Some(Err(arrow_schema::ArrowError::ParseError(
+                    "invalid canonical transfer".into(),
+                )))
+            }
+        }
     }
-    if file.read(&mut [0])? != 0 || validation.digest.finish() != metadata.source.snapshot_sha256 {
-        return Err(bad());
+}
+impl arrow_array::RecordBatchReader for Reader {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
     }
-    same_file(&file, path, &before)?;
-    check_parent(&directory, path).map_err(|_| bad())?;
-    Ok(())
 }
 #[cfg(test)]
 mod tests;
