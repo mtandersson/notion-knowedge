@@ -17,14 +17,18 @@ use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
 #[test]
 #[ignore = "requires matching normal NK_LEXICAL_RUNTIME"]
 fn runtime_journal_legacy_handoff_quarantine_and_retention_preserve_source() {
-    run(false);
+    for newer in [false, true] {
+        run_case(false, newer);
+    }
 }
 #[test]
 #[ignore = "requires matching normal runtime and pinned NK_LEXICAL_TEST_ARCHIVE"]
 fn runtime_journal_bound_handoff_quarantine_and_retention_preserve_source() {
-    run(true);
+    for newer in [false, true] {
+        run_case(true, newer);
+    }
 }
-fn run(bound: bool) {
+fn run_case(bound: bool, newer: bool) {
     let binary = PathBuf::from(std::env::var_os("NK_LEXICAL_RUNTIME").unwrap());
     let sha = format!("{:x}", Sha256::digest(fs::read(&binary).unwrap()));
     let runtime = PinnedRuntime::pin(&binary, &sha, 1 << 30).unwrap();
@@ -78,7 +82,9 @@ fn run(bound: bool) {
     let current_dictionary = dictionary(&[("cinnamon roll", "distinct current plan")]);
     let source = activate(&root, &old, &embedding, &current_dictionary);
     drop(old);
-    probe::commit_fixture_row(&root, source.clone(), Some(&current_dictionary)).unwrap();
+    if newer {
+        probe::commit_fixture_row(&root, source.clone(), Some(&current_dictionary)).unwrap();
+    }
     let current = IndexCommitCoordinator::open_existing(&index, &state, source.clone()).unwrap();
     let lineage = vec![crate::commit::transition::journal_path(&state).unwrap()];
     let prior = root.join("selected-prior-archive");
@@ -165,6 +171,19 @@ fn run(bound: bool) {
     let record = operator.retain_current_source(i64::MAX / 2).unwrap();
     assert_eq!(record.phase, RuntimePhase::SourceRetained);
     assert!(!index.exists());
+    assert_eq!(bytes(&archive), before);
+    let record = operator.refence_target(i64::MAX / 2).unwrap();
+    assert_eq!(record.phase, RuntimePhase::TargetRefenced);
+    assert_eq!(
+        record.refenced.as_ref().unwrap().snapshot_sha256,
+        metadata.current.metadata.source.snapshot_sha256
+    );
+    assert_eq!(bytes(&archive), before);
+    let record = operator.install_target(i64::MAX / 2).unwrap();
+    assert_eq!(record.phase, RuntimePhase::TargetInstalled);
+    operator.publish_derived(i64::MAX / 2).unwrap();
+    let record = operator.complete_publication(i64::MAX / 2).unwrap();
+    assert_eq!(record.phase, RuntimePhase::Complete);
     assert_eq!(bytes(&archive), before);
     drop(operator);
     let reopened = RuntimeTransitionOperator::open(

@@ -757,6 +757,8 @@ impl GuardedChunkTable {
 
 #[cfg(target_os = "linux")]
 pub use candidate::runtime_builder;
+#[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+pub use candidate::runtime_refence;
 #[cfg(target_os = "linux")]
 pub use candidate::transfer as canonical_transfer;
 

@@ -512,3 +512,47 @@ impl TransitionOwnership {
         self.validate_owned_transaction(transaction)
     }
 }
+
+impl TransitionOwnership {
+    pub(crate) fn record_refenced(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+        snapshot: RuntimeSourceSnapshot,
+    ) -> Result<RuntimeJournalRecord, CommitError> {
+        self.validate_owned_transaction(transaction)?;
+        let previous = self.runtime_record()?;
+        if previous.phase != RuntimePhase::SourceRetained {
+            return Err(CommitError::Conflict);
+        }
+        let mut next = previous.clone();
+        next.phase = RuntimePhase::TargetRefenced;
+        next.refenced = Some(snapshot);
+        next.canonical_bytes()?;
+        persist(self, &next, Some(&previous))?;
+        self.validate_owned_transaction(transaction)?;
+        Ok(next)
+    }
+}
+
+impl TransitionOwnership {
+    pub(crate) fn advance_runtime_phase(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+        phase: RuntimePhase,
+    ) -> Result<RuntimeJournalRecord, CommitError> {
+        self.validate_owned_transaction(transaction)?;
+        let previous = self.runtime_record()?;
+        if !matches!(
+            (previous.phase, phase),
+            (RuntimePhase::TargetInstalled, RuntimePhase::Published)
+                | (RuntimePhase::Published, RuntimePhase::Complete)
+        ) {
+            return Err(CommitError::Conflict);
+        }
+        let mut next = previous.clone();
+        next.phase = phase;
+        persist(self, &next, Some(&previous))?;
+        self.validate_owned_transaction(transaction)?;
+        Ok(next)
+    }
+}

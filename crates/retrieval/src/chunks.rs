@@ -1921,6 +1921,8 @@ fn rows_to_batch(
 pub use guarded::canonical_transfer;
 #[cfg(target_os = "linux")]
 pub use guarded::runtime_builder;
+#[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+pub use guarded::runtime_refence;
 
 #[cfg(test)]
 mod tests {

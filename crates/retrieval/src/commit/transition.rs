@@ -553,6 +553,14 @@ impl TransitionOwnership {
     ) -> Result<TransitionRecord, CommitError> {
         self.install_candidate_inner(now, true, verify)
     }
+    #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+    pub(crate) fn install_candidate_checked(
+        &self,
+        now: i64,
+        verify: impl FnMut(&rusqlite::Transaction<'_>) -> Result<(), CommitError>,
+    ) -> Result<TransitionRecord, CommitError> {
+        self.install_candidate_inner(now, false, verify)
+    }
     fn install_candidate_inner(
         &self,
         now: i64,
@@ -624,6 +632,7 @@ impl TransitionOwnership {
             File::open(current.target.path.parent().ok_or(CommitError::InvalidInput)?).map_err(io)?.sync_all().map_err(io)?;
             #[cfg(test)]
             transition_checkpoint(self, "target-renamed");
+            verify(transaction)?;
             if current.phase == TransitionPhase::SourceRetained {
                 let previous = current.clone();
                 current.phase = TransitionPhase::TargetInstalled;

@@ -25,7 +25,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("describe") => 1,
         Some(
             "probe-create" | "probe-reopen" | "inspect-source" | "candidate-create"
-            | "candidate-reopen",
+            | "candidate-reopen" | "refence-owned",
         ) => 2,
         _ => return Err("unsupported action".into()),
     };
@@ -48,6 +48,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             Path::new(&args[1]),
             dictionary.as_ref(),
             action == OsStr::new("candidate-create"),
+        )?
+    } else if action == OsStr::new("refence-owned") {
+        notion_knowledge_retrieval::chunks::runtime_refence::execute(
+            Path::new(&args[1]),
+            dictionary.as_ref(),
         )?
     } else if action == OsStr::new("inspect-source") {
         source::inspect_request(Path::new(&args[1]), dictionary.as_ref())?

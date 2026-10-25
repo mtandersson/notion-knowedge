@@ -307,7 +307,7 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
         } else {
             &old
         };
-        let target_report = observe(
+        let target_result = observe(
             self.runtime,
             self.asset,
             &target,
@@ -315,7 +315,24 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
             &self.embedding,
             self.limits.transfer,
             remaining()?,
-        )?;
+        );
+        let mut recovering_refence = false;
+        let target_report = match target_result {
+            Ok(report) => report,
+            Err(_) if record.phase == RuntimePhase::SourceRetained => {
+                recovering_refence = true;
+                observe(
+                    self.runtime,
+                    self.asset,
+                    &target,
+                    &self.target,
+                    &self.embedding,
+                    self.limits.transfer,
+                    remaining()?,
+                )?
+            }
+            Err(error) => return Err(error),
+        };
         let expected_target = record
             .refenced
             .as_ref()
@@ -329,9 +346,20 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
             || target_report.source.source_version != expected_target.source_version
             || target_report.source.rows != expected.rows
             || target_report.source.snapshot_sha256 != expected.snapshot_sha256
-            || target_report.source.lexical != expected_target.lexical
+            || (!recovering_refence && target_report.source.lexical != expected_target.lexical)
         {
             return Err(RuntimeError);
+        }
+        if recovering_refence {
+            match &target_report.source.lexical {
+                Some(binding) if candidate.prior.descriptor.describes_bound_source(binding) => {
+                    binding
+                        .validate_transfer_metadata(&self.embedding, &self.target)
+                        .map_err(err)?
+                }
+                None if candidate.prior.descriptor.is_legacy() => (),
+                _ => return Err(RuntimeError),
+            }
         }
         if self._prior.is_some() {
             let prior = observe(
@@ -607,3 +635,166 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
 
 #[cfg(test)]
 mod tests;
+
+impl RuntimeTransitionOperator<'_> {
+    /// Refence only the retained target under the exact selected implementation.
+    /// Current source/SQL and all canonical rows/vectors remain unchanged.
+    pub fn refence_target(&self, now: i64) -> Result<RuntimeJournalRecord> {
+        use crate::chunks::runtime_refence::RefenceRequest;
+        use std::{io::Write, os::unix::fs::PermissionsExt};
+        self.owner
+            .with_exclusive_sql(now, |transaction| {
+                let result = (|| -> Result<RuntimeJournalRecord> {
+                    let version = self.verify_all(transaction)?;
+                    let record = self.owner.runtime_record().map_err(err)?;
+                    if record.phase != RuntimePhase::SourceRetained {
+                        return Err(RuntimeError);
+                    }
+                    let (source, target) = self.owner.physical_paths().map_err(err)?;
+                    let request = RefenceRequest {
+                        version: 1,
+                        source: DirectoryIdentity::capture(&source).map_err(err)?,
+                        target: DirectoryIdentity::capture(&target).map_err(err)?,
+                        current_authority_json: record
+                            .prepared
+                            .candidate
+                            .current
+                            .metadata
+                            .authority_json
+                            .clone(),
+                        old_authority_json: record.prepared.observed_target_authority_json.clone(),
+                        desired_authority_json: record
+                            .prepared
+                            .candidate
+                            .target_authority_json
+                            .clone(),
+                        embedding: self.embedding.clone(),
+                        runtime: record.prepared.candidate.prior.descriptor.clone(),
+                        source_version: version,
+                        rows: record.prepared.candidate.current.metadata.source.rows,
+                        snapshot_sha256: record
+                            .prepared
+                            .candidate
+                            .current
+                            .metadata
+                            .source
+                            .snapshot_sha256
+                            .clone(),
+                        limits: self.limits.transfer.native,
+                    };
+                    let root = tempfile::Builder::new()
+                        .permissions(std::fs::Permissions::from_mode(0o700))
+                        .tempdir()?;
+                    let path = root.path().join("request.json");
+                    let mut file = OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .open(&path)?;
+                    file.write_all(&request.canonical_bytes().map_err(err)?)?;
+                    drop(file);
+                    let mode = self
+                        .asset
+                        .map(PinnedAsset::mode)
+                        .unwrap_or_else(|| vec!["legacy".into()]);
+                    let bytes = self.runtime.run(
+                        &[
+                            vec!["refence-owned".into(), path.as_os_str().to_owned()],
+                            mode,
+                        ]
+                        .concat(),
+                        self.limits.process_budget,
+                        131072,
+                    )?;
+                    let report = super::source::SourceReport::parse_metadata(&bytes)?;
+                    if report.descriptor != record.prepared.candidate.prior.descriptor
+                        || report.source.source_version != version
+                        || report.source.rows != request.rows
+                        || report.source.snapshot_sha256 != request.snapshot_sha256
+                    {
+                        return Err(RuntimeError);
+                    }
+                    // Re-run actual checks before accepting the journaled result;
+                    // SourceRetained explicitly permits the just-completed fence.
+                    self.verify_all(transaction)?;
+                    let result = self
+                        .owner
+                        .record_refenced(transaction, report.source)
+                        .map_err(err)?;
+                    self.verify_all(transaction)?;
+                    Ok(result)
+                })();
+                result.map_err(|_| crate::commit::CommitError::BindingMismatch)
+            })
+            .map_err(err)
+    }
+}
+
+impl RuntimeTransitionOperator<'_> {
+    pub fn install_target(&self, now: i64) -> Result<RuntimeJournalRecord> {
+        self.owner
+            .install_candidate_checked(now, |transaction| {
+                self.verify_all(transaction)
+                    .map(|_| ())
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)
+            })
+            .map_err(err)?;
+        self.owner.runtime_record().map_err(err)
+    }
+    /// Actual native checks bracket the entire SQL adoption/CAS transaction.
+    pub fn publish_derived(&self, now: i64) -> Result<()> {
+        use crate::commit::transition::publication::{SqlPublication, publish_derived_owned};
+        self.owner
+            .with_exclusive_sql(now, |transaction| {
+                let version = self
+                    .verify_all(transaction)
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                publish_derived_owned(
+                    &self.owner,
+                    transaction,
+                    SqlPublication {
+                        source: &self.source,
+                        target: &self.target,
+                        target_version: version,
+                        adoption: self.limits.adoption,
+                        manifest: self.limits.sql,
+                        backup_bytes: self.limits.transfer.sql_bytes,
+                    },
+                )?;
+                self.verify_all(transaction)
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                Ok(())
+            })
+            .map_err(err)
+    }
+    pub fn complete_publication(&self, now: i64) -> Result<RuntimeJournalRecord> {
+        self.owner
+            .with_exclusive_sql(now, |transaction| {
+                self.verify_all(transaction)
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                let mut current = self.owner.runtime_record()?;
+                if current.phase == RuntimePhase::TargetInstalled {
+                    crate::commit::transition::publication::install_anchor(&self.owner)?;
+                    self.verify_all(transaction)
+                        .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                    current = self
+                        .owner
+                        .advance_runtime_phase(transaction, RuntimePhase::Published)?;
+                }
+                if current.phase == RuntimePhase::Published {
+                    self.verify_all(transaction)
+                        .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                    current = self
+                        .owner
+                        .advance_runtime_phase(transaction, RuntimePhase::Complete)?;
+                }
+                if current.phase != RuntimePhase::Complete {
+                    return Err(crate::commit::CommitError::Conflict);
+                }
+                self.verify_all(transaction)
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                Ok(current)
+            })
+            .map_err(err)
+    }
+}
