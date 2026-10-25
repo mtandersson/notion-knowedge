@@ -236,6 +236,8 @@ pub fn publish(
     directory.sync_all()?;
     check_parent(&directory, path)?;
     owner.revalidate().map_err(err)?;
+    #[cfg(test)]
+    checkpoint("stage-synced");
     let from = name(stage_path.file_name().ok_or(RuntimeError)?)?;
     let to = name(filename)?;
     // SAFETY: both names are single components relative to the retained private
@@ -252,6 +254,8 @@ pub fn publish(
     {
         return Err(RuntimeError);
     }
+    #[cfg(test)]
+    checkpoint("renamed");
     directory.sync_all()?;
     let (actual, _) = read_at(&directory, filename)?;
     if actual != evidence {
@@ -259,5 +263,22 @@ pub fn publish(
     }
     owner.revalidate().map_err(err)?;
     check_parent(&directory, path)?;
+    #[cfg(test)]
+    checkpoint("published");
     Ok(evidence)
+}
+
+#[cfg(test)]
+type CheckpointHook = std::cell::RefCell<Option<Box<dyn Fn(&str)>>>;
+#[cfg(test)]
+thread_local! {
+    pub(super) static CHECKPOINT: CheckpointHook = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+fn checkpoint(phase: &str) {
+    CHECKPOINT.with(|hook| {
+        if let Some(hook) = hook.borrow().as_ref() {
+            hook(phase);
+        }
+    });
 }

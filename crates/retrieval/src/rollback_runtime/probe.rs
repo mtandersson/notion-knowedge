@@ -416,6 +416,52 @@ pub(crate) fn fixture_configuration(legacy: bool) -> Result<(CommitBinding, Embe
 }
 
 #[cfg(test)]
+pub(crate) fn commit_new_fixture_row(root: &Path, dictionary: Option<&Dictionary>) -> Result<()> {
+    let coordinator = IndexCommitCoordinator::open_existing(
+        root.join("index"),
+        root.join("state.sqlite"),
+        report_binding(dictionary.is_none())?,
+    )
+    .map_err(err)?;
+    let table = bind_table(root, coordinator.clone(), dictionary)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(err)?
+        .as_secs() as i64;
+    let lease = coordinator.state().acquire_lease(now, 100).map_err(err)?;
+    let mut row = chunk();
+    row.text = "new acknowledged cinnamon roll".into();
+    row.content_hash = "new-acknowledged-content".into();
+    row.metadata.last_edited_time = "new-acknowledged-revision".into();
+    let operation = PageOperation::new(
+        "new-acknowledged-operation",
+        "new-acknowledged-revision",
+        PageAction::Refresh,
+        PageSyncState::present(
+            PAGE.into(),
+            row.content_hash.clone(),
+            Some(row.metadata.last_edited_time.clone()),
+        )
+        .map_err(err)?,
+    )
+    .map_err(err)?;
+    let rt = runtime()?;
+    let prepared = rt
+        .block_on(table.prepare_page(&Provider(embedding()?), operation, &[row]))
+        .map_err(err)?;
+    if prepared.metrics().changed != 1 {
+        return Err(RuntimeError);
+    }
+    rt.block_on(
+        table.commit_page(prepared, lease.clone(), Arc::new(move || now), || async {
+            Ok(())
+        }),
+    )
+    .map_err(err)?;
+    coordinator.state().release_lease(&lease, now).map_err(err)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
