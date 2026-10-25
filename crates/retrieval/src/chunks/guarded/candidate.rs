@@ -11,7 +11,8 @@ use std::{
 
 const READY: &str = ".nk-lexical-candidate-ready-v1.json";
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CandidateLimits {
     pub files: usize,
     pub file_bytes: u64,
@@ -501,7 +502,9 @@ impl SnapshotDigest {
                 return Err(bad());
             }
         }
-        let row_hash = hash.finalize();
+        self.add_hash(&hash.finalize())
+    }
+    fn add_hash(&mut self, row_hash: &sha2::digest::Output<Sha256>) -> Result<(), ChunkTableError> {
         let mut carry = 0u16;
         for (i, value) in row_hash.iter().enumerate() {
             self.xor[i] ^= value;
@@ -925,6 +928,9 @@ impl GuardedChunkTable {
 
 /// Complete bounded native observation, not permanent compatibility authority.
 /// Includes exact canonical row/vector bytes and the original lexical binding.
+/// Version 2 additionally binds the bounded physical file/descriptor inventory
+/// to authority_sha256; changed inode, timestamp or permissions cannot reuse
+/// an otherwise identical cached canonical-row observation.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSourceSnapshot {
@@ -955,16 +961,60 @@ pub fn inspect_runtime_source(
     {
         return Err(bad());
     }
+    fn node(
+        root: &Path,
+        path: &Path,
+        metadata: &fs::Metadata,
+        tree: &mut SnapshotDigest,
+    ) -> Result<(), ChunkTableError> {
+        use std::os::unix::ffi::OsStrExt;
+        let name = path
+            .strip_prefix(root)
+            .map_err(|_| bad())?
+            .as_os_str()
+            .as_bytes();
+        let mut hash = Sha256::new();
+        hash.update(b"nk-native-artifact-descriptor-v1");
+        hash.update((name.len() as u64).to_le_bytes());
+        hash.update(name);
+        for value in [
+            metadata.dev(),
+            metadata.ino(),
+            metadata.len(),
+            metadata.nlink(),
+            metadata.mode() as u64,
+            metadata.uid() as u64,
+            metadata.gid() as u64,
+        ] {
+            hash.update(value.to_le_bytes());
+        }
+        for value in [
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        ] {
+            hash.update(value.to_le_bytes());
+        }
+        tree.add_hash(&hash.finalize())
+    }
     fn preflight(
+        root: &Path,
         path: &Path,
         limits: CandidateLimits,
         files: &mut usize,
         bytes: &mut u64,
         depth: usize,
+        tree: &mut SnapshotDigest,
     ) -> Result<(), ChunkTableError> {
         if depth > 32 {
             return Err(bad());
         }
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.is_dir() {
+            return Err(bad());
+        }
+        node(root, path, &metadata, tree)?;
         for entry in fs::read_dir(path)? {
             let entry = entry?;
             *files = files.checked_add(1).ok_or_else(bad)?;
@@ -973,22 +1023,25 @@ pub fn inspect_runtime_source(
             }
             let metadata = fs::symlink_metadata(entry.path())?;
             if metadata.is_dir() {
-                preflight(&entry.path(), limits, files, bytes, depth + 1)?;
+                preflight(root, &entry.path(), limits, files, bytes, depth + 1, tree)?;
             } else if metadata.is_file() && metadata.nlink() == 1 {
                 *bytes = bytes.checked_add(metadata.len()).ok_or_else(bad)?;
                 if *bytes > limits.file_bytes {
                     return Err(bad());
                 }
+                node(root, &entry.path(), &metadata, tree)?;
             } else {
                 return Err(bad());
             }
         }
         Ok(())
     }
-    if !fs::symlink_metadata(directory)?.is_dir() {
-        return Err(bad());
-    }
-    preflight(directory, limits, &mut 0, &mut 0, 0)?;
+    let inventory = || {
+        let mut tree = SnapshotDigest::default();
+        preflight(directory, directory, limits, &mut 0, &mut 0, 0, &mut tree)?;
+        Ok::<_, ChunkTableError>(tree.finish())
+    };
+    let physical = inventory()?;
     let lexical = lexical_binding::read(directory)?;
     if let Some(binding) = &lexical {
         binding.validate_offline_source(directory, embedding, authority)?;
@@ -1016,9 +1069,16 @@ pub fn inspect_runtime_source(
     if source_authority_at(directory, authority)? != authority_sha256 {
         return Err(bad());
     }
+    if inventory()? != physical {
+        return Err(bad());
+    }
+    let mut authority = Sha256::new();
+    authority.update(b"nk-runtime-source-physical-authority-v2");
+    authority.update(authority_sha256.as_bytes());
+    authority.update(physical.as_bytes());
     Ok(RuntimeSourceSnapshot {
-        version: 1,
-        authority_sha256,
+        version: 2,
+        authority_sha256: format!("{:x}", authority.finalize()),
         source_version,
         rows: digest.rows,
         snapshot_sha256: digest.finish(),

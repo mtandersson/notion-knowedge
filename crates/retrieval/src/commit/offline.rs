@@ -120,6 +120,8 @@ impl OwnedOfflineInspection<'_> {
     /// Scope, state token, operational anchor and physical authority must still
     /// be exactly those captured by the original coordinator.
     pub fn revalidate(&self) -> Result<(), CommitError> {
+        private_parent(&self.coordinator.state_path)?;
+        private_parent(&self.coordinator.index_path)?;
         self.coordinator.identities()?;
         validate_original_state(&self.state, self.coordinator)?;
         transition::validate_connection_file(

@@ -14,15 +14,16 @@ fn main() {
 #[cfg(target_os = "linux")]
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     use notion_knowledge_retrieval::{
-        chunks::lexical_binding::runtime::RuntimeDescriptor, lexical_dictionary::Dictionary,
-        rollback_runtime::probe,
+        chunks::lexical_binding::runtime::RuntimeDescriptor,
+        lexical_dictionary::Dictionary,
+        rollback_runtime::{probe, source},
     };
     use std::{ffi::OsStr, io::Write, path::Path};
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let action = args.first().ok_or("missing action")?;
     let mode_index = match action.to_str() {
         Some("describe") => 1,
-        Some("probe-create" | "probe-reopen") => 2,
+        Some("probe-create" | "probe-reopen" | "inspect-source") => 2,
         _ => return Err("unsupported action".into()),
     };
     let mode = args.get(mode_index).ok_or("missing lexical mode")?;
@@ -39,6 +40,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let bytes = if action == OsStr::new("describe") {
         RuntimeDescriptor::current(dictionary.as_ref())?.canonical_bytes()?
+    } else if action == OsStr::new("inspect-source") {
+        source::inspect_request(Path::new(&args[1]), dictionary.as_ref())?
     } else {
         let root = Path::new(&args[1]);
         if !root.is_absolute() {

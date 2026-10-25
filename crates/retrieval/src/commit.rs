@@ -89,6 +89,57 @@ impl CommitBinding {
             epoch,
         })
     }
+    /// Parse canonical descriptive authority sent by an already-owned offline
+    /// verifier. This does not open SQL, initialize a coordinator or grant use.
+    #[cfg(all(target_os = "linux", feature = "local-lancedb"))]
+    pub(crate) fn parse_retained(bytes: &[u8]) -> Result<Self, CommitError> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            table: String,
+            workspace: String,
+            roots: Vec<String>,
+            scope: String,
+            generation: String,
+            epoch: u64,
+        }
+        if bytes.len() > 32768 {
+            return Err(CommitError::InvalidInput);
+        }
+        let wire: Wire = serde_json::from_slice(bytes).map_err(|_| CommitError::InvalidInput)?;
+        if wire.scope.len() != 64
+            || !wire
+                .scope
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(CommitError::InvalidInput);
+        }
+        // Validate canonical roots through the original constructor. Retain the
+        // exact trusted source scope digest; never infer a new policy identity.
+        let roots = ReconciliationScope::new(
+            wire.roots.clone(),
+            vec![],
+            "retained-metadata",
+            "retained-metadata",
+        )
+        .map_err(|_| CommitError::InvalidInput)?;
+        if roots.roots() != wire.roots {
+            return Err(CommitError::InvalidInput);
+        }
+        let mut result = Self::new(
+            &wire.table,
+            &wire.workspace,
+            &roots,
+            &wire.generation,
+            wire.epoch,
+        )?;
+        result.scope = wire.scope;
+        if serde_json::to_vec(&result).map_err(|_| CommitError::InvalidInput)? != bytes {
+            return Err(CommitError::InvalidInput);
+        }
+        Ok(result)
+    }
     pub fn table(&self) -> &str {
         &self.table
     }

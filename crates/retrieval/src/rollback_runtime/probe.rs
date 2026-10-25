@@ -71,10 +71,13 @@ fn binding(generation: &str, epoch: u64) -> Result<CommitBinding> {
     .map_err(err)
 }
 fn final_binding(dictionary: Option<&Dictionary>) -> Result<CommitBinding> {
-    if dictionary.is_some() {
-        binding("probe-expanded", 5)
-    } else {
+    report_binding(dictionary.is_none())
+}
+fn report_binding(legacy: bool) -> Result<CommitBinding> {
+    if legacy {
         binding("probe-current", 3)
+    } else {
+        binding("probe-expanded", 5)
     }
 }
 fn embedding() -> Result<EmbeddingMetadata> {
@@ -351,6 +354,65 @@ pub fn reopen(root: &Path, dictionary: Option<&Dictionary>) -> Result<ProbeRepor
         chunk: CHUNK.into(),
         snapshot,
     })
+}
+
+/// Check a selected trusted runtime's report against the actual disposable
+/// native fixture. Metadata alone never substitutes for either native source.
+pub(crate) fn verify_report(
+    bytes: &[u8],
+    descriptor: &RuntimeDescriptor,
+    root: &Path,
+    limits: CandidateLimits,
+) -> Result<ProbeReport> {
+    if bytes.len() > 65536 {
+        return Err(RuntimeError);
+    }
+    let report: ProbeReport = serde_json::from_slice(bytes).map_err(err)?;
+    let authority = report_binding(descriptor.is_legacy())?;
+    if report.version != 1
+        || &report.descriptor != descriptor
+        || report.policy != scope()?.identity()
+        || report.generation != authority.generation()
+        || report.epoch != authority.epoch()
+        || report.page != PAGE
+        || report.chunk != CHUNK
+        || serde_json::to_vec(&report).map_err(err)? != bytes
+    {
+        return Err(RuntimeError);
+    }
+    // This is the disposable fixture's SQL, never the locked original state.
+    // Independently verify its real current schema and published policy/physical
+    // tuple; a runtime's claimed descriptor cannot substitute for admission.
+    let coordinator = IndexCommitCoordinator::open_read_only(
+        root.join("index"),
+        root.join("state.sqlite"),
+        authority.clone(),
+    )
+    .map_err(err)?;
+    let _guard = coordinator.search_guard().map_err(err)?;
+    let actual = crate::chunks::inspect_runtime_source(
+        &root.join("index"),
+        &embedding()?,
+        &authority,
+        limits,
+    )
+    .map_err(err)?;
+    if actual.rows != 1
+        || report.snapshot != actual
+        || actual
+            .lexical
+            .as_ref()
+            .is_some_and(|b| !descriptor.describes_bound_source(b))
+        || actual.lexical.is_none() != descriptor.is_legacy()
+    {
+        return Err(RuntimeError);
+    }
+    Ok(report)
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_configuration(legacy: bool) -> Result<(CommitBinding, EmbeddingMetadata)> {
+    Ok((report_binding(legacy)?, embedding()?))
 }
 
 #[cfg(test)]

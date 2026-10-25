@@ -134,10 +134,46 @@ limit is 1 GiB; use a bounded shipping artifact rather than a multi-gigabyte
 native test binary with debug data. The selected binary and its dependencies
 must already be trusted; pinning does not establish that trust.
 
-These components do not yet construct verified prior-source compatibility.
-Retained owned-source evidence and its selected-runtime verification remain
-required before #523 can close. Probe reports and parsed descriptors remain
-metadata, and must not be accepted as activation authority. The normal compiled
-legacy probe runs explicitly in CI through sealed execution. The bound normal
-executable test additionally accepts `NK_LEXICAL_TEST_ARCHIVE` pointing to the
-local pinned public archive; it never downloads data or uses Notion credentials.
+## Ownership-scoped actual source verification
+
+`IndexCommitCoordinator::with_owned_offline_inspection` retains the original
+index lock, exclusive operational transaction and no-follow state descriptor.
+Its read-only context validates SQLite's own VFS descriptor before queries and
+checks the original token/binding tuple again after the callback. Existing
+`with_offline_inspection` callers use the same boundary through a wrapper.
+The context exposes bounded operational-byte hashing without reopening SQL or
+exposing a connection. All source processes must already be stopped.
+
+`rollback_runtime::verification::verify` borrows that context, an immutable
+`PinnedRuntime`, and an optional opaque `PinnedAsset`. It captures actual native
+source and SQL evidence, asks that exact runtime to inspect the source under its
+own compiled storage/plan/asset contract, exercises real disposable fencing and
+fresh-process reopen, then repeats the original source/state/artifact checks.
+The host does not execute an old bundle with its current importer. Exact prior
+identities must match; unsupported or differently identified backports are
+refused rather than relabeled. A compatible artifact and its matching asset
+must already be explicitly trusted and available.
+
+The selected runtime's `inspect-source PRIVATE_REQUEST legacy|expansion ...`
+entrypoint consumes bounded canonical owned configuration and opens no original
+operational SQL. Requests omit SQL paths/tokens and source content. Reports are
+descriptive, and parsing one never creates verified authority. They must match
+the host's still-owned actual source; a generic fixture alone is insufficient.
+Native source observation version 2 also binds a streaming bounded inventory of
+relative paths, inodes, size, ownership, permissions and modification/change
+timestamps. It checks that inventory before and after scanning, so a replaced
+native file cannot reuse cached row evidence. Canonical row/vector digests and
+existing candidate/transition record formats retain their previous meaning.
+
+The resulting `VerifiedPriorRuntime` has a private constructor, no deserializer,
+and a lifetime tied to its owning callback. It cannot escape that ownership or
+be reconstructed from saved metadata. No serving or activation command is
+introduced. This implementation remains subject to #529's complete verification
+and independent review before delivery. Durable evidence, explicit operator
+shutdown acknowledgement, cross-restart retry and aggregate acceptance remain
+#530/#528/#523; candidate rebuilding/publication remain #524/#525.
+
+The normal compiled legacy probe and actual owned-source verifier run explicitly
+in CI through sealed execution. The bound normal-executable tests additionally
+accept `NK_LEXICAL_TEST_ARCHIVE` pointing to the local pinned public archive;
+they never download data or use Notion credentials.

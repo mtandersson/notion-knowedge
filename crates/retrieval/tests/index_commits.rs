@@ -1916,3 +1916,19 @@ fn owned_offline_inspection_rechecks_original_file_identity_after_the_callback()
         assert_eq!(fs::read(&f.state).unwrap(), before);
     }
 }
+
+#[test]
+fn owned_offline_inspection_refuses_loss_of_private_parent_ownership() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = private_inspection_fixture();
+    let c = f.coordinator();
+    let before = fs::read(&f.state).unwrap();
+    let result = c.with_owned_offline_inspection(10, |owner| {
+        owner.revalidate()?;
+        fs::set_permissions(&f.root, fs::Permissions::from_mode(0o755)).unwrap();
+        Ok(())
+    });
+    assert_eq!(result, Err(CommitError::InvalidInput));
+    fs::set_permissions(&f.root, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(fs::read(&f.state).unwrap(), before);
+}
