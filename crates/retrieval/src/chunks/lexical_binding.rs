@@ -164,18 +164,14 @@ impl LexicalIndexBinding {
     pub fn plan(&self) -> &LexicalPlanIdentity {
         &self.plan
     }
-    /// Offline migration may read an earlier approved plan/storage build without
-    /// executing it. Admit only known schema/backend/tokenizer and the unchanged
-    /// embedding text contract, authority and physical generation. Complete rows
-    /// and vectors are subsequently verified; runtime validation remains exact.
-    pub(crate) fn validate_offline_source(
-        &self,
-        directory: &Path,
-        embedding: &EmbeddingMetadata,
-        authority: &CommitBinding,
-    ) -> Result<(), ChunkTableError> {
+    /// Validate supported descriptive metadata without asserting live source
+    /// identity or equivalence to this build's implementation.
+    pub(crate) fn validate_metadata(&self) -> Result<(), ChunkTableError> {
         let current = StorageIdentity::current();
-        if self.storage.schema != current.schema
+        if self.version != 1
+            || !valid_digest(&self.source_snapshot_sha256)
+            || self.canonical_bytes()?.len() as u64 > MAX_BYTES
+            || self.storage.schema != current.schema
             || self.storage.canonical_schema != current.canonical_schema
             || self.storage.fields != current.fields
             || self.storage.backend != current.backend
@@ -199,6 +195,19 @@ impl LexicalIndexBinding {
         {
             return Err(incompatible());
         }
+        Ok(())
+    }
+    /// Offline migration may read an earlier approved plan/storage build without
+    /// executing it. Admit only known schema/backend/tokenizer and the unchanged
+    /// embedding text contract, authority and physical generation. Complete rows
+    /// and vectors are subsequently verified; runtime validation remains exact.
+    pub(crate) fn validate_offline_source(
+        &self,
+        directory: &Path,
+        embedding: &EmbeddingMetadata,
+        authority: &CommitBinding,
+    ) -> Result<(), ChunkTableError> {
+        self.validate_metadata()?;
         let expected = Self::for_candidate(
             directory,
             embedding.clone(),

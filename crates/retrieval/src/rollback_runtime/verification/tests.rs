@@ -163,6 +163,20 @@ fn normal_runtime_case(archive: Option<&Path>) {
             );
             assert_eq!(std::fs::read(&evidence_path).unwrap(), invalid);
         }
+        if archive.is_some() {
+            let mut metadata: serde_json::Value = serde_json::from_slice(&original).unwrap();
+            metadata["observation"]["source"]["lexical"]["version"] = 999.into();
+            // Re-serialize through the descriptive type to preserve canonical
+            // field order: refusal must be the unsupported nested schema.
+            let unsupported: crate::rollback_runtime::evidence::RetainedEvidence =
+                serde_json::from_value(metadata).unwrap();
+            let canonical = serde_json::to_vec(&unsupported).unwrap();
+            std::fs::write(&evidence_path, &canonical).unwrap();
+            assert!(
+                crate::rollback_runtime::evidence::RetainedEvidence::read(&evidence_path).is_err()
+            );
+            assert_eq!(std::fs::read(&evidence_path).unwrap(), canonical);
+        }
         std::fs::write(&evidence_path, &original).unwrap();
         used = true;
         Ok(())

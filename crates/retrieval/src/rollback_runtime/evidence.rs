@@ -59,6 +59,9 @@ impl RetainedEvidence {
             return Err(RuntimeError);
         }
         SourceReport::parse_metadata(&canonical(&value.observation, MAX_BYTES)?)?;
+        if let Some(binding) = &value.observation.source.lexical {
+            binding.validate_metadata().map_err(err)?;
+        }
         for hash in [
             &value.authority_sha256,
             &value.operational_sha256,
