@@ -1883,6 +1883,24 @@ fn owned_offline_inspection_refuses_live_leases_before_exposing_the_context() {
     assert!(!called.get());
     assert_eq!(fs::read(&f.state).unwrap(), before);
     c.state().release_lease(&lease, 12).unwrap();
+    let db = rusqlite::Connection::open(&f.state).unwrap();
+    db.execute_batch("INSERT INTO mutation_refresh(workspace_id,mutation_digest,page_id) VALUES('workspace','held-intent','page'); INSERT INTO file_refresh_intents VALUES('workspace','held-intent',zeroblob(32),100,200,'held');").unwrap();
+    let held = fs::read(&f.state).unwrap();
+    assert_eq!(
+        c.with_owned_offline_inspection(13, |_| {
+            called.set(true);
+            Ok(())
+        }),
+        Err(CommitError::Conflict)
+    );
+    assert!(!called.get());
+    assert_eq!(fs::read(&f.state).unwrap(), held);
+    db.execute(
+        "UPDATE file_refresh_intents SET phase='released',lease_until=0",
+        [],
+    )
+    .unwrap();
+    drop(db);
     c.with_owned_offline_inspection(13, |owner| owner.revalidate())
         .unwrap();
     let guard = fs::File::open(&f.index).unwrap();
