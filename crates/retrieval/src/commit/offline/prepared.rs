@@ -20,6 +20,7 @@ impl OwnedOfflineInspection<'_> {
         &self,
         path: &Path,
         max_bytes: u64,
+        create: bool,
     ) -> Result<OfflineBackup, CommitError> {
         let expected = self.state_snapshot(max_bytes)?;
         private_parent(path)?;
@@ -43,7 +44,7 @@ impl OwnedOfflineInspection<'_> {
                 self.revalidate()?;
                 return Ok(expected);
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => (),
             Err(error) => return Err(io(error)),
         }
         let mut output = OpenOptions::new()

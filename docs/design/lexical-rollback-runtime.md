@@ -397,3 +397,25 @@ Prepared publication still requires actual native/runtime and whole-SQL
 verification under retained ownership, private no-clobber durable persistence,
 and killed-process/fresh-process retry tests. The metadata contract alone does
 not complete #546 or authorize #547 publication.
+
+`prepared::prepare` now retains the actual original transaction through complete
+selected-runtime candidate verification, a descriptor-anchored immutable SQL
+backup, whole-SQL manifest comparison and the shared derived-work adoption
+preview. The preview rolls back its temporary table and changes no operational
+rows. Quarantine/final generation names must be unused; preparation reserves
+neither. Candidate and prior archive locks remain held across final native
+inspection and record preparation, without reacquiring SQL/index ownership.
+
+`VerifiedPreparedRollback` has no public constructor or deserializer. Its
+`publish` method revalidates actual owned inputs, writes/fsyncs a private kept
+stage and renames without replacement through a retained parent descriptor,
+then fsyncs that directory. Incomplete diagnostics survive. Retained reopening
+and exact retry run actual verification again; missing metadata/backups are
+refused rather than recreated. Unknown, noncanonical, nonprivate, aliased or
+oversized metadata is not an authority source.
+
+The Prepared boundary does not rewrite a prior archive, quarantine the current
+source, reserve generations, adopt/publish SQL, install a target or serve it.
+#547 must reverify each actual publication phase under its real SQL/physical
+owner, including recoverable selected-runtime archive refencing. Those later
+conditions cannot be inferred from this Prepared record or its phase label.

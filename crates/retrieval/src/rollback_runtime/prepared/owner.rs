@@ -40,10 +40,10 @@ impl Default for PreparedLimits {
 /// Only actual owned verification constructs this value. Retained metadata must
 /// be independently reverified and cannot construct it by deserialization.
 pub struct VerifiedPreparedRollback<'owner> {
-    owner: &'owner OwnedOfflineInspection<'owner>,
-    candidate: VerifiedPriorCandidate<'owner>,
-    metadata: PreparedRollbackMetadata,
-    limits: PreparedLimits,
+    pub(super) owner: &'owner OwnedOfflineInspection<'owner>,
+    pub(super) candidate: VerifiedPriorCandidate<'owner>,
+    pub(super) metadata: PreparedRollbackMetadata,
+    pub(super) limits: PreparedLimits,
 }
 impl VerifiedPreparedRollback<'_> {
     pub fn metadata(&self) -> &PreparedRollbackMetadata {
@@ -51,6 +51,25 @@ impl VerifiedPreparedRollback<'_> {
     }
     pub fn revalidate(&self) -> Result<()> {
         self.candidate.revalidate()?;
+        self.revalidate_state()
+    }
+    pub(super) fn revalidate_state(&self) -> Result<()> {
+        let provenance = self
+            .owner
+            .prior_archive(&self.metadata.lineage_paths)
+            .map_err(err)?;
+        if DirectoryIdentity::capture(self.owner.index_directory()).map_err(err)?
+            != self.metadata.current
+            || self.owner.state_path() != self.metadata.state_path
+            || DirectoryIdentity::capture(&self.metadata.prior_archive.path).map_err(err)?
+                != self.metadata.prior_archive
+            || provenance.path != self.metadata.prior_archive.path
+            || provenance.device != self.metadata.prior_archive.device
+            || provenance.inode != self.metadata.prior_archive.inode
+            || provenance.lineage_sha256 != self.metadata.candidate.lineage_sha256
+        {
+            return Err(RuntimeError);
+        }
         self.metadata.canonical_bytes()?;
         self.metadata
             .backup
@@ -107,6 +126,39 @@ pub fn prepare<'owner>(
     backup_path: &Path,
     limits: PreparedLimits,
 ) -> Result<VerifiedPreparedRollback<'owner>> {
+    prepare_inner(owner, inputs, embedding, backup_path, limits, None)
+}
+/// Freshly verify an explicitly retained Prepared record. Missing backups or
+/// metadata are errors; reopening never recreates them.
+pub fn reopen<'owner>(
+    owner: &'owner OwnedOfflineInspection<'owner>,
+    inputs: PreparedInputs<'owner>,
+    embedding: &EmbeddingMetadata,
+    path: &Path,
+    limits: PreparedLimits,
+) -> Result<VerifiedPreparedRollback<'owner>> {
+    let retained = PreparedRollbackMetadata::read(path)?;
+    let proof = prepare_inner(
+        owner,
+        inputs,
+        embedding,
+        &retained.backup_path,
+        limits,
+        Some(&retained),
+    )?;
+    if PreparedRollbackMetadata::read(path)? != retained {
+        return Err(RuntimeError);
+    }
+    Ok(proof)
+}
+fn prepare_inner<'owner>(
+    owner: &'owner OwnedOfflineInspection<'owner>,
+    inputs: PreparedInputs<'owner>,
+    embedding: &EmbeddingMetadata,
+    backup_path: &Path,
+    limits: PreparedLimits,
+    retained: Option<&PreparedRollbackMetadata>,
+) -> Result<VerifiedPreparedRollback<'owner>> {
     let prior_archive = DirectoryIdentity::capture(inputs.prior.archive).map_err(err)?;
     let prior_evidence_path = inputs.prior.evidence.to_owned();
     let lineage_paths = inputs.prior.lineage.to_vec();
@@ -133,6 +185,12 @@ pub fn prepare<'owner>(
         limits.process_budget,
     )?;
     let provenance = owner.prior_archive(&lineage_paths).map_err(err)?;
+    if provenance.path != prior_archive.path
+        || provenance.device != prior_archive.device
+        || provenance.inode != prior_archive.inode
+    {
+        return Err(RuntimeError);
+    }
     let metadata = candidate.with_locked_candidate(|report| {
         let connection = owner.owned_transaction().map_err(err)?;
         let reused: bool = connection.query_row(
@@ -141,7 +199,7 @@ pub fn prepare<'owner>(
         if reused { return Err(RuntimeError); }
         let sql_limits = preparation_limits(owner.binding(), target, quarantine_generation, limits.sql).map_err(err)?;
         let before = manifest::capture_sql_manifest(connection, sql_limits).map_err(err)?;
-        let backup = owner.backup_current(backup_path, limits.transfer.sql_bytes).map_err(err)?;
+        let backup = owner.backup_current(backup_path, limits.transfer.sql_bytes, retained.is_none()).map_err(err)?;
         if backup_manifest(backup_path, &backup, sql_limits)? != before { return Err(RuntimeError); }
         adoption::preview_current(owner, target, report.source.source_version, limits.adoption).map_err(err)?;
         if manifest::capture_sql_manifest(connection, sql_limits).map_err(err)? != before { return Err(RuntimeError); }
@@ -157,6 +215,7 @@ pub fn prepare<'owner>(
             backup_path: backup_path.into(), backup, adoption: before,
         };
         metadata.canonical_bytes()?;
+        if retained.is_some_and(|expected| expected != &metadata) { return Err(RuntimeError); }
         Ok(metadata)
     })?;
     let verified = VerifiedPreparedRollback {

@@ -132,7 +132,12 @@ fn run(bound: bool) {
         } else {
             "exact.sqlite"
         });
-        current.with_owned_offline_inspection(i64::MAX/2, |owner| {
+        let record_path = parent.path().join(if newer {
+            "latest-prepared.json"
+        } else {
+            "exact-prepared.json"
+        });
+        let prepared_metadata = current.with_owned_offline_inspection(i64::MAX/2, |owner| {
             let prepared = prepare(owner, PreparedInputs { prior: inputs(),
                 retained: RetainedCandidate { transfer: &transfer, metadata: &metadata },
                 target: &target, quarantine_generation: "rollback-quarantine" },
@@ -148,12 +153,202 @@ fn run(bound: bool) {
             let temp: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_temp_schema WHERE name='nk_adoption_owned_pages')", [], |r|r.get(0)).unwrap();
             assert!(!temp);
             prepared.revalidate().unwrap();
+            prepared.publish(&record_path).unwrap();
             let original = fs::read(&backup).unwrap();
             fs::write(&backup, b"corrupt immutable backup").unwrap();
             assert!(prepared.revalidate().is_err());
             fs::write(&backup, original).unwrap();
-            Ok(())
+            Ok(record.clone())
         }).unwrap();
         assert_eq!(bytes(&root), before);
+        assert_eq!(
+            PreparedRollbackMetadata::read(&record_path).unwrap(),
+            prepared_metadata
+        );
+        let alias = parent
+            .path()
+            .join(if newer { "latest-alias" } else { "exact-alias" });
+        std::os::unix::fs::symlink(&record_path, &alias).unwrap();
+        assert!(PreparedRollbackMetadata::read(&alias).is_err());
+        if newer && !bound {
+            killed_publication_retries(&record_path, &binary, &sha, &prepared_metadata);
+            assert_eq!(bytes(&root), before);
+        }
+        // Retained reopening never creates a missing immutable backup.
+        let saved = fs::read(&backup).unwrap();
+        fs::remove_file(&backup).unwrap();
+        current
+            .with_owned_offline_inspection(i64::MAX / 2, |owner| {
+                assert!(
+                    reopen(
+                        owner,
+                        PreparedInputs {
+                            prior: inputs(),
+                            retained: RetainedCandidate {
+                                transfer: &transfer,
+                                metadata: &metadata
+                            },
+                            target: &target,
+                            quarantine_generation: "rollback-quarantine"
+                        },
+                        &embedding,
+                        &record_path,
+                        PreparedLimits::default()
+                    )
+                    .is_err()
+                );
+                assert!(!backup.exists());
+                Ok(())
+            })
+            .unwrap();
+        fs::write(&backup, saved).unwrap();
+        fs::set_permissions(&backup, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(bytes(&root), before);
     }
+}
+
+struct Child(std::process::Child);
+impl Drop for Child {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+fn spawn_record_child(
+    input: &Path,
+    output: &Path,
+    runtime: &Path,
+    sha: &str,
+    phase: &str,
+) -> Child {
+    Child(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "rollback_runtime::prepared::tests::prepared_record_process_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("NK_RUNTIME_PREPARED_TEST_INPUT", input)
+            .env("NK_RUNTIME_PREPARED_TEST_OUTPUT", output)
+            .env("NK_RUNTIME_PREPARED_TEST_PHASE", phase)
+            .env("NK_RUNTIME_PREPARED_TEST_RUNTIME", runtime)
+            .env("NK_RUNTIME_PREPARED_TEST_SHA", sha)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    )
+}
+fn killed_publication_retries(
+    input: &Path,
+    runtime: &Path,
+    sha: &str,
+    metadata: &PreparedRollbackMetadata,
+) {
+    let parent = input.parent().unwrap();
+    let marker = parent.join("observed-runtime-prepared");
+    for phase in ["stage-synced", "record-renamed", "record-published"] {
+        let output = parent.join(format!("interrupted-{phase}.json"));
+        let mut child = spawn_record_child(input, &output, runtime, sha, phase);
+        let started = std::time::Instant::now();
+        loop {
+            if fs::read_to_string(&marker).is_ok_and(|value| value == phase) {
+                break;
+            }
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "child exited before {phase}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(120),
+                "child timed out before {phase}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child.0.kill().unwrap();
+        assert!(!child.0.wait().unwrap().success());
+        fs::remove_file(&marker).unwrap();
+        if phase == "stage-synced" {
+            assert!(!output.exists());
+            assert!(fs::read_dir(parent).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".nk-runtime-prepared-")
+            }));
+        } else {
+            assert_eq!(PreparedRollbackMetadata::read(&output).unwrap(), *metadata);
+        }
+        for _ in 0..2 {
+            assert!(
+                spawn_record_child(input, &output, runtime, sha, "")
+                    .0
+                    .wait()
+                    .unwrap()
+                    .success()
+            );
+            assert_eq!(PreparedRollbackMetadata::read(&output).unwrap(), *metadata);
+        }
+    }
+}
+#[test]
+#[ignore = "only launched by Prepared durability process tests"]
+fn prepared_record_process_child() {
+    let input = PathBuf::from(std::env::var_os("NK_RUNTIME_PREPARED_TEST_INPUT").unwrap());
+    let output = PathBuf::from(std::env::var_os("NK_RUNTIME_PREPARED_TEST_OUTPUT").unwrap());
+    let metadata = PreparedRollbackMetadata::read(&input).unwrap();
+    let runtime = PinnedRuntime::pin(
+        Path::new(&std::env::var_os("NK_RUNTIME_PREPARED_TEST_RUNTIME").unwrap()),
+        &std::env::var("NK_RUNTIME_PREPARED_TEST_SHA").unwrap(),
+        1 << 30,
+    )
+    .unwrap();
+    assert!(metadata.candidate.asset_sha256.is_none());
+    let binding = CommitBinding::parse_retained(
+        metadata
+            .candidate
+            .current
+            .metadata
+            .authority_json
+            .as_bytes(),
+    )
+    .unwrap();
+    let target =
+        CommitBinding::parse_retained(metadata.candidate.target_authority_json.as_bytes()).unwrap();
+    let current = IndexCommitCoordinator::open_existing(
+        &metadata.current.path,
+        &metadata.state_path,
+        binding,
+    )
+    .unwrap();
+    current
+        .with_owned_offline_inspection(i64::MAX / 2, |owner| {
+            let proof = reopen(
+                owner,
+                PreparedInputs {
+                    prior: PriorInputs {
+                        runtime: &runtime,
+                        asset: None,
+                        evidence: &metadata.prior_evidence_path,
+                        lineage: &metadata.lineage_paths,
+                        archive: &metadata.prior_archive.path,
+                    },
+                    retained: RetainedCandidate {
+                        transfer: &metadata.transfer_path,
+                        metadata: &metadata.candidate,
+                    },
+                    target: &target,
+                    quarantine_generation: &metadata.quarantine_generation,
+                },
+                &metadata.candidate.current.metadata.embedding,
+                &input,
+                PreparedLimits::default(),
+            )
+            .unwrap();
+            proof.publish(&output).unwrap();
+            Ok(())
+        })
+        .unwrap();
 }

@@ -12,7 +12,8 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 mod owner;
-pub use owner::{PreparedInputs, PreparedLimits, VerifiedPreparedRollback, prepare};
+mod store;
+pub use owner::{PreparedInputs, PreparedLimits, VerifiedPreparedRollback, prepare, reopen};
 const MAX_BYTES: usize = 262144;
 const PROTOCOL: &str = "selected-runtime-rollback-prepared-v1";
 fn err<T>(_: T) -> RuntimeError {
