@@ -168,10 +168,14 @@ existing candidate/transition record formats retain their previous meaning.
 The resulting `VerifiedPriorRuntime` has a private constructor, no deserializer,
 and a lifetime tied to its owning callback. It cannot escape that ownership or
 be reconstructed from saved metadata. No serving or activation command is
-introduced. This implementation remains subject to #529's complete verification
-and independent review before delivery. Durable evidence, explicit operator
-shutdown acknowledgement, cross-restart retry and aggregate acceptance remain
-#530/#528/#523; candidate rebuilding/publication remain #524/#525.
+introduced. The owned-source verifier was delivered by #529 (PR #531), followed
+by the durable evidence primitive in #532 (PR #535) and the explicit
+shutdown-acknowledged command and killed-process retry in #533 (PR #536).
+Those latter two units implement #530. A serialized record still cannot
+reconstruct the owned proof: every retry must freshly verify the actual source
+and selected executable. Aggregate acceptance for #530/#528/#523 was reviewed
+against the evidence below and closed after merge verification; candidate
+rebuilding and rollback publication remain #524/#525.
 
 The normal compiled legacy probe and actual owned-source verifier run explicitly
 in CI through sealed execution. The bound normal-executable tests additionally
@@ -196,9 +200,10 @@ parent fsync, atomic no-replace rename and final parent fsync. Failed stages
 remain diagnostics, and callers must name evidence explicitly rather than scan
 for authority. All source processes must remain stopped.
 
-This primitive does not provide the operator command or killed-process retry
-workflow tracked by #533. Activation, rollback publication and aggregate
-acceptance remain gated by their subsequent units.
+This primitive is not itself an operator command or a cross-process retry
+workflow; those behaviors were added separately in #533 (PR #536), as
+documented below. Neither layer enables activation or rollback publication.
+The completed aggregate acceptance review is recorded below.
 
 ### Explicit verification command
 
@@ -237,9 +242,23 @@ This command does not activate, serve, rebuild a candidate or publish rollback.
 
 ### Compatibility acceptance evidence (#530 / #528 / #523)
 
-The following maps the original aggregate requirements to implementation and
-behavioral checks. Aggregates may close only after the command delivery merges
-with its required CI; the candidate and publication requirements remain open.
+The following maps the original #530, #528 and #523 acceptance requirements
+to their implemented boundaries and reported behavioral checks, delivered in
+PRs #531, #535 and #536 (now merged). The mapping is an audit aid, not a
+certificate for an arbitrary historical runtime/asset pair: every selected pair
+still needs its own actual-source and executable verification.
+
+The independent review of PR #536 confirmed this audit, including its follow-up
+assertion for held file-effect leases. Its reviewed head `bcb62cf` passed
+[required CI](https://github.com/mtandersson/notion-knowedge/actions/runs/40182130263)
+and merged as `07b291d`. The merged tree was verified against the reviewed
+implementation before #530, #528 and #523 were closed, with their native
+blocking dependencies confirmed closed. Their closure records retain the
+acceptance evidence and remaining boundaries.
+
+Latest-row candidate rebuilding (#524), rollback publication (#525), and the
+complete operator workflow and parent audits (#517) remain open and separately
+gated. The broader #516/#504/#491 acceptance is not established by these units.
 
 | Original requirement | Evidence boundary and behavioral check |
 | --- | --- |
