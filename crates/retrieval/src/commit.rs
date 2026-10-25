@@ -24,7 +24,7 @@ mod alias_projection;
 mod offline;
 pub mod transition;
 pub use alias_projection::AliasProjection;
-pub use offline::OfflineBackup;
+pub use offline::{OfflineBackup, OwnedOfflineInspection};
 pub(crate) mod projection;
 pub use projection::RelationProjection;
 
