@@ -187,17 +187,6 @@ fn command_case(bound: bool) {
     fs::write(&config_path, canonical(&wrong, 65536).unwrap()).unwrap();
     assert!(!run(&direct, true, true).status.success());
     fs::write(&config_path, &config_bytes).unwrap();
-    for artifact in [&config.index_directory, &config.state_file]
-        .into_iter()
-        .chain(config.asset.as_ref().map(|a| &a.path))
-    {
-        let moved = parent.path().join("temporarily-missing");
-        fs::rename(artifact, &moved).unwrap();
-        assert!(!run(&direct, true, true).status.success());
-        fs::rename(&moved, artifact).unwrap();
-        assert_eq!(fs::read(&direct).unwrap(), original);
-        assert_eq!(snapshot(&root), baseline);
-    }
 
     assert!(!run(&direct, false, true).status.success());
     assert!(run(&direct, true, true).status.success());
@@ -297,9 +286,22 @@ fn command_case(bound: bool) {
         "{}",
         String::from_utf8_lossy(&fresh.stderr)
     );
-    assert_ne!(fs::read(fresh_path).unwrap(), original);
+    let fresh_bytes = fs::read(&fresh_path).unwrap();
+    assert_ne!(fresh_bytes, original);
     fs::write(&direct, b"{").unwrap();
     assert!(!run(&direct, true, true).status.success());
     assert_eq!(fs::read(&direct).unwrap(), b"{");
-    assert_eq!(snapshot(&root), latest);
+    assert_eq!(snapshot(&root), latest); // Directory renames intentionally invalidate physical inventory metadata;
+    // run these destructive fixture probes after all exact-retry assertions.
+    for artifact in [&config.index_directory, &config.state_file]
+        .into_iter()
+        .chain(config.asset.as_ref().map(|a| &a.path))
+    {
+        let moved = parent.path().join("temporarily-missing");
+        fs::rename(artifact, &moved).unwrap();
+        assert!(!run(&fresh_path, true, true).status.success());
+        fs::rename(&moved, artifact).unwrap();
+        assert_eq!(fs::read(&fresh_path).unwrap(), fresh_bytes);
+        assert_eq!(snapshot(&root), latest);
+    }
 }
