@@ -18,7 +18,7 @@ pub mod runtime_journal;
 const MAX_RECORD_BYTES: u64 = 65_536;
 
 #[cfg(test)]
-pub(super) fn transition_checkpoint(owner: &TransitionOwnership, phase: &str) {
+pub(crate) fn transition_checkpoint(owner: &TransitionOwnership, phase: &str) {
     let Some(root) = std::env::var_os("NK_TRANSITION_TEST_ROOT").map(PathBuf::from) else {
         return;
     };
@@ -33,6 +33,23 @@ pub(super) fn transition_checkpoint(owner: &TransitionOwnership, phase: &str) {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn sql_checkpoint(
+    owner: &TransitionOwnership,
+    transaction: &rusqlite::Transaction<'_>,
+    phase: &str,
+) -> Result<(), CommitError> {
+    if std::env::var("NK_TRANSITION_TEST_PHASE").ok().as_deref() == Some(phase) {
+        // Exercise SQLite's real hot rollback journal, not a simulated phase.
+        let flushed = unsafe { rusqlite::ffi::sqlite3_db_cacheflush(transaction.handle()) };
+        if flushed != rusqlite::ffi::SQLITE_OK {
+            return Err(CommitError::Unavailable);
+        }
+    }
+    transition_checkpoint(owner, phase);
+    Ok(())
+}
+
 /// Stable ownership across directory renames. This excludes other transition
 /// operators and guarded index consumers; an exclusive SQLite transaction is
 /// still required to exclude operational writers before any durable effects.
@@ -44,6 +61,8 @@ pub struct TransitionOwnership {
     record: TransitionRecord,
     #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
     runtime: Option<runtime_journal::RuntimeJournalRecord>,
+    #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+    runtime_history: Option<PathBuf>,
 }
 
 fn exclusive(file: &File) -> Result<(), CommitError> {
@@ -194,6 +213,10 @@ impl TransitionOwnership {
     /// only for the shared physical/SQL engine; it is never serialized as v1.
     pub(crate) fn current_record(&self) -> Result<Option<TransitionRecord>, CommitError> {
         #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+        if self.runtime_history.is_some() {
+            return self.runtime_record()?.layout().map(Some);
+        }
+        #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
         if let Some(base) = &self.runtime {
             return runtime_journal::RuntimeJournalRecord::read_active(&self.state_path)?
                 .map(|record| {
@@ -292,6 +315,8 @@ impl TransitionOwnership {
             record: record.clone(),
             #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
             runtime: None,
+            #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+            runtime_history: None,
         };
         owned.revalidate()?;
         // An interrupted publication can leave a hot rollback journal. SQLite
@@ -525,6 +550,8 @@ impl TransitionOwnership {
             }
             transaction.execute("UPDATE index_commit_binding SET generation=?1,epoch=?2 WHERE singleton=1", params![previous.quarantine_generation,quarantine_epoch]).map_err(sql)?;
             verify(transaction)?;
+            #[cfg(test)]
+            sql_checkpoint(self, transaction, "runtime-quarantine-before-commit")?;
             Ok(())
         })?;
         #[cfg(test)]

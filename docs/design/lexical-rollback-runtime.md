@@ -444,3 +444,29 @@ renames, recovery from every durable boundary and ordinary selected-runtime
 admission after completion remain implementation/test gates. Deserializing the
 journal contract alone grants no ownership or publication authority and does
 not complete #547 or #525.
+
+The publication actor now shares the existing original-state, directory-lock,
+quarantine and no-clobber installation engine. Native and whole-SQL checks run
+inside the actual transaction before and after each effect. An exact archive is
+refenced by the pinned selected executable using its own storage/plan identity;
+legacy targets retain binding absence. Adoption changes only compatible derived
+work and the fresh serving fence, with the complete operational manifest checked
+against the activation backup. SQLite performs its own hot-journal recovery;
+application backups are never restored over operational state.
+
+Completion copies and fsyncs immutable version-two history before unlinking the
+active journal. `RuntimeTransitionOperator::verify_completed` accepts an explicit
+completed-history path after that unlink and reacquires the original physical
+and SQL owner, then repeats native, provenance and whole-SQL checks. It refuses
+a new active transition or a changed snapshot. Both initial completion and this
+retry release publication ownership before running actual read-only admission
+in a fresh selected-runtime process. A missing active journal alone is never a
+completion proof.
+
+The native CI lane includes actual legacy publication and subprocess-kill
+recovery. Bound-pair tests additionally require the pinned public archive and a
+matching normal executable through `NK_LEXICAL_TEST_ARCHIVE` and
+`NK_LEXICAL_RUNTIME`. Local passing end-to-end cases establish exact/stale
+archive publication for those fixtures. Interruption/refusal coverage, the
+independent review, required CI and the original aggregate audits remain gates
+before #547/#525/#516 can be closed.

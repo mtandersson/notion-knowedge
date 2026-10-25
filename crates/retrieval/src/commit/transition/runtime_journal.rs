@@ -274,10 +274,32 @@ fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>, CommitError> {
 }
 impl TransitionOwnership {
     pub(crate) fn runtime_record(&self) -> Result<RuntimeJournalRecord, CommitError> {
-        let record =
-            RuntimeJournalRecord::read_active(&self.state_path)?.ok_or(CommitError::Conflict)?;
+        let record = if let Some(history) = &self.runtime_history {
+            if read_bytes(&journal_path(&self.state_path)?)?.is_some() {
+                return Err(CommitError::Conflict);
+            }
+            RuntimeJournalRecord::read_history(history)?
+        } else {
+            RuntimeJournalRecord::read_active(&self.state_path)?.ok_or(CommitError::Conflict)?
+        };
         record.same_operation(self.runtime.as_ref().ok_or(CommitError::BindingMismatch)?)?;
         Ok(record)
+    }
+    pub(crate) fn acquire_completed_runtime(
+        record: &RuntimeJournalRecord,
+        history: &Path,
+    ) -> Result<Self, CommitError> {
+        if record.phase != RuntimePhase::Complete
+            || RuntimeJournalRecord::read_history(history)? != *record
+        {
+            return Err(CommitError::BindingMismatch);
+        }
+        let mut owner = Self::acquire_runtime(record)?;
+        owner.runtime_history = Some(history.to_owned());
+        if owner.runtime_record()? != *record {
+            return Err(CommitError::Conflict);
+        }
+        Ok(owner)
     }
     pub(crate) fn acquire_runtime(record: &RuntimeJournalRecord) -> Result<Self, CommitError> {
         let mut owner = Self::acquire(&record.prepared.state_path, &record.layout()?)?;
@@ -348,6 +370,8 @@ fn persist_expected(
     let (mut file, temporary) = temporary.keep().map_err(|e| io(e.error))?;
     file.write_all(&next.canonical_bytes()?).map_err(io)?;
     file.sync_all().map_err(io)?;
+    #[cfg(test)]
+    transition_checkpoint(owner, &format!("runtime-{:?}-staged", next.phase));
     check_parent(&directory, &path).map_err(invalid)?;
     if read_bytes(&path)? != expected {
         return Err(CommitError::Conflict);
@@ -383,7 +407,11 @@ fn persist_expected(
     if result != 0 {
         return Err(io(std::io::Error::last_os_error()));
     }
+    #[cfg(test)]
+    transition_checkpoint(owner, &format!("runtime-{:?}-renamed", next.phase));
     directory.sync_all().map_err(io)?;
+    #[cfg(test)]
+    transition_checkpoint(owner, &format!("runtime-{:?}-durable", next.phase));
     check_parent(&directory, &path).map_err(invalid)?;
     if RuntimeJournalRecord::read_active(&owner.state_path)?.as_ref() != Some(next) {
         return Err(CommitError::Conflict);
@@ -502,6 +530,8 @@ impl TransitionOwnership {
                 }
             }
             directory.sync_all().map_err(io)?;
+            #[cfg(test)]
+            transition_checkpoint(self, "runtime-prior-history-retained");
             check_parent(&directory, &history).map_err(invalid)?;
             if TransitionRecord::read_completed(&self.state_path, &history)? != *previous {
                 return Err(CommitError::Conflict);
@@ -630,6 +660,8 @@ impl TransitionOwnership {
             return Err(CommitError::Conflict);
         }
         verify(transaction)?;
+        #[cfg(test)]
+        transition_checkpoint(self, "runtime-complete-history-retained");
         check_parent(&directory, &active).map_err(invalid)?;
         let name = std::ffi::CString::new(
             active
@@ -642,6 +674,8 @@ impl TransitionOwnership {
         if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
             return Err(io(std::io::Error::last_os_error()));
         }
+        #[cfg(test)]
+        transition_checkpoint(self, "runtime-complete-unlinked");
         directory.sync_all().map_err(io)?;
         check_parent(&directory, &active).map_err(invalid)?;
         self.validate_owned_transaction(transaction)?;

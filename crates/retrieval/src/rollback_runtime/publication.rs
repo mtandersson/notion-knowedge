@@ -49,6 +49,11 @@ pub struct RuntimeTransitionOperator<'pair> {
     seed: RuntimeJournalRecord,
     active: bool,
 }
+enum JournalMode<'a> {
+    Active,
+    Prepared,
+    Completed(&'a Path),
+}
 impl<'pair> RuntimeTransitionOperator<'pair> {
     /// Reopen only an actual active version-two operation. This performs real
     /// selected-runtime fencing and native/SQL checks before returning.
@@ -60,7 +65,15 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
         limits: PreparedLimits,
         now: i64,
     ) -> Result<Self> {
-        Self::acquire(runtime, asset, current, record, limits, now, true)
+        Self::acquire(
+            runtime,
+            asset,
+            current,
+            record,
+            limits,
+            now,
+            JournalMode::Active,
+        )
     }
     fn acquire(
         runtime: &'pair PinnedRuntime,
@@ -69,8 +82,9 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
         record: &RuntimeJournalRecord,
         limits: PreparedLimits,
         now: i64,
-        active: bool,
+        mode: JournalMode<'_>,
     ) -> Result<Self> {
+        let active = !matches!(mode, JournalMode::Prepared);
         let target = CommitBinding::parse_retained(
             record.prepared.candidate.target_authority_json.as_bytes(),
         )
@@ -100,7 +114,15 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
             limits.transfer.native,
             limits.process_budget,
         )?;
-        let owner = TransitionOwnership::acquire_runtime(record).map_err(err)?;
+        let owner = match mode {
+            JournalMode::Completed(path) => {
+                TransitionOwnership::acquire_completed_runtime(record, path)
+            }
+            JournalMode::Active | JournalMode::Prepared => {
+                TransitionOwnership::acquire_runtime(record)
+            }
+        }
+        .map_err(err)?;
         if active && owner.runtime_record().map_err(err)? != *record {
             return Err(RuntimeError);
         }
@@ -607,7 +629,15 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
                 Ok(record)
             })
             .map_err(err)?;
-        let mut operator = Self::acquire(runtime, asset, current, &record, limits, now, false)?;
+        let mut operator = Self::acquire(
+            runtime,
+            asset,
+            current,
+            &record,
+            limits,
+            now,
+            JournalMode::Prepared,
+        )?;
         operator
             .owner
             .with_exclusive_sql(now, |transaction| {
@@ -775,9 +805,18 @@ impl RuntimeTransitionOperator<'_> {
                 )?;
                 self.verify_all(transaction)
                     .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                #[cfg(test)]
+                crate::commit::transition::sql_checkpoint(
+                    &self.owner,
+                    transaction,
+                    "runtime-adoption-before-commit",
+                )?;
                 Ok(())
             })
-            .map_err(err)
+            .map_err(err)?;
+        #[cfg(test)]
+        crate::commit::transition::transition_checkpoint(&self.owner, "runtime-adoption-committed");
+        Ok(())
     }
     pub fn complete_publication(&self, now: i64) -> Result<RuntimeJournalRecord> {
         self.owner
@@ -870,10 +909,35 @@ pub struct PublicationOutcome {
     pub history: std::path::PathBuf,
     pub observation: super::source::SourceReport,
 }
-impl RuntimeTransitionOperator<'_> {
+impl<'pair> RuntimeTransitionOperator<'pair> {
     pub fn finish(self, now: i64) -> Result<PublicationOutcome> {
-        use std::{io::Write, os::unix::fs::PermissionsExt};
         let history = self.reconcile(now)?;
+        self.observe_completed(history)
+    }
+    /// Retry after the durable active-marker unlink using explicit immutable
+    /// history, original trusted configuration and freshly held native/SQL locks.
+    pub fn verify_completed(
+        runtime: &'pair PinnedRuntime,
+        asset: Option<&'pair PinnedAsset>,
+        current: CurrentSource<'_>,
+        history: &Path,
+        limits: PreparedLimits,
+        now: i64,
+    ) -> Result<PublicationOutcome> {
+        let record = RuntimeJournalRecord::read_history(history).map_err(err)?;
+        let operator = Self::acquire(
+            runtime,
+            asset,
+            current,
+            &record,
+            limits,
+            now,
+            JournalMode::Completed(history),
+        )?;
+        operator.observe_completed(history.to_owned())
+    }
+    fn observe_completed(self, history: std::path::PathBuf) -> Result<PublicationOutcome> {
+        use std::{io::Write, os::unix::fs::PermissionsExt};
         let record = RuntimeJournalRecord::read_history(&history).map_err(err)?;
         let runtime = self.runtime;
         let asset = self.asset;
