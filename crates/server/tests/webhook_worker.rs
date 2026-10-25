@@ -1379,11 +1379,22 @@ async fn deadline_cancellation_retains_due_retry_and_allows_healthy_page_progres
         .expect("timed-out worker failed to complete cancellation cleanup")
         .unwrap()
         .unwrap();
+    // A successful new acquisition alone is insufficient: the old fence
+    // could have expired under load without ever being explicitly released.
+    let expires_at: i64 = rusqlite::Connection::open(&runtime.db)
+        .unwrap()
+        .query_row(
+            "SELECT expires_at FROM reconciliation_lease WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(expires_at, 0, "deadline cancellation must release its writer lease");
     let lease = runtime
         .worker
         .state
         .acquire_lease(now_ms() / 1000, 60)
-        .expect("deadline cancellation must release the writer lease");
+        .expect("deadline cancellation must allow a fresh writer lease");
     runtime
         .worker
         .state
