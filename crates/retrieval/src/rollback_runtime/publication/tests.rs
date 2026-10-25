@@ -18,17 +18,28 @@ use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
 #[ignore = "requires matching normal NK_LEXICAL_RUNTIME"]
 fn runtime_journal_legacy_handoff_quarantine_and_retention_preserve_source() {
     for newer in [false, true] {
-        run_case(false, newer, false);
+        run_case(false, newer, Case::Publication);
     }
 }
 #[test]
 #[ignore = "requires matching normal runtime and pinned NK_LEXICAL_TEST_ARCHIVE"]
 fn runtime_journal_bound_handoff_quarantine_and_retention_preserve_source() {
     for newer in [false, true] {
-        run_case(true, newer, false);
+        run_case(true, newer, Case::Publication);
     }
 }
-fn run_case(bound: bool, newer: bool, crash: bool) {
+enum Case {
+    Publication,
+    Crash,
+    PhysicalRefusal,
+}
+#[test]
+#[ignore = "requires matching normal runtime"]
+fn runtime_publication_rejects_physical_replacement_and_stale_preparation() {
+    run_case(false, false, Case::PhysicalRefusal);
+}
+fn run_case(bound: bool, newer: bool, case: Case) {
+    let crash = matches!(case, Case::Crash);
     let binary = PathBuf::from(std::env::var_os("NK_LEXICAL_RUNTIME").unwrap());
     let sha = format!("{:x}", Sha256::digest(fs::read(&binary).unwrap()));
     let runtime = PinnedRuntime::pin(&binary, &sha, 1 << 30).unwrap();
@@ -177,6 +188,10 @@ fn run_case(bound: bool, newer: bool, crash: bool) {
             assert!(!backup.exists());
             assert!(!archive.exists());
         }
+    }
+    if matches!(case, Case::PhysicalRefusal) {
+        let marker = crate::commit::transition::journal_path(&state).unwrap();
+        let original_marker = fs::read(&marker).unwrap();
         for physical in [&state, &index] {
             let retained_path = physical.with_extension("replaced-original");
             fs::rename(physical, &retained_path).unwrap();
@@ -211,6 +226,28 @@ fn run_case(bound: bool, newer: bool, crash: bool) {
             assert!(!backup.exists());
             assert!(!archive.exists());
         }
+        // Restoring the same directory does not restore its old ctime. A new
+        // Prepared proof is required; the old one must remain refused.
+        assert!(
+            RuntimeTransitionOperator::start(
+                &runtime,
+                None,
+                current_config,
+                &prepared_path,
+                ActivationPaths {
+                    archive: &archive,
+                    backup: &backup
+                },
+                Default::default(),
+                i64::MAX / 2,
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(&state).unwrap(), sql);
+        assert_eq!(bytes(&index), before);
+        assert!(!backup.exists());
+        assert!(!archive.exists());
+        return;
     }
     if crash {
         let input = parent.path().join("publication-child.json");
@@ -372,12 +409,12 @@ fn run_case(bound: bool, newer: bool, crash: bool) {
 #[test]
 #[ignore = "requires matching normal runtime; kills actual publication subprocesses"]
 fn runtime_publication_recovers_legacy_after_killed_processes() {
-    run_case(false, true, true);
+    run_case(false, true, Case::Crash);
 }
 #[test]
 #[ignore = "requires matching normal runtime and pinned public archive"]
 fn runtime_publication_recovers_bound_archive_after_killed_processes() {
-    run_case(true, false, true);
+    run_case(true, false, Case::Crash);
 }
 
 #[test]
