@@ -199,3 +199,38 @@ for authority. All source processes must remain stopped.
 This primitive does not provide the operator command or killed-process retry
 workflow tracked by #533. Activation, rollback publication and aggregate
 acceptance remain gated by their subsequent units.
+
+### Explicit verification command
+
+After stopping **all** source processes, build `lexical-verify` with
+`cargo build -p notion-knowledge-retrieval --features local-lancedb --example lexical-verify`
+in the documented Nix spike shell. Select the exact trusted runtime ELF and,
+for bound sources, its exact matching immutable asset. No historical executable
+or bundle becomes compatible merely because its digest was supplied.
+
+Use an absolute private canonical configuration file (operator-owned regular
+single-link file, mode 0600, at most 64 KiB). Its version-1 fields are
+`index_directory`, `state_file`, `authority_json` (the exact canonical original
+`CommitBinding` JSON from trusted configuration), `embedding`, `runtime`,
+`runtime_sha256`, and `asset` (`null` for legacy, otherwise an object with
+`path` and `sha256`). Unknown fields and noncanonical bytes are refused; all
+paths select existing artifacts explicitly. Serialize the configuration through
+`VerificationConfig` to preserve canonical field order. Never infer authority
+from a directory scan.
+
+```sh
+lexical-verify /absolute/config.json --all-source-processes-stopped --evidence /private/evidence.json
+lexical-verify /absolute/config.json --all-source-processes-stopped --retained /private/evidence.json
+```
+
+The first command requires an unused evidence path; the retry requires the
+explicit retained file. Both freshly verify the original ownership, SQL, native
+source and real executable/asset behavior before publication or identical reuse.
+Refusal never rewrites stale evidence or restores a backup. Retain orphaned
+`.runtime-evidence-*` stages as diagnostics after interruption; they grant no
+authority and must never be selected automatically. If interruption preceded
+publication, rerun with the explicitly chosen unused `--evidence` path. If the
+published file exists, retry with `--retained`. New acknowledged source state
+requires fresh verification and a new unused evidence path.
+
+This command does not activate, serve, rebuild a candidate or publish rollback.
