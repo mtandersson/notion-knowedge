@@ -417,10 +417,18 @@ pub(crate) fn fixture_configuration(legacy: bool) -> Result<(CommitBinding, Embe
 
 #[cfg(test)]
 pub(crate) fn commit_new_fixture_row(root: &Path, dictionary: Option<&Dictionary>) -> Result<()> {
+    commit_fixture_row(root, report_binding(dictionary.is_none())?, dictionary)
+}
+#[cfg(test)]
+pub(crate) fn commit_fixture_row(
+    root: &Path,
+    binding: CommitBinding,
+    dictionary: Option<&Dictionary>,
+) -> Result<()> {
     let coordinator = IndexCommitCoordinator::open_existing(
         root.join("index"),
         root.join("state.sqlite"),
-        report_binding(dictionary.is_none())?,
+        binding,
     )
     .map_err(err)?;
     let table = bind_table(root, coordinator.clone(), dictionary)?;

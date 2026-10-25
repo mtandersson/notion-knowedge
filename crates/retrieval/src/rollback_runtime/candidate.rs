@@ -35,6 +35,10 @@ pub struct PriorInputs<'a> {
     pub lineage: &'a [PathBuf],
     pub archive: &'a Path,
 }
+pub struct PreparationPaths<'a> {
+    pub transfer: &'a Path,
+    pub candidate: &'a Path,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CandidateKind {
     ExactArchive,
@@ -291,11 +295,14 @@ pub fn prepare<'owner>(
     prior: PriorInputs<'owner>,
     embedding: &EmbeddingMetadata,
     target: &CommitBinding,
-    transfer_path: &Path,
-    candidate: &Path,
+    paths: PreparationPaths<'_>,
     limits: TransferLimits,
     budget: Duration,
 ) -> Result<VerifiedPriorCandidate<'owner>> {
+    let PreparationPaths {
+        transfer: transfer_path,
+        candidate,
+    } = paths;
     if budget.is_zero()
         || budget > Duration::from_secs(300)
         || target.table() != owner.binding().table()
@@ -418,3 +425,6 @@ pub fn prepare<'owner>(
     remaining()?;
     Ok(proof)
 }
+
+#[cfg(test)]
+mod tests;
