@@ -118,6 +118,52 @@ fn normal_runtime_case(archive: Option<&Path>) {
             &owner.state_snapshot(64 * 1024 * 1024)?
         );
         assert_eq!(proof.descriptor().is_legacy(), archive.is_none());
+        let evidence_path = parent.path().join("runtime-evidence.json");
+        let retained =
+            crate::rollback_runtime::evidence::publish(&evidence_path, owner, &proof).unwrap();
+        let original = std::fs::read(&evidence_path).unwrap();
+        assert_eq!(
+            crate::rollback_runtime::evidence::RetainedEvidence::read(&evidence_path).unwrap(),
+            retained
+        );
+        assert_eq!(
+            crate::rollback_runtime::evidence::publish(&evidence_path, owner, &proof).unwrap(),
+            retained
+        );
+        assert_eq!(std::fs::read(&evidence_path).unwrap(), original);
+        assert!(
+            crate::rollback_runtime::evidence::publish(
+                &root.join("index/forbidden.json"),
+                owner,
+                &proof
+            )
+            .is_err()
+        );
+        let alias = parent.path().join("alias.json");
+        std::os::unix::fs::symlink(&evidence_path, &alias).unwrap();
+        assert!(crate::rollback_runtime::evidence::RetainedEvidence::read(&alias).is_err());
+        std::fs::remove_file(&alias).unwrap();
+        std::fs::hard_link(&evidence_path, &alias).unwrap();
+        assert!(crate::rollback_runtime::evidence::RetainedEvidence::read(&evidence_path).is_err());
+        std::fs::remove_file(&alias).unwrap();
+        std::fs::set_permissions(&evidence_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(crate::rollback_runtime::evidence::RetainedEvidence::read(&evidence_path).is_err());
+        std::fs::set_permissions(&evidence_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        for invalid in [
+            b"{".to_vec(),
+            vec![b'x'; 65537],
+            [original.clone(), b"\n".to_vec()].concat(),
+        ] {
+            std::fs::write(&evidence_path, &invalid).unwrap();
+            assert!(
+                crate::rollback_runtime::evidence::RetainedEvidence::read(&evidence_path).is_err()
+            );
+            assert!(
+                crate::rollback_runtime::evidence::publish(&evidence_path, owner, &proof).is_err()
+            );
+            assert_eq!(std::fs::read(&evidence_path).unwrap(), invalid);
+        }
+        std::fs::write(&evidence_path, &original).unwrap();
         used = true;
         Ok(())
     })
