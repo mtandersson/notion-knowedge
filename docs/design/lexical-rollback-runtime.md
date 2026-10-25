@@ -314,3 +314,30 @@ backend or execute that plan. Actual native source/provenance verification still
 belongs to the owning current host. This does not certify an unfamiliar backend
 or historical pair. Candidate construction and integrated proof remain #539 and
 #540; #524 remains open.
+
+### Selected-runtime candidate protocol
+
+`lexical-runtime candidate-create PRIVATE_REQUEST legacy|expansion ASSET SHA`
+and `candidate-reopen` consume a private canonical `CandidateRequest` containing
+the explicit current-source directory identity, canonical transfer and limits,
+expected selected runtime descriptor, fresh target binding and unused sibling
+candidate path. The selected executable consumes canonical Arrow rows rather
+than opening current native storage or original operational SQL. It constructs
+its own native storage and FTS profiles, writes its own complete bound plan or
+retains explicit legacy absence, and preserves the canonical rows/vector bits.
+
+`rollback_runtime::builder::build` executes a sealed trusted runtime and pinned
+asset, verifies real separate-policy/physical-fencing probes first, creates the
+candidate, then reopens it in a fresh selected-runtime process and compares the
+complete descriptive reports. Unsupported builder protocols and coupled
+fencing fail closed. The original source identity and transfer are rechecked;
+failed candidate directories remain diagnostic. No original SQLite, source
+operation, serving listener, operational anchor or existing READY format is
+created or modified by this protocol.
+
+The report describes a native verification moment, not publication authority.
+The integrated current owner must establish prior provenance and current-source
+freshness (#540), including archive reuse rules, before the publication/fencing
+unit (#525) can consume the candidate. This protocol alone does not complete
+#524 or authorize activation, source choice, deployment or historical-pair
+compatibility claims.
