@@ -175,6 +175,11 @@ fn read_at(parent: &File, filename: &std::ffi::OsStr) -> Result<(RetainedEvidenc
         || current.len() != m.len()
         || current.nlink() != 1
         || current.mode() != m.mode()
+        || current.uid() != m.uid()
+        || current.mtime() != m.mtime()
+        || current.mtime_nsec() != m.mtime_nsec()
+        || current.ctime() != m.ctime()
+        || current.ctime_nsec() != m.ctime_nsec()
     {
         return Err(RuntimeError);
     }

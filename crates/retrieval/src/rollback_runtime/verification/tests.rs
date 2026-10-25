@@ -171,6 +171,42 @@ fn normal_runtime_case(archive: Option<&Path>) {
     assert!(used);
     assert_eq!(bytes(&root), before);
     refusal_and_freshness_cases(&c, &runtime, asset.as_ref(), &embedding, &root, path);
+    // A newly acknowledged webhook changes operational state even when the
+    // native row/vector snapshot remains identical. Old evidence must not be
+    // rewritten or accepted for this newer acknowledged state.
+    use notion_knowledge_core::webhook::{WebhookEvent, WebhookInbox};
+    let event = WebhookEvent {
+        id: "00000000-0000-4000-8000-000000000001".into(),
+        workspace_id: "00000000-0000-4000-8000-000000000002".into(),
+        subscription_id: "00000000-0000-4000-8000-000000000003".into(),
+        integration_id: "00000000-0000-4000-8000-000000000004".into(),
+        entity_id: "00000000-0000-4000-8000-000000000005".into(),
+        timestamp: "2026-10-25T00:00:00Z".into(),
+        event_type: "page.content_updated".into(),
+        entity_type: "page".into(),
+        attempt_number: 1,
+    };
+    c.state().receive(&event).unwrap();
+    let acknowledged = bytes(&root);
+    assert_ne!(acknowledged, before);
+    let evidence_path = parent.path().join("runtime-evidence.json");
+    let retained = std::fs::read(&evidence_path).unwrap();
+    c.with_owned_offline_inspection(10, |owner| {
+        let fresh = verify(
+            owner,
+            &runtime,
+            asset.as_ref(),
+            &embedding,
+            VerificationLimits::default(),
+        )
+        .map_err(|_| CommitError::BindingMismatch)?;
+        assert!(crate::rollback_runtime::evidence::publish(&evidence_path, owner, &fresh).is_err());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(std::fs::read(&evidence_path).unwrap(), retained);
+    assert_eq!(bytes(&root), acknowledged);
+    assert!(c.state().event(&event.key()).unwrap().is_some());
 }
 #[test]
 #[ignore = "requires NK_LEXICAL_RUNTIME pointing to the freshly built normal executable"]
