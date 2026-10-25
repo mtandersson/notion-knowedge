@@ -262,6 +262,30 @@ mod tests {
                     assert!(report.descriptor.describes_bound_source(binding));
                     let other = crate::lexical_dictionary::tests::dictionary(&[("river", "flod")]);
                     assert_eq!(inspect_request(&path, Some(&other)), Err(RuntimeError));
+                    let metadata_path = root.join("index/.nk-lexical-binding-v1.json");
+                    let original = std::fs::read(&metadata_path).unwrap();
+                    for (section, field) in [
+                        ("storage", "implementation_sha256"),
+                        ("plan", "executor_sha256"),
+                        ("plan", "importer_sha256"),
+                        ("plan", "lock_sha256"),
+                        ("plan", "asset_sha256"),
+                    ] {
+                        let mut json: serde_json::Value =
+                            serde_json::from_slice(&original).unwrap();
+                        json[section][field] = "0".repeat(64).into();
+                        let changed: crate::chunks::lexical_binding::LexicalIndexBinding =
+                            serde_json::from_value(json).unwrap();
+                        let changed = changed.canonical_bytes().unwrap();
+                        std::fs::write(&metadata_path, &changed).unwrap();
+                        assert_eq!(
+                            inspect_request(&path, dictionary),
+                            Err(RuntimeError),
+                            "wrong {section}/{field} must be refused"
+                        );
+                        assert_eq!(std::fs::read(&metadata_path).unwrap(), changed);
+                        std::fs::write(&metadata_path, &original).unwrap();
+                    }
                 } else {
                     assert!(report.source.lexical.is_none());
                 }

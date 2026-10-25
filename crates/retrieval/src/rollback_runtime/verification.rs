@@ -260,6 +260,12 @@ pub fn verify<'owner>(
     if created != reopened {
         return Err(RuntimeError);
     }
+    #[cfg(test)]
+    AFTER_PROBES.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
     if let Some(asset) = asset {
         asset.revalidate()?;
     }
@@ -293,6 +299,11 @@ pub fn verify<'owner>(
         operational,
         _ownership: PhantomData,
     })
+}
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_PROBES: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]

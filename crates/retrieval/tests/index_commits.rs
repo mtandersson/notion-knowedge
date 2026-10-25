@@ -1885,6 +1885,16 @@ fn owned_offline_inspection_refuses_live_leases_before_exposing_the_context() {
     c.state().release_lease(&lease, 12).unwrap();
     c.with_owned_offline_inspection(13, |owner| owner.revalidate())
         .unwrap();
+    let guard = fs::File::open(&f.index).unwrap();
+    guard.lock().unwrap();
+    assert_eq!(
+        c.with_owned_offline_inspection(13, |_| {
+            called.set(true);
+            Ok(())
+        }),
+        Err(CommitError::Conflict)
+    );
+    assert!(!called.get());
 }
 
 #[test]
