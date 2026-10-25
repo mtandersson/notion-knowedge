@@ -1343,6 +1343,7 @@ async fn deadline_cancellation_retains_due_retry_and_allows_healthy_page_progres
     let bad = event(PAGE, "page.created");
     runtime.worker.state.receive(&bad).unwrap();
     let worker = runtime.worker.clone();
+    let dispatch_started_at = now_ms() / 1000;
     let task = tokio::spawn(async move { worker.tick(CancellationToken::new(), false).await });
     tokio::time::timeout(Duration::from_secs(10), runtime.source.entered.notified())
         .await
@@ -1353,12 +1354,7 @@ async fn deadline_cancellation_retains_due_retry_and_allows_healthy_page_progres
     // background cleanup is not reliable under parallel feature CI load.
     let operation = format!(
         "webhook-{:x}",
-        sha2::Sha256::digest(format!(
-            "{}:{}:{:?}",
-            WORKSPACE,
-            SUB,
-            vec![bad.id.clone()]
-        ))
+        sha2::Sha256::digest(format!("{}:{}:{:?}", WORKSPACE, SUB, vec![bad.id.clone()]))
     );
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
@@ -1398,7 +1394,15 @@ async fn deadline_cancellation_retains_due_retry_and_allows_healthy_page_progres
     assert_eq!(pending.last_failure, Some(EventFailure::Unavailable));
     assert_eq!(pending.cycle_attempts, 1);
     assert_eq!(pending.lifetime_attempts, 1);
-    assert!(pending.retry_at.unwrap() > now_ms() / 1000);
+    // Compare against the dispatch time, not the observation time: parallel
+    // scheduling cannot make a correctly persisted retry appear overdue.
+    assert!(
+        pending.retry_at.unwrap()
+            >= pending
+                .policy
+                .deadline(dispatch_started_at + 6, pending.cycle_attempts)
+                .unwrap()
+    );
     assert_eq!(runtime.searchable("Saffron").await, 0);
     runtime.source.proceed.notify_one();
     let metadata = runtime.worker.provider.metadata().clone();
