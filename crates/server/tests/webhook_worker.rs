@@ -1389,7 +1389,10 @@ async fn deadline_cancellation_retains_due_retry_and_allows_healthy_page_progres
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(expires_at, 0, "deadline cancellation must release its writer lease");
+    assert_eq!(
+        expires_at, 0,
+        "deadline cancellation must release its writer lease"
+    );
     let lease = runtime
         .worker
         .state
