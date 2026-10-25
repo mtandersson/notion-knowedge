@@ -26,6 +26,8 @@ pub mod evidence;
 #[cfg(feature = "local-lancedb")]
 pub mod operator;
 #[cfg(feature = "local-lancedb")]
+pub mod prepared;
+#[cfg(feature = "local-lancedb")]
 pub mod probe;
 #[cfg(feature = "local-lancedb")]
 pub mod source;

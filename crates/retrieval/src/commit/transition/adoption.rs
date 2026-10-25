@@ -115,6 +115,77 @@ fn transfer_sql(
     preview: bool,
 ) -> Result<Option<AdoptionReport>, CommitError> {
     owner.validate_owned_transaction(transaction)?;
+    let savepoint = transaction.savepoint().map_err(sql)?;
+    let plans = inspect_derived_work(
+        &savepoint,
+        source,
+        target,
+        target_index_version,
+        limits,
+        preview,
+    )?;
+    if preview {
+        // Dropping the savepoint rolls back the temporary ownership table.
+        // No operational table or receipt has been changed.
+        owner.validate_owned_transaction(&savepoint)?;
+        return Ok(None);
+    }
+    let update = |table: &str| {
+        savepoint
+            .execute(
+                &format!("UPDATE {table} SET generation=?2 WHERE generation=?1"),
+                params![source.generation(), target.generation()],
+            )
+            .map_err(sql)
+    };
+    let receipts = savepoint.execute("UPDATE index_commit_receipts SET generation=?2 WHERE generation=?1 AND status IN(0,1,2)",params![source.generation(),target.generation()]).map_err(sql)?;
+    let metadata = update("page_metadata_identity")?;
+    let relations = update("page_relation_projections")?;
+    let aliases = update("page_alias_projections")?;
+    let schedules = savepoint
+        .execute(
+            "UPDATE reconciliation_schedules SET generation=?2,epoch=?3 WHERE generation=?1",
+            params![
+                source.generation(),
+                target.generation(),
+                i64::try_from(target.epoch()).map_err(|_| CommitError::InvalidInput)?
+            ],
+        )
+        .map_err(sql)?;
+    for (run, document) in &plans {
+        savepoint
+            .execute(
+                "UPDATE reconciliation_plans SET document=?2 WHERE run_id=?1",
+                params![run, document],
+            )
+            .map_err(sql)?;
+    }
+    let report = AdoptionReport {
+        receipts,
+        metadata,
+        relations,
+        aliases,
+        schedules,
+        plans: plans.len(),
+    };
+    savepoint
+        .execute_batch("DROP TABLE nk_adoption_owned_pages;")
+        .map_err(sql)?;
+    owner.revalidate()?;
+    owner.validate_sql(&savepoint)?;
+    savepoint.commit().map_err(sql)?;
+    Ok(Some(report))
+}
+
+// Shared validation for publication and an already-owned read-only preview.
+fn inspect_derived_work(
+    connection: &Connection,
+    source: &CommitBinding,
+    target: &CommitBinding,
+    target_index_version: u64,
+    limits: AdoptionLimits,
+    preview: bool,
+) -> Result<Vec<(String, String)>, CommitError> {
     if source.table() != target.table()
         || source.workspace() != target.workspace()
         || source.roots() != target.roots()
@@ -136,7 +207,6 @@ fn transfer_sql(
         .ok_or(CommitError::InvalidInput)?;
     let plan_bytes = i64::try_from(limits.plan_bytes).map_err(|_| CommitError::InvalidInput)?;
     let effect_bytes = i64::try_from(limits.effect_bytes).map_err(|_| CommitError::InvalidInput)?;
-    let savepoint = transaction.savepoint().map_err(sql)?;
     // Bound complete table scans, including unrelated historical generations,
     // before generation-filtered queries or updates can inspect them.
     let mut charged = 0u64;
@@ -152,7 +222,7 @@ fn transfer_sql(
         "reconciliation_plan_progress",
         "reconciliation_schedules",
     ] {
-        let count: i64 = savepoint
+        let count: i64 = connection
             .query_row(
                 &format!("SELECT COUNT(*) FROM (SELECT 1 FROM {table} LIMIT ?1)"),
                 [sentinel],
@@ -166,23 +236,23 @@ fn transfer_sql(
             return Err(CommitError::InvalidInput);
         }
     }
-    let invalid_page: bool = savepoint.query_row("SELECT EXISTS(SELECT 1 FROM index_commit_receipts WHERE generation=?1 AND status IN(0,1,2) AND length(CAST(page_id AS BLOB)) NOT BETWEEN 1 AND 4096)",[source.generation()],|r|r.get(0)).map_err(sql)?;
-    let page_bytes: i64 = savepoint.query_row("SELECT coalesce(sum(length(CAST(page_id AS BLOB))),0) FROM index_commit_receipts WHERE generation=?1 AND status IN(0,1,2)",[source.generation()],|r|r.get(0)).map_err(sql)?;
+    let invalid_page: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM index_commit_receipts WHERE generation=?1 AND status IN(0,1,2) AND length(CAST(page_id AS BLOB)) NOT BETWEEN 1 AND 4096)",[source.generation()],|r|r.get(0)).map_err(sql)?;
+    let page_bytes: i64 = connection.query_row("SELECT coalesce(sum(length(CAST(page_id AS BLOB))),0) FROM index_commit_receipts WHERE generation=?1 AND status IN(0,1,2)",[source.generation()],|r|r.get(0)).map_err(sql)?;
     if invalid_page || page_bytes as u64 > limits.identity_bytes {
         return Err(CommitError::InvalidInput);
     }
-    savepoint
+    connection
         .execute_batch(
             "CREATE TEMP TABLE nk_adoption_owned_pages(page_id TEXT PRIMARY KEY) WITHOUT ROWID;",
         )
         .map_err(sql)?;
-    savepoint.execute("INSERT INTO nk_adoption_owned_pages SELECT DISTINCT page_id FROM index_commit_receipts WHERE generation=?1 AND status IN(0,1,2)",[source.generation()]).map_err(sql)?;
-    let reserved: bool = savepoint.query_row("SELECT EXISTS(SELECT 1 FROM index_commit_generations WHERE generation=?1 AND scope=?2 AND epoch=?3)",params![target.generation(),target.scope(),i64::try_from(target.epoch()).map_err(|_|CommitError::InvalidInput)?],|r|r.get(0)).map_err(sql)?;
+    connection.execute("INSERT INTO nk_adoption_owned_pages SELECT DISTINCT page_id FROM index_commit_receipts WHERE generation=?1 AND status IN(0,1,2)",[source.generation()]).map_err(sql)?;
+    let reserved: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM index_commit_generations WHERE generation=?1 AND scope=?2 AND epoch=?3)",params![target.generation(),target.scope(),i64::try_from(target.epoch()).map_err(|_|CommitError::InvalidInput)?],|r|r.get(0)).map_err(sql)?;
     if reserved == preview {
         return Err(CommitError::BindingMismatch);
     }
-    let source_reserved: bool = savepoint.query_row("SELECT EXISTS(SELECT 1 FROM index_commit_generations WHERE generation=?1 AND scope=?2 AND epoch=?3)",params![source.generation(),source.scope(),i64::try_from(source.epoch()).map_err(|_|CommitError::InvalidInput)?],|r|r.get(0)).map_err(sql)?;
-    let policy: bool = savepoint.query_row("SELECT table_name=?1 AND workspace=?2 AND scope=?3 FROM index_commit_binding WHERE singleton=1",params![source.table(),source.workspace(),source.scope()],|r|r.get(0)).optional().map_err(sql)?.unwrap_or(false);
+    let source_reserved: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM index_commit_generations WHERE generation=?1 AND scope=?2 AND epoch=?3)",params![source.generation(),source.scope(),i64::try_from(source.epoch()).map_err(|_|CommitError::InvalidInput)?],|r|r.get(0)).map_err(sql)?;
+    let policy: bool = connection.query_row("SELECT table_name=?1 AND workspace=?2 AND scope=?3 FROM index_commit_binding WHERE singleton=1",params![source.table(),source.workspace(),source.scope()],|r|r.get(0)).optional().map_err(sql)?.unwrap_or(false);
     if !source_reserved || !policy {
         return Err(CommitError::BindingMismatch);
     }
@@ -191,19 +261,19 @@ fn transfer_sql(
         "page_relation_projections",
         "page_alias_projections",
     ] {
-        let orphan: bool = savepoint.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} p WHERE p.generation=?1 AND NOT EXISTS(SELECT 1 FROM nk_adoption_owned_pages r WHERE r.page_id=p.page_id))"),[source.generation()],|r|r.get(0)).map_err(sql)?;
+        let orphan: bool = connection.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} p WHERE p.generation=?1 AND NOT EXISTS(SELECT 1 FROM nk_adoption_owned_pages r WHERE r.page_id=p.page_id))"),[source.generation()],|r|r.get(0)).map_err(sql)?;
         if orphan {
             return Err(CommitError::BindingMismatch);
         }
     }
     for table in ["page_relation_projections", "page_alias_projections"] {
-        let invalid: bool = savepoint.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE generation=?1 AND (version<>1 OR length(CAST(effect AS BLOB))>?2))"),params![source.generation(),effect_bytes],|r|r.get(0)).map_err(sql)?;
+        let invalid: bool = connection.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE generation=?1 AND (version<>1 OR length(CAST(effect AS BLOB))>?2))"),params![source.generation(),effect_bytes],|r|r.get(0)).map_err(sql)?;
         if invalid {
             return Err(CommitError::InvalidInput);
         }
     }
     for table in ["relation_operation_proposals", "alias_operation_proposals"] {
-        let oversized: bool = savepoint.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} p JOIN index_commit_receipts r USING(operation_id) WHERE r.generation=?1 AND r.status IN(0,1,2) AND length(CAST(p.effect AS BLOB))>?2)"),params![source.generation(),effect_bytes],|r|r.get(0)).map_err(sql)?;
+        let oversized: bool = connection.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} p JOIN index_commit_receipts r USING(operation_id) WHERE r.generation=?1 AND r.status IN(0,1,2) AND length(CAST(p.effect AS BLOB))>?2)"),params![source.generation(),effect_bytes],|r|r.get(0)).map_err(sql)?;
         if oversized {
             return Err(CommitError::InvalidInput);
         }
@@ -215,7 +285,7 @@ fn transfer_sql(
         "SELECT coalesce(sum(length(CAST(p.effect AS BLOB))),0) FROM relation_operation_proposals p JOIN index_commit_receipts r USING(operation_id) WHERE r.generation=?1 AND r.status IN(0,1,2)",
         "SELECT coalesce(sum(length(CAST(p.effect AS BLOB))),0) FROM alias_operation_proposals p JOIN index_commit_receipts r USING(operation_id) WHERE r.generation=?1 AND r.status IN(0,1,2)",
     ] {
-        let bytes: i64 = savepoint
+        let bytes: i64 = connection
             .query_row(query, [source.generation()], |r| r.get(0))
             .map_err(sql)?;
         total_effects = total_effects
@@ -237,13 +307,13 @@ fn transfer_sql(
             "(substr(effect,1,12)<>'relation-v1:' AND substr(effect,1,9)<>'graph-v2:')",
         ),
     ] {
-        let invalid: bool = savepoint.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {markers} WHERE generation=?1 AND {format}) OR EXISTS(SELECT 1 FROM {proposals} JOIN index_commit_receipts USING(operation_id) WHERE generation=?1 AND status IN(0,1,2) AND {format})"),[source.generation()],|r|r.get(0)).map_err(sql)?;
+        let invalid: bool = connection.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {markers} WHERE generation=?1 AND {format}) OR EXISTS(SELECT 1 FROM {proposals} JOIN index_commit_receipts USING(operation_id) WHERE generation=?1 AND status IN(0,1,2) AND {format})"),[source.generation()],|r|r.get(0)).map_err(sql)?;
         if invalid {
             return Err(CommitError::InvalidInput);
         }
     }
     {
-        let mut statement = savepoint.prepare("SELECT effect FROM page_relation_projections WHERE generation=?1 UNION ALL SELECT p.effect FROM relation_operation_proposals p JOIN index_commit_receipts r USING(operation_id) WHERE r.generation=?1 AND r.status IN(0,1,2)").map_err(sql)?;
+        let mut statement = connection.prepare("SELECT effect FROM page_relation_projections WHERE generation=?1 UNION ALL SELECT p.effect FROM relation_operation_proposals p JOIN index_commit_receipts r USING(operation_id) WHERE r.generation=?1 AND r.status IN(0,1,2)").map_err(sql)?;
         for effect in statement
             .query_map([source.generation()], |r| r.get::<_, String>(0))
             .map_err(sql)?
@@ -253,13 +323,13 @@ fn transfer_sql(
             }
         }
     }
-    let invalid_schedule: bool = savepoint.query_row("SELECT EXISTS(SELECT 1 FROM reconciliation_schedules WHERE generation=?1 AND (table_name<>?2 OR workspace<>?3 OR scope<>?4 OR epoch<>?5))",params![source.generation(),source.table(),source.workspace(),source.scope(),i64::try_from(source.epoch()).map_err(|_|CommitError::InvalidInput)?],|r|r.get(0)).map_err(sql)?;
+    let invalid_schedule: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM reconciliation_schedules WHERE generation=?1 AND (table_name<>?2 OR workspace<>?3 OR scope<>?4 OR epoch<>?5))",params![source.generation(),source.table(),source.workspace(),source.scope(),i64::try_from(source.epoch()).map_err(|_|CommitError::InvalidInput)?],|r|r.get(0)).map_err(sql)?;
     if invalid_schedule {
         return Err(CommitError::BindingMismatch);
     }
     let mut plans = Vec::new();
     {
-        let mut statement = savepoint.prepare("SELECT CASE WHEN length(CAST(r.run_id AS BLOB)) BETWEEN 1 AND 4096 THEN r.run_id ELSE NULL END,CASE WHEN length(CAST(r.scope AS BLOB))=64 THEN r.scope ELSE NULL END,p.version,CASE WHEN length(CAST(p.document AS BLOB))<=?1 THEN p.document ELSE NULL END FROM reconciliation_runs r LEFT JOIN reconciliation_plans p USING(run_id) WHERE r.phase<>2 AND r.abandoned=0 LIMIT 2").map_err(sql)?;
+        let mut statement = connection.prepare("SELECT CASE WHEN length(CAST(r.run_id AS BLOB)) BETWEEN 1 AND 4096 THEN r.run_id ELSE NULL END,CASE WHEN length(CAST(r.scope AS BLOB))=64 THEN r.scope ELSE NULL END,p.version,CASE WHEN length(CAST(p.document AS BLOB))<=?1 THEN p.document ELSE NULL END FROM reconciliation_runs r LEFT JOIN reconciliation_plans p USING(run_id) WHERE r.phase<>2 AND r.abandoned=0 LIMIT 2").map_err(sql)?;
         let mut rows = statement.query([plan_bytes]).map_err(sql)?;
         let mut active = 0;
         while let Some(row) = rows.next().map_err(sql)? {
@@ -281,14 +351,14 @@ fn transfer_sql(
             if plan.run_id() != run {
                 return Err(CommitError::BindingMismatch);
             }
-            let prepared_bytes:i64 = savepoint.query_row("SELECT coalesce(sum(length(CAST(prepared AS BLOB))),0) FROM reconciliation_plan_progress WHERE run_id=?1",[&run],|r|r.get(0)).map_err(sql)?;
+            let prepared_bytes:i64 = connection.query_row("SELECT coalesce(sum(length(CAST(prepared AS BLOB))),0) FROM reconciliation_plan_progress WHERE run_id=?1",[&run],|r|r.get(0)).map_err(sql)?;
             if (document.len() as u64)
                 .checked_add(prepared_bytes as u64)
                 .is_none_or(|bytes| bytes > limits.plan_bytes)
             {
                 return Err(CommitError::InvalidInput);
             }
-            let mut progress = savepoint.prepare("SELECT CASE WHEN length(CAST(page_id AS BLOB)) BETWEEN 1 AND 4096 THEN page_id ELSE NULL END,CASE WHEN length(CAST(operation_id AS BLOB)) BETWEEN 1 AND 4096 THEN operation_id ELSE NULL END,status,prepared FROM reconciliation_plan_progress WHERE run_id=?1 ORDER BY page_id").map_err(sql)?;
+            let mut progress = connection.prepare("SELECT CASE WHEN length(CAST(page_id AS BLOB)) BETWEEN 1 AND 4096 THEN page_id ELSE NULL END,CASE WHEN length(CAST(operation_id AS BLOB)) BETWEEN 1 AND 4096 THEN operation_id ELSE NULL END,status,prepared FROM reconciliation_plan_progress WHERE run_id=?1 ORDER BY page_id").map_err(sql)?;
             let mut progress_rows = progress.query([&run]).map_err(sql)?;
             let mut count = 0usize;
             while let Some(row) = progress_rows.next().map_err(sql)? {
@@ -363,55 +433,51 @@ fn transfer_sql(
             plans.push((run, encoded));
         }
     }
-    if preview {
-        // Dropping the savepoint rolls back the temporary ownership table.
-        // No operational table or receipt has been changed.
-        owner.validate_owned_transaction(&savepoint)?;
-        return Ok(None);
+    Ok(plans)
+}
+
+/// Validate compatible unfinished work in the caller's existing exclusive SQL
+/// context. Only a temporary ownership table is created, then rolled back.
+#[cfg(target_os = "linux")]
+pub(crate) fn preview_current(
+    owner: &super::super::offline::OwnedOfflineInspection<'_>,
+    target: &CommitBinding,
+    target_version: u64,
+    limits: AdoptionLimits,
+) -> Result<(), CommitError> {
+    struct Preview<'a> {
+        connection: &'a Connection,
+        active: bool,
     }
-    let update = |table: &str| {
-        savepoint
-            .execute(
-                &format!("UPDATE {table} SET generation=?2 WHERE generation=?1"),
-                params![source.generation(), target.generation()],
-            )
-            .map_err(sql)
-    };
-    let receipts = savepoint.execute("UPDATE index_commit_receipts SET generation=?2 WHERE generation=?1 AND status IN(0,1,2)",params![source.generation(),target.generation()]).map_err(sql)?;
-    let metadata = update("page_metadata_identity")?;
-    let relations = update("page_relation_projections")?;
-    let aliases = update("page_alias_projections")?;
-    let schedules = savepoint
-        .execute(
-            "UPDATE reconciliation_schedules SET generation=?2,epoch=?3 WHERE generation=?1",
-            params![
-                source.generation(),
-                target.generation(),
-                i64::try_from(target.epoch()).map_err(|_| CommitError::InvalidInput)?
-            ],
-        )
-        .map_err(sql)?;
-    for (run, document) in &plans {
-        savepoint
-            .execute(
-                "UPDATE reconciliation_plans SET document=?2 WHERE run_id=?1",
-                params![run, document],
-            )
-            .map_err(sql)?;
+    impl Drop for Preview<'_> {
+        fn drop(&mut self) {
+            if self.active {
+                let _ = self
+                    .connection
+                    .execute_batch("ROLLBACK TO nk_runtime_preview; RELEASE nk_runtime_preview");
+            }
+        }
     }
-    let report = AdoptionReport {
-        receipts,
-        metadata,
-        relations,
-        aliases,
-        schedules,
-        plans: plans.len(),
-    };
-    savepoint
-        .execute_batch("DROP TABLE nk_adoption_owned_pages;")
+    let connection = owner.owned_connection()?;
+    connection
+        .execute_batch("SAVEPOINT nk_runtime_preview")
         .map_err(sql)?;
-    owner.revalidate()?;
-    owner.validate_sql(&savepoint)?;
-    savepoint.commit().map_err(sql)?;
-    Ok(Some(report))
+    let mut guard = Preview {
+        connection,
+        active: true,
+    };
+    let result = inspect_derived_work(
+        connection,
+        owner.binding(),
+        target,
+        target_version,
+        limits,
+        true,
+    );
+    connection
+        .execute_batch("ROLLBACK TO nk_runtime_preview; RELEASE nk_runtime_preview")
+        .map_err(sql)?;
+    guard.active = false;
+    result?;
+    owner.revalidate()
 }

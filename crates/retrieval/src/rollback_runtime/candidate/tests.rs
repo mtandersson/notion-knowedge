@@ -19,7 +19,7 @@ use crate::{
 };
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs, os::unix::fs::DirBuilderExt, sync::Arc};
-fn bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+pub(crate) fn bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     fn walk(root: &Path, at: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
         for entry in fs::read_dir(at).unwrap() {
             let path = entry.unwrap().path();
@@ -40,7 +40,7 @@ fn bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     walk(root, root, &mut out);
     out
 }
-fn next(binding: &CommitBinding, generation: &str) -> CommitBinding {
+pub(crate) fn next(binding: &CommitBinding, generation: &str) -> CommitBinding {
     let json = serde_json::to_string(binding)
         .unwrap()
         .replace(
@@ -53,7 +53,7 @@ fn next(binding: &CommitBinding, generation: &str) -> CommitBinding {
         );
     CommitBinding::parse_retained(json.as_bytes()).unwrap()
 }
-fn activate(
+pub(crate) fn activate(
     root: &Path,
     coordinator: &Arc<IndexCommitCoordinator>,
     embedding: &EmbeddingMetadata,

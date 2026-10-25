@@ -63,12 +63,26 @@ fn source_limits(
     record: &TransitionRecord,
     input: &ComparisonInputs<'_>,
 ) -> Result<ManifestLimits, CommitError> {
-    let mut limits = input.limits;
+    preparation_limits(
+        input.source,
+        input.target,
+        &record.quarantine_generation,
+        input.limits,
+    )
+}
+/// Leave room for both future physical fences before any Prepared publication.
+pub(crate) fn preparation_limits(
+    source: &CommitBinding,
+    target: &CommitBinding,
+    quarantine_generation: &str,
+    limits: ManifestLimits,
+) -> Result<ManifestLimits, CommitError> {
+    let mut limits = limits;
     // Reserve capacity for the only two new logical rows before quarantine.
     // The estimate matches the reader's byte preflight, including ROWID/epoch.
     let mut reserve = 0u64;
-    for generation in [&record.quarantine_generation, input.target.generation()] {
-        let bytes = 4 * (generation.len() as u64 + input.source.scope().len() as u64 + 40) + 128;
+    for generation in [quarantine_generation, target.generation()] {
+        let bytes = 4 * (generation.len() as u64 + source.scope().len() as u64 + 40) + 128;
         if bytes > limits.row_bytes {
             return Err(CommitError::InvalidInput);
         }

@@ -1,6 +1,8 @@
 //! Offline index preparation owns both filesystem admission and operational SQL.
 //! No scope changes, receipt supersession, or external source effects occur here.
 #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+mod prepared;
+#[cfg(all(feature = "local-lancedb", target_os = "linux"))]
 mod prior;
 
 use super::*;
@@ -108,7 +110,7 @@ impl OfflineBackup {
 /// ```
 pub struct OwnedOfflineInspection<'owner> {
     coordinator: &'owner IndexCommitCoordinator,
-    connection: &'owner Connection,
+    connection: &'owner rusqlite::Transaction<'owner>,
     state: File,
 }
 impl OwnedOfflineInspection<'_> {
