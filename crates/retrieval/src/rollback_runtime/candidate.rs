@@ -94,10 +94,41 @@ impl VerifiedPriorCandidate<'_> {
                 .filter(|d| !d.is_zero())
                 .ok_or(RuntimeError)
         };
+        let metadata = &self.observation;
+        if metadata.version != 1
+            || metadata.runtime_sha256 != self.runtime.sha256()
+            || metadata.asset_sha256.as_deref() != self.asset.map(PinnedAsset::sha256)
+            || metadata.target_authority_json.as_bytes() != source::canonical(&self.target, 32768)?
+            || self.transfer_path.starts_with(&self.archive.path)
+        {
+            return Err(RuntimeError);
+        }
+        match (&metadata.kind, &metadata.built) {
+            (CandidateKind::ExactArchive, None)
+                if metadata.candidate == self.archive
+                    && metadata.current.metadata.source.rows == metadata.prior.source.rows
+                    && metadata.current.metadata.source.snapshot_sha256
+                        == metadata.prior.source.snapshot_sha256 => {}
+            (CandidateKind::Rebuilt, Some(report))
+                if report.candidate == metadata.candidate
+                    && report.runtime == metadata.prior.descriptor
+                    && report.target_authority_json == metadata.target_authority_json
+                    && report.transfer_sha256 == metadata.current.sha256
+                    && report.snapshot.rows == metadata.current.metadata.source.rows
+                    && report.snapshot.snapshot_sha256
+                        == metadata.current.metadata.source.snapshot_sha256 => {}
+            _ => return Err(RuntimeError),
+        }
         self.current_unchanged()?;
         let provenance = self.owner.prior_archive(&self.lineage).map_err(err)?;
         if provenance.lineage_sha256 != self.observation.lineage_sha256
             || provenance.ownership_sha256 != self.retained.prior_authority_sha256()
+            || provenance.snapshot_sha256 != metadata.prior.source.snapshot_sha256
+            || !self.retained.matches_prior_observation(
+                self.runtime.sha256(),
+                self.asset.map(PinnedAsset::sha256),
+                &metadata.prior,
+            )
             || RetainedEvidence::read(&self.evidence_path)? != self.retained
             || DirectoryIdentity::capture(&provenance.path).map_err(err)? != self.archive
         {
@@ -287,6 +318,78 @@ fn reopen(
     })
 }
 
+fn validate_target(
+    owner: &OwnedOfflineInspection<'_>,
+    target: &CommitBinding,
+    budget: Duration,
+) -> Result<()> {
+    if budget.is_zero()
+        || budget > Duration::from_secs(300)
+        || target.table() != owner.binding().table()
+        || target.workspace() != owner.binding().workspace()
+        || target.roots() != owner.binding().roots()
+        || target.scope() != owner.binding().scope()
+        || target.generation() == owner.binding().generation()
+        || target.epoch() < owner.binding().epoch().checked_add(2).ok_or(RuntimeError)?
+    {
+        return Err(RuntimeError);
+    }
+    Ok(())
+}
+
+/// Explicit descriptive inputs retained by an earlier preparation. They grant
+/// no authority until independent current/prior/candidate verification succeeds.
+pub struct RetainedCandidate<'a> {
+    pub transfer: &'a Path,
+    pub metadata: &'a CandidateEvidence,
+}
+/// Reverify existing artifacts without rebuilding or recreating a missing file.
+/// This is the restart/publication adapter; #525 must call it while holding its
+/// actual publishing ownership before reserving or changing any physical fence.
+pub fn verify_retained<'owner>(
+    owner: &'owner OwnedOfflineInspection<'owner>,
+    prior: PriorInputs<'owner>,
+    embedding: &EmbeddingMetadata,
+    target: &CommitBinding,
+    retained: RetainedCandidate<'_>,
+    limits: TransferLimits,
+    budget: Duration,
+) -> Result<VerifiedPriorCandidate<'owner>> {
+    validate_target(owner, target, budget)?;
+    let mut proof = VerifiedPriorCandidate {
+        owner,
+        runtime: prior.runtime,
+        asset: prior.asset,
+        evidence_path: prior.evidence.into(),
+        retained: RetainedEvidence::read(prior.evidence)?,
+        lineage: prior.lineage.to_vec(),
+        archive: DirectoryIdentity::capture(prior.archive).map_err(err)?,
+        transfer_path: retained.transfer.into(),
+        embedding: embedding.clone(),
+        target: target.clone(),
+        limits,
+        budget,
+        observation: retained.metadata.clone(),
+    };
+    let started = Instant::now();
+    builder::verify_fencing(
+        prior.runtime,
+        prior.asset,
+        &proof.observation.prior.descriptor,
+        limits.native,
+        budget
+            .checked_sub(started.elapsed())
+            .filter(|d| !d.is_zero())
+            .ok_or(RuntimeError)?,
+    )?;
+    proof.budget = budget
+        .checked_sub(started.elapsed())
+        .filter(|d| !d.is_zero())
+        .ok_or(RuntimeError)?;
+    proof.revalidate()?;
+    Ok(proof)
+}
+
 /// Capture the latest owned source once. Reuse only an exact canonical archive;
 /// newer acknowledged rows require a fresh selected-prior-runtime candidate.
 /// Original operational SQL is never restored or passed to a subprocess.
@@ -303,17 +406,7 @@ pub fn prepare<'owner>(
         transfer: transfer_path,
         candidate,
     } = paths;
-    if budget.is_zero()
-        || budget > Duration::from_secs(300)
-        || target.table() != owner.binding().table()
-        || target.workspace() != owner.binding().workspace()
-        || target.roots() != owner.binding().roots()
-        || target.scope() != owner.binding().scope()
-        || target.generation() == owner.binding().generation()
-        || target.epoch() < owner.binding().epoch().checked_add(2).ok_or(RuntimeError)?
-    {
-        return Err(RuntimeError);
-    }
+    validate_target(owner, target, budget)?;
     let started = Instant::now();
     let remaining = || {
         budget

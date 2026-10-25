@@ -267,6 +267,7 @@ jobs:
           NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib verified_prior_runtime_legacy_uses_actual_owned_source_without_sql_changes --locked -- --ignored
           NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" NK_LEXICAL_VERIFY="$GITHUB_WORKSPACE/target/debug/examples/lexical-verify" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib offline_verification_command_legacy_retries_killed_publication --locked -- --ignored
           NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib pinned_runtime_builds_and_reopens_legacy_candidate_from_bound_current_rows --locked -- --ignored
+          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib owned_legacy_archive_reuse_then_latest_acknowledged_rows_rebuild --locked -- --ignored
 
       - name: Test production evaluation storage and authorization boundaries
         if: matrix.suite == 'webhook-worker'

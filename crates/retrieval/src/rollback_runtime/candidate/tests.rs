@@ -18,7 +18,7 @@ use crate::{
     },
 };
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fs, sync::Arc};
+use std::{collections::BTreeMap, fs, os::unix::fs::DirBuilderExt, sync::Arc};
 fn bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     fn walk(root: &Path, at: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
         for entry in fs::read_dir(at).unwrap() {
@@ -196,7 +196,7 @@ fn run(bound: bool) {
         archive: &archive,
     };
     let before = bytes(&root);
-    current
+    let exact_metadata = current
         .with_owned_offline_inspection(30, |owner| {
             // The original source lock is already held; nested owners refuse before
             // trying to acquire the same SQL mutex. The controller never nests one.
@@ -228,14 +228,112 @@ fn run(bound: bool) {
                 proof.metadata().prior.source.lexical
             );
             proof.revalidate().unwrap();
+            Ok(proof.metadata().clone())
+        })
+        .unwrap();
+    assert_eq!(bytes(&root), before);
+    current
+        .with_owned_offline_inspection(30, |owner| {
+            let refuse = |selected: PriorInputs<'_>| {
+                let output = parent.path().join("refused.rows");
+                assert!(
+                    prepare(
+                        owner,
+                        selected,
+                        &embedding,
+                        &target,
+                        PreparationPaths {
+                            transfer: &output,
+                            candidate: &candidate
+                        },
+                        TransferLimits::default(),
+                        Duration::from_secs(300)
+                    )
+                    .is_err()
+                );
+                assert!(!output.exists());
+                assert!(!candidate.exists());
+            };
+            refuse(PriorInputs {
+                lineage: &[],
+                ..inputs()
+            });
+            refuse(PriorInputs {
+                evidence: &parent.path().join("missing-evidence"),
+                ..inputs()
+            });
+            refuse(PriorInputs {
+                lineage: std::slice::from_ref(&retained),
+                ..inputs()
+            });
+            let held = File::open(&archive).unwrap();
+            held.try_lock().unwrap();
+            refuse(inputs());
+            drop(held);
+            let moved = root.join("moved-prior");
+            fs::rename(&archive, &moved).unwrap();
+            fs::DirBuilder::new().mode(0o700).create(&archive).unwrap();
+            refuse(inputs());
+            fs::remove_dir(&archive).unwrap();
+            fs::rename(&moved, &archive).unwrap();
+            let original = fs::read(&retained).unwrap();
+            fs::write(&retained, b"{}").unwrap();
+            refuse(inputs());
+            fs::write(&retained, original).unwrap();
+            if let Some(asset) = asset.as_ref() {
+                refuse(PriorInputs {
+                    asset: None,
+                    ..inputs()
+                });
+                let path = parent.path().join("prior.bundle");
+                let original = fs::read(&path).unwrap();
+                fs::write(&path, b"corrupt prior asset").unwrap();
+                refuse(inputs());
+                fs::write(&path, original).unwrap();
+                asset.revalidate().unwrap();
+            }
+            // Refuse derived transfer output inside the retained prior generation
+            // before creating any file, even when its name is currently unused.
+            let forbidden = archive.join("forbidden-transfer");
+            assert!(
+                prepare(
+                    owner,
+                    inputs(),
+                    &embedding,
+                    &target,
+                    PreparationPaths {
+                        transfer: &forbidden,
+                        candidate: &candidate
+                    },
+                    TransferLimits::default(),
+                    Duration::from_secs(300)
+                )
+                .is_err()
+            );
+            assert!(!forbidden.exists());
             Ok(())
         })
         .unwrap();
     assert_eq!(bytes(&root), before);
     probe::commit_fixture_row(&root, current_binding, Some(&current_dictionary)).unwrap();
     let before = bytes(&root);
-    current
+    let latest_metadata = current
         .with_owned_offline_inspection(i64::MAX / 2, |owner| {
+            assert!(
+                verify_retained(
+                    owner,
+                    inputs(),
+                    &embedding,
+                    &target,
+                    RetainedCandidate {
+                        transfer: &parent.path().join("exact.rows"),
+                        metadata: &exact_metadata
+                    },
+                    TransferLimits::default(),
+                    Duration::from_secs(300)
+                )
+                .is_err()
+            );
             let proof = prepare(
                 owner,
                 inputs(),
@@ -273,10 +371,47 @@ fn run(bound: bool) {
             assert!(proof.revalidate().is_err());
             fs::write(&retained, original).unwrap();
             assert!(
-                !root
-                    .join("index/.nk-lexical-candidate-ready-v1.json")
+                !candidate
+                    .join(".nk-lexical-candidate-ready-v1.json")
                     .exists()
             );
+            Ok(proof.metadata().clone())
+        })
+        .unwrap();
+    assert_eq!(bytes(&root), before);
+    current
+        .with_owned_offline_inspection(i64::MAX / 2, |owner| {
+            let mut forged = latest_metadata.clone();
+            forged.kind = CandidateKind::ExactArchive;
+            assert!(
+                verify_retained(
+                    owner,
+                    inputs(),
+                    &embedding,
+                    &target,
+                    RetainedCandidate {
+                        transfer: &parent.path().join("latest.rows"),
+                        metadata: &forged
+                    },
+                    TransferLimits::default(),
+                    Duration::from_secs(300)
+                )
+                .is_err()
+            );
+            let proof = verify_retained(
+                owner,
+                inputs(),
+                &embedding,
+                &target,
+                RetainedCandidate {
+                    transfer: &parent.path().join("latest.rows"),
+                    metadata: &latest_metadata,
+                },
+                TransferLimits::default(),
+                Duration::from_secs(300),
+            )
+            .unwrap();
+            assert_eq!(proof.metadata(), &latest_metadata);
             Ok(())
         })
         .unwrap();

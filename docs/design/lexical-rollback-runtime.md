@@ -341,3 +341,37 @@ freshness (#540), including archive reuse rules, before the publication/fencing
 unit (#525) can consume the candidate. This protocol alone does not complete
 #524 or authorize activation, source choice, deployment or historical-pair
 compatibility claims.
+
+### Owned current/prior candidate verification
+
+`rollback_runtime::candidate` separates the current owned SQL/index authority
+from the retained prior runtime and physical generation. The operator explicitly
+names completed transition records newest first. They must connect the actual
+current endpoint through the same original SQL inode/token to the selected
+archive inode. Retained prior evidence must match the original owned authority,
+complete prior descriptor, exact executable/asset and original canonical
+snapshot. No directory discovery or operational backup restoration is involved.
+
+Only the selected prior runtime interprets the archived native source or its
+asset. Full native inspection must match retained semantics and row/vector data;
+physical relocation is accepted only through verified completed lineage. Fresh
+archive observations then compare in full. The current host captures the latest
+canonical rows while the original SQL/index owner remains held. Exact archives
+are reusable only after full row/vector equality. A newer acknowledged change
+requires a fresh selected-runtime candidate, including explicit legacy targets.
+
+`VerifiedPriorCandidate` has no deserializer or public constructor and borrows
+the current owner. Its `CandidateEvidence` metadata is descriptive. Retained
+reuse runs actual current/prior/candidate verification and fencing probes again;
+it never recreates a missing transfer or candidate. Original SQL bytes, current
+native snapshot, lineage, evidence, assets and physical identities are rechecked.
+
+An exact archived source still carries its OLD physical binding. Candidate
+verification does not activate it or reserve a fresh generation. #525 must
+reverify under its actual publication transaction, apply never-reused fences,
+preserve the whole operational SQL state and demonstrate killed-process
+recovery. #517 retains the complete operator integration and parent audits.
+#524 remains open until all original acceptance and merged delivery units are
+verified; #516/#504/#491 remain open. No historical/backport artifact is proved
+compatible merely by these local fixtures, and no serving or quality claim is
+made.
