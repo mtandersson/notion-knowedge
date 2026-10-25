@@ -82,15 +82,25 @@ pub fn request_bytes(
     limits: CandidateLimits,
 ) -> Result<Vec<u8>> {
     owner.revalidate().map_err(err)?;
+    archived_request_bytes(owner.index_directory(), owner.binding(), embedding, limits)
+}
+
+// Descriptive subprocess configuration only. The integrated caller separately
+// retains current ownership and validates the archive's physical lineage.
+pub(super) fn archived_request_bytes(
+    directory: &Path,
+    authority: &CommitBinding,
+    embedding: &EmbeddingMetadata,
+    limits: CandidateLimits,
+) -> Result<Vec<u8>> {
     if !limits_valid(limits) {
         return Err(RuntimeError);
     }
-    let authority_json =
-        String::from_utf8(canonical(owner.binding(), MAX_REQUEST / 2)?).map_err(err)?;
+    let authority_json = String::from_utf8(canonical(authority, MAX_REQUEST / 2)?).map_err(err)?;
     canonical(
         &SourceRequest {
             version: 1,
-            directory: owner.index_directory().into(),
+            directory: directory.into(),
             authority_json,
             embedding: embedding.clone(),
             limits,

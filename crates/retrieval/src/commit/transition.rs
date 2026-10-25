@@ -767,6 +767,21 @@ impl TransitionRecord {
         Ok(record)
     }
 
+    /// Read an explicitly named completed active record or its exact retained
+    /// history filename. This is descriptive; current ownership must validate
+    /// SQL identity and physical endpoint lineage before using it as provenance.
+    #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+    pub(crate) fn read_completed(state: &Path, path: &Path) -> Result<Self, CommitError> {
+        let record = Self::read_path(state, path)?.ok_or(CommitError::BindingMismatch)?;
+        if record.phase != TransitionPhase::Complete
+            || (path != journal_path(state)?
+                && path != retained_history_path(state, &record, false)?)
+        {
+            return Err(CommitError::BindingMismatch);
+        }
+        Ok(record)
+    }
+
     /// Bounded no-follow read. Unknown fields, noncanonical bytes and unsafe
     /// ownership are errors; an absent record is distinct from a corrupt one.
     pub fn read(state: &Path) -> Result<Option<Self>, CommitError> {

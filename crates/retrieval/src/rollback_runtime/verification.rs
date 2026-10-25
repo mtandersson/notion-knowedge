@@ -99,6 +99,9 @@ impl PinnedAsset {
         }
         Ok(())
     }
+    pub(super) fn sha256(&self) -> &str {
+        &self.sha256
+    }
     pub(super) fn mode(&self) -> Vec<OsString> {
         vec![
             "expansion".into(),

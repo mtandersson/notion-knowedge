@@ -61,22 +61,13 @@ pub fn build(
     };
     // A capability string cannot prove that a coupled-generation runtime can
     // admit revoked/current policy under distinct physical fences.
-    let root = scratch.path().join("probe");
-    let created = probe::verify_report(
-        &run("probe-create", &root)?,
+    verify_fencing(
+        runtime,
+        asset,
         &request.runtime,
-        &root,
         request.limits.native,
+        remaining()?,
     )?;
-    let reopened = probe::verify_report(
-        &run("probe-reopen", &root)?,
-        &request.runtime,
-        &root,
-        request.limits.native,
-    )?;
-    if created != reopened {
-        return Err(RuntimeError);
-    }
     let create = CandidateReport::parse_metadata(&run("candidate-create", &path)?)
         .map_err(|_| RuntimeError)?;
     let reopen = CandidateReport::parse_metadata(&run("candidate-reopen", &path)?)
@@ -102,6 +93,42 @@ pub fn build(
     }
     remaining()?;
     Ok(reopen)
+}
+pub(super) fn verify_fencing(
+    runtime: &PinnedRuntime,
+    asset: Option<&PinnedAsset>,
+    descriptor: &crate::chunks::lexical_binding::runtime::RuntimeDescriptor,
+    limits: crate::chunks::CandidateLimits,
+    budget: Duration,
+) -> Result<()> {
+    let started = Instant::now();
+    let scratch = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()?;
+    let root = scratch.path().join("probe");
+    let mode = asset
+        .map(PinnedAsset::mode)
+        .unwrap_or_else(|| vec!["legacy".into()]);
+    let run = |action: &str| {
+        runtime.run(
+            &[
+                vec![action.into(), root.as_os_str().to_owned()],
+                mode.clone(),
+            ]
+            .concat(),
+            budget
+                .checked_sub(started.elapsed())
+                .filter(|d| !d.is_zero())
+                .ok_or(RuntimeError)?,
+            65536,
+        )
+    };
+    let created = probe::verify_report(&run("probe-create")?, descriptor, &root, limits)?;
+    let reopened = probe::verify_report(&run("probe-reopen")?, descriptor, &root, limits)?;
+    if created != reopened {
+        return Err(RuntimeError);
+    }
+    Ok(())
 }
 #[cfg(test)]
 mod tests;

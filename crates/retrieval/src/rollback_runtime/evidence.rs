@@ -82,6 +82,28 @@ impl RetainedEvidence {
         }
         Ok(value)
     }
+    pub(super) fn prior_authority_sha256(&self) -> &str {
+        &self.authority_sha256
+    }
+    pub(super) fn matches_prior_observation(
+        &self,
+        runtime_sha256: &str,
+        asset_sha256: Option<&str>,
+        report: &SourceReport,
+    ) -> bool {
+        // Moving an archived directory changes its physical inventory digest.
+        // Accept that relocation only after the caller proves original SQL and
+        // exact inode lineage; canonical content and complete semantics remain
+        // exact. Fresh archive observations must subsequently match in full.
+        self.runtime_sha256 == runtime_sha256
+            && self.asset_sha256.as_deref() == asset_sha256
+            && self.observation.descriptor == report.descriptor
+            && self.observation.source.version == report.source.version
+            && self.observation.source.source_version == report.source.source_version
+            && self.observation.source.rows == report.source.rows
+            && self.observation.source.snapshot_sha256 == report.source.snapshot_sha256
+            && self.observation.source.lexical == report.source.lexical
+    }
     /// Read bounded private canonical metadata, without granting authority.
     pub fn read(path: &Path) -> Result<Self> {
         let parent = parent(path)?;
