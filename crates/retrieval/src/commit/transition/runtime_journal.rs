@@ -556,3 +556,95 @@ impl TransitionOwnership {
         Ok(next)
     }
 }
+
+impl RuntimeJournalRecord {
+    pub fn completed_history_path(&self) -> Result<PathBuf, CommitError> {
+        if self.phase != RuntimePhase::Complete {
+            return Err(CommitError::Conflict);
+        }
+        let active = journal_path(&self.prepared.state_path)?;
+        let mut name = active
+            .file_name()
+            .ok_or(CommitError::InvalidInput)?
+            .to_os_string();
+        name.push(format!(
+            ".{:x}.runtime-v2.history",
+            Sha256::digest(self.canonical_bytes()?)
+        ));
+        Ok(active.with_file_name(name))
+    }
+    pub(crate) fn read_history(path: &Path) -> Result<Self, CommitError> {
+        let record = Self::parse_metadata(&read_bytes(path)?.ok_or(CommitError::BindingMismatch)?)?;
+        if record.completed_history_path()? != path {
+            return Err(CommitError::BindingMismatch);
+        }
+        Ok(record)
+    }
+}
+impl TransitionOwnership {
+    /// The verification callback runs while the same SQL and physical owner is
+    /// retained. Completion is never inferred from missing active metadata.
+    pub(crate) fn retire_runtime_complete(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+        mut verify: impl FnMut(&rusqlite::Transaction<'_>) -> Result<(), CommitError>,
+    ) -> Result<PathBuf, CommitError> {
+        use crate::rollback_runtime::evidence::{check_parent, parent};
+        use std::os::{
+            fd::AsRawFd,
+            unix::{ffi::OsStrExt, fs::PermissionsExt},
+        };
+        self.validate_owned_transaction(transaction)?;
+        let record = self.runtime_record()?;
+        if record.phase != RuntimePhase::Complete {
+            return Err(CommitError::Conflict);
+        }
+        verify(transaction)?;
+        let history = record.completed_history_path()?;
+        let active = journal_path(&self.state_path)?;
+        let directory = parent(&active).map_err(invalid)?;
+        let bytes = record.canonical_bytes()?;
+        match read_bytes(&history)? {
+            Some(existing) if existing == bytes => (),
+            Some(_) => return Err(CommitError::Conflict),
+            None => {
+                let root = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+                let temporary = tempfile::Builder::new()
+                    .prefix(".nk-runtime-complete-")
+                    .permissions(fs::Permissions::from_mode(0o600))
+                    .tempfile_in(&root)
+                    .map_err(io)?;
+                temporary.as_file().write_all(&bytes).map_err(io)?;
+                temporary.as_file().sync_all().map_err(io)?;
+                temporary
+                    .persist_noclobber(
+                        root.join(history.file_name().ok_or(CommitError::InvalidInput)?),
+                    )
+                    .map_err(|e| io(e.error))?;
+            }
+        }
+        directory.sync_all().map_err(io)?;
+        if RuntimeJournalRecord::read_history(&history)? != record
+            || self.runtime_record()? != record
+        {
+            return Err(CommitError::Conflict);
+        }
+        verify(transaction)?;
+        check_parent(&directory, &active).map_err(invalid)?;
+        let name = std::ffi::CString::new(
+            active
+                .file_name()
+                .ok_or(CommitError::InvalidInput)?
+                .as_bytes(),
+        )
+        .map_err(invalid)?;
+        // SAFETY: retained original private parent and one terminated filename.
+        if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(io(std::io::Error::last_os_error()));
+        }
+        directory.sync_all().map_err(io)?;
+        check_parent(&directory, &active).map_err(invalid)?;
+        self.validate_owned_transaction(transaction)?;
+        Ok(history)
+    }
+}

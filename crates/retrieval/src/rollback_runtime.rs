@@ -18,6 +18,8 @@ use std::{
 };
 
 #[cfg(feature = "local-lancedb")]
+pub mod admission;
+#[cfg(feature = "local-lancedb")]
 pub mod builder;
 #[cfg(feature = "local-lancedb")]
 pub mod candidate;

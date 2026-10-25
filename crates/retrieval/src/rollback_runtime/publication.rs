@@ -93,7 +93,7 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
         {
             return Err(RuntimeError);
         }
-        builder::verify_fencing(
+        builder::verify_publication_runtime(
             runtime,
             asset,
             &record.prepared.candidate.prior.descriptor,
@@ -746,6 +746,18 @@ impl RuntimeTransitionOperator<'_> {
         use crate::commit::transition::publication::{SqlPublication, publish_derived_owned};
         self.owner
             .with_exclusive_sql(now, |transaction| {
+                let generation: String = transaction
+                    .query_row(
+                        "SELECT generation FROM index_commit_binding WHERE singleton=1",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                if generation == self.target.generation() {
+                    self.verify_all(transaction)
+                        .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                    return Ok(());
+                }
                 let version = self
                     .verify_all(transaction)
                     .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
@@ -772,6 +784,16 @@ impl RuntimeTransitionOperator<'_> {
             .with_exclusive_sql(now, |transaction| {
                 self.verify_all(transaction)
                     .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                let generation: String = transaction
+                    .query_row(
+                        "SELECT generation FROM index_commit_binding WHERE singleton=1",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                if generation != self.target.generation() {
+                    return Err(crate::commit::CommitError::Conflict);
+                }
                 let mut current = self.owner.runtime_record()?;
                 if current.phase == RuntimePhase::TargetInstalled {
                     crate::commit::transition::publication::install_anchor(&self.owner)?;
@@ -796,5 +818,112 @@ impl RuntimeTransitionOperator<'_> {
                 Ok(current)
             })
             .map_err(err)
+    }
+}
+
+impl RuntimeTransitionOperator<'_> {
+    pub fn retire_complete(&self, now: i64) -> Result<std::path::PathBuf> {
+        self.owner
+            .with_exclusive_sql(now, |transaction| {
+                self.owner
+                    .retire_runtime_complete(transaction, |transaction| {
+                        self.verify_all(transaction)
+                            .map(|_| ())
+                            .map_err(|_| crate::commit::CommitError::BindingMismatch)
+                    })
+            })
+            .map_err(err)
+    }
+    /// Inspect each actual phase and SQL tuple rather than replaying effects.
+    pub fn reconcile(&self, now: i64) -> Result<std::path::PathBuf> {
+        for _ in 0..10 {
+            match self.owner.runtime_record().map_err(err)?.phase {
+                RuntimePhase::Prepared => {
+                    self.quarantine(now)?;
+                }
+                RuntimePhase::Quarantined => {
+                    self.retain_current_source(now)?;
+                }
+                RuntimePhase::SourceRetained => {
+                    self.refence_target(now)?;
+                }
+                RuntimePhase::TargetRefenced => {
+                    self.install_target(now)?;
+                }
+                RuntimePhase::TargetInstalled => {
+                    self.publish_derived(now)?;
+                    self.complete_publication(now)?;
+                }
+                RuntimePhase::Published => {
+                    self.complete_publication(now)?;
+                }
+                RuntimePhase::Complete => return self.retire_complete(now),
+            }
+        }
+        Err(RuntimeError)
+    }
+}
+
+/// Publication result is descriptive. The observed serving snapshot came from
+/// a fresh read-only selected-runtime process after all publication locks ended.
+pub struct PublicationOutcome {
+    pub history: std::path::PathBuf,
+    pub observation: super::source::SourceReport,
+}
+impl RuntimeTransitionOperator<'_> {
+    pub fn finish(self, now: i64) -> Result<PublicationOutcome> {
+        use std::{io::Write, os::unix::fs::PermissionsExt};
+        let history = self.reconcile(now)?;
+        let record = RuntimeJournalRecord::read_history(&history).map_err(err)?;
+        let runtime = self.runtime;
+        let asset = self.asset;
+        let limits = self.limits;
+        let embedding = self.embedding.clone();
+        drop(self);
+        if let Some(asset) = asset {
+            asset.revalidate()?;
+        }
+        let request = super::admission::AdmissionRequest {
+            version: 1,
+            directory: record.prepared.current.path.clone(),
+            state: record.prepared.state_path.clone(),
+            authority_json: record.prepared.candidate.target_authority_json.clone(),
+            embedding,
+            limits: limits.transfer.native,
+        };
+        let root = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()?;
+        let path = root.path().join("admission.json");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
+        file.write_all(&request.canonical_bytes()?)?;
+        drop(file);
+        let mode = asset
+            .map(PinnedAsset::mode)
+            .unwrap_or_else(|| vec!["legacy".into()]);
+        let bytes = runtime.run(
+            &[
+                vec!["inspect-admission".into(), path.as_os_str().to_owned()],
+                mode,
+            ]
+            .concat(),
+            limits.process_budget,
+            65536,
+        )?;
+        let observation = super::source::SourceReport::parse_metadata(&bytes)?;
+        if observation.descriptor != record.prepared.candidate.prior.descriptor {
+            return Err(RuntimeError);
+        }
+        if let Some(asset) = asset {
+            asset.revalidate()?;
+        }
+        Ok(PublicationOutcome {
+            history,
+            observation,
+        })
     }
 }

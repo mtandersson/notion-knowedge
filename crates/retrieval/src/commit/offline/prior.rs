@@ -1,6 +1,6 @@
 //! Read-only provenance for an explicitly selected retained physical generation.
 use super::*;
-use crate::commit::transition::TransitionRecord;
+use crate::commit::transition::{TransitionRecord, runtime_journal::RuntimeJournalRecord};
 
 /// Resolved provenance; the caller must retain and revalidate actual ownership.
 pub(crate) struct PriorArchive {
@@ -47,6 +47,34 @@ pub(crate) struct LineageContext<'a> {
     pub state_inode: u64,
     pub state_token: &'a str,
 }
+// Untagged serialization preserves the original v1 lineage digest byte for
+// byte, while permitting explicit v2 completed history in later transitions.
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum CompletedRecord {
+    Legacy(Box<TransitionRecord>),
+    Runtime(Box<RuntimeJournalRecord>),
+}
+impl CompletedRecord {
+    fn read(state: &Path, path: &Path) -> Result<Self, CommitError> {
+        match TransitionRecord::read_completed(state, path) {
+            Ok(record) => Ok(Self::Legacy(Box::new(record))),
+            Err(_) => {
+                let record = RuntimeJournalRecord::read_history(path)?;
+                if record.prepared.state_path != state {
+                    return Err(CommitError::BindingMismatch);
+                }
+                Ok(Self::Runtime(Box::new(record)))
+            }
+        }
+    }
+    fn layout(&self) -> Result<TransitionRecord, CommitError> {
+        match self {
+            Self::Legacy(record) => Ok(*record.clone()),
+            Self::Runtime(record) => record.layout(),
+        }
+    }
+}
 pub(crate) fn resolve_archive_lineage(
     c: LineageContext<'_>,
     paths: &[PathBuf],
@@ -59,7 +87,8 @@ pub(crate) fn resolve_archive_lineage(
     let mut inode = c.index_inode;
     let mut records = Vec::new();
     for path in paths {
-        let record = TransitionRecord::read_completed(c.state_path, path)?;
+        let completed = CompletedRecord::read(c.state_path, path)?;
+        let record = completed.layout()?;
         if record.state_device != c.state_device
             || record.state_inode != c.state_inode
             || record.state_token != c.state_token
@@ -74,9 +103,9 @@ pub(crate) fn resolve_archive_lineage(
         binding = CommitBinding::parse_retained(record.source.binding.as_bytes())?;
         device = record.source.device;
         inode = record.source.inode;
-        records.push(record);
+        records.push(completed);
     }
-    let prior = records.last().ok_or(CommitError::InvalidInput)?;
+    let prior = records.last().ok_or(CommitError::InvalidInput)?.layout()?;
     let bytes = serde_json::to_vec(&(
         &binding,
         &prior.source.path,

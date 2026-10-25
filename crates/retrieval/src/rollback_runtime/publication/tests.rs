@@ -196,5 +196,18 @@ fn run_case(bound: bool, newer: bool) {
     )
     .unwrap();
     assert_eq!(reopened.owner.runtime_record().unwrap(), record);
+    let outcome = reopened.finish(i64::MAX / 2).unwrap();
+    assert!(outcome.history.exists());
+    assert_eq!(
+        outcome.observation.source.snapshot_sha256,
+        metadata.current.metadata.source.snapshot_sha256
+    );
+    assert!(
+        !crate::commit::transition::journal_path(&state)
+            .unwrap()
+            .exists()
+    );
+    assert!(IndexCommitCoordinator::open_read_only(&index, &state, target.clone()).is_ok());
+
     assert_eq!(bytes(&archive), before);
 }

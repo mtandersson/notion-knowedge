@@ -469,6 +469,29 @@ pub(crate) fn commit_fixture_row(
     coordinator.state().release_lease(&lease, now).map_err(err)
 }
 
+pub(super) fn admission_request(
+    root: &Path,
+    legacy: bool,
+    limits: CandidateLimits,
+) -> Result<Vec<u8>> {
+    super::admission::AdmissionRequest {
+        version: 1,
+        directory: root.join("index"),
+        state: root.join("state.sqlite"),
+        authority_json: serde_json::to_string(&report_binding(legacy)?).map_err(err)?,
+        embedding: embedding()?,
+        limits,
+    }
+    .canonical_bytes()
+}
+pub(super) fn verify_admission_report(bytes: &[u8], expected: &ProbeReport) -> Result<()> {
+    let report = super::source::SourceReport::parse_metadata(bytes)?;
+    if report.descriptor != expected.descriptor || report.source != expected.snapshot {
+        return Err(RuntimeError);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
