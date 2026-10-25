@@ -419,3 +419,28 @@ source, reserve generations, adopt/publish SQL, install a target or serve it.
 #547 must reverify each actual publication phase under its real SQL/physical
 owner, including recoverable selected-runtime archive refencing. Those later
 conditions cannot be inferred from this Prepared record or its phase label.
+
+### Runtime publication journal contract
+
+#547 uses an explicitly version-two `selected-runtime-publication-v2` record
+at the existing active admission journal path. Version-one readers refuse this
+unknown format; it must never be disguised as a version-one READY/candidate
+record. The active record blocks ordinary admission throughout publication.
+After complete native/whole-SQL verification, completion must durably retain
+its immutable history before removing the active admission blocker. A crash
+between history retention and removal must remain safe and retryable.
+
+The journal binds the actual original SQL inode/token, exact Prepared metadata
+and hash, explicitly resolved completed-lineage history names, fresh current-
+source archive path, verified activation-time backup and adoption manifest.
+It distinguishes source retention from selected-runtime target refencing,
+installation, SQL publication and completion. Refencing evidence must retain
+all current canonical rows/exact vectors and the complete selected prior
+storage/plan/asset semantics, including explicit binding absence in legacy
+mode. Only physical fencing metadata may change through that durable step.
+
+Native and SQL verification under the actual publication owner, no-clobber
+renames, recovery from every durable boundary and ordinary selected-runtime
+admission after completion remain implementation/test gates. Deserializing the
+journal contract alone grants no ownership or publication authority and does
+not complete #547 or #525.
