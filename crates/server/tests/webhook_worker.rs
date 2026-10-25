@@ -1343,20 +1343,80 @@ async fn deadline_cancellation_retains_due_retry_and_allows_healthy_page_progres
     let bad = event(PAGE, "page.created");
     runtime.worker.state.receive(&bad).unwrap();
     let worker = runtime.worker.clone();
+    let dispatch_started_at = now_ms() / 1000;
     let task = tokio::spawn(async move { worker.tick(CancellationToken::new(), false).await });
     tokio::time::timeout(Duration::from_secs(10), runtime.source.entered.notified())
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(7), task)
+    // The timeout is deliberately the real six-second worker deadline. Observe
+    // its cancellation by waiting for the owned index receipt to be marked
+    // failed; a one-second wall-clock allowance for both cancellation and
+    // background cleanup is not reliable under parallel feature CI load.
+    let operation = format!(
+        "webhook-{:x}",
+        sha2::Sha256::digest(format!("{}:{}:{:?}", WORKSPACE, SUB, vec![bad.id.clone()]))
+    );
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if runtime
+                .worker
+                .coordinator
+                .receipt(&operation)
+                .unwrap()
+                .is_some_and(|receipt| receipt.failure.is_some())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("timed-out index operation must record cancelled receipt cleanup");
+    // Joining synchronizes the durable inbox completion and writer-lease release.
+    // This outer watchdog detects hangs; it does not set the worker deadline.
+    tokio::time::timeout(Duration::from_secs(30), task)
         .await
+        .expect("timed-out worker failed to complete cancellation cleanup")
         .unwrap()
+        .unwrap();
+    // A successful new acquisition alone is insufficient: the old fence
+    // could have expired under load without ever being explicitly released.
+    let expires_at: i64 = rusqlite::Connection::open(&runtime.db)
         .unwrap()
+        .query_row(
+            "SELECT expires_at FROM reconciliation_lease WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        expires_at, 0,
+        "deadline cancellation must release its writer lease"
+    );
+    let lease = runtime
+        .worker
+        .state
+        .acquire_lease(now_ms() / 1000, 60)
+        .expect("deadline cancellation must allow a fresh writer lease");
+    runtime
+        .worker
+        .state
+        .release_lease(&lease, now_ms() / 1000)
         .unwrap();
     let pending = inspect(&runtime.worker, &bad);
     assert_eq!(pending.state, EventState::Pending);
     assert_eq!(pending.last_failure, Some(EventFailure::Unavailable));
     assert_eq!(pending.cycle_attempts, 1);
-    assert!(pending.retry_at.unwrap() > now_ms() / 1000);
+    assert_eq!(pending.lifetime_attempts, 1);
+    // Compare against the dispatch time, not the observation time: parallel
+    // scheduling cannot make a correctly persisted retry appear overdue.
+    assert!(
+        pending.retry_at.unwrap()
+            >= pending
+                .policy
+                .deadline(dispatch_started_at + 6, pending.cycle_attempts)
+                .unwrap()
+    );
     assert_eq!(runtime.searchable("Saffron").await, 0);
     runtime.source.proceed.notify_one();
     let metadata = runtime.worker.provider.metadata().clone();
@@ -1395,6 +1455,7 @@ async fn deadline_cancellation_retains_due_retry_and_allows_healthy_page_progres
     }
     assert_eq!(inspect(&runtime.worker, &bad).state, EventState::Succeeded);
     assert_eq!(inspect(&runtime.worker, &bad).cycle_attempts, 2);
+    assert_eq!(inspect(&runtime.worker, &bad).lifetime_attempts, 2);
     assert_eq!(
         inspect(&runtime.worker, &healthy).state,
         EventState::Succeeded
