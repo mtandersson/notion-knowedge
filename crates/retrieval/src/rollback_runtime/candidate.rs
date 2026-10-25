@@ -182,6 +182,85 @@ impl VerifiedPriorCandidate<'_> {
         remaining()?;
         Ok(())
     }
+    /// Retain original prior/candidate physical ownership while preparing a
+    /// durable record. Native inspection under the already-held lock uses the
+    /// selected runtime's read-only protocol, never nested lock acquisition.
+    pub(crate) fn with_locked_candidate<T>(
+        &self,
+        operation: impl FnOnce(&SourceReport) -> Result<T>,
+    ) -> Result<T> {
+        let started = Instant::now();
+        let remaining = || {
+            self.budget
+                .checked_sub(started.elapsed())
+                .filter(|d| !d.is_zero())
+                .ok_or(RuntimeError)
+        };
+        self.current_unchanged()?;
+        let provenance = self.owner.prior_archive(&self.lineage).map_err(err)?;
+        let _archive = archive_guard(&self.archive)?;
+        let _candidate = if self.observation.kind == CandidateKind::Rebuilt {
+            Some(archive_guard(&self.observation.candidate)?)
+        } else {
+            None
+        };
+        let binding = if self.observation.kind == CandidateKind::ExactArchive {
+            &provenance.binding
+        } else {
+            &self.target
+        };
+        let expected = self
+            .observation
+            .built
+            .as_ref()
+            .map(|r| &r.snapshot)
+            .unwrap_or(&self.observation.prior.source);
+        let inspect = || {
+            observe(
+                self.runtime,
+                self.asset,
+                &self.observation.candidate.path,
+                binding,
+                &self.embedding,
+                self.limits,
+                remaining()?,
+            )
+        };
+        let report = inspect()?;
+        if &report.source != expected || report.descriptor != self.observation.prior.descriptor {
+            return Err(RuntimeError);
+        }
+        let result = operation(&report)?;
+        if inspect()? != report
+            || observe(
+                self.runtime,
+                self.asset,
+                &self.archive.path,
+                &provenance.binding,
+                &self.embedding,
+                self.limits,
+                remaining()?,
+            )? != self.observation.prior
+            || DirectoryIdentity::capture(&self.archive.path).map_err(err)? != self.archive
+            || DirectoryIdentity::capture(&self.observation.candidate.path).map_err(err)?
+                != self.observation.candidate
+            || RetainedEvidence::read(&self.evidence_path)? != self.retained
+            || self
+                .owner
+                .prior_archive(&self.lineage)
+                .map_err(err)?
+                .lineage_sha256
+                != self.observation.lineage_sha256
+        {
+            return Err(RuntimeError);
+        }
+        self.current_unchanged()?;
+        if let Some(asset) = self.asset {
+            asset.revalidate()?;
+        }
+        remaining()?;
+        Ok(result)
+    }
     fn request(&self, candidate: PathBuf) -> Result<CandidateRequest> {
         Ok(CandidateRequest {
             version: 1,
@@ -520,4 +599,4 @@ pub fn prepare<'owner>(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -11,6 +11,8 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+mod owner;
+pub use owner::{PreparedInputs, PreparedLimits, VerifiedPreparedRollback, prepare};
 const MAX_BYTES: usize = 262144;
 const PROTOCOL: &str = "selected-runtime-rollback-prepared-v1";
 fn err<T>(_: T) -> RuntimeError {
@@ -51,6 +53,10 @@ pub struct PreparedRollbackMetadata {
     pub version: u32,
     pub protocol: String,
     pub state_path: PathBuf,
+    pub transfer_path: PathBuf,
+    pub prior_evidence_path: PathBuf,
+    pub lineage_paths: Vec<PathBuf>,
+    pub prior_archive: DirectoryIdentity,
     pub current: DirectoryIdentity,
     pub candidate: CandidateEvidence,
     pub observed_target_authority_json: String,
@@ -109,6 +115,12 @@ impl PreparedRollbackMetadata {
             || candidate.version != 1
             || !absolute(&self.state_path)
             || !absolute(&self.backup_path)
+            || !absolute(&self.transfer_path)
+            || !absolute(&self.prior_evidence_path)
+            || !absolute(&self.prior_archive.path)
+            || self.lineage_paths.is_empty()
+            || self.lineage_paths.len() > 64
+            || self.lineage_paths.iter().any(|p| !absolute(p))
             || !absolute(&self.current.path)
             || !absolute(&candidate.candidate.path)
             || self.state_path == self.backup_path
@@ -178,3 +190,6 @@ impl PreparedRollbackMetadata {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;
