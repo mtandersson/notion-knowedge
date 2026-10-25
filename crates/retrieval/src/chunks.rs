@@ -1917,6 +1917,9 @@ fn rows_to_batch(
     )?)
 }
 
+#[cfg(target_os = "linux")]
+pub use guarded::canonical_transfer;
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -4041,6 +4044,3 @@ mod tests {
         );
     }
 }
-
-#[cfg(target_os = "linux")]
-pub use guarded::canonical_transfer;

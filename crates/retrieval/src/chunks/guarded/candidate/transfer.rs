@@ -362,9 +362,26 @@ pub fn read(
         || metadata.version != 1
         || metadata.canonical_schema != CANONICAL_CHUNK_SCHEMA_VERSION
         || metadata.source.version != 2
+        || metadata.source.source_version == 0
+        || metadata.operational.bytes == 0
+        || metadata.operational.bytes > limits.sql_bytes
         || metadata.source.rows > limits.native.rows
     {
         return Err(bad());
+    }
+    for hash in [
+        &metadata.ownership_sha256,
+        &metadata.operational.sha256,
+        &metadata.source.authority_sha256,
+        &metadata.source.snapshot_sha256,
+    ] {
+        if hash.len() != 64
+            || !hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(bad());
+        }
     }
     if let Some(binding) = &metadata.source.lexical {
         binding.validate_metadata()?;

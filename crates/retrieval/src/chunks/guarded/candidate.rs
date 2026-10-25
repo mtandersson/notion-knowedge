@@ -614,7 +614,7 @@ impl RowValidation {
             return Err(bad());
         }
         // Bound retained IDs before decode/string allocation.
-        let chunk_ids = string_column(&batch, "chunk_id")?;
+        let chunk_ids = string_column(batch, "chunk_id")?;
         for id in chunk_ids.iter() {
             let id = id.ok_or_else(bad)?;
             self.id_bytes = self.id_bytes.checked_add(id.len() + 128).ok_or_else(bad)?;
