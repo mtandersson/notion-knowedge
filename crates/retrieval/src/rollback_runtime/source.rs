@@ -44,7 +44,7 @@ impl Write for BoundedJson {
         Ok(())
     }
 }
-pub(super) fn canonical(value: &impl Serialize, max: usize) -> Result<Vec<u8>> {
+pub(crate) fn canonical(value: &impl Serialize, max: usize) -> Result<Vec<u8>> {
     let mut output = BoundedJson {
         bytes: Vec::with_capacity(max),
         max,

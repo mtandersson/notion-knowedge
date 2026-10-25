@@ -271,3 +271,31 @@ gated. The broader #516/#504/#491 acceptance is not established by these units.
 | Explicit shutdown-acknowledged operator, real interruption and fresh-process retry | `lexical-verify` requires explicit configuration and new/retained paths. Both `offline_verification_command_*` cases SIGKILL at staged-file fsync, rename-before-parent-fsync and completed publication, then retry with fresh normal command processes. Orphaned diagnostic stages remain unchanged and are never scanned for authority. |
 | New acknowledged state, held leases/locks and original-store preservation | Command tests refuse missing acknowledgement/evidence, held index locks and active reconciliation leases. They commit a real newer native row and receipt through the production guard, refuse stale evidence, retain the latest source/SQL bytes and accept fresh evidence at a new explicit path. Original source/store byte inventories are compared after every crash retry and refusal. Existing ownership tests cover exclusive SQL and held file-effect leases. |
 | Serving/activation and dependent acceptance remain gated | This command creates descriptive evidence only. #524 owns latest-row prior-semantics candidates; #525 owns fenced rollback publication/crash proof; #517 owns the complete operator workflow and parent audits. No graph enablement, source effects, credential use, corpus changes or quality/cutover claim is established here. |
+
+### Canonical transfer for prior-runtime preparation
+
+`chunks::canonical_transfer::export` consumes a retained original offline
+inspection context and writes only an explicitly named unused private file
+outside the native source. It reuses the native row/profile validator and
+captures the original SQL identity/token fingerprint, SQL bytes hash, current
+physical source observation and exact canonical row/vector digest. Source and
+SQL must still match after the bounded stream is written and synced. All source
+processes must remain stopped; partial files remain diagnostics.
+
+Transfer version 1 starts with `NKROWS`, a zero byte and version byte 1, then
+little-endian u32-length canonical JSON frames: one metadata header followed
+by exactly the recorded number of rows. Each row contains the 16 version-1
+canonical scalar string columns in schema order (including exact raw JSON
+strings and nullable fields), followed by finite f32 vectors as u32 bit patterns.
+No embedding or lexical execution occurs. The current source may be bound or
+legacy independently of the eventual prior target plan.
+
+`canonical_transfer::read` checks private regular-file identity, explicit limits,
+complete file SHA/size, supported header/schema, bounded canonical frames,
+shared row/ID/policy validation, exact row/vector digest and EOF. Its batch
+callback may create derived diagnostics, but must discard any result if final
+validation fails. `TransferRecord` is descriptive and deserializing it grants
+no source, SQL or candidate authority; restarted reuse needs fresh ownership
+and comparison. This unit does not build/select a candidate or publish rollback:
+#539 owns the prior-runtime builder and #540 owns the integrated candidate and
+archive-freshness proof. #524 remains open for its full acceptance.

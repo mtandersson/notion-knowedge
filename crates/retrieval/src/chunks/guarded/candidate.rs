@@ -9,6 +9,9 @@ use std::{
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
 };
 
+#[cfg(target_os = "linux")]
+pub mod transfer;
+
 const READY: &str = ".nk-lexical-candidate-ready-v1.json";
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -584,22 +587,26 @@ pub(super) async fn preflight_rows(
     }
     Ok(count)
 }
-async fn verify_rows(
-    table: &LanceChunkTable,
-    authority: &crate::commit::CommitBinding,
-    limits: CandidateLimits,
-    probe: bool,
-) -> Result<SnapshotDigest, ChunkTableError> {
-    let preflight_count = preflight_rows(table, limits).await?;
-    let mut options = QueryExecutionOptions::default();
-    options.max_batch_length = 64;
-    let mut stream = table.table.query().execute_with_options(options).await?;
-    let mut digest = SnapshotDigest::default();
-    let mut ids = HashSet::new();
-    let mut id_bytes = 0usize;
-    while let Some(batch) = stream.try_next().await? {
+#[derive(Default)]
+struct RowValidation {
+    digest: SnapshotDigest,
+    ids: HashSet<String>,
+    id_bytes: usize,
+}
+impl RowValidation {
+    fn batch(
+        &mut self,
+        batch: &RecordBatch,
+        authority: &crate::commit::CommitBinding,
+        embedding: &EmbeddingMetadata,
+        limits: CandidateLimits,
+    ) -> Result<Vec<StoredChunk>, ChunkTableError> {
+        if batch.schema().fields() != chunk_schema(embedding)?.fields() {
+            return Err(bad());
+        }
         if batch.get_array_memory_size() > limits.batch_bytes
-            || digest
+            || self
+                .digest
                 .rows
                 .checked_add(batch.num_rows() as u64)
                 .is_none_or(|rows| rows > limits.rows)
@@ -607,28 +614,53 @@ async fn verify_rows(
             return Err(bad());
         }
         // Bound retained IDs before decode/string allocation.
-        let chunk_ids = string_column(&batch, "chunk_id")?;
+        let chunk_ids = string_column(batch, "chunk_id")?;
         for id in chunk_ids.iter() {
             let id = id.ok_or_else(bad)?;
-            id_bytes = id_bytes.checked_add(id.len() + 128).ok_or_else(bad)?;
-            if id_bytes > limits.identifier_bytes || !ids.insert(id.to_owned()) {
+            self.id_bytes = self.id_bytes.checked_add(id.len() + 128).ok_or_else(bad)?;
+            if self.id_bytes > limits.identifier_bytes || !self.ids.insert(id.to_owned()) {
                 return Err(bad());
             }
         }
-        for (row_index, row) in decode_stored_chunks(std::slice::from_ref(&batch))?
-            .into_iter()
-            .enumerate()
-        {
+        let rows = decode_stored_chunks(std::slice::from_ref(batch))?;
+        for (row_index, row) in rows.iter().enumerate() {
             if row.workspace_id != authority.workspace()
                 || !authority.roots().contains(&row.root_page_id)
                 || row.chunk_id.trim().is_empty()
                 || row.page_id.trim().is_empty()
                 || row.content_hash.trim().is_empty()
                 || row.text.trim().is_empty()
-                || row.vector.len() != table.embedding.dimension()
+                || row.vector.len() != embedding.dimension()
             {
                 return Err(bad());
             }
+            self.digest.row(batch, row_index)?;
+        }
+        Ok(rows)
+    }
+}
+async fn verify_rows(
+    table: &LanceChunkTable,
+    authority: &crate::commit::CommitBinding,
+    limits: CandidateLimits,
+    probe: bool,
+) -> Result<SnapshotDigest, ChunkTableError> {
+    visit_rows(table, authority, limits, probe, |_| Ok(())).await
+}
+async fn visit_rows(
+    table: &LanceChunkTable,
+    authority: &crate::commit::CommitBinding,
+    limits: CandidateLimits,
+    probe: bool,
+    mut visit: impl FnMut(&RecordBatch) -> Result<(), ChunkTableError>,
+) -> Result<SnapshotDigest, ChunkTableError> {
+    let preflight_count = preflight_rows(table, limits).await?;
+    let mut options = QueryExecutionOptions::default();
+    options.max_batch_length = 64;
+    let mut stream = table.table.query().execute_with_options(options).await?;
+    let mut validation = RowValidation::default();
+    while let Some(batch) = stream.try_next().await? {
+        for row in validation.batch(&batch, authority, &table.embedding, limits)? {
             if probe {
                 for (field, id) in [("page_id", &row.page_id), ("chunk_id", &row.chunk_id)] {
                     let hits = table.fts_query(field, id, 1).await?;
@@ -643,13 +675,15 @@ async fn verify_rows(
                     }
                 }
             }
-            digest.row(&batch, row_index)?;
         }
+        visit(&batch)?;
     }
-    if digest.rows != preflight_count || digest.rows != table.table.count_rows(None).await? as u64 {
+    if validation.digest.rows != preflight_count
+        || validation.digest.rows != table.table.count_rows(None).await? as u64
+    {
         return Err(bad());
     }
-    Ok(digest)
+    Ok(validation.digest)
 }
 struct CandidateVerification<'a> {
     source_directory: &'a Path,
@@ -952,6 +986,15 @@ pub fn inspect_runtime_source(
     authority: &crate::commit::CommitBinding,
     limits: CandidateLimits,
 ) -> Result<RuntimeSourceSnapshot, ChunkTableError> {
+    inspect_source_rows(directory, embedding, authority, limits, |_| Ok(()))
+}
+fn inspect_source_rows(
+    directory: &Path,
+    embedding: &EmbeddingMetadata,
+    authority: &crate::commit::CommitBinding,
+    limits: CandidateLimits,
+    mut visit: impl FnMut(&RecordBatch) -> Result<(), ChunkTableError>,
+) -> Result<RuntimeSourceSnapshot, ChunkTableError> {
     if tokio::runtime::Handle::try_current().is_ok()
         || limits.files == 0
         || limits.file_bytes == 0
@@ -1062,7 +1105,7 @@ pub fn inspect_runtime_source(
         verify_profile_config(&source, &config).await?;
         Ok::<_, ChunkTableError>((
             source.table.version().await?,
-            verify_rows(&source, authority, limits, true).await?,
+            visit_rows(&source, authority, limits, true, &mut visit).await?,
         ))
     })?;
     lexical_binding::verify(directory, &lexical)?;
