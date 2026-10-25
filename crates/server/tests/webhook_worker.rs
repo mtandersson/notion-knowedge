@@ -1396,7 +1396,8 @@ async fn deadline_cancellation_retains_due_retry_and_allows_healthy_page_progres
     let pending = inspect(&runtime.worker, &bad);
     assert_eq!(pending.state, EventState::Pending);
     assert_eq!(pending.last_failure, Some(EventFailure::Unavailable));
-    assert_eq!(pending.cycle_attempts, 1);\n    assert_eq!(pending.lifetime_attempts, 1);
+    assert_eq!(pending.cycle_attempts, 1);
+    assert_eq!(pending.lifetime_attempts, 1);
     assert!(pending.retry_at.unwrap() > now_ms() / 1000);
     assert_eq!(runtime.searchable("Saffron").await, 0);
     runtime.source.proceed.notify_one();
@@ -1435,7 +1436,8 @@ async fn deadline_cancellation_retains_due_retry_and_allows_healthy_page_progres
         .unwrap();
     }
     assert_eq!(inspect(&runtime.worker, &bad).state, EventState::Succeeded);
-    assert_eq!(inspect(&runtime.worker, &bad).cycle_attempts, 2);\n    assert_eq!(inspect(&runtime.worker, &bad).lifetime_attempts, 2);
+    assert_eq!(inspect(&runtime.worker, &bad).cycle_attempts, 2);
+    assert_eq!(inspect(&runtime.worker, &bad).lifetime_attempts, 2);
     assert_eq!(
         inspect(&runtime.worker, &healthy).state,
         EventState::Succeeded
