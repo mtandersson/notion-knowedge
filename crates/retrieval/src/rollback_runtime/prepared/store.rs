@@ -78,6 +78,9 @@ impl VerifiedPreparedRollback<'_> {
         .iter()
         .any(|p| path.starts_with(p))
             || path == self.metadata.state_path
+            || path
+                == crate::commit::transition::journal_path(&self.metadata.state_path)
+                    .map_err(err)?
             || path == self.metadata.backup_path
             || path == self.metadata.transfer_path
             || path == self.metadata.prior_evidence_path

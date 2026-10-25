@@ -463,6 +463,21 @@ impl TransitionOwnership {
     /// ownership. Prepared must already contain a fresh activation-time backup.
     /// Recovery may repeat this after SQL committed but journal fsync failed.
     pub fn quarantine(&self, now: i64) -> Result<TransitionRecord, CommitError> {
+        self.quarantine_inner(now, |_| Ok(()))
+    }
+    #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+    pub(crate) fn quarantine_checked(
+        &self,
+        now: i64,
+        verify: impl FnMut(&rusqlite::Transaction<'_>) -> Result<(), CommitError>,
+    ) -> Result<TransitionRecord, CommitError> {
+        self.quarantine_inner(now, verify)
+    }
+    fn quarantine_inner(
+        &self,
+        now: i64,
+        mut verify: impl FnMut(&rusqlite::Transaction<'_>) -> Result<(), CommitError>,
+    ) -> Result<TransitionRecord, CommitError> {
         let previous = self.current_record()?.ok_or(CommitError::Conflict)?;
         let mut expected = self.record.clone();
         expected.phase = previous.phase;
@@ -481,6 +496,7 @@ impl TransitionOwnership {
         let quarantine_epoch =
             i64::try_from(previous.quarantine_epoch).map_err(|_| CommitError::InvalidInput)?;
         self.with_exclusive_sql(now, |transaction| {
+            verify(transaction)?;
             if self.current_record()?.as_ref() != Some(&previous) {
                 return Err(CommitError::Conflict);
             }
@@ -508,6 +524,7 @@ impl TransitionOwnership {
                 transaction.execute("INSERT INTO index_commit_generations VALUES(?1,?2,?3)", params![name,source.scope,epoch]).map_err(sql)?;
             }
             transaction.execute("UPDATE index_commit_binding SET generation=?1,epoch=?2 WHERE singleton=1", params![previous.quarantine_generation,quarantine_epoch]).map_err(sql)?;
+            verify(transaction)?;
             Ok(())
         })?;
         #[cfg(test)]

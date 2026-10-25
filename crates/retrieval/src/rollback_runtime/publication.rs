@@ -28,6 +28,7 @@ fn err<T>(_: T) -> RuntimeError {
 }
 /// Expected values must come from the trusted original serving configuration,
 /// not merely be copied from a journal being recovered.
+#[derive(Clone, Copy)]
 pub struct CurrentSource<'a> {
     pub index: &'a Path,
     pub state: &'a Path,
@@ -45,6 +46,8 @@ pub struct RuntimeTransitionOperator<'pair> {
     embedding: EmbeddingMetadata,
     limits: PreparedLimits,
     _prior: Option<File>,
+    seed: RuntimeJournalRecord,
+    active: bool,
 }
 impl<'pair> RuntimeTransitionOperator<'pair> {
     /// Reopen only an actual active version-two operation. This performs real
@@ -56,6 +59,17 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
         record: &RuntimeJournalRecord,
         limits: PreparedLimits,
         now: i64,
+    ) -> Result<Self> {
+        Self::acquire(runtime, asset, current, record, limits, now, true)
+    }
+    fn acquire(
+        runtime: &'pair PinnedRuntime,
+        asset: Option<&'pair PinnedAsset>,
+        current: CurrentSource<'_>,
+        record: &RuntimeJournalRecord,
+        limits: PreparedLimits,
+        now: i64,
+        active: bool,
     ) -> Result<Self> {
         let target = CommitBinding::parse_retained(
             record.prepared.candidate.target_authority_json.as_bytes(),
@@ -87,7 +101,7 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
             limits.process_budget,
         )?;
         let owner = TransitionOwnership::acquire_runtime(record).map_err(err)?;
-        if owner.runtime_record().map_err(err)? != *record {
+        if active && owner.runtime_record().map_err(err)? != *record {
             return Err(RuntimeError);
         }
         let prior = if record.prepared.candidate.candidate == record.prepared.prior_archive {
@@ -117,6 +131,8 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
             embedding: current.embedding.clone(),
             limits,
             _prior: prior,
+            seed: record.clone(),
+            active,
         };
         operator
             .owner
@@ -129,10 +145,25 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
             .map_err(err)?;
         Ok(operator)
     }
+    pub fn quarantine(&self, now: i64) -> Result<RuntimeJournalRecord> {
+        if !self.active {
+            return Err(RuntimeError);
+        }
+        self.owner
+            .quarantine_checked(now, |transaction| {
+                self.verify_all(transaction)
+                    .map(|_| ())
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)
+            })
+            .map_err(err)?;
+        self.owner.runtime_record().map_err(err)
+    }
     /// Retain the current source only while SQL is already quarantined. Native,
     /// lineage and complete SQL checks run inside the actual rename transaction.
     pub fn retain_current_source(&self, now: i64) -> Result<RuntimeJournalRecord> {
-        if self.owner.runtime_record().map_err(err)?.phase != RuntimePhase::Quarantined {
+        if !self.active
+            || self.owner.runtime_record().map_err(err)?.phase != RuntimePhase::Quarantined
+        {
             return Err(RuntimeError);
         }
         self.owner
@@ -156,7 +187,11 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
         self.owner
             .validate_owned_transaction(transaction)
             .map_err(err)?;
-        let record = self.owner.runtime_record().map_err(err)?;
+        let record = if self.active {
+            self.owner.runtime_record().map_err(err)?
+        } else {
+            self.seed.clone()
+        };
         let prepared = &record.prepared;
         let candidate = &prepared.candidate;
         if candidate.runtime_sha256 != self.runtime.sha256()
@@ -216,7 +251,11 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
                 state_inode: record.state_inode,
                 state_token: &record.state_token,
             },
-            &record.lineage_paths,
+            if self.active {
+                &record.lineage_paths
+            } else {
+                &prepared.lineage_paths
+            },
         )
         .map_err(err)?;
         let evidence = RetainedEvidence::read(&prepared.prior_evidence_path)?;
@@ -347,22 +386,53 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
             }
             _ => return Err(RuntimeError),
         };
-        verify_backup_comparison(
-            &self.owner,
-            transaction,
-            &ComparisonInputs {
+        if self.active {
+            verify_backup_comparison(
+                &self.owner,
+                transaction,
+                &ComparisonInputs {
+                    source: &self.source,
+                    target: &self.target,
+                    target_version: target_report.source.source_version,
+                    plan_bytes: self.limits.adoption.plan_bytes,
+                    backup_bytes: self.limits.transfer.sql_bytes,
+                    limits: self.limits.sql,
+                },
+                stage,
+            )
+            .map_err(err)?;
+            if self.owner.runtime_record().map_err(err)? != record {
+                return Err(RuntimeError);
+            }
+        } else {
+            use crate::commit::transition::manifest::{
+                capture_sql_manifest,
+                comparison::{capture_backup_manifest, preparation_limits},
+            };
+            let comparison = ComparisonInputs {
                 source: &self.source,
                 target: &self.target,
                 target_version: target_report.source.source_version,
                 plan_bytes: self.limits.adoption.plan_bytes,
                 backup_bytes: self.limits.transfer.sql_bytes,
                 limits: self.limits.sql,
-            },
-            stage,
-        )
-        .map_err(err)?;
-        if self.owner.runtime_record().map_err(err)? != record {
-            return Err(RuntimeError);
+            };
+            let backup = capture_backup_manifest(&record.layout().map_err(err)?, &comparison)
+                .map_err(err)?;
+            let actual = capture_sql_manifest(
+                transaction,
+                preparation_limits(
+                    &self.source,
+                    &self.target,
+                    &prepared.quarantine_generation,
+                    self.limits.sql,
+                )
+                .map_err(err)?,
+            )
+            .map_err(err)?;
+            if actual != backup || actual.sha256 != record.adoption_sha256 {
+                return Err(RuntimeError);
+            }
         }
         self.owner
             .validate_owned_transaction(transaction)
@@ -374,3 +444,166 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
         Ok(target_report.source.source_version)
     }
 }
+
+pub struct ActivationPaths<'a> {
+    pub archive: &'a Path,
+    pub backup: &'a Path,
+}
+impl<'pair> RuntimeTransitionOperator<'pair> {
+    /// Freshly reverify a Prepared record, capture a fresh activation backup,
+    /// then replace the previous completed journal only after retaining history.
+    /// No generation is reserved and no native directory is renamed here.
+    pub fn start(
+        runtime: &'pair PinnedRuntime,
+        asset: Option<&'pair PinnedAsset>,
+        current: CurrentSource<'_>,
+        prepared_path: &Path,
+        paths: ActivationPaths<'_>,
+        limits: PreparedLimits,
+        now: i64,
+    ) -> Result<Self> {
+        use super::{
+            candidate::{PriorInputs, RetainedCandidate},
+            prepared::{self, PreparedInputs, PreparedRollbackMetadata},
+        };
+        use crate::commit::{
+            IndexCommitCoordinator,
+            transition::{
+                self,
+                runtime_journal::{self, ExistingJournal},
+            },
+        };
+        let metadata = PreparedRollbackMetadata::read(prepared_path)?;
+        let bytes = metadata.canonical_bytes()?;
+        let prepared_sha256 = format!("{:x}", Sha256::digest(&bytes));
+        let previous = match runtime_journal::existing(current.state).map_err(err)? {
+            ExistingJournal::Runtime(record) => {
+                if record.prepared_sha256 != prepared_sha256
+                    || record.archive_path != paths.archive
+                    || record.activation_backup_path != paths.backup
+                {
+                    return Err(RuntimeError);
+                }
+                return Self::open(runtime, asset, current, &record, limits, now);
+            }
+            ExistingJournal::Legacy(record)
+                if record.phase == transition::TransitionPhase::Complete =>
+            {
+                Some(record)
+            }
+            ExistingJournal::Legacy(_) => return Err(RuntimeError),
+            ExistingJournal::Missing => None,
+        };
+        if paths.archive.parent() != current.index.parent()
+            || paths.archive.try_exists()?
+            || [
+                &metadata.current.path,
+                &metadata.candidate.candidate.path,
+                &metadata.prior_archive.path,
+            ]
+            .iter()
+            .any(|p| paths.backup.starts_with(p))
+            || paths.backup == current.state
+            || paths.backup == prepared_path
+        {
+            return Err(RuntimeError);
+        }
+        // Both paths must have canonical private parents before any output.
+        super::evidence::parent(paths.archive)?;
+        super::evidence::parent(paths.backup)?;
+        let target =
+            CommitBinding::parse_retained(metadata.candidate.target_authority_json.as_bytes())
+                .map_err(err)?;
+        let coordinator = IndexCommitCoordinator::open_existing(
+            current.index,
+            current.state,
+            current.binding.clone(),
+        )
+        .map_err(err)?;
+        let record = coordinator
+            .with_owned_offline_inspection(now, |owner| {
+                let proof = prepared::reopen(
+                    owner,
+                    PreparedInputs {
+                        prior: PriorInputs {
+                            runtime,
+                            asset,
+                            evidence: &metadata.prior_evidence_path,
+                            lineage: &metadata.lineage_paths,
+                            archive: &metadata.prior_archive.path,
+                        },
+                        retained: RetainedCandidate {
+                            transfer: &metadata.transfer_path,
+                            metadata: &metadata.candidate,
+                        },
+                        target: &target,
+                        quarantine_generation: &metadata.quarantine_generation,
+                    },
+                    current.embedding,
+                    prepared_path,
+                    limits,
+                )
+                .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                if proof.metadata() != &metadata {
+                    return Err(crate::commit::CommitError::BindingMismatch);
+                }
+                let (state_device, state_inode, state_token) = owner.runtime_state_identity()?;
+                let backup = owner.backup_current(paths.backup, limits.transfer.sql_bytes, true)?;
+                let active = transition::journal_path(current.state)?;
+                let mut lineage_paths = metadata.lineage_paths.clone();
+                if let Some(previous) = &previous {
+                    let history = runtime_journal::completed_path(current.state, previous)?;
+                    for path in &mut lineage_paths {
+                        if *path == active {
+                            *path = history.clone();
+                        }
+                    }
+                }
+                let record = RuntimeJournalRecord {
+                    version: 2,
+                    protocol: "selected-runtime-publication-v2".into(),
+                    phase: RuntimePhase::Prepared,
+                    state_device,
+                    state_inode,
+                    state_token,
+                    prepared: metadata.clone(),
+                    prepared_sha256: prepared_sha256.clone(),
+                    lineage_paths,
+                    archive_path: paths.archive.into(),
+                    activation_backup_path: paths.backup.into(),
+                    activation_backup: backup,
+                    adoption_sha256: metadata.adoption.sha256.clone(),
+                    refenced: None,
+                };
+                record.canonical_bytes()?;
+                Ok(record)
+            })
+            .map_err(err)?;
+        let mut operator = Self::acquire(runtime, asset, current, &record, limits, now, false)?;
+        operator
+            .owner
+            .with_exclusive_sql(now, |transaction| {
+                operator
+                    .verify_all(transaction)
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                operator
+                    .owner
+                    .begin_runtime(transaction, &record, previous.as_deref())
+            })
+            .map_err(err)?;
+        operator.active = true;
+        operator
+            .owner
+            .with_exclusive_sql(now, |transaction| {
+                operator
+                    .verify_all(transaction)
+                    .map(|_| ())
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)
+            })
+            .map_err(err)?;
+        Ok(operator)
+    }
+}
+
+#[cfg(test)]
+mod tests;

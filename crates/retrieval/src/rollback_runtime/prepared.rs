@@ -125,6 +125,8 @@ impl PreparedRollbackMetadata {
             || !absolute(&self.current.path)
             || !absolute(&candidate.candidate.path)
             || self.state_path == self.backup_path
+            || self.backup_path
+                == crate::commit::transition::journal_path(&self.state_path).map_err(err)?
             || [&self.current.path, &candidate.candidate.path]
                 .iter()
                 .any(|p| self.state_path.starts_with(p) || self.backup_path.starts_with(p))

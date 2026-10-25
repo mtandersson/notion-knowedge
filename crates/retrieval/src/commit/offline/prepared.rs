@@ -11,6 +11,15 @@ impl OwnedOfflineInspection<'_> {
         self.revalidate()?;
         Ok(self.connection)
     }
+    pub(crate) fn runtime_state_identity(&self) -> Result<(u64, u64, String), CommitError> {
+        self.revalidate()?;
+        let metadata = self.state.metadata().map_err(io)?;
+        Ok((
+            metadata.dev(),
+            metadata.ino(),
+            self.coordinator.state_token.clone(),
+        ))
+    }
     pub(crate) fn state_path(&self) -> &Path {
         &self.coordinator.state_path
     }
@@ -27,6 +36,7 @@ impl OwnedOfflineInspection<'_> {
         let parent_path = path.parent().ok_or(CommitError::InvalidInput)?;
         if parent_path.starts_with(self.index_directory())
             || path == self.state_path()
+            || path == super::super::transition::journal_path(self.state_path())?
             || fs::canonicalize(parent_path).map_err(io)? != parent_path
         {
             return Err(CommitError::InvalidInput);
@@ -83,5 +93,40 @@ impl OwnedOfflineInspection<'_> {
         expected.verify(path)?;
         self.revalidate()?;
         Ok(expected)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn refusing_backup_at_admission_journal_keeps_original_source_admissible() {
+        let parent = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let root = parent.path().join("source");
+        crate::rollback_runtime::probe::create(&root, None).unwrap();
+        let (binding, _) = crate::rollback_runtime::probe::fixture_configuration(true).unwrap();
+        let index = root.join("index");
+        let state = root.join("state.sqlite");
+        let coordinator =
+            IndexCommitCoordinator::open_existing(&index, &state, binding.clone()).unwrap();
+        let before = crate::rollback_runtime::candidate::tests::bytes(&root);
+        let journal = super::super::super::transition::journal_path(&state).unwrap();
+        assert!(!journal.exists());
+        coordinator
+            .with_owned_offline_inspection(20, |owner| {
+                assert!(owner.backup_current(&journal, 64 << 20, true).is_err());
+                assert!(!journal.exists());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            crate::rollback_runtime::candidate::tests::bytes(&root),
+            before
+        );
+        assert!(IndexCommitCoordinator::open_read_only(&index, &state, binding).is_ok());
     }
 }

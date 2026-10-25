@@ -480,17 +480,25 @@ pub fn verify_backup_comparison(
     let mut expected = owner.record().clone();
     expected.phase = record.phase;
     check_input(&record, input)?;
+    #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+    let runtime_complete = owner.runtime.is_some() && record.phase == TransitionPhase::Complete;
+    #[cfg(not(all(feature = "local-lancedb", target_os = "linux")))]
+    let runtime_complete = false;
     let valid_phase = match stage {
         ComparisonStage::Prepared => record.phase == TransitionPhase::Prepared,
         ComparisonStage::BeforeInstallation => matches!(
             record.phase,
-            TransitionPhase::Quarantined | TransitionPhase::SourceRetained
+            TransitionPhase::Prepared
+                | TransitionPhase::Quarantined
+                | TransitionPhase::SourceRetained
         ),
         ComparisonStage::BeforePublication => record.phase == TransitionPhase::TargetInstalled,
-        ComparisonStage::AfterPublication => matches!(
-            record.phase,
-            TransitionPhase::TargetInstalled | TransitionPhase::Published
-        ),
+        ComparisonStage::AfterPublication => {
+            matches!(
+                record.phase,
+                TransitionPhase::TargetInstalled | TransitionPhase::Published
+            ) || runtime_complete
+        }
     };
     if expected != record || !valid_phase {
         return Err(CommitError::BindingMismatch);

@@ -105,6 +105,7 @@ impl RuntimeJournalRecord {
                     || self.prepared.state_path.starts_with(p)
             })
             || self.activation_backup_path == self.prepared.state_path
+            || self.activation_backup_path == journal_path(&self.prepared.state_path)?
             || self.activation_backup != candidate.current.metadata.operational
             || !digest(&self.activation_backup.sha256)
             || !digest(&self.adoption_sha256)
@@ -318,6 +319,14 @@ fn persist(
     next: &RuntimeJournalRecord,
     previous: Option<&RuntimeJournalRecord>,
 ) -> Result<(), CommitError> {
+    let expected = previous.map(|p| p.canonical_bytes()).transpose()?;
+    persist_expected(owner, next, expected)
+}
+fn persist_expected(
+    owner: &TransitionOwnership,
+    next: &RuntimeJournalRecord,
+    expected: Option<Vec<u8>>,
+) -> Result<(), CommitError> {
     use crate::rollback_runtime::evidence::{check_parent, parent};
     use std::os::{
         fd::AsRawFd,
@@ -327,7 +336,6 @@ fn persist(
     next.same_operation(owner.runtime.as_ref().ok_or(CommitError::BindingMismatch)?)?;
     let path = journal_path(&owner.state_path)?;
     let directory = parent(&path).map_err(invalid)?;
-    let expected = previous.map(|p| p.canonical_bytes()).transpose()?;
     if read_bytes(&path)? != expected {
         return Err(CommitError::Conflict);
     }
@@ -365,7 +373,7 @@ fn persist(
             from.as_ptr(),
             directory.as_raw_fd(),
             to.as_ptr(),
-            if previous.is_none() {
+            if expected.is_none() {
                 libc::RENAME_NOREPLACE
             } else {
                 0
@@ -381,4 +389,126 @@ fn persist(
         return Err(CommitError::Conflict);
     }
     Ok(())
+}
+
+/// Classify only after bounded input; each branch subsequently uses its strict
+/// complete parser. Unknown/corrupt records are never treated as an empty slot.
+pub(crate) enum ExistingJournal {
+    Missing,
+    Legacy(Box<TransitionRecord>),
+    Runtime(Box<RuntimeJournalRecord>),
+}
+pub(crate) fn existing(state: &Path) -> Result<ExistingJournal, CommitError> {
+    #[derive(Deserialize)]
+    struct Version {
+        version: u32,
+    }
+    let path = journal_path(state)?;
+    let Some(bytes) = read_bytes(&path)? else {
+        return Ok(ExistingJournal::Missing);
+    };
+    let version: Version = serde_json::from_slice(&bytes).map_err(invalid)?;
+    match version.version {
+        1 => Ok(ExistingJournal::Legacy(Box::new(
+            TransitionRecord::read(state)?.ok_or(CommitError::Conflict)?,
+        ))),
+        2 => Ok(ExistingJournal::Runtime(Box::new(
+            RuntimeJournalRecord::parse_metadata(&bytes)?,
+        ))),
+        _ => Err(CommitError::InvalidInput),
+    }
+}
+pub(crate) fn completed_path(
+    state: &Path,
+    record: &TransitionRecord,
+) -> Result<PathBuf, CommitError> {
+    if record.phase != TransitionPhase::Complete {
+        return Err(CommitError::Conflict);
+    }
+    retained_history_path(state, record, false)
+}
+impl TransitionOwnership {
+    /// History is copied and synced BEFORE replacing the previous admission
+    /// record. There is no missing-journal crash window between these intents.
+    /// Caller must freshly verify native state in this actual transaction.
+    pub(crate) fn begin_runtime(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+        record: &RuntimeJournalRecord,
+        previous: Option<&TransitionRecord>,
+    ) -> Result<(), CommitError> {
+        use crate::rollback_runtime::evidence::{check_parent, parent};
+        use std::os::{fd::AsRawFd, unix::fs::PermissionsExt};
+        self.validate_owned_transaction(transaction)?;
+        if record.phase != RuntimePhase::Prepared
+            || record.refenced.is_some()
+            || record.layout()? != self.record
+            || TransitionRecord::read(&self.state_path)?.as_ref() != previous
+        {
+            return Err(CommitError::Conflict);
+        }
+        let source = CommitBinding::parse_retained(self.record.source.binding.as_bytes())?;
+        let exact: bool = transaction
+            .query_row(
+                "SELECT generation=?1 AND epoch=?2 FROM index_commit_binding WHERE singleton=1",
+                params![
+                    source.generation(),
+                    i64::try_from(source.epoch()).map_err(invalid)?
+                ],
+                |r| r.get(0),
+            )
+            .map_err(sql)?;
+        if !exact {
+            return Err(CommitError::BindingMismatch);
+        }
+        let expected = previous.map(canonical).transpose()?;
+        if let Some(previous) = previous {
+            if previous.phase != TransitionPhase::Complete
+                || previous.target != self.record.source
+                || previous.state_device != record.state_device
+                || previous.state_inode != record.state_inode
+                || previous.state_token != record.state_token
+            {
+                return Err(CommitError::BindingMismatch);
+            }
+            let history = completed_path(&self.state_path, previous)?;
+            let active = journal_path(&self.state_path)?;
+            if record.prepared.lineage_paths.iter().any(|p| p == &active)
+                && !record.lineage_paths.iter().any(|p| p == &history)
+            {
+                return Err(CommitError::BindingMismatch);
+            }
+            let directory = parent(&history).map_err(invalid)?;
+            match read_bytes(&history)? {
+                Some(bytes) if expected.as_ref() == Some(&bytes) => (),
+                Some(_) => return Err(CommitError::Conflict),
+                None => {
+                    let root = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+                    let temporary = tempfile::Builder::new()
+                        .prefix(".nk-runtime-history-")
+                        .permissions(fs::Permissions::from_mode(0o600))
+                        .tempfile_in(&root)
+                        .map_err(io)?;
+                    temporary
+                        .as_file()
+                        .write_all(expected.as_ref().ok_or(CommitError::Conflict)?)
+                        .map_err(io)?;
+                    temporary.as_file().sync_all().map_err(io)?;
+                    let destination =
+                        root.join(history.file_name().ok_or(CommitError::InvalidInput)?);
+                    temporary
+                        .persist_noclobber(&destination)
+                        .map_err(|e| io(e.error))?;
+                }
+            }
+            directory.sync_all().map_err(io)?;
+            check_parent(&directory, &history).map_err(invalid)?;
+            if TransitionRecord::read_completed(&self.state_path, &history)? != *previous {
+                return Err(CommitError::Conflict);
+            }
+        }
+        self.validate_owned_transaction(transaction)?;
+        persist_expected(self, record, expected)?;
+        self.validate_owned_transaction(transaction)
+    }
 }
