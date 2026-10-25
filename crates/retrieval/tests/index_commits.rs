@@ -1814,3 +1814,131 @@ fn offline_backup_never_places_operational_state_inside_disposable_index() {
     );
     assert!(!backup.exists());
 }
+
+fn private_inspection_fixture() -> Fixture {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    for path in [&f.root, &f.index] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    f
+}
+
+#[test]
+fn owned_offline_inspection_retains_sql_and_index_exclusion_without_changing_bytes() {
+    use sha2::{Digest, Sha256};
+    let f = private_inspection_fixture();
+    let c = f.coordinator();
+    let before = fs::read(&f.state).unwrap();
+    let expected = format!("{:x}", Sha256::digest(&before));
+    let fingerprint = c
+        .with_owned_offline_inspection(10, |owner| {
+            assert_eq!(owner.binding(), c.binding());
+            assert_eq!(owner.index_directory(), fs::canonicalize(&f.index).unwrap());
+            assert_eq!(owner.state_snapshot(1024 * 1024)?.sha256, expected);
+            assert_eq!(owner.state_snapshot(1), Err(CommitError::InvalidInput));
+            let guard = fs::File::open(&f.index).unwrap();
+            assert!(matches!(
+                guard.try_lock(),
+                Err(std::fs::TryLockError::WouldBlock)
+            ));
+            let other = Connection::open(&f.state).unwrap();
+            other.busy_timeout(Duration::ZERO).unwrap();
+            let error = other
+                .execute("CREATE TABLE competing_writer(value TEXT)", [])
+                .unwrap_err();
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy)
+            );
+            owner.revalidate()?;
+            owner.authority_sha256()
+        })
+        .unwrap();
+    assert_eq!(fingerprint.len(), 64);
+    assert_eq!(fs::read(&f.state).unwrap(), before);
+    assert_eq!(
+        c.with_owned_offline_inspection(10, |owner| owner.authority_sha256())
+            .unwrap(),
+        fingerprint
+    );
+    c.with_offline_inspection(10, || Ok(())).unwrap();
+    assert_eq!(fs::read(&f.state).unwrap(), before);
+}
+
+#[test]
+fn owned_offline_inspection_refuses_live_leases_before_exposing_the_context() {
+    let f = private_inspection_fixture();
+    let c = f.coordinator();
+    let lease = c.state().acquire_lease(10, 100).unwrap();
+    let before = fs::read(&f.state).unwrap();
+    let called = std::cell::Cell::new(false);
+    assert_eq!(
+        c.with_owned_offline_inspection(11, |_| {
+            called.set(true);
+            Ok(())
+        }),
+        Err(CommitError::Conflict)
+    );
+    assert!(!called.get());
+    assert_eq!(fs::read(&f.state).unwrap(), before);
+    c.state().release_lease(&lease, 12).unwrap();
+    c.with_owned_offline_inspection(13, |owner| owner.revalidate())
+        .unwrap();
+    let guard = fs::File::open(&f.index).unwrap();
+    guard.lock().unwrap();
+    assert_eq!(
+        c.with_owned_offline_inspection(13, |_| {
+            called.set(true);
+            Ok(())
+        }),
+        Err(CommitError::Conflict)
+    );
+    assert!(!called.get());
+}
+
+#[test]
+fn owned_offline_inspection_rechecks_original_file_identity_after_the_callback() {
+    for replace_sql in [false, true] {
+        let f = private_inspection_fixture();
+        let c = f.coordinator();
+        let before = fs::read(&f.state).unwrap();
+        let original = if replace_sql { &f.state } else { &f.index };
+        let retained = f.root.join("retained-original");
+        let result = c.with_owned_offline_inspection(10, |owner| {
+            owner.revalidate()?;
+            fs::rename(original, &retained).unwrap();
+            if replace_sql {
+                fs::copy(&retained, original).unwrap();
+            } else {
+                fs::create_dir(original).unwrap();
+            }
+            Ok(())
+        });
+        assert_eq!(result, Err(CommitError::BindingMismatch));
+        if replace_sql {
+            assert_eq!(fs::read(&retained).unwrap(), before);
+            fs::remove_file(original).unwrap();
+        } else {
+            fs::remove_dir(original).unwrap();
+        }
+        fs::rename(&retained, original).unwrap();
+        assert_eq!(fs::read(&f.state).unwrap(), before);
+    }
+}
+
+#[test]
+fn owned_offline_inspection_refuses_loss_of_private_parent_ownership() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = private_inspection_fixture();
+    let c = f.coordinator();
+    let before = fs::read(&f.state).unwrap();
+    let result = c.with_owned_offline_inspection(10, |owner| {
+        owner.revalidate()?;
+        fs::set_permissions(&f.root, fs::Permissions::from_mode(0o755)).unwrap();
+        Ok(())
+    });
+    assert_eq!(result, Err(CommitError::InvalidInput));
+    fs::set_permissions(&f.root, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(fs::read(&f.state).unwrap(), before);
+}

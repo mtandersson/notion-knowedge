@@ -19,6 +19,10 @@ use std::{
 
 #[cfg(feature = "local-lancedb")]
 pub mod probe;
+#[cfg(feature = "local-lancedb")]
+pub mod source;
+#[cfg(feature = "local-lancedb")]
+pub mod verification;
 
 /// No subprocess output, paths or credentials are included in errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

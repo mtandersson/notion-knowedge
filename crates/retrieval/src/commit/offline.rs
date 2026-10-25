@@ -93,6 +93,97 @@ impl OfflineBackup {
         Ok(())
     }
 }
+/// Read-only evidence access while the original index lock, SQL transaction and
+/// state descriptor are retained. No connection or mutation API is exposed.
+/// This value cannot be returned from its higher-ranked owning callback.
+///
+/// ```compile_fail
+/// use notion_knowledge_retrieval::commit::{IndexCommitCoordinator, OwnedOfflineInspection};
+/// fn escape<'a>(c: &'a IndexCommitCoordinator) -> &'a OwnedOfflineInspection<'a> {
+///     c.with_owned_offline_inspection(10, |owner| Ok(owner)).unwrap()
+/// }
+/// ```
+pub struct OwnedOfflineInspection<'owner> {
+    coordinator: &'owner IndexCommitCoordinator,
+    connection: &'owner Connection,
+    state: File,
+}
+impl OwnedOfflineInspection<'_> {
+    pub fn binding(&self) -> &CommitBinding {
+        self.coordinator.binding()
+    }
+    pub fn index_directory(&self) -> &Path {
+        self.coordinator.index_directory()
+    }
+
+    /// Revalidate both the retained descriptor and SQLite's actual VFS file.
+    /// Scope, state token, operational anchor and physical authority must still
+    /// be exactly those captured by the original coordinator.
+    pub fn revalidate(&self) -> Result<(), CommitError> {
+        private_parent(&self.coordinator.state_path)?;
+        private_parent(&self.coordinator.index_path)?;
+        self.coordinator.identities()?;
+        validate_original_state(&self.state, self.coordinator)?;
+        transition::validate_connection_file(
+            self.connection,
+            &self.state,
+            &self.coordinator.state_path,
+        )?;
+        self.coordinator.validate_binding(self.connection)
+    }
+    /// An opaque digest of the exact SQL token/inode and index/binding tuple.
+    /// No token bytes escape into evidence or subprocess configuration.
+    pub fn authority_sha256(&self) -> Result<String, CommitError> {
+        self.revalidate()?;
+        let c = self.coordinator;
+        let bytes = serde_json::to_vec(&(
+            &c.binding,
+            &c.index_path,
+            &c.state_path,
+            c.index_identity.device,
+            c.index_identity.inode,
+            c.state_identity.device,
+            c.state_identity.inode,
+            &c.state_token,
+        ))
+        .map_err(|_| CommitError::InvalidInput)?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
+    /// Hash the original operational bytes under the retained exclusive SQL
+    /// transaction. This creates no backup and changes no acknowledgements.
+    pub fn state_snapshot(&self, max_bytes: u64) -> Result<OfflineBackup, CommitError> {
+        if max_bytes == 0 {
+            return Err(CommitError::InvalidInput);
+        }
+        self.revalidate()?;
+        let snapshot = hash_file_bounded(&mut self.state.try_clone().map_err(io)?, max_bytes)?;
+        self.revalidate()?;
+        Ok(snapshot)
+    }
+}
+fn validate_original_state(
+    file: &File,
+    coordinator: &IndexCommitCoordinator,
+) -> Result<(), CommitError> {
+    use std::io::{Seek, SeekFrom};
+    let metadata = file.metadata().map_err(io)?;
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o077 != 0
+        || metadata.uid() != fs::metadata("/proc/self").map_err(io)?.uid()
+        || Identity::file(file)? != coordinator.state_identity
+    {
+        return Err(CommitError::BindingMismatch);
+    }
+    let mut file = file.try_clone().map_err(io)?;
+    file.seek(SeekFrom::Start(0)).map_err(io)?;
+    let mut header = [0; 100];
+    file.read_exact(&mut header).map_err(io)?;
+    if &header[..16] != b"SQLite format 3\0" || header[18] != 1 || header[19] != 1 {
+        return Err(CommitError::InvalidInput);
+    }
+    Ok(())
+}
 impl IndexCommitCoordinator {
     /// Read-only offline verification under the same index/SQL exclusion used
     /// during preparation. No backup, schema migration, lease or receipt writes.
@@ -100,6 +191,16 @@ impl IndexCommitCoordinator {
         &self,
         now: i64,
         inspect: impl FnOnce() -> Result<T, CommitError>,
+    ) -> Result<T, CommitError> {
+        self.with_owned_offline_inspection(now, |_| inspect())
+    }
+    /// Hold original index/SQL ownership throughout one read-only verification.
+    /// All source processes must already be stopped. The callback must use this
+    /// context rather than reacquire the coordinator's SQL mutex or index lock.
+    pub fn with_owned_offline_inspection<T>(
+        &self,
+        now: i64,
+        inspect: impl for<'owner> FnOnce(&OwnedOfflineInspection<'owner>) -> Result<T, CommitError>,
     ) -> Result<T, CommitError> {
         if now < 0 {
             return Err(CommitError::InvalidInput);
@@ -110,6 +211,12 @@ impl IndexCommitCoordinator {
         }
         let _index = self.try_acquire()?;
         self.identities()?;
+        let state = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&self.state_path)
+            .map_err(io)?;
+        validate_original_state(&state, self)?;
         let mut db = self
             .state
             .lock_connection()
@@ -117,14 +224,19 @@ impl IndexCommitCoordinator {
         let transaction = db
             .transaction_with_behavior(TransactionBehavior::Exclusive)
             .map_err(sql)?;
-        self.validate_binding(&transaction)?;
+        let owner = OwnedOfflineInspection {
+            coordinator: self,
+            connection: &transaction,
+            state,
+        };
+        owner.revalidate()?;
         let active: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM reconciliation_lease WHERE expires_at>?1) OR EXISTS(SELECT 1 FROM file_refresh_intents WHERE phase='held' AND lease_until>?1)", [now], |r|r.get(0)).map_err(sql)?;
         if active {
             return Err(CommitError::Conflict);
         }
-        let result = inspect()?;
-        self.identities()?;
-        self.validate_binding(&transaction)?;
+        let result = inspect(&owner)?;
+        owner.revalidate()?;
+        drop(owner);
         transaction.commit().map_err(sql)?;
         Ok(result)
     }
