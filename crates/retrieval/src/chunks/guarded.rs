@@ -756,6 +756,8 @@ impl GuardedChunkTable {
 }
 
 #[cfg(target_os = "linux")]
+pub use candidate::runtime_builder;
+#[cfg(target_os = "linux")]
 pub use candidate::transfer as canonical_transfer;
 
 #[cfg(all(test, unix))]

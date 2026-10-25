@@ -69,7 +69,7 @@ impl PinnedAsset {
         asset.revalidate()?;
         Ok(asset)
     }
-    fn revalidate(&self) -> Result<()> {
+    pub(super) fn revalidate(&self) -> Result<()> {
         let mut hash = Sha256::new();
         let mut count = 0u64;
         let mut buffer = [0; 65536];
@@ -99,7 +99,7 @@ impl PinnedAsset {
         }
         Ok(())
     }
-    fn mode(&self) -> Vec<OsString> {
+    pub(super) fn mode(&self) -> Vec<OsString> {
         vec![
             "expansion".into(),
             self.path.clone().into_os_string(),
