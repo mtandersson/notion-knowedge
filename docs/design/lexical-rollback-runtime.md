@@ -177,3 +177,25 @@ The normal compiled legacy probe and actual owned-source verifier run explicitly
 in CI through sealed execution. The bound normal-executable tests additionally
 accept `NK_LEXICAL_TEST_ARCHIVE` pointing to the local pinned public archive;
 they never download data or use Notion credentials.
+
+### Retained descriptive evidence
+
+`rollback_runtime::evidence::publish` accepts an explicit output path, the
+still-owned offline context and a verified prior runtime. It reruns actual
+source and executable verification before comparing or publishing evidence.
+The bounded canonical record retains the complete prior binding (or legacy
+absence), native physical inventory and row/vector observation, operational
+identity/token fingerprint and bytes hash, and exact runtime/asset identities.
+Parsing this metadata never creates `VerifiedPriorRuntime`.
+
+Evidence must live outside the source index in an existing private directory.
+An existing artifact is accepted only when its strict canonical metadata equals
+the freshly verified observation; mismatched, partial, aliased or nonprivate
+files remain untouched. New records use a private retained stage, file and
+parent fsync, atomic no-replace rename and final parent fsync. Failed stages
+remain diagnostics, and callers must name evidence explicitly rather than scan
+for authority. All source processes must remain stopped.
+
+This primitive does not provide the operator command or killed-process retry
+workflow tracked by #533. Activation, rollback publication and aggregate
+acceptance remain gated by their subsequent units.

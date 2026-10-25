@@ -118,6 +118,66 @@ fn normal_runtime_case(archive: Option<&Path>) {
             &owner.state_snapshot(64 * 1024 * 1024)?
         );
         assert_eq!(proof.descriptor().is_legacy(), archive.is_none());
+        let evidence_path = parent.path().join("runtime-evidence.json");
+        let retained =
+            crate::rollback_runtime::evidence::publish(&evidence_path, owner, &proof).unwrap();
+        let original = std::fs::read(&evidence_path).unwrap();
+        assert_eq!(
+            crate::rollback_runtime::evidence::RetainedEvidence::read(&evidence_path).unwrap(),
+            retained
+        );
+        assert_eq!(
+            crate::rollback_runtime::evidence::publish(&evidence_path, owner, &proof).unwrap(),
+            retained
+        );
+        assert_eq!(std::fs::read(&evidence_path).unwrap(), original);
+        assert!(
+            crate::rollback_runtime::evidence::publish(
+                &root.join("index/forbidden.json"),
+                owner,
+                &proof
+            )
+            .is_err()
+        );
+        let alias = parent.path().join("alias.json");
+        std::os::unix::fs::symlink(&evidence_path, &alias).unwrap();
+        assert!(crate::rollback_runtime::evidence::RetainedEvidence::read(&alias).is_err());
+        std::fs::remove_file(&alias).unwrap();
+        std::fs::hard_link(&evidence_path, &alias).unwrap();
+        assert!(crate::rollback_runtime::evidence::RetainedEvidence::read(&evidence_path).is_err());
+        std::fs::remove_file(&alias).unwrap();
+        std::fs::set_permissions(&evidence_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(crate::rollback_runtime::evidence::RetainedEvidence::read(&evidence_path).is_err());
+        std::fs::set_permissions(&evidence_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        for invalid in [
+            b"{".to_vec(),
+            vec![b'x'; 65537],
+            [original.clone(), b"\n".to_vec()].concat(),
+        ] {
+            std::fs::write(&evidence_path, &invalid).unwrap();
+            assert!(
+                crate::rollback_runtime::evidence::RetainedEvidence::read(&evidence_path).is_err()
+            );
+            assert!(
+                crate::rollback_runtime::evidence::publish(&evidence_path, owner, &proof).is_err()
+            );
+            assert_eq!(std::fs::read(&evidence_path).unwrap(), invalid);
+        }
+        if archive.is_some() {
+            let mut metadata: serde_json::Value = serde_json::from_slice(&original).unwrap();
+            metadata["observation"]["source"]["lexical"]["version"] = 999.into();
+            // Re-serialize through the descriptive type to preserve canonical
+            // field order: refusal must be the unsupported nested schema.
+            let unsupported: crate::rollback_runtime::evidence::RetainedEvidence =
+                serde_json::from_value(metadata).unwrap();
+            let canonical = serde_json::to_vec(&unsupported).unwrap();
+            std::fs::write(&evidence_path, &canonical).unwrap();
+            assert!(
+                crate::rollback_runtime::evidence::RetainedEvidence::read(&evidence_path).is_err()
+            );
+            assert_eq!(std::fs::read(&evidence_path).unwrap(), canonical);
+        }
+        std::fs::write(&evidence_path, &original).unwrap();
         used = true;
         Ok(())
     })
@@ -125,6 +185,42 @@ fn normal_runtime_case(archive: Option<&Path>) {
     assert!(used);
     assert_eq!(bytes(&root), before);
     refusal_and_freshness_cases(&c, &runtime, asset.as_ref(), &embedding, &root, path);
+    // A newly acknowledged webhook changes operational state even when the
+    // native row/vector snapshot remains identical. Old evidence must not be
+    // rewritten or accepted for this newer acknowledged state.
+    use notion_knowledge_core::webhook::{WebhookEvent, WebhookInbox};
+    let event = WebhookEvent {
+        id: "00000000-0000-4000-8000-000000000001".into(),
+        workspace_id: "00000000-0000-4000-8000-000000000002".into(),
+        subscription_id: "00000000-0000-4000-8000-000000000003".into(),
+        integration_id: "00000000-0000-4000-8000-000000000004".into(),
+        entity_id: "00000000-0000-4000-8000-000000000005".into(),
+        timestamp: "2026-10-25T00:00:00Z".into(),
+        event_type: "page.content_updated".into(),
+        entity_type: "page".into(),
+        attempt_number: 1,
+    };
+    c.state().receive(&event).unwrap();
+    let acknowledged = bytes(&root);
+    assert_ne!(acknowledged, before);
+    let evidence_path = parent.path().join("runtime-evidence.json");
+    let retained = std::fs::read(&evidence_path).unwrap();
+    c.with_owned_offline_inspection(10, |owner| {
+        let fresh = verify(
+            owner,
+            &runtime,
+            asset.as_ref(),
+            &embedding,
+            VerificationLimits::default(),
+        )
+        .map_err(|_| CommitError::BindingMismatch)?;
+        assert!(crate::rollback_runtime::evidence::publish(&evidence_path, owner, &fresh).is_err());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(std::fs::read(&evidence_path).unwrap(), retained);
+    assert_eq!(bytes(&root), acknowledged);
+    assert!(c.state().event(&event.key()).unwrap().is_some());
 }
 #[test]
 #[ignore = "requires NK_LEXICAL_RUNTIME pointing to the freshly built normal executable"]

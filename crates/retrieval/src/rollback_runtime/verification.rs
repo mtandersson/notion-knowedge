@@ -146,9 +146,31 @@ pub struct VerifiedPriorRuntime<'owner> {
     source: RuntimeSourceSnapshot,
     authority_sha256: String,
     operational: OfflineBackup,
+    embedding: EmbeddingMetadata,
+    limits: VerificationLimits,
     _ownership: PhantomData<&'owner ()>,
 }
 impl VerifiedPriorRuntime<'_> {
+    pub(super) fn refresh<'a>(
+        &'a self,
+        owner: &'a OwnedOfflineInspection<'_>,
+    ) -> Result<VerifiedPriorRuntime<'a>> {
+        let fresh = verify(
+            owner,
+            self.runtime,
+            self.asset,
+            &self.embedding,
+            self.limits,
+        )?;
+        if fresh.authority_sha256 != self.authority_sha256
+            || fresh.operational != self.operational
+            || fresh.source != self.source
+            || fresh.descriptor != self.descriptor
+        {
+            return Err(RuntimeError);
+        }
+        Ok(fresh)
+    }
     pub fn runtime_sha256(&self) -> &str {
         self.runtime.sha256()
     }
@@ -297,6 +319,8 @@ pub fn verify<'owner>(
         source,
         authority_sha256,
         operational,
+        embedding: embedding.clone(),
+        limits,
         _ownership: PhantomData,
     })
 }
