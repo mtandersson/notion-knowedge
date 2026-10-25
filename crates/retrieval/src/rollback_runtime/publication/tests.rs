@@ -306,6 +306,67 @@ fn run_case(bound: bool, newer: bool, crash: bool) {
     assert!(IndexCommitCoordinator::open_read_only(&index, &state, target.clone()).is_ok());
 
     assert_eq!(bytes(&archive), before);
+    assert!(
+        current.search_guard().is_err(),
+        "stale current worker admitted after rollback"
+    );
+    let old_fence = probe::fixture_configuration(!bound).unwrap().0;
+    assert!(
+        IndexCommitCoordinator::open_read_only(&index, &state, old_fence).is_err(),
+        "reused prior physical index must not reuse its old serving fence"
+    );
+    let final_sql = fs::read(&state).unwrap();
+    assert!(
+        RuntimeTransitionOperator::start(
+            &runtime,
+            asset.as_ref(),
+            current_config,
+            &prepared_path,
+            ActivationPaths {
+                archive: &archive,
+                backup: &backup
+            },
+            Default::default(),
+            i64::MAX / 2,
+        )
+        .is_err(),
+        "stale Prepared work was accepted after publication"
+    );
+    assert_eq!(fs::read(&state).unwrap(), final_sql);
+    assert_eq!(bytes(&archive), before);
+    let published = IndexCommitCoordinator::open_existing(&index, &state, target).unwrap();
+    published
+        .with_owned_offline_inspection(i64::MAX / 2, |owner| {
+            let latest = owner
+                .prior_archive(std::slice::from_ref(&outcome.history))
+                .unwrap();
+            assert_eq!(latest.binding, source);
+            assert_eq!(latest.path, archive);
+            assert_eq!(latest.device, record.prepared.current.device);
+            assert_eq!(latest.inode, record.prepared.current.inode);
+            assert_eq!(
+                latest.snapshot_sha256,
+                metadata.current.metadata.source.snapshot_sha256
+            );
+            if newer {
+                // Explicit mixed v2/v1 lineage remains usable after a rollback that
+                // built a fresh target and retained the original prior archive.
+                let mut lineage = vec![outcome.history.clone()];
+                lineage.extend(record.lineage_paths.clone());
+                let oldest = owner.prior_archive(&lineage).unwrap();
+                let expected = probe::fixture_configuration(!bound).unwrap().0;
+                assert_eq!(oldest.binding, expected);
+                assert_eq!(oldest.path, prior);
+                assert_eq!(oldest.device, record.prepared.prior_archive.device);
+                assert_eq!(oldest.inode, record.prepared.prior_archive.inode);
+                assert_eq!(
+                    oldest.snapshot_sha256,
+                    metadata.prior.source.snapshot_sha256
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]
