@@ -235,10 +235,10 @@ jobs:
             shell: spike
             args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
     runs-on: ubuntu-latest
-    # The existing native lane measured 29m44s before the choice recovery
-    # matrix. Run that matrix separately so neither bounded job accumulates
-    # both workloads near its timeout.
-    timeout-minutes: ${{ (matrix.suite == 'local-lancedb' || matrix.suite == 'runtime-choices') && 45 || 30 }}
+    # Keep choice recovery parallel. Native run 40360967114 passed 369 cases
+    # before its cumulative 45m timeout with two cases still incomplete.
+    # Preserve all coverage with 60m native, 45m choices and 30m other budgets.
+    timeout-minutes: ${{ matrix.suite == 'local-lancedb' && 60 || matrix.suite == 'runtime-choices' && 45 || 30 }}
     env:
       # Retain file/line backtraces without full dependency type/variable DWARF.
       # This setting is included in Cargo snapshot compatibility keys.
