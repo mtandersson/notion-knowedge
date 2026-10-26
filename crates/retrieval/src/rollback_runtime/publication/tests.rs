@@ -318,6 +318,32 @@ fn run_case(bound: bool, newer: bool, case: Case) {
     assert_eq!(bytes(&archive), before);
     if matches!(case, Case::Capture) {
         let original_sql = fs::read(&state).unwrap();
+        let original_prior = bytes(&prior);
+        let forbidden = prior.join("must-not-write-capture");
+        assert!(
+            operator
+                .with_quarantined_source_inspection(
+                    i64::MAX / 2,
+                    Default::default(),
+                    |inspection| {
+                        crate::chunks::canonical_transfer::export_quarantined(
+                            inspection,
+                            &forbidden,
+                            &embedding,
+                            Default::default(),
+                        )
+                        .map_err(|_| crate::commit::CommitError::BindingMismatch)
+                    },
+                )
+                .is_err()
+        );
+        assert!(
+            !forbidden.exists(),
+            "refusal must precede retained native mutation"
+        );
+        assert_eq!(bytes(&prior), original_prior);
+        assert_eq!(bytes(&archive), before);
+        assert_eq!(fs::read(&state).unwrap(), original_sql);
         let output = parent.path().join("quarantined-canonical-rows");
         let captured = operator
             .with_quarantined_source_inspection(i64::MAX / 2, Default::default(), |inspection| {
@@ -349,6 +375,7 @@ fn run_case(bound: bool, newer: bool, case: Case) {
         assert_eq!(count, metadata.current.metadata.source.rows);
         assert_eq!(fs::read(&state).unwrap(), original_sql);
         assert_eq!(bytes(&archive), before);
+        assert_eq!(bytes(&prior), original_prior);
         assert_eq!(operator.owner.runtime_record().unwrap(), record);
         assert!(current.search_guard().is_err());
         return;

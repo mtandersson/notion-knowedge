@@ -42,6 +42,7 @@ pub struct QuarantinedSourceInspection<'owner> {
     embedding: notion_knowledge_core::embedding::EmbeddingMetadata,
     target: CommitBinding,
     directory: PathBuf,
+    retained_prior: Option<PathBuf>,
     target_version: u64,
     limits: SourceCaptureLimits,
 }
@@ -145,6 +146,10 @@ impl QuarantinedSourceInspection<'_> {
         ]
         .iter()
         .any(|index| path.starts_with(index))
+            || self
+                .retained_prior
+                .as_ref()
+                .is_some_and(|prior| path.starts_with(prior))
             || path == self.owner.state_path
             || path == record.backup_path
             || journal_path(&self.owner.state_path).is_ok_and(|journal| path == journal)
@@ -186,6 +191,11 @@ pub(crate) fn inspect<T>(
         embedding: embedding.clone(),
         target: CommitBinding::parse_retained(record.target.binding.as_bytes())?,
         directory: owner.physical_paths()?.0,
+        retained_prior: if owner.runtime.is_some() {
+            Some(owner.runtime_record()?.prepared.prior_archive.path)
+        } else {
+            None
+        },
         target_version,
         limits,
         record,
