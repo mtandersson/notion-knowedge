@@ -455,6 +455,7 @@ fn run_case(bound: bool, newer: bool, case: Case) {
         let original_prior = bytes(&prior);
         let desired = next(&target, "explicit-prepared-choice");
         let output = parent.path().join("explicit-prepared-choice.json");
+        let mut history_for_retry = None;
         operator
             .with_quarantined_source_inspection(i64::MAX / 2, Default::default(), |inspection| {
                 let inputs = || SelectionInputs {
@@ -497,6 +498,7 @@ fn run_case(bound: bool, newer: bool, case: Case) {
                 );
                 proof.publish(&output).unwrap();
                 let handoff = proof.retain_handoff_origin(&output).unwrap();
+                history_for_retry = Some(handoff.origin_history_path.clone());
                 handoff.verify_retained_files().unwrap();
                 assert_eq!(proof.retain_handoff_origin(&output).unwrap(), handoff);
                 assert!(matches!(
@@ -532,6 +534,7 @@ fn run_case(bound: bool, newer: bool, case: Case) {
         assert_eq!(operator.owner.runtime_record().unwrap(), record);
         assert!(current.search_guard().is_err());
         if matches!(case, Case::ChoiceHandoffCrash) {
+            fs::remove_file(history_for_retry.as_ref().unwrap()).unwrap();
             let input = parent.path().join("handoff-child.json");
             fs::write(
                 &input,
@@ -549,7 +552,12 @@ fn run_case(bound: bool, newer: bool, case: Case) {
             .unwrap();
             fs::set_permissions(&input, fs::Permissions::from_mode(0o600)).unwrap();
             drop(operator);
-            for phase in ["choice-handoff-staged", "choice-handoff-renamed", ""] {
+            for phase in [
+                "choice-origin-renamed",
+                "choice-handoff-staged",
+                "choice-handoff-renamed",
+                "",
+            ] {
                 let mut child = PublicationChild(
                     std::process::Command::new(std::env::current_exe().unwrap())
                         .args([

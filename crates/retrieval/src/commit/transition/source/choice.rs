@@ -167,6 +167,10 @@ pub(crate) struct ChoiceContext {
     pub highest_reserved_epoch: u64,
 }
 impl QuarantinedSourceInspection<'_> {
+    #[cfg(test)]
+    pub(crate) fn choice_checkpoint(&self, phase: &str) {
+        transition_checkpoint(self.owner, phase);
+    }
     pub(crate) fn stage_choice_handoff(
         &self,
         record: crate::rollback_runtime::choice::ChoiceHandoffRecord,

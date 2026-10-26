@@ -478,6 +478,8 @@ impl VerifiedPreparedChoice<'_, '_> {
             }
             Err(e) => return Err(e.into()),
         }
+        #[cfg(test)]
+        inspection.choice_checkpoint("choice-origin-renamed");
         // An exact retry must finish the durability barrier if a predecessor
         // died after rename but before syncing this parent.
         directory.sync_all()?;

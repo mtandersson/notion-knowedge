@@ -345,6 +345,7 @@ fn source_choice_case(bound: bool, handoff_case: bool, crash: bool) {
     let fresh = crate::rollback_runtime::candidate::tests::next(&target, "chosen-source");
     let before = crate::rollback_runtime::candidate::tests::bytes(&index);
     let sql = fs::read(&state).unwrap();
+    let mut history_for_retry = None;
     let selected = owner
         .with_quarantined_source_inspection(
             i64::MAX / 2,
@@ -455,6 +456,7 @@ fn source_choice_case(bound: bool, handoff_case: bool, crash: bool) {
                 let output = parent.path().join("prepared-choice.json");
                 prepared.publish(&output).unwrap();
                 let handoff = prepared.retain_handoff_origin(&output).unwrap();
+                history_for_retry = Some(handoff.origin_history_path.clone());
                 handoff.verify_retained_files().unwrap();
                 assert_eq!(prepared.retain_handoff_origin(&output).unwrap(), handoff);
                 assert!(matches!(
@@ -563,6 +565,7 @@ fn source_choice_case(bound: bool, handoff_case: bool, crash: bool) {
     if handoff_case {
         let output = parent.path().join("prepared-choice.json");
         if crash {
+            fs::remove_file(history_for_retry.as_ref().unwrap()).unwrap();
             let input = parent.path().join("source-handoff-child.json");
             let origin = owner.current_record().unwrap().unwrap();
             fs::write(
@@ -583,7 +586,12 @@ fn source_choice_case(bound: bool, handoff_case: bool, crash: bool) {
             .unwrap();
             fs::set_permissions(&input, fs::Permissions::from_mode(0o600)).unwrap();
             drop(owner);
-            for phase in ["choice-handoff-staged", "choice-handoff-renamed", ""] {
+            for phase in [
+                "choice-origin-renamed",
+                "choice-handoff-staged",
+                "choice-handoff-renamed",
+                "",
+            ] {
                 let mut child = HandoffChild(
                     std::process::Command::new(std::env::current_exe().unwrap())
                         .args([
@@ -650,9 +658,17 @@ fn source_choice_case(bound: bool, handoff_case: bool, crash: bool) {
                             Default::default(),
                         )
                         .unwrap();
+                        let chosen_candidate = proof.metadata().candidate.path.clone();
                         proof
                             .stage_handoff(&output)
-                            .map_err(|_| crate::commit::CommitError::BindingMismatch)
+                            .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                        drop(proof);
+                        let competing = fs::File::open(&chosen_candidate).unwrap();
+                        assert!(
+                            competing.try_lock().is_err(),
+                            "the staged handoff must retain the candidate lock"
+                        );
+                        Ok(())
                     },
                 )
                 .unwrap();
