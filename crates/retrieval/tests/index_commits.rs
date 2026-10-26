@@ -1826,6 +1826,29 @@ fn private_inspection_fixture() -> Fixture {
 
 #[test]
 fn owned_offline_inspection_retains_sql_and_index_exclusion_without_changing_bytes() {
+    // Unrelated parallel tests spawn processes. Between fork and exec those
+    // children inherit our locked file description, even with CLOEXEC, so
+    // closing our descriptor need not release the last copy immediately.
+    // Isolate this strict release/reacquisition contract without retrying it.
+    struct InspectionChild(Child);
+    impl Drop for InspectionChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = InspectionChild(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "owned_offline_inspection_child", "--ignored"])
+            .spawn()
+            .unwrap(),
+    );
+    wait_child(&mut child.0);
+}
+
+#[test]
+#[ignore = "isolated ownership/exclusion subprocess invoked by its parent test"]
+fn owned_offline_inspection_child() {
     use sha2::{Digest, Sha256};
     let f = private_inspection_fixture();
     let c = f.coordinator();
