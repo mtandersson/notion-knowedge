@@ -10,7 +10,13 @@ for its separate deployment/monitoring/overload gates.
 ## Provision separately, then admit deliberately
 
 Use a clean checkout with no tracked or untracked changes (including generated
-bytecode); the runner refuses dirty inputs before any Docker command. Use Python3.11+, local Unix-socket Docker/cgroupv2, compiler/OpenSSL and a clean reviewed checkout.
+bytecode); the runner refuses dirty inputs before any Docker command. Use
+Python3.11+, local Unix-socket Docker/cgroupv2 and compiler/OpenSSL from the
+reviewed Nix environment. Docker CLI and any temporary private user daemon must
+come from Nix/Nix shell tooling; do not install distribution packages or change
+the existing system daemon. Record the selected context/socket explicitly. A
+private user daemon, if provisioned separately, must have its own resource bounds,
+socket, data directory and ownership record.
 Provision the shipping `webhook-worker` image **after #562's security-fixed merge
 and exact-head CI**. Record that actual merge, checkout commit, image revision
 label and immutable image ID. The supplied fixed merge must be an ancestor of
@@ -138,7 +144,20 @@ No automatic retry, volume deletion or Docker prune occurs. The runner removes
 only its own containers/network, retains all named state/index volumes on both
 success and failure and records their names for deliberate operator follow-up.
 Private TLS fixture material remains under the evidence directory. Inspect it
-locally; remove only this run's retained resources when no investigation remains.
+locally. Retention is temporary for investigation, not permission to leave the
+experiment deployed indefinitely.
+
+After a successful run, or an explicit decision to end an investigated failure,
+export the bounded evidence to the operator's private retained location before
+final cleanup. Using the exact recorded identities, remove only this run's
+remaining containers, network and retained state/index volumes. Remove image or
+build-cache objects only when this run created them exclusively and no existing
+consumer uses them; the runner itself creates no builds or image pulls. If a
+private user daemon was provisioned for this experiment, stop only that owned
+daemon/slice and remove its owned sockets/data directory after export. Verify
+those resources and listeners are gone. Preserve pre-existing volumes, images,
+services, system Docker daemon and unrelated sockets/slices. Never use global
+`docker system prune`, `docker volume prune` or wildcard resource deletion.
 
 Ordinary CI needs no model, Docker, network or credentials:
 
@@ -150,5 +169,9 @@ python3 scripts/test-production-resources.py
 These contracts establish wrapper admission, limits, sampling parsing and safe
 failure retention. Actual model/container execution is a separate opt-in gate;
 no such run is claimed by those tests. Representative workload/page/chunk counts,
-concurrency/SLOs,rebuild reserve,hard disk quota and private alert delivery still
-need operator input and actual #455 evidence before a release decision.
+concurrency/SLOs, rebuild reserve, measured state/index disk headroom and actual
+private disk alerts still need #455 evidence before a release decision. Verify
+local warning/critical alert delivery and recovery against the actual monitored
+paths; a private local observer is valid without an external notification
+service. Bounded temporary storage remains required. A hard state/index disk
+quota or external alert destination is not an additional completion gate.
