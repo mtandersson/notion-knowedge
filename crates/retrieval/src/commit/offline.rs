@@ -21,7 +21,7 @@ pub struct OfflineBackup {
 pub(super) fn hash_file(file: &mut File) -> Result<OfflineBackup, CommitError> {
     hash_file_bounded(file, u64::MAX)
 }
-fn hash_file_bounded(file: &mut File, limit: u64) -> Result<OfflineBackup, CommitError> {
+pub(super) fn hash_file_bounded(file: &mut File, limit: u64) -> Result<OfflineBackup, CommitError> {
     file.rewind().map_err(io)?;
     let mut hash = Sha256::new();
     let mut bytes = 0u64;

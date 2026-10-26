@@ -1402,6 +1402,37 @@ fn transition_process_child() {
         preparation_backup: &preparation_backup,
         limits: CandidateLimits::default(),
     };
+    if let Ok(action) = std::env::var("NK_TRANSITION_TEST_ACTION")
+        && action.starts_with("capture-")
+    {
+        let output = root.join(&action);
+        let captured = owner.with_quarantined_source_inspection(
+            12,
+            candidate,
+            source::SourceCaptureLimits::default(),
+            |inspection| {
+                crate::chunks::canonical_transfer::export_quarantined(
+                    inspection,
+                    &output,
+                    &embedding,
+                    Default::default(),
+                )
+                .map_err(|_| CommitError::BindingMismatch)
+            },
+        );
+        if action.starts_with("capture-allowed-") {
+            let record = captured.unwrap();
+            fs::write(
+                output.with_extension("json"),
+                serde_json::to_vec(&record).unwrap(),
+            )
+            .unwrap();
+        } else {
+            assert!(captured.is_err());
+            assert!(!output.exists());
+        }
+        return;
+    }
     publication::reconcile_forward(
         &owner,
         12,
@@ -1817,3 +1848,5 @@ fn prepared_abort_case(phase: &str, operator: Option<&std::path::Path>) {
         1
     );
 }
+
+mod source_capture;

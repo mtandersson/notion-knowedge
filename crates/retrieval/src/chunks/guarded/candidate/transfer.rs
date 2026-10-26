@@ -233,13 +233,80 @@ pub fn export(
     embedding: &EmbeddingMetadata,
     limits: TransferLimits,
 ) -> Result<TransferRecord, ChunkTableError> {
+    export_owned(owner, path, embedding, limits)
+}
+/// Capture from an actually verified quarantined source; this never restores
+/// serving admission for the revoked source generation.
+pub fn export_quarantined(
+    owner: &crate::commit::transition::source::QuarantinedSourceInspection<'_>,
+    path: &Path,
+    embedding: &EmbeddingMetadata,
+    limits: TransferLimits,
+) -> Result<TransferRecord, ChunkTableError> {
+    if owner.embedding() != embedding {
+        return Err(bad());
+    }
+    export_owned(owner, path, embedding, limits)
+}
+trait TransferSource {
+    fn binding(&self) -> &crate::commit::CommitBinding;
+    fn index_directory(&self) -> &Path;
+    fn revalidate(&self) -> Result<(), crate::commit::CommitError>;
+    fn authority_sha256(&self) -> Result<String, crate::commit::CommitError>;
+    fn state_snapshot(&self, bytes: u64) -> Result<OfflineBackup, crate::commit::CommitError>;
+    fn allows_output(&self, path: &Path) -> bool;
+}
+impl TransferSource for OwnedOfflineInspection<'_> {
+    fn binding(&self) -> &crate::commit::CommitBinding {
+        self.binding()
+    }
+    fn index_directory(&self) -> &Path {
+        self.index_directory()
+    }
+    fn revalidate(&self) -> Result<(), crate::commit::CommitError> {
+        self.revalidate()
+    }
+    fn authority_sha256(&self) -> Result<String, crate::commit::CommitError> {
+        self.authority_sha256()
+    }
+    fn state_snapshot(&self, bytes: u64) -> Result<OfflineBackup, crate::commit::CommitError> {
+        self.state_snapshot(bytes)
+    }
+    fn allows_output(&self, path: &Path) -> bool {
+        !path
+            .parent()
+            .is_none_or(|p| p.starts_with(self.index_directory()))
+    }
+}
+impl TransferSource for crate::commit::transition::source::QuarantinedSourceInspection<'_> {
+    fn binding(&self) -> &crate::commit::CommitBinding {
+        self.binding()
+    }
+    fn index_directory(&self) -> &Path {
+        self.index_directory()
+    }
+    fn revalidate(&self) -> Result<(), crate::commit::CommitError> {
+        self.revalidate()
+    }
+    fn authority_sha256(&self) -> Result<String, crate::commit::CommitError> {
+        self.authority_sha256()
+    }
+    fn state_snapshot(&self, bytes: u64) -> Result<OfflineBackup, crate::commit::CommitError> {
+        self.state_snapshot(bytes)
+    }
+    fn allows_output(&self, path: &Path) -> bool {
+        self.allows_output(path)
+    }
+}
+fn export_owned(
+    owner: &impl TransferSource,
+    path: &Path,
+    embedding: &EmbeddingMetadata,
+    limits: TransferLimits,
+) -> Result<TransferRecord, ChunkTableError> {
     limits.validate(embedding)?;
     let directory = parent(path).map_err(|_| bad())?;
-    if path
-        .parent()
-        .ok_or_else(bad)?
-        .starts_with(owner.index_directory())
-    {
+    if !owner.allows_output(path) {
         return Err(bad());
     }
     owner.revalidate().map_err(|_| bad())?;

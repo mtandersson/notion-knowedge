@@ -14,6 +14,8 @@ pub mod preparation;
 pub mod publication;
 #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
 pub mod runtime_journal;
+#[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+pub mod source;
 
 const MAX_RECORD_BYTES: u64 = 65_536;
 
