@@ -63,7 +63,8 @@ CARGO_TARGET_DIR=/tmp/nk-compression-compat-target \
   nix develop .#spike --command python3 scripts/test-compression-compat.py
 ```
 
-This runs original and patched consumers in separate disposable fixture-only
+This pins the original compression trio (0.13.3 / 7.3.0 / 2.1.0) and patched
+trio (0.14.3 / 8.2.0 / 2.1.2), running consumers in separate disposable fixture-only
 processes outside the checkout, checking both reading directions for ZSTD Arrow
 IPC files (nullable multilingual columns, repeated batches), Lance length-prefixed
 blocks and legacy raw streaming frames. It never introduces the vulnerable

@@ -20,7 +20,10 @@ def main():
     environment.setdefault('CARGO_BUILD_JOBS', '4')
     with tempfile.TemporaryDirectory(prefix='nk-compression-compat-') as temporary:
         base = Path(temporary)
-        for variant, zstd_version in [('original', '0.13.3'), ('patched', '0.14.3')]:
+        for variant, zstd_version, safe_version, sys_version in [
+            ('original', '0.13.3', '7.3.0', '2.1.0'),
+            ('patched', '0.14.3', '8.2.0', '2.1.2'),
+        ]:
             project = base / variant
             project.mkdir()
             manifest = f'''[package]
@@ -34,6 +37,8 @@ arrow-schema = "=58.4.0"
 arrow-ipc = {{ version = "=58.4.0", features = ["zstd"] }}
 lance-encoding = {{ version = "=12.0.0", features = ["zstd"] }}
 zstd = "={zstd_version}"
+zstd-safe = {{ version = "={safe_version}", default-features = false }}
+zstd-sys = {{ version = "={sys_version}", default-features = false }}
 '''
             if variant == 'patched':
                 manifest += '\n[patch.crates-io]\n'
