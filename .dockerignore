@@ -11,6 +11,9 @@
 !vendor/**/*.rs
 !vendor/**/*.md
 !vendor/**/LICENSE
+!vendor/**/LICENSE.txt
+!vendor/**/NOTICE.txt
+!vendor/lance-encoding/protos/*.proto
 # Never allow common credential files, even inside an otherwise allowed tree.
 **/.env*
 **/*.pem

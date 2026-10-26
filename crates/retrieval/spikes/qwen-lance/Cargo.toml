@@ -33,3 +33,5 @@ debug = 0
 
 [patch.crates-io]
 candle-core = { path = "../../../../vendor/candle-core" }
+arrow-ipc = { path = "../../../../vendor/arrow-ipc" }
+lance-encoding = { path = "../../../../vendor/lance-encoding" }
