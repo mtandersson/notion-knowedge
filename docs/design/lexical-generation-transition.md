@@ -261,3 +261,20 @@ reopen a revoked serving coordinator, reserve fences, choose a pair or publish
 SQL. Final SQL publication requires forward completion and refuses this capture
 boundary. Verified source-choice preparation and durable choice publication
 remain separate #551/#552 obligations under #519.
+
+### Explicit runtime choice verification
+
+`choice::select` consumes the borrowed quarantined inspection and an explicit
+`OriginalSource` or `PreparedTarget` choice. Original-source selection requires
+retained runtime/asset evidence tied to the original physical/SQL source tuple;
+acknowledged content changes are checked against the freshly verified current
+source. Target selection uses the actual originating target contract, including
+the exact pinned pair retained by version-two operations. Both run fresh native
+inspection and real independent fencing/admission probes under the selected
+implementation. A desired fence must be unused and exceed all reserved epochs.
+
+The returned selection borrows the original transaction and its metadata is
+descriptive. It reserves no generation and grants no Prepared-choice or
+publication permission. Complete candidate/Prepared-choice persistence and
+adoption preview remain #551 implementation gates; choice handoff/publication
+and mandatory forward completion remain #552.

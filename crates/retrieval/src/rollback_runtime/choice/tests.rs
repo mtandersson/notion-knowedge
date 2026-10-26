@@ -1,0 +1,196 @@
+use super::*;
+use crate::{
+    chunks::{OfflineLexicalSource, TransitionCandidateInputs},
+    commit::{
+        IndexCommitCoordinator,
+        transition::{self, adoption::AdoptionLimits, manifest::ManifestLimits},
+    },
+    rollback_runtime::{
+        evidence, probe,
+        verification::{self, VerificationLimits},
+    },
+};
+use sha2::{Digest, Sha256};
+use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
+
+#[test]
+#[ignore = "requires a normal NK_LEXICAL_RUNTIME"]
+fn explicit_source_selection_verifies_latest_rows_and_preserves_quarantine() {
+    let binary = PathBuf::from(std::env::var_os("NK_LEXICAL_RUNTIME").unwrap());
+    let sha = format!("{:x}", Sha256::digest(fs::read(&binary).unwrap()));
+    let runtime = PinnedRuntime::pin(&binary, &sha, 1 << 30).unwrap();
+    let parent = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let root = parent.path().join("installation");
+    runtime
+        .run(
+            &[
+                "probe-create".into(),
+                root.as_os_str().to_owned(),
+                "legacy".into(),
+            ],
+            Duration::from_secs(90),
+            65536,
+        )
+        .unwrap();
+    let (binding, embedding) = probe::fixture_configuration(true).unwrap();
+    let index = root.join("index");
+    let state = root.join("state.sqlite");
+    let coordinator =
+        IndexCommitCoordinator::open_existing(&index, &state, binding.clone()).unwrap();
+    let retained = parent.path().join("original-source-evidence.json");
+    coordinator
+        .with_owned_offline_inspection(20, |owner| {
+            let proof = verification::verify(
+                owner,
+                &runtime,
+                None,
+                &embedding,
+                VerificationLimits::default(),
+            )
+            .unwrap();
+            evidence::publish(&retained, owner, &proof).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let old_snapshot =
+        inspect_runtime_source(&index, &embedding, &binding, Default::default()).unwrap();
+    probe::commit_fixture_row(&root, binding.clone(), None).unwrap();
+    let target = crate::rollback_runtime::candidate::tests::next(&binding, "original-target");
+    let dictionary = crate::lexical_dictionary::tests::dictionary(&[("cinnamon", "kanel")]);
+    let native_candidate = root.join("original-target-candidate");
+    let preparation_backup = parent.path().join("original-preparation.sqlite");
+    OfflineLexicalSource::bind(
+        &index,
+        binding.table(),
+        embedding.clone(),
+        coordinator.clone(),
+    )
+    .unwrap()
+    .prepare(
+        &native_candidate,
+        &preparation_backup,
+        &target,
+        &dictionary,
+        i64::MAX / 2,
+        Default::default(),
+    )
+    .unwrap();
+    let candidate = TransitionCandidateInputs {
+        source: &binding,
+        target: &target,
+        embedding: &embedding,
+        dictionary: &dictionary,
+        preparation_backup: &preparation_backup,
+        limits: Default::default(),
+    };
+    let record = transition::preparation::prepare_activation(
+        &coordinator,
+        i64::MAX / 2,
+        candidate,
+        transition::preparation::ActivationPaths {
+            candidate: &native_candidate,
+            archive: &root.join("original-source-archive"),
+            backup: &parent.path().join("activation.sqlite"),
+            quarantine_generation: "original-quarantine",
+        },
+        AdoptionLimits::default(),
+        ManifestLimits::default(),
+        64 << 20,
+    )
+    .unwrap();
+    let owner = transition::TransitionOwnership::acquire(&state, &record).unwrap();
+    owner.quarantine(i64::MAX / 2).unwrap();
+    let fresh = crate::rollback_runtime::candidate::tests::next(&target, "chosen-source");
+    let before = crate::rollback_runtime::candidate::tests::bytes(&index);
+    let sql = fs::read(&state).unwrap();
+    let selected = owner
+        .with_quarantined_source_inspection(
+            i64::MAX / 2,
+            candidate,
+            Default::default(),
+            |inspection| {
+                assert!(
+                    select(
+                        inspection,
+                        SelectionInputs {
+                            choice: Choice::OriginalSource,
+                            runtime: &runtime,
+                            asset: None,
+                            source_evidence: None,
+                            desired: &fresh
+                        },
+                        Default::default()
+                    )
+                    .is_err()
+                );
+                assert!(
+                    select(
+                        inspection,
+                        SelectionInputs {
+                            choice: Choice::OriginalSource,
+                            runtime: &runtime,
+                            asset: None,
+                            source_evidence: Some(&retained),
+                            desired: &target
+                        },
+                        Default::default()
+                    )
+                    .is_err()
+                );
+                let selected = select(
+                    inspection,
+                    SelectionInputs {
+                        choice: Choice::OriginalSource,
+                        runtime: &runtime,
+                        asset: None,
+                        source_evidence: Some(&retained),
+                        desired: &fresh,
+                    },
+                    Default::default(),
+                )
+                .unwrap();
+                selected.revalidate().unwrap();
+                assert_eq!(selected.metadata().choice, Choice::OriginalSource);
+                assert_ne!(
+                    selected.metadata().current_native.snapshot_sha256,
+                    old_snapshot.snapshot_sha256
+                );
+                assert_eq!(
+                    selected.metadata().current_native.snapshot_sha256,
+                    selected.metadata().observation.source.snapshot_sha256
+                );
+                assert_eq!(
+                    Origin::parse_metadata(&selected.metadata().origin.canonical_bytes().unwrap())
+                        .unwrap(),
+                    selected.metadata().origin
+                );
+                Ok(selected.metadata().clone())
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        selected.desired_authority_json,
+        serde_json::to_string(&fresh).unwrap()
+    );
+    assert_eq!(fs::read(&state).unwrap(), sql);
+    assert_eq!(
+        crate::rollback_runtime::candidate::tests::bytes(&index),
+        before
+    );
+    assert!(coordinator.search_guard().is_err());
+    let db = rusqlite::Connection::open(&state).unwrap();
+    let reserved: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM index_commit_generations WHERE generation=?1)",
+            [fresh.generation()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        !reserved,
+        "read-only selection must not reserve its fresh plan"
+    );
+}

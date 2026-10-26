@@ -104,6 +104,24 @@ impl RetainedEvidence {
             && self.observation.source.snapshot_sha256 == report.source.snapshot_sha256
             && self.observation.source.lexical == report.source.lexical
     }
+    /// Necessary identity check after acknowledged source updates. Callers must
+    /// separately prove original physical/SQL lineage and inspect the actual
+    /// latest source; this comparison grants no snapshot or publication rights.
+    pub(super) fn matches_current_source_pair(
+        &self,
+        runtime_sha256: &str,
+        asset_sha256: Option<&str>,
+        report: &SourceReport,
+    ) -> bool {
+        self.runtime_sha256 == runtime_sha256
+            && self.asset_sha256.as_deref() == asset_sha256
+            && self.observation.descriptor == report.descriptor
+            && self.observation.source.version == report.source.version
+            && match &report.source.lexical {
+                Some(binding) => self.observation.descriptor.describes_bound_source(binding),
+                None => self.observation.descriptor.is_legacy(),
+            }
+    }
     /// Read bounded private canonical metadata, without granting authority.
     pub fn read(path: &Path) -> Result<Self> {
         let parent = parent(path)?;

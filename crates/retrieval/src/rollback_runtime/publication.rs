@@ -1016,7 +1016,14 @@ impl RuntimeTransitionOperator<'_> {
                     transaction,
                     &self.source,
                     &self.embedding,
-                    version,
+                    crate::commit::transition::source::TargetNativeContract {
+                        version,
+                        descriptor: self.seed.prepared.candidate.prior.descriptor.clone(),
+                        pinned: Some((
+                            self.runtime.sha256().into(),
+                            self.asset.map(|a| a.sha256().into()),
+                        )),
+                    },
                     limits,
                     action,
                 )?;
