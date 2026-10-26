@@ -436,7 +436,6 @@ fn run_case(bound: bool, newer: bool, case: Case) {
                 desired: &desired,
             },
             Default::default(),
-            Default::default(),
             i64::MAX / 2,
         )
         .unwrap();
@@ -643,7 +642,6 @@ fn run_case(bound: bool, newer: bool, case: Case) {
                     desired: &desired,
                 },
                 Default::default(),
-                Default::default(),
                 i64::MAX / 2,
             )
             .unwrap();
@@ -696,7 +694,6 @@ fn run_case(bound: bool, newer: bool, case: Case) {
                         source_evidence: None,
                         desired: &desired,
                     },
-                    Default::default(),
                     Default::default(),
                     i64::MAX / 2,
                 )
@@ -1158,7 +1155,6 @@ fn choice_handoff_process_child() {
             current,
             &handoff,
             inputs(),
-            Default::default(),
             Default::default(),
             i64::MAX / 2,
         )

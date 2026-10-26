@@ -670,6 +670,13 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
 #[cfg(test)]
 mod tests;
 
+/// Bounds applied to the retained choice and its original source inspection.
+#[derive(Clone, Copy, Default)]
+pub struct ChoiceRecoveryLimits {
+    pub prepared: PreparedLimits,
+    pub source: crate::commit::transition::source::SourceCaptureLimits,
+}
+
 impl RuntimeTransitionOperator<'_> {
     /// Reacquire and verify a v2-origin handoff with trusted current and
     /// selected runtime inputs. No publication capability escapes this check.
@@ -679,8 +686,7 @@ impl RuntimeTransitionOperator<'_> {
         current: CurrentSource<'_>,
         handoff: &super::choice::ChoiceHandoffRecord,
         inputs: super::choice::SelectionInputs<'_>,
-        limits: PreparedLimits,
-        capture_limits: crate::commit::transition::source::SourceCaptureLimits,
+        limits: ChoiceRecoveryLimits,
         now: i64,
     ) -> Result<()> {
         let super::choice::Origin::Runtime(origin) = &handoff.prepared.selection.origin else {
@@ -691,13 +697,14 @@ impl RuntimeTransitionOperator<'_> {
             asset,
             current,
             origin,
-            limits,
+            limits.prepared,
             now,
             JournalMode::Choice(handoff),
         )?;
-        operator.with_quarantined_source_inspection(now, capture_limits, |inspection| {
-            let proof = super::choice::reopen(inspection, inputs, &handoff.prepared_path, limits)
-                .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+        operator.with_quarantined_source_inspection(now, limits.source, |inspection| {
+            let proof =
+                super::choice::reopen(inspection, inputs, &handoff.prepared_path, limits.prepared)
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
             if proof.metadata() != &handoff.prepared {
                 return Err(crate::commit::CommitError::BindingMismatch);
             }
