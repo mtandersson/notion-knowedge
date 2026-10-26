@@ -261,3 +261,32 @@ reopen a revoked serving coordinator, reserve fences, choose a pair or publish
 SQL. Final SQL publication requires forward completion and refuses this capture
 boundary. Verified source-choice preparation and durable choice publication
 remain separate #551/#552 obligations under #519.
+
+### Explicit runtime choice verification
+
+`choice::select` consumes the borrowed quarantined inspection and an explicit
+`OriginalSource` or `PreparedTarget` choice. Original-source selection requires
+retained runtime/asset evidence tied to the original physical/SQL source tuple;
+acknowledged content changes are checked against the freshly verified current
+source. Target selection uses the actual originating target contract, including
+the exact pinned pair retained by version-two operations. Both run fresh native
+inspection and real independent fencing/admission probes under the selected
+implementation. A desired fence must be unused and exceed all reserved epochs.
+
+The returned selection borrows the original transaction; its metadata is
+descriptive. `prepare` exports the latest canonical rows and exact vectors,
+verifies the candidate under the selected implementation, preserves an immutable
+whole-SQL backup, and computes a complete read-only adoption preview. An
+original-source choice builds a distinct candidate so its retained source stays
+immutable. A prepared-target choice may reuse the verified target only while
+its complete snapshot matches the latest source.
+
+The Prepared-choice record is bounded, canonical and private. Publication uses
+file synchronization, a no-replace rename and parent synchronization. Fresh
+`reopen` requires the actual original quarantined owner and explicit trusted
+runtime/asset/choice inputs; it repeats native and independent fencing/admission
+checks and verifies all retained artifacts. Parsing metadata cannot construct a
+verified capability. Missing artifacts are refused rather than recreated.
+Preparation and record publication reserve no generation, change no original
+native or operational SQL state, and grant no serving rights. Actual choice
+handoff, final SQL publication and mandatory forward completion remain #552.

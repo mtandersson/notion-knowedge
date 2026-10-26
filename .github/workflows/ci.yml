@@ -228,10 +228,14 @@ jobs:
           - suite: local-lancedb
             shell: spike
             args: -p notion-knowledge-retrieval --features local-lancedb
+          - suite: runtime-choices
+            shell: spike
+            args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
     runs-on: ubuntu-latest
-    # This lane also runs every real offline image/restart test. Hosted run
-    # 40274740808 was still passing those cases when the old 30m job expired.
-    timeout-minutes: ${{ matrix.suite == 'local-lancedb' && 45 || 30 }}
+    # The existing native lane measured 29m44s before the choice recovery
+    # matrix. Run that matrix separately so neither bounded job accumulates
+    # both workloads near its timeout.
+    timeout-minutes: ${{ (matrix.suite == 'local-lancedb' || matrix.suite == 'runtime-choices') && 45 || 30 }}
     env:
       # Retain file/line backtraces without full dependency type/variable DWARF.
       # This setting is included in Cargo snapshot compatibility keys.
@@ -283,6 +287,14 @@ jobs:
           NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib runtime_publication_recovers_legacy_after_killed_processes --locked -- --ignored
           NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib runtime_publication_rejects_physical_replacement_and_stale_preparation --locked -- --ignored
           NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_runtime_source_capture_legacy_preserves_latest_source --locked -- --ignored
+
+      - name: Test quarantined runtime choices
+        if: matrix.suite == 'runtime-choices'
+        run: |
+          CARGO_PROFILE_DEV_DEBUG="$CARGO_PROFILE_TEST_DEBUG" nix develop .#spike --command cargo build -p notion-knowledge-retrieval --features local-lancedb --example lexical-runtime --locked
+          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib explicit_source_selection_verifies_latest_rows_and_preserves_quarantine --locked -- --ignored
+          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_choice_prepared_target_legacy_preserves_source_and_sql --locked -- --ignored
+          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_choice_prepared_record_recovers_after_killed_processes --locked -- --ignored
 
       - name: Test production evaluation storage and authorization boundaries
         if: matrix.suite == 'webhook-worker'

@@ -33,6 +33,8 @@ enum Case {
     Crash,
     PhysicalRefusal,
     Capture,
+    ChoicePrepared,
+    ChoiceCrash,
 }
 #[test]
 #[ignore = "requires matching normal runtime"]
@@ -48,6 +50,21 @@ fn quarantined_runtime_source_capture_legacy_preserves_latest_source() {
 #[ignore = "requires matching normal runtime and pinned public archive"]
 fn quarantined_runtime_source_capture_bound_preserves_latest_source() {
     run_case(true, true, Case::Capture);
+}
+#[test]
+#[ignore = "requires matching normal runtime"]
+fn quarantined_choice_prepared_target_legacy_preserves_source_and_sql() {
+    run_case(false, true, Case::ChoicePrepared);
+}
+#[test]
+#[ignore = "requires matching normal runtime and pinned public archive"]
+fn quarantined_choice_prepared_target_bound_preserves_source_and_sql() {
+    run_case(true, true, Case::ChoicePrepared);
+}
+#[test]
+#[ignore = "requires normal runtime; kills actual Prepared-choice publication processes"]
+fn quarantined_choice_prepared_record_recovers_after_killed_processes() {
+    run_case(false, true, Case::ChoiceCrash);
 }
 fn run_case(bound: bool, newer: bool, case: Case) {
     let crash = matches!(case, Case::Crash);
@@ -316,6 +333,136 @@ fn run_case(bound: bool, newer: bool, case: Case) {
     assert_eq!(record.phase, RuntimePhase::SourceRetained);
     assert!(!index.exists());
     assert_eq!(bytes(&archive), before);
+    if matches!(case, Case::ChoicePrepared | Case::ChoiceCrash) {
+        use crate::rollback_runtime::choice::{self, Choice, SelectionInputs};
+        let original_sql = fs::read(&state).unwrap();
+        let original_candidate = bytes(&candidate);
+        let original_prior = bytes(&prior);
+        let desired = next(&target, "explicit-prepared-choice");
+        let output = parent.path().join("explicit-prepared-choice.json");
+        operator
+            .with_quarantined_source_inspection(i64::MAX / 2, Default::default(), |inspection| {
+                let inputs = || SelectionInputs {
+                    choice: Choice::PreparedTarget,
+                    runtime: &runtime,
+                    asset: asset.as_ref(),
+                    source_evidence: None,
+                    desired: &desired,
+                };
+                if bound {
+                    assert!(
+                        choice::select(
+                            inspection,
+                            SelectionInputs {
+                                choice: Choice::PreparedTarget,
+                                runtime: &runtime,
+                                asset: None,
+                                source_evidence: None,
+                                desired: &desired,
+                            },
+                            Default::default()
+                        )
+                        .is_err(),
+                        "missing selected bound asset was accepted"
+                    );
+                }
+                let selected = choice::select(inspection, inputs(), Default::default()).unwrap();
+                assert_eq!(selected.metadata().selected.path, candidate);
+                let proof = selected
+                    .prepare(choice::PreparationPaths {
+                        transfer: &parent.path().join("explicit-choice-rows"),
+                        candidate: None,
+                        backup: &parent.path().join("explicit-choice-state.sqlite"),
+                    })
+                    .unwrap();
+                assert!(proof.metadata().built.is_none());
+                assert_eq!(
+                    proof.metadata().candidate_report.source.snapshot_sha256,
+                    metadata.current.metadata.source.snapshot_sha256
+                );
+                proof.publish(&output).unwrap();
+                drop(proof);
+                let reopened =
+                    choice::reopen(inspection, inputs(), &output, Default::default()).unwrap();
+                reopened.publish(&output).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(fs::read(&state).unwrap(), original_sql);
+        assert_eq!(bytes(&archive), before);
+        assert_eq!(bytes(&candidate), original_candidate);
+        assert_eq!(bytes(&prior), original_prior);
+        assert_eq!(operator.owner.runtime_record().unwrap(), record);
+        assert!(current.search_guard().is_err());
+        if matches!(case, Case::ChoiceCrash) {
+            let input = parent.path().join("choice-child.json");
+            fs::write(
+                &input,
+                serde_json::to_vec(&serde_json::json!({
+                    "record": record,
+                    "source": serde_json::to_string(&source).unwrap(),
+                    "desired": serde_json::to_string(&desired).unwrap(),
+                    "embedding": embedding,
+                    "index": index,
+                    "state": state,
+                    "prepared": output,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            drop(operator);
+            for phase in ["stage-synced", "record-renamed", "record-published"] {
+                let destination = parent.path().join(format!("choice-{phase}.json"));
+                let retries = if phase == "record-renamed" { 4 } else { 3 };
+                for attempt in 0..retries {
+                    let checkpoint = if attempt == 0 {
+                        phase
+                    } else if phase == "record-renamed" && attempt == 1 {
+                        "record-published"
+                    } else {
+                        ""
+                    };
+                    let mut child = PublicationChild(std::process::Command::new(std::env::current_exe().unwrap())
+                        .args(["--exact", "rollback_runtime::publication::tests::choice_prepared_process_child", "--ignored", "--nocapture"])
+                        .env_clear()
+                        .env("NK_LEXICAL_RUNTIME", &binary)
+                        .env("NK_CHOICE_INPUT", &input)
+                        .env("NK_CHOICE_DESTINATION", &destination)
+                        .env("NK_CHOICE_TEST_ROOT", &root)
+                        .env("NK_CHOICE_TEST_PHASE", checkpoint)
+                        .spawn().unwrap());
+                    if !checkpoint.is_empty() {
+                        let marker = root.join("observed-choice-prepared");
+                        let started = std::time::Instant::now();
+                        while !fs::read_to_string(&marker).is_ok_and(|v| v == checkpoint) {
+                            assert!(
+                                child.0.try_wait().unwrap().is_none(),
+                                "child exited before {phase}"
+                            );
+                            assert!(
+                                started.elapsed() < Duration::from_secs(300),
+                                "checkpoint timeout: {phase}"
+                            );
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                        child.0.kill().unwrap();
+                        assert!(!child.0.wait().unwrap().success());
+                        fs::remove_file(marker).unwrap();
+                    } else {
+                        assert!(
+                            child.0.wait().unwrap().success(),
+                            "fresh Prepared-choice retry failed"
+                        );
+                    }
+                    assert_eq!(fs::read(&state).unwrap(), original_sql);
+                    assert_eq!(bytes(&archive), before);
+                    assert_eq!(bytes(&candidate), original_candidate);
+                    assert_eq!(bytes(&prior), original_prior);
+                }
+            }
+        }
+        return;
+    }
     if matches!(case, Case::Capture) {
         let original_sql = fs::read(&state).unwrap();
         let original_prior = bytes(&prior);
@@ -657,4 +804,63 @@ fn killed_publication_retries(
         }
     }
     history.unwrap()
+}
+
+#[test]
+#[ignore = "Prepared-choice publication subprocess entrypoint"]
+fn choice_prepared_process_child() {
+    use crate::rollback_runtime::choice::{self, Choice, SelectionInputs};
+    let Some(input) = std::env::var_os("NK_CHOICE_INPUT") else {
+        return;
+    };
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(input).unwrap()).unwrap();
+    let binary = PathBuf::from(std::env::var_os("NK_LEXICAL_RUNTIME").unwrap());
+    let sha = format!("{:x}", Sha256::digest(fs::read(&binary).unwrap()));
+    let runtime = PinnedRuntime::pin(&binary, &sha, 1 << 30).unwrap();
+    let path = |name: &str| PathBuf::from(value[name].as_str().unwrap());
+    let source =
+        CommitBinding::parse_retained(value["source"].as_str().unwrap().as_bytes()).unwrap();
+    let desired =
+        CommitBinding::parse_retained(value["desired"].as_str().unwrap().as_bytes()).unwrap();
+    let embedding = serde_json::from_value(value["embedding"].clone()).unwrap();
+    let record = serde_json::from_value(value["record"].clone()).unwrap();
+    let index = path("index");
+    let state = path("state");
+    let operator = RuntimeTransitionOperator::open(
+        &runtime,
+        None,
+        CurrentSource {
+            index: &index,
+            state: &state,
+            binding: &source,
+            embedding: &embedding,
+        },
+        &record,
+        Default::default(),
+        i64::MAX / 2,
+    )
+    .unwrap();
+    operator
+        .with_quarantined_source_inspection(i64::MAX / 2, Default::default(), |inspection| {
+            let proof = choice::reopen(
+                inspection,
+                SelectionInputs {
+                    choice: Choice::PreparedTarget,
+                    runtime: &runtime,
+                    asset: None,
+                    source_evidence: None,
+                    desired: &desired,
+                },
+                &path("prepared"),
+                Default::default(),
+            )
+            .unwrap();
+            proof
+                .publish(&PathBuf::from(
+                    std::env::var_os("NK_CHOICE_DESTINATION").unwrap(),
+                ))
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
 }

@@ -20,6 +20,12 @@ impl Default for SourceCaptureLimits {
         }
     }
 }
+#[derive(Clone)]
+pub(crate) struct TargetNativeContract {
+    pub version: u64,
+    pub descriptor: crate::chunks::lexical_binding::runtime::RuntimeDescriptor,
+    pub pinned: Option<(String, Option<String>)>,
+}
 /// Borrows actual original-state and physical ownership, never serving rights.
 /// No constructor or deserializer is available to callers. Its lifetime cannot
 /// escape the verified original transaction's callback.
@@ -43,7 +49,7 @@ pub struct QuarantinedSourceInspection<'owner> {
     target: CommitBinding,
     directory: PathBuf,
     retained_prior: Option<PathBuf>,
-    target_version: u64,
+    target_native: TargetNativeContract,
     limits: SourceCaptureLimits,
 }
 fn operation(owner: &TransitionOwnership) -> Result<Vec<u8>, CommitError> {
@@ -99,7 +105,7 @@ impl QuarantinedSourceInspection<'_> {
             &ComparisonInputs {
                 source: &self.binding,
                 target: &self.target,
-                target_version: self.target_version,
+                target_version: self.target_native.version,
                 plan_bytes: self.limits.plan_bytes,
                 backup_bytes: self.limits.backup_bytes,
                 limits: self.limits.sql,
@@ -173,7 +179,7 @@ pub(crate) fn inspect<T>(
     transaction: &rusqlite::Transaction<'_>,
     binding: &CommitBinding,
     embedding: &notion_knowledge_core::embedding::EmbeddingMetadata,
-    target_version: u64,
+    target_native: TargetNativeContract,
     limits: SourceCaptureLimits,
     action: impl for<'a> FnOnce(&QuarantinedSourceInspection<'a>) -> Result<T, CommitError>,
 ) -> Result<T, CommitError> {
@@ -196,7 +202,7 @@ pub(crate) fn inspect<T>(
         } else {
             None
         },
-        target_version,
+        target_native,
         limits,
         record,
     };
@@ -226,7 +232,15 @@ impl TransitionOwnership {
                 transaction,
                 candidate.source,
                 candidate.embedding,
-                verified.target_version(),
+                TargetNativeContract {
+                    version: verified.target_version(),
+                    descriptor:
+                        crate::chunks::lexical_binding::runtime::RuntimeDescriptor::current(Some(
+                            candidate.dictionary,
+                        ))
+                        .map_err(|_| CommitError::BindingMismatch)?,
+                    pinned: None,
+                },
                 limits,
                 action,
             )?;
@@ -234,4 +248,9 @@ impl TransitionOwnership {
             Ok(result)
         })
     }
+}
+
+mod choice;
+pub(crate) fn validate_origin_activation(record: &TransitionRecord) -> Result<(), CommitError> {
+    canonical(record).map(|_| ())
 }
