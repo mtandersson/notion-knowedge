@@ -51,6 +51,8 @@ pub struct QuarantinedSourceInspection<'owner> {
     retained_prior: Option<PathBuf>,
     target_native: TargetNativeContract,
     limits: SourceCaptureLimits,
+    staged_handoff:
+        std::cell::RefCell<Option<crate::rollback_runtime::choice::ChoiceHandoffRecord>>,
 }
 fn operation(owner: &TransitionOwnership) -> Result<Vec<u8>, CommitError> {
     if owner.runtime.is_some() {
@@ -183,6 +185,59 @@ pub(crate) fn inspect<T>(
     limits: SourceCaptureLimits,
     action: impl for<'a> FnOnce(&QuarantinedSourceInspection<'a>) -> Result<T, CommitError>,
 ) -> Result<T, CommitError> {
+    let (result, staged) = inspect_inner(
+        owner,
+        transaction,
+        binding,
+        embedding,
+        target_native,
+        limits,
+        action,
+    )?;
+    if staged.is_some() {
+        return Err(CommitError::Conflict);
+    }
+    Ok(result)
+}
+
+/// A staged handoff is returned only to the dialect-specific wrapper, which
+/// must finish its native checks under this same owner and transaction.
+pub(crate) fn inspect_handoff<T>(
+    owner: &TransitionOwnership,
+    transaction: &rusqlite::Transaction<'_>,
+    binding: &CommitBinding,
+    embedding: &notion_knowledge_core::embedding::EmbeddingMetadata,
+    target_native: TargetNativeContract,
+    limits: SourceCaptureLimits,
+    action: impl for<'a> FnOnce(&QuarantinedSourceInspection<'a>) -> Result<T, CommitError>,
+) -> Result<(T, crate::rollback_runtime::choice::ChoiceHandoffRecord), CommitError> {
+    let (result, staged) = inspect_inner(
+        owner,
+        transaction,
+        binding,
+        embedding,
+        target_native,
+        limits,
+        action,
+    )?;
+    Ok((result, staged.ok_or(CommitError::Conflict)?))
+}
+
+fn inspect_inner<T>(
+    owner: &TransitionOwnership,
+    transaction: &rusqlite::Transaction<'_>,
+    binding: &CommitBinding,
+    embedding: &notion_knowledge_core::embedding::EmbeddingMetadata,
+    target_native: TargetNativeContract,
+    limits: SourceCaptureLimits,
+    action: impl for<'a> FnOnce(&QuarantinedSourceInspection<'a>) -> Result<T, CommitError>,
+) -> Result<
+    (
+        T,
+        Option<crate::rollback_runtime::choice::ChoiceHandoffRecord>,
+    ),
+    CommitError,
+> {
     let record = owner.current_record()?.ok_or(CommitError::Conflict)?;
     if serde_json::to_string(binding).map_err(|_| CommitError::InvalidInput)?
         != record.source.binding
@@ -205,13 +260,51 @@ pub(crate) fn inspect<T>(
         target_native,
         limits,
         record,
+        staged_handoff: std::cell::RefCell::new(None),
     };
     inspection.revalidate()?;
     let result = action(&inspection)?;
     inspection.revalidate()?;
-    Ok(result)
+    Ok((result, inspection.staged_handoff.into_inner()))
 }
 impl TransitionOwnership {
+    /// Stage a freshly verified explicit choice and atomically replace the
+    /// original v1 journal while the same physical and SQL ownership is held.
+    pub fn handoff_quarantined_choice<T>(
+        &self,
+        now: i64,
+        candidate: crate::chunks::TransitionCandidateInputs<'_>,
+        limits: SourceCaptureLimits,
+        action: impl for<'a> FnOnce(&QuarantinedSourceInspection<'a>) -> Result<T, CommitError>,
+    ) -> Result<T, CommitError> {
+        if self.runtime.is_some() {
+            return Err(CommitError::BindingMismatch);
+        }
+        self.with_exclusive_sql(now, |transaction| {
+            let verified =
+                crate::chunks::verify_transition_candidate(self, transaction, candidate)?;
+            let (result, handoff) = inspect_handoff(
+                self,
+                transaction,
+                candidate.source,
+                candidate.embedding,
+                TargetNativeContract {
+                    version: verified.target_version(),
+                    descriptor:
+                        crate::chunks::lexical_binding::runtime::RuntimeDescriptor::current(Some(
+                            candidate.dictionary,
+                        ))
+                        .map_err(|_| CommitError::BindingMismatch)?,
+                    pinned: None,
+                },
+                limits,
+                action,
+            )?;
+            crate::chunks::verify_transition_candidate(self, transaction, candidate)?;
+            choice::install_choice_handoff(self, transaction, &handoff)?;
+            Ok(result)
+        })
+    }
     /// Read an unfinished v1 source under actual native/whole-SQL verification.
     /// The revoked source fence is never reopened as a serving coordinator.
     pub fn with_quarantined_source_inspection<T>(
@@ -251,6 +344,7 @@ impl TransitionOwnership {
 }
 
 mod choice;
+pub(crate) use choice::{acquire_choice_recovery, install_choice_handoff};
 pub(crate) fn validate_origin_activation(record: &TransitionRecord) -> Result<(), CommitError> {
     canonical(record).map(|_| ())
 }

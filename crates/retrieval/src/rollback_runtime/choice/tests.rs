@@ -16,14 +16,24 @@ use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 #[test]
 #[ignore = "requires a normal NK_LEXICAL_RUNTIME"]
 fn explicit_source_selection_verifies_latest_rows_and_preserves_quarantine() {
-    source_choice_case(false);
+    source_choice_case(false, false);
 }
 #[test]
 #[ignore = "requires matching normal runtime and pinned public archive"]
 fn explicit_bound_source_selection_preserves_latest_rows_and_quarantine() {
-    source_choice_case(true);
+    source_choice_case(true, false);
 }
-fn source_choice_case(bound: bool) {
+#[test]
+#[ignore = "requires a normal NK_LEXICAL_RUNTIME"]
+fn explicit_source_handoff_recovers_with_legacy_runtime() {
+    source_choice_case(false, true);
+}
+#[test]
+#[ignore = "requires matching normal runtime and pinned public archive"]
+fn explicit_source_handoff_recovers_with_bound_runtime() {
+    source_choice_case(true, true);
+}
+fn source_choice_case(bound: bool, handoff_case: bool) {
     let binary = PathBuf::from(std::env::var_os("NK_LEXICAL_RUNTIME").unwrap());
     let sha = format!("{:x}", Sha256::digest(fs::read(&binary).unwrap()));
     let runtime = PinnedRuntime::pin(&binary, &sha, 1 << 30).unwrap();
@@ -242,7 +252,9 @@ fn source_choice_case(bound: bool) {
                 );
                 let output = parent.path().join("prepared-choice.json");
                 prepared.publish(&output).unwrap();
-                let handoff = prepared.describe_handoff(&output).unwrap();
+                let handoff = prepared.retain_handoff_origin(&output).unwrap();
+                handoff.verify_retained_files().unwrap();
+                assert_eq!(prepared.retain_handoff_origin(&output).unwrap(), handoff);
                 assert!(matches!(
                     &handoff.prepared.selection.origin,
                     Origin::Activation(_)
@@ -286,6 +298,7 @@ fn source_choice_case(bound: bool) {
                     let original = fs::read(artifact).unwrap();
                     fs::write(artifact, b"corrupt retained artifact").unwrap();
                     assert!(prepared.revalidate().is_err());
+                    assert!(handoff.verify_retained_files().is_err());
                     fs::write(artifact, original).unwrap();
                     let moved = artifact.with_extension("temporarily-missing");
                     fs::rename(artifact, &moved).unwrap();
@@ -299,6 +312,7 @@ fn source_choice_case(bound: bool) {
                 drop(prepared);
                 let original_record = fs::read(&output).unwrap();
                 fs::write(&output, b"corrupt Prepared record").unwrap();
+                assert!(handoff.verify_retained_files().is_err());
                 assert!(
                     reopen(
                         inspection,
@@ -329,20 +343,62 @@ fn source_choice_case(bound: bool) {
                 )
                 .unwrap();
                 reopened.publish(&output).unwrap();
-                let candidate_path = &reopened.metadata().candidate.path;
-                let moved_candidate = candidate_path.with_extension("original-inode");
-                fs::rename(candidate_path, &moved_candidate).unwrap();
-                fs::create_dir(candidate_path).unwrap();
-                assert!(reopened.revalidate().is_err());
-                fs::remove_dir(candidate_path).unwrap();
-                fs::rename(moved_candidate, candidate_path).unwrap();
-                // Rename changes the complete native inventory even after the
-                // inode is returned. An old proof must continue to refuse it.
-                assert!(reopened.revalidate().is_err());
+                if !handoff_case {
+                    let candidate_path = &reopened.metadata().candidate.path;
+                    let moved_candidate = candidate_path.with_extension("original-inode");
+                    fs::rename(candidate_path, &moved_candidate).unwrap();
+                    fs::create_dir(candidate_path).unwrap();
+                    assert!(reopened.revalidate().is_err());
+                    fs::remove_dir(candidate_path).unwrap();
+                    fs::rename(moved_candidate, candidate_path).unwrap();
+                    // Rename changes the inventory even after the inode returns.
+                    assert!(reopened.revalidate().is_err());
+                }
                 Ok(selection_metadata)
             },
         )
         .unwrap();
+    if handoff_case {
+        let output = parent.path().join("prepared-choice.json");
+        owner
+            .handoff_quarantined_choice(i64::MAX / 2, candidate, Default::default(), |inspection| {
+                let proof = reopen(
+                    inspection,
+                    SelectionInputs {
+                        choice: Choice::OriginalSource,
+                        runtime: &runtime,
+                        asset: asset.as_ref(),
+                        source_evidence: Some(&retained),
+                        desired: &fresh,
+                    },
+                    &output,
+                    Default::default(),
+                )
+                .unwrap();
+                proof
+                    .stage_handoff(&output)
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)
+            })
+            .unwrap();
+        assert!(transition::TransitionRecord::read(&state).is_err());
+        let handoff = ChoiceHandoffRecord::read_active_metadata(&state).unwrap();
+        drop(owner);
+        recover_activation_handoff(
+            &handoff,
+            candidate,
+            SelectionInputs {
+                choice: Choice::OriginalSource,
+                runtime: &runtime,
+                asset: asset.as_ref(),
+                source_evidence: Some(&retained),
+                desired: &fresh,
+            },
+            Default::default(),
+            Default::default(),
+            i64::MAX / 2,
+        )
+        .unwrap();
+    }
     assert_eq!(
         selected.desired_authority_json,
         serde_json::to_string(&fresh).unwrap()

@@ -274,6 +274,21 @@ fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>, CommitError> {
 }
 impl TransitionOwnership {
     pub(crate) fn runtime_record(&self) -> Result<RuntimeJournalRecord, CommitError> {
+        if let Some(handoff) = &self.choice_recovery {
+            handoff
+                .verify_active()
+                .map_err(|_| CommitError::BindingMismatch)?;
+            handoff
+                .verify_retained_files()
+                .map_err(|_| CommitError::BindingMismatch)?;
+            let crate::rollback_runtime::choice::Origin::Runtime(record) =
+                &handoff.prepared.selection.origin
+            else {
+                return Err(CommitError::BindingMismatch);
+            };
+            record.same_operation(self.runtime.as_ref().ok_or(CommitError::BindingMismatch)?)?;
+            return Ok(*record.clone());
+        }
         let record = if let Some(history) = &self.runtime_history {
             if read_bytes(&journal_path(&self.state_path)?)?.is_some() {
                 return Err(CommitError::Conflict);

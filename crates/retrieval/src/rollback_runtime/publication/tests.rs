@@ -35,6 +35,7 @@ enum Case {
     Capture,
     ChoicePrepared,
     ChoiceCrash,
+    ChoiceHandoff,
 }
 #[test]
 #[ignore = "requires matching normal runtime"]
@@ -60,6 +61,18 @@ fn quarantined_choice_prepared_target_legacy_preserves_source_and_sql() {
 #[ignore = "requires matching normal runtime and pinned public archive"]
 fn quarantined_choice_prepared_target_bound_preserves_source_and_sql() {
     run_case(true, true, Case::ChoicePrepared);
+}
+
+#[test]
+#[ignore = "requires matching normal runtime"]
+fn quarantined_target_handoff_recovers_with_legacy_runtime() {
+    run_case(false, true, Case::ChoiceHandoff);
+}
+
+#[test]
+#[ignore = "requires matching normal runtime and pinned public archive"]
+fn quarantined_target_handoff_recovers_with_bound_runtime() {
+    run_case(true, true, Case::ChoiceHandoff);
 }
 #[test]
 #[ignore = "requires normal runtime; kills actual Prepared-choice publication processes"]
@@ -333,7 +346,10 @@ fn run_case(bound: bool, newer: bool, case: Case) {
     assert_eq!(record.phase, RuntimePhase::SourceRetained);
     assert!(!index.exists());
     assert_eq!(bytes(&archive), before);
-    if matches!(case, Case::ChoicePrepared | Case::ChoiceCrash) {
+    if matches!(
+        case,
+        Case::ChoicePrepared | Case::ChoiceCrash | Case::ChoiceHandoff
+    ) {
         use crate::rollback_runtime::choice::{self, Choice, SelectionInputs};
         let original_sql = fs::read(&state).unwrap();
         let original_candidate = bytes(&candidate);
@@ -381,7 +397,9 @@ fn run_case(bound: bool, newer: bool, case: Case) {
                     metadata.current.metadata.source.snapshot_sha256
                 );
                 proof.publish(&output).unwrap();
-                let handoff = proof.describe_handoff(&output).unwrap();
+                let handoff = proof.retain_handoff_origin(&output).unwrap();
+                handoff.verify_retained_files().unwrap();
+                assert_eq!(proof.retain_handoff_origin(&output).unwrap(), handoff);
                 assert!(matches!(
                     &handoff.prepared.selection.origin,
                     choice::Origin::Runtime(_)
@@ -396,6 +414,11 @@ fn run_case(bound: bool, newer: bool, case: Case) {
                         .is_err()
                 );
                 assert!(RuntimeJournalRecord::parse_metadata(&bytes).is_err());
+                let origin = fs::read(&handoff.origin_history_path).unwrap();
+                fs::write(&handoff.origin_history_path, b"replaced origin").unwrap();
+                assert!(handoff.verify_retained_files().is_err());
+                assert!(proof.retain_handoff_origin(&output).is_err());
+                fs::write(&handoff.origin_history_path, origin).unwrap();
                 drop(proof);
                 let reopened =
                     choice::reopen(inspection, inputs(), &output, Default::default()).unwrap();
@@ -409,6 +432,54 @@ fn run_case(bound: bool, newer: bool, case: Case) {
         assert_eq!(bytes(&prior), original_prior);
         assert_eq!(operator.owner.runtime_record().unwrap(), record);
         assert!(current.search_guard().is_err());
+        if matches!(case, Case::ChoiceHandoff) {
+            operator
+                .handoff_quarantined_choice(i64::MAX / 2, Default::default(), |inspection| {
+                    let proof = choice::reopen(
+                        inspection,
+                        SelectionInputs {
+                            choice: Choice::PreparedTarget,
+                            runtime: &runtime,
+                            asset: asset.as_ref(),
+                            source_evidence: None,
+                            desired: &desired,
+                        },
+                        &output,
+                        Default::default(),
+                    )
+                    .unwrap();
+                    proof
+                        .stage_handoff(&output)
+                        .map_err(|_| crate::commit::CommitError::BindingMismatch)
+                })
+                .unwrap();
+            assert!(operator.owner.runtime_record().is_err());
+            assert!(crate::commit::transition::TransitionRecord::read(&state).is_err());
+            let handoff = choice::ChoiceHandoffRecord::read_active_metadata(&state).unwrap();
+            drop(operator);
+            RuntimeTransitionOperator::recover_choice_handoff(
+                &runtime,
+                asset.as_ref(),
+                current_config,
+                &handoff,
+                SelectionInputs {
+                    choice: Choice::PreparedTarget,
+                    runtime: &runtime,
+                    asset: asset.as_ref(),
+                    source_evidence: None,
+                    desired: &desired,
+                },
+                Default::default(),
+                Default::default(),
+                i64::MAX / 2,
+            )
+            .unwrap();
+            assert_eq!(fs::read(&state).unwrap(), original_sql);
+            assert_eq!(bytes(&archive), before);
+            assert_eq!(bytes(&candidate), original_candidate);
+            assert_eq!(bytes(&prior), original_prior);
+            return;
+        }
         if matches!(case, Case::ChoiceCrash) {
             let input = parent.path().join("choice-child.json");
             fs::write(
