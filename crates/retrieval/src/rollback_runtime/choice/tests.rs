@@ -242,6 +242,30 @@ fn source_choice_case(bound: bool) {
                 );
                 let output = parent.path().join("prepared-choice.json");
                 prepared.publish(&output).unwrap();
+                let handoff = prepared.describe_handoff(&output).unwrap();
+                assert!(matches!(
+                    &handoff.prepared.selection.origin,
+                    Origin::Activation(_)
+                ));
+                let bytes = handoff.canonical_bytes().unwrap();
+                assert_eq!(
+                    ChoiceHandoffRecord::parse_metadata(&bytes).unwrap(),
+                    handoff
+                );
+                assert!(serde_json::from_slice::<transition::TransitionRecord>(&bytes).is_err());
+                assert!(
+                    transition::runtime_journal::RuntimeJournalRecord::parse_metadata(&bytes)
+                        .is_err()
+                );
+                let mut invalid = handoff.clone();
+                invalid.prepared_sha256 = "0".repeat(64);
+                assert!(invalid.canonical_bytes().is_err());
+                let mut invalid = handoff.clone();
+                invalid.origin_history_path = output.clone();
+                assert!(invalid.canonical_bytes().is_err());
+                assert!(
+                    ChoiceHandoffRecord::parse_metadata(&[bytes, b"\n".to_vec()].concat()).is_err()
+                );
                 assert_eq!(
                     PreparedChoiceMetadata::read(&output).unwrap(),
                     *prepared.metadata()

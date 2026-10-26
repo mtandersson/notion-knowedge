@@ -381,6 +381,21 @@ fn run_case(bound: bool, newer: bool, case: Case) {
                     metadata.current.metadata.source.snapshot_sha256
                 );
                 proof.publish(&output).unwrap();
+                let handoff = proof.describe_handoff(&output).unwrap();
+                assert!(matches!(
+                    &handoff.prepared.selection.origin,
+                    choice::Origin::Runtime(_)
+                ));
+                let bytes = handoff.canonical_bytes().unwrap();
+                assert_eq!(
+                    choice::ChoiceHandoffRecord::parse_metadata(&bytes).unwrap(),
+                    handoff
+                );
+                assert!(
+                    serde_json::from_slice::<crate::commit::transition::TransitionRecord>(&bytes)
+                        .is_err()
+                );
+                assert!(RuntimeJournalRecord::parse_metadata(&bytes).is_err());
                 drop(proof);
                 let reopened =
                     choice::reopen(inspection, inputs(), &output, Default::default()).unwrap();
