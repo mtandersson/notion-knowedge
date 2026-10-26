@@ -201,7 +201,52 @@ fn explicit_source_selection_verifies_latest_rows_and_preserves_quarantine() {
                 forged.transfer.metadata.authority_json =
                     selection_metadata.desired_authority_json.clone();
                 assert!(forged.canonical_bytes().is_err());
+                // Retained descriptions cannot hide missing or changed artifacts.
+                for artifact in [
+                    &prepared.metadata().transfer_path,
+                    &prepared.metadata().backup_path,
+                    &retained,
+                ] {
+                    let original = fs::read(artifact).unwrap();
+                    fs::write(artifact, b"corrupt retained artifact").unwrap();
+                    assert!(prepared.revalidate().is_err());
+                    fs::write(artifact, original).unwrap();
+                    let moved = artifact.with_extension("temporarily-missing");
+                    fs::rename(artifact, &moved).unwrap();
+                    assert!(prepared.revalidate().is_err());
+                    assert!(
+                        !artifact.exists(),
+                        "verification recreated an absent artifact"
+                    );
+                    fs::rename(moved, artifact).unwrap();
+                }
+                let candidate_path = &prepared.metadata().candidate.path;
+                let moved_candidate = candidate_path.with_extension("original-inode");
+                fs::rename(candidate_path, &moved_candidate).unwrap();
+                fs::create_dir(candidate_path).unwrap();
+                assert!(prepared.revalidate().is_err());
+                fs::remove_dir(candidate_path).unwrap();
+                fs::rename(moved_candidate, candidate_path).unwrap();
+                prepared.revalidate().unwrap();
                 drop(prepared);
+                let original_record = fs::read(&output).unwrap();
+                fs::write(&output, b"corrupt Prepared record").unwrap();
+                assert!(
+                    reopen(
+                        inspection,
+                        SelectionInputs {
+                            choice: Choice::OriginalSource,
+                            runtime: &runtime,
+                            asset: None,
+                            source_evidence: Some(&retained),
+                            desired: &fresh,
+                        },
+                        &output,
+                        Default::default(),
+                    )
+                    .is_err()
+                );
+                fs::write(&output, original_record).unwrap();
                 let reopened = reopen(
                     inspection,
                     SelectionInputs {

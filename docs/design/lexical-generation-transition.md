@@ -273,8 +273,20 @@ the exact pinned pair retained by version-two operations. Both run fresh native
 inspection and real independent fencing/admission probes under the selected
 implementation. A desired fence must be unused and exceed all reserved epochs.
 
-The returned selection borrows the original transaction and its metadata is
-descriptive. It reserves no generation and grants no Prepared-choice or
-publication permission. Complete candidate/Prepared-choice persistence and
-adoption preview remain #551 implementation gates; choice handoff/publication
-and mandatory forward completion remain #552.
+The returned selection borrows the original transaction; its metadata is
+descriptive. `prepare` exports the latest canonical rows and exact vectors,
+verifies the candidate under the selected implementation, preserves an immutable
+whole-SQL backup, and computes a complete read-only adoption preview. An
+original-source choice builds a distinct candidate so its retained source stays
+immutable. A prepared-target choice may reuse the verified target only while
+its complete snapshot matches the latest source.
+
+The Prepared-choice record is bounded, canonical and private. Publication uses
+file synchronization, a no-replace rename and parent synchronization. Fresh
+`reopen` requires the actual original quarantined owner and explicit trusted
+runtime/asset/choice inputs; it repeats native and independent fencing/admission
+checks and verifies all retained artifacts. Parsing metadata cannot construct a
+verified capability. Missing artifacts are refused rather than recreated.
+Preparation and record publication reserve no generation, change no original
+native or operational SQL state, and grant no serving rights. Actual choice
+handoff, final SQL publication and mandatory forward completion remain #552.
