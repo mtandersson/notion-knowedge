@@ -226,7 +226,9 @@ jobs:
             shell: spike
             args: -p notion-knowledge-retrieval --features local-lancedb
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # This lane also runs every real offline image/restart test. Hosted run
+    # 40274740808 was still passing those cases when the old 30m job expired.
+    timeout-minutes: ${{ matrix.suite == 'local-lancedb' && 45 || 30 }}
     env:
       # Retain file/line backtraces without full dependency type/variable DWARF.
       # This setting is included in Cargo snapshot compatibility keys.
