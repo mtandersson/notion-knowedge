@@ -37,10 +37,12 @@ pub(crate) fn acquire_choice_recovery(
 pub(crate) fn install_choice_handoff(
     owner: &TransitionOwnership,
     transaction: &rusqlite::Transaction<'_>,
-    record: &crate::rollback_runtime::choice::ChoiceHandoffRecord,
+    staged: &StagedChoiceHandoff,
 ) -> Result<(), CommitError> {
     use crate::rollback_runtime::evidence::{check_parent, parent};
+    let record = &staged.record;
     owner.validate_owned_transaction(transaction)?;
+    verify_candidate_guard(staged)?;
     record
         .verify_retained_files()
         .map_err(|_| CommitError::BindingMismatch)?;
@@ -69,6 +71,7 @@ pub(crate) fn install_choice_handoff(
     #[cfg(test)]
     transition_checkpoint(owner, "choice-handoff-staged");
     owner.validate_owned_transaction(transaction)?;
+    verify_candidate_guard(staged)?;
     check_parent(&directory, &path).map_err(|_| CommitError::BindingMismatch)?;
     record
         .verify_retained_files()
@@ -109,6 +112,7 @@ pub(crate) fn install_choice_handoff(
     #[cfg(test)]
     transition_checkpoint(owner, "choice-handoff-durable");
     owner.validate_owned_transaction(transaction)?;
+    verify_candidate_guard(staged)?;
     check_parent(&directory, &path).map_err(|_| CommitError::BindingMismatch)?;
     record
         .verify_active()
@@ -116,6 +120,38 @@ pub(crate) fn install_choice_handoff(
     record
         .verify_retained_files()
         .map_err(|_| CommitError::BindingMismatch)?;
+    Ok(())
+}
+
+fn verify_candidate_guard(staged: &StagedChoiceHandoff) -> Result<(), CommitError> {
+    let candidate = &staged.record.prepared.candidate;
+    if DirectoryIdentity::capture(&candidate.path).map_err(|_| CommitError::BindingMismatch)?
+        != *candidate
+    {
+        return Err(CommitError::BindingMismatch);
+    }
+    match (&staged.record.prepared.built, &staged.candidate_guard) {
+        (Some(_), Some(guard)) => {
+            let metadata = guard.metadata().map_err(io)?;
+            if metadata.dev() != candidate.device || metadata.ino() != candidate.inode {
+                return Err(CommitError::BindingMismatch);
+            }
+        }
+        (None, None) => (),
+        _ => return Err(CommitError::BindingMismatch),
+    }
+    let authority =
+        CommitBinding::parse_retained(staged.record.prepared.observed_authority_json.as_bytes())?;
+    let current = crate::chunks::inspect_runtime_source(
+        &candidate.path,
+        &staged.embedding,
+        &authority,
+        staged.native_limits,
+    )
+    .map_err(|_| CommitError::BindingMismatch)?;
+    if current != staged.record.prepared.candidate_report.source {
+        return Err(CommitError::BindingMismatch);
+    }
     Ok(())
 }
 
@@ -134,6 +170,8 @@ impl QuarantinedSourceInspection<'_> {
     pub(crate) fn stage_choice_handoff(
         &self,
         record: crate::rollback_runtime::choice::ChoiceHandoffRecord,
+        candidate_guard: Option<File>,
+        native_limits: crate::chunks::CandidateLimits,
     ) -> Result<(), CommitError> {
         self.revalidate()?;
         record
@@ -149,7 +187,14 @@ impl QuarantinedSourceInspection<'_> {
         if staged.is_some() {
             return Err(CommitError::Conflict);
         }
-        *staged = Some(record);
+        let handoff = StagedChoiceHandoff {
+            record,
+            candidate_guard,
+            embedding: self.embedding.clone(),
+            native_limits,
+        };
+        verify_candidate_guard(&handoff)?;
+        *staged = Some(handoff);
         drop(staged);
         self.revalidate()
     }

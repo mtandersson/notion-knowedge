@@ -37,6 +37,7 @@ enum Case {
     ChoiceCrash,
     ChoiceHandoff,
     ChoiceHandoffCrash,
+    ChoiceSourceHandoff,
 }
 #[test]
 #[ignore = "requires matching normal runtime"]
@@ -81,6 +82,11 @@ fn quarantined_target_handoff_recovers_after_killed_processes() {
     run_case(false, true, Case::ChoiceHandoffCrash);
 }
 #[test]
+#[ignore = "requires matching normal runtime and pinned public archive"]
+fn quarantined_source_handoff_recovers_from_runtime_origin() {
+    run_case(true, true, Case::ChoiceSourceHandoff);
+}
+#[test]
 #[ignore = "requires normal runtime; kills actual Prepared-choice publication processes"]
 fn quarantined_choice_prepared_record_recovers_after_killed_processes() {
     run_case(false, true, Case::ChoiceCrash);
@@ -104,8 +110,12 @@ fn run_case(bound: bool, newer: bool, case: Case) {
         .unwrap();
         PinnedAsset::pin(&path, &info.sha256).unwrap()
     });
-    let mode = asset
-        .as_ref()
+    let old_asset = if matches!(case, Case::ChoiceSourceHandoff) {
+        None
+    } else {
+        asset.as_ref()
+    };
+    let mode = old_asset
         .map(PinnedAsset::mode)
         .unwrap_or_else(|| vec!["legacy".into()]);
     runtime
@@ -119,7 +129,7 @@ fn run_case(bound: bool, newer: bool, case: Case) {
             65536,
         )
         .unwrap();
-    let (old_binding, embedding) = probe::fixture_configuration(!bound).unwrap();
+    let (old_binding, embedding) = probe::fixture_configuration(old_asset.is_none()).unwrap();
     let index = root.join("index");
     let state = root.join("state.sqlite");
     let old = IndexCommitCoordinator::open_existing(&index, &state, old_binding).unwrap();
@@ -128,7 +138,7 @@ fn run_case(bound: bool, newer: bool, case: Case) {
         let proof = verification::verify(
             owner,
             &runtime,
-            asset.as_ref(),
+            old_asset,
             &embedding,
             VerificationLimits::default(),
         )
@@ -137,13 +147,38 @@ fn run_case(bound: bool, newer: bool, case: Case) {
         Ok(())
     })
     .unwrap();
-    let current_dictionary = dictionary(&[("cinnamon roll", "distinct current plan")]);
+    let current_dictionary = if matches!(case, Case::ChoiceSourceHandoff) {
+        crate::lexical_dictionary::Dictionary::load(
+            &parent.path().join("prior.bundle"),
+            asset.as_ref().unwrap().sha256(),
+        )
+        .unwrap()
+    } else {
+        dictionary(&[("cinnamon roll", "distinct current plan")])
+    };
     let source = activate(&root, &old, &embedding, &current_dictionary);
     drop(old);
     if newer {
         probe::commit_fixture_row(&root, source.clone(), Some(&current_dictionary)).unwrap();
     }
     let current = IndexCommitCoordinator::open_existing(&index, &state, source.clone()).unwrap();
+    let current_evidence = parent.path().join("current-source-evidence.json");
+    if matches!(case, Case::ChoiceSourceHandoff) {
+        current
+            .with_owned_offline_inspection(i64::MAX / 2, |owner| {
+                let proof = verification::verify(
+                    owner,
+                    &runtime,
+                    asset.as_ref(),
+                    &embedding,
+                    VerificationLimits::default(),
+                )
+                .unwrap();
+                evidence::publish(&current_evidence, owner, &proof).unwrap();
+                Ok(())
+            })
+            .unwrap();
+    }
     let lineage = vec![crate::commit::transition::journal_path(&state).unwrap()];
     let prior = root.join("selected-prior-archive");
     let target = next(&source, "runtime-target");
@@ -151,7 +186,7 @@ fn run_case(bound: bool, newer: bool, case: Case) {
     let transfer = parent.path().join("rows");
     let inputs = || PriorInputs {
         runtime: &runtime,
-        asset: asset.as_ref(),
+        asset: old_asset,
         evidence: &retained,
         lineage: &lineage,
         archive: &prior,
@@ -331,7 +366,7 @@ fn run_case(bound: bool, newer: bool, case: Case) {
     }
     let operator = RuntimeTransitionOperator::start(
         &runtime,
-        asset.as_ref(),
+        old_asset,
         current_config,
         &prepared_path,
         ActivationPaths {
@@ -352,6 +387,64 @@ fn run_case(bound: bool, newer: bool, case: Case) {
     assert_eq!(record.phase, RuntimePhase::SourceRetained);
     assert!(!index.exists());
     assert_eq!(bytes(&archive), before);
+    if matches!(case, Case::ChoiceSourceHandoff) {
+        use crate::rollback_runtime::choice::{self, Choice, SelectionInputs};
+        let desired = next(&target, "runtime-origin-source-choice");
+        let output = parent.path().join("runtime-source-choice.json");
+        let source_candidate = root.join("runtime-source-choice-candidate");
+        let original_sql = fs::read(&state).unwrap();
+        operator
+            .handoff_quarantined_choice(i64::MAX / 2, Default::default(), |inspection| {
+                let selected = choice::select(
+                    inspection,
+                    SelectionInputs {
+                        choice: Choice::OriginalSource,
+                        runtime: &runtime,
+                        asset: asset.as_ref(),
+                        source_evidence: Some(&current_evidence),
+                        desired: &desired,
+                    },
+                    Default::default(),
+                )
+                .unwrap();
+                let proof = selected
+                    .prepare(choice::PreparationPaths {
+                        transfer: &parent.path().join("runtime-source-choice-rows"),
+                        candidate: Some(&source_candidate),
+                        backup: &parent.path().join("runtime-source-choice-state.sqlite"),
+                    })
+                    .unwrap();
+                proof.publish(&output).unwrap();
+                proof
+                    .stage_handoff(&output)
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)
+            })
+            .unwrap();
+        let handoff = choice::ChoiceHandoffRecord::read_active_metadata(&state).unwrap();
+        assert!(operator.owner.runtime_record().is_err());
+        drop(operator);
+        RuntimeTransitionOperator::recover_choice_handoff(
+            &runtime,
+            old_asset,
+            current_config,
+            &handoff,
+            SelectionInputs {
+                choice: Choice::OriginalSource,
+                runtime: &runtime,
+                asset: asset.as_ref(),
+                source_evidence: Some(&current_evidence),
+                desired: &desired,
+            },
+            Default::default(),
+            Default::default(),
+            i64::MAX / 2,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&state).unwrap(), original_sql);
+        assert_eq!(bytes(&archive), before);
+        assert!(current.search_guard().is_err());
+        return;
+    }
     if matches!(
         case,
         Case::ChoicePrepared | Case::ChoiceCrash | Case::ChoiceHandoff | Case::ChoiceHandoffCrash
@@ -550,6 +643,29 @@ fn run_case(bound: bool, newer: bool, case: Case) {
             assert_eq!(bytes(&archive), before);
             assert_eq!(bytes(&candidate), original_candidate);
             assert_eq!(bytes(&prior), original_prior);
+            let db = rusqlite::Connection::open(&state).unwrap();
+            db.execute(
+                "UPDATE reconciliation_lease SET expires_at=?1 WHERE singleton=1",
+                [i64::MAX],
+            )
+            .unwrap();
+            drop(db);
+            let owner =
+                crate::commit::transition::source::acquire_choice_recovery(&handoff).unwrap();
+            let entered = std::cell::Cell::new(false);
+            assert!(
+                owner
+                    .with_exclusive_sql(i64::MAX / 2, |_| {
+                        entered.set(true);
+                        Ok(())
+                    })
+                    .is_err()
+            );
+            assert!(
+                !entered.get(),
+                "a live lease must be rejected before recovery work"
+            );
+            drop(owner);
             let replacement = parent.path().join("replacement-origin-history");
             fs::write(
                 &replacement,
@@ -558,6 +674,7 @@ fn run_case(bound: bool, newer: bool, case: Case) {
             .unwrap();
             fs::set_permissions(&replacement, fs::Permissions::from_mode(0o600)).unwrap();
             fs::rename(&replacement, &handoff.origin_history_path).unwrap();
+            assert!(handoff.verify_retained_files().is_err());
             assert!(
                 RuntimeTransitionOperator::recover_choice_handoff(
                     &runtime,

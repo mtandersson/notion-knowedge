@@ -51,8 +51,13 @@ pub struct QuarantinedSourceInspection<'owner> {
     retained_prior: Option<PathBuf>,
     target_native: TargetNativeContract,
     limits: SourceCaptureLimits,
-    staged_handoff:
-        std::cell::RefCell<Option<crate::rollback_runtime::choice::ChoiceHandoffRecord>>,
+    staged_handoff: std::cell::RefCell<Option<StagedChoiceHandoff>>,
+}
+pub(crate) struct StagedChoiceHandoff {
+    record: crate::rollback_runtime::choice::ChoiceHandoffRecord,
+    candidate_guard: Option<File>,
+    embedding: notion_knowledge_core::embedding::EmbeddingMetadata,
+    native_limits: crate::chunks::CandidateLimits,
 }
 fn operation(owner: &TransitionOwnership) -> Result<Vec<u8>, CommitError> {
     if owner.runtime.is_some() {
@@ -210,7 +215,7 @@ pub(crate) fn inspect_handoff<T>(
     target_native: TargetNativeContract,
     limits: SourceCaptureLimits,
     action: impl for<'a> FnOnce(&QuarantinedSourceInspection<'a>) -> Result<T, CommitError>,
-) -> Result<(T, crate::rollback_runtime::choice::ChoiceHandoffRecord), CommitError> {
+) -> Result<(T, StagedChoiceHandoff), CommitError> {
     let (result, staged) = inspect_inner(
         owner,
         transaction,
@@ -231,13 +236,7 @@ fn inspect_inner<T>(
     target_native: TargetNativeContract,
     limits: SourceCaptureLimits,
     action: impl for<'a> FnOnce(&QuarantinedSourceInspection<'a>) -> Result<T, CommitError>,
-) -> Result<
-    (
-        T,
-        Option<crate::rollback_runtime::choice::ChoiceHandoffRecord>,
-    ),
-    CommitError,
-> {
+) -> Result<(T, Option<StagedChoiceHandoff>), CommitError> {
     let record = owner.current_record()?.ok_or(CommitError::Conflict)?;
     if serde_json::to_string(binding).map_err(|_| CommitError::InvalidInput)?
         != record.source.binding

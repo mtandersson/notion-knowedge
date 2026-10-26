@@ -373,9 +373,10 @@ impl VerifiedPreparedChoice<'_, '_> {
     pub fn stage_handoff(&self, prepared_path: &Path) -> Result<()> {
         let record = self.retain_handoff_origin(prepared_path)?;
         self.revalidate()?;
+        let guard = self.guard.as_ref().map(File::try_clone).transpose()?;
         self.selection
             .inspection
-            .stage_choice_handoff(record)
+            .stage_choice_handoff(record, guard, self.selection.limits.transfer.native)
             .map_err(|_| RuntimeError)
     }
     /// Retain the exact originating journal under the original owner. The

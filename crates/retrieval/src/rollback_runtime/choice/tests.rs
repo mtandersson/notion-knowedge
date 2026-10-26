@@ -110,6 +110,131 @@ fn explicit_source_handoff_recovers_with_bound_runtime() {
 fn explicit_source_handoff_recovers_after_killed_processes() {
     source_choice_case(false, true, true);
 }
+#[test]
+#[ignore = "requires matching normal runtime and pinned public archive"]
+fn explicit_target_handoff_recovers_from_activation_origin() {
+    let binary = PathBuf::from(std::env::var_os("NK_LEXICAL_RUNTIME").unwrap());
+    let sha = format!("{:x}", Sha256::digest(fs::read(&binary).unwrap()));
+    let runtime = PinnedRuntime::pin(&binary, &sha, 1 << 30).unwrap();
+    let parent = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let root = parent.path().join("installation");
+    let bundle = parent.path().join("target.bundle");
+    let info = crate::lexical_dictionary::prepare_archive(
+        Path::new(&std::env::var_os("NK_LEXICAL_TEST_ARCHIVE").unwrap()),
+        &bundle,
+    )
+    .unwrap();
+    let asset = PinnedAsset::pin(&bundle, &info.sha256).unwrap();
+    let dictionary = crate::lexical_dictionary::Dictionary::load(&bundle, asset.sha256()).unwrap();
+    runtime
+        .run(
+            &[
+                "probe-create".into(),
+                root.as_os_str().to_owned(),
+                "legacy".into(),
+            ],
+            Duration::from_secs(90),
+            65536,
+        )
+        .unwrap();
+    let (binding, embedding) = probe::fixture_configuration(true).unwrap();
+    let index = root.join("index");
+    let state = root.join("state.sqlite");
+    let coordinator =
+        IndexCommitCoordinator::open_existing(&index, &state, binding.clone()).unwrap();
+    let target =
+        crate::rollback_runtime::candidate::tests::next(&binding, "target-choice-original");
+    let fresh = crate::rollback_runtime::candidate::tests::next(&target, "target-choice-final");
+    let target_path = root.join("target-choice-candidate");
+    let preparation_backup = parent.path().join("target-choice-preparation.sqlite");
+    OfflineLexicalSource::bind(
+        &index,
+        binding.table(),
+        embedding.clone(),
+        coordinator.clone(),
+    )
+    .unwrap()
+    .prepare(
+        &target_path,
+        &preparation_backup,
+        &target,
+        &dictionary,
+        i64::MAX / 2,
+        Default::default(),
+    )
+    .unwrap();
+    let candidate = TransitionCandidateInputs {
+        source: &binding,
+        target: &target,
+        embedding: &embedding,
+        dictionary: &dictionary,
+        preparation_backup: &preparation_backup,
+        limits: Default::default(),
+    };
+    let record = transition::preparation::prepare_activation(
+        &coordinator,
+        i64::MAX / 2,
+        candidate,
+        transition::preparation::ActivationPaths {
+            candidate: &target_path,
+            archive: &root.join("target-choice-archive"),
+            backup: &parent.path().join("target-choice-activation.sqlite"),
+            quarantine_generation: "target-choice-quarantine",
+        },
+        AdoptionLimits::default(),
+        ManifestLimits::default(),
+        64 << 20,
+    )
+    .unwrap();
+    let owner = transition::TransitionOwnership::acquire(&state, &record).unwrap();
+    owner.quarantine(i64::MAX / 2).unwrap();
+    let sql = fs::read(&state).unwrap();
+    let original = crate::rollback_runtime::candidate::tests::bytes(&index);
+    let output = parent.path().join("target-choice.json");
+    let inputs = || SelectionInputs {
+        choice: Choice::PreparedTarget,
+        runtime: &runtime,
+        asset: Some(&asset),
+        source_evidence: None,
+        desired: &fresh,
+    };
+    owner
+        .handoff_quarantined_choice(i64::MAX / 2, candidate, Default::default(), |inspection| {
+            let selected = select(inspection, inputs(), Default::default()).unwrap();
+            let proof = selected
+                .prepare(PreparationPaths {
+                    transfer: &parent.path().join("target-choice-rows"),
+                    candidate: None,
+                    backup: &parent.path().join("target-choice-state.sqlite"),
+                })
+                .unwrap();
+            proof.publish(&output).unwrap();
+            proof
+                .stage_handoff(&output)
+                .map_err(|_| crate::commit::CommitError::BindingMismatch)
+        })
+        .unwrap();
+    let handoff = ChoiceHandoffRecord::read_active_metadata(&state).unwrap();
+    drop(owner);
+    recover_activation_handoff(
+        &handoff,
+        candidate,
+        inputs(),
+        Default::default(),
+        Default::default(),
+        i64::MAX / 2,
+    )
+    .unwrap();
+    assert_eq!(fs::read(&state).unwrap(), sql);
+    assert_eq!(
+        crate::rollback_runtime::candidate::tests::bytes(&index),
+        original
+    );
+    assert!(coordinator.search_guard().is_err());
+}
 fn source_choice_case(bound: bool, handoff_case: bool, crash: bool) {
     let binary = PathBuf::from(std::env::var_os("NK_LEXICAL_RUNTIME").unwrap());
     let sha = format!("{:x}", Sha256::digest(fs::read(&binary).unwrap()));
