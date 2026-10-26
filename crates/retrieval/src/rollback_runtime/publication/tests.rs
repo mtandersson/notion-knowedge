@@ -32,11 +32,22 @@ enum Case {
     Publication,
     Crash,
     PhysicalRefusal,
+    Capture,
 }
 #[test]
 #[ignore = "requires matching normal runtime"]
 fn runtime_publication_rejects_physical_replacement_and_stale_preparation() {
     run_case(false, false, Case::PhysicalRefusal);
+}
+#[test]
+#[ignore = "requires matching normal runtime"]
+fn quarantined_runtime_source_capture_legacy_preserves_latest_source() {
+    run_case(false, true, Case::Capture);
+}
+#[test]
+#[ignore = "requires matching normal runtime and pinned public archive"]
+fn quarantined_runtime_source_capture_bound_preserves_latest_source() {
+    run_case(true, true, Case::Capture);
 }
 fn run_case(bound: bool, newer: bool, case: Case) {
     let crash = matches!(case, Case::Crash);
@@ -305,6 +316,43 @@ fn run_case(bound: bool, newer: bool, case: Case) {
     assert_eq!(record.phase, RuntimePhase::SourceRetained);
     assert!(!index.exists());
     assert_eq!(bytes(&archive), before);
+    if matches!(case, Case::Capture) {
+        let original_sql = fs::read(&state).unwrap();
+        let output = parent.path().join("quarantined-canonical-rows");
+        let captured = operator
+            .with_quarantined_source_inspection(i64::MAX / 2, Default::default(), |inspection| {
+                assert_eq!(inspection.binding(), &source);
+                assert_eq!(inspection.index_directory(), archive);
+                crate::chunks::canonical_transfer::export_quarantined(
+                    inspection,
+                    &output,
+                    &embedding,
+                    Default::default(),
+                )
+                .map_err(|_| crate::commit::CommitError::BindingMismatch)
+            })
+            .unwrap();
+        assert_eq!(
+            captured.metadata.source.snapshot_sha256,
+            metadata.current.metadata.source.snapshot_sha256
+        );
+        assert_eq!(
+            captured.metadata.source.rows,
+            metadata.current.metadata.source.rows
+        );
+        let mut count = 0;
+        crate::chunks::canonical_transfer::read(&output, &captured, Default::default(), |batch| {
+            count += batch.num_rows() as u64;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, metadata.current.metadata.source.rows);
+        assert_eq!(fs::read(&state).unwrap(), original_sql);
+        assert_eq!(bytes(&archive), before);
+        assert_eq!(operator.owner.runtime_record().unwrap(), record);
+        assert!(current.search_guard().is_err());
+        return;
+    }
     let record = operator.refence_target(i64::MAX / 2).unwrap();
     assert_eq!(record.phase, RuntimePhase::TargetRefenced);
     assert_eq!(
