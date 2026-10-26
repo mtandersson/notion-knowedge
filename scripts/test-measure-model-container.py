@@ -2,6 +2,10 @@
 """Credential-free contracts for bounded admission, evidence and kernel checks."""
 import importlib.util
 import json
+import hashlib
+import os
+import sys
+import time
 import platform
 import shutil
 from pathlib import Path
@@ -193,6 +197,93 @@ class MeasurementContracts(unittest.TestCase):
         failed=subprocess.run([str(binary)],capture_output=True,text=True,timeout=3)
         self.assertEqual(failed.returncode,1)
         self.assertLess(len(failed.stdout),65536)
+
+
+    def test_real_stack_reader_launch_receives_caps_and_synchronous_admission(self):
+        stack=m.runtime.Stack('fixture:local',self.path,self.path/'ca.pem')
+        original_options=stack.options
+        def options(name,model=None):
+            self.runner.models.add(name)
+            return original_options(name,model)
+        stack.options=options
+        stack.launch_reader=self.runner.launch_reader
+        original_popen=subprocess.Popen
+        launches=[]
+        program = """import json,sys
+for line in sys.stdin:
+ r=json.loads(line)
+ if 'id' not in r:continue
+ p=r.get('params',{})
+ if r['method']=='initialize':v={}
+ elif p['name']=='knowledge_get':v={'text':'cinnamon'}
+ else:
+  mode=p['arguments']['mode']
+  paths=['semantic','lexical'] if mode=='hybrid' else [mode]
+  v={'structuredContent':{'results':[{'source':{'page_id':'11111111-1111-1111-1111-111111111111','chunk_id':'stable-fixture'},'score':0.8,'text':'cinnamon','matched_paths':paths}]}}
+ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':v}),flush=True)
+"""
+        def popen(command,**kwargs):
+            launches.append(command)
+            return original_popen([sys.executable,'-u','-c',program],**kwargs)
+        with patch.object(m.subprocess,'Popen',side_effect=popen),patch.object(m,'headroom',return_value={}):
+            self.assertEqual(stack.retrieve('actual-method'),('stable-fixture','cinnamon'))
+        self.runner.done.set()
+        self.assertEqual(len(launches),1)
+        command=launches[0]
+        self.assertEqual(command[:2],['docker','run'])
+        for flag,value in [('--pull','never'),('--cpus','2'),('--memory','6442450944'),('--memory-swap','6442450944'),('--pids-limit','256'),('--ulimit','nofile=1024:1024'),('--log-driver','local')]:
+            self.assertEqual(command[command.index(flag)+1],value)
+        self.runner.abort.set()
+        with patch.object(m.subprocess,'Popen') as blocked:
+            with self.assertRaises(ValueError):stack.retrieve('refused')
+            blocked.assert_not_called()
+        self.runner.abort.clear()
+        with patch.object(m,'headroom',side_effect=ValueError('pressure')),patch.object(m.subprocess,'Popen') as blocked:
+            with self.assertRaises(ValueError):stack.retrieve('pressure')
+            blocked.assert_not_called()
+
+    def test_dirty_trusted_checkout_is_rejected_before_docker(self):
+        subprocess.run(['git','init','-q',str(self.path)],check=True)
+        m.clean_checkout(self.path)
+        source=self.path/'trusted.py';source.write_text('original')
+        subprocess.run(['git','-C',str(self.path),'add','trusted.py'],check=True)
+        subprocess.run(['git','-C',str(self.path),'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture'],check=True)
+        m.clean_checkout(self.path)
+        for target in (source,self.path/'untracked.py'):
+            target.write_text('dirty input')
+            with patch.object(m,'ROOT',self.path),patch.object(m.runtime,'docker') as docker:
+                with self.assertRaisesRegex(ValueError,'Trusted checkout'):m.execute(SimpleNamespace())
+                docker.assert_not_called()
+            if target==source:target.write_text('original')
+
+    def test_probe_attestation_requires_protected_bytes_and_immutable_snapshot(self):
+        probe=self.path/'operator-probe';probe.write_bytes(b'trusted fixture executable');probe.chmod(0o700)
+        expected=hashlib.sha256(probe.read_bytes()).hexdigest()
+        source=hashlib.sha256((m.ROOT/'deploy/production/measurement-probe.c').read_bytes()).hexdigest()
+        evidence=self.path/'evidence';evidence.mkdir(mode=0o700)
+        with self.assertRaises(ValueError):m.snapshot_probe(probe,evidence,'0'*64,source)
+        probe.chmod(0o720)
+        with self.assertRaises(ValueError):m.snapshot_probe(probe,evidence,expected,source)
+        probe.chmod(0o700)
+        snapshot=m.snapshot_probe(probe,evidence,expected,source)
+        self.assertEqual(snapshot.stat().st_mode&0o777,0o500)
+        self.runner.args.probe=snapshot;self.runner.args.probe_sha256=expected
+        self.runner.verify_probe()
+        probe.write_bytes(b'changed original')
+        self.runner.verify_probe()
+        snapshot.chmod(0o700);snapshot.write_bytes(b'changed snapshot')
+        with self.assertRaises(ValueError):self.runner.verify_probe()
+
+
+    def test_reader_deadline_stops_owned_container_and_reaps_cli(self):
+        original_popen=subprocess.Popen
+        self.runner.models.add('owned-reader')
+        self.runner.deadline=time.monotonic()+.03
+        with patch.object(m.subprocess,'Popen',side_effect=lambda *a,**kw: original_popen([sys.executable,'-c','import time;time.sleep(60)'],**kw)),patch.object(m,'headroom',return_value={}):
+            process=self.runner.launch_reader(['docker','run','--name','owned-reader','fixture:local'])
+            self.assertNotEqual(process.wait(timeout=3),0)
+        self.assertTrue(self.runner.abort.is_set())
+        self.assertEqual(self.calls[0][0],('stop','--time','10','owned-reader'))
 
 
 if __name__ == '__main__': unittest.main()

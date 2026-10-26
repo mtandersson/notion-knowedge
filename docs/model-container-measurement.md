@@ -9,7 +9,8 @@ for its separate deployment/monitoring/overload gates.
 
 ## Provision separately, then admit deliberately
 
-Use Python3.11+, local Unix-socket Docker/cgroupv2, compiler/OpenSSL and a clean reviewed checkout.
+Use a clean checkout with no tracked or untracked changes (including generated
+bytecode); the runner refuses dirty inputs before any Docker command. Use Python3.11+, local Unix-socket Docker/cgroupv2, compiler/OpenSSL and a clean reviewed checkout.
 Provision the shipping `webhook-worker` image **after #562's security-fixed merge
 and exact-head CI**. Record that actual merge, checkout commit, image revision
 label and immutable image ID. The supplied fixed merge must be an ancestor of
@@ -43,13 +44,23 @@ helper memory, exec sampler overhead and other host workloads when choosing
 explicit host start/stop gates. Stop admission on memory pressure rather than
 raising limits on a busy shared host.
 
-Compile only the read-only sampler; it does not perform the #454 exhaustion
+Compile only the read-only sampler from the exact reviewed source; it does not perform the #454 exhaustion
 probe's fault operations:
 
 ```sh
 cc -nostdlib -static -ffreestanding -fno-builtin -fno-stack-protector -O2 \
   deploy/production/measurement-probe.c -o /absolute/private/measurement-probe
 ```
+
+Record SHA-256 of both the reviewed `measurement-probe.c` and the executable.
+`--attest-probe-built-from-source` declares that the operator compiled that exact
+source into that artifact. These supplied hashes are a trusted operator
+attestation, **not** cryptographic proof of arbitrary compiler provenance. The
+artifact must be operator-owned, executable, at most1MiB and not group/world
+writable. The runner checks both hashes, snapshots exact bytes under private
+evidence mode0500 and binds only that snapshot. It rechecks protected snapshot
+identity before container launch and each sampler exec; replacing the original
+artifact cannot change an admitted run. No implicit compilation is introduced.
 
 Create a mode0700 operator-owned evidence parent; choose a new child name. Supply
 absolute non-symlinked assets/probe paths and separate assets/evidence locations.
@@ -61,6 +72,9 @@ python3 scripts/measure-model-container.py \
   --policy /absolute/private/policy.json \
   --assets /absolute/pinned-model-assets \
   --probe /absolute/private/measurement-probe \
+  --probe-sha256 ATTESTED_EXECUTABLE_SHA256 \
+  --probe-source-sha256 REVIEWED_SOURCE_SHA256 \
+  --attest-probe-built-from-source \
   --evidence /absolute/private/evidence/run-1 \
   --source-revision EXACT_CHECKOUT_COMMIT \
   --fixed-merge ACTUAL_SECURITY_FIXED_MERGE \
@@ -69,6 +83,10 @@ python3 scripts/measure-model-container.py \
   --start-available-bytes 10737418240 --stop-available-bytes 6442450944 \
   --start-psi 0.5 --stop-psi 2
 ```
+
+The actual shipping reader launch has its own capped `Popen` hook, synchronous
+headroom/abort/deadline check and watchdog that stops its owned container and
+terminates the CLI on expiry. Both launch paths enforce the same declared container limits.
 
 The host gates inspect MemAvailable and memory PSI full avg60. Start admission
 requires the stricter gate; every later container admission and sampler tick

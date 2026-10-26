@@ -210,10 +210,13 @@ class Stack:
         common.require(output == {"operation": "index", "status": "complete" if expected == 0 else "model_configuration"},
                        "Shipping index command did not report its expected bounded result")
 
+    def launch_reader(self, command, **kwargs):
+        return subprocess.Popen(command, **kwargs)
+
     def retrieve(self, generation):
         name = self.prefix + f"-reader-{generation}"
         with tempfile.TemporaryFile(mode="w+t") as diagnostics:
-            process = subprocess.Popen(["docker", "run", "-i", *self.options(name),
+            process = self.launch_reader(["docker", "run", "-i", *self.options(name),
                 "--env", "NK_RETRIEVAL=true", self.image], stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=diagnostics, text=True)
             selector = selectors.DefaultSelector()
@@ -270,6 +273,9 @@ class Stack:
                 if process.poll() is None:
                     process.kill()
                     process.wait(timeout=10)
+                process.stdout.close()
+                if not process.stdin.closed:
+                    process.stdin.close()
 
     def cleanup(self):
         for name in reversed(self.containers):
