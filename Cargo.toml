@@ -20,3 +20,5 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # Temporary security patch; see vendor/README.md.
 [patch.crates-io]
 candle-core = { path = "vendor/candle-core" }
+arrow-ipc = { path = "vendor/arrow-ipc" }
+lance-encoding = { path = "vendor/lance-encoding" }

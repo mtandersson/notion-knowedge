@@ -21,7 +21,7 @@ RUN cargo install cargo-chef --version 0.1.78 --locked
 WORKDIR /build
 
 # Source edits rerun prepare, but unchanged Cargo graph emits the same recipe.
-# The vendor tree is a required local patched Candle dependency.
+# The vendor tree is a required local security-patched dependencies.
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
