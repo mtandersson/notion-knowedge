@@ -2,6 +2,8 @@
 """Credential-free contracts for bounded admission, evidence and kernel checks."""
 import importlib.util
 import json
+import platform
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -113,6 +115,84 @@ class MeasurementContracts(unittest.TestCase):
         for field,value in [('Memory',1),('MemorySwap',1),('PidsLimit',0),('NanoCpus',0),('Privileged',True),('PortBindings',{'3000':[]})]:
             changed=json.loads(json.dumps(info));changed['HostConfig'][field]=value
             with self.subTest(field=field),self.assertRaises(ValueError):m.check_effective(changed,POLICY,self.args.image_id)
+
+
+    def test_sampler_records_actual_protocol_and_bounded_private_stream(self):
+        host = dict(NanoCpus=2000000000, Memory=6442450944, MemorySwap=6442450944,
+                    PidsLimit=256, ReadonlyRootfs=True, NetworkMode='owned-network',
+                    CapDrop=['ALL'], SecurityOpt=['no-new-privileges:true'],
+                    Ulimits=[dict(Name='nofile', Soft=1024, Hard=1024)],
+                    Tmpfs={'/tmp':'size=268435456'}, LogConfig=dict(Type='local', Config={'max-size':'8388608','max-file':'2'}))
+        info = dict(Image=self.args.image_id, HostConfig=host, Config={'User':'65532:65532'}, State={'Running':True})
+        def backend(*args, **kwargs):
+            self.calls.append((args,kwargs))
+            if args[0]=='inspect': return subprocess.CompletedProcess(args,0,json.dumps([info]),'')
+            self.runner.done.set()
+            return subprocess.CompletedProcess(args,0,sample(),'')
+        self.runner.backend=backend
+        self.runner.models.add('owned-model')
+        with patch.object(m,'headroom',return_value={}): self.runner.sample()
+        self.assertIsNone(self.runner.failure)
+        self.assertEqual(self.runner.samples,1)
+        target=self.path/'samples.jsonl'
+        self.assertEqual(target.stat().st_mode&0o777,0o600)
+        row=json.loads(target.read_text())
+        self.assertEqual(row['counters']['memory.peak'],80)
+        self.assertNotIn('private-source',target.read_text())
+        self.assertEqual(self.calls[1][0],('exec','owned-model','/measurement-probe'))
+        self.assertEqual(self.calls[1][1]['timeout'],3)
+
+    def test_shipping_fixture_orchestration_rejects_changed_receipts_and_no_samples(self):
+        class Stack:
+            def __init__(self, changed=False): self.calls=[];self.changed=changed;self.rebuilt=False
+            def worker(self,g): self.calls.append('worker');return {'content_hash':'fixture-checkpoint'}
+            def maintain(self,g,action='ensure'):
+                self.calls.append(action)
+                if action=='rebuild': self.rebuilt=True
+            def retrieve(self,g): self.calls.append('retrieve');return ('fixture-chunk','private source text')
+            def helper(self,action):
+                if action=='snapshot': value={'fixture':'snapshot'}
+                else: value={'webhook_inbox':[[1]],'index_commit_receipts':[[2 if self.changed and self.rebuilt else 1]]}
+                return SimpleNamespace(stdout=json.dumps(value))
+        self.runner.samples=1
+        stack=Stack();m.workload(self.runner,stack)
+        self.assertEqual(stack.calls,['worker','ensure','retrieve','retrieve','rebuild','retrieve'])
+        self.assertEqual(self.runner.report['outcome'],'measured_synthetic_fixture')
+        self.assertNotIn('private source',json.dumps(self.runner.report))
+        self.assertTrue(self.runner.report['receipt_recovery'])
+        with self.assertRaisesRegex(ValueError,'operational receipts'):m.workload(self.runner,Stack(changed=True))
+        self.runner.samples=0
+        with self.assertRaisesRegex(ValueError,'No actual model samples'):m.workload(self.runner,Stack())
+
+
+    @unittest.skipUnless(platform.system()=='Linux' and platform.machine()=='x86_64' and shutil.which('cc'), 'Linux x86_64 compiler required')
+    def test_static_probe_uses_read_only_bounded_filesystem_contract(self):
+        root=self.path/'fixture'
+        values={}
+        for block in sample().split('\nEND\n'):
+            if block:
+                key,value=block.split('\n',1);values[key]=value
+        for key in ['cpu.max','cpu.stat','memory.max','memory.current','memory.peak','memory.events','memory.swap.max','pids.max','pids.current']:
+            target=root/'sys/fs/cgroup'/key;target.parent.mkdir(parents=True,exist_ok=True);target.write_text(values[key])
+        for name,key in [('status','process.status'),('limits','process.limits')]:
+            target=root/'proc/1'/name;target.parent.mkdir(parents=True,exist_ok=True);target.write_text(values[key])
+        fd=root/'proc/1/fd';fd.mkdir();(fd/'0').touch();(fd/'1').touch()
+        for name in ['tmp','var/lib/notion-knowledge/index','var/lib/notion-knowledge/state']:
+            target=root/name;target.mkdir(parents=True);(target/'fixture-content').write_text('private payload not counters')
+        (root/'tmp/outside-link').symlink_to(self.path,target_is_directory=True)
+        binary=self.path/'probe'
+        subprocess.run(['cc','-nostdlib','-static','-ffreestanding','-fno-builtin','-fno-stack-protector','-O2',
+                        '-DPROBE_ROOT="'+str(root)+'"',str(m.ROOT/'deploy/production/measurement-probe.c'),'-o',str(binary)],check=True,capture_output=True,timeout=30)
+        result=subprocess.run([str(binary)],capture_output=True,text=True,timeout=3,check=True)
+        self.assertNotIn('private payload',result.stdout)
+        decoded=m.probe_output(result.stdout)
+        self.assertEqual(decoded['process.fd_count'],2)
+        self.assertGreaterEqual(decoded['index.allocated_bytes'],0)
+        nested=root/'tmp'
+        for i in range(34): nested=nested/'d';nested.mkdir()
+        failed=subprocess.run([str(binary)],capture_output=True,text=True,timeout=3)
+        self.assertEqual(failed.returncode,1)
+        self.assertLess(len(failed.stdout),65536)
 
 
 if __name__ == '__main__': unittest.main()

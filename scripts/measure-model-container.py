@@ -148,6 +148,8 @@ class Runner:
                     with self.lock:
                         names = list(self.models)
                     for name in names:
+                        if self.done.is_set():
+                            break
                         current = self.backend('inspect', name, capture_output=True, check=False, timeout=3)
                         if current.returncode:
                             continue
@@ -199,6 +201,28 @@ class Runner:
         return value
 
 
+def workload(runner, stack):
+    checkpoint = runner.stage('worker_model_load_and_commit', lambda: stack.worker('initial'))
+    runner.report['checkpoint'] = checkpoint
+    runner.stage('index_ensure', lambda: stack.maintain('initial'))
+    before = json.loads(stack.helper('snapshot').stdout)
+    first = runner.stage('first_and_warm_query', lambda: stack.retrieve('initial'))
+    require(json.loads(stack.helper('snapshot').stdout) == before, 'Read changed committed state')
+    replacement = runner.stage('reader_replacement', lambda: stack.retrieve('replacement'))
+    require(replacement == first, 'Replacement changed source identity')
+    require(json.loads(stack.helper('snapshot').stdout) == before, 'Replacement read changed committed state')
+    ledgers = json.loads(stack.helper('ledgers').stdout)
+    runner.report['ledger_sha256'] = hashlib.sha256(json.dumps(ledgers, sort_keys=True).encode()).hexdigest()
+    runner.report['ledger_row_counts'] = {k: len(v) for k, v in ledgers.items()}
+    require(ledgers['webhook_inbox'] and ledgers['index_commit_receipts'], 'Missing real durable receipts')
+    runner.stage('retained_receipt_rebuild', lambda: stack.maintain('retained', action='rebuild'))
+    require(json.loads(stack.helper('ledgers').stdout) == ledgers, 'Rebuild changed operational receipts')
+    require(runner.stage('receipt_recovery_query', lambda: stack.retrieve('retained')) == first, 'Recovery changed source identity')
+    require(json.loads(stack.helper('ledgers').stdout) == ledgers, 'Recovery read changed operational receipts')
+    require(runner.samples > 0, 'No actual model samples captured')
+    runner.report.update(outcome='measured_synthetic_fixture', chunk_id=first[0], receipt_recovery=True)
+
+
 def execute(args):
     require(args.source_revision == subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip(), 'Checkout revision differs')
     require(re.fullmatch('[0-9a-f]{40}', args.fixed_merge) is not None, 'Explicit security-fixed merge required')
@@ -208,6 +232,9 @@ def execute(args):
     require(args.evidence.is_absolute() and not args.evidence.exists(), 'Evidence directory must be new')
     require(args.assets.is_absolute() and args.assets.resolve() == args.assets, 'Assets must be absolute without symlinks')
     require(not args.evidence.is_relative_to(args.assets) and not args.assets.is_relative_to(args.evidence), 'Assets and evidence must be separate')
+    require(args.policy.is_absolute() and args.policy.resolve() == args.policy and args.policy.is_file(), 'Explicit absolute policy file required')
+    policy_info = args.policy.stat()
+    require(policy_info.st_uid == os.getuid() and policy_info.st_mode & 0o022 == 0, 'Policy must be operator owned without shared write access')
     policy = resources.policy(args.policy, fixture=True)
     require(args.interval >= .5 and args.interval <= 30 and 1 <= args.duration <= 1800 and
             65536 <= args.evidence_bytes <= 64*1024**2, 'Sampling bounds invalid')
@@ -215,7 +242,13 @@ def execute(args):
             args.start_available_bytes >= args.stop_available_bytes > 0 and args.start_psi <= args.stop_psi,
             'Explicit consistent host gates required')
     backend = runtime.docker
+    context = json.loads(backend('context', 'inspect', capture_output=True).stdout)[0]
+    require(context['Endpoints']['docker']['Host'].startswith('unix://'), 'Only a local Unix-socket Docker context is supported')
+    daemon = json.loads(backend('info', '--format', '{{json .}}', capture_output=True).stdout)
+    require(daemon.get('CgroupVersion') == '2' and all(daemon.get(k) for k in
+            ('MemoryLimit', 'SwapLimit', 'PidsLimit', 'CpuCfsQuota')), 'Required local cgroup controllers unavailable')
     current = json.loads(backend('image', 'inspect', policy['image'], capture_output=True).stdout)[0]
+    require(current.get('Os') == 'linux' and current.get('Architecture') == 'amd64', 'Linux x86_64 image required')
     require(current['Id'] == args.image_id and current['Config']['Labels'].get('org.opencontainers.image.revision') == args.source_revision, 'Image identity/source revision mismatch')
     # Existing helper image must already be present; do not let Docker pull on run.
     backend('image', 'inspect', runtime.PYTHON_IMAGE, capture_output=True)
@@ -244,6 +277,14 @@ def execute(args):
         runtime.certificates(tls)
         # Fixture must read its owned test key; no external secret is present.
         stack = runtime.Stack(args.image_id, args.assets, tls / 'ca.pem')
+        runner.report['owned_network'] = stack.network
+        runner.save()
+        original_helper = stack.helper
+        def helper(action, *values, **kwargs):
+            if action == 'admit':
+                runner.report['hint_event_id'] = values[values.index('--event') + 1]
+            return original_helper(action, *values, **kwargs)
+        stack.helper = helper
         original_options = stack.options
         def options(name, model=None):
             with runner.lock:
@@ -268,32 +309,23 @@ def execute(args):
                     f'type=bind,src={runtime.FIXTURE_SCRIPT},dst=/fixture.py,readonly', runtime.PYTHON_IMAGE,
                     'python', '/fixture.py', 'serve', stdout=subprocess.DEVNULL)
         thread.start()
-        checkpoint = runner.stage('worker_model_load_and_commit', lambda: stack.worker('initial'))
-        runner.report['checkpoint'] = checkpoint
-        runner.stage('index_ensure', lambda: stack.maintain('initial'))
-        before = json.loads(stack.helper('snapshot').stdout)
-        first = runner.stage('first_and_warm_query', lambda: stack.retrieve('initial'))
-        require(json.loads(stack.helper('snapshot').stdout) == before, 'Read changed committed state')
-        replacement = runner.stage('reader_replacement', lambda: stack.retrieve('replacement'))
-        require(replacement == first, 'Replacement changed source identity')
-        ledgers = json.loads(stack.helper('ledgers').stdout)
-        runner.report['ledger_sha256'] = hashlib.sha256(json.dumps(ledgers, sort_keys=True).encode()).hexdigest()
-        runner.report['ledger_row_counts'] = {k: len(v) for k, v in ledgers.items()}
-        require(ledgers['webhook_inbox'] and ledgers['index_commit_receipts'], 'Missing real durable receipts')
-        runner.stage('retained_receipt_rebuild', lambda: stack.maintain('retained', action='rebuild'))
-        require(json.loads(stack.helper('ledgers').stdout) == ledgers, 'Rebuild changed operational receipts')
-        require(runner.stage('receipt_recovery_query', lambda: stack.retrieve('retained')) == first, 'Recovery changed source identity')
-        require(runner.samples > 0, 'No actual model samples captured')
-        runner.report.update(outcome='measured_synthetic_fixture', chunk_id=first[0], receipt_recovery=True)
+        workload(runner, stack)
+    except Exception:
+        runner.report['failure'] = 'Phase failed; inspect retained synthetic state privately'
+        raise
     finally:
         runner.done.set()
         if thread.ident is not None:
             thread.join(timeout=20)
+            if thread.is_alive():
+                runner.failure = 'Sampler did not stop within its cleanup deadline'
         if runner.failure:
             runner.report['sampler_failure'] = runner.failure
             runner.report['outcome'] = 'failed'
         # Never delete volumes, including after failure. Only exact owned names.
         if stack:
+            runner.report['retained_volumes'] = list(stack.volumes)
+            runner.report['owned_container_names'] = list(stack.containers)
             for name in reversed(stack.containers):
                 with contextlib.suppress(Exception):
                     backend('rm', '-f', name, capture_output=True, timeout=20)
@@ -322,7 +354,8 @@ def main():
         parser.add_argument('--'+key, type=float, required=True)
     args = parser.parse_args()
     try:
-        require(args.probe.is_absolute() and args.probe.is_file() and args.probe.resolve() == args.probe, 'Precompiled read-only probe required')
+        require(args.probe.is_absolute() and args.probe.is_file() and args.probe.resolve() == args.probe and
+                0 < args.probe.stat().st_size <= 1048576 and os.access(args.probe, os.X_OK), 'Bounded precompiled executable probe required')
         execute(args)
     except Exception:
         parser.exit(1, 'Synthetic measurement failed; retain private artifacts/volumes. No automatic retry.\n')

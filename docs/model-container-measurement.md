@@ -9,7 +9,7 @@ for its separate deployment/monitoring/overload gates.
 
 ## Provision separately, then admit deliberately
 
-Use Python3.11+, Docker/cgroupv2, compiler/OpenSSL and a clean reviewed checkout.
+Use Python3.11+, local Unix-socket Docker/cgroupv2, compiler/OpenSSL and a clean reviewed checkout.
 Provision the shipping `webhook-worker` image **after #562's security-fixed merge
 and exact-head CI**. Record that actual merge, checkout commit, image revision
 label and immutable image ID. The supplied fixed merge must be an ancestor of
@@ -105,7 +105,7 @@ symlinks and emits bounded output; each exec has a3second deadline. Resource
 sampling itself adds one transient exec process to the measured cgroup.
 
 `result.json` and `samples.jsonl` are private mode0600. They record phase times,
-sample counts, image/source/probe identities, policy, fixture/checkpoint/chunk
+sample counts, image/source/probe identities, policy, fixture/hint-event/checkpoint/chunk
 identities, ledger digest/counts and retained volume names, without source text,
 raw stderr, credentials or process environment. Sampled RSS/FD/disk values can
 miss brief peaks; cgroup memory.peak spans each model container lifetime. A short

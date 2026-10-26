@@ -5,6 +5,10 @@
 #if !defined(__linux__) || !defined(__x86_64__)
 #error Measurement probe requires Linux x86_64
 #endif
+/* Compile-time prefix is solely for credential-free filesystem contract tests. */
+#ifndef PROBE_ROOT
+#define PROBE_ROOT ""
+#endif
 static long syscall4(long n, long a, long b, long c, long d) {
     register long r10 __asm__("r10") = d;
     long r;
@@ -55,22 +59,22 @@ static unsigned long tree(const char *path,int depth,int count_only) {
 static void metric(const char *key,const char *path,int count) {
     visited=0;unsigned long n=tree(path,0,count);out(key);out("\n");number(n);out("\nEND\n");
 }
-void _start(void) {
-    file("cpu.max","/sys/fs/cgroup/cpu.max");
-    file("cpu.stat","/sys/fs/cgroup/cpu.stat");
-    file("memory.max","/sys/fs/cgroup/memory.max");
-    file("memory.current","/sys/fs/cgroup/memory.current");
-    file("memory.peak","/sys/fs/cgroup/memory.peak");
-    file("memory.events","/sys/fs/cgroup/memory.events");
-    file("memory.swap.max","/sys/fs/cgroup/memory.swap.max");
-    file("pids.max","/sys/fs/cgroup/pids.max");
-    file("pids.current","/sys/fs/cgroup/pids.current");
+__attribute__((force_align_arg_pointer)) void _start(void) {
+    file("cpu.max",PROBE_ROOT "/sys/fs/cgroup/cpu.max");
+    file("cpu.stat",PROBE_ROOT "/sys/fs/cgroup/cpu.stat");
+    file("memory.max",PROBE_ROOT "/sys/fs/cgroup/memory.max");
+    file("memory.current",PROBE_ROOT "/sys/fs/cgroup/memory.current");
+    file("memory.peak",PROBE_ROOT "/sys/fs/cgroup/memory.peak");
+    file("memory.events",PROBE_ROOT "/sys/fs/cgroup/memory.events");
+    file("memory.swap.max",PROBE_ROOT "/sys/fs/cgroup/memory.swap.max");
+    file("pids.max",PROBE_ROOT "/sys/fs/cgroup/pids.max");
+    file("pids.current",PROBE_ROOT "/sys/fs/cgroup/pids.current");
     /* status contains bounded process counters/name, never cmdline/environment. */
-    file("process.status","/proc/1/status");
-    file("process.limits","/proc/1/limits");
-    metric("process.fd_count","/proc/1/fd",1);
-    metric("tmp.allocated_bytes","/tmp",0);
-    metric("index.allocated_bytes","/var/lib/notion-knowledge/index",0);
-    metric("state.allocated_bytes","/var/lib/notion-knowledge/state",0);
+    file("process.status",PROBE_ROOT "/proc/1/status");
+    file("process.limits",PROBE_ROOT "/proc/1/limits");
+    metric("process.fd_count",PROBE_ROOT "/proc/1/fd",1);
+    metric("tmp.allocated_bytes",PROBE_ROOT "/tmp",0);
+    metric("index.allocated_bytes",PROBE_ROOT "/var/lib/notion-knowledge/index",0);
+    metric("state.allocated_bytes",PROBE_ROOT "/var/lib/notion-knowledge/state",0);
     syscall4(60,failed?1:0,0,0,0);__builtin_unreachable();
 }
