@@ -167,7 +167,56 @@ fn explicit_source_selection_verifies_latest_rows_and_preserves_quarantine() {
                         .unwrap(),
                     selected.metadata().origin
                 );
-                Ok(selected.metadata().clone())
+                let selection_metadata = selected.metadata().clone();
+                let prepared = selected
+                    .prepare(PreparationPaths {
+                        transfer: &parent.path().join("choice-canonical-rows"),
+                        candidate: Some(&root.join("chosen-source-candidate")),
+                        backup: &parent.path().join("choice-state.sqlite"),
+                    })
+                    .unwrap();
+                prepared.revalidate().unwrap();
+                assert!(prepared.metadata().built.is_some());
+                assert_eq!(
+                    prepared.metadata().candidate_report.source.snapshot_sha256,
+                    selection_metadata.current_native.snapshot_sha256
+                );
+                assert_eq!(
+                    PreparedChoiceMetadata::parse_metadata(
+                        &prepared.metadata().canonical_bytes().unwrap()
+                    )
+                    .unwrap(),
+                    *prepared.metadata()
+                );
+                let output = parent.path().join("prepared-choice.json");
+                prepared.publish(&output).unwrap();
+                assert_eq!(
+                    PreparedChoiceMetadata::read(&output).unwrap(),
+                    *prepared.metadata()
+                );
+                let mut forged = prepared.metadata().clone();
+                forged.selection.operation_sha256 = "0".repeat(64);
+                assert!(forged.canonical_bytes().is_err());
+                let mut forged = prepared.metadata().clone();
+                forged.transfer.metadata.authority_json =
+                    selection_metadata.desired_authority_json.clone();
+                assert!(forged.canonical_bytes().is_err());
+                drop(prepared);
+                let reopened = reopen(
+                    inspection,
+                    SelectionInputs {
+                        choice: Choice::OriginalSource,
+                        runtime: &runtime,
+                        asset: None,
+                        source_evidence: Some(&retained),
+                        desired: &fresh,
+                    },
+                    &output,
+                    Default::default(),
+                )
+                .unwrap();
+                reopened.publish(&output).unwrap();
+                Ok(selection_metadata)
             },
         )
         .unwrap();

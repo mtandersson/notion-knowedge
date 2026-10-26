@@ -127,3 +127,102 @@ impl QuarantinedSourceInspection<'_> {
         self.revalidate()
     }
 }
+
+impl QuarantinedSourceInspection<'_> {
+    pub(crate) fn choice_preview(
+        &self,
+        target: &CommitBinding,
+        version: u64,
+        limits: crate::rollback_runtime::prepared::PreparedLimits,
+    ) -> Result<manifest::SqlManifest, CommitError> {
+        self.validate_choice_fence(target)?;
+        // Preserve capacity for the one additional final fence; the original
+        // quarantine and original target reservations already exist in SQL.
+        let mut sql_limits = limits.sql;
+        let bytes = 4 * (target.generation().len() as u64 + target.scope().len() as u64 + 40) + 128;
+        if bytes > sql_limits.row_bytes {
+            return Err(CommitError::InvalidInput);
+        }
+        sql_limits.rows = sql_limits
+            .rows
+            .checked_sub(1)
+            .ok_or(CommitError::InvalidInput)?;
+        sql_limits.total_bytes = sql_limits
+            .total_bytes
+            .checked_sub(bytes)
+            .ok_or(CommitError::InvalidInput)?;
+        sql_limits.digest_bytes = sql_limits
+            .digest_bytes
+            .checked_sub(32)
+            .ok_or(CommitError::InvalidInput)?;
+        let before = manifest::capture_sql_manifest(self.transaction, sql_limits)?;
+        adoption::preview_connection(
+            self.transaction,
+            &self.binding,
+            target,
+            version,
+            limits.adoption,
+        )?;
+        if manifest::capture_sql_manifest(self.transaction, sql_limits)? != before {
+            return Err(CommitError::BindingMismatch);
+        }
+        self.revalidate()?;
+        Ok(before)
+    }
+    pub(crate) fn choice_output(&self, path: &Path) -> Result<(), CommitError> {
+        self.revalidate()?;
+        if !self.allows_output(path) {
+            return Err(CommitError::InvalidInput);
+        }
+        super::super::super::offline::private_parent(path)
+    }
+    pub(crate) fn choice_backup(
+        &self,
+        path: &Path,
+        bytes: u64,
+        create: bool,
+    ) -> Result<OfflineBackup, CommitError> {
+        use crate::rollback_runtime::evidence::{check_parent, parent};
+        use std::{
+            io::{Read, Seek},
+            os::fd::AsRawFd,
+        };
+        self.choice_output(path)?;
+        let expected = self.state_snapshot(bytes)?;
+        let directory = parent(path).map_err(|_| CommitError::InvalidInput)?;
+        if !create {
+            expected.verify(path)?;
+            check_parent(&directory, path).map_err(|_| CommitError::BindingMismatch)?;
+            self.revalidate()?;
+            return Ok(expected);
+        }
+        let anchored = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()))
+            .join(path.file_name().ok_or(CommitError::InvalidInput)?);
+        let mut output = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&anchored)
+            .map_err(io)?;
+        let mut original = self.owner.state.try_clone().map_err(io)?;
+        original.rewind().map_err(io)?;
+        let copied = std::io::copy(
+            &mut (&mut original).take(bytes.saturating_add(1)),
+            &mut output,
+        )
+        .map_err(io)?;
+        if copied != expected.bytes
+            || super::super::super::offline::hash_file_bounded(&mut output, bytes)? != expected
+            || self.state_snapshot(bytes)? != expected
+        {
+            return Err(CommitError::BindingMismatch);
+        }
+        output.sync_all().map_err(io)?;
+        directory.sync_all().map_err(io)?;
+        check_parent(&directory, path).map_err(|_| CommitError::BindingMismatch)?;
+        expected.verify(path)?;
+        self.revalidate()?;
+        Ok(expected)
+    }
+}

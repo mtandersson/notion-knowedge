@@ -445,6 +445,18 @@ pub(crate) fn preview_current(
     target_version: u64,
     limits: AdoptionLimits,
 ) -> Result<(), CommitError> {
+    let connection = owner.owned_connection()?;
+    preview_connection(connection, owner.binding(), target, target_version, limits)?;
+    owner.revalidate()
+}
+#[cfg(target_os = "linux")]
+pub(super) fn preview_connection(
+    connection: &Connection,
+    source: &CommitBinding,
+    target: &CommitBinding,
+    target_version: u64,
+    limits: AdoptionLimits,
+) -> Result<(), CommitError> {
     struct Preview<'a> {
         connection: &'a Connection,
         active: bool,
@@ -458,7 +470,6 @@ pub(crate) fn preview_current(
             }
         }
     }
-    let connection = owner.owned_connection()?;
     connection
         .execute_batch("SAVEPOINT nk_runtime_preview")
         .map_err(sql)?;
@@ -466,18 +477,11 @@ pub(crate) fn preview_current(
         connection,
         active: true,
     };
-    let result = inspect_derived_work(
-        connection,
-        owner.binding(),
-        target,
-        target_version,
-        limits,
-        true,
-    );
+    let result = inspect_derived_work(connection, source, target, target_version, limits, true);
     connection
         .execute_batch("ROLLBACK TO nk_runtime_preview; RELEASE nk_runtime_preview")
         .map_err(sql)?;
     guard.active = false;
     result?;
-    owner.revalidate()
+    Ok(())
 }

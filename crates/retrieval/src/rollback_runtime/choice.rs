@@ -114,7 +114,30 @@ pub fn select<'a, 'owner>(
     inputs: SelectionInputs<'a>,
     limits: PreparedLimits,
 ) -> Result<VerifiedSelection<'a, 'owner>> {
+    let started = Instant::now();
     let metadata = inspect_selection(inspection, &inputs, limits)?;
+    let remaining = || {
+        limits
+            .process_budget
+            .checked_sub(started.elapsed())
+            .filter(|budget| !budget.is_zero())
+            .ok_or(RuntimeError)
+    };
+    // The pair is immutable for this borrowed proof. Fresh-process reopening
+    // repeats these real probes; each revalidation still reopens actual native
+    // data and checks the live SQL/physical source and artifact identities.
+    builder::verify_publication_runtime(
+        inputs.runtime,
+        inputs.asset,
+        &metadata.observation.descriptor,
+        limits.transfer.native,
+        remaining()?,
+    )?;
+    let mut recheck = limits;
+    recheck.process_budget = remaining()?;
+    if inspect_selection(inspection, &inputs, recheck)? != metadata {
+        return Err(RuntimeError);
+    }
     Ok(VerifiedSelection {
         inspection,
         inputs,
@@ -206,13 +229,6 @@ fn inspect_selection(
     {
         return Err(RuntimeError);
     }
-    builder::verify_publication_runtime(
-        inputs.runtime,
-        inputs.asset,
-        &report.descriptor,
-        limits.transfer.native,
-        remaining()?,
-    )?;
     if observe(
         inputs.runtime,
         inputs.asset,
@@ -276,3 +292,9 @@ fn inspect_selection(
 
 #[cfg(test)]
 mod tests;
+
+mod prepared;
+pub use prepared::{PreparationPaths, PreparedChoiceMetadata, VerifiedPreparedChoice};
+
+mod store;
+pub use store::reopen;
