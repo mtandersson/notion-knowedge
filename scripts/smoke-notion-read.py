@@ -17,9 +17,13 @@ from urllib.parse import urlparse
 LIMIT = 1024 * 1024
 
 
+class SmokeFailure(ValueError):
+    """A static, safe-to-retain diagnostic; never constructed from source data."""
+
+
 def require(condition, message):
     if not condition:
-        raise ValueError(message)
+        raise SmokeFailure(message)
 
 
 def private(path, directory):
@@ -50,6 +54,8 @@ def configuration(args):
             "Model assets and derived state must be separate")
     require(not diagnostics.is_relative_to(data) and not data.is_relative_to(diagnostics),
             "Diagnostics must be separate from derived state")
+    require(not diagnostics.is_relative_to(assets) and not assets.is_relative_to(diagnostics),
+            "Diagnostics must be separate from model assets")
     token = os.environ.get("NOTION_TOKEN", "")
     require(bool(token), "NOTION_TOKEN must be supplied locally")
     env = {k: v for k, v in os.environ.items() if not k.startswith("NK_") and k != "NOTION_TOKEN"}
@@ -114,7 +120,7 @@ class MCP:
             result = reply["result"]
             require(result.get("isError") is not True, "MCP tool failed")
             return result
-        raise ValueError("MCP response deadline exceeded")
+        raise SmokeFailure("MCP response deadline exceeded")
 
     def close(self):
         try:
@@ -132,6 +138,7 @@ def source(source, root, provenance=False):
     require(source.get("page_id") == root and (not provenance or source.get("root_page_id") == root),
             "Source identity differs from the selected root page")
     url = source.get("url", "")
+    require(isinstance(url, str), "Missing canonical Notion source link")
     parsed = urlparse(url)
     require(parsed.scheme == "https" and parsed.netloc in ("www.notion.so", "notion.so") and
             parsed.path.replace("-", "").endswith(root.replace("-", "")), "Missing canonical Notion source link")
@@ -148,6 +155,8 @@ def retrieve(client, root, marker):
     require(len(hits) == 1, "Expected exactly one selected-page result")
     hit = hits[0]
     source(hit["source"], root)
+    require(hit.get("matched_paths") == ["semantic"] and bool(hit["source"].get("chunk_id")),
+            "Semantic path or stable indexed chunk identity missing")
     require(marker in hit.get("text", "") and isinstance(hit.get("score"), (int, float)) and
             math.isfinite(hit["score"]), "Indexed marker or finite semantic score missing")
     for freshness in ("indexed", "fresh"):
@@ -157,14 +166,17 @@ def retrieve(client, root, marker):
         require(bool(sources), "Get returned no source")
         for item in sources:
             source(item["provenance"], root, provenance=True)
+            require(item.get("content_scope") == ("page" if freshness == "fresh" else "indexed"),
+                    "Get did not report the requested content scope")
         require(any(marker in item.get("text", "") for item in sources), "Get did not verify marker")
+    return hit["source"]["chunk_id"]
 
 
 def execute(args):
     binary, env, diagnostics, root, workspace = configuration(args)
     diagnostics.mkdir(mode=0o700)
     manifest = {"schema": 1, "root_page_id": root, "workspace_id": workspace,
-                "run_id": "smoke-" + uuid.uuid4().hex, "phase": "version", "outcome": "failed",
+                "run_id": "smoke-" + uuid.uuid4().hex,
                 "phase": "assets", "outcome": "failed"}
 
     def save():
@@ -196,10 +208,16 @@ def execute(args):
         save()
         client = MCP(binary, env, args.timeout)
         try:
-            retrieve(client, root, args.marker)
+            manifest["chunk_id"] = retrieve(client, root, args.marker)
         finally:
             client.close()
         manifest.update(phase="complete", outcome="verified")
+    except SmokeFailure as error:
+        manifest["failure"] = str(error)
+        raise
+    except (ValueError, OSError, subprocess.SubprocessError, KeyError, TypeError):
+        manifest["failure"] = "Process, storage or protocol failure; inspect privately"
+        raise
     finally:
         save()
 

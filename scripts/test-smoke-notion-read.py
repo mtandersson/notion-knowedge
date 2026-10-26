@@ -28,7 +28,10 @@ assert 'NK_WEBHOOK_WORKER' not in os.environ
 root = os.environ['NK_NOTION_SCOPE_ROOTS']
 mode = os.environ.get('SMOKE_FIXTURE_MODE', '')
 if sys.argv[1:] == ['--reconcile', 'apply', sys.argv[-1]]:
-    print(json.dumps(dict(operation='reconciliation', phase='Completed', errors=0, pending=0)))
+    if mode == 'command-failure':
+        print('secret-do-not-disclose upstream raw text', file=sys.stderr)
+        sys.exit(3)
+    print(json.dumps(dict(operation='reconciliation', phase='Applying' if mode == 'incomplete' else 'Completed', errors=0, pending=0)))
     sys.exit(0)
 if sys.argv[1:] == ['--index', 'ensure']:
     print(json.dumps(dict(operation='index', status='complete')))
@@ -43,17 +46,20 @@ for line in sys.stdin:
         source = dict(page_id=root, url='https://www.notion.so/' + root.replace('-', ''))
         text = '{marker}'
         if mode == 'wrong-page': source['page_id'] = '{workspace}'
+        if mode == 'wrong-url': source['url'] = 'https://attacker.invalid/' + root.replace('-', '')
         if mode == 'missing-marker': text = 'unrelated source'
         if request['params']['name'] == 'knowledge_search':
             assert args == dict(query='{marker}', mode='semantic', limit=1, filters=dict(page_ids=[root]))
-            result = dict(structuredContent=dict(results=[dict(source=source, text=text, score=0.75)]))
+            source['chunk_id'] = 'synthetic-stable-chunk'
+            result = dict(structuredContent=dict(results=[dict(source=source, text=text, matched_paths=['semantic'], score=float('nan') if mode == 'nonfinite' else 0.75)]))
         else:
             assert request['params']['name'] == 'knowledge_get'
             assert args['refs'] == [dict(kind='page', id=root)]
             assert args['freshness'] in ('indexed', 'fresh')
             source['root_page_id'] = root
             if mode == 'wrong-root': source['root_page_id'] = '{workspace}'
-            result = dict(structuredContent=dict(sources=[dict(provenance=source, text=text)]))
+            result = dict(structuredContent=dict(sources=[dict(provenance=source, text=text, content_scope='page' if args['freshness'] == 'fresh' else 'indexed')]))
+    if mode == 'tool-error' and request['method'] == 'tools/call': result = dict(isError=True)
     print(json.dumps(dict(jsonrpc='2.0', id=request['id'], result=result)), flush=True)
 '''.format(root=ROOT, marker=MARKER, workspace=WORKSPACE)
 
@@ -103,13 +109,25 @@ class SmokeContracts(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.data.iterdir()), ["index", "state"])
 
     def test_wrong_page_wrong_root_and_missing_marker_retain_failure_phase(self):
-        for mode in ("wrong-page", "wrong-root", "missing-marker"):
+        for mode in ("wrong-page", "wrong-root", "missing-marker", "wrong-url", "nonfinite", "tool-error"):
             with self.subTest(mode=mode):
                 result = self.run_smoke(mode)
                 self.assertEqual(result.returncode, 1)
                 self.assertNotIn("secret-do-not-disclose", result.stderr)
                 report = self.manifest()
                 self.assertEqual((report["outcome"], report["phase"]), ("failed", "retrieve"))
+                (self.base / "diagnostics/result.json").unlink()
+                (self.base / "diagnostics").rmdir()
+
+    def test_failed_or_incomplete_reconciliation_stops_before_indexing(self):
+        for mode in ("command-failure", "incomplete"):
+            with self.subTest(mode=mode):
+                result = self.run_smoke(mode)
+                self.assertEqual(result.returncode, 1)
+                self.assertNotIn("secret-do-not-disclose", result.stderr)
+                report = self.manifest()
+                self.assertEqual((report["outcome"], report["phase"]), ("failed", "reconcile"))
+                self.assertIn("failure", report)
                 (self.base / "diagnostics/result.json").unlink()
                 (self.base / "diagnostics").rmdir()
 

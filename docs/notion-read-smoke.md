@@ -90,7 +90,8 @@ write/upload or cleanup acceptance.
 ## Retention and recovery
 
 `result.json` is retained mode 0600 beneath a mode-0700 diagnostic directory.
-It contains phase/outcome, the known reconciliation run ID, root/workspace IDs
+It contains phase/outcome, a bounded static failure description, the known
+reconciliation run ID, verified chunk identity on success, root/workspace IDs
 and SHA-256 identities of the exact executable and three supplied model assets.
 It contains no marker, source text, token or raw upstream output. These IDs are
 still private operational metadata. Keep the matching code revision/build
