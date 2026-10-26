@@ -55,3 +55,18 @@ Remove each patch when a compatible published consumer accepts patched zstd;
 recheck both locked graphs, persisted compression interoperability and full CI.
 Do not replace the model/tokenization/vector identity or migrate stored indexes
 as part of this dependency-only update.
+
+Compression compatibility can be reproduced with:
+
+```sh
+CARGO_TARGET_DIR=/tmp/nk-compression-compat-target \
+  nix develop .#spike --command python3 scripts/test-compression-compat.py
+```
+
+This runs original and patched consumers in separate disposable fixture-only
+processes outside the checkout, checking both reading directions for ZSTD Arrow
+IPC files (nullable multilingual columns, repeated batches), Lance length-prefixed
+blocks and legacy raw streaming frames. It never introduces the vulnerable
+original dependency into either application lockfile. The original compressor is
+used only on generated nonsecret input; this is storage interoperability evidence,
+not model-quality or deployed-capacity acceptance.
