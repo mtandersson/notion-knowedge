@@ -991,3 +991,39 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
         })
     }
 }
+
+impl RuntimeTransitionOperator<'_> {
+    /// Capture an unfinished v2 source using its actual selected-runtime native
+    /// checks and the already retained original physical/SQL owner.
+    pub fn with_quarantined_source_inspection<T>(
+        &self,
+        now: i64,
+        limits: crate::commit::transition::source::SourceCaptureLimits,
+        action: impl for<'a> FnOnce(
+            &crate::commit::transition::source::QuarantinedSourceInspection<'a>,
+        ) -> std::result::Result<T, crate::commit::CommitError>,
+    ) -> Result<T> {
+        if !self.active {
+            return Err(RuntimeError);
+        }
+        self.owner
+            .with_exclusive_sql(now, |transaction| {
+                let version = self
+                    .verify_all(transaction)
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                let result = crate::commit::transition::source::inspect(
+                    &self.owner,
+                    transaction,
+                    &self.source,
+                    &self.embedding,
+                    version,
+                    limits,
+                    action,
+                )?;
+                self.verify_all(transaction)
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                Ok(result)
+            })
+            .map_err(err)
+    }
+}

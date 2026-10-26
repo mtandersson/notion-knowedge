@@ -243,3 +243,21 @@ handles/prepared work, path replacement, missing/corrupt artifacts, unchanged
 operational inode, retained queued and completed work, resumed derived work,
 rollback after later page updates, and reopened raw/exact-ID searches. No fixture
 may weaken corpus judgments, enable graph ranking or claim production quality.
+
+### Read-only capture while quarantined
+
+`with_quarantined_source_inspection` retains the original transition owner and
+actual exclusive SQL transaction, verifies the native pair, and requires the
+real quarantine tuple and whole-SQL allowed-delta comparison. It locates the
+original source by physical identity, including rename-before-journal windows.
+The returned inspection borrows that transaction and cannot be deserialized or
+escape its callback. Runtime-specific transitions use the selected executable's
+native checks through the matching publication actor.
+
+`canonical_transfer::export_quarantined` reuses the bounded canonical row/vector
+format and private output protocol. Its descriptive evidence binds the actual
+operation, source/configuration and operational snapshot. Capture does not
+reopen a revoked serving coordinator, reserve fences, choose a pair or publish
+SQL. Final SQL publication requires forward completion and refuses this capture
+boundary. Verified source-choice preparation and durable choice publication
+remain separate #551/#552 obligations under #519.

@@ -1817,3 +1817,5 @@ fn prepared_abort_case(phase: &str, operator: Option<&std::path::Path>) {
         1
     );
 }
+
+mod source_capture;
