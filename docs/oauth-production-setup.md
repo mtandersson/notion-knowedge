@@ -154,6 +154,10 @@ confirm their exact issuer, resource, callback and endpoint URLs.
 
 ## Link, verify and reconnect
 
+Use the [production ChatGPT acceptance checklist](chatgpt-oauth-acceptance.md)
+for private transport reachability, actual browser/tool evidence, token expiry
+and stale discovery recovery. Complete its live steps separately from fixture tests.
+
 Start the server and proxy with the complete environment, then link the custom
 MCP connection in ChatGPT. The browser goes to this server, then Notion; consent
 must use the configured person and workspace. On success, the callback seals the
