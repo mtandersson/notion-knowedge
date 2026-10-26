@@ -96,6 +96,16 @@ impl VerifiedPreparedChoice<'_, '_> {
                     return Err(RuntimeError);
                 }
                 self.revalidate()?;
+                // A predecessor may have died after rename but before the
+                // parent durability barrier. Exact-name retry must finish it.
+                check_parent(&directory, path)?;
+                directory.sync_all()?;
+                #[cfg(test)]
+                checkpoint(&self.metadata, "record-published");
+                if read(&directory, path)? != self.metadata {
+                    return Err(RuntimeError);
+                }
+                self.revalidate()?;
                 return Ok(());
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),

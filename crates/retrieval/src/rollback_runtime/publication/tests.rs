@@ -413,7 +413,15 @@ fn run_case(bound: bool, newer: bool, case: Case) {
             drop(operator);
             for phase in ["stage-synced", "record-renamed", "record-published"] {
                 let destination = parent.path().join(format!("choice-{phase}.json"));
-                for attempt in 0..3 {
+                let retries = if phase == "record-renamed" { 4 } else { 3 };
+                for attempt in 0..retries {
+                    let checkpoint = if attempt == 0 {
+                        phase
+                    } else if phase == "record-renamed" && attempt == 1 {
+                        "record-published"
+                    } else {
+                        ""
+                    };
                     let mut child = PublicationChild(std::process::Command::new(std::env::current_exe().unwrap())
                         .args(["--exact", "rollback_runtime::publication::tests::choice_prepared_process_child", "--ignored", "--nocapture"])
                         .env_clear()
@@ -421,12 +429,12 @@ fn run_case(bound: bool, newer: bool, case: Case) {
                         .env("NK_CHOICE_INPUT", &input)
                         .env("NK_CHOICE_DESTINATION", &destination)
                         .env("NK_CHOICE_TEST_ROOT", &root)
-                        .env("NK_CHOICE_TEST_PHASE", if attempt == 0 { phase } else { "" })
+                        .env("NK_CHOICE_TEST_PHASE", checkpoint)
                         .spawn().unwrap());
-                    if attempt == 0 {
+                    if !checkpoint.is_empty() {
                         let marker = root.join("observed-choice-prepared");
                         let started = std::time::Instant::now();
-                        while !fs::read_to_string(&marker).is_ok_and(|v| v == phase) {
+                        while !fs::read_to_string(&marker).is_ok_and(|v| v == checkpoint) {
                             assert!(
                                 child.0.try_wait().unwrap().is_none(),
                                 "child exited before {phase}"
