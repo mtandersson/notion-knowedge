@@ -238,7 +238,7 @@ jobs:
     # Keep choice recovery parallel. Native run 40360967114 passed 369 cases
     # before its cumulative 45m timeout with two cases still incomplete.
     # Preserve all coverage with 60m native, 45m choices and 30m other budgets.
-    timeout-minutes: ${{ matrix.suite == 'local-lancedb' && 60 || matrix.suite == 'runtime-choices' && 45 || 30 }}
+    timeout-minutes: ${{ matrix.suite == 'local-lancedb' && 60 || matrix.suite == 'runtime-choices' && 60 || 30 }}
     env:
       # Retain file/line backtraces without full dependency type/variable DWARF.
       # This setting is included in Cargo snapshot compatibility keys.
@@ -302,6 +302,14 @@ jobs:
           NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib explicit_source_handoff_recovers_after_killed_processes --locked -- --ignored
           NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_target_handoff_recovers_after_killed_processes --locked -- --ignored
           NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_choice_prepared_record_recovers_after_killed_processes --locked -- --ignored
+          curl --fail --location --retry 2 --max-time 60 --max-filesize 2579240 --output "$RUNNER_TEMP/nk-lexical-archive.tar.xz" https://download.freedict.org/dictionaries/eng-swe/2025.11.23/freedict-eng-swe-2025.11.23.src.tar.xz
+          printf '%s  %s\n' 3c9f80c800d4810e34a80c82aca4e468fbc3180099d8b24a4fad7c61324015dc "$RUNNER_TEMP/nk-lexical-archive.tar.xz" | sha256sum --check --status
+          export NK_LEXICAL_TEST_ARCHIVE="$RUNNER_TEMP/nk-lexical-archive.tar.xz"
+          export NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime"
+          nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib explicit_source_handoff_recovers_with_bound_runtime --locked -- --ignored
+          nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_target_handoff_recovers_with_bound_runtime --locked -- --ignored
+          nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib explicit_target_handoff_recovers_from_activation_origin --locked -- --ignored
+          nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_source_handoff_recovers_from_runtime_origin --locked -- --ignored
 
       - name: Test production evaluation storage and authorization boundaries
         if: matrix.suite == 'webhook-worker'
