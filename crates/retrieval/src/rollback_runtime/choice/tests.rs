@@ -140,6 +140,31 @@ fn explicit_source_selection_verifies_latest_rows_and_preserves_quarantine() {
                     )
                     .is_err()
                 );
+                let original_evidence = fs::read(&retained).unwrap();
+                for field in ["runtime_sha256", "asset_sha256", "authority_sha256"] {
+                    let mut value: serde_json::Value =
+                        serde_json::from_slice(&original_evidence).unwrap();
+                    value[field] = serde_json::Value::String("0".repeat(64));
+                    let mismatched: evidence::RetainedEvidence =
+                        serde_json::from_value(value).unwrap();
+                    fs::write(&retained, serde_json::to_vec(&mismatched).unwrap()).unwrap();
+                    assert!(
+                        select(
+                            inspection,
+                            SelectionInputs {
+                                choice: Choice::OriginalSource,
+                                runtime: &runtime,
+                                asset: None,
+                                source_evidence: Some(&retained),
+                                desired: &fresh,
+                            },
+                            Default::default()
+                        )
+                        .is_err(),
+                        "mismatched {field} was accepted"
+                    );
+                    fs::write(&retained, &original_evidence).unwrap();
+                }
                 let selected = select(
                     inspection,
                     SelectionInputs {
