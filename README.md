@@ -137,6 +137,8 @@ their runtime and confirmation composition.
 Discovery settings alone authenticate nobody. A missing content scope or index
 never grants private data; the feature-built container still requires explicit
 [production role and external asset configuration](docs/container.md).
+Use the [ChatGPT OAuth acceptance checklist](docs/chatgpt-oauth-acceptance.md)
+for live connection evidence and discovery/reconnect troubleshooting.
 See [OAuth end-to-end evidence](docs/oauth-e2e-tests.md) and perform a real
 operator-controlled deployed ChatGPT smoke before relying on the connection.
 
