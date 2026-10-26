@@ -16,6 +16,14 @@ use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 #[test]
 #[ignore = "requires a normal NK_LEXICAL_RUNTIME"]
 fn explicit_source_selection_verifies_latest_rows_and_preserves_quarantine() {
+    source_choice_case(false);
+}
+#[test]
+#[ignore = "requires matching normal runtime and pinned public archive"]
+fn explicit_bound_source_selection_preserves_latest_rows_and_quarantine() {
+    source_choice_case(true);
+}
+fn source_choice_case(bound: bool) {
     let binary = PathBuf::from(std::env::var_os("NK_LEXICAL_RUNTIME").unwrap());
     let sha = format!("{:x}", Sha256::digest(fs::read(&binary).unwrap()));
     let runtime = PinnedRuntime::pin(&binary, &sha, 1 << 30).unwrap();
@@ -24,18 +32,37 @@ fn explicit_source_selection_verifies_latest_rows_and_preserves_quarantine() {
         .tempdir()
         .unwrap();
     let root = parent.path().join("installation");
+    let asset = bound.then(|| {
+        let path = parent.path().join("source.bundle");
+        let info = crate::lexical_dictionary::prepare_archive(
+            Path::new(&std::env::var_os("NK_LEXICAL_TEST_ARCHIVE").unwrap()),
+            &path,
+        )
+        .unwrap();
+        PinnedAsset::pin(&path, &info.sha256).unwrap()
+    });
+    let source_dictionary = asset.as_ref().map(|asset| {
+        crate::lexical_dictionary::Dictionary::load(
+            &parent.path().join("source.bundle"),
+            asset.sha256(),
+        )
+        .unwrap()
+    });
     runtime
         .run(
             &[
-                "probe-create".into(),
-                root.as_os_str().to_owned(),
-                "legacy".into(),
-            ],
+                vec!["probe-create".into(), root.as_os_str().to_owned()],
+                asset
+                    .as_ref()
+                    .map(PinnedAsset::mode)
+                    .unwrap_or_else(|| vec!["legacy".into()]),
+            ]
+            .concat(),
             Duration::from_secs(90),
             65536,
         )
         .unwrap();
-    let (binding, embedding) = probe::fixture_configuration(true).unwrap();
+    let (binding, embedding) = probe::fixture_configuration(!bound).unwrap();
     let index = root.join("index");
     let state = root.join("state.sqlite");
     let coordinator =
@@ -46,7 +73,7 @@ fn explicit_source_selection_verifies_latest_rows_and_preserves_quarantine() {
             let proof = verification::verify(
                 owner,
                 &runtime,
-                None,
+                asset.as_ref(),
                 &embedding,
                 VerificationLimits::default(),
             )
@@ -57,7 +84,7 @@ fn explicit_source_selection_verifies_latest_rows_and_preserves_quarantine() {
         .unwrap();
     let old_snapshot =
         inspect_runtime_source(&index, &embedding, &binding, Default::default()).unwrap();
-    probe::commit_fixture_row(&root, binding.clone(), None).unwrap();
+    probe::commit_fixture_row(&root, binding.clone(), source_dictionary.as_ref()).unwrap();
     let target = crate::rollback_runtime::candidate::tests::next(&binding, "original-target");
     let dictionary = crate::lexical_dictionary::tests::dictionary(&[("cinnamon", "kanel")]);
     let native_candidate = root.join("original-target-candidate");
@@ -118,7 +145,7 @@ fn explicit_source_selection_verifies_latest_rows_and_preserves_quarantine() {
                         SelectionInputs {
                             choice: Choice::OriginalSource,
                             runtime: &runtime,
-                            asset: None,
+                            asset: asset.as_ref(),
                             source_evidence: None,
                             desired: &fresh
                         },
@@ -132,7 +159,7 @@ fn explicit_source_selection_verifies_latest_rows_and_preserves_quarantine() {
                         SelectionInputs {
                             choice: Choice::OriginalSource,
                             runtime: &runtime,
-                            asset: None,
+                            asset: asset.as_ref(),
                             source_evidence: Some(&retained),
                             desired: &target
                         },
@@ -154,7 +181,7 @@ fn explicit_source_selection_verifies_latest_rows_and_preserves_quarantine() {
                             SelectionInputs {
                                 choice: Choice::OriginalSource,
                                 runtime: &runtime,
-                                asset: None,
+                                asset: asset.as_ref(),
                                 source_evidence: Some(&retained),
                                 desired: &fresh,
                             },
@@ -170,7 +197,7 @@ fn explicit_source_selection_verifies_latest_rows_and_preserves_quarantine() {
                     SelectionInputs {
                         choice: Choice::OriginalSource,
                         runtime: &runtime,
-                        asset: None,
+                        asset: asset.as_ref(),
                         source_evidence: Some(&retained),
                         desired: &fresh,
                     },
@@ -262,7 +289,7 @@ fn explicit_source_selection_verifies_latest_rows_and_preserves_quarantine() {
                         SelectionInputs {
                             choice: Choice::OriginalSource,
                             runtime: &runtime,
-                            asset: None,
+                            asset: asset.as_ref(),
                             source_evidence: Some(&retained),
                             desired: &fresh,
                         },
@@ -277,7 +304,7 @@ fn explicit_source_selection_verifies_latest_rows_and_preserves_quarantine() {
                     SelectionInputs {
                         choice: Choice::OriginalSource,
                         runtime: &runtime,
-                        asset: None,
+                        asset: asset.as_ref(),
                         source_evidence: Some(&retained),
                         desired: &fresh,
                     },
