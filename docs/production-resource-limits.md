@@ -117,3 +117,7 @@ and exact healthy backend/liveness recovery. The generated proxy config hash,
 actual NGINX version and selected bounds are recorded. It does not test every
 slow-progress case, application-model memory pressure or actual deployment
 capacity; those remain #455. Do not use its numbers to size a production model.
+
+For bounded actual-model **synthetic** measurements, use the separate
+[shipping-model measurement runner](model-container-measurement.md). Its tiny
+fixture does not replace the actual deployment acceptance above.
