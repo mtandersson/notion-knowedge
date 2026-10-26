@@ -47,6 +47,7 @@ for line in sys.stdin:
         text = '{marker}'
         if mode == 'wrong-page': source['page_id'] = '{workspace}'
         if mode == 'wrong-url': source['url'] = 'https://attacker.invalid/' + root.replace('-', '')
+        if mode.startswith('link='): source['url'] = mode.split('=', 1)[1]
         if mode == 'missing-marker': text = 'unrelated source'
         if request['params']['name'] == 'knowledge_search':
             assert args == dict(query='{marker}', mode='semantic', limit=1, filters=dict(page_ids=[root]))
@@ -128,6 +129,27 @@ class SmokeContracts(unittest.TestCase):
                 report = self.manifest()
                 self.assertEqual((report["outcome"], report["phase"]), ("failed", "reconcile"))
                 self.assertIn("failure", report)
+                (self.base / "diagnostics/result.json").unlink()
+                (self.base / "diagnostics").rmdir()
+
+    def test_production_notion_links_preserve_exact_page_identity_and_authority(self):
+        raw = ROOT.replace("-", "")
+        links = [
+            ("https://app.notion.com/p/Selected-" + raw, True),
+            ("https://app.notion.com/p/Foo-" + raw, True),
+            ("https://team.notion.site/Selected-" + raw, True),
+            ("https://team.notion.so/" + ROOT, True),
+            ("https://app.notion.com.attacker.invalid/p/Selected-" + raw, False),
+            ("https://notion.so.attacker.invalid/" + raw, False),
+            ("https://user@app.notion.com/p/Selected-" + raw, False),
+            ("https://app.notion.com:443/p/Selected-" + raw, False),
+            ("https://app.notion.com/p/Selected-" + WORKSPACE.replace("-", ""), False),
+        ]
+        for link, accepted in links:
+            with self.subTest(link=link):
+                result = self.run_smoke("link=" + link)
+                self.assertEqual(result.returncode, 0 if accepted else 1, result.stderr)
+                self.assertEqual(self.manifest()["outcome"], "verified" if accepted else "failed")
                 (self.base / "diagnostics/result.json").unlink()
                 (self.base / "diagnostics").rmdir()
 

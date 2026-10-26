@@ -139,9 +139,19 @@ def source(source, root, provenance=False):
             "Source identity differs from the selected root page")
     url = source.get("url", "")
     require(isinstance(url, str), "Missing canonical Notion source link")
+    require(not any(ord(c) < 33 or ord(c) == 127 for c in url), "Invalid Notion source link")
     parsed = urlparse(url)
-    require(parsed.scheme == "https" and parsed.netloc in ("www.notion.so", "notion.so") and
-            parsed.path.replace("-", "").endswith(root.replace("-", "")), "Missing canonical Notion source link")
+    host = parsed.hostname or ""
+    require(parsed.scheme == "https" and parsed.username is None and parsed.password is None and
+            parsed.port is None and parsed.netloc.lower() == host and
+            (host in ("app.notion.com", "notion.so", "notion.site") or
+             host.endswith(".notion.so") or host.endswith(".notion.site")),
+            "Missing canonical Notion source link")
+    segment = parsed.path.rsplit("/", 1)[-1]
+    # Match the production page adapter: a UUID or a slug ending in 32 hex digits.
+    candidate = (segment if len(segment) == 36 and all(segment[i] == "-" for i in (8, 13, 18, 23))
+                 else segment[-32:])
+    require(str(uuid.UUID(candidate)) == root, "Notion source link identifies a different page")
 
 
 def retrieve(client, root, marker):
