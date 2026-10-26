@@ -272,14 +272,6 @@ fn source_choice_case(bound: bool) {
                     );
                     fs::rename(moved, artifact).unwrap();
                 }
-                let candidate_path = &prepared.metadata().candidate.path;
-                let moved_candidate = candidate_path.with_extension("original-inode");
-                fs::rename(candidate_path, &moved_candidate).unwrap();
-                fs::create_dir(candidate_path).unwrap();
-                assert!(prepared.revalidate().is_err());
-                fs::remove_dir(candidate_path).unwrap();
-                fs::rename(moved_candidate, candidate_path).unwrap();
-                prepared.revalidate().unwrap();
                 drop(prepared);
                 let original_record = fs::read(&output).unwrap();
                 fs::write(&output, b"corrupt Prepared record").unwrap();
@@ -313,6 +305,16 @@ fn source_choice_case(bound: bool) {
                 )
                 .unwrap();
                 reopened.publish(&output).unwrap();
+                let candidate_path = &reopened.metadata().candidate.path;
+                let moved_candidate = candidate_path.with_extension("original-inode");
+                fs::rename(candidate_path, &moved_candidate).unwrap();
+                fs::create_dir(candidate_path).unwrap();
+                assert!(reopened.revalidate().is_err());
+                fs::remove_dir(candidate_path).unwrap();
+                fs::rename(moved_candidate, candidate_path).unwrap();
+                // Rename changes the complete native inventory even after the
+                // inode is returned. An old proof must continue to refuse it.
+                assert!(reopened.revalidate().is_err());
                 Ok(selection_metadata)
             },
         )
