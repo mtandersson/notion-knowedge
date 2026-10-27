@@ -67,6 +67,8 @@ pub struct TransitionOwnership {
     runtime_history: Option<PathBuf>,
     #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
     choice_recovery: Option<Box<crate::rollback_runtime::choice::ChoiceHandoffRecord>>,
+    #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+    choice_candidate_guard: std::cell::RefCell<Option<File>>,
 }
 
 fn exclusive(file: &File) -> Result<(), CommitError> {
@@ -352,6 +354,8 @@ impl TransitionOwnership {
             runtime_history: None,
             #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
             choice_recovery: None,
+            #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+            choice_candidate_guard: std::cell::RefCell::new(None),
         };
         owned.revalidate()?;
         // An interrupted publication can leave a hot rollback journal. SQLite
@@ -411,6 +415,24 @@ impl TransitionOwnership {
     }
 
     pub fn revalidate(&self) -> Result<(), CommitError> {
+        #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+        if let Some(guard) = self.choice_candidate_guard.borrow().as_ref() {
+            let handoff = self
+                .choice_recovery
+                .as_deref()
+                .ok_or(CommitError::BindingMismatch)?;
+            let expected = &handoff.prepared.candidate;
+            let actual = Identity::file(guard)?;
+            if actual
+                != (Identity {
+                    device: expected.device,
+                    inode: expected.inode,
+                })
+                || Identity::file(&owned_directory(&expected.path)?)? != actual
+            {
+                return Err(CommitError::BindingMismatch);
+            }
+        }
         for path in [
             &self.state_path,
             &self.record.source.path,

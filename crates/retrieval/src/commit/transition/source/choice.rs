@@ -233,11 +233,27 @@ impl QuarantinedSourceInspection<'_> {
     pub(crate) fn reserve_choice_authority(
         &self,
         handoff: &crate::rollback_runtime::choice::ChoiceHandoffRecord,
+        candidate_guard: Option<File>,
     ) -> Result<(), CommitError> {
         self.revalidate()?;
         if self.owner.choice_recovery.as_deref() != Some(handoff) {
             return Err(CommitError::BindingMismatch);
         }
+        if handoff.prepared.built.is_some() != candidate_guard.is_some() {
+            return Err(CommitError::BindingMismatch);
+        }
+        {
+            let mut retained = self.owner.choice_candidate_guard.borrow_mut();
+            if let (Some(previous), Some(next)) = (retained.as_ref(), candidate_guard.as_ref())
+                && Identity::file(previous)? != Identity::file(next)?
+            {
+                return Err(CommitError::BindingMismatch);
+            }
+            if retained.is_none() {
+                *retained = candidate_guard;
+            }
+        }
+        self.revalidate()?;
         let target = CommitBinding::parse_retained(
             handoff.prepared.selection.desired_authority_json.as_bytes(),
         )?;

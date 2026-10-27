@@ -138,7 +138,13 @@ impl VerifiedPreparedChoice<'_, '_> {
         let intent = self.retain_publication_start(handoff)?;
         self.selection
             .inspection
-            .reserve_choice_authority(handoff)
+            .reserve_choice_authority(
+                handoff,
+                self.guard
+                    .as_ref()
+                    .map(std::fs::File::try_clone)
+                    .transpose()?,
+            )
             .map_err(|_| RuntimeError)?;
         self.revalidate()?;
         #[cfg(test)]

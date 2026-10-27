@@ -78,6 +78,15 @@ pub(crate) fn kill_reservation_windows(
                     > 512
             );
         }
+        if phase == "choice-reservation-committed" {
+            let handoff =
+                ChoiceHandoffRecord::read_active_metadata(&root.join("state.sqlite")).unwrap();
+            let competitor = fs::File::open(&handoff.prepared.candidate.path).unwrap();
+            assert!(
+                competitor.try_lock().is_err(),
+                "the selected candidate must stay locked through commit"
+            );
+        }
         child.0.kill().unwrap();
         assert!(!child.0.wait().unwrap().success());
         fs::remove_file(marker).unwrap();
