@@ -237,8 +237,27 @@ jobs:
             shell: spike
             args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
           - suite: runtime-choices
-            name: runtime-choices-legacy
-            choice_group: legacy
+            name: runtime-choices-legacy-source
+            choice_group: legacy-case
+            choice_case: explicit_source_handoff_recovers_with_legacy_runtime
+            shell: spike
+            args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
+          - suite: runtime-choices
+            name: runtime-choices-legacy-target
+            choice_group: legacy-case
+            choice_case: quarantined_target_handoff_recovers_with_legacy_runtime
+            shell: spike
+            args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
+          - suite: runtime-choices
+            name: runtime-choices-legacy-source-crash
+            choice_group: legacy-case
+            choice_case: explicit_source_handoff_recovers_after_killed_processes
+            shell: spike
+            args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
+          - suite: runtime-choices
+            name: runtime-choices-legacy-target-crash
+            choice_group: legacy-case
+            choice_case: quarantined_target_handoff_recovers_after_killed_processes
             shell: spike
             args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
           - suite: runtime-choices
@@ -369,14 +388,6 @@ jobs:
           NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_choice_prepared_target_legacy_preserves_source_and_sql --locked -- --ignored
           NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_choice_prepared_record_recovers_after_killed_processes --locked -- --ignored
 
-      - name: Test legacy runtime choices
-        if: matrix.choice_group == 'legacy'
-        run: |
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib explicit_source_handoff_recovers_with_legacy_runtime --locked -- --ignored
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_target_handoff_recovers_with_legacy_runtime --locked -- --ignored
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib explicit_source_handoff_recovers_after_killed_processes --locked -- --ignored
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_target_handoff_recovers_after_killed_processes --locked -- --ignored
-
       - name: Fetch verified public lexical fixture
         if: startsWith(matrix.choice_group, 'bound-') || matrix.choice_group == 'native-start-bound'
         run: |
@@ -386,7 +397,7 @@ jobs:
       # Each bound case exercises several real killed-process windows. Keep
       # each case in its own 60-minute lane without dropping any coverage.
       - name: Test ${{ matrix.choice_case }}
-        if: startsWith(matrix.choice_group, 'bound-') || startsWith(matrix.choice_group, 'native-start-')
+        if: startsWith(matrix.choice_group, 'bound-') || startsWith(matrix.choice_group, 'native-start-') || matrix.choice_group == 'legacy-case'
         env:
           NK_LEXICAL_TEST_ARCHIVE: ${{ runner.temp }}/nk-lexical-archive.tar.xz
           NK_LEXICAL_RUNTIME: ${{ github.workspace }}/target/debug/examples/lexical-runtime
