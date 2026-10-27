@@ -242,13 +242,27 @@ jobs:
             shell: spike
             args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
           - suite: runtime-choices
-            name: runtime-choices-bound-source
+            name: runtime-choices-bound-source-activation
             choice_group: bound-source
+            choice_case: explicit_source_handoff_recovers_with_bound_runtime
             shell: spike
             args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
           - suite: runtime-choices
-            name: runtime-choices-bound-target
+            name: runtime-choices-bound-source-runtime
+            choice_group: bound-source
+            choice_case: quarantined_source_handoff_recovers_from_runtime_origin
+            shell: spike
+            args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
+          - suite: runtime-choices
+            name: runtime-choices-bound-target-runtime
             choice_group: bound-target
+            choice_case: quarantined_target_handoff_recovers_with_bound_runtime
+            shell: spike
+            args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
+          - suite: runtime-choices
+            name: runtime-choices-bound-target-activation
+            choice_group: bound-target
+            choice_case: explicit_target_handoff_recovers_from_activation_origin
             shell: spike
             args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
     runs-on: ubuntu-latest
@@ -333,23 +347,14 @@ jobs:
           curl --fail --location --retry 2 --max-time 60 --max-filesize 2579240 --output "$RUNNER_TEMP/nk-lexical-archive.tar.xz" https://download.freedict.org/dictionaries/eng-swe/2025.11.23/freedict-eng-swe-2025.11.23.src.tar.xz
           printf '%s  %s\n' 3c9f80c800d4810e34a80c82aca4e468fbc3180099d8b24a4fad7c61324015dc "$RUNNER_TEMP/nk-lexical-archive.tar.xz" | sha256sum --check --status
 
-      - name: Test bound-source runtime choices
-        if: matrix.choice_group == 'bound-source'
+      # Each bound case exercises several real killed-process windows. Keep
+      # each case in its own 60-minute lane without dropping any coverage.
+      - name: Test ${{ matrix.choice_case }}
+        if: startsWith(matrix.choice_group, 'bound-')
         env:
           NK_LEXICAL_TEST_ARCHIVE: ${{ runner.temp }}/nk-lexical-archive.tar.xz
           NK_LEXICAL_RUNTIME: ${{ github.workspace }}/target/debug/examples/lexical-runtime
-        run: |
-          nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib explicit_source_handoff_recovers_with_bound_runtime --locked -- --ignored
-          nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_source_handoff_recovers_from_runtime_origin --locked -- --ignored
-
-      - name: Test bound-target runtime choices
-        if: matrix.choice_group == 'bound-target'
-        env:
-          NK_LEXICAL_TEST_ARCHIVE: ${{ runner.temp }}/nk-lexical-archive.tar.xz
-          NK_LEXICAL_RUNTIME: ${{ github.workspace }}/target/debug/examples/lexical-runtime
-        run: |
-          nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_target_handoff_recovers_with_bound_runtime --locked -- --ignored
-          nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib explicit_target_handoff_recovers_from_activation_origin --locked -- --ignored
+        run: nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib "${{ matrix.choice_case }}" --locked -- --ignored
 
       - name: Test production evaluation storage and authorization boundaries
         if: matrix.suite == 'webhook-worker'

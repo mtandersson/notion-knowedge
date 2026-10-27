@@ -30,6 +30,10 @@ pub(crate) fn kill_reservation_windows(
     entry: &str,
     input_env: &str,
 ) {
+    // One checkpoint composes several independently bounded native/asset
+    // verifications. The public bound fixture can exceed five minutes without
+    // any individual runtime invocation exceeding its production budget.
+    const CHECKPOINT_BUDGET: Duration = Duration::from_secs(600);
     for phase in [
         "choice-publication-start-staged",
         "choice-publication-start-renamed",
@@ -51,6 +55,14 @@ pub(crate) fn kill_reservation_windows(
                 .unwrap(),
         );
         if phase.is_empty() {
+            let started = std::time::Instant::now();
+            while child.0.try_wait().unwrap().is_none() {
+                assert!(
+                    started.elapsed() < CHECKPOINT_BUDGET,
+                    "fresh reservation retry timeout"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
             assert!(
                 child.0.wait().unwrap().success(),
                 "fresh reservation retry failed"
@@ -65,7 +77,7 @@ pub(crate) fn kill_reservation_windows(
                 "child exited before {phase}"
             );
             assert!(
-                started.elapsed() < Duration::from_secs(300),
+                started.elapsed() < CHECKPOINT_BUDGET,
                 "checkpoint timeout: {phase}"
             );
             std::thread::sleep(Duration::from_millis(20));
