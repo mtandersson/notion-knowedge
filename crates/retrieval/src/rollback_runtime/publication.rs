@@ -706,29 +706,33 @@ impl RuntimeTransitionOperator<'_> {
             now,
             JournalMode::NativeReady(native),
         )?;
-        operator.with_quarantined_source_inspection(now, limits.source, |inspection| {
-            inspection.require_reserved_handoff(&native.handoff)?;
-            let proof = super::choice::reopen(
-                inspection,
-                inputs,
-                &native.handoff.prepared_path,
-                limits.prepared,
-            )
-            .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
-            if proof.metadata() != &native.handoff.prepared {
-                return Err(crate::commit::CommitError::BindingMismatch);
-            }
-            proof
-                .revalidate()
+        let _candidate_guard =
+            operator.with_quarantined_source_inspection(now, limits.source, |inspection| {
+                inspection.require_reserved_handoff(&native.handoff)?;
+                let proof = super::choice::reopen(
+                    inspection,
+                    inputs,
+                    &native.handoff.prepared_path,
+                    limits.prepared,
+                )
                 .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
-            inspection.require_reserved_handoff(&native.handoff)?;
-            native
-                .verify_active()
-                .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
-            native
-                .verify_retained_files()
-                .map_err(|_| crate::commit::CommitError::BindingMismatch)
-        })?;
+                if proof.metadata() != &native.handoff.prepared {
+                    return Err(crate::commit::CommitError::BindingMismatch);
+                }
+                proof
+                    .revalidate()
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                inspection.require_reserved_handoff(&native.handoff)?;
+                native
+                    .verify_active()
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                native
+                    .verify_retained_files()
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                proof
+                    .retain_candidate_guard()
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)
+            })?;
         let path =
             crate::commit::transition::journal_path(&native.handoff.prepared.selection.state_path)
                 .map_err(err)?;

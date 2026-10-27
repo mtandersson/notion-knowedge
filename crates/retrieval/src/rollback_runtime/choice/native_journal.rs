@@ -46,6 +46,10 @@ fn file_identity(file: &File) -> Result<RetainedFileIdentity> {
 }
 
 impl VerifiedPreparedChoice<'_, '_> {
+    pub(crate) fn retain_candidate_guard(&self) -> Result<Option<File>> {
+        Ok(self.guard.as_ref().map(File::try_clone).transpose()?)
+    }
+
     pub(crate) fn stage_native_start(
         &self,
         handoff: &ChoiceHandoffRecord,
@@ -446,7 +450,7 @@ pub fn recover_activation_native_ready(
     }
     let owner = crate::commit::transition::source::acquire_choice_native_ready(native)
         .map_err(|_| RuntimeError)?;
-    owner
+    let _candidate_guard = owner
         .with_quarantined_source_inspection(now, candidate, capture_limits, |inspection| {
             inspection.require_reserved_handoff(&native.handoff)?;
             let proof = super::reopen(inspection, inputs, &native.handoff.prepared_path, limits)
@@ -463,6 +467,9 @@ pub fn recover_activation_native_ready(
                 .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
             native
                 .verify_retained_files()
+                .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+            proof
+                .retain_candidate_guard()
                 .map_err(|_| crate::commit::CommitError::BindingMismatch)
         })
         .map_err(|_| RuntimeError)?;

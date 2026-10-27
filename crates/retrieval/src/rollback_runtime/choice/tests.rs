@@ -181,6 +181,19 @@ pub(crate) fn kill_native_start_windows(
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+        if phase == "choice-native-journal-durable" {
+            let value: serde_json::Value =
+                serde_json::from_slice(&fs::read(input).unwrap()).unwrap();
+            let state = Path::new(value["state"].as_str().unwrap());
+            let native = ChoiceNativeRecord::read_active_metadata(state).unwrap();
+            if native.handoff.prepared.built.is_some() {
+                let competing = fs::File::open(&native.handoff.prepared.candidate.path).unwrap();
+                assert!(
+                    competing.try_lock().is_err(),
+                    "fresh Ready recovery must retain the selected candidate lock through durability"
+                );
+            }
+        }
         child.0.kill().unwrap();
         assert!(!child.0.wait().unwrap().success());
         fs::remove_file(marker).unwrap();
