@@ -298,3 +298,8 @@ pub use prepared::{PreparationPaths, PreparedChoiceMetadata, VerifiedPreparedCho
 
 mod store;
 pub use store::reopen;
+
+mod handoff;
+pub use handoff::{
+    ChoiceHandoffRecord, HandoffPhase, RetainedFileIdentity, recover_activation_handoff,
+};

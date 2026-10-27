@@ -65,6 +65,8 @@ pub struct TransitionOwnership {
     runtime: Option<runtime_journal::RuntimeJournalRecord>,
     #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
     runtime_history: Option<PathBuf>,
+    #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+    choice_recovery: Option<Box<crate::rollback_runtime::choice::ChoiceHandoffRecord>>,
 }
 
 fn exclusive(file: &File) -> Result<(), CommitError> {
@@ -215,6 +217,23 @@ impl TransitionOwnership {
     /// only for the shared physical/SQL engine; it is never serialized as v1.
     pub(crate) fn current_record(&self) -> Result<Option<TransitionRecord>, CommitError> {
         #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+        if let Some(handoff) = &self.choice_recovery {
+            handoff
+                .verify_active()
+                .map_err(|_| CommitError::BindingMismatch)?;
+            handoff
+                .verify_retained_files()
+                .map_err(|_| CommitError::BindingMismatch)?;
+            return match &handoff.prepared.selection.origin {
+                crate::rollback_runtime::choice::Origin::Activation(record) => {
+                    Ok(Some(*record.clone()))
+                }
+                crate::rollback_runtime::choice::Origin::Runtime(record) => {
+                    record.layout().map(Some)
+                }
+            };
+        }
+        #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
         if self.runtime_history.is_some() {
             return self.runtime_record()?.layout().map(Some);
         }
@@ -229,11 +248,23 @@ impl TransitionOwnership {
         }
         TransitionRecord::read(&self.state_path)
     }
+    #[cfg(feature = "local-lancedb")]
+    pub(crate) fn activation_native_record(&self) -> Result<Option<TransitionRecord>, CommitError> {
+        #[cfg(target_os = "linux")]
+        if self.runtime.is_some() {
+            return Err(CommitError::BindingMismatch);
+        }
+        self.current_record()
+    }
     fn persist_record(
         &self,
         record: &TransitionRecord,
         previous: &TransitionRecord,
     ) -> Result<(), CommitError> {
+        #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+        if self.choice_recovery.is_some() {
+            return Err(CommitError::Conflict);
+        }
         #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
         if self.runtime.is_some() {
             return runtime_journal::advance_layout(self, record, previous);
@@ -319,6 +350,8 @@ impl TransitionOwnership {
             runtime: None,
             #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
             runtime_history: None,
+            #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+            choice_recovery: None,
         };
         owned.revalidate()?;
         // An interrupted publication can leave a hot rollback journal. SQLite

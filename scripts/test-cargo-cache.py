@@ -86,7 +86,9 @@ class CargoSnapshots(unittest.TestCase):
 
     def test_every_configured_ci_suite_can_restore_an_isolated_snapshot(self):
         workflow = Path(cache.__file__).resolve().parents[1] / '.github/workflows/ci.yml'
-        suites = re.findall(r'- suite: ([A-Za-z0-9_-]+)', workflow.read_text())
+        # Lanes of one suite share compiled artifacts; different suites remain
+        # isolated even when a suite appears in several matrix rows.
+        suites = set(re.findall(r'- suite: ([A-Za-z0-9_-]+)', workflow.read_text()))
         self.assertTrue(suites)
         snapshots = [self.key(job=f'test-{suite}') for suite in suites]
         self.assertEqual(len({entry['prefix'] for entry in snapshots}), len(suites))

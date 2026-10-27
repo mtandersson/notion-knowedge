@@ -90,7 +90,7 @@ pub fn verify_transition_candidate<'owner>(
     transaction: &rusqlite::Transaction<'_>,
     input: TransitionCandidateInputs<'_>,
 ) -> Result<VerifiedTransitionCandidate<'owner>, CommitError> {
-    use crate::commit::transition::{TransitionPhase, TransitionRecord};
+    use crate::commit::transition::TransitionPhase;
     if tokio::runtime::Handle::try_current().is_ok()
         || input.limits.files == 0
         || input.limits.file_bytes == 0
@@ -101,10 +101,9 @@ pub fn verify_transition_candidate<'owner>(
         return Err(CommitError::InvalidInput);
     }
     owner.validate_owned_transaction(transaction)?;
-    let record = TransitionRecord::read(Path::new(
-        transaction.path().ok_or(CommitError::BindingMismatch)?,
-    ))?
-    .ok_or(CommitError::BindingMismatch)?;
+    let record = owner
+        .activation_native_record()?
+        .ok_or(CommitError::BindingMismatch)?;
     let mut expected = owner.record().clone();
     expected.phase = record.phase;
     if expected != record
@@ -171,12 +170,7 @@ pub fn verify_transition_candidate<'owner>(
     }
     record.backup.verify(&record.backup_path)?;
     owner.validate_owned_transaction(transaction)?;
-    if TransitionRecord::read(Path::new(
-        transaction.path().ok_or(CommitError::BindingMismatch)?,
-    ))?
-    .as_ref()
-        != Some(&record)
-    {
+    if owner.activation_native_record()?.as_ref() != Some(&record) {
         return Err(CommitError::BindingMismatch);
     }
     Ok(VerifiedTransitionCandidate {

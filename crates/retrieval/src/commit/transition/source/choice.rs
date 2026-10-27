@@ -4,6 +4,156 @@ use crate::{
     chunks::runtime_builder::DirectoryIdentity,
     rollback_runtime::choice::{Choice, Origin},
 };
+use std::os::{
+    fd::AsRawFd,
+    unix::{ffi::OsStrExt, fs::PermissionsExt},
+};
+
+/// Recover physical locks only. The returned owner stays crate-private and
+/// must be used solely within an inspection that proves SQL and native state.
+pub(crate) fn acquire_choice_recovery(
+    handoff: &crate::rollback_runtime::choice::ChoiceHandoffRecord,
+) -> Result<TransitionOwnership, CommitError> {
+    handoff
+        .verify_active()
+        .map_err(|_| CommitError::BindingMismatch)?;
+    handoff
+        .verify_retained_files()
+        .map_err(|_| CommitError::BindingMismatch)?;
+    let mut owner = match &handoff.prepared.selection.origin {
+        Origin::Activation(record) => {
+            TransitionOwnership::acquire(&handoff.prepared.selection.state_path, record)?
+        }
+        Origin::Runtime(record) => TransitionOwnership::acquire_runtime(record)?,
+    };
+    owner.choice_recovery = Some(Box::new(handoff.clone()));
+    owner.current_record()?.ok_or(CommitError::Conflict)?;
+    Ok(owner)
+}
+
+/// Called only by a dialect-specific wrapper after its full pre-swap native
+/// verification, while the original physical owner and SQL transaction remain
+/// held. It never creates a gap in the active journal.
+pub(crate) fn install_choice_handoff(
+    owner: &TransitionOwnership,
+    transaction: &rusqlite::Transaction<'_>,
+    staged: &StagedChoiceHandoff,
+) -> Result<(), CommitError> {
+    use crate::rollback_runtime::evidence::{check_parent, parent};
+    let record = &staged.record;
+    owner.validate_owned_transaction(transaction)?;
+    verify_candidate_guard(staged)?;
+    record
+        .verify_retained_files()
+        .map_err(|_| CommitError::BindingMismatch)?;
+    let previous = operation(owner)?;
+    if record.prepared.selection.state_path != owner.state_path
+        || format!("{:x}", Sha256::digest(&previous)) != record.origin_sha256
+    {
+        return Err(CommitError::BindingMismatch);
+    }
+    let path = journal_path(&owner.state_path)?;
+    let directory = parent(&path).map_err(|_| CommitError::InvalidInput)?;
+    let root = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".nk-choice-handoff-")
+        .permissions(fs::Permissions::from_mode(0o600))
+        .tempfile_in(root)
+        .map_err(io)?;
+    temporary
+        .write_all(
+            &record
+                .canonical_bytes()
+                .map_err(|_| CommitError::InvalidInput)?,
+        )
+        .map_err(io)?;
+    temporary.as_file().sync_all().map_err(io)?;
+    #[cfg(test)]
+    transition_checkpoint(owner, "choice-handoff-staged");
+    owner.validate_owned_transaction(transaction)?;
+    verify_candidate_guard(staged)?;
+    check_parent(&directory, &path).map_err(|_| CommitError::BindingMismatch)?;
+    record
+        .verify_retained_files()
+        .map_err(|_| CommitError::BindingMismatch)?;
+    if operation(owner)? != previous {
+        return Err(CommitError::Conflict);
+    }
+    let from = std::ffi::CString::new(
+        temporary
+            .path()
+            .file_name()
+            .ok_or(CommitError::InvalidInput)?
+            .as_bytes(),
+    )
+    .map_err(|_| CommitError::InvalidInput)?;
+    let to = std::ffi::CString::new(
+        path.file_name()
+            .ok_or(CommitError::InvalidInput)?
+            .as_bytes(),
+    )
+    .map_err(|_| CommitError::InvalidInput)?;
+    // SAFETY: both names are single components in the retained private directory.
+    if unsafe {
+        libc::renameat2(
+            directory.as_raw_fd(),
+            from.as_ptr(),
+            directory.as_raw_fd(),
+            to.as_ptr(),
+            0,
+        )
+    } != 0
+    {
+        return Err(io(std::io::Error::last_os_error()));
+    }
+    #[cfg(test)]
+    transition_checkpoint(owner, "choice-handoff-renamed");
+    directory.sync_all().map_err(io)?;
+    #[cfg(test)]
+    transition_checkpoint(owner, "choice-handoff-durable");
+    owner.validate_owned_transaction(transaction)?;
+    verify_candidate_guard(staged)?;
+    check_parent(&directory, &path).map_err(|_| CommitError::BindingMismatch)?;
+    record
+        .verify_active()
+        .map_err(|_| CommitError::BindingMismatch)?;
+    record
+        .verify_retained_files()
+        .map_err(|_| CommitError::BindingMismatch)?;
+    Ok(())
+}
+
+fn verify_candidate_guard(staged: &StagedChoiceHandoff) -> Result<(), CommitError> {
+    let candidate = &staged.record.prepared.candidate;
+    if DirectoryIdentity::capture(&candidate.path).map_err(|_| CommitError::BindingMismatch)?
+        != *candidate
+    {
+        return Err(CommitError::BindingMismatch);
+    }
+    match (&staged.record.prepared.built, &staged.candidate_guard) {
+        (Some(_), Some(guard)) => {
+            let metadata = guard.metadata().map_err(io)?;
+            if metadata.dev() != candidate.device || metadata.ino() != candidate.inode {
+                return Err(CommitError::BindingMismatch);
+            }
+        }
+        (None, None) => (),
+        _ => return Err(CommitError::BindingMismatch),
+    }
+    let authority =
+        CommitBinding::parse_retained(staged.record.prepared.observed_authority_json.as_bytes())?;
+    let current = crate::chunks::inspect_runtime_source(
+        &candidate.path,
+        &staged.embedding,
+        &authority,
+        staged.native_limits,
+    )
+    .map_err(|_| CommitError::BindingMismatch)?;
+    if current != staged.record.prepared.candidate_report.source {
+        return Err(CommitError::BindingMismatch);
+    }
+    Ok(())
+}
 
 pub(crate) struct ChoiceContext {
     pub origin: Origin,
@@ -17,6 +167,50 @@ pub(crate) struct ChoiceContext {
     pub highest_reserved_epoch: u64,
 }
 impl QuarantinedSourceInspection<'_> {
+    #[cfg(test)]
+    pub(crate) fn choice_checkpoint(&self, phase: &str) {
+        transition_checkpoint(self.owner, phase);
+    }
+    pub(crate) fn stage_choice_handoff(
+        &self,
+        record: crate::rollback_runtime::choice::ChoiceHandoffRecord,
+        candidate_guard: Option<File>,
+        native_limits: crate::chunks::CandidateLimits,
+    ) -> Result<(), CommitError> {
+        self.revalidate()?;
+        record
+            .verify_retained_files()
+            .map_err(|_| CommitError::BindingMismatch)?;
+        if record.prepared.selection.operation_sha256
+            != format!("{:x}", Sha256::digest(&self.operation))
+            || record.prepared.selection.state_path != self.owner.state_path
+        {
+            return Err(CommitError::BindingMismatch);
+        }
+        let mut staged = self.staged_handoff.borrow_mut();
+        if staged.is_some() {
+            return Err(CommitError::Conflict);
+        }
+        let handoff = StagedChoiceHandoff {
+            record,
+            candidate_guard,
+            embedding: self.embedding.clone(),
+            native_limits,
+        };
+        verify_candidate_guard(&handoff)?;
+        *staged = Some(handoff);
+        drop(staged);
+        self.revalidate()
+    }
+    /// Exact original active-journal bytes, usable only while this transaction
+    /// and its original physical owner remain valid.
+    pub(crate) fn choice_operation_bytes(&self) -> Result<Vec<u8>, CommitError> {
+        self.revalidate()?;
+        let bytes = self.operation.clone();
+        self.revalidate()?;
+        Ok(bytes)
+    }
+
     pub(crate) fn choice_context(&self, choice: Choice) -> Result<ChoiceContext, CommitError> {
         self.revalidate()?;
         let runtime = if self.owner.runtime.is_some() {

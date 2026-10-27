@@ -53,6 +53,7 @@ enum JournalMode<'a> {
     Active,
     Prepared,
     Completed(&'a Path),
+    Choice(&'a super::choice::ChoiceHandoffRecord),
 }
 impl<'pair> RuntimeTransitionOperator<'pair> {
     /// Reopen only an actual active version-two operation. This performs real
@@ -120,6 +121,9 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
             }
             JournalMode::Active | JournalMode::Prepared => {
                 TransitionOwnership::acquire_runtime(record)
+            }
+            JournalMode::Choice(handoff) => {
+                crate::commit::transition::source::acquire_choice_recovery(handoff)
             }
         }
         .map_err(err)?;
@@ -666,7 +670,102 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
 #[cfg(test)]
 mod tests;
 
+/// Bounds applied to the retained choice and its original source inspection.
+#[derive(Clone, Copy, Default)]
+pub struct ChoiceRecoveryLimits {
+    pub prepared: PreparedLimits,
+    pub source: crate::commit::transition::source::SourceCaptureLimits,
+}
+
 impl RuntimeTransitionOperator<'_> {
+    /// Reacquire and verify a v2-origin handoff with trusted current and
+    /// selected runtime inputs. No publication capability escapes this check.
+    pub fn recover_choice_handoff(
+        runtime: &PinnedRuntime,
+        asset: Option<&PinnedAsset>,
+        current: CurrentSource<'_>,
+        handoff: &super::choice::ChoiceHandoffRecord,
+        inputs: super::choice::SelectionInputs<'_>,
+        limits: ChoiceRecoveryLimits,
+        now: i64,
+    ) -> Result<()> {
+        let super::choice::Origin::Runtime(origin) = &handoff.prepared.selection.origin else {
+            return Err(RuntimeError);
+        };
+        let operator = RuntimeTransitionOperator::acquire(
+            runtime,
+            asset,
+            current,
+            origin,
+            limits.prepared,
+            now,
+            JournalMode::Choice(handoff),
+        )?;
+        operator.with_quarantined_source_inspection(now, limits.source, |inspection| {
+            let proof =
+                super::choice::reopen(inspection, inputs, &handoff.prepared_path, limits.prepared)
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+            if proof.metadata() != &handoff.prepared {
+                return Err(crate::commit::CommitError::BindingMismatch);
+            }
+            proof
+                .revalidate()
+                .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+            handoff
+                .verify_retained_files()
+                .map_err(|_| crate::commit::CommitError::BindingMismatch)
+        })?;
+        let path = crate::commit::transition::journal_path(&handoff.prepared.selection.state_path)
+            .map_err(err)?;
+        super::evidence::parent(&path)?.sync_all()?;
+        handoff.verify_active()?;
+        handoff.verify_retained_files()
+    }
+    /// Stage and install an explicit choice while the v2 owner, selected
+    /// runtime and exclusive SQL transaction remain held.
+    pub fn handoff_quarantined_choice<T>(
+        &self,
+        now: i64,
+        limits: crate::commit::transition::source::SourceCaptureLimits,
+        action: impl for<'a> FnOnce(
+            &crate::commit::transition::source::QuarantinedSourceInspection<'a>,
+        ) -> std::result::Result<T, crate::commit::CommitError>,
+    ) -> Result<T> {
+        if !self.active {
+            return Err(RuntimeError);
+        }
+        self.owner
+            .with_exclusive_sql(now, |transaction| {
+                let version = self
+                    .verify_all(transaction)
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                let (result, handoff) = crate::commit::transition::source::inspect_handoff(
+                    &self.owner,
+                    transaction,
+                    &self.source,
+                    &self.embedding,
+                    crate::commit::transition::source::TargetNativeContract {
+                        version,
+                        descriptor: self.seed.prepared.candidate.prior.descriptor.clone(),
+                        pinned: Some((
+                            self.runtime.sha256().into(),
+                            self.asset.map(|a| a.sha256().into()),
+                        )),
+                    },
+                    limits,
+                    action,
+                )?;
+                self.verify_all(transaction)
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                crate::commit::transition::source::install_choice_handoff(
+                    &self.owner,
+                    transaction,
+                    &handoff,
+                )?;
+                Ok(result)
+            })
+            .map_err(err)
+    }
     /// Refence only the retained target under the exact selected implementation.
     /// Current source/SQL and all canonical rows/vectors remain unchanged.
     pub fn refence_target(&self, now: i64) -> Result<RuntimeJournalRecord> {

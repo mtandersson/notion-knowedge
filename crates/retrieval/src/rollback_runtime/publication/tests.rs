@@ -35,6 +35,9 @@ enum Case {
     Capture,
     ChoicePrepared,
     ChoiceCrash,
+    ChoiceHandoff,
+    ChoiceHandoffCrash,
+    ChoiceSourceHandoff,
 }
 #[test]
 #[ignore = "requires matching normal runtime"]
@@ -61,6 +64,28 @@ fn quarantined_choice_prepared_target_legacy_preserves_source_and_sql() {
 fn quarantined_choice_prepared_target_bound_preserves_source_and_sql() {
     run_case(true, true, Case::ChoicePrepared);
 }
+
+#[test]
+#[ignore = "requires matching normal runtime"]
+fn quarantined_target_handoff_recovers_with_legacy_runtime() {
+    run_case(false, true, Case::ChoiceHandoff);
+}
+
+#[test]
+#[ignore = "requires matching normal runtime and pinned public archive"]
+fn quarantined_target_handoff_recovers_with_bound_runtime() {
+    run_case(true, true, Case::ChoiceHandoff);
+}
+#[test]
+#[ignore = "requires normal runtime and kills handoff processes"]
+fn quarantined_target_handoff_recovers_after_killed_processes() {
+    run_case(false, true, Case::ChoiceHandoffCrash);
+}
+#[test]
+#[ignore = "requires matching normal runtime and pinned public archive"]
+fn quarantined_source_handoff_recovers_from_runtime_origin() {
+    run_case(true, true, Case::ChoiceSourceHandoff);
+}
 #[test]
 #[ignore = "requires normal runtime; kills actual Prepared-choice publication processes"]
 fn quarantined_choice_prepared_record_recovers_after_killed_processes() {
@@ -85,8 +110,12 @@ fn run_case(bound: bool, newer: bool, case: Case) {
         .unwrap();
         PinnedAsset::pin(&path, &info.sha256).unwrap()
     });
-    let mode = asset
-        .as_ref()
+    let old_asset = if matches!(case, Case::ChoiceSourceHandoff) {
+        None
+    } else {
+        asset.as_ref()
+    };
+    let mode = old_asset
         .map(PinnedAsset::mode)
         .unwrap_or_else(|| vec!["legacy".into()]);
     runtime
@@ -100,7 +129,7 @@ fn run_case(bound: bool, newer: bool, case: Case) {
             65536,
         )
         .unwrap();
-    let (old_binding, embedding) = probe::fixture_configuration(!bound).unwrap();
+    let (old_binding, embedding) = probe::fixture_configuration(old_asset.is_none()).unwrap();
     let index = root.join("index");
     let state = root.join("state.sqlite");
     let old = IndexCommitCoordinator::open_existing(&index, &state, old_binding).unwrap();
@@ -109,7 +138,7 @@ fn run_case(bound: bool, newer: bool, case: Case) {
         let proof = verification::verify(
             owner,
             &runtime,
-            asset.as_ref(),
+            old_asset,
             &embedding,
             VerificationLimits::default(),
         )
@@ -118,13 +147,38 @@ fn run_case(bound: bool, newer: bool, case: Case) {
         Ok(())
     })
     .unwrap();
-    let current_dictionary = dictionary(&[("cinnamon roll", "distinct current plan")]);
+    let current_dictionary = if matches!(case, Case::ChoiceSourceHandoff) {
+        crate::lexical_dictionary::Dictionary::load(
+            &parent.path().join("prior.bundle"),
+            asset.as_ref().unwrap().sha256(),
+        )
+        .unwrap()
+    } else {
+        dictionary(&[("cinnamon roll", "distinct current plan")])
+    };
     let source = activate(&root, &old, &embedding, &current_dictionary);
     drop(old);
     if newer {
         probe::commit_fixture_row(&root, source.clone(), Some(&current_dictionary)).unwrap();
     }
     let current = IndexCommitCoordinator::open_existing(&index, &state, source.clone()).unwrap();
+    let current_evidence = parent.path().join("current-source-evidence.json");
+    if matches!(case, Case::ChoiceSourceHandoff) {
+        current
+            .with_owned_offline_inspection(i64::MAX / 2, |owner| {
+                let proof = verification::verify(
+                    owner,
+                    &runtime,
+                    asset.as_ref(),
+                    &embedding,
+                    VerificationLimits::default(),
+                )
+                .unwrap();
+                evidence::publish(&current_evidence, owner, &proof).unwrap();
+                Ok(())
+            })
+            .unwrap();
+    }
     let lineage = vec![crate::commit::transition::journal_path(&state).unwrap()];
     let prior = root.join("selected-prior-archive");
     let target = next(&source, "runtime-target");
@@ -132,7 +186,7 @@ fn run_case(bound: bool, newer: bool, case: Case) {
     let transfer = parent.path().join("rows");
     let inputs = || PriorInputs {
         runtime: &runtime,
-        asset: asset.as_ref(),
+        asset: old_asset,
         evidence: &retained,
         lineage: &lineage,
         archive: &prior,
@@ -312,7 +366,7 @@ fn run_case(bound: bool, newer: bool, case: Case) {
     }
     let operator = RuntimeTransitionOperator::start(
         &runtime,
-        asset.as_ref(),
+        old_asset,
         current_config,
         &prepared_path,
         ActivationPaths {
@@ -333,13 +387,74 @@ fn run_case(bound: bool, newer: bool, case: Case) {
     assert_eq!(record.phase, RuntimePhase::SourceRetained);
     assert!(!index.exists());
     assert_eq!(bytes(&archive), before);
-    if matches!(case, Case::ChoicePrepared | Case::ChoiceCrash) {
+    if matches!(case, Case::ChoiceSourceHandoff) {
+        use crate::rollback_runtime::choice::{self, Choice, SelectionInputs};
+        let desired = next(&target, "runtime-origin-source-choice");
+        let output = parent.path().join("runtime-source-choice.json");
+        let source_candidate = root.join("runtime-source-choice-candidate");
+        let original_sql = fs::read(&state).unwrap();
+        operator
+            .handoff_quarantined_choice(i64::MAX / 2, Default::default(), |inspection| {
+                let selected = choice::select(
+                    inspection,
+                    SelectionInputs {
+                        choice: Choice::OriginalSource,
+                        runtime: &runtime,
+                        asset: asset.as_ref(),
+                        source_evidence: Some(&current_evidence),
+                        desired: &desired,
+                    },
+                    Default::default(),
+                )
+                .unwrap();
+                let proof = selected
+                    .prepare(choice::PreparationPaths {
+                        transfer: &parent.path().join("runtime-source-choice-rows"),
+                        candidate: Some(&source_candidate),
+                        backup: &parent.path().join("runtime-source-choice-state.sqlite"),
+                    })
+                    .unwrap();
+                proof.publish(&output).unwrap();
+                proof
+                    .stage_handoff(&output)
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)
+            })
+            .unwrap();
+        let handoff = choice::ChoiceHandoffRecord::read_active_metadata(&state).unwrap();
+        assert!(operator.owner.runtime_record().is_err());
+        drop(operator);
+        RuntimeTransitionOperator::recover_choice_handoff(
+            &runtime,
+            old_asset,
+            current_config,
+            &handoff,
+            SelectionInputs {
+                choice: Choice::OriginalSource,
+                runtime: &runtime,
+                asset: asset.as_ref(),
+                source_evidence: Some(&current_evidence),
+                desired: &desired,
+            },
+            Default::default(),
+            i64::MAX / 2,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&state).unwrap(), original_sql);
+        assert_eq!(bytes(&archive), before);
+        assert!(current.search_guard().is_err());
+        return;
+    }
+    if matches!(
+        case,
+        Case::ChoicePrepared | Case::ChoiceCrash | Case::ChoiceHandoff | Case::ChoiceHandoffCrash
+    ) {
         use crate::rollback_runtime::choice::{self, Choice, SelectionInputs};
         let original_sql = fs::read(&state).unwrap();
         let original_candidate = bytes(&candidate);
         let original_prior = bytes(&prior);
         let desired = next(&target, "explicit-prepared-choice");
         let output = parent.path().join("explicit-prepared-choice.json");
+        let mut history_for_retry = None;
         operator
             .with_quarantined_source_inspection(i64::MAX / 2, Default::default(), |inspection| {
                 let inputs = || SelectionInputs {
@@ -381,6 +496,29 @@ fn run_case(bound: bool, newer: bool, case: Case) {
                     metadata.current.metadata.source.snapshot_sha256
                 );
                 proof.publish(&output).unwrap();
+                let handoff = proof.retain_handoff_origin(&output).unwrap();
+                history_for_retry = Some(handoff.origin_history_path.clone());
+                handoff.verify_retained_files().unwrap();
+                assert_eq!(proof.retain_handoff_origin(&output).unwrap(), handoff);
+                assert!(matches!(
+                    &handoff.prepared.selection.origin,
+                    choice::Origin::Runtime(_)
+                ));
+                let bytes = handoff.canonical_bytes().unwrap();
+                assert_eq!(
+                    choice::ChoiceHandoffRecord::parse_metadata(&bytes).unwrap(),
+                    handoff
+                );
+                assert!(
+                    serde_json::from_slice::<crate::commit::transition::TransitionRecord>(&bytes)
+                        .is_err()
+                );
+                assert!(RuntimeJournalRecord::parse_metadata(&bytes).is_err());
+                let origin = fs::read(&handoff.origin_history_path).unwrap();
+                fs::write(&handoff.origin_history_path, b"replaced origin").unwrap();
+                assert!(handoff.verify_retained_files().is_err());
+                assert!(proof.retain_handoff_origin(&output).is_err());
+                fs::write(&handoff.origin_history_path, origin).unwrap();
                 drop(proof);
                 let reopened =
                     choice::reopen(inspection, inputs(), &output, Default::default()).unwrap();
@@ -394,6 +532,176 @@ fn run_case(bound: bool, newer: bool, case: Case) {
         assert_eq!(bytes(&prior), original_prior);
         assert_eq!(operator.owner.runtime_record().unwrap(), record);
         assert!(current.search_guard().is_err());
+        if matches!(case, Case::ChoiceHandoffCrash) {
+            fs::remove_file(history_for_retry.as_ref().unwrap()).unwrap();
+            let input = parent.path().join("handoff-child.json");
+            fs::write(
+                &input,
+                serde_json::to_vec(&serde_json::json!({
+                    "record": record,
+                    "source": serde_json::to_string(&source).unwrap(),
+                    "desired": serde_json::to_string(&desired).unwrap(),
+                    "embedding": embedding,
+                    "index": index,
+                    "state": state,
+                    "prepared": output,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            fs::set_permissions(&input, fs::Permissions::from_mode(0o600)).unwrap();
+            drop(operator);
+            for phase in [
+                "choice-origin-renamed",
+                "choice-handoff-staged",
+                "choice-handoff-renamed",
+                "",
+            ] {
+                let mut child = PublicationChild(
+                    std::process::Command::new(std::env::current_exe().unwrap())
+                        .args([
+                            "--exact",
+                            "rollback_runtime::publication::tests::choice_handoff_process_child",
+                            "--ignored",
+                            "--nocapture",
+                        ])
+                        .env_clear()
+                        .env("NK_LEXICAL_RUNTIME", &binary)
+                        .env("NK_CHOICE_INPUT", &input)
+                        .env("NK_TRANSITION_TEST_ROOT", &root)
+                        .env("NK_TRANSITION_TEST_PHASE", phase)
+                        .spawn()
+                        .unwrap(),
+                );
+                if phase.is_empty() {
+                    assert!(
+                        child.0.wait().unwrap().success(),
+                        "fresh handoff recovery failed"
+                    );
+                } else {
+                    let marker = root.join("observed-transition");
+                    let started = std::time::Instant::now();
+                    while !fs::read_to_string(&marker).is_ok_and(|v| v == phase) {
+                        assert!(
+                            child.0.try_wait().unwrap().is_none(),
+                            "child exited before {phase}"
+                        );
+                        assert!(
+                            started.elapsed() < Duration::from_secs(300),
+                            "checkpoint timeout: {phase}"
+                        );
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    child.0.kill().unwrap();
+                    assert!(!child.0.wait().unwrap().success());
+                    fs::remove_file(marker).unwrap();
+                }
+                assert_eq!(fs::read(&state).unwrap(), original_sql);
+                assert_eq!(bytes(&archive), before);
+                assert_eq!(bytes(&candidate), original_candidate);
+                assert_eq!(bytes(&prior), original_prior);
+                assert!(current.search_guard().is_err());
+            }
+            return;
+        }
+        if matches!(case, Case::ChoiceHandoff) {
+            operator
+                .handoff_quarantined_choice(i64::MAX / 2, Default::default(), |inspection| {
+                    let proof = choice::reopen(
+                        inspection,
+                        SelectionInputs {
+                            choice: Choice::PreparedTarget,
+                            runtime: &runtime,
+                            asset: asset.as_ref(),
+                            source_evidence: None,
+                            desired: &desired,
+                        },
+                        &output,
+                        Default::default(),
+                    )
+                    .unwrap();
+                    proof
+                        .stage_handoff(&output)
+                        .map_err(|_| crate::commit::CommitError::BindingMismatch)
+                })
+                .unwrap();
+            assert!(operator.owner.runtime_record().is_err());
+            assert!(crate::commit::transition::TransitionRecord::read(&state).is_err());
+            let handoff = choice::ChoiceHandoffRecord::read_active_metadata(&state).unwrap();
+            drop(operator);
+            RuntimeTransitionOperator::recover_choice_handoff(
+                &runtime,
+                asset.as_ref(),
+                current_config,
+                &handoff,
+                SelectionInputs {
+                    choice: Choice::PreparedTarget,
+                    runtime: &runtime,
+                    asset: asset.as_ref(),
+                    source_evidence: None,
+                    desired: &desired,
+                },
+                Default::default(),
+                i64::MAX / 2,
+            )
+            .unwrap();
+            assert_eq!(fs::read(&state).unwrap(), original_sql);
+            assert_eq!(bytes(&archive), before);
+            assert_eq!(bytes(&candidate), original_candidate);
+            assert_eq!(bytes(&prior), original_prior);
+            let db = rusqlite::Connection::open(&state).unwrap();
+            db.execute(
+                "UPDATE reconciliation_lease SET expires_at=?1 WHERE singleton=1",
+                [i64::MAX],
+            )
+            .unwrap();
+            drop(db);
+            let owner =
+                crate::commit::transition::source::acquire_choice_recovery(&handoff).unwrap();
+            let entered = std::cell::Cell::new(false);
+            assert!(
+                owner
+                    .with_exclusive_sql(i64::MAX / 2, |_| {
+                        entered.set(true);
+                        Ok(())
+                    })
+                    .is_err()
+            );
+            assert!(
+                !entered.get(),
+                "a live lease must be rejected before recovery work"
+            );
+            drop(owner);
+            let replacement = parent.path().join("replacement-origin-history");
+            fs::write(
+                &replacement,
+                fs::read(&handoff.origin_history_path).unwrap(),
+            )
+            .unwrap();
+            fs::set_permissions(&replacement, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::rename(&replacement, &handoff.origin_history_path).unwrap();
+            assert!(handoff.verify_retained_files().is_err());
+            assert!(
+                RuntimeTransitionOperator::recover_choice_handoff(
+                    &runtime,
+                    asset.as_ref(),
+                    current_config,
+                    &handoff,
+                    SelectionInputs {
+                        choice: Choice::PreparedTarget,
+                        runtime: &runtime,
+                        asset: asset.as_ref(),
+                        source_evidence: None,
+                        desired: &desired,
+                    },
+                    Default::default(),
+                    i64::MAX / 2,
+                )
+                .is_err(),
+                "replaced evidence must not establish ownership"
+            );
+            return;
+        }
         if matches!(case, Case::ChoiceCrash) {
             let input = parent.path().join("choice-child.json");
             fs::write(
@@ -804,6 +1112,73 @@ fn killed_publication_retries(
         }
     }
     history.unwrap()
+}
+
+#[test]
+#[ignore = "choice handoff subprocess entrypoint"]
+fn choice_handoff_process_child() {
+    use crate::rollback_runtime::choice::{self, Choice, SelectionInputs};
+    let Some(input) = std::env::var_os("NK_CHOICE_INPUT") else {
+        return;
+    };
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(input).unwrap()).unwrap();
+    let binary = PathBuf::from(std::env::var_os("NK_LEXICAL_RUNTIME").unwrap());
+    let sha = format!("{:x}", Sha256::digest(fs::read(&binary).unwrap()));
+    let runtime = PinnedRuntime::pin(&binary, &sha, 1 << 30).unwrap();
+    let path = |name: &str| PathBuf::from(value[name].as_str().unwrap());
+    let source =
+        CommitBinding::parse_retained(value["source"].as_str().unwrap().as_bytes()).unwrap();
+    let desired =
+        CommitBinding::parse_retained(value["desired"].as_str().unwrap().as_bytes()).unwrap();
+    let embedding = serde_json::from_value(value["embedding"].clone()).unwrap();
+    let origin = serde_json::from_value(value["record"].clone()).unwrap();
+    let index = path("index");
+    let state = path("state");
+    let output = path("prepared");
+    let current = CurrentSource {
+        index: &index,
+        state: &state,
+        binding: &source,
+        embedding: &embedding,
+    };
+    let inputs = || SelectionInputs {
+        choice: Choice::PreparedTarget,
+        runtime: &runtime,
+        asset: None,
+        source_evidence: None,
+        desired: &desired,
+    };
+    if let Ok(handoff) = choice::ChoiceHandoffRecord::read_active_metadata(&state) {
+        RuntimeTransitionOperator::recover_choice_handoff(
+            &runtime,
+            None,
+            current,
+            &handoff,
+            inputs(),
+            Default::default(),
+            i64::MAX / 2,
+        )
+        .unwrap();
+    } else {
+        let operator = RuntimeTransitionOperator::open(
+            &runtime,
+            None,
+            current,
+            &origin,
+            Default::default(),
+            i64::MAX / 2,
+        )
+        .unwrap();
+        operator
+            .handoff_quarantined_choice(i64::MAX / 2, Default::default(), |inspection| {
+                let proof =
+                    choice::reopen(inspection, inputs(), &output, Default::default()).unwrap();
+                proof
+                    .stage_handoff(&output)
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)
+            })
+            .unwrap();
+    }
 }
 
 #[test]
