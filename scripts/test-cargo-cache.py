@@ -109,9 +109,9 @@ class CargoSnapshots(unittest.TestCase):
         self.assertNotIn("inputs.hit != 'true'", save,
                          'an older compatible snapshot is not an exact source-key hit')
         self.assertEqual(workflow.count(
-            'matched-key: ${{ steps.cargo-cache.outputs.matched-key }}'), 4)
+            'matched-key: ${{ steps.cargo-cache.outputs.matched-key }}'), 5)
         self.assertEqual(workflow.count(
-            'prefix: ${{ steps.cargo-cache.outputs.prefix }}'), 4)
+            'prefix: ${{ steps.cargo-cache.outputs.prefix }}'), 5)
         # Semantics of the guarded expression. A legacy/incompatible fallback
         # never blocks seeding the current job/dependency/toolchain prefix.
         prefix = 'nk-cargo-v1-Linux-X64-build-release-compatible-'
