@@ -10,6 +10,28 @@ use std::os::{
 };
 
 impl TransitionOwnership {
+    /// A Ready projection is private to an owner that has reopened the active
+    /// native journal and retained files. Later phases remain unsupported here.
+    pub(crate) fn native_ready_record(
+        &self,
+    ) -> Result<Option<crate::rollback_runtime::choice::ChoiceNativeRecord>, CommitError> {
+        let native = self.choice_native.borrow().as_deref().cloned();
+        if let Some(record) = &native {
+            if record.phase != crate::rollback_runtime::choice::ChoiceNativePhase::Ready
+                || self.choice_recovery.as_deref() != Some(&record.handoff)
+            {
+                return Err(CommitError::BindingMismatch);
+            }
+            record
+                .verify_active()
+                .map_err(|_| CommitError::BindingMismatch)?;
+            record
+                .verify_retained_files()
+                .map_err(|_| CommitError::BindingMismatch)?;
+        }
+        Ok(native)
+    }
+
     /// Only the original choice owner may account for the one reserved tuple.
     /// The complete remaining SQL must match the freshly verified intent.
     pub(crate) fn reserved_choice(
@@ -20,10 +42,13 @@ impl TransitionOwnership {
         let Some(handoff) = self.choice_recovery.as_deref() else {
             return Ok(None);
         };
-        let Some(intent) =
+        let intent = if let Some(native) = self.native_ready_record()? {
+            Some(native.reservation)
+        } else {
             crate::rollback_runtime::choice::PublicationStartMetadata::read_if_present(handoff)
                 .map_err(|_| CommitError::BindingMismatch)?
-        else {
+        };
+        let Some(intent) = intent else {
             return Ok(None);
         };
         let target = CommitBinding::parse_retained(intent.desired_authority_json.as_bytes())?;
@@ -64,6 +89,147 @@ pub(crate) fn acquire_choice_recovery(
     owner.choice_recovery = Some(Box::new(handoff.clone()));
     owner.current_record()?.ok_or(CommitError::Conflict)?;
     Ok(owner)
+}
+
+/// Reacquire the same original physical owner after the active journal has
+/// become a native Ready record. The description is checked, not trusted as
+/// evidence of SQL or native compatibility; the caller must freshly verify both.
+pub(crate) fn acquire_choice_native_ready(
+    native: &crate::rollback_runtime::choice::ChoiceNativeRecord,
+) -> Result<TransitionOwnership, CommitError> {
+    use crate::rollback_runtime::choice::ChoiceNativePhase;
+    if native.phase != ChoiceNativePhase::Ready {
+        return Err(CommitError::Conflict);
+    }
+    native
+        .verify_active()
+        .map_err(|_| CommitError::BindingMismatch)?;
+    native
+        .verify_retained_files()
+        .map_err(|_| CommitError::BindingMismatch)?;
+    let handoff = &native.handoff;
+    let mut owner = match &handoff.prepared.selection.origin {
+        Origin::Activation(record) => {
+            TransitionOwnership::acquire(&handoff.prepared.selection.state_path, record)?
+        }
+        Origin::Runtime(record) => TransitionOwnership::acquire_runtime(record)?,
+    };
+    owner.choice_recovery = Some(Box::new(handoff.clone()));
+    *owner.choice_native.borrow_mut() = Some(Box::new(native.clone()));
+    owner.current_record()?.ok_or(CommitError::Conflict)?;
+    Ok(owner)
+}
+
+/// Install Ready only after a caller has freshly verified the selected proof
+/// and original native pair in this same exclusive SQL transaction. The
+/// staged guard must stay alive until the outer transaction has committed.
+pub(crate) fn install_choice_native_ready(
+    owner: &TransitionOwnership,
+    transaction: &rusqlite::Transaction<'_>,
+    staged: &StagedNativeStart,
+    limits: manifest::ManifestLimits,
+) -> Result<(), CommitError> {
+    use crate::rollback_runtime::{
+        choice::ChoiceNativePhase,
+        evidence::{check_parent, parent},
+    };
+    let native = &staged.record;
+    if native.phase != ChoiceNativePhase::Ready
+        || owner.choice_recovery.as_deref() != Some(&native.handoff)
+        || owner.choice_native.borrow().is_some()
+    {
+        return Err(CommitError::BindingMismatch);
+    }
+    let desired =
+        CommitBinding::parse_retained(native.reservation.desired_authority_json.as_bytes())?;
+    let verify = || -> Result<(), CommitError> {
+        owner.validate_owned_transaction(transaction)?;
+        if owner.reserved_choice(transaction, limits)? != Some(desired.clone()) {
+            return Err(CommitError::BindingMismatch);
+        }
+        native
+            .verify_retained_files()
+            .map_err(|_| CommitError::BindingMismatch)?;
+        let candidate = StagedChoiceHandoff {
+            record: native.handoff.clone(),
+            candidate_guard: staged
+                .candidate_guard
+                .as_ref()
+                .map(File::try_clone)
+                .transpose()
+                .map_err(io)?,
+            embedding: staged.embedding.clone(),
+            native_limits: staged.native_limits,
+        };
+        verify_candidate_guard(&candidate)
+    };
+    verify()?;
+    native
+        .handoff
+        .verify_active()
+        .map_err(|_| CommitError::BindingMismatch)?;
+    let path = journal_path(&owner.state_path)?;
+    let directory = parent(&path).map_err(|_| CommitError::InvalidInput)?;
+    let root = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".nk-choice-native-journal-")
+        .permissions(fs::Permissions::from_mode(0o600))
+        .tempfile_in(root)
+        .map_err(io)?;
+    temporary
+        .write_all(
+            &native
+                .canonical_bytes()
+                .map_err(|_| CommitError::InvalidInput)?,
+        )
+        .map_err(io)?;
+    temporary.as_file().sync_all().map_err(io)?;
+    #[cfg(test)]
+    transition_checkpoint(owner, "choice-native-journal-staged");
+    verify()?;
+    native
+        .handoff
+        .verify_active()
+        .map_err(|_| CommitError::BindingMismatch)?;
+    check_parent(&directory, &path).map_err(|_| CommitError::BindingMismatch)?;
+    let from = std::ffi::CString::new(
+        temporary
+            .path()
+            .file_name()
+            .ok_or(CommitError::InvalidInput)?
+            .as_bytes(),
+    )
+    .map_err(|_| CommitError::InvalidInput)?;
+    let to = std::ffi::CString::new(
+        path.file_name()
+            .ok_or(CommitError::InvalidInput)?
+            .as_bytes(),
+    )
+    .map_err(|_| CommitError::InvalidInput)?;
+    // SAFETY: both names are components of the same retained private parent.
+    if unsafe {
+        libc::renameat2(
+            directory.as_raw_fd(),
+            from.as_ptr(),
+            directory.as_raw_fd(),
+            to.as_ptr(),
+            0,
+        )
+    } != 0
+    {
+        return Err(io(std::io::Error::last_os_error()));
+    }
+    *owner.choice_native.borrow_mut() = Some(Box::new(native.clone()));
+    #[cfg(test)]
+    transition_checkpoint(owner, "choice-native-journal-renamed");
+    directory.sync_all().map_err(io)?;
+    #[cfg(test)]
+    transition_checkpoint(owner, "choice-native-journal-durable");
+    check_parent(&directory, &path).map_err(|_| CommitError::BindingMismatch)?;
+    native
+        .verify_active()
+        .map_err(|_| CommitError::BindingMismatch)?;
+    verify()
 }
 
 /// Called only by a dialect-specific wrapper after its full pre-swap native

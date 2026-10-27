@@ -69,6 +69,9 @@ pub struct TransitionOwnership {
     choice_recovery: Option<Box<crate::rollback_runtime::choice::ChoiceHandoffRecord>>,
     #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
     choice_candidate_guard: std::cell::RefCell<Option<File>>,
+    #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+    choice_native:
+        std::cell::RefCell<Option<Box<crate::rollback_runtime::choice::ChoiceNativeRecord>>>,
 }
 
 fn exclusive(file: &File) -> Result<(), CommitError> {
@@ -219,6 +222,17 @@ impl TransitionOwnership {
     /// only for the shared physical/SQL engine; it is never serialized as v1.
     pub(crate) fn current_record(&self) -> Result<Option<TransitionRecord>, CommitError> {
         #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+        if let Some(native) = self.native_ready_record()? {
+            return match &native.handoff.prepared.selection.origin {
+                crate::rollback_runtime::choice::Origin::Activation(record) => {
+                    Ok(Some(*record.clone()))
+                }
+                crate::rollback_runtime::choice::Origin::Runtime(record) => {
+                    record.layout().map(Some)
+                }
+            };
+        }
+        #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
         if let Some(handoff) = &self.choice_recovery {
             handoff
                 .verify_active()
@@ -356,6 +370,8 @@ impl TransitionOwnership {
             choice_recovery: None,
             #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
             choice_candidate_guard: std::cell::RefCell::new(None),
+            #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+            choice_native: std::cell::RefCell::new(None),
         };
         owned.revalidate()?;
         // An interrupted publication can leave a hot rollback journal. SQLite

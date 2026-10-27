@@ -127,6 +127,65 @@ pub(crate) fn assert_reserved_choice_sql(
     assert_eq!(after.rows, before.rows + 1);
 }
 
+fn kill_native_start_windows(root: &Path, binary: &Path, input: &Path) {
+    for phase in [
+        "choice-native-origin-staged",
+        "choice-native-origin-renamed",
+        "choice-native-journal-staged",
+        "choice-native-journal-renamed",
+        "choice-native-journal-durable",
+        "",
+    ] {
+        let mut child = HandoffChild(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "rollback_runtime::choice::tests::source_handoff_process_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env("NK_LEXICAL_RUNTIME", binary)
+                .env("NK_SOURCE_HANDOFF_INPUT", input)
+                .env("NK_CHOICE_NATIVE_START", "1")
+                .env("NK_TRANSITION_TEST_ROOT", root)
+                .env("NK_TRANSITION_TEST_PHASE", phase)
+                .spawn()
+                .unwrap(),
+        );
+        let started = std::time::Instant::now();
+        if phase.is_empty() {
+            while child.0.try_wait().unwrap().is_none() {
+                assert!(
+                    started.elapsed() < Duration::from_secs(600),
+                    "fresh native Ready retry timed out"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(
+                child.0.wait().unwrap().success(),
+                "fresh native Ready retry failed"
+            );
+            continue;
+        }
+        let marker = root.join("observed-transition");
+        while !fs::read_to_string(&marker).is_ok_and(|value| value == phase) {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "child exited before {phase}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(600),
+                "native Ready checkpoint timed out: {phase}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        child.0.kill().unwrap();
+        assert!(!child.0.wait().unwrap().success());
+        fs::remove_file(marker).unwrap();
+    }
+}
+
 #[test]
 #[ignore = "source handoff subprocess entrypoint"]
 fn source_handoff_process_child() {
@@ -185,6 +244,31 @@ fn source_handoff_process_child() {
         },
         desired: &desired,
     };
+    if std::env::var_os("NK_CHOICE_NATIVE_START").is_some() {
+        if let Ok(native) = ChoiceNativeRecord::read_active_metadata(&state) {
+            recover_activation_native_ready(
+                &native,
+                candidate,
+                inputs(),
+                Default::default(),
+                Default::default(),
+                i64::MAX / 2,
+            )
+            .unwrap();
+        } else {
+            let handoff = ChoiceHandoffRecord::read_active_metadata(&state).unwrap();
+            start_activation_native(
+                &handoff,
+                candidate,
+                inputs(),
+                Default::default(),
+                Default::default(),
+                i64::MAX / 2,
+            )
+            .unwrap();
+        }
+        return;
+    }
     if let Ok(handoff) = ChoiceHandoffRecord::read_active_metadata(&state) {
         let action = if std::env::var_os("NK_CHOICE_RESERVE").is_some() {
             reserve_activation_publication
@@ -237,6 +321,11 @@ fn explicit_source_handoff_recovers_with_bound_runtime() {
 #[ignore = "requires normal runtime and kills handoff processes"]
 fn explicit_source_handoff_recovers_after_killed_processes() {
     source_choice_case(false, true, true);
+}
+#[test]
+#[ignore = "requires a normal runtime and kills actual native journal starts"]
+fn explicit_source_native_ready_recovers_after_killed_processes() {
+    source_choice_case_impl(false, true, false, true);
 }
 #[test]
 #[ignore = "requires matching normal runtime and pinned public archive"]
@@ -389,6 +478,9 @@ fn explicit_target_handoff_recovers_from_activation_origin() {
     assert!(coordinator.search_guard().is_err());
 }
 fn source_choice_case(bound: bool, handoff_case: bool, crash: bool) {
+    source_choice_case_impl(bound, handoff_case, crash, false);
+}
+fn source_choice_case_impl(bound: bool, handoff_case: bool, crash: bool, native_start: bool) {
     let binary = PathBuf::from(std::env::var_os("NK_LEXICAL_RUNTIME").unwrap());
     let sha = format!("{:x}", Sha256::digest(fs::read(&binary).unwrap()));
     let runtime = PinnedRuntime::pin(&binary, &sha, 1 << 30).unwrap();
@@ -941,7 +1033,7 @@ fn source_choice_case(bound: bool, handoff_case: bool, crash: bool) {
     if handoff_case {
         let handoff = ChoiceHandoffRecord::read_active_metadata(&state).unwrap();
         assert!(ChoiceNativeRecord::read_active_metadata(&state).is_err());
-        if !crash {
+        if !crash && !native_start {
             let Origin::Activation(origin) = &handoff.prepared.selection.origin else {
                 panic!("activation origin required")
             };
@@ -1008,7 +1100,84 @@ fn source_choice_case(bound: bool, handoff_case: bool, crash: bool) {
         assert!(coordinator.search_guard().is_err());
         drop(tx);
         drop(db);
-        if !bound && !crash {
+        if native_start {
+            let sql = fs::read(&state).unwrap();
+            let selected_before =
+                crate::rollback_runtime::candidate::tests::bytes(&handoff.prepared.candidate.path);
+            let target_before = crate::rollback_runtime::candidate::tests::bytes(&native_candidate);
+            let Origin::Activation(origin) = &handoff.prepared.selection.origin else {
+                panic!("activation origin required")
+            };
+            let input = parent.path().join("native-start-child.json");
+            fs::write(&input, serde_json::to_vec(&serde_json::json!({
+                "origin": origin, "source": serde_json::to_string(&binding).unwrap(),
+                "target": serde_json::to_string(&target).unwrap(), "desired": serde_json::to_string(&fresh).unwrap(),
+                "embedding": embedding, "state": state, "prepared": handoff.prepared_path,
+                "evidence": retained, "preparation_backup": preparation_backup,
+                "asset": asset.as_ref().map(|_| parent.path().join("source.bundle")),
+                "asset_sha256": asset.as_ref().map(PinnedAsset::sha256),
+            })).unwrap()).unwrap();
+            fs::set_permissions(&input, fs::Permissions::from_mode(0o600)).unwrap();
+            kill_native_start_windows(&root, &binary, &input);
+            let native = ChoiceNativeRecord::read_active_metadata(&state).unwrap();
+            assert_eq!(native.phase, ChoiceNativePhase::Ready);
+            assert_eq!(native.handoff, handoff);
+            assert!(ChoiceHandoffRecord::read_active_metadata(&state).is_err());
+            native.verify_retained_files().unwrap();
+            recover_activation_native_ready(
+                &native,
+                candidate,
+                inputs(),
+                Default::default(),
+                Default::default(),
+                i64::MAX / 2,
+            )
+            .unwrap();
+            start_activation_native(
+                &handoff,
+                candidate,
+                inputs(),
+                Default::default(),
+                Default::default(),
+                i64::MAX / 2,
+            )
+            .unwrap();
+            assert_reserved_choice_sql(&state, &fresh, &handoff);
+            assert_eq!(fs::read(&state).unwrap(), sql);
+            assert_eq!(
+                crate::rollback_runtime::candidate::tests::bytes(&index),
+                before
+            );
+            assert_eq!(
+                crate::rollback_runtime::candidate::tests::bytes(&handoff.prepared.candidate.path),
+                selected_before
+            );
+            assert_eq!(
+                crate::rollback_runtime::candidate::tests::bytes(&native_candidate),
+                target_before
+            );
+            assert!(coordinator.search_guard().is_err());
+            let replacement = parent.path().join("replacement-native-history");
+            let original = fs::read(&native.handoff_history_path).unwrap();
+            fs::write(&replacement, &original).unwrap();
+            fs::set_permissions(&replacement, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::rename(&replacement, &native.handoff_history_path).unwrap();
+            assert!(native.verify_retained_files().is_err());
+            assert!(
+                recover_activation_native_ready(
+                    &native,
+                    candidate,
+                    inputs(),
+                    Default::default(),
+                    Default::default(),
+                    i64::MAX / 2
+                )
+                .is_err()
+            );
+            assert_eq!(fs::read(&native.handoff_history_path).unwrap(), original);
+            assert_eq!(fs::read(&state).unwrap(), sql);
+        }
+        if !bound && !crash && !native_start {
             let sql = fs::read(&state).unwrap();
             let owner = transition::source::acquire_choice_recovery(&handoff).unwrap();
             owner
@@ -1017,8 +1186,13 @@ fn source_choice_case(bound: bool, handoff_case: bool, crash: bool) {
                     candidate,
                     Default::default(),
                     |inspection| {
-                        let proof =
-                            reopen(inspection, inputs(), &output, Default::default()).unwrap();
+                        let proof = reopen(
+                            inspection,
+                            inputs(),
+                            &handoff.prepared_path,
+                            Default::default(),
+                        )
+                        .unwrap();
                         let native = proof.retain_native_handoff(&handoff).unwrap();
                         assert_eq!(proof.retain_native_handoff(&handoff).unwrap(), native);
                         native.verify_retained_files().unwrap();

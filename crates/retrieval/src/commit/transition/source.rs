@@ -59,6 +59,14 @@ pub(crate) struct StagedChoiceHandoff {
     embedding: notion_knowledge_core::embedding::EmbeddingMetadata,
     native_limits: crate::chunks::CandidateLimits,
 }
+/// Holds the selected candidate lock until the native journal swap and the
+/// enclosing SQL transaction have both finished.
+pub(crate) struct StagedNativeStart {
+    pub(crate) record: crate::rollback_runtime::choice::ChoiceNativeRecord,
+    pub(crate) candidate_guard: Option<File>,
+    pub(crate) embedding: notion_knowledge_core::embedding::EmbeddingMetadata,
+    pub(crate) native_limits: crate::chunks::CandidateLimits,
+}
 fn operation(owner: &TransitionOwnership) -> Result<Vec<u8>, CommitError> {
     if owner.runtime.is_some() {
         owner.runtime_record()?.canonical_bytes()
@@ -343,7 +351,10 @@ impl TransitionOwnership {
 }
 
 mod choice;
-pub(crate) use choice::{acquire_choice_recovery, install_choice_handoff};
+pub(crate) use choice::{
+    acquire_choice_native_ready, acquire_choice_recovery, install_choice_handoff,
+    install_choice_native_ready,
+};
 pub(crate) fn validate_origin_activation(record: &TransitionRecord) -> Result<(), CommitError> {
     canonical(record).map(|_| ())
 }

@@ -54,6 +54,7 @@ enum JournalMode<'a> {
     Prepared,
     Completed(&'a Path),
     Choice(&'a super::choice::ChoiceHandoffRecord),
+    NativeReady(&'a super::choice::ChoiceNativeRecord),
 }
 impl<'pair> RuntimeTransitionOperator<'pair> {
     /// Reopen only an actual active version-two operation. This performs real
@@ -124,6 +125,9 @@ impl<'pair> RuntimeTransitionOperator<'pair> {
             }
             JournalMode::Choice(handoff) => {
                 crate::commit::transition::source::acquire_choice_recovery(handoff)
+            }
+            JournalMode::NativeReady(native) => {
+                crate::commit::transition::source::acquire_choice_native_ready(native)
             }
         }
         .map_err(err)?;
@@ -678,6 +682,156 @@ pub struct ChoiceRecoveryLimits {
 }
 
 impl RuntimeTransitionOperator<'_> {
+    /// Recover a native Ready record under the original runtime owner. This
+    /// performs actual pinned/native/SQL checks and advances no phase.
+    pub fn recover_choice_native_ready(
+        runtime: &PinnedRuntime,
+        asset: Option<&PinnedAsset>,
+        current: CurrentSource<'_>,
+        native: &super::choice::ChoiceNativeRecord,
+        inputs: super::choice::SelectionInputs<'_>,
+        limits: ChoiceRecoveryLimits,
+        now: i64,
+    ) -> Result<()> {
+        let super::choice::Origin::Runtime(origin) = &native.handoff.prepared.selection.origin
+        else {
+            return Err(RuntimeError);
+        };
+        let operator = RuntimeTransitionOperator::acquire(
+            runtime,
+            asset,
+            current,
+            origin,
+            limits.prepared,
+            now,
+            JournalMode::NativeReady(native),
+        )?;
+        operator.with_quarantined_source_inspection(now, limits.source, |inspection| {
+            inspection.require_reserved_handoff(&native.handoff)?;
+            let proof = super::choice::reopen(
+                inspection,
+                inputs,
+                &native.handoff.prepared_path,
+                limits.prepared,
+            )
+            .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+            if proof.metadata() != &native.handoff.prepared {
+                return Err(crate::commit::CommitError::BindingMismatch);
+            }
+            proof
+                .revalidate()
+                .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+            inspection.require_reserved_handoff(&native.handoff)?;
+            native
+                .verify_active()
+                .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+            native
+                .verify_retained_files()
+                .map_err(|_| crate::commit::CommitError::BindingMismatch)
+        })?;
+        let path =
+            crate::commit::transition::journal_path(&native.handoff.prepared.selection.state_path)
+                .map_err(err)?;
+        super::evidence::parent(&path)?.sync_all()?;
+        #[cfg(test)]
+        crate::commit::transition::transition_checkpoint(
+            &operator.owner,
+            "choice-native-journal-durable",
+        );
+        native.verify_active()?;
+        native.verify_retained_files()?;
+        Ok(())
+    }
+
+    /// Install the native Ready journal under the original runtime owner and
+    /// retain the selected candidate lock through SQL transaction completion.
+    pub fn start_choice_native(
+        runtime: &PinnedRuntime,
+        asset: Option<&PinnedAsset>,
+        current: CurrentSource<'_>,
+        handoff: &super::choice::ChoiceHandoffRecord,
+        inputs: super::choice::SelectionInputs<'_>,
+        limits: ChoiceRecoveryLimits,
+        now: i64,
+    ) -> Result<()> {
+        let super::choice::Origin::Runtime(origin) = &handoff.prepared.selection.origin else {
+            return Err(RuntimeError);
+        };
+        if let Ok(native) = super::choice::ChoiceNativeRecord::read_active_metadata(
+            &handoff.prepared.selection.state_path,
+        ) {
+            if native.handoff != *handoff {
+                return Err(RuntimeError);
+            }
+            return Self::recover_choice_native_ready(
+                runtime, asset, current, &native, inputs, limits, now,
+            );
+        }
+        let operator = RuntimeTransitionOperator::acquire(
+            runtime,
+            asset,
+            current,
+            origin,
+            limits.prepared,
+            now,
+            JournalMode::Choice(handoff),
+        )?;
+        let _staged = operator
+            .owner
+            .with_exclusive_sql(now, |transaction| {
+                let version = operator
+                    .verify_all(transaction)
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                let target = crate::commit::transition::source::TargetNativeContract {
+                    version,
+                    descriptor: operator.seed.prepared.candidate.prior.descriptor.clone(),
+                    pinned: Some((
+                        operator.runtime.sha256().into(),
+                        operator.asset.map(|value| value.sha256().into()),
+                    )),
+                };
+                let staged = crate::commit::transition::source::inspect(
+                    &operator.owner,
+                    transaction,
+                    &operator.source,
+                    &operator.embedding,
+                    target,
+                    limits.source,
+                    |inspection| {
+                        inspection.require_reserved_handoff(handoff)?;
+                        let proof = super::choice::reopen(
+                            inspection,
+                            inputs,
+                            &handoff.prepared_path,
+                            limits.prepared,
+                        )
+                        .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                        if proof.metadata() != &handoff.prepared {
+                            return Err(crate::commit::CommitError::BindingMismatch);
+                        }
+                        proof
+                            .stage_native_start(handoff)
+                            .map_err(|_| crate::commit::CommitError::BindingMismatch)
+                    },
+                )?;
+                operator
+                    .verify_all(transaction)
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                crate::commit::transition::source::install_choice_native_ready(
+                    &operator.owner,
+                    transaction,
+                    &staged,
+                    limits.source.sql,
+                )?;
+                operator
+                    .verify_all(transaction)
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                Ok(staged)
+            })
+            .map_err(err)?;
+        Ok(())
+    }
+
     /// Reserve a selected fresh authority while retaining the original runtime
     /// owner and exclusive SQL transaction. This does not publish serving SQL.
     pub fn reserve_choice_publication(

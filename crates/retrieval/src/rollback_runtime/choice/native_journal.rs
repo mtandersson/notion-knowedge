@@ -46,6 +46,24 @@ fn file_identity(file: &File) -> Result<RetainedFileIdentity> {
 }
 
 impl VerifiedPreparedChoice<'_, '_> {
+    pub(crate) fn stage_native_start(
+        &self,
+        handoff: &ChoiceHandoffRecord,
+    ) -> Result<crate::commit::transition::source::StagedNativeStart> {
+        let record = self.retain_native_handoff(handoff)?;
+        self.revalidate()?;
+        self.selection
+            .inspection
+            .require_reserved_handoff(handoff)
+            .map_err(|_| RuntimeError)?;
+        Ok(crate::commit::transition::source::StagedNativeStart {
+            record,
+            candidate_guard: self.guard.as_ref().map(File::try_clone).transpose()?,
+            embedding: self.selection.inspection.embedding().clone(),
+            native_limits: self.selection.limits.transfer.native,
+        })
+    }
+
     /// Durably retain the exact active handoff as a prerequisite for a future
     /// native journal. This does not replace the active journal or modify SQL
     /// or an index. The caller still owns the original exclusive transaction.
@@ -224,6 +242,13 @@ impl ChoiceNativeRecord {
         Ok(record)
     }
 
+    pub(crate) fn verify_active(&self) -> Result<()> {
+        if Self::read_active_metadata(&self.handoff.prepared.selection.state_path)? != *self {
+            return Err(RuntimeError);
+        }
+        Ok(())
+    }
+
     /// Derive one immutable history name from the exact v3 handoff bytes.
     pub fn handoff_history_path(handoff: &ChoiceHandoffRecord) -> Result<PathBuf> {
         let digest = format!("{:x}", Sha256::digest(handoff.canonical_bytes()?));
@@ -400,4 +425,130 @@ impl ChoiceNativeRecord {
         self.handoff.verify_retained_files()?;
         verify()
     }
+}
+
+/// Recover a Ready activation-origin native journal under the original owner.
+/// Trusted runtime/asset and candidate inputs are supplied by the caller;
+/// this read-only verification neither advances a phase nor enables serving.
+pub fn recover_activation_native_ready(
+    native: &ChoiceNativeRecord,
+    candidate: crate::chunks::TransitionCandidateInputs<'_>,
+    inputs: SelectionInputs<'_>,
+    limits: PreparedLimits,
+    capture_limits: crate::commit::transition::source::SourceCaptureLimits,
+    now: i64,
+) -> Result<()> {
+    if !matches!(
+        native.handoff.prepared.selection.origin,
+        Origin::Activation(_)
+    ) {
+        return Err(RuntimeError);
+    }
+    let owner = crate::commit::transition::source::acquire_choice_native_ready(native)
+        .map_err(|_| RuntimeError)?;
+    owner
+        .with_quarantined_source_inspection(now, candidate, capture_limits, |inspection| {
+            inspection.require_reserved_handoff(&native.handoff)?;
+            let proof = super::reopen(inspection, inputs, &native.handoff.prepared_path, limits)
+                .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+            if proof.metadata() != &native.handoff.prepared {
+                return Err(crate::commit::CommitError::BindingMismatch);
+            }
+            proof
+                .revalidate()
+                .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+            inspection.require_reserved_handoff(&native.handoff)?;
+            native
+                .verify_active()
+                .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+            native
+                .verify_retained_files()
+                .map_err(|_| crate::commit::CommitError::BindingMismatch)
+        })
+        .map_err(|_| RuntimeError)?;
+    let path =
+        crate::commit::transition::journal_path(&native.handoff.prepared.selection.state_path)
+            .map_err(|_| RuntimeError)?;
+    parent(&path)?.sync_all()?;
+    #[cfg(test)]
+    crate::commit::transition::transition_checkpoint(&owner, "choice-native-journal-durable");
+    native.verify_active()?;
+    native.verify_retained_files()?;
+    Ok(())
+}
+
+/// Replace a verified v3 handoff with the durable native Ready journal while
+/// retaining the original owner, selected candidate lock and exclusive SQL.
+/// An exact already-installed Ready journal is reverified on retry.
+pub fn start_activation_native(
+    handoff: &ChoiceHandoffRecord,
+    candidate: crate::chunks::TransitionCandidateInputs<'_>,
+    inputs: SelectionInputs<'_>,
+    limits: PreparedLimits,
+    capture_limits: crate::commit::transition::source::SourceCaptureLimits,
+    now: i64,
+) -> Result<()> {
+    if !matches!(handoff.prepared.selection.origin, Origin::Activation(_)) {
+        return Err(RuntimeError);
+    }
+    if let Ok(native) =
+        ChoiceNativeRecord::read_active_metadata(&handoff.prepared.selection.state_path)
+    {
+        if native.handoff != *handoff {
+            return Err(RuntimeError);
+        }
+        return recover_activation_native_ready(
+            &native,
+            candidate,
+            inputs,
+            limits,
+            capture_limits,
+            now,
+        );
+    }
+    let owner = crate::commit::transition::source::acquire_choice_recovery(handoff)
+        .map_err(|_| RuntimeError)?;
+    let _staged = owner
+        .with_exclusive_sql(now, |transaction| {
+            let verified =
+                crate::chunks::verify_transition_candidate(&owner, transaction, candidate)?;
+            let target = crate::commit::transition::source::TargetNativeContract {
+                version: verified.target_version(),
+                descriptor: crate::chunks::lexical_binding::runtime::RuntimeDescriptor::current(
+                    Some(candidate.dictionary),
+                )
+                .map_err(|_| crate::commit::CommitError::BindingMismatch)?,
+                pinned: None,
+            };
+            let staged = crate::commit::transition::source::inspect(
+                &owner,
+                transaction,
+                candidate.source,
+                candidate.embedding,
+                target,
+                capture_limits,
+                |inspection| {
+                    inspection.require_reserved_handoff(handoff)?;
+                    let proof = super::reopen(inspection, inputs, &handoff.prepared_path, limits)
+                        .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+                    if proof.metadata() != &handoff.prepared {
+                        return Err(crate::commit::CommitError::BindingMismatch);
+                    }
+                    proof
+                        .stage_native_start(handoff)
+                        .map_err(|_| crate::commit::CommitError::BindingMismatch)
+                },
+            )?;
+            crate::chunks::verify_transition_candidate(&owner, transaction, candidate)?;
+            crate::commit::transition::source::install_choice_native_ready(
+                &owner,
+                transaction,
+                &staged,
+                capture_limits.sql,
+            )?;
+            crate::chunks::verify_transition_candidate(&owner, transaction, candidate)?;
+            Ok(staged)
+        })
+        .map_err(|_| RuntimeError)?;
+    Ok(())
 }

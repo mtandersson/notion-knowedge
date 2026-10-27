@@ -242,6 +242,11 @@ jobs:
             shell: spike
             args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
           - suite: runtime-choices
+            name: runtime-choices-native-start
+            choice_group: native-start
+            shell: spike
+            args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
+          - suite: runtime-choices
             name: runtime-choices-bound-source-activation
             choice_group: bound-source
             choice_case: explicit_source_handoff_recovers_with_bound_runtime
@@ -340,6 +345,11 @@ jobs:
           NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_target_handoff_recovers_with_legacy_runtime --locked -- --ignored
           NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib explicit_source_handoff_recovers_after_killed_processes --locked -- --ignored
           NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_target_handoff_recovers_after_killed_processes --locked -- --ignored
+
+      - name: Test native Ready journal recovery
+        if: matrix.choice_group == 'native-start'
+        run: |
+          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib explicit_source_native_ready_recovers_after_killed_processes --locked -- --ignored
 
       - name: Fetch verified public lexical fixture
         if: startsWith(matrix.choice_group, 'bound-')
