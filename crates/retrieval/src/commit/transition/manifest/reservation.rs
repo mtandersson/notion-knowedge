@@ -169,10 +169,11 @@ mod tests {
         let tx = db.transaction().unwrap();
         let target = target();
         let limits = ManifestLimits {
-            rows: 4,
+            rows: 9,
             ..ManifestLimits::default()
         };
-        // Two schema objects and two original rows exhaust this budget.
+        // Two schema objects, five column-metadata rows and two original data
+        // rows exhaust this budget; the reservation adds one physical row.
         capture_sql_manifest(&tx, limits).unwrap();
         reserve(&tx, &target);
         assert!(capture_reservation_preimage(&tx, &target, limits).is_err());
