@@ -197,6 +197,26 @@ impl LexicalIndexBinding {
         }
         Ok(())
     }
+    /// Compare descriptive binding fields to a selected physical candidate.
+    /// This checks no live directory and does not authorize an index effect.
+    #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+    pub(crate) fn validate_selected_metadata(
+        &self,
+        embedding: &EmbeddingMetadata,
+        authority: &CommitBinding,
+        candidate: &super::runtime_builder::DirectoryIdentity,
+        snapshot_sha256: &str,
+    ) -> Result<(), ChunkTableError> {
+        self.validate_metadata()?;
+        self.validate_transfer_metadata(embedding, authority)?;
+        if self.device != candidate.device
+            || self.inode != candidate.inode
+            || self.source_snapshot_sha256 != snapshot_sha256
+        {
+            return Err(incompatible());
+        }
+        Ok(())
+    }
     /// A canonical transfer describes the current native source opaquely; a
     /// prior runtime must not interpret that source's backend or lexical plan.
     /// Only the shared canonical/embedding contract is interpreted.

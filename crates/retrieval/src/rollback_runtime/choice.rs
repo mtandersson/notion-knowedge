@@ -306,3 +306,6 @@ pub use handoff::{
 
 mod reservation;
 pub use reservation::{PublicationStartMetadata, reserve_activation_publication};
+
+mod native_journal;
+pub use native_journal::{ChoiceNativePhase, ChoiceNativeRecord};

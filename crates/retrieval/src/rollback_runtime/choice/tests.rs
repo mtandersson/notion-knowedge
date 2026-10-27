@@ -11,7 +11,11 @@ use crate::{
     },
 };
 use sha2::{Digest, Sha256};
-use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
+use std::{
+    fs,
+    os::unix::fs::{MetadataExt, PermissionsExt},
+    time::Duration,
+};
 
 struct HandoffChild(std::process::Child);
 impl Drop for HandoffChild {
@@ -617,6 +621,76 @@ fn source_choice_case(bound: bool, handoff_case: bool, crash: bool) {
                     ChoiceHandoffRecord::parse_metadata(&bytes).unwrap(),
                     handoff
                 );
+                // A native-phase description remains metadata: unsupported
+                // older readers refuse it, and phase/report mismatches fail.
+                let reservation = PublicationStartMetadata {
+                    version: 1,
+                    protocol: "explicit-choice-publication-start-v1".into(),
+                    handoff_sha256: format!("{:x}", Sha256::digest(&bytes)),
+                    desired_authority_json: handoff
+                        .prepared
+                        .selection
+                        .desired_authority_json
+                        .clone(),
+                    before: handoff.prepared.adoption.clone(),
+                };
+                let history_file = tempfile::NamedTempFile::new_in(parent.path()).unwrap();
+                let intent_file = tempfile::NamedTempFile::new_in(parent.path()).unwrap();
+                let identity = |metadata: fs::Metadata| RetainedFileIdentity {
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                    mtime: metadata.mtime(),
+                    mtime_nsec: metadata.mtime_nsec(),
+                    ctime: metadata.ctime(),
+                    ctime_nsec: metadata.ctime_nsec(),
+                };
+                let history_identity = identity(history_file.as_file().metadata().unwrap());
+                let intent_identity = identity(intent_file.as_file().metadata().unwrap());
+                let native = ChoiceNativeRecord {
+                    version: 4,
+                    protocol: "explicit-choice-native-v4".into(),
+                    phase: ChoiceNativePhase::Ready,
+                    handoff: handoff.clone(),
+                    reservation,
+                    handoff_history_path: ChoiceNativeRecord::handoff_history_path(&handoff)
+                        .unwrap(),
+                    handoff_history_identity: history_identity,
+                    reservation_identity: intent_identity,
+                    refenced: None,
+                };
+                let native_bytes = native.canonical_bytes().unwrap();
+                assert_eq!(
+                    ChoiceNativeRecord::parse_metadata(&native_bytes).unwrap(),
+                    native
+                );
+                assert!(ChoiceHandoffRecord::parse_metadata(&native_bytes).is_err());
+                assert!(
+                    transition::runtime_journal::RuntimeJournalRecord::parse_metadata(
+                        &native_bytes
+                    )
+                    .is_err()
+                );
+                assert!(
+                    serde_json::from_slice::<transition::TransitionRecord>(&native_bytes).is_err()
+                );
+                let mut forged = native.clone();
+                forged.phase = ChoiceNativePhase::TargetRefenced;
+                assert!(forged.canonical_bytes().is_err());
+                forged = native.clone();
+                forged.handoff_history_path = handoff.prepared_path.clone();
+                assert!(forged.canonical_bytes().is_err());
+                forged = native.clone();
+                forged.reservation_identity = forged.handoff_history_identity.clone();
+                assert!(forged.canonical_bytes().is_err());
+                if bound {
+                    forged = native.clone();
+                    forged.phase = ChoiceNativePhase::TargetRefenced;
+                    forged.refenced = Some(handoff.prepared.candidate_report.clone());
+                    assert!(
+                        forged.canonical_bytes().is_err(),
+                        "the old candidate fence is not the reserved authority"
+                    );
+                }
                 assert!(serde_json::from_slice::<transition::TransitionRecord>(&bytes).is_err());
                 assert!(
                     transition::runtime_journal::RuntimeJournalRecord::parse_metadata(&bytes)
