@@ -37,6 +37,10 @@
             packages = with pkgs; [ spikeToolchain pkg-config openssl protobuf python3 curl time ];
             RUST_BACKTRACE = "1";
           };
+          runtime-tests = pkgs.mkShellNoCC {
+            packages = [ pkgs.stdenv.cc.libc pkgs.stdenv.cc.cc.lib ];
+            RUST_BACKTRACE = "1";
+          };
           default = pkgs.mkShell {
             packages = with pkgs; [
               cargo

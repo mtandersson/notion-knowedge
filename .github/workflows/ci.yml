@@ -508,7 +508,7 @@ jobs:
           NK_LEXICAL_RUNTIME: ${{ runner.temp }}/runtime-choice/lexical-runtime
         run: |
           cd crates/retrieval
-          nix develop "$GITHUB_WORKSPACE#spike" --command "$RUNNER_TEMP/runtime-choice/retrieval-tests" "${{ matrix.choice_case }}" --ignored
+          nix develop "$GITHUB_WORKSPACE#runtime-tests" --command "$RUNNER_TEMP/runtime-choice/retrieval-tests" "${{ matrix.choice_case }}" --ignored
 
 
   build:
