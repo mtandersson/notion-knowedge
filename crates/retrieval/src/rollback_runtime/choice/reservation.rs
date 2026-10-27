@@ -29,7 +29,7 @@ pub struct PublicationStartMetadata {
     pub before: SqlManifest,
 }
 
-fn path(handoff: &ChoiceHandoffRecord) -> Result<PathBuf> {
+pub(super) fn path(handoff: &ChoiceHandoffRecord) -> Result<PathBuf> {
     let active = crate::commit::transition::journal_path(&handoff.prepared.selection.state_path)
         .map_err(|_| RuntimeError)?;
     let mut name = active.file_name().ok_or(RuntimeError)?.to_os_string();

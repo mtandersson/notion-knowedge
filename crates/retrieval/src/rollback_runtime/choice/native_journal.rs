@@ -4,8 +4,22 @@
 //! contents and the reservation intent have been durably retained. Native
 //! effects require fresh physical, SQL and selected-runtime verification.
 use super::*;
-use crate::rollback_runtime::source::SourceReport;
+use crate::rollback_runtime::{
+    evidence::{check_parent, parent},
+    source::SourceReport,
+};
 use sha2::{Digest, Sha256};
+use std::{
+    fs::{self, File},
+    io::Write,
+    os::{
+        fd::AsRawFd,
+        unix::{
+            ffi::OsStrExt,
+            fs::{MetadataExt, PermissionsExt},
+        },
+    },
+};
 
 const MAX_BYTES: usize = 4 << 20;
 const PROTOCOL: &str = "explicit-choice-native-v4";
@@ -17,6 +31,146 @@ pub enum ChoiceNativePhase {
     SourceRetained,
     TargetRefenced,
     TargetInstalled,
+}
+
+fn file_identity(file: &File) -> Result<RetainedFileIdentity> {
+    let metadata = file.metadata()?;
+    Ok(RetainedFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        mtime: metadata.mtime(),
+        mtime_nsec: metadata.mtime_nsec(),
+        ctime: metadata.ctime(),
+        ctime_nsec: metadata.ctime_nsec(),
+    })
+}
+
+impl VerifiedPreparedChoice<'_, '_> {
+    /// Durably retain the exact active handoff as a prerequisite for a future
+    /// native journal. This does not replace the active journal or modify SQL
+    /// or an index. The caller still owns the original exclusive transaction.
+    pub fn retain_native_handoff(
+        &self,
+        handoff: &ChoiceHandoffRecord,
+    ) -> Result<ChoiceNativeRecord> {
+        self.revalidate()?;
+        if self.metadata != handoff.prepared {
+            return Err(RuntimeError);
+        }
+        let inspection = self.selection.inspection;
+        inspection
+            .require_reserved_handoff(handoff)
+            .map_err(|_| RuntimeError)?;
+        handoff.verify_active()?;
+        handoff.verify_retained_files()?;
+        let reservation = PublicationStartMetadata::read(handoff)?;
+        let intent_bytes = reservation.canonical_bytes(handoff)?;
+        let intent_path = reservation::path(handoff)?;
+        let (intent_identity, intent_size, intent_sha) =
+            handoff::read_private(&parent(&intent_path)?, &intent_path, 131072)?;
+        if intent_size != intent_bytes.len() as u64
+            || intent_sha != format!("{:x}", Sha256::digest(&intent_bytes))
+        {
+            return Err(RuntimeError);
+        }
+        let history = ChoiceNativeRecord::handoff_history_path(handoff)?;
+        inspection
+            .choice_output(&history)
+            .map_err(|_| RuntimeError)?;
+        let directory = parent(&history)?;
+        let root = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+        let anchored = root.join(history.file_name().ok_or(RuntimeError)?);
+        let handoff_bytes = handoff.canonical_bytes()?;
+        let expected_sha = format!("{:x}", Sha256::digest(&handoff_bytes));
+        let make_record = |identity| ChoiceNativeRecord {
+            version: 4,
+            protocol: PROTOCOL.into(),
+            phase: ChoiceNativePhase::Ready,
+            handoff: handoff.clone(),
+            reservation: reservation.clone(),
+            handoff_history_path: history.clone(),
+            handoff_history_identity: identity,
+            reservation_identity: intent_identity.clone(),
+            refenced: None,
+        };
+        match fs::symlink_metadata(&anchored) {
+            Ok(_) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut temporary = tempfile::Builder::new()
+                    .prefix(".nk-choice-native-origin-")
+                    .permissions(fs::Permissions::from_mode(0o600))
+                    .tempfile_in(&root)?;
+                temporary.write_all(&handoff_bytes)?;
+                temporary.as_file().sync_all()?;
+                // Check all path and identity exclusions before publishing.
+                make_record(file_identity(temporary.as_file())?).canonical_bytes()?;
+                #[cfg(test)]
+                inspection.choice_checkpoint("choice-native-origin-staged");
+                self.revalidate()?;
+                inspection
+                    .require_reserved_handoff(handoff)
+                    .map_err(|_| RuntimeError)?;
+                handoff.verify_active()?;
+                handoff.verify_retained_files()?;
+                check_parent(&directory, &history)?;
+                let from = std::ffi::CString::new(
+                    temporary.path().file_name().ok_or(RuntimeError)?.as_bytes(),
+                )
+                .map_err(|_| RuntimeError)?;
+                let to =
+                    std::ffi::CString::new(history.file_name().ok_or(RuntimeError)?.as_bytes())
+                        .map_err(|_| RuntimeError)?;
+                // SAFETY: both names are single components under the retained private parent.
+                if unsafe {
+                    libc::renameat2(
+                        directory.as_raw_fd(),
+                        from.as_ptr(),
+                        directory.as_raw_fd(),
+                        to.as_ptr(),
+                        libc::RENAME_NOREPLACE,
+                    )
+                } != 0
+                {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+        #[cfg(test)]
+        inspection.choice_checkpoint("choice-native-origin-renamed");
+        check_parent(&directory, &history)?;
+        directory.sync_all()?;
+        let (history_identity, history_size, history_sha) =
+            handoff::read_private(&directory, &history, 2 << 20)?;
+        if history_size != handoff_bytes.len() as u64 || history_sha != expected_sha {
+            return Err(RuntimeError);
+        }
+        let record = make_record(history_identity);
+        record.canonical_bytes()?;
+        self.revalidate()?;
+        inspection
+            .require_reserved_handoff(handoff)
+            .map_err(|_| RuntimeError)?;
+        handoff.verify_active()?;
+        handoff.verify_retained_files()?;
+        let (current_history, size, sha) = handoff::read_private(&directory, &history, 2 << 20)?;
+        if current_history != record.handoff_history_identity
+            || size != history_size
+            || sha != history_sha
+        {
+            return Err(RuntimeError);
+        }
+        let (current_intent, size, sha) =
+            handoff::read_private(&parent(&intent_path)?, &intent_path, 131072)?;
+        if current_intent != intent_identity
+            || size != intent_size
+            || sha != intent_sha
+            || PublicationStartMetadata::read(handoff)? != reservation
+        {
+            return Err(RuntimeError);
+        }
+        Ok(record)
+    }
 }
 
 /// A bounded description of native work under the original quarantined owner.

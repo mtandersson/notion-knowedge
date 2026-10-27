@@ -202,6 +202,29 @@ pub(crate) struct ChoiceContext {
     pub highest_reserved_epoch: u64,
 }
 impl QuarantinedSourceInspection<'_> {
+    /// Confirm this exact handoff's fresh authority is already reserved under
+    /// the current original owner; a staged intent alone is insufficient.
+    pub(crate) fn require_reserved_handoff(
+        &self,
+        handoff: &crate::rollback_runtime::choice::ChoiceHandoffRecord,
+    ) -> Result<(), CommitError> {
+        self.revalidate()?;
+        if self.owner.choice_recovery.as_deref() != Some(handoff) {
+            return Err(CommitError::BindingMismatch);
+        }
+        let desired = CommitBinding::parse_retained(
+            handoff.prepared.selection.desired_authority_json.as_bytes(),
+        )?;
+        if self
+            .owner
+            .reserved_choice(self.transaction, self.limits.sql)?
+            != Some(desired)
+        {
+            return Err(CommitError::BindingMismatch);
+        }
+        self.revalidate()
+    }
+
     /// Identity of the immutable choice SQL preimage, not a hash of the live
     /// database after reservation. The complete logical delta is checked first.
     pub(crate) fn choice_operational_preimage(

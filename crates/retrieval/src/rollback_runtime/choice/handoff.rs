@@ -245,7 +245,7 @@ fn anchored(directory: &File, path: &Path) -> Result<PathBuf> {
     )
 }
 
-fn read_private(
+pub(super) fn read_private(
     directory: &File,
     path: &Path,
     max: u64,

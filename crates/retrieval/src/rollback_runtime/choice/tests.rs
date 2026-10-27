@@ -1005,5 +1005,46 @@ fn source_choice_case(bound: bool, handoff_case: bool, crash: bool) {
             before
         );
         assert!(coordinator.search_guard().is_err());
+        drop(tx);
+        drop(db);
+        if !bound && !crash {
+            let sql = fs::read(&state).unwrap();
+            let owner = transition::source::acquire_choice_recovery(&handoff).unwrap();
+            owner
+                .with_quarantined_source_inspection(
+                    i64::MAX / 2,
+                    candidate,
+                    Default::default(),
+                    |inspection| {
+                        let proof =
+                            reopen(inspection, inputs(), &output, Default::default()).unwrap();
+                        let native = proof.retain_native_handoff(&handoff).unwrap();
+                        assert_eq!(proof.retain_native_handoff(&handoff).unwrap(), native);
+                        assert_eq!(
+                            fs::read(&native.handoff_history_path).unwrap(),
+                            handoff.canonical_bytes().unwrap()
+                        );
+                        assert_eq!(
+                            ChoiceHandoffRecord::read_active_metadata(&state).unwrap(),
+                            handoff
+                        );
+                        fs::write(&native.handoff_history_path, b"corrupt retained handoff")
+                            .unwrap();
+                        assert!(proof.retain_native_handoff(&handoff).is_err());
+                        assert_eq!(
+                            fs::read(&native.handoff_history_path).unwrap(),
+                            b"corrupt retained handoff"
+                        );
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            assert_eq!(fs::read(&state).unwrap(), sql);
+            assert_eq!(
+                crate::rollback_runtime::candidate::tests::bytes(&index),
+                before
+            );
+            assert!(coordinator.search_guard().is_err());
+        }
     }
 }
