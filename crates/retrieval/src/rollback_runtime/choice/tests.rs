@@ -690,6 +690,41 @@ fn source_choice_case(bound: bool, handoff_case: bool, crash: bool) {
                 i64::MAX / 2,
             )
             .unwrap();
+            if !bound {
+                let reservation_owner =
+                    transition::source::acquire_choice_recovery(&handoff).unwrap();
+                reservation_owner
+                    .with_quarantined_source_inspection(
+                        i64::MAX / 2,
+                        candidate,
+                        Default::default(),
+                        |inspection| {
+                            let proof = reopen(
+                                inspection,
+                                SelectionInputs {
+                                    choice: Choice::OriginalSource,
+                                    runtime: &runtime,
+                                    asset: asset.as_ref(),
+                                    source_evidence: Some(&retained),
+                                    desired: &fresh,
+                                },
+                                &output,
+                                Default::default(),
+                            )
+                            .unwrap();
+                            let intent = proof.retain_publication_start(&handoff).unwrap();
+                            assert_eq!(intent.before, proof.metadata().adoption);
+                            assert_eq!(PublicationStartMetadata::read(&handoff).unwrap(), intent);
+                            assert_eq!(proof.retain_publication_start(&handoff).unwrap(), intent);
+                            let mut forged = intent;
+                            forged.desired_authority_json =
+                                serde_json::to_string(&binding).unwrap();
+                            assert!(forged.canonical_bytes(&handoff).is_err());
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+            }
         }
     }
     assert_eq!(

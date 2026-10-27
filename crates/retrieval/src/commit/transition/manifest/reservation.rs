@@ -173,4 +173,24 @@ mod tests {
         reserve(&tx, &target);
         assert!(capture_reservation_preimage(&tx, &target, limits).is_err());
     }
+
+    #[test]
+    fn reservation_preimage_rejects_duplicate_exact_rows_and_retains_unrelated_reservations() {
+        let mut db = database();
+        let tx = db.transaction().unwrap();
+        let target = target();
+        let before = capture_sql_manifest(&tx, ManifestLimits::default()).unwrap();
+        reserve(&tx, &target);
+        tx.execute(
+            "INSERT INTO index_commit_generations VALUES('unrelated','scope',3)",
+            [],
+        )
+        .unwrap();
+        assert_ne!(
+            capture_reservation_preimage(&tx, &target, ManifestLimits::default()).unwrap(),
+            before
+        );
+        reserve(&tx, &target);
+        assert!(capture_reservation_preimage(&tx, &target, ManifestLimits::default()).is_err());
+    }
 }

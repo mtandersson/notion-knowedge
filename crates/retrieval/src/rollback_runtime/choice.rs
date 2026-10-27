@@ -303,3 +303,6 @@ mod handoff;
 pub use handoff::{
     ChoiceHandoffRecord, HandoffPhase, RetainedFileIdentity, recover_activation_handoff,
 };
+
+mod reservation;
+pub use reservation::PublicationStartMetadata;
