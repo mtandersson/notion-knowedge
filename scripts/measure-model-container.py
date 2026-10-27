@@ -49,6 +49,7 @@ def clean_checkout(root):
 
 
 def snapshot_probe(probe, evidence, expected, source_expected):
+    private(evidence)
     source = ROOT / 'deploy/production/measurement-probe.c'
     require(re.fullmatch('[0-9a-f]{64}', expected) and re.fullmatch('[0-9a-f]{64}', source_expected),
             'Explicit operator source/executable digest attestation required')
@@ -67,7 +68,9 @@ def snapshot_probe(probe, evidence, expected, source_expected):
     target = evidence / 'measurement-probe'
     with target.open('xb') as output:
         output.write(payload)
-    target.chmod(0o500)
+    # The bind-mounted executable must be readable/executable by UID 65532.
+    # Its operator-private parent protects it on the host; no user can write it.
+    target.chmod(0o555)
     return target
 
 
@@ -164,9 +167,10 @@ class Runner:
 
     def verify_probe(self):
         if hasattr(self.args, 'probe_sha256'):
+            private(self.args.probe.parent)
             info = self.args.probe.stat()
             require(self.args.probe.resolve() == self.args.probe and info.st_uid == os.getuid() and
-                    info.st_mode & 0o777 == 0o500 and 0 < info.st_size <= 1048576, 'Private probe snapshot protection changed')
+                    info.st_mode & 0o777 == 0o555 and 0 < info.st_size <= 1048576, 'Private probe snapshot protection changed')
             require(hashlib.sha256(self.args.probe.read_bytes()).hexdigest() == self.args.probe_sha256,
                     'Private probe snapshot changed')
 

@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
+import uuid
 from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location('measurement', Path(__file__).with_name('measure-model-container.py'))
@@ -266,13 +267,55 @@ for line in sys.stdin:
         with self.assertRaises(ValueError):m.snapshot_probe(probe,evidence,expected,source)
         probe.chmod(0o700)
         snapshot=m.snapshot_probe(probe,evidence,expected,source)
-        self.assertEqual(snapshot.stat().st_mode&0o777,0o500)
+        self.assertEqual(snapshot.stat().st_mode&0o777,0o555)
         self.runner.args.probe=snapshot;self.runner.args.probe_sha256=expected
         self.runner.verify_probe()
         probe.write_bytes(b'changed original')
         self.runner.verify_probe()
+        evidence.chmod(0o755)
+        with self.assertRaisesRegex(ValueError,'private'):self.runner.verify_probe()
+        evidence.chmod(0o700)
+        snapshot.chmod(0o755)
+        with self.assertRaisesRegex(ValueError,'protection'):self.runner.verify_probe()
         snapshot.chmod(0o700);snapshot.write_bytes(b'changed snapshot')
+        snapshot.chmod(0o555)
         with self.assertRaises(ValueError):self.runner.verify_probe()
+
+    @unittest.skipUnless(os.environ.get('NK_MEASUREMENT_PROBE_DOCKER_TEST') == '1' and
+                         platform.system() == 'Linux' and platform.machine() == 'x86_64' and shutil.which('cc'),
+                         'requires explicit opt-in, preprovisioned helper image and Linux compiler')
+    def test_nonroot_container_executes_the_protected_snapshot(self):
+        binary=self.path/'compiled-probe'
+        subprocess.run(['cc','-nostdlib','-static','-ffreestanding','-fno-builtin','-fno-stack-protector','-O2',
+                        str(m.ROOT/'deploy/production/measurement-probe.c'),'-o',str(binary)],
+                       check=True,capture_output=True,timeout=30)
+        evidence=self.path/'evidence';evidence.mkdir(mode=0o700)
+        expected=hashlib.sha256(binary.read_bytes()).hexdigest()
+        source=hashlib.sha256((m.ROOT/'deploy/production/measurement-probe.c').read_bytes()).hexdigest()
+        snapshot=m.snapshot_probe(binary,evidence,expected,source)
+        small=dict(POLICY,cpus=.25,memory_bytes=128*1024**2,pids=32,nofile=256,tmp_bytes=16*1024**2)
+        args=SimpleNamespace(duration=60,evidence_bytes=65536,interval=.5,
+                             stop_available_bytes=256*1024**2,stop_psi=2,
+                             probe=snapshot,probe_sha256=expected)
+        runner=m.Runner(args,small,evidence,m.runtime.docker)
+        name='nk-probe-permissions-'+uuid.uuid4().hex
+        runner.models.add(name)
+        self.addCleanup(lambda:m.runtime.docker('rm','--force',name,check=False,capture_output=True,timeout=10))
+        mounts=['--mount',f'type=bind,src={snapshot},dst=/measurement-probe,readonly']
+        for part in ('index','state'):
+            directory=self.path/part;directory.mkdir(mode=0o755)
+            mounts.extend(['--mount',f'type=bind,src={directory},dst=/var/lib/notion-knowledge/{part},readonly'])
+        result=runner.call('run','--rm','--name',name,'--read-only','--network','none',
+                          '--user','65532:65532','--cap-drop=ALL','--security-opt=no-new-privileges',
+                          '--tmpfs','/tmp:rw,nosuid,nodev,noexec,size=16777216,uid=65532,gid=65532',
+                          *mounts,'--entrypoint','/measurement-probe',m.runtime.PYTHON_IMAGE,capture_output=True)
+        self.assertRegex(result.stdout,r'\nUid:\s+65532\s+65532\s+65532\s+65532')
+        counters=m.probe_output(result.stdout)
+        self.assertEqual(counters['process.nofile'],[256,256])
+        self.assertEqual(counters['memory.max'],128*1024**2)
+        self.assertEqual(counters['pids.max'],32)
+        self.assertEqual(evidence.stat().st_mode&0o777,0o700)
+        runner.verify_probe()
 
 
     def test_reader_deadline_stops_owned_container_and_reaps_cli(self):

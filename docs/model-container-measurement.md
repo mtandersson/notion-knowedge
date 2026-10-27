@@ -63,8 +63,10 @@ Record SHA-256 of both the reviewed `measurement-probe.c` and the executable.
 source into that artifact. These supplied hashes are a trusted operator
 attestation, **not** cryptographic proof of arbitrary compiler provenance. The
 artifact must be operator-owned, executable, at most1MiB and not group/world
-writable. The runner checks both hashes, snapshots exact bytes under private
-evidence mode0500 and binds only that snapshot. It rechecks protected snapshot
+writable. The runner checks both hashes and snapshots exact bytes as mode0555
+inside its operator-owned mode0700 evidence directory. This lets the non-root
+container user execute the read-only bind mount while the host directory remains
+private and the snapshot has no write bits. It rechecks the private parent and protected snapshot
 identity before container launch and each sampler exec; replacing the original
 artifact cannot change an admitted run. No implicit compilation is introduced.
 
@@ -165,6 +167,22 @@ Ordinary CI needs no model, Docker, network or credentials:
 python3 scripts/test-measure-model-container.py
 python3 scripts/test-production-resources.py
 ```
+
+To verify the non-root sampler boundary against an explicitly selected private
+daemon with the pinned helper image already provisioned, run from the Nix shell:
+
+```sh
+DOCKER_HOST=unix:///absolute/private/docker.sock \
+DOCKER_CONFIG=/absolute/private/client \
+NK_MEASUREMENT_PROBE_DOCKER_TEST=1 \
+python3 scripts/test-measure-model-container.py \
+  MeasurementContracts.test_nonroot_container_executes_the_protected_snapshot
+```
+
+This test compiles the reviewed static sampler and executes its protected
+snapshot as UID65532 in a read-only, network-isolated helper with CPU0.25,
+128MiB RAM, no additional swap,32PIDs and256FDs. It never pulls an image or loads
+the model, and removes only its uniquely named helper container.
 
 These contracts establish wrapper admission, limits, sampling parsing and safe
 failure retention. Actual model/container execution is a separate opt-in gate;
