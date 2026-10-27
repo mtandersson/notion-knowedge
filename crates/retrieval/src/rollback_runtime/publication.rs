@@ -678,6 +678,49 @@ pub struct ChoiceRecoveryLimits {
 }
 
 impl RuntimeTransitionOperator<'_> {
+    /// Reserve a selected fresh authority while retaining the original runtime
+    /// owner and exclusive SQL transaction. This does not publish serving SQL.
+    pub fn reserve_choice_publication(
+        runtime: &PinnedRuntime,
+        asset: Option<&PinnedAsset>,
+        current: CurrentSource<'_>,
+        handoff: &super::choice::ChoiceHandoffRecord,
+        inputs: super::choice::SelectionInputs<'_>,
+        limits: ChoiceRecoveryLimits,
+        now: i64,
+    ) -> Result<()> {
+        let super::choice::Origin::Runtime(origin) = &handoff.prepared.selection.origin else {
+            return Err(RuntimeError);
+        };
+        let operator = RuntimeTransitionOperator::acquire(
+            runtime,
+            asset,
+            current,
+            origin,
+            limits.prepared,
+            now,
+            JournalMode::Choice(handoff),
+        )?;
+        operator.with_quarantined_source_inspection(now, limits.source, |inspection| {
+            let proof =
+                super::choice::reopen(inspection, inputs, &handoff.prepared_path, limits.prepared)
+                    .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+            if proof.metadata() != &handoff.prepared {
+                return Err(crate::commit::CommitError::BindingMismatch);
+            }
+            proof
+                .reserve_publication_authority(handoff)
+                .map(|_| ())
+                .map_err(|_| crate::commit::CommitError::BindingMismatch)
+        })?;
+        #[cfg(test)]
+        crate::commit::transition::transition_checkpoint(
+            &operator.owner,
+            "choice-reservation-committed",
+        );
+        Ok(())
+    }
+
     /// Reacquire and verify a v2-origin handoff with trusted current and
     /// selected runtime inputs. No publication capability escapes this check.
     pub fn recover_choice_handoff(

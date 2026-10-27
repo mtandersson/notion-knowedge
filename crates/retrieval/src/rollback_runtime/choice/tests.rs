@@ -63,7 +63,12 @@ fn source_handoff_process_child() {
         desired: &desired,
     };
     if let Ok(handoff) = ChoiceHandoffRecord::read_active_metadata(&state) {
-        recover_activation_handoff(
+        let action = if std::env::var_os("NK_CHOICE_RESERVE").is_some() {
+            reserve_activation_publication
+        } else {
+            recover_activation_handoff
+        };
+        action(
             &handoff,
             candidate,
             inputs(),
@@ -749,4 +754,51 @@ fn source_choice_case(bound: bool, handoff_case: bool, crash: bool) {
         !reserved,
         "read-only selection must not reserve its fresh plan"
     );
+    drop(db);
+    if handoff_case {
+        let handoff = ChoiceHandoffRecord::read_active_metadata(&state).unwrap();
+        let inputs = || SelectionInputs {
+            choice: Choice::OriginalSource,
+            runtime: &runtime,
+            asset: asset.as_ref(),
+            source_evidence: Some(&retained),
+            desired: &fresh,
+        };
+        for _ in 0..2 {
+            reserve_activation_publication(
+                &handoff,
+                candidate,
+                inputs(),
+                Default::default(),
+                Default::default(),
+                i64::MAX / 2,
+            )
+            .unwrap();
+        }
+        recover_activation_handoff(
+            &handoff,
+            candidate,
+            inputs(),
+            Default::default(),
+            Default::default(),
+            i64::MAX / 2,
+        )
+        .unwrap();
+        let mut db = rusqlite::Connection::open(&state).unwrap();
+        let tx = db.transaction().unwrap();
+        assert_eq!(
+            transition::manifest::reservation::capture_reservation_preimage(
+                &tx,
+                &fresh,
+                Default::default()
+            )
+            .unwrap(),
+            handoff.prepared.adoption
+        );
+        assert_eq!(
+            crate::rollback_runtime::candidate::tests::bytes(&index),
+            before
+        );
+        assert!(coordinator.search_guard().is_err());
+    }
 }

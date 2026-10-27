@@ -51,6 +51,14 @@ fn path(handoff: &ChoiceHandoffRecord) -> Result<PathBuf> {
 }
 
 impl PublicationStartMetadata {
+    pub(crate) fn read_if_present(handoff: &ChoiceHandoffRecord) -> Result<Option<Self>> {
+        match fs::symlink_metadata(path(handoff)?) {
+            Ok(_) => Self::read(handoff).map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub fn canonical_bytes(&self, handoff: &ChoiceHandoffRecord) -> Result<Vec<u8>> {
         if self.version != 1
             || self.protocol != "explicit-choice-publication-start-v1"
@@ -120,6 +128,27 @@ impl PublicationStartMetadata {
 }
 
 impl VerifiedPreparedChoice<'_, '_> {
+    /// Reserve the selected fresh tuple in the enclosing original owner's SQL
+    /// transaction. Exact retries verify the committed tuple and full preimage.
+    /// Serving remains quarantined; native data and operational work are intact.
+    pub fn reserve_publication_authority(
+        &self,
+        handoff: &ChoiceHandoffRecord,
+    ) -> Result<PublicationStartMetadata> {
+        let intent = self.retain_publication_start(handoff)?;
+        self.selection
+            .inspection
+            .reserve_choice_authority(handoff)
+            .map_err(|_| RuntimeError)?;
+        self.revalidate()?;
+        #[cfg(test)]
+        self.selection
+            .inspection
+            .reservation_checkpoint("choice-reservation-before-commit")
+            .map_err(|_| RuntimeError)?;
+        Ok(intent)
+    }
+
     /// Retain an immutable exact intent under the freshly verified original
     /// owner. This does not reserve SQL, change native data, or enable serving.
     pub fn retain_publication_start(
@@ -160,6 +189,10 @@ impl VerifiedPreparedChoice<'_, '_> {
                     .tempfile_in(root)?;
                 stage.write_all(&intent.canonical_bytes(handoff)?)?;
                 stage.as_file().sync_all()?;
+                #[cfg(test)]
+                self.selection
+                    .inspection
+                    .choice_checkpoint("choice-publication-start-staged");
                 self.revalidate()?;
                 handoff.verify_active()?;
                 handoff.verify_retained_files()?;
@@ -182,15 +215,56 @@ impl VerifiedPreparedChoice<'_, '_> {
                 {
                     return Err(std::io::Error::last_os_error().into());
                 }
+                #[cfg(test)]
+                self.selection
+                    .inspection
+                    .choice_checkpoint("choice-publication-start-renamed");
             }
             Err(error) => return Err(error.into()),
         }
         check_parent(&directory, &path)?;
         directory.sync_all()?;
+        #[cfg(test)]
+        self.selection
+            .inspection
+            .choice_checkpoint("choice-publication-start-durable");
         self.revalidate()?;
         if PublicationStartMetadata::read(handoff)? != intent {
             return Err(RuntimeError);
         }
         Ok(intent)
     }
+}
+
+/// Reserve under a freshly reacquired activation-origin owner. No publication
+/// capability escapes, and the original serving tuple stays quarantined.
+pub fn reserve_activation_publication(
+    handoff: &ChoiceHandoffRecord,
+    candidate: crate::chunks::TransitionCandidateInputs<'_>,
+    inputs: SelectionInputs<'_>,
+    limits: PreparedLimits,
+    capture_limits: crate::commit::transition::source::SourceCaptureLimits,
+    now: i64,
+) -> Result<()> {
+    if !matches!(handoff.prepared.selection.origin, Origin::Activation(_)) {
+        return Err(RuntimeError);
+    }
+    let owner = crate::commit::transition::source::acquire_choice_recovery(handoff)
+        .map_err(|_| RuntimeError)?;
+    owner
+        .with_quarantined_source_inspection(now, candidate, capture_limits, |inspection| {
+            let proof = super::reopen(inspection, inputs, &handoff.prepared_path, limits)
+                .map_err(|_| crate::commit::CommitError::BindingMismatch)?;
+            if proof.metadata() != &handoff.prepared {
+                return Err(crate::commit::CommitError::BindingMismatch);
+            }
+            proof
+                .reserve_publication_authority(handoff)
+                .map(|_| ())
+                .map_err(|_| crate::commit::CommitError::BindingMismatch)
+        })
+        .map_err(|_| RuntimeError)?;
+    #[cfg(test)]
+    crate::commit::transition::transition_checkpoint(&owner, "choice-reservation-committed");
+    Ok(())
 }
