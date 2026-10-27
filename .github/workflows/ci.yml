@@ -489,9 +489,9 @@ jobs:
         if: matrix.choice_group == 'prepared'
         run: |
           cd crates/retrieval
-          NK_LEXICAL_RUNTIME="$RUNNER_TEMP/runtime-choice/lexical-runtime" nix develop .#spike --command "$RUNNER_TEMP/runtime-choice/retrieval-tests" explicit_source_selection_verifies_latest_rows_and_preserves_quarantine --ignored
-          NK_LEXICAL_RUNTIME="$RUNNER_TEMP/runtime-choice/lexical-runtime" nix develop .#spike --command "$RUNNER_TEMP/runtime-choice/retrieval-tests" quarantined_choice_prepared_target_legacy_preserves_source_and_sql --ignored
-          NK_LEXICAL_RUNTIME="$RUNNER_TEMP/runtime-choice/lexical-runtime" nix develop .#spike --command "$RUNNER_TEMP/runtime-choice/retrieval-tests" quarantined_choice_prepared_record_recovers_after_killed_processes --ignored
+          NK_LEXICAL_RUNTIME="$RUNNER_TEMP/runtime-choice/lexical-runtime" nix develop "$GITHUB_WORKSPACE#runtime-tests" --command "$RUNNER_TEMP/runtime-choice/retrieval-tests" explicit_source_selection_verifies_latest_rows_and_preserves_quarantine --ignored
+          NK_LEXICAL_RUNTIME="$RUNNER_TEMP/runtime-choice/lexical-runtime" nix develop "$GITHUB_WORKSPACE#runtime-tests" --command "$RUNNER_TEMP/runtime-choice/retrieval-tests" quarantined_choice_prepared_target_legacy_preserves_source_and_sql --ignored
+          NK_LEXICAL_RUNTIME="$RUNNER_TEMP/runtime-choice/lexical-runtime" nix develop "$GITHUB_WORKSPACE#runtime-tests" --command "$RUNNER_TEMP/runtime-choice/retrieval-tests" quarantined_choice_prepared_record_recovers_after_killed_processes --ignored
 
       - name: Fetch verified public lexical fixture
         if: startsWith(matrix.choice_group, 'bound-') || matrix.choice_group == 'native-start-bound'
