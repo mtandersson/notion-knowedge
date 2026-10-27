@@ -6,6 +6,7 @@ use super::*;
 use rusqlite::{Row, types::ValueRef};
 use sha2::{Digest, Sha256};
 pub mod comparison;
+pub mod reservation;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ManifestLimits {

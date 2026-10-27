@@ -39,6 +39,7 @@ struct Context<'a> {
     state_inode: String,
     active: Option<ActivePlan>,
     reserved: Cell<u8>,
+    choice: Option<CommitBinding>,
 }
 
 fn index(columns: &[String], name: &str) -> Result<usize, CommitError> {
@@ -235,6 +236,7 @@ impl<'a> Context<'a> {
             state_inode: record.state_inode.to_string(),
             active,
             reserved: Cell::new(0),
+            choice: None,
         })
     }
 
@@ -281,6 +283,22 @@ impl Normalizer for Context<'_> {
             }
             let generation = text(row, columns, "generation")?;
             let epoch = integer(row, columns, "epoch")?;
+            if let Some(choice) = &self.choice
+                && (generation == choice.generation()
+                    || epoch
+                        == i64::try_from(choice.epoch()).map_err(|_| CommitError::InvalidInput)?)
+            {
+                if generation != choice.generation()
+                    || text(row, columns, "scope")? != choice.scope()
+                    || epoch
+                        != i64::try_from(choice.epoch()).map_err(|_| CommitError::InvalidInput)?
+                    || self.reserved.get() & 4 != 0
+                {
+                    return Err(CommitError::BindingMismatch);
+                }
+                self.reserved.set(self.reserved.get() | 4);
+                return Ok(false);
+            }
             let q_epoch = i64::try_from(self.record.quarantine_epoch)
                 .map_err(|_| CommitError::InvalidInput)?;
             if generation == self.record.quarantine_generation
@@ -436,6 +454,8 @@ impl Normalizer for Context<'_> {
         if table == "index_commit_generations" {
             let (count, mask) = if self.stage == ComparisonStage::Prepared {
                 (0, 0)
+            } else if self.choice.is_some() {
+                (3, 7)
             } else {
                 (2, 3)
             };
@@ -528,6 +548,10 @@ pub fn verify_backup_comparison(
         }
         context.stage = stage;
         context.reserved.set(0);
+        #[cfg(all(feature = "local-lancedb", target_os = "linux"))]
+        {
+            context.choice = owner.reserved_choice(transaction, input.limits)?;
+        }
         let actual = capture_normalized(transaction, input.limits, &context)?;
         backup_guard(&record, file, backup)?;
         owner.validate_owned_transaction(transaction)?;

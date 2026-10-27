@@ -9,6 +9,41 @@ use std::os::{
     unix::{ffi::OsStrExt, fs::PermissionsExt},
 };
 
+impl TransitionOwnership {
+    /// Only the original choice owner may account for the one reserved tuple.
+    /// The complete remaining SQL must match the freshly verified intent.
+    pub(crate) fn reserved_choice(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+        limits: manifest::ManifestLimits,
+    ) -> Result<Option<CommitBinding>, CommitError> {
+        let Some(handoff) = self.choice_recovery.as_deref() else {
+            return Ok(None);
+        };
+        let Some(intent) =
+            crate::rollback_runtime::choice::PublicationStartMetadata::read_if_present(handoff)
+                .map_err(|_| CommitError::BindingMismatch)?
+        else {
+            return Ok(None);
+        };
+        let target = CommitBinding::parse_retained(intent.desired_authority_json.as_bytes())?;
+        let present: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM index_commit_generations WHERE generation=?1 OR epoch=?2)",
+            params![target.generation(), i64::try_from(target.epoch()).map_err(|_| CommitError::InvalidInput)?],
+            |row| row.get(0),
+        ).map_err(sql)?;
+        let actual = if present {
+            manifest::reservation::capture_reservation_preimage(transaction, &target, limits)?
+        } else {
+            manifest::capture_sql_manifest(transaction, limits)?
+        };
+        if actual != intent.before {
+            return Err(CommitError::BindingMismatch);
+        }
+        Ok(present.then_some(target))
+    }
+}
+
 /// Recover physical locks only. The returned owner stays crate-private and
 /// must be used solely within an inspection that proves SQL and native state.
 pub(crate) fn acquire_choice_recovery(
@@ -167,6 +202,96 @@ pub(crate) struct ChoiceContext {
     pub highest_reserved_epoch: u64,
 }
 impl QuarantinedSourceInspection<'_> {
+    /// Identity of the immutable choice SQL preimage, not a hash of the live
+    /// database after reservation. The complete logical delta is checked first.
+    pub(crate) fn choice_operational_preimage(
+        &self,
+        bytes: u64,
+    ) -> Result<OfflineBackup, CommitError> {
+        self.revalidate()?;
+        if self
+            .owner
+            .reserved_choice(self.transaction, self.limits.sql)?
+            .is_some()
+        {
+            let handoff = self
+                .owner
+                .choice_recovery
+                .as_deref()
+                .ok_or(CommitError::Conflict)?;
+            let expected = &handoff.prepared.selection.operational;
+            if bytes == 0 || expected.bytes > bytes || handoff.prepared.backup != *expected {
+                return Err(CommitError::InvalidInput);
+            }
+            expected.verify(&handoff.prepared.backup_path)?;
+            self.revalidate()?;
+            return Ok(expected.clone());
+        }
+        self.state_snapshot(bytes)
+    }
+
+    pub(crate) fn reserve_choice_authority(
+        &self,
+        handoff: &crate::rollback_runtime::choice::ChoiceHandoffRecord,
+        candidate_guard: Option<File>,
+    ) -> Result<(), CommitError> {
+        self.revalidate()?;
+        if self.owner.choice_recovery.as_deref() != Some(handoff) {
+            return Err(CommitError::BindingMismatch);
+        }
+        if handoff.prepared.built.is_some() != candidate_guard.is_some() {
+            return Err(CommitError::BindingMismatch);
+        }
+        {
+            let mut retained = self.owner.choice_candidate_guard.borrow_mut();
+            if let (Some(previous), Some(next)) = (retained.as_ref(), candidate_guard.as_ref())
+                && Identity::file(previous)? != Identity::file(next)?
+            {
+                return Err(CommitError::BindingMismatch);
+            }
+            if retained.is_none() {
+                *retained = candidate_guard;
+            }
+        }
+        self.revalidate()?;
+        let target = CommitBinding::parse_retained(
+            handoff.prepared.selection.desired_authority_json.as_bytes(),
+        )?;
+        self.validate_choice_fence(&target)?;
+        if self
+            .owner
+            .reserved_choice(self.transaction, self.limits.sql)?
+            .is_none()
+        {
+            // The durable exact intent must precede the first SQL effect.
+            crate::rollback_runtime::choice::PublicationStartMetadata::read(handoff)
+                .map_err(|_| CommitError::BindingMismatch)?;
+            self.transaction
+                .execute(
+                    "INSERT INTO index_commit_generations VALUES(?1,?2,?3)",
+                    params![
+                        target.generation(),
+                        target.scope(),
+                        i64::try_from(target.epoch()).map_err(|_| CommitError::InvalidInput)?
+                    ],
+                )
+                .map_err(sql)?;
+        }
+        if self
+            .owner
+            .reserved_choice(self.transaction, self.limits.sql)?
+            != Some(target)
+        {
+            return Err(CommitError::BindingMismatch);
+        }
+        self.revalidate()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reservation_checkpoint(&self, phase: &str) -> Result<(), CommitError> {
+        super::super::sql_checkpoint(self.owner, self.transaction, phase)
+    }
+
     #[cfg(test)]
     pub(crate) fn choice_checkpoint(&self, phase: &str) {
         transition_checkpoint(self.owner, phase);
@@ -267,11 +392,19 @@ impl QuarantinedSourceInspection<'_> {
             &self.record.state_token,
         ))
         .map_err(|_| CommitError::InvalidInput)?;
+        let reserved = self
+            .owner
+            .reserved_choice(self.transaction, self.limits.sql)?;
+        let reserved_epoch = reserved
+            .as_ref()
+            .map(|binding| i64::try_from(binding.epoch()))
+            .transpose()
+            .map_err(|_| CommitError::InvalidInput)?;
         let highest: i64 = self
             .transaction
             .query_row(
-                "SELECT coalesce(max(epoch),0) FROM index_commit_generations",
-                [],
+                "SELECT coalesce(max(epoch),0) FROM index_commit_generations WHERE (?1 IS NULL OR generation<>?1) AND (?2 IS NULL OR epoch<>?2)",
+                params![reserved.as_ref().map(CommitBinding::generation), reserved_epoch],
                 |r| r.get(0),
             )
             .map_err(sql)?;
@@ -299,6 +432,15 @@ impl QuarantinedSourceInspection<'_> {
             || target.epoch() <= self.target.epoch()
         {
             return Err(CommitError::BindingMismatch);
+        }
+        if let Some(reserved) = self
+            .owner
+            .reserved_choice(self.transaction, self.limits.sql)?
+        {
+            if reserved != *target {
+                return Err(CommitError::Conflict);
+            }
+            return self.revalidate();
         }
         let used: bool = self.transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM index_commit_generations WHERE generation=?1 OR epoch=?2)",
@@ -330,6 +472,20 @@ impl QuarantinedSourceInspection<'_> {
         limits: crate::rollback_runtime::prepared::PreparedLimits,
     ) -> Result<manifest::SqlManifest, CommitError> {
         self.validate_choice_fence(target)?;
+        if self
+            .owner
+            .reserved_choice(self.transaction, limits.sql)?
+            .is_some()
+        {
+            // The complete preimage equals the original freshly checked preview;
+            // its sole delta is this exact reservation. Reusing that preview
+            // does not pretend the reserved target is fresh or alter main SQL.
+            return manifest::reservation::capture_reservation_preimage(
+                self.transaction,
+                target,
+                limits.sql,
+            );
+        }
         // Preserve capacity for the one additional final fence; the original
         // quarantine and original target reservations already exist in SQL.
         let mut sql_limits = limits.sql;
@@ -382,7 +538,15 @@ impl QuarantinedSourceInspection<'_> {
             os::fd::AsRawFd,
         };
         self.choice_output(path)?;
-        let expected = self.state_snapshot(bytes)?;
+        if create
+            && self
+                .owner
+                .reserved_choice(self.transaction, self.limits.sql)?
+                .is_some()
+        {
+            return Err(CommitError::Conflict);
+        }
+        let expected = self.choice_operational_preimage(bytes)?;
         let directory = parent(path).map_err(|_| CommitError::InvalidInput)?;
         if !create {
             expected.verify(path)?;

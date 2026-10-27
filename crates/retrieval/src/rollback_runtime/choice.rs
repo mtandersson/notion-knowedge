@@ -166,7 +166,7 @@ fn inspect_selection(
         .choice_context(inputs.choice)
         .map_err(|_| RuntimeError)?;
     let operational = inspection
-        .state_snapshot(limits.transfer.sql_bytes)
+        .choice_operational_preimage(limits.transfer.sql_bytes)
         .map_err(|_| RuntimeError)?;
     let authority = inspection.authority_sha256().map_err(|_| RuntimeError)?;
     let current_native = inspect_runtime_source(
@@ -247,7 +247,7 @@ fn inspect_selection(
         .map_err(|_| RuntimeError)?
             != current_native
         || inspection
-            .state_snapshot(limits.transfer.sql_bytes)
+            .choice_operational_preimage(limits.transfer.sql_bytes)
             .map_err(|_| RuntimeError)?
             != operational
         || inspection.authority_sha256().map_err(|_| RuntimeError)? != authority
@@ -291,7 +291,7 @@ fn inspect_selection(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 mod prepared;
 pub use prepared::{PreparationPaths, PreparedChoiceMetadata, VerifiedPreparedChoice};
@@ -303,3 +303,6 @@ mod handoff;
 pub use handoff::{
     ChoiceHandoffRecord, HandoffPhase, RetainedFileIdentity, recover_activation_handoff,
 };
+
+mod reservation;
+pub use reservation::{PublicationStartMetadata, reserve_activation_publication};
