@@ -38,6 +38,8 @@ enum Case {
     ChoiceHandoff,
     ChoiceHandoffCrash,
     ChoiceSourceHandoff,
+    ChoiceNativeReady,
+    ChoiceSourceNativeReady,
 }
 #[test]
 #[ignore = "requires matching normal runtime"]
@@ -87,6 +89,21 @@ fn quarantined_source_handoff_recovers_from_runtime_origin() {
     run_case(true, true, Case::ChoiceSourceHandoff);
 }
 #[test]
+#[ignore = "requires normal runtime and kills native journal starts"]
+fn runtime_target_legacy_native_ready_recovers_after_killed_processes() {
+    run_case(false, true, Case::ChoiceNativeReady);
+}
+#[test]
+#[ignore = "requires the pinned public archive and kills native journal starts"]
+fn runtime_target_bound_native_ready_recovers_after_killed_processes() {
+    run_case(true, true, Case::ChoiceNativeReady);
+}
+#[test]
+#[ignore = "requires the pinned public archive and kills native journal starts"]
+fn runtime_source_bound_native_ready_recovers_after_killed_processes() {
+    run_case(true, true, Case::ChoiceSourceNativeReady);
+}
+#[test]
 #[ignore = "requires normal runtime; kills actual Prepared-choice publication processes"]
 fn quarantined_choice_prepared_record_recovers_after_killed_processes() {
     run_case(false, true, Case::ChoiceCrash);
@@ -110,7 +127,10 @@ fn run_case(bound: bool, newer: bool, case: Case) {
         .unwrap();
         PinnedAsset::pin(&path, &info.sha256).unwrap()
     });
-    let old_asset = if matches!(case, Case::ChoiceSourceHandoff) {
+    let old_asset = if matches!(
+        case,
+        Case::ChoiceSourceHandoff | Case::ChoiceSourceNativeReady
+    ) {
         None
     } else {
         asset.as_ref()
@@ -147,7 +167,10 @@ fn run_case(bound: bool, newer: bool, case: Case) {
         Ok(())
     })
     .unwrap();
-    let current_dictionary = if matches!(case, Case::ChoiceSourceHandoff) {
+    let current_dictionary = if matches!(
+        case,
+        Case::ChoiceSourceHandoff | Case::ChoiceSourceNativeReady
+    ) {
         crate::lexical_dictionary::Dictionary::load(
             &parent.path().join("prior.bundle"),
             asset.as_ref().unwrap().sha256(),
@@ -163,7 +186,10 @@ fn run_case(bound: bool, newer: bool, case: Case) {
     }
     let current = IndexCommitCoordinator::open_existing(&index, &state, source.clone()).unwrap();
     let current_evidence = parent.path().join("current-source-evidence.json");
-    if matches!(case, Case::ChoiceSourceHandoff) {
+    if matches!(
+        case,
+        Case::ChoiceSourceHandoff | Case::ChoiceSourceNativeReady
+    ) {
         current
             .with_owned_offline_inspection(i64::MAX / 2, |owner| {
                 let proof = verification::verify(
@@ -387,7 +413,10 @@ fn run_case(bound: bool, newer: bool, case: Case) {
     assert_eq!(record.phase, RuntimePhase::SourceRetained);
     assert!(!index.exists());
     assert_eq!(bytes(&archive), before);
-    if matches!(case, Case::ChoiceSourceHandoff) {
+    if matches!(
+        case,
+        Case::ChoiceSourceHandoff | Case::ChoiceSourceNativeReady
+    ) {
         use crate::rollback_runtime::choice::{self, Choice, SelectionInputs};
         let desired = next(&target, "runtime-origin-source-choice");
         let output = parent.path().join("runtime-source-choice.json");
@@ -451,13 +480,57 @@ fn run_case(bound: bool, newer: bool, case: Case) {
             "asset": parent.path().join("prior.bundle"), "asset_sha256": asset.as_ref().unwrap().sha256(),
         })).unwrap()).unwrap();
         fs::set_permissions(&input, fs::Permissions::from_mode(0o600)).unwrap();
-        choice::tests::kill_reservation_windows(
-            &root,
-            &binary,
-            &input,
-            "rollback_runtime::publication::tests::choice_handoff_process_child",
-            "NK_CHOICE_INPUT",
-        );
+        if matches!(case, Case::ChoiceSourceNativeReady) {
+            let inputs = || SelectionInputs {
+                choice: Choice::OriginalSource,
+                runtime: &runtime,
+                asset: asset.as_ref(),
+                source_evidence: Some(&current_evidence),
+                desired: &desired,
+            };
+            RuntimeTransitionOperator::reserve_choice_publication(
+                &runtime,
+                old_asset,
+                current_config,
+                &handoff,
+                inputs(),
+                Default::default(),
+                i64::MAX / 2,
+            )
+            .unwrap();
+            let reserved_sql = fs::read(&state).unwrap();
+            let selected_before = bytes(&source_candidate);
+            choice::tests::kill_native_start_windows(
+                &root,
+                &binary,
+                &input,
+                "rollback_runtime::publication::tests::choice_handoff_process_child",
+                "NK_CHOICE_INPUT",
+            );
+            let native = choice::ChoiceNativeRecord::read_active_metadata(&state).unwrap();
+            assert_eq!(native.phase, choice::ChoiceNativePhase::Ready);
+            assert_eq!(native.handoff, handoff);
+            RuntimeTransitionOperator::recover_choice_native_ready(
+                &runtime,
+                old_asset,
+                current_config,
+                &native,
+                inputs(),
+                Default::default(),
+                i64::MAX / 2,
+            )
+            .unwrap();
+            assert_eq!(fs::read(&state).unwrap(), reserved_sql);
+            assert_eq!(bytes(&source_candidate), selected_before);
+        } else {
+            choice::tests::kill_reservation_windows(
+                &root,
+                &binary,
+                &input,
+                "rollback_runtime::publication::tests::choice_handoff_process_child",
+                "NK_CHOICE_INPUT",
+            );
+        }
         choice::tests::assert_reserved_choice_sql(&state, &desired, &handoff);
         assert_eq!(bytes(&archive), before);
         assert!(current.search_guard().is_err());
@@ -465,7 +538,11 @@ fn run_case(bound: bool, newer: bool, case: Case) {
     }
     if matches!(
         case,
-        Case::ChoicePrepared | Case::ChoiceCrash | Case::ChoiceHandoff | Case::ChoiceHandoffCrash
+        Case::ChoicePrepared
+            | Case::ChoiceCrash
+            | Case::ChoiceHandoff
+            | Case::ChoiceHandoffCrash
+            | Case::ChoiceNativeReady
     ) {
         use crate::rollback_runtime::choice::{self, Choice, SelectionInputs};
         let original_sql = fs::read(&state).unwrap();
@@ -623,7 +700,7 @@ fn run_case(bound: bool, newer: bool, case: Case) {
             }
             return;
         }
-        if matches!(case, Case::ChoiceHandoff) {
+        if matches!(case, Case::ChoiceHandoff | Case::ChoiceNativeReady) {
             operator
                 .handoff_quarantined_choice(i64::MAX / 2, Default::default(), |inspection| {
                     let proof = choice::reopen(
@@ -682,6 +759,53 @@ fn run_case(bound: bool, newer: bool, case: Case) {
             )
             .unwrap();
             fs::set_permissions(&input, fs::Permissions::from_mode(0o600)).unwrap();
+            if matches!(case, Case::ChoiceNativeReady) {
+                let inputs = || SelectionInputs {
+                    choice: Choice::PreparedTarget,
+                    runtime: &runtime,
+                    asset: asset.as_ref(),
+                    source_evidence: None,
+                    desired: &desired,
+                };
+                RuntimeTransitionOperator::reserve_choice_publication(
+                    &runtime,
+                    asset.as_ref(),
+                    current_config,
+                    &handoff,
+                    inputs(),
+                    Default::default(),
+                    i64::MAX / 2,
+                )
+                .unwrap();
+                let reserved_sql = fs::read(&state).unwrap();
+                choice::tests::kill_native_start_windows(
+                    &root,
+                    &binary,
+                    &input,
+                    "rollback_runtime::publication::tests::choice_handoff_process_child",
+                    "NK_CHOICE_INPUT",
+                );
+                let native = choice::ChoiceNativeRecord::read_active_metadata(&state).unwrap();
+                assert_eq!(native.phase, choice::ChoiceNativePhase::Ready);
+                assert_eq!(native.handoff, handoff);
+                RuntimeTransitionOperator::recover_choice_native_ready(
+                    &runtime,
+                    asset.as_ref(),
+                    current_config,
+                    &native,
+                    inputs(),
+                    Default::default(),
+                    i64::MAX / 2,
+                )
+                .unwrap();
+                choice::tests::assert_reserved_choice_sql(&state, &desired, &handoff);
+                assert_eq!(fs::read(&state).unwrap(), reserved_sql);
+                assert_eq!(bytes(&archive), before);
+                assert_eq!(bytes(&candidate), original_candidate);
+                assert_eq!(bytes(&prior), original_prior);
+                assert!(current.search_guard().is_err());
+                return;
+            }
             choice::tests::kill_reservation_windows(
                 &root,
                 &binary,
@@ -1253,6 +1377,33 @@ fn choice_handoff_process_child() {
         source_evidence: evidence.as_deref(),
         desired: &desired,
     };
+    if std::env::var_os("NK_CHOICE_NATIVE_START").is_some() {
+        if let Ok(native) = choice::ChoiceNativeRecord::read_active_metadata(&state) {
+            RuntimeTransitionOperator::recover_choice_native_ready(
+                &runtime,
+                original_asset,
+                current,
+                &native,
+                inputs(),
+                Default::default(),
+                i64::MAX / 2,
+            )
+            .unwrap();
+        } else {
+            let handoff = choice::ChoiceHandoffRecord::read_active_metadata(&state).unwrap();
+            RuntimeTransitionOperator::start_choice_native(
+                &runtime,
+                original_asset,
+                current,
+                &handoff,
+                inputs(),
+                Default::default(),
+                i64::MAX / 2,
+            )
+            .unwrap();
+        }
+        return;
+    }
     if let Ok(handoff) = choice::ChoiceHandoffRecord::read_active_metadata(&state) {
         let action = if std::env::var_os("NK_CHOICE_RESERVE").is_some() {
             RuntimeTransitionOperator::reserve_choice_publication

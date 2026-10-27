@@ -242,8 +242,39 @@ jobs:
             shell: spike
             args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
           - suite: runtime-choices
-            name: runtime-choices-native-start
-            choice_group: native-start
+            name: runtime-choices-native-activation-source-legacy
+            choice_group: native-start-legacy
+            choice_case: explicit_source_native_ready_recovers_after_killed_processes
+            shell: spike
+            args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
+          - suite: runtime-choices
+            name: runtime-choices-native-activation-source-bound
+            choice_group: native-start-bound
+            choice_case: bound_source_native_ready_recovers_after_killed_processes
+            shell: spike
+            args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
+          - suite: runtime-choices
+            name: runtime-choices-native-activation-target-bound
+            choice_group: native-start-bound
+            choice_case: bound_target_activation_native_ready_recovers_after_killed_processes
+            shell: spike
+            args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
+          - suite: runtime-choices
+            name: runtime-choices-native-runtime-target-legacy
+            choice_group: native-start-legacy
+            choice_case: runtime_target_legacy_native_ready_recovers_after_killed_processes
+            shell: spike
+            args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
+          - suite: runtime-choices
+            name: runtime-choices-native-runtime-target-bound
+            choice_group: native-start-bound
+            choice_case: runtime_target_bound_native_ready_recovers_after_killed_processes
+            shell: spike
+            args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
+          - suite: runtime-choices
+            name: runtime-choices-native-runtime-source-bound
+            choice_group: native-start-bound
+            choice_case: runtime_source_bound_native_ready_recovers_after_killed_processes
             shell: spike
             args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
           - suite: runtime-choices
@@ -346,13 +377,8 @@ jobs:
           NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib explicit_source_handoff_recovers_after_killed_processes --locked -- --ignored
           NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_target_handoff_recovers_after_killed_processes --locked -- --ignored
 
-      - name: Test native Ready journal recovery
-        if: matrix.choice_group == 'native-start'
-        run: |
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib explicit_source_native_ready_recovers_after_killed_processes --locked -- --ignored
-
       - name: Fetch verified public lexical fixture
-        if: startsWith(matrix.choice_group, 'bound-')
+        if: startsWith(matrix.choice_group, 'bound-') || matrix.choice_group == 'native-start-bound'
         run: |
           curl --fail --location --retry 2 --max-time 60 --max-filesize 2579240 --output "$RUNNER_TEMP/nk-lexical-archive.tar.xz" https://download.freedict.org/dictionaries/eng-swe/2025.11.23/freedict-eng-swe-2025.11.23.src.tar.xz
           printf '%s  %s\n' 3c9f80c800d4810e34a80c82aca4e468fbc3180099d8b24a4fad7c61324015dc "$RUNNER_TEMP/nk-lexical-archive.tar.xz" | sha256sum --check --status
@@ -360,7 +386,7 @@ jobs:
       # Each bound case exercises several real killed-process windows. Keep
       # each case in its own 60-minute lane without dropping any coverage.
       - name: Test ${{ matrix.choice_case }}
-        if: startsWith(matrix.choice_group, 'bound-')
+        if: startsWith(matrix.choice_group, 'bound-') || startsWith(matrix.choice_group, 'native-start-')
         env:
           NK_LEXICAL_TEST_ARCHIVE: ${{ runner.temp }}/nk-lexical-archive.tar.xz
           NK_LEXICAL_RUNTIME: ${{ github.workspace }}/target/debug/examples/lexical-runtime

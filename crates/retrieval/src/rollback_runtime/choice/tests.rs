@@ -127,7 +127,13 @@ pub(crate) fn assert_reserved_choice_sql(
     assert_eq!(after.rows, before.rows + 1);
 }
 
-fn kill_native_start_windows(root: &Path, binary: &Path, input: &Path) {
+pub(crate) fn kill_native_start_windows(
+    root: &Path,
+    binary: &Path,
+    input: &Path,
+    entry: &str,
+    input_env: &str,
+) {
     for phase in [
         "choice-native-origin-staged",
         "choice-native-origin-renamed",
@@ -138,15 +144,10 @@ fn kill_native_start_windows(root: &Path, binary: &Path, input: &Path) {
     ] {
         let mut child = HandoffChild(
             std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "rollback_runtime::choice::tests::source_handoff_process_child",
-                    "--ignored",
-                    "--nocapture",
-                ])
+                .args(["--exact", entry, "--ignored", "--nocapture"])
                 .env_clear()
                 .env("NK_LEXICAL_RUNTIME", binary)
-                .env("NK_SOURCE_HANDOFF_INPUT", input)
+                .env(input_env, input)
                 .env("NK_CHOICE_NATIVE_START", "1")
                 .env("NK_TRANSITION_TEST_ROOT", root)
                 .env("NK_TRANSITION_TEST_PHASE", phase)
@@ -328,8 +329,21 @@ fn explicit_source_native_ready_recovers_after_killed_processes() {
     source_choice_case_impl(false, true, false, true);
 }
 #[test]
+#[ignore = "requires the pinned public archive and kills native journal starts"]
+fn bound_source_native_ready_recovers_after_killed_processes() {
+    source_choice_case_impl(true, true, false, true);
+}
+#[test]
 #[ignore = "requires matching normal runtime and pinned public archive"]
 fn explicit_target_handoff_recovers_from_activation_origin() {
+    activation_target_case(false);
+}
+#[test]
+#[ignore = "requires the pinned public archive and kills native journal starts"]
+fn bound_target_activation_native_ready_recovers_after_killed_processes() {
+    activation_target_case(true);
+}
+fn activation_target_case(native_start: bool) {
     let binary = PathBuf::from(std::env::var_os("NK_LEXICAL_RUNTIME").unwrap());
     let sha = format!("{:x}", Sha256::digest(fs::read(&binary).unwrap()));
     let runtime = PinnedRuntime::pin(&binary, &sha, 1 << 30).unwrap();
@@ -463,13 +477,51 @@ fn explicit_target_handoff_recovers_from_activation_origin() {
         "asset": bundle, "target_dictionary": bundle, "asset_sha256": asset.sha256(),
     })).unwrap()).unwrap();
     fs::set_permissions(&input, fs::Permissions::from_mode(0o600)).unwrap();
-    kill_reservation_windows(
-        &root,
-        &binary,
-        &input,
-        "rollback_runtime::choice::tests::source_handoff_process_child",
-        "NK_SOURCE_HANDOFF_INPUT",
-    );
+    if native_start {
+        reserve_activation_publication(
+            &handoff,
+            candidate,
+            inputs(),
+            Default::default(),
+            Default::default(),
+            i64::MAX / 2,
+        )
+        .unwrap();
+        let reserved_sql = fs::read(&state).unwrap();
+        let target_before = crate::rollback_runtime::candidate::tests::bytes(&target_path);
+        kill_native_start_windows(
+            &root,
+            &binary,
+            &input,
+            "rollback_runtime::choice::tests::source_handoff_process_child",
+            "NK_SOURCE_HANDOFF_INPUT",
+        );
+        let native = ChoiceNativeRecord::read_active_metadata(&state).unwrap();
+        assert_eq!(native.phase, ChoiceNativePhase::Ready);
+        assert_eq!(native.handoff, handoff);
+        recover_activation_native_ready(
+            &native,
+            candidate,
+            inputs(),
+            Default::default(),
+            Default::default(),
+            i64::MAX / 2,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&state).unwrap(), reserved_sql);
+        assert_eq!(
+            crate::rollback_runtime::candidate::tests::bytes(&target_path),
+            target_before
+        );
+    } else {
+        kill_reservation_windows(
+            &root,
+            &binary,
+            &input,
+            "rollback_runtime::choice::tests::source_handoff_process_child",
+            "NK_SOURCE_HANDOFF_INPUT",
+        );
+    }
     assert_reserved_choice_sql(&state, &fresh, &handoff);
     assert_eq!(
         crate::rollback_runtime::candidate::tests::bytes(&index),
@@ -1118,7 +1170,13 @@ fn source_choice_case_impl(bound: bool, handoff_case: bool, crash: bool, native_
                 "asset_sha256": asset.as_ref().map(PinnedAsset::sha256),
             })).unwrap()).unwrap();
             fs::set_permissions(&input, fs::Permissions::from_mode(0o600)).unwrap();
-            kill_native_start_windows(&root, &binary, &input);
+            kill_native_start_windows(
+                &root,
+                &binary,
+                &input,
+                "rollback_runtime::choice::tests::source_handoff_process_child",
+                "NK_SOURCE_HANDOFF_INPUT",
+            );
             let native = ChoiceNativeRecord::read_active_metadata(&state).unwrap();
             assert_eq!(native.phase, ChoiceNativePhase::Ready);
             assert_eq!(native.handoff, handoff);
