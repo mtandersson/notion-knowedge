@@ -291,7 +291,7 @@ fn inspect_selection(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 mod prepared;
 pub use prepared::{PreparationPaths, PreparedChoiceMetadata, VerifiedPreparedChoice};

@@ -23,6 +23,85 @@ impl Drop for HandoffChild {
     }
 }
 
+pub(crate) fn kill_reservation_windows(
+    root: &Path,
+    binary: &Path,
+    input: &Path,
+    entry: &str,
+    input_env: &str,
+) {
+    for phase in [
+        "choice-publication-start-staged",
+        "choice-publication-start-renamed",
+        "choice-publication-start-durable",
+        "choice-reservation-before-commit",
+        "choice-reservation-committed",
+        "",
+    ] {
+        let mut child = HandoffChild(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", entry, "--ignored", "--nocapture"])
+                .env_clear()
+                .env("NK_LEXICAL_RUNTIME", binary)
+                .env(input_env, input)
+                .env("NK_CHOICE_RESERVE", "1")
+                .env("NK_TRANSITION_TEST_ROOT", root)
+                .env("NK_TRANSITION_TEST_PHASE", phase)
+                .spawn()
+                .unwrap(),
+        );
+        if phase.is_empty() {
+            assert!(
+                child.0.wait().unwrap().success(),
+                "fresh reservation retry failed"
+            );
+            continue;
+        }
+        let marker = root.join("observed-transition");
+        let started = std::time::Instant::now();
+        while !fs::read_to_string(&marker).is_ok_and(|value| value == phase) {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "child exited before {phase}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(300),
+                "checkpoint timeout: {phase}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if phase == "choice-reservation-before-commit" {
+            assert!(
+                fs::metadata(root.join("state.sqlite-journal"))
+                    .unwrap()
+                    .len()
+                    > 512
+            );
+        }
+        child.0.kill().unwrap();
+        assert!(!child.0.wait().unwrap().success());
+        fs::remove_file(marker).unwrap();
+    }
+}
+
+pub(crate) fn assert_reserved_choice_sql(
+    state: &Path,
+    desired: &CommitBinding,
+    handoff: &ChoiceHandoffRecord,
+) {
+    let mut db = rusqlite::Connection::open(state).unwrap();
+    let tx = db.transaction().unwrap();
+    let before = transition::manifest::reservation::capture_reservation_preimage(
+        &tx,
+        desired,
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(before, handoff.prepared.adoption);
+    let after = transition::manifest::capture_sql_manifest(&tx, Default::default()).unwrap();
+    assert_eq!(after.rows, before.rows + 1);
+}
+
 #[test]
 #[ignore = "source handoff subprocess entrypoint"]
 fn source_handoff_process_child() {
@@ -45,8 +124,19 @@ fn source_handoff_process_child() {
     let state = path("state");
     let output = path("prepared");
     let evidence = path("evidence");
+    let asset = value["asset"].as_str().map(|path| {
+        PinnedAsset::pin(Path::new(path), value["asset_sha256"].as_str().unwrap()).unwrap()
+    });
     let preparation_backup = path("preparation_backup");
-    let dictionary = crate::lexical_dictionary::tests::dictionary(&[("cinnamon", "kanel")]);
+    let dictionary = if let Some(bundle) = value["target_dictionary"].as_str() {
+        crate::lexical_dictionary::Dictionary::load(
+            Path::new(bundle),
+            value["asset_sha256"].as_str().unwrap(),
+        )
+        .unwrap()
+    } else {
+        crate::lexical_dictionary::tests::dictionary(&[("cinnamon", "kanel")])
+    };
     let candidate = TransitionCandidateInputs {
         source: &binding,
         target: &target,
@@ -56,10 +146,18 @@ fn source_handoff_process_child() {
         limits: Default::default(),
     };
     let inputs = || SelectionInputs {
-        choice: Choice::OriginalSource,
+        choice: if value["choice"].as_str() == Some("prepared_target") {
+            Choice::PreparedTarget
+        } else {
+            Choice::OriginalSource
+        },
         runtime: &runtime,
-        asset: None,
-        source_evidence: Some(&evidence),
+        asset: asset.as_ref(),
+        source_evidence: if value["choice"].as_str() == Some("prepared_target") {
+            None
+        } else {
+            Some(&evidence)
+        },
         desired: &desired,
     };
     if let Ok(handoff) = ChoiceHandoffRecord::read_active_metadata(&state) {
@@ -234,6 +332,31 @@ fn explicit_target_handoff_recovers_from_activation_origin() {
     )
     .unwrap();
     assert_eq!(fs::read(&state).unwrap(), sql);
+    assert_eq!(
+        crate::rollback_runtime::candidate::tests::bytes(&index),
+        original
+    );
+    assert!(coordinator.search_guard().is_err());
+    let input = parent.path().join("target-reservation-child.json");
+    let Origin::Activation(origin) = &handoff.prepared.selection.origin else {
+        panic!("activation origin required")
+    };
+    fs::write(&input, serde_json::to_vec(&serde_json::json!({
+        "origin": origin, "source": serde_json::to_string(&binding).unwrap(),
+        "target": serde_json::to_string(&target).unwrap(), "desired": serde_json::to_string(&fresh).unwrap(),
+        "embedding": embedding, "state": state, "prepared": output, "evidence": output,
+        "preparation_backup": preparation_backup, "choice": "prepared_target",
+        "asset": bundle, "target_dictionary": bundle, "asset_sha256": asset.sha256(),
+    })).unwrap()).unwrap();
+    fs::set_permissions(&input, fs::Permissions::from_mode(0o600)).unwrap();
+    kill_reservation_windows(
+        &root,
+        &binary,
+        &input,
+        "rollback_runtime::choice::tests::source_handoff_process_child",
+        "NK_SOURCE_HANDOFF_INPUT",
+    );
+    assert_reserved_choice_sql(&state, &fresh, &handoff);
     assert_eq!(
         crate::rollback_runtime::candidate::tests::bytes(&index),
         original
@@ -695,41 +818,6 @@ fn source_choice_case(bound: bool, handoff_case: bool, crash: bool) {
                 i64::MAX / 2,
             )
             .unwrap();
-            if !bound {
-                let reservation_owner =
-                    transition::source::acquire_choice_recovery(&handoff).unwrap();
-                reservation_owner
-                    .with_quarantined_source_inspection(
-                        i64::MAX / 2,
-                        candidate,
-                        Default::default(),
-                        |inspection| {
-                            let proof = reopen(
-                                inspection,
-                                SelectionInputs {
-                                    choice: Choice::OriginalSource,
-                                    runtime: &runtime,
-                                    asset: asset.as_ref(),
-                                    source_evidence: Some(&retained),
-                                    desired: &fresh,
-                                },
-                                &output,
-                                Default::default(),
-                            )
-                            .unwrap();
-                            let intent = proof.retain_publication_start(&handoff).unwrap();
-                            assert_eq!(intent.before, proof.metadata().adoption);
-                            assert_eq!(PublicationStartMetadata::read(&handoff).unwrap(), intent);
-                            assert_eq!(proof.retain_publication_start(&handoff).unwrap(), intent);
-                            let mut forged = intent;
-                            forged.desired_authority_json =
-                                serde_json::to_string(&binding).unwrap();
-                            assert!(forged.canonical_bytes(&handoff).is_err());
-                            Ok(())
-                        },
-                    )
-                    .unwrap();
-            }
         }
     }
     assert_eq!(
@@ -757,6 +845,28 @@ fn source_choice_case(bound: bool, handoff_case: bool, crash: bool) {
     drop(db);
     if handoff_case {
         let handoff = ChoiceHandoffRecord::read_active_metadata(&state).unwrap();
+        if !crash {
+            let Origin::Activation(origin) = &handoff.prepared.selection.origin else {
+                panic!("activation origin required")
+            };
+            let input = parent.path().join("reservation-child.json");
+            fs::write(&input, serde_json::to_vec(&serde_json::json!({
+                "origin": origin, "source": serde_json::to_string(&binding).unwrap(),
+                "target": serde_json::to_string(&target).unwrap(), "desired": serde_json::to_string(&fresh).unwrap(),
+                "embedding": embedding, "state": state, "prepared": handoff.prepared_path,
+                "evidence": retained, "preparation_backup": preparation_backup,
+                "asset": asset.as_ref().map(|_| parent.path().join("source.bundle")),
+                "asset_sha256": asset.as_ref().map(PinnedAsset::sha256),
+            })).unwrap()).unwrap();
+            fs::set_permissions(&input, fs::Permissions::from_mode(0o600)).unwrap();
+            kill_reservation_windows(
+                &root,
+                &binary,
+                &input,
+                "rollback_runtime::choice::tests::source_handoff_process_child",
+                "NK_SOURCE_HANDOFF_INPUT",
+            );
+        }
         let inputs = || SelectionInputs {
             choice: Choice::OriginalSource,
             runtime: &runtime,

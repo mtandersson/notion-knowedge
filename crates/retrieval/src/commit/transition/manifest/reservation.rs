@@ -104,7 +104,11 @@ mod tests {
     fn reserve(db: &Connection, target: &CommitBinding) {
         db.execute(
             "INSERT INTO index_commit_generations VALUES(?1,?2,?3)",
-            params![target.generation(), target.scope(), target.epoch()],
+            params![
+                target.generation(),
+                target.scope(),
+                i64::try_from(target.epoch()).unwrap()
+            ],
         )
         .unwrap();
     }

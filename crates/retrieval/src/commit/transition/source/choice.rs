@@ -379,11 +379,16 @@ impl QuarantinedSourceInspection<'_> {
         let reserved = self
             .owner
             .reserved_choice(self.transaction, self.limits.sql)?;
+        let reserved_epoch = reserved
+            .as_ref()
+            .map(|binding| i64::try_from(binding.epoch()))
+            .transpose()
+            .map_err(|_| CommitError::InvalidInput)?;
         let highest: i64 = self
             .transaction
             .query_row(
                 "SELECT coalesce(max(epoch),0) FROM index_commit_generations WHERE (?1 IS NULL OR generation<>?1) AND (?2 IS NULL OR epoch<>?2)",
-                params![reserved.as_ref().map(CommitBinding::generation), reserved.as_ref().map(CommitBinding::epoch)],
+                params![reserved.as_ref().map(CommitBinding::generation), reserved_epoch],
                 |r| r.get(0),
             )
             .map_err(sql)?;
