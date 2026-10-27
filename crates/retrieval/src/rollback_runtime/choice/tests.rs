@@ -940,6 +940,7 @@ fn source_choice_case(bound: bool, handoff_case: bool, crash: bool) {
     drop(db);
     if handoff_case {
         let handoff = ChoiceHandoffRecord::read_active_metadata(&state).unwrap();
+        assert!(ChoiceNativeRecord::read_active_metadata(&state).is_err());
         if !crash {
             let Origin::Activation(origin) = &handoff.prepared.selection.origin else {
                 panic!("activation origin required")
@@ -1020,6 +1021,7 @@ fn source_choice_case(bound: bool, handoff_case: bool, crash: bool) {
                             reopen(inspection, inputs(), &output, Default::default()).unwrap();
                         let native = proof.retain_native_handoff(&handoff).unwrap();
                         assert_eq!(proof.retain_native_handoff(&handoff).unwrap(), native);
+                        native.verify_retained_files().unwrap();
                         assert_eq!(
                             fs::read(&native.handoff_history_path).unwrap(),
                             handoff.canonical_bytes().unwrap()
@@ -1030,6 +1032,7 @@ fn source_choice_case(bound: bool, handoff_case: bool, crash: bool) {
                         );
                         fs::write(&native.handoff_history_path, b"corrupt retained handoff")
                             .unwrap();
+                        assert!(native.verify_retained_files().is_err());
                         assert!(proof.retain_native_handoff(&handoff).is_err());
                         assert_eq!(
                             fs::read(&native.handoff_history_path).unwrap(),

@@ -10,13 +10,13 @@ use crate::rollback_runtime::{
 };
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, File},
-    io::Write,
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
     os::{
         fd::AsRawFd,
         unix::{
             ffi::OsStrExt,
-            fs::{MetadataExt, PermissionsExt},
+            fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
         },
     },
 };
@@ -190,6 +190,40 @@ pub struct ChoiceNativeRecord {
 }
 
 impl ChoiceNativeRecord {
+    /// Read a bounded active description. This does not acquire ownership or
+    /// establish native, SQL, or serving authority.
+    pub fn read_active_metadata(state: &Path) -> Result<Self> {
+        let path = crate::commit::transition::journal_path(state).map_err(|_| RuntimeError)?;
+        let directory = parent(&path)?;
+        let (identity, size, sha) = handoff::read_private(&directory, &path, MAX_BYTES as u64)?;
+        let anchored = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()))
+            .join(path.file_name().ok_or(RuntimeError)?);
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&anchored)?;
+        if file_identity(&file)? != identity {
+            return Err(RuntimeError);
+        }
+        let mut bytes = Vec::new();
+        (&file).take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+        let record = Self::parse_metadata(&bytes)?;
+        let (after, after_size, after_sha) =
+            handoff::read_private(&directory, &path, MAX_BYTES as u64)?;
+        if file_identity(&file)? != identity
+            || after != identity
+            || size != bytes.len() as u64
+            || after_size != size
+            || after_sha != sha
+            || sha != format!("{:x}", Sha256::digest(&bytes))
+            || record.handoff.prepared.selection.state_path != state
+        {
+            return Err(RuntimeError);
+        }
+        check_parent(&directory, &path)?;
+        Ok(record)
+    }
+
     /// Derive one immutable history name from the exact v3 handoff bytes.
     pub fn handoff_history_path(handoff: &ChoiceHandoffRecord) -> Result<PathBuf> {
         let digest = format!("{:x}", Sha256::digest(handoff.canonical_bytes()?));
@@ -279,10 +313,18 @@ impl ChoiceNativeRecord {
             let bytes = source::canonical(report, 65536)?;
             SourceReport::parse_metadata(&bytes)?;
             let selected = &self.handoff.prepared.selection;
+            let valid_digest = |value: &str| {
+                value.len() == 64
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            };
             if report.descriptor != selected.observation.descriptor
                 || report.source.source_version != selected.current_native.source_version
                 || report.source.rows != selected.current_native.rows
                 || report.source.snapshot_sha256 != selected.current_native.snapshot_sha256
+                || !valid_digest(&report.source.authority_sha256)
+                || !valid_digest(&report.source.snapshot_sha256)
                 || report.source.lexical.is_some()
                     != self
                         .handoff
@@ -325,5 +367,37 @@ impl ChoiceNativeRecord {
             return Err(RuntimeError);
         }
         Ok(record)
+    }
+
+    /// Check retained bytes and captured identities without treating them as
+    /// authority. The original owner and actual SQL/native state must still be
+    /// acquired and verified before a transition effect.
+    pub fn verify_retained_files(&self) -> Result<()> {
+        self.canonical_bytes()?;
+        let history = &self.handoff_history_path;
+        let intent_path = reservation::path(&self.handoff)?;
+        let handoff_bytes = self.handoff.canonical_bytes()?;
+        let intent_bytes = self.reservation.canonical_bytes(&self.handoff)?;
+        let expected_history = format!("{:x}", Sha256::digest(&handoff_bytes));
+        let expected_intent = format!("{:x}", Sha256::digest(&intent_bytes));
+        let verify = || -> Result<()> {
+            let (history_id, history_size, history_sha) =
+                handoff::read_private(&parent(history)?, history, 2 << 20)?;
+            let (intent_id, intent_size, intent_sha) =
+                handoff::read_private(&parent(&intent_path)?, &intent_path, 131072)?;
+            if history_id != self.handoff_history_identity
+                || history_size != handoff_bytes.len() as u64
+                || history_sha != expected_history
+                || intent_id != self.reservation_identity
+                || intent_size != intent_bytes.len() as u64
+                || intent_sha != expected_intent
+            {
+                return Err(RuntimeError);
+            }
+            Ok(())
+        };
+        verify()?;
+        self.handoff.verify_retained_files()?;
+        verify()
     }
 }
