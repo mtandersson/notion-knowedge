@@ -230,7 +230,7 @@ class ContainerRegistryCachePublication(unittest.TestCase):
     def test_registry_export_is_main_only_and_required_smoke_is_not_optional(self):
         self.check_contract(self.workflow)
         self.assertEqual(self.workflow.count(
-            "if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'"), 4)
+            "if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'"), 5)
         pr = self.workflow.split('\n  container:\n', 1)[1].split('\n  container-main:\n', 1)[0]
         self.assertEqual(pr.count(
             "if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'"), 3)

@@ -211,8 +211,52 @@ jobs:
           downloads-key: ${{ steps.cargo-cache.outputs.downloads-key }}
           downloads-hit: ${{ steps.cargo-cache.outputs.downloads-hit }}
 
-  test:
+  runtime-choice-build:
     needs: changes
+    if: needs.changes.outputs.test == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Restore pinned Cargo caches
+        id: cargo-cache
+        uses: ./.github/actions/cargo-cache-restore
+        with:
+          job: test-runtime-choices
+          profile: debug
+      - name: Build shared runtime choice test binaries
+        run: |
+          nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib --no-run --locked --message-format=json > "$RUNNER_TEMP/runtime-choice-build.json"
+          CARGO_PROFILE_DEV_DEBUG="$CARGO_PROFILE_TEST_DEBUG" nix develop .#spike --command cargo build -p notion-knowledge-retrieval --features local-lancedb --example lexical-runtime --locked
+          python3 scripts/package-runtime-choice-tests.py "$RUNNER_TEMP/runtime-choice-build.json" "$RUNNER_TEMP/runtime-choice-tests.tar"
+      - name: Upload shared runtime choice test binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-choice-tests
+          path: ${{ runner.temp }}/runtime-choice-tests.tar
+          if-no-files-found: error
+          retention-days: 1
+      - name: Save successful refreshed Cargo caches
+        if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: ./.github/actions/cargo-cache-save
+        with:
+          key: ${{ steps.cargo-cache.outputs.key }}
+          hit: ${{ steps.cargo-cache.outputs.hit }}
+          matched-key: ${{ steps.cargo-cache.outputs.matched-key }}
+          prefix: ${{ steps.cargo-cache.outputs.prefix }}
+          downloads-key: ${{ steps.cargo-cache.outputs.downloads-key }}
+          downloads-hit: ${{ steps.cargo-cache.outputs.downloads-hit }}
+
+  test:
+    needs: [changes, runtime-choice-build]
     if: needs.changes.outputs.test == 'true'
     name: Unit tests (${{ matrix.name || matrix.suite }})
     strategy:
@@ -341,6 +385,7 @@ jobs:
             experimental-features = nix-command flakes
 
       - name: Restore pinned Cargo caches
+        if: matrix.suite != 'runtime-choices'
         id: cargo-cache
         uses: ./.github/actions/cargo-cache-restore
         with:
@@ -348,6 +393,7 @@ jobs:
           profile: debug
 
       - name: Run ${{ matrix.suite }} tests
+        if: matrix.suite != 'runtime-choices'
         run: nix develop .#${{ matrix.shell }} --command cargo test ${{ matrix.args }} --locked
 
       - name: Verify persisted compression compatibility in both directions
@@ -376,17 +422,24 @@ jobs:
           NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib runtime_publication_rejects_physical_replacement_and_stale_preparation --locked -- --ignored
           NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_runtime_source_capture_legacy_preserves_latest_source --locked -- --ignored
 
-      - name: Build runtime choice fixture
+      - name: Download shared runtime choice test binaries
         if: matrix.suite == 'runtime-choices'
-        run: |
-          CARGO_PROFILE_DEV_DEBUG="$CARGO_PROFILE_TEST_DEBUG" nix develop .#spike --command cargo build -p notion-knowledge-retrieval --features local-lancedb --example lexical-runtime --locked
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: runtime-choice-tests
+          path: ${{ runner.temp }}
+
+      - name: Extract shared runtime choice test binaries
+        if: matrix.suite == 'runtime-choices'
+        run: tar -xf "$RUNNER_TEMP/runtime-choice-tests.tar" -C "$RUNNER_TEMP"
 
       - name: Test prepared runtime choices
         if: matrix.choice_group == 'prepared'
         run: |
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib explicit_source_selection_verifies_latest_rows_and_preserves_quarantine --locked -- --ignored
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_choice_prepared_target_legacy_preserves_source_and_sql --locked -- --ignored
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_choice_prepared_record_recovers_after_killed_processes --locked -- --ignored
+          cd crates/retrieval
+          NK_LEXICAL_RUNTIME="$RUNNER_TEMP/runtime-choice/lexical-runtime" nix develop .#spike --command "$RUNNER_TEMP/runtime-choice/retrieval-tests" explicit_source_selection_verifies_latest_rows_and_preserves_quarantine --ignored
+          NK_LEXICAL_RUNTIME="$RUNNER_TEMP/runtime-choice/lexical-runtime" nix develop .#spike --command "$RUNNER_TEMP/runtime-choice/retrieval-tests" quarantined_choice_prepared_target_legacy_preserves_source_and_sql --ignored
+          NK_LEXICAL_RUNTIME="$RUNNER_TEMP/runtime-choice/lexical-runtime" nix develop .#spike --command "$RUNNER_TEMP/runtime-choice/retrieval-tests" quarantined_choice_prepared_record_recovers_after_killed_processes --ignored
 
       - name: Fetch verified public lexical fixture
         if: startsWith(matrix.choice_group, 'bound-') || matrix.choice_group == 'native-start-bound'
@@ -400,14 +453,17 @@ jobs:
         if: startsWith(matrix.choice_group, 'bound-') || startsWith(matrix.choice_group, 'native-start-') || matrix.choice_group == 'legacy-case'
         env:
           NK_LEXICAL_TEST_ARCHIVE: ${{ runner.temp }}/nk-lexical-archive.tar.xz
-          NK_LEXICAL_RUNTIME: ${{ github.workspace }}/target/debug/examples/lexical-runtime
-        run: nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib "${{ matrix.choice_case }}" --locked -- --ignored
+          NK_LEXICAL_RUNTIME: ${{ runner.temp }}/runtime-choice/lexical-runtime
+        run: |
+          cd crates/retrieval
+          nix develop "$GITHUB_WORKSPACE#spike" --command "$RUNNER_TEMP/runtime-choice/retrieval-tests" "${{ matrix.choice_case }}" --ignored
 
       - name: Test production evaluation storage and authorization boundaries
         if: matrix.suite == 'webhook-worker'
         run: nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-qwen,local-lancedb --example production-eval --locked
 
       - name: Report compiled test cache footprint
+        if: matrix.suite != 'runtime-choices'
         run: |
           du -h --max-depth=2 target/debug
           find target/debug -type f -printf '%s %p\n' | sort -nr | sed -n '1,20p'
@@ -416,7 +472,7 @@ jobs:
       # restore compatible main snapshots; neither PRs nor source-only main
       # edits publish new multi-GB targets that can evict Docker roots.
       - name: Save successful refreshed Cargo caches
-        if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && matrix.suite != 'runtime-choices'
         uses: ./.github/actions/cargo-cache-save
         with:
           key: ${{ steps.cargo-cache.outputs.key }}
