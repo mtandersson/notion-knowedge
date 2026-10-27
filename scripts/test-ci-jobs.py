@@ -112,6 +112,7 @@ class Gate(unittest.TestCase):
             job: 'true' if job in selected else 'false' for job in ALL}}}
         needs.update({job: {'result': 'success' if job in selected else 'skipped'} for job in ALL})
         needs['container-main'] = {'result': 'skipped'}
+        needs['runtime-choice-test'] = {'result': 'success' if 'test' in selected else 'skipped'}
         return needs
 
     def gate(self, needs):
@@ -152,6 +153,12 @@ class Gate(unittest.TestCase):
                 needs[job]['result'] = result
                 with self.subTest(job=job, result=result):
                     self.assertNotEqual(self.gate(needs).returncode, 0)
+
+    def test_runtime_choice_failures_block_when_selected(self):
+        for result in ('failure', 'cancelled', 'skipped', None):
+            needs = self.needs(ALL)
+            needs['runtime-choice-test']['result'] = result
+            self.assertNotEqual(self.gate(needs).returncode, 0)
 
     def test_selection_failure_and_malformed_outputs_block(self):
         for result in ('failure', 'cancelled', 'skipped'):

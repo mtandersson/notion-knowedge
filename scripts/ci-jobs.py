@@ -101,6 +101,11 @@ def validate(needs):
             errors.append(f'{job}: required job finished {result!r}')
         elif selected == 'false' and result not in {'skipped', 'success'}:
             errors.append(f'{job}: unselected job finished {result!r}')
+    choice_result = needs.get('runtime-choice-test', {}).get('result')
+    if outputs.get('test') == 'true' and choice_result != 'success':
+        errors.append(f'runtime-choice-test: required job finished {choice_result!r}')
+    elif outputs.get('test') == 'false' and choice_result not in {'skipped', 'success'}:
+        errors.append(f'runtime-choice-test: unselected job finished {choice_result!r}')
     return errors
 
 
