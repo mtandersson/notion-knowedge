@@ -6,7 +6,12 @@ impl IndexCommitCoordinator {
     /// database and all upstream-effect records; discard only known cache
     /// artifacts. No old generation or runtime is needed to reconstruct it.
     pub fn reset_cache(index: &Path, state: &Path, now: i64) -> Result<(), CommitError> {
-        fs::create_dir_all(index).map_err(io)?;
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(index)
+            .map_err(io)?;
         let index = fs::canonicalize(index).map_err(io)?;
         if state.starts_with(&index) {
             return Err(CommitError::InvalidInput);

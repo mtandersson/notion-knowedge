@@ -36,7 +36,35 @@ impl IndexRuntime {
         source: Arc<NotionClient>,
         provider: Arc<dyn EmbeddingProvider>,
     ) -> Result<Self, &'static str> {
-        Self::recover_with_reset(settings, state, scope, source, provider, false).await
+        Self::recover_with_reset(
+            settings,
+            state,
+            scope,
+            source,
+            provider,
+            false,
+            OpenMode::Initialize,
+        )
+        .await
+    }
+
+    pub async fn recover_for_reads(
+        settings: &WorkerSettings,
+        state: &Path,
+        scope: LifecycleScope,
+        source: Arc<NotionClient>,
+        provider: Arc<dyn EmbeddingProvider>,
+    ) -> Result<Self, &'static str> {
+        Self::recover_with_reset(
+            settings,
+            state,
+            scope,
+            source,
+            provider,
+            false,
+            OpenMode::ReadOnly,
+        )
+        .await
     }
 
     pub async fn reset_and_resync(
@@ -46,7 +74,16 @@ impl IndexRuntime {
         source: Arc<NotionClient>,
         provider: Arc<dyn EmbeddingProvider>,
     ) -> Result<Self, &'static str> {
-        Self::recover_with_reset(settings, state, scope, source, provider, true).await
+        Self::recover_with_reset(
+            settings,
+            state,
+            scope,
+            source,
+            provider,
+            true,
+            OpenMode::Initialize,
+        )
+        .await
     }
 
     async fn recover_with_reset(
@@ -56,6 +93,7 @@ impl IndexRuntime {
         source: Arc<NotionClient>,
         provider: Arc<dyn EmbeddingProvider>,
         force: bool,
+        healthy_mode: OpenMode,
     ) -> Result<Self, &'static str> {
         use notion_knowledge_retrieval::{commit::CommitError, sync_state::SqliteSyncStateStore};
         let exists = |p: &Path| p.try_exists().map_err(|_| "cache path unavailable");
@@ -75,6 +113,7 @@ impl IndexRuntime {
             || !state_exists
             || exists(&journal_path)?
             || !exists(&settings.index)?
+            || !exists(&settings.index.join(".nk-operational-binding"))?
             || !exists(&settings.index.join("chunks.lance"))?;
         if !rebuild {
             let journal = production_scope(&scope).map_err(|_| "invalid index scope")?;
@@ -121,7 +160,11 @@ impl IndexRuntime {
             scope,
             source,
             provider,
-            OpenMode::Initialize,
+            if rebuild {
+                OpenMode::Initialize
+            } else {
+                healthy_mode
+            },
         )
         .await?;
         if rebuild {
@@ -133,12 +176,19 @@ impl IndexRuntime {
     async fn resync_cache(&self, timeout_seconds: u64) -> Result<(), &'static str> {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::Duration;
+        struct Attempt(Arc<AtomicBool>);
+        impl Drop for Attempt {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
         let state = self.coordinator.state();
         let mut lease = state
             .acquire_lease(now_ms() / 1000, timeout_seconds as i64 + 30)
             .map_err(|_| "cache sync writer busy")?;
         let result = loop {
             let expired = Arc::new(AtomicBool::new(false));
+            let _attempt = Attempt(expired.clone());
             let flag = expired.clone();
             let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || {
                 if flag.load(Ordering::SeqCst) {
@@ -168,6 +218,33 @@ impl IndexRuntime {
                 break Err("cache resync incomplete; retry startup");
             }
             if progress.pending.is_empty() {
+                use notion_knowledge_retrieval::chunks::{VectorDistance, VectorIndexConfig};
+                let table = GuardedChunkTable::bind(
+                    self.coordinator.index_directory(),
+                    "chunks",
+                    self.provider.metadata().clone(),
+                    self.coordinator.clone(),
+                )
+                .map_err(|_| "rebuilt cache binding unavailable");
+                let table = match table {
+                    Ok(table) => table,
+                    Err(error) => break Err(error),
+                };
+                let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| now_ms() / 1000);
+                if table
+                    .ensure_vector_index(
+                        VectorIndexConfig {
+                            distance: VectorDistance::Cosine,
+                            ..Default::default()
+                        },
+                        lease.clone(),
+                        clock,
+                    )
+                    .await
+                    .is_err()
+                {
+                    break Err("rebuilt search index unavailable");
+                }
                 break state
                     .finish_cache_rebuild(&lease, now_ms() / 1000)
                     .map_err(|_| "cache sync state unavailable");

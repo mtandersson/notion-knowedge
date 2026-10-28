@@ -2302,6 +2302,10 @@ async fn lost_or_incompatible_cache_resyncs_without_replaying_external_effects()
         )
         .unwrap();
         assert!(!table.page_chunks(PAGE).await.unwrap().is_empty());
+        assert!(
+            table.search_snapshot().await.is_ok(),
+            "rebuilt cache must have usable search indexes"
+        );
         let db = rusqlite::Connection::open(&f.state).unwrap();
         for (query, expected) in [
             (
