@@ -2116,162 +2116,92 @@ async fn authenticated_http_serves_committed_hybrid_and_graph_and_denies_untrust
     assert_eq!(index_before_http, storage_files(&runtime.index));
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn read_activation_refuses_incompatible_assets_and_unsuitable_http_never_opens_them() {
+async fn read_activation_preserves_protected_storage_and_untrusted_http_cannot_rebuild() {
+    use std::os::unix::fs::PermissionsExt;
     let runtime = TestRuntime::with_scope_policy("webhook-v1").await;
     commit_search_fixture(&runtime).await;
-    let mut config = retrieval_config(&runtime);
-    config.retrieval.as_mut().unwrap().index = runtime._dir.path().join("missing-index");
-    assert!(
-        installed_retrieval(
-            &runtime,
-            &config,
-            notion_knowledge_server::root_scope::Transport::Stdio
-        )
-        .await
-        .is_err()
-    );
-    assert!(!config.retrieval.as_ref().unwrap().index.exists());
-    config.bearer_fallback = None;
-    let output = wire_stdio(
-        installed_retrieval(
-            &runtime,
-            &config,
-            notion_knowledge_server::root_scope::Transport::Http,
-        )
-        .await
-        .unwrap(),
-        vec![search_request(2, "hybrid", json!({}))],
-    )
-    .await;
-    assert!(output[1].to_string().contains("retrieval_unavailable"));
-    assert!(!config.retrieval.as_ref().unwrap().index.exists());
-    // Ordinary production activation also returns before loading absent models.
+    let config = retrieval_config(&runtime);
+    let before_state = std::fs::read(&runtime.db).unwrap();
+    let before_index = storage_files(&runtime.index);
+    // A missing/invalid real model is rejected before recovery changes storage.
     assert!(
         notion_knowledge_server::retrieval_runtime::configured(
-            notion_knowledge_mcp::KnowledgeServer::default(),
-            &config,
-            notion_knowledge_server::root_scope::Transport::Http
-        )
-        .await
-        .is_ok()
-    );
-    config = retrieval_config(&runtime);
-    config.webhook_state_file = Some(runtime._dir.path().join("absent.sqlite"));
-    assert!(
-        installed_retrieval(
-            &runtime,
-            &config,
-            notion_knowledge_server::root_scope::Transport::Stdio
-        )
-        .await
-        .is_err()
-    );
-    assert!(!config.webhook_state_file.as_ref().unwrap().exists());
-    std::fs::write(config.webhook_state_file.as_ref().unwrap(), b"corrupt").unwrap();
-    assert!(
-        installed_retrieval(
-            &runtime,
-            &config,
-            notion_knowledge_server::root_scope::Transport::Stdio
-        )
-        .await
-        .is_err()
-    );
-    config = retrieval_config(&runtime);
-    let other_runtime = TestRuntime::with_scope_policy("webhook-v1").await;
-    config.retrieval.as_mut().unwrap().index = other_runtime.index.clone();
-    assert!(
-        installed_retrieval(
-            &runtime,
-            &config,
-            notion_knowledge_server::root_scope::Transport::Stdio
-        )
-        .await
-        .is_err()
-    );
-    config = retrieval_config(&runtime);
-    let foreign = Arc::new(Provider {
-        metadata: EmbeddingMetadata::new("other".into(), "other".into(), "1".into(), 3).unwrap(),
-        count: Arc::new(AtomicUsize::new(0)),
-    });
-    assert!(
-        notion_knowledge_server::retrieval_runtime::compose(
             notion_knowledge_mcp::KnowledgeServer::default(),
             &config,
             notion_knowledge_server::root_scope::Transport::Stdio,
-            runtime.source.client(),
-            foreign
         )
         .await
         .is_err()
     );
-    config.notion_scope.as_mut().unwrap().roots = vec![PageId(FOREIGN.into())];
+    assert_eq!(std::fs::read(&runtime.db).unwrap(), before_state);
+    assert_eq!(storage_files(&runtime.index), before_index);
+
+    // Corrupt operational state is protected; it is never treated as a fresh
+    // empty ledger merely because the derived cache is rebuildable.
+    let mut corrupt = retrieval_config(&runtime);
+    let bad_state = runtime._dir.path().join("corrupt.sqlite");
+    std::fs::write(&bad_state, b"corrupt").unwrap();
+    std::fs::set_permissions(&bad_state, std::fs::Permissions::from_mode(0o600)).unwrap();
+    corrupt.webhook_state_file = Some(bad_state.clone());
     assert!(
         installed_retrieval(
             &runtime,
-            &config,
+            &corrupt,
             notion_knowledge_server::root_scope::Transport::Stdio
         )
         .await
         .is_err()
     );
-    config = retrieval_config(&runtime);
-    config
-        .notion_scope
-        .as_mut()
+    assert_eq!(std::fs::read(&bad_state).unwrap(), b"corrupt");
+    assert_eq!(std::fs::read(&runtime.db).unwrap(), before_state);
+    assert_eq!(storage_files(&runtime.index), before_index);
+
+    let mut no_bearer = retrieval_config(&runtime);
+    no_bearer.bearer_fallback = None;
+    let mut public = retrieval_config(&runtime);
+    public.http_bind = "192.0.2.1:3000".parse().unwrap();
+    let mut oauth = config;
+    oauth.oauth_discovery =
+        notion_knowledge_server::config::Config::from_lookup(|name| match name {
+            "NK_OAUTH_ISSUER" => Some("https://auth.example.test".into()),
+            "NK_OAUTH_RESOURCE" => Some("https://knowledge.example.test/mcp".into()),
+            _ => None,
+        })
         .unwrap()
-        .exclusions
-        .page_ids
-        .insert(PAGE.into());
-    assert!(
-        installed_retrieval(
+        .oauth_discovery;
+    let source_reads = runtime.source.attempts.load(Ordering::SeqCst);
+    let embeddings = runtime.embeddings.load(Ordering::SeqCst);
+    for mut untrusted in [no_bearer, public, oauth] {
+        let index = runtime._dir.path().join("untrusted-missing-index");
+        let state = runtime._dir.path().join("untrusted-missing.sqlite");
+        untrusted.retrieval.as_mut().unwrap().index = index.clone();
+        untrusted.retrieval.as_mut().unwrap().assets = runtime._dir.path().join("absent-model");
+        untrusted.webhook_state_file = Some(state.clone());
+        let handler = installed_retrieval(
             &runtime,
-            &config,
-            notion_knowledge_server::root_scope::Transport::Stdio
+            &untrusted,
+            notion_knowledge_server::root_scope::Transport::Http,
         )
         .await
-        .is_err()
-    );
-    config = retrieval_config(&runtime);
-    config.http_bind = "192.0.2.1:3000".parse().unwrap();
-    config.retrieval.as_mut().unwrap().assets = runtime._dir.path().join("absent-model");
-    assert!(
-        notion_knowledge_server::retrieval_runtime::configured(
-            notion_knowledge_mcp::KnowledgeServer::default(),
-            &config,
-            notion_knowledge_server::root_scope::Transport::Http
-        )
-        .await
-        .is_ok()
-    );
-    config = retrieval_config(&runtime);
-    let discovery = notion_knowledge_server::config::Config::from_lookup(|name| match name {
-        "NK_OAUTH_ISSUER" => Some("https://auth.example.test".into()),
-        "NK_OAUTH_RESOURCE" => Some("https://knowledge.example.test/mcp".into()),
-        _ => None,
-    })
-    .unwrap();
-    config.oauth_discovery = discovery.oauth_discovery;
-    config.retrieval.as_mut().unwrap().assets = runtime._dir.path().join("absent-model");
-    assert!(
-        notion_knowledge_server::retrieval_runtime::configured(
-            notion_knowledge_mcp::KnowledgeServer::default(),
-            &config,
-            notion_knowledge_server::root_scope::Transport::Http
-        )
-        .await
-        .is_ok()
-    );
-    config = retrieval_config(&runtime);
-    assert!(
-        notion_knowledge_server::retrieval_runtime::configured(
-            notion_knowledge_mcp::KnowledgeServer::default(),
-            &config,
-            notion_knowledge_server::root_scope::Transport::Stdio
-        )
-        .await
-        .is_err()
-    );
+        .unwrap();
+        let output = wire_stdio(handler, vec![search_request(2, "hybrid", json!({}))]).await;
+        assert!(output[1].to_string().contains("retrieval_unavailable"));
+        assert!(
+            notion_knowledge_server::retrieval_runtime::configured(
+                notion_knowledge_mcp::KnowledgeServer::default(),
+                &untrusted,
+                notion_knowledge_server::root_scope::Transport::Http,
+            )
+            .await
+            .is_ok()
+        );
+        assert!(!index.exists());
+        assert!(!state.exists());
+    }
+    assert_eq!(runtime.source.attempts.load(Ordering::SeqCst), source_reads);
+    assert_eq!(runtime.embeddings.load(Ordering::SeqCst), embeddings);
+    assert_eq!(std::fs::read(&runtime.db).unwrap(), before_state);
+    assert_eq!(storage_files(&runtime.index), before_index);
 }
 
 fn storage_files(
