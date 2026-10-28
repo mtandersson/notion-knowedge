@@ -2264,6 +2264,7 @@ async fn ordinary_reconciliation_repairs_missing_rows_without_a_source_revision_
     use notion_knowledge_core::search::{
         LexicalQuery, LexicalSearch, SemanticQuery, SemanticSearch,
     };
+    use notion_knowledge_core::sync_state::SyncStateStore;
     use notion_knowledge_retrieval::chunks::{
         GuardedChunkTable, LanceChunkTable, LanceSemanticSearch,
     };
