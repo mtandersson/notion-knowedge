@@ -13,6 +13,8 @@ use notion_knowledge_core::sync_state::{
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
+mod cache_reset;
+
 pub const LATEST_SCHEMA_VERSION: i64 = 19;
 
 const MIGRATIONS: &[(i64, &str, &str)] = &[

@@ -30,6 +30,53 @@ fn validate_owned(config: &Config) -> Result<(), &'static str> {
         own,
     )
 }
+
+/// Validate existing storage and parent ownership before recovery may create
+/// missing cache paths. A missing cache does not relax the trust boundary.
+fn validate_recovery_paths(config: &Config) -> Result<(), &'static str> {
+    use std::os::unix::fs::MetadataExt;
+    let own = std::fs::metadata("/proc/self")
+        .map_err(|_| "retrieval ownership unavailable")?
+        .uid();
+    let state = config
+        .webhook_state_file
+        .as_deref()
+        .ok_or("retrieval state unavailable")?;
+    for (path, directory) in [(index_path(config)?, true), (state, false)] {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                if metadata.uid() != own
+                    || metadata.mode() & 0o077 != 0
+                    || (directory && !metadata.is_dir())
+                    || (!directory && !metadata.is_file())
+                {
+                    return Err("retrieval storage must be private and operator-owned");
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("retrieval storage unavailable"),
+        }
+        for ancestor in path
+            .parent()
+            .ok_or("retrieval storage unavailable")?
+            .ancestors()
+        {
+            match std::fs::symlink_metadata(ancestor) {
+                Ok(metadata) => {
+                    if !metadata.is_dir()
+                        || (metadata.uid() != own && metadata.uid() != 0)
+                        || (metadata.mode() & 0o022 != 0 && metadata.mode() & 0o1000 == 0)
+                    {
+                        return Err("retrieval storage must be operator-controlled");
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err("retrieval ownership unavailable"),
+            }
+        }
+    }
+    Ok(())
+}
 fn index_path(config: &Config) -> Result<&std::path::Path, &'static str> {
     Ok(&config
         .retrieval
@@ -79,7 +126,7 @@ pub async fn configured(
     if config.retrieval.is_none() || !crate::root_scope::trusted_transport(config, transport) {
         return Ok(handler);
     }
-    validate_owned(config)?;
+    validate_recovery_paths(config)?;
     let settings = config
         .retrieval
         .as_ref()
@@ -112,7 +159,7 @@ pub async fn compose(
     if config.retrieval.is_none() || !crate::root_scope::trusted_transport(config, transport) {
         return Ok(handler);
     }
-    validate_owned(config)?;
+    validate_recovery_paths(config)?;
     let settings = config
         .retrieval
         .as_ref()
@@ -121,7 +168,7 @@ pub async fn compose(
         .notion_scope
         .clone()
         .ok_or("retrieval scope unavailable")?;
-    let runtime = crate::index_runtime::IndexRuntime::compose(
+    let runtime = crate::index_runtime::IndexRuntime::recover_for_reads(
         settings,
         config
             .webhook_state_file
@@ -130,9 +177,9 @@ pub async fn compose(
         scope.clone(),
         source.clone(),
         provider.clone(),
-        crate::index_runtime::OpenMode::ReadOnly,
     )
     .await?;
+    validate_owned(config)?;
     let table = GuardedChunkTable::bind(
         &settings.index,
         "chunks",

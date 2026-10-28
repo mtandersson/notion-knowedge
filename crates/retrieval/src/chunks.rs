@@ -649,6 +649,9 @@ impl LanceChunkTable {
             ));
         }
         self.validate_vector_index_layout().await?;
+        if self.count_rows().await? == 0 {
+            return Ok(Vec::new());
+        }
         let stats = self
             .table
             .index_stats(CHUNK_VECTOR_INDEX_NAME)
@@ -870,6 +873,9 @@ impl LanceChunkTable {
     async fn lexical_search(&self, query: LexicalQuery) -> Result<Vec<SearchHit>, ChunkTableError> {
         validate_lexical_query(&query)?;
         let snapshot = self.read_snapshot().await?;
+        if snapshot.count_rows().await? == 0 {
+            return Ok(Vec::new());
+        }
         let predicate = snapshot.metadata_predicate(&query).await?;
         let candidate_limit = query.limit.saturating_mul(4).min(400);
         let fields = [
@@ -2564,7 +2570,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vector_index_and_query_validation_fail_closed() {
+    async fn vector_training_rejects_empty_data_and_queries_validate_empty_cache_inputs() {
         let path = temp_database("vector-validation");
         let metadata = embedding("revision-1", 3);
         let table = LanceChunkTable::create(&path, "chunks", metadata)
@@ -2577,10 +2583,13 @@ mod tests {
                 .await,
             Err(ChunkTableError::InvalidRows(_))
         ));
-        assert!(matches!(
-            table.vector_query(&[1.0, 0.0, 0.0], 1, 1).await,
-            Err(ChunkTableError::InvalidSchema(_))
-        ));
+        assert!(
+            table
+                .vector_query(&[1.0, 0.0, 0.0], 1, 1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(matches!(
             table.vector_query(&[1.0, 0.0], 1, 1).await,
             Err(ChunkTableError::InvalidRows(_))

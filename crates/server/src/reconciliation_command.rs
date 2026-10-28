@@ -401,17 +401,42 @@ pub mod runtime {
                         .begin_relation_rebuild(&run, lease.clone(), clock.clone())
                         .await?;
                 }
-                if let Some(page) = &page {
+                let progress = if let Some(page) = &page {
                     runtime
                         .runner
-                        .retry_page(&run, page, lease.clone(), clock, runtime.provider.as_ref())
-                        .await
+                        .retry_page(
+                            &run,
+                            page,
+                            lease.clone(),
+                            clock.clone(),
+                            runtime.provider.as_ref(),
+                        )
+                        .await?
                 } else {
                     runtime
                         .runner
-                        .apply_next(&run, lease.clone(), clock, runtime.provider.as_ref())
-                        .await
+                        .apply_next(
+                            &run,
+                            lease.clone(),
+                            clock.clone(),
+                            runtime.provider.as_ref(),
+                        )
+                        .await?
+                };
+                if progress.pending.is_empty()
+                    && progress.failed_pages() == 0
+                    && progress.run_failures.is_empty()
+                {
+                    crate::index_runtime::prepare_search_if_missing(
+                        &runtime.coordinator,
+                        runtime.provider.metadata(),
+                        lease.clone(),
+                        clock,
+                    )
+                    .await
+                    .map_err(|_| RunnerError::Journal(JournalError::Unavailable))?;
                 }
+                Ok(progress)
             };
             let result = tokio::select! { biased;
                 _ = stop.cancelled() => { attempt.cancel(); None },

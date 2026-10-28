@@ -8,12 +8,11 @@ between processes is not a product requirement.
 ## Current support and remaining work
 
 Production webhook indexing, manual reconciliation and periodic reconciliation
-exist. See [manual reconciliation](manual-reconciliation.md) and
-[webhook workers](notion-webhooks.md). However, the current coordinator requires
-the SQLite/index physical pairing, and `--index rebuild` rebuilds search
-structures over existing rows rather than recrawling a lost cache. Complete
-cache-loss recovery is being implemented in #577. Do not claim it is available
-based on historical #111 closure, component tests or the isolated #215 spike.
+exist. The shared startup recovery path rebuilds a missing or incompatible
+cache before composing the sync worker or installed integration-backed readers.
+Use [cache reset and resync](cache-reset-and-resync.md) for detection, preserved
+state, configuration, command and failure behavior. `--index rebuild` remains
+ANN-only maintenance; `--index reset` performs authoritative reconstruction.
 
 The [storage inventory and reset contract](cache-reset-and-resync.md) defines
 what reset must discard and preserve. #578 removes obsolete recovery machinery;
@@ -52,9 +51,9 @@ assets, authorization failures and transient upstream errors require bounded
 retry or configuration repair; they are not proof of cache corruption. No
 rollback to historical local data is needed to reconstruct authoritative state.
 
-Until #577 implements and verifies this path, avoid manually bypassing existing
-binding guards or inventing filesystem deletion commands for production. Report
-the actual unavailable condition and keep protected stores intact.
+Use the supported reset API or `--index reset` with the service stopped. Avoid
+manually bypassing binding guards or deleting operational SQLite. Report the
+actual unavailable condition and keep protected stores intact.
 
 ## Backup of protected operational state
 
@@ -77,7 +76,9 @@ startup/sync seams: create a cache, delete it, restart and verify reconstructed
 scoped results; repeat with unusable derived metadata and a transient sync
 failure. Check unavailable search during rebuilding and subsequent incremental
 updates. Verify preserved credentials/ledgers and zero upstream writes/uploads
-from recovery. The commands and measured results belong in #577 once implemented.
+from recovery. The bounded cache-resync tests in `server/tests/reconciliation_command.rs`
+exercise the shared production startup seam. Current-head CI must pass before #577 closes; these fixtures do not establish
+deployed or real Notion acceptance.
 
 Actual deployed resource/overload recovery remains #455/#416; real Notion and
 ChatGPT smoke remains separately controlled by #110/#109. Component/spike checks

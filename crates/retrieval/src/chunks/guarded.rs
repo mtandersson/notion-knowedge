@@ -375,6 +375,7 @@ impl GuardedChunkTable {
         if !indexes
             .iter()
             .any(|index| index.name == CHUNK_VECTOR_INDEX_NAME)
+            && current.count_rows().await? != 0
         {
             return Err(ChunkTableError::InvalidSchema(
                 "required vector index unavailable".into(),
