@@ -1,26 +1,48 @@
 # Cache reset and authoritative resync
 
-Implementation tracking: #577. This document records the current storage
-inventory and intended recovery behavior; it is not a claim that full cache
-loss recovery is already implemented.
+Implementation: #577. See the production behavior below and the bounded
+credential-free acceptance tests in `server/tests/reconciliation_command.rs`.
 
 Notion is authoritative. One server process owns local retrieval and sync.
 Derived data can be discarded and rebuilt. Recovery must not depend on a prior
 index generation, a retained handoff journal, a legacy executable, or transfer
 of authority between processes. See ADR 0001.
 
-## Current implementation gaps
+## Production recovery
 
-`server::index_runtime::IndexRuntime::compose(Initialize)` initializes the
-coordinator and either creates an empty `chunks` table or ensures its indexes.
-It does not recrawl Notion itself. Coordinator initialization validates the
-physical directory identity recorded in SQLite; recreating a deleted directory
-therefore fails against existing operational state.
+The sync worker and installed integration-backed retrieval readers call the
+shared `IndexRuntime` recovery path before serving. Missing storage, missing
+binding metadata, known identity/schema incompatibility, or an interrupted
+rebuild trigger reset and a fresh authoritative inventory. A healthy cache is
+reused; healthy read-only composition still opens it without writes.
 
-`--index rebuild` rebuilds the vector search index over existing chunk rows.
-It does not reconstruct missing canonical chunks from Notion. Manual
-reconciliation requires existing compatible storage. These commands do not
-currently establish complete loss-of-cache recovery.
+Reset holds the directory guard and current writer lease, clears an explicit
+allowlist of derived SQLite bookkeeping, and removes only the canonical chunks
+table and its known binding/journal artifacts. It preserves the directory and
+operational SQLite file, admitted webhook work, mutation/file refresh intents
+and unrelated application tables. A single pending-sync flag remains until the
+fresh inventory, page refreshes and search index preparation all succeed.
+
+Each inventory/page attempt uses the configured timeout. Failed resync leaves
+startup unavailable and the flag pending; the next start resets partial derived
+output and retries. Use normal supervisor restart/backoff for unavailable
+Notion or assets. Resource/permission and arbitrary storage errors do not cause
+an automatic destructive reset.
+
+For a corrupt cache file that cannot be classified as an identity/schema
+mismatch, stop the service and run the explicit trusted operator command with
+the normal scope, Notion credential and offline embedding settings:
+
+```sh
+notion-knowledge-server --index reset
+```
+
+Exit 0 reports complete reset/resync; exit 3 reports an incomplete reset/resync.
+Invalid configuration exits 2. This command only reads Notion; it never replays
+a write or upload. Existing `--index rebuild` remains ANN-only maintenance over
+stored rows, while `--index reset` reconstructs content from Notion. The command
+requires the Unix `webhook-worker` feature and integration-backed source
+configuration, like the existing manual reconciliation runtime.
 
 ## Storage inventory
 

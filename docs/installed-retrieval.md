@@ -127,3 +127,14 @@ nix develop .#spike --command cargo test -p notion-knowledge-server --features w
 
 Optional bounded graph reranking is installed over this same hybrid adapter through
 [immutable graph boost settings and paired evaluation](installed-graph-boost.md).
+
+## Recovery of disposable cache
+
+Installed integration-backed retrieval startup uses the shared
+[cache reset/resync path](cache-reset-and-resync.md) for missing or known
+incompatible derived storage. It does not serve until authoritative resync and
+search index preparation succeed. Healthy read-only startup remains read-only.
+For arbitrary unusable cache files, stop the service and run `--index reset`
+with the normal Notion scope, integration credential and offline model settings.
+This preserves credentials and external-effect records; `--index rebuild`
+continues to mean ANN-only maintenance, not reconstruction of missing content.
