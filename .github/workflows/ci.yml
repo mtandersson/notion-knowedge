@@ -70,6 +70,9 @@ jobs:
       - name: Validate isolated Notion read smoke contracts
         run: python3 scripts/test-smoke-notion-read.py
 
+      - name: Validate guarded Notion write smoke contracts
+        run: python3 scripts/test-smoke-notion-write.py
+
       - name: Validate bounded model measurement contracts
         run: python3 scripts/test-measure-model-container.py
 

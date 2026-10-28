@@ -2,6 +2,7 @@
 """Explicit disposable-root write/upload smoke against installed OAuth HTTP MCP."""
 import argparse
 import base64
+from contextlib import closing
 import hashlib
 import http.client
 import importlib.util
@@ -9,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import tempfile
 import time
 import uuid
 from urllib.parse import urlparse
@@ -18,12 +20,15 @@ read = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(read)
 require, SmokeFailure = read.require, read.SmokeFailure
 # Publish only these synthetic bytes at operator-managed allowlisted HTTPS URLs.
-IMAGE = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=")
+IMAGE = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=")
 DOCUMENT = b"Notion knowledge disposable smoke synthetic document.\n"
 
 
 def canonical(value):
-    return isinstance(value, str) and str(uuid.UUID(value)) == value
+    try:
+        return isinstance(value, str) and str(uuid.UUID(value)) == value
+    except ValueError:
+        return False
 
 
 class HTTP:
@@ -104,7 +109,7 @@ def key_digest(workspace, key):
 
 def query(path, sql, parameters):
     # Read-only SQLite connections include live WAL evidence without copying secrets.
-    with sqlite3.connect(Path(path).as_uri() + "?mode=ro", uri=True) as connection:
+    with closing(sqlite3.connect(Path(path).as_uri() + "?mode=ro", uri=True)) as connection:
         return connection.execute(sql, parameters).fetchall()
 
 
@@ -149,11 +154,17 @@ def execute(args):
                          "Manually archive only the verified run-owned child after inspection; never the root."}
 
     def save():
-        descriptor = os.open(diagnostics / "result.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, "w") as output:
+        with tempfile.NamedTemporaryFile(mode="w", dir=diagnostics, delete=False) as output:
             json.dump(report, output, indent=2)
             output.flush()
             os.fsync(output.fileno())
+            temporary = output.name
+        os.replace(temporary, diagnostics / "result.json")
+        descriptor = os.open(diagnostics, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     def write(name, arguments, expected_page=None):
         phase = report["phase"]
@@ -201,7 +212,7 @@ def execute(args):
         read.initialize_client(client)
         tools = client.send("tools/list").get("tools", [])
         require({"knowledge_create_page", "knowledge_append", "knowledge_upload_file", "knowledge_get",
-                 "knowledge_search"}.issubset({item["name"] for item in tools}), "Installed guarded tools unavailable")
+                 "knowledge_search", "knowledge_file_refresh"}.issubset({item["name"] for item in tools}), "Installed guarded tools unavailable")
         report["phase"] = "create"
         page = write("knowledge_create_page", {"root_page_id": args.root, "parent_page_id": args.root,
                      "title": run, "markdown": marker + "\n", "idempotency_key": run + "-create"})
@@ -238,12 +249,19 @@ def execute(args):
         files = result.get("files", [])
         # Retain only typed identities/statuses, including earlier successful batch members.
         for item in files:
-            safe = {"index": item.get("index"), "status": item.get("status") if item.get("status") in
+            safe = {"index": item.get("index") if type(item.get("index")) is int else None, "status": item.get("status") if item.get("status") in
                     ("verified", "verified_audit_failed", "failed", "denied", "indeterminate", "unattempted") else "uncertain"}
             for field in ("target", "upload_id", "block_id"):
                 value = item.get(field)
                 if isinstance(value, str) and canonical(value):
                     safe[field] = value
+            refresh = item.get("refresh", {})
+            digest = refresh.get("mutation_digest", "")
+            if (refresh.get("page_id") == page and isinstance(digest, str) and len(digest) == 64 and
+                    all(c in "0123456789abcdef" for c in digest)):
+                safe["refresh"] = {"page_id": page, "mutation_digest": digest}
+            if item.get("index_status") in ("held", "queued", "running", "completed", "failed", "unavailable", "not_needed"):
+                safe["index_status"] = item["index_status"]
             report["effects"]["upload"]["files"].append(safe)
         save()
         require(response.get("isError") is not True and not result.get("failure") and
@@ -262,9 +280,29 @@ def execute(args):
             rows = query(path, "SELECT count(*) FROM agent_audit_events WHERE target_page_id=? AND tool=? AND outcome='succeeded'",
                          [page, tool])
             require(rows[0][0] >= minimum, "Durable terminal audit evidence missing")
+        for kind, size in (("image", len(IMAGE)), ("other", len(DOCUMENT))):
+            rows = query(settings["file_audit"], "SELECT count(*) FROM agent_audit_events WHERE target_page_id=? AND tool='file_attach' AND outcome='succeeded' AND file_kind=? AND file_size_bytes=?",
+                         [page, kind, size])
+            require(rows[0][0] >= 1, "Synthetic attachment kind or observed tiny byte size differs")
         report["durable_audits_verified"] = True
         report["phase"] = "uploaded_retrieval"
         save()
+        receipts = report["effects"]["upload"]["files"]
+        require(all("refresh" in item for item in receipts) and receipts[0]["refresh"] == receipts[1]["refresh"],
+                "Missing shared derived refresh receipt")
+        deadline = time.monotonic() + args.wait_seconds
+        while True:
+            response = call(client, "knowledge_file_refresh", dict(receipts[0]["refresh"], retry=False))
+            status = response.get("structuredContent", {}).get("index_status")
+            if status in ("queued", "running", "completed", "failed", "unavailable", "held"):
+                report["upload_index_status"] = status
+                save()
+            require(response.get("isError") is not True and status not in ("failed", "unavailable", "held"),
+                    "Attachment verified but derived refresh requires operator reconciliation")
+            if status == "completed":
+                break
+            require(time.monotonic() < deadline, "Attachment verified but derived refresh deadline exceeded")
+            time.sleep(min(2, max(0, deadline - time.monotonic())))
         report["uploaded_chunk_id"] = retrieve(appended_marker)
         report.update(phase="complete", outcome="verified")
     except SmokeFailure as error:
