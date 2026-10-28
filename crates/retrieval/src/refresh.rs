@@ -940,10 +940,11 @@ impl AuthoritativePageRefresh {
             // not a source conflict. Reclassify this operation as Refresh so the
             // existing diff path embeds only missing rows. The exact planned
             // local/source identities remain checked inside the owned commit.
-            if !previous_chunks
-                .iter()
-                .all(|chunk| prepared_chunks.contains(chunk))
-            {
+            if !previous_chunks.iter().all(|chunk| {
+                prepared_chunks
+                    .binary_search_by(|candidate| candidate.chunk_id.cmp(&chunk.chunk_id))
+                    .is_ok_and(|index| prepared_chunks[index] == *chunk)
+            }) {
                 return Err(RefreshError::Conflict);
             }
             let mut repair = expected;
