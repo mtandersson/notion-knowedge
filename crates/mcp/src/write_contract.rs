@@ -23,11 +23,11 @@ pub fn is_planned_write(name: &str) -> bool {
 }
 
 fn short_id() -> Value {
-    json!({"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"})
+    json!({"type":"string","minLength":1,"maxLength":128,"pattern":crate::NONBLANK_TEXT_PATTERN})
 }
 
 fn content() -> Value {
-    json!({"type":"string","minLength":1,"maxLength":200000,"pattern":"\\S"})
+    json!({"type":"string","minLength":1,"maxLength":200000,"pattern":crate::NONBLANK_TEXT_PATTERN})
 }
 
 fn input(name: &str) -> Value {
@@ -42,7 +42,7 @@ fn input(name: &str) -> Value {
             fields.insert("parent_page_id".into(), short_id());
             fields.insert(
                 "title".into(),
-                json!({"type":"string","minLength":1,"maxLength":200,"pattern":"\\S"}),
+                json!({"type":"string","minLength":1,"maxLength":200,"pattern":crate::NONBLANK_TEXT_PATTERN}),
             );
             fields.insert("markdown".into(), content());
             required.extend(["parent_page_id", "title", "markdown"]);

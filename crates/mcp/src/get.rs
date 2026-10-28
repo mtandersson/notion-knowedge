@@ -132,7 +132,7 @@ pub fn tool() -> Tool {
         "required":["kind","id"],
         "properties":{
             "kind":{"type":"string","enum":["page","chunk"]},
-            "id":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"}
+            "id":{"type":"string","minLength":1,"maxLength":128,"pattern":crate::NONBLANK_TEXT_PATTERN}
         }
     });
     let provenance = json!({
