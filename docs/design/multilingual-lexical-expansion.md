@@ -183,48 +183,47 @@ and commit preparation; propagate plan identity into evaluation provenance.
 Assets must be regular immutable local files with verified digests, opened once
 and retained through a request; atomic path replacement cannot mix generations.
 
-Initial enablement is an explicit offline operation: stop admission and all
-index writers, acquire existing lifecycle/index ownership, retain a verified
-operational SQLite backup and the old derived index, and prepare a sibling
-candidate index. Rebuild the four FTS indexes from the unchanged original rows
-under a new versioned lexical storage binding, validate the expected raw
-profile and exact-ID probes, and bind the approved retrieval plan. Keep source
-text/hashes/citations, embedding identity and vector bytes unchanged. If source
-rows or vector identity cannot be verified compatible, use the existing explicit
-Notion-authoritative full rebuild and normal re-embedding; never copy/relabel
-incompatible vectors.
+The service is one process and its local retrieval state is disposable. Initial
+enablement and later dictionary/planner/model changes use the supported cache
+reset and authoritative Notion resync path (#577). Rebuild compatible lexical
+structures from authorized canonical content; preserve source text, hashes,
+citations and correct embedding identity. Never relabel incompatible vectors.
+Re-embed from Notion when the configured vector identity changes.
 
-Validate the candidate completely before activating it through a fenced
-coordinator transition. A standalone rename is not sufficient: the coordinator
-pins directory identity. The implementation must explicitly rebind that
-physical identity while preventing old workers from committing to the new
-index. Reopen under the new generation and validate again before admission.
-A crash before activation leaves the old compatible generation active; a crash
-mid-transition leaves admission blocked until reconciliation verifies one
-complete binding. No mixed old/new dictionary or FTS state is searchable.
+Coordinate admission and writers inside the process while rebuilding. Reopen
+and validate the configured vector, lexical and plan identities before allowing
+search. Missing or incompatible metadata is a reason to rebuild derived data,
+not a requirement to preserve the old generation. A failed or interrupted rebuild
+can reset its partial output and resync again. No sibling candidate, verified old
+index backup, durable phase journal, process handoff or rollback protocol is
+required. Existing code may still enforce physical bindings until #577/#578
+replace that recovery path; this design does not authorize bypassing those guards
+manually.
 
-A new dictionary/planner digest requires the same explicit candidate preparation
-and transition, even though only query behavior changes. Old requests may
-finish only under their original pinned generation; no new generation may
-adopt a stale worker. Rollback restores the complete prior derived-index/plan
-pair through the same ownership checks. Never delete/reset/recreate grant
-storage, idempotency ledgers, audit, refresh intents/queues or operational SQLite
-to make an index compatible. Preserve pending acknowledged work and replay
-only derived indexing after compatible authority is restored. Do not replay
-Notion writes or attachments during rebuild/recovery.
+Requests must use one coherent verified configuration. Asset files are verified
+local inputs; a request cannot mix dictionary or plan identities after path
+replacement. Keep ordinary process-local writer coordination and authorization.
+
+Reset only derived retrieval and its invalidated bookkeeping. Preserve grant
+storage, credentials, external mutation/idempotency records and audit. Preserve
+admitted refresh work or account for it through authoritative resync without
+replaying Notion writes or attachments. Operational SQLite contains a mixture of
+derived projections and admitted work; whole-file deletion is not the recovery
+API. Retaining every historical cache receipt is not a prerequisite to rebuilding.
+See [cache reset boundaries](../cache-reset-and-resync.md).
 
 ## Implementation and decision protocol (#473)
 
 Independent design approval must precede implementation and new decision
-measurements. After merge, #473 must implement this contract or return an
-explicitly reviewed revision before collecting evidence; it cannot quietly add
+measurements. After merge, #473 must implement this contract, including the 2026-10-28
+single-process reset/resync correction, before collecting evidence; it cannot quietly add
 query expansion branches after observing failed judgments.
 
 Use independent behavior examples for normalization, phrase/ID bypass, literal
 query safety, ambiguity/budget limits, English/Swedish lookup and out-of-scope
-sources. Verify default/off mode, corrupted assets, version mismatch, restarted
-process, interrupted activation, rollback, stale writers and retained operational
-state. The direct matching path must expose original citations, with no semantic
+sources. Verify default/off mode, corrupted assets, version mismatch, cache
+loss followed by authoritative resync, coherent request configuration and
+preservation of credentials and external-effect safety records. The direct matching path must expose original citations, with no semantic
 fallback or unauthorized candidates admitted before truncation.
 
 Then rerun the real configured production vector/FTS/hybrid adapter on **both
