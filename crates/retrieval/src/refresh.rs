@@ -951,10 +951,18 @@ impl AuthoritativePageRefresh {
             repair.replan = true;
             let page = PageId(repair.page.page_id.clone());
             let operation = repair.page.operation_id.clone();
-            return self
-                .apply_lifecycle_expected(&page, &operation, provider, lease, clock, Some(repair))
-                .await
-                .map(|_| ());
+            // Keep the full refresh future out of the unchanged fast path's
+            // stack frame, including callers that never need this fallback.
+            return Box::pin(self.apply_lifecycle_expected(
+                &page,
+                &operation,
+                provider,
+                lease,
+                clock,
+                Some(repair),
+            ))
+            .await
+            .map(|_| ());
         }
         let projection = RelationProjection::new(
             self.coordinator.binding(),
