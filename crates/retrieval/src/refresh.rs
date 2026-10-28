@@ -890,11 +890,12 @@ impl AuthoritativePageRefresh {
     }
 
     /// An unchanged canonical page still verifies the full source/relation
-    /// snapshot. Its derived graph may change; embeddings and Lance membership
-    /// do not. The exact projection and Unchanged receipt commit atomically.
+    /// snapshot. Missing derived rows are repaired through the normal refresh
+    /// pipeline; intact pages commit only their projection and Unchanged receipt.
     pub(crate) async fn apply_unchanged(
         &self,
         expected: ExpectedReconciliation,
+        provider: &dyn EmbeddingProvider,
         lease: Lease,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Result<(), RefreshError> {
@@ -930,10 +931,29 @@ impl AuthoritativePageRefresh {
         let mut previous_chunks = previous;
         prepared_chunks.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
         previous_chunks.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
-        if prepared_chunks != previous_chunks
-            || checkpoint.content_hash() != Some(proposal.snapshot().document.content_hash.as_str())
-        {
+        if checkpoint.content_hash() != Some(proposal.snapshot().document.content_hash.as_str()) {
             return Err(RefreshError::Conflict);
+        }
+        if prepared_chunks != previous_chunks {
+            // The source revision and canonical body still agree with the
+            // checkpoint. An incomplete local subset is disposable cache loss,
+            // not a source conflict. Reclassify this operation as Refresh so the
+            // existing diff path embeds only missing rows. The exact planned
+            // local/source identities remain checked inside the owned commit.
+            if !previous_chunks
+                .iter()
+                .all(|chunk| prepared_chunks.contains(chunk))
+            {
+                return Err(RefreshError::Conflict);
+            }
+            let mut repair = expected;
+            repair.replan = true;
+            let page = PageId(repair.page.page_id.clone());
+            let operation = repair.page.operation_id.clone();
+            return self
+                .apply_lifecycle_expected(&page, &operation, provider, lease, clock, Some(repair))
+                .await
+                .map(|_| ());
         }
         let projection = RelationProjection::new(
             self.coordinator.binding(),

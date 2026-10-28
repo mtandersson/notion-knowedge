@@ -278,7 +278,7 @@ impl AuthoritativeReconciliationRunner {
                 .await
         } else if expected.page.difference == ProposedDifference::Unchanged {
             self.refresh
-                .apply_unchanged(expected, lease.clone(), clock.clone())
+                .apply_unchanged(expected, provider, lease.clone(), clock.clone())
                 .await
         } else {
             let operation = expected.page.operation_id.clone();
