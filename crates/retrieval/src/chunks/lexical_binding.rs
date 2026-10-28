@@ -11,8 +11,6 @@ use std::{
     path::Path,
 };
 
-pub mod runtime;
-
 pub(crate) const FILE: &str = ".nk-lexical-binding-v1.json";
 const MAX_BYTES: u64 = 32 * 1024;
 fn incompatible() -> ChunkTableError {

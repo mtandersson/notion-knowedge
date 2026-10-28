@@ -128,6 +128,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_handoff_blocks_existing_and_reopened_readers_until_reset() {
+        let root = tempfile::tempdir().unwrap();
+        let index = root.path().join("index");
+        let state = root.path().join("state.sqlite");
+        fs::create_dir(&index).unwrap();
+        let scope = ReconciliationScope::new(vec!["root".into()], vec![], "policy", "v1").unwrap();
+        let binding = CommitBinding::new("chunks", "workspace", &scope, "generation", 1).unwrap();
+        let coordinator =
+            IndexCommitCoordinator::initialize(&index, &state, binding.clone()).unwrap();
+        #[cfg(feature = "local-lancedb")]
+        assert!(coordinator.search_guard().is_ok());
+        fs::write(legacy_journal_path(&state).unwrap(), b"obsolete").unwrap();
+        #[cfg(feature = "local-lancedb")]
+        assert!(matches!(
+            coordinator.search_guard(),
+            Err(CommitError::Conflict)
+        ));
+        assert!(matches!(
+            IndexCommitCoordinator::open_read_only(&index, &state, binding.clone()),
+            Err(CommitError::Conflict)
+        ));
+        assert!(matches!(
+            IndexCommitCoordinator::open_existing(&index, &state, binding),
+            Err(CommitError::Conflict)
+        ));
+        drop(coordinator);
+        IndexCommitCoordinator::reset_cache(&index, &state, 1).unwrap();
+        assert!(!IndexCommitCoordinator::has_legacy_cache_journal(&state).unwrap());
+    }
+
+    #[test]
     fn legacy_handoff_artifact_is_discarded_without_resuming_it() {
         let root = tempfile::tempdir().unwrap();
         let index = root.path().join("index");

@@ -653,6 +653,11 @@ impl IndexCommitCoordinator {
         Ok(guard)
     }
     pub(crate) fn validate_binding(&self, db: &Connection) -> Result<(), CommitError> {
+        // Paths that cannot perform startup resync (including request-bound
+        // readers) must refuse an incomplete legacy installation as well.
+        if Self::has_legacy_cache_journal(&self.state_path)? {
+            return Err(CommitError::Conflict);
+        }
         let token: String = db
             .query_row(
                 "SELECT identity FROM index_commit_state_identity WHERE singleton=1",
