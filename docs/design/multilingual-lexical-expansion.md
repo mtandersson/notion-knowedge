@@ -176,7 +176,8 @@ Separate three identities rather than relabeling vectors:
   tie semantics. Hash canonical metadata; never use an unversioned local path.
 
 The enabled runtime must require an explicit binding of all three plus the
-coordinator's authoritative physical root/workspace policy and index generation.
+trusted configured workspace/root policy. Physical cache identity is an
+implementation detail, not a requirement to preserve a prior generation.
 A missing binding is incompatible, not permission to stamp an old table as new.
 Persist the binding in trusted derived-index metadata checked by guarded opens
 and commit preparation; propagate plan identity into evaluation provenance.
