@@ -20,7 +20,8 @@ class Bundles(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name).resolve()
+        self.root = Path(self.temporary.name).resolve() / 'checkout'
+        self.root.mkdir()
         self.metadata = {'workspace_root': str(self.root), 'packages': [
             {'id': name, 'name': name, 'manifest_path': str(self.root / 'crates' / name.removeprefix('notion-knowledge-') / 'Cargo.toml')}
             for name in native.PACKAGES]}
@@ -89,10 +90,11 @@ class Bundles(unittest.TestCase):
         with tarfile.open(archive) as old:
             for member in old:
                 records.append((member.name, old.extractfile(member).read()))
+        records = [(path, payload if path == name else data) for path, data in records]
+        if name not in {path for path, _ in records}:
+            records.append((name, payload))
         with tarfile.open(archive, 'w:gz') as target:
             for path, data in records:
-                if path == name:
-                    data = payload
                 member = tarfile.TarInfo(path)
                 member.size = len(data)
                 target.addfile(member, io.BytesIO(data))
@@ -105,11 +107,18 @@ class Bundles(unittest.TestCase):
 
     def test_traversal_and_unlisted_files_are_rejected(self):
         archive = self.bundle()
-        with tarfile.open(archive, 'r:gz') as original:
-            manifest = json.load(original.extractfile('manifest.json'))
-        manifest['files']['target/debug/../../../outside'] = '0' * 64
+        original = archive.read_bytes()
+        self.altered(archive, 'target/debug/unlisted', b'not listed')
+        with self.assertRaisesRegex(ValueError, 'Unexpected archive'):
+            native.unpack(self.root, archive, REVISION, 'webhook-worker')
+        archive.write_bytes(original)
+        with tarfile.open(archive, 'r:gz') as packed:
+            manifest = json.load(packed.extractfile('manifest.json'))
+        escaped = 'target/debug/../../../outside'
+        manifest['files'][escaped] = '0' * 64
         self.altered(archive, 'manifest.json', json.dumps(manifest).encode())
-        with self.assertRaises(ValueError):
+        self.altered(archive, escaped, b'outside the checkout')
+        with self.assertRaisesRegex(ValueError, 'Unsafe executable path'):
             native.unpack(self.root, archive, REVISION, 'webhook-worker')
         self.assertFalse((self.root.parent / 'outside').exists())
 
