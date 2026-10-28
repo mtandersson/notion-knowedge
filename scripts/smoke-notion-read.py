@@ -134,8 +134,8 @@ class MCP:
             self.selector.close()
 
 
-def source(source, root, provenance=False):
-    require(source.get("page_id") == root and (not provenance or source.get("root_page_id") == root),
+def source(source, root, provenance=False, physical_root=None):
+    require(source.get("page_id") == root and (not provenance or source.get("root_page_id") == (physical_root or root)),
             "Source identity differs from the selected root page")
     url = source.get("url", "")
     require(isinstance(url, str), "Missing canonical Notion source link")
@@ -154,11 +154,20 @@ def source(source, root, provenance=False):
     require(str(uuid.UUID(candidate)) == root, "Notion source link identifies a different page")
 
 
-def retrieve(client, root, marker):
+def retrieve(client, root, marker, physical_root=None, initialize=True):
+    if initialize:
+        initialize_client(client)
+    return retrieve_initialized(client, root, marker, physical_root)
+
+
+def initialize_client(client):
     initialization = client.send("initialize", {"protocolVersion": "2025-03-26", "capabilities": {},
                                                "clientInfo": {"name": "notion-read-smoke", "version": "1"}})
     require(initialization.get("protocolVersion") == "2025-03-26", "Unexpected MCP version")
     client.send("notifications/initialized", notify=True)
+
+
+def retrieve_initialized(client, root, marker, physical_root):
     result = client.send("tools/call", {"name": "knowledge_search", "arguments": {
         "query": marker, "mode": "semantic", "limit": 1, "filters": {"page_ids": [root]}}})
     hits = result.get("structuredContent", {}).get("results", [])
@@ -175,7 +184,7 @@ def retrieve(client, root, marker):
         sources = result.get("structuredContent", {}).get("sources", [])
         require(bool(sources), "Get returned no source")
         for item in sources:
-            source(item["provenance"], root, provenance=True)
+            source(item["provenance"], root, provenance=True, physical_root=physical_root)
             require(item.get("content_scope") == ("page" if freshness == "fresh" else "indexed"),
                     "Get did not report the requested content scope")
         require(any(marker in item.get("text", "") for item in sources), "Get did not verify marker")
