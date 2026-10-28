@@ -28,7 +28,24 @@ The ignored helpers are invoked deliberately by their owning tests. They do not
 represent deferred product acceptance. #583 subsequently adds one ordinary sync
 repair case, so its merged server count differs from this pinned baseline.
 
-The old recovery lane in run40646750809 exhausted its 60-minute job limit.
+The preceding #577 run
+[40719531116](https://github.com/mtandersson/notion-knowedge/actions/runs/40719531116)
+had 126 passing retrieval-library tests and 43 ignored cases, taking 70.19s
+against the same isolated LanceDB feature. After source cleanup the library has
+89 passing tests and two ignored helpers, taking 9.94s. Compilation changed from
+10m07s to 9m59s; the source removal primarily reduced unnecessary test execution.
+
+Two explicit over-60-second warnings named
+`candidate::killed_transition_recovers_every_durable_phase_in_a_fresh_process`
+and `candidate::source_capture::killed_transition_source_capture_uses_actual_sql_authority_after_restart`.
+They specified durable offline candidate phases and retained source handoff,
+whose operator examples were not shipping server callers. #578 removed that
+framework and its fixtures. The replacement is the normal authoritative
+reconciliation/cache-reset suite above, including retry, scope/provenance and
+preservation of external-effect records. Ordinary directory/lease and
+external-write safety checks remain covered.
+
+The old recovery lane in run 40646750809 exhausted its 60-minute job limit.
 That does not isolate an individual test cost. Its retired subprocess/archive
 matrix is superseded by bounded reset/resync acceptance, not by a larger timeout.
 
@@ -69,8 +86,11 @@ the new pipeline, not a measured claim that the new pipeline has already passed.
 A failure, timeout, missing artifact or skipped selected native job blocks the
 unchanged final CI gate. No native test is silently disabled.
 
-## After measurements
+## Delivery measurements
 
-The shared-build pipeline's exact-head CI measurements and artifact footprint
-are pending. Record them here before closing #579; the initial baseline alone
-does not prove delivery or a speedup.
+Each run emits per-binary execution timing reports and a compiled executable
+footprint. The accepted head, job/report identifiers and before/after comparison
+are recorded in the [delivery PR](https://github.com/mtandersson/notion-knowedge/pull/589)
+before #579 closes. Those results must prove real native execution in the Nix
+runtime and practical budgets; packaging fixtures and this baseline alone do
+not establish a speedup or complete delivery.
