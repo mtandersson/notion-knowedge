@@ -76,11 +76,11 @@ class CargoSnapshots(unittest.TestCase):
     def test_test_suites_have_isolated_builds_and_shared_downloads(self):
         snapshots = [self.key(job=job) for job in
                      ('test', 'test-workspace', 'test-local-qwen', 'test-local-lancedb',
-                      'test-runtime-choices', 'test-webhook-worker')]
-        self.assertEqual(len({entry['prefix'] for entry in snapshots}), 6)
+                      'test-webhook-worker')]
+        self.assertEqual(len({entry['prefix'] for entry in snapshots}), len(snapshots))
         self.assertEqual(len({entry['downloads-key'] for entry in snapshots}), 1)
         for job in ('test-workspace', 'test-local-qwen', 'test-local-lancedb',
-                    'test-runtime-choices', 'test-webhook-worker'):
+                    'test-webhook-worker'):
             with self.subTest(job=job), self.assertRaises(ValueError):
                 self.key(job=job, profile='release')
 
