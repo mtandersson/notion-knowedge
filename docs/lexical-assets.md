@@ -53,7 +53,7 @@ and source digest, Cargo.lock digest, compiler version and Unicode tables, exact
 normalization/segmentation versions, input/member hashes and attribution. The
 source digest identifies development changes too. Prepare release assets from
 the committed build that will consume them. A different importer identity
-requires a newly prepared asset and the future explicit index transition; the
+requires a newly prepared asset and compatible cache rebuild/resync (#577); the
 loader never relabels a bundle as compatible.
 
 `Dictionary::load(path, trusted_sha256)` opens a regular local file without
