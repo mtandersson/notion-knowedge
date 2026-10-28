@@ -2570,7 +2570,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vector_index_and_query_validation_fail_closed() {
+    async fn vector_training_rejects_empty_data_and_queries_validate_empty_cache_inputs() {
         let path = temp_database("vector-validation");
         let metadata = embedding("revision-1", 3);
         let table = LanceChunkTable::create(&path, "chunks", metadata)
@@ -2583,10 +2583,13 @@ mod tests {
                 .await,
             Err(ChunkTableError::InvalidRows(_))
         ));
-        assert!(matches!(
-            table.vector_query(&[1.0, 0.0, 0.0], 1, 1).await,
-            Err(ChunkTableError::InvalidSchema(_))
-        ));
+        assert!(
+            table
+                .vector_query(&[1.0, 0.0, 0.0], 1, 1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(matches!(
             table.vector_query(&[1.0, 0.0], 1, 1).await,
             Err(ChunkTableError::InvalidRows(_))

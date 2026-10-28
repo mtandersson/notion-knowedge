@@ -419,6 +419,25 @@ impl Fixture {
         )
         .await
     }
+    /// Populate through the core refresh seam without production ANN completion,
+    /// for fixtures that deliberately construct missing or foreign indexes.
+    async fn populate(&self, http: &HttpNotion, run: &str) {
+        let runtime = self.open(http, OpenMode::ExistingWrite).await;
+        let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
+        let lease = runtime.coordinator.state().acquire_lease(now, 330).unwrap();
+        let clock: Arc<dyn Fn() -> i64 + Send + Sync> =
+            Arc::new(|| notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000);
+        runtime
+            .runner
+            .apply(run, lease.clone(), clock, self.provider.as_ref())
+            .await
+            .unwrap();
+        runtime
+            .coordinator
+            .state()
+            .release_lease(&lease, now)
+            .unwrap();
+    }
     fn snapshot(&self) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
         fn read(dir: &std::path::Path, files: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
             for entry in fs::read_dir(dir).unwrap() {
@@ -1227,6 +1246,10 @@ async fn actual_scheduled_http_timeout_exhaustion_is_inspectable_and_explicit_ab
             .unwrap()
             .starts_with(&history)
     );
+    // Schedule completion can precede bounded search maintenance. Drain the
+    // serving worker before taking an inspection lease ourselves.
+    stop.cancel();
+    server.await.unwrap().unwrap();
     assert!(
         worker
             .state
@@ -1244,8 +1267,6 @@ async fn actual_scheduled_http_timeout_exhaustion_is_inspectable_and_explicit_ab
             )
             .is_err()
     );
-    stop.cancel();
-    server.await.unwrap().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2170,13 +2191,7 @@ async fn index_rebuild_refuses_foreign_vector_distance_without_replacing_it() {
     };
     let http = HttpNotion::start().await;
     let f = Fixture::new(&http).await;
-    counts(
-        &f.command(&http, &["--reconcile", "apply", "seed-distance"])
-            .await,
-        3,
-        0,
-        0,
-    );
+    f.populate(&http, "seed-distance").await;
     let runtime = f.open(&http, OpenMode::ExistingWrite).await;
     let table = GuardedChunkTable::bind(
         &f.settings.index,
@@ -2252,23 +2267,7 @@ async fn lost_or_incompatible_cache_resyncs_without_replaying_external_effects()
         let http = HttpNotion::start().await;
         let f = Fixture::new(&http).await;
         if damage == "missing-index" {
-            // Populate rows through the core refresh seam without the production
-            // completion hook to simulate lost/unprepared search indexes.
-            let runtime = f.open(&http, OpenMode::ExistingWrite).await;
-            let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
-            let lease = runtime.coordinator.state().acquire_lease(now, 330).unwrap();
-            let clock: Arc<dyn Fn() -> i64 + Send + Sync> =
-                Arc::new(|| notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000);
-            runtime
-                .runner
-                .apply("seed-cache", lease.clone(), clock, f.provider.as_ref())
-                .await
-                .unwrap();
-            runtime
-                .coordinator
-                .state()
-                .release_lease(&lease, now)
-                .unwrap();
+            f.populate(&http, "seed-cache").await;
         } else {
             counts(
                 &f.command(&http, &["--reconcile", "apply", "seed-cache"])
