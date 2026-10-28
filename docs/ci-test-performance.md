@@ -32,12 +32,45 @@ The old recovery lane in run40646750809 exhausted its 60-minute job limit.
 That does not isolate an individual test cost. Its retired subprocess/archive
 matrix is superseded by bounded reset/resync acceptance, not by a larger timeout.
 
-## Remaining #579 work
+## Native execution pipeline
 
-Share useful native-test compilation and distribute executable test artifacts;
-runners should not restore a build cache or install a compiler just to execute
-those binaries. Keep the independent workspace and Qwen suites able to start
-without waiting for the native build. Preserve compression compatibility,
-production-evaluation authorization checks, security checks and the final CI
-gate. Record the implemented command split, after measurements and practical
-budgets once the resulting pipeline has run.
+Four logical test suites remain. Workspace and Qwen continue to compile/run
+independently, without a dependency on the native build or release artifact.
+The native build job compiles server and retrieval tests plus the production
+evaluation example in one Cargo invocation. It uses the shipping server feature
+set (`webhook-worker`, enabling local Qwen and LanceDB). Retrieval's ordinary
+native behavior does not depend on the Qwen feature; the existing separate
+Clippy step still checks standalone LanceDB compilation. The separate Qwen
+suite retains provider-only and Qwen/e5 example coverage.
+
+The build job also runs Rust doc tests and the existing original/patched
+compression fixture. Those checks intentionally need a compiler and stay in the
+build job. The two native execution jobs download only their suite's compressed
+executable archive. They restore no Cargo cache and run no Cargo command.
+`nix develop .#test-runtime` supplies Python, OpenSSL and C++ runtime libraries,
+without a Rust toolchain, protobuf compiler or C compiler.
+
+`native-test-artifacts.py` consumes Cargo's executable metadata, never a scan of
+the build cache. Archives include the ordinary server binary required by
+`CARGO_BIN_EXE` in integration tests. They retain checkout-relative executable
+paths for subprocess helpers and embedded fixture paths. Builder and runners
+check out the same workflow SHA at the same workspace path; the manifest checks
+that revision/path, the suite and each executable digest before execution.
+Only regular executable files are unpacked under `target/debug`; archives do not
+contain compiler fingerprints, incremental scratch or dependency build caches.
+They expire after one day. Execution timing reports are retained separately.
+
+Each executable has a 180-second ceiling; each suite has a 240-second execution
+budget. These leave margin above the pinned baseline's approximately 53/76-second
+suite executions. The ten-minute execution-job limit also covers artifact
+transfer, Nix runtime setup and integrity checks. The native build retains the
+previous 30-minute compilation limit. These are initial budgets to validate with
+the new pipeline, not a measured claim that the new pipeline has already passed.
+A failure, timeout, missing artifact or skipped selected native job blocks the
+unchanged final CI gate. No native test is silently disabled.
+
+## After measurements
+
+The shared-build pipeline's exact-head CI measurements and artifact footprint
+are pending. Record them here before closing #579; the initial baseline alone
+does not prove delivery or a speedup.

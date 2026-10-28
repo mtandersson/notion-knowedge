@@ -59,7 +59,7 @@ class CargoSnapshots(unittest.TestCase):
     def test_platform_profile_toolchain_and_flags_cannot_restore_each_other(self):
         before = self.key()['prefix']
         for variation in [dict(platform='Linux-ARM64'), dict(platform='macOS-X64'),
-                          dict(job='build', profile='release'), dict(job='test'),
+                          dict(job='build', profile='release'), dict(job='test-workspace'),
                           dict(toolchain=['rustc other', 'cargo pinned']),
                           dict(environment={'RUSTFLAGS': '-C opt-level=2'}),
                           dict(environment={'CARGO_BUILD_RUSTC': '/new/rustc'}),
@@ -75,12 +75,10 @@ class CargoSnapshots(unittest.TestCase):
 
     def test_test_suites_have_isolated_builds_and_shared_downloads(self):
         snapshots = [self.key(job=job) for job in
-                     ('test', 'test-workspace', 'test-local-qwen', 'test-local-lancedb',
-                      'test-webhook-worker')]
+                     ('test-workspace', 'test-local-qwen', 'test-native-build')]
         self.assertEqual(len({entry['prefix'] for entry in snapshots}), len(snapshots))
         self.assertEqual(len({entry['downloads-key'] for entry in snapshots}), 1)
-        for job in ('test-workspace', 'test-local-qwen', 'test-local-lancedb',
-                    'test-webhook-worker'):
+        for job in ('test-workspace', 'test-local-qwen', 'test-native-build'):
             with self.subTest(job=job), self.assertRaises(ValueError):
                 self.key(job=job, profile='release')
 
@@ -88,7 +86,8 @@ class CargoSnapshots(unittest.TestCase):
         workflow = Path(cache.__file__).resolve().parents[1] / '.github/workflows/ci.yml'
         # Lanes of one suite share compiled artifacts; different suites remain
         # isolated even when a suite appears in several matrix rows.
-        suites = set(re.findall(r'- suite: ([A-Za-z0-9_-]+)', workflow.read_text()))
+        direct = workflow.read_text().split('  test:\n', 1)[1].split('  native-build:\n', 1)[0]
+        suites = set(re.findall(r'- suite: ([A-Za-z0-9_-]+)', direct))
         self.assertTrue(suites)
         snapshots = [self.key(job=f'test-{suite}') for suite in suites]
         self.assertEqual(len({entry['prefix'] for entry in snapshots}), len(suites))
@@ -109,9 +108,11 @@ class CargoSnapshots(unittest.TestCase):
         self.assertNotIn("inputs.hit != 'true'", save,
                          'an older compatible snapshot is not an exact source-key hit')
         self.assertEqual(workflow.count(
-            'matched-key: ${{ steps.cargo-cache.outputs.matched-key }}'), 4)
+            'matched-key: ${{ steps.cargo-cache.outputs.matched-key }}'),
+            workflow.count('uses: ./.github/actions/cargo-cache-restore'))
         self.assertEqual(workflow.count(
-            'prefix: ${{ steps.cargo-cache.outputs.prefix }}'), 4)
+            'prefix: ${{ steps.cargo-cache.outputs.prefix }}'),
+            workflow.count('uses: ./.github/actions/cargo-cache-restore'))
         # Semantics of the guarded expression. A legacy/incompatible fallback
         # never blocks seeding the current job/dependency/toolchain prefix.
         prefix = 'nk-cargo-v1-Linux-X64-build-release-compatible-'
