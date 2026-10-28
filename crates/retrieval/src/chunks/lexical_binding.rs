@@ -11,8 +11,6 @@ use std::{
     path::Path,
 };
 
-pub mod runtime;
-
 pub(crate) const FILE: &str = ".nk-lexical-binding-v1.json";
 const MAX_BYTES: u64 = 32 * 1024;
 fn incompatible() -> ChunkTableError {
@@ -98,8 +96,8 @@ impl StorageIdentity {
     }
 }
 
-/// Complete candidate binding. Building bytes does not authorize installing them
-/// on an existing table: only the offline candidate/activation workflow may do so.
+/// Complete lexical identity. Constructing metadata does not authorize installing
+/// it on an existing table; readers require an exact compatible binding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LexicalIndexBinding {
@@ -118,8 +116,8 @@ pub struct LexicalIndexBinding {
     source_snapshot_sha256: String,
 }
 impl LexicalIndexBinding {
-    /// Trusted offline primitive; caller must verify every canonical row/vector
-    /// and the four native index profiles before publishing a sibling candidate.
+    /// Construct identity metadata for a verified canonical snapshot and native
+    /// index profile. Construction alone never grants installation authority.
     /// This function does not write files or change coordinator authority.
     pub fn for_candidate(
         directory: &Path,
@@ -158,114 +156,8 @@ impl LexicalIndexBinding {
         }
         Ok(bytes)
     }
-    pub(crate) fn storage_profile(&self) -> FtsIndexConfig {
-        self.storage.profile.clone()
-    }
     pub fn plan(&self) -> &LexicalPlanIdentity {
         &self.plan
-    }
-    /// Validate supported descriptive metadata without asserting live source
-    /// identity or equivalence to this build's implementation.
-    pub(crate) fn validate_metadata(&self) -> Result<(), ChunkTableError> {
-        let current = StorageIdentity::current();
-        if self.version != 1
-            || !valid_digest(&self.source_snapshot_sha256)
-            || self.canonical_bytes()?.len() as u64 > MAX_BYTES
-            || self.storage.schema != current.schema
-            || self.storage.canonical_schema != current.canonical_schema
-            || self.storage.fields != current.fields
-            || self.storage.backend != current.backend
-            || self.storage.raw_identifier_profile != current.raw_identifier_profile
-            || ![
-                FtsIndexConfig::default(),
-                FtsIndexConfig::lexical_expansion_v1(),
-            ]
-            .contains(&self.storage.profile)
-            || !valid_digest(&self.storage.implementation_sha256)
-            || ![
-                &self.plan.asset_sha256,
-                &self.plan.importer_sha256,
-                &self.plan.executor_sha256,
-                &self.plan.lock_sha256,
-            ]
-            .into_iter()
-            .all(|value| valid_digest(value))
-            || self.plan.embedding_text_contract
-                != "canonical-indexed-chunk-v1;embedding-input=chunk.text;unchanged-vector-space"
-        {
-            return Err(incompatible());
-        }
-        Ok(())
-    }
-    /// A canonical transfer describes the current native source opaquely; a
-    /// prior runtime must not interpret that source's backend or lexical plan.
-    /// Only the shared canonical/embedding contract is interpreted.
-    pub(crate) fn validate_transfer_metadata(
-        &self,
-        embedding: &EmbeddingMetadata,
-        authority: &CommitBinding,
-    ) -> Result<(), ChunkTableError> {
-        if self.version != 1
-            || self.embedding != *embedding
-            || self.storage.canonical_schema != super::CANONICAL_CHUNK_SCHEMA_VERSION
-            || self.plan.embedding_text_contract
-                != "canonical-indexed-chunk-v1;embedding-input=chunk.text;unchanged-vector-space"
-            || self.table != authority.table()
-            || self.workspace != authority.workspace()
-            || self.roots != authority.roots()
-            || self.scope != authority.scope()
-            || self.generation != authority.generation()
-            || self.epoch != authority.epoch()
-            || ![
-                &self.storage.implementation_sha256,
-                &self.source_snapshot_sha256,
-                &self.plan.asset_sha256,
-                &self.plan.importer_sha256,
-                &self.plan.executor_sha256,
-                &self.plan.lock_sha256,
-            ]
-            .into_iter()
-            .all(|h| valid_digest(h))
-        {
-            return Err(incompatible());
-        }
-        self.canonical_bytes()?;
-        Ok(())
-    }
-    /// Offline migration may read an earlier approved plan/storage build without
-    /// executing it. Admit only known schema/backend/tokenizer and the unchanged
-    /// embedding text contract, authority and physical generation. Complete rows
-    /// and vectors are subsequently verified; runtime validation remains exact.
-    pub(crate) fn validate_offline_source(
-        &self,
-        directory: &Path,
-        embedding: &EmbeddingMetadata,
-        authority: &CommitBinding,
-    ) -> Result<(), ChunkTableError> {
-        self.validate_metadata()?;
-        let expected = Self::for_candidate(
-            directory,
-            embedding.clone(),
-            authority,
-            self.plan.clone(),
-            &self.source_snapshot_sha256,
-        )?;
-        // Older implementation digests are evidence about the source generation,
-        // never new runtime compatibility or permission to relabel its vectors.
-        if self.version != expected.version
-            || self.embedding != expected.embedding
-            || self.table != expected.table
-            || self.workspace != expected.workspace
-            || self.roots != expected.roots
-            || self.scope != expected.scope
-            || self.generation != expected.generation
-            || self.epoch != expected.epoch
-            || self.device != expected.device
-            || self.inode != expected.inode
-        {
-            return Err(incompatible());
-        }
-        Ok(())
     }
     pub(crate) fn validate(
         &self,

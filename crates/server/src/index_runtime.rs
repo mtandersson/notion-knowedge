@@ -106,12 +106,12 @@ impl IndexRuntime {
         } else {
             false
         };
-        let journal_path = notion_knowledge_retrieval::commit::transition::journal_path(state)
-            .map_err(|_| "invalid state path")?;
+        let legacy_journal = IndexCommitCoordinator::has_legacy_cache_journal(state)
+            .map_err(|_| "cache path unavailable")?;
         let mut rebuild = force
             || pending
             || !state_exists
-            || exists(&journal_path)?
+            || legacy_journal
             || !exists(&settings.index)?
             || !exists(&settings.index.join(".nk-operational-binding"))?
             || !exists(&settings.index.join("chunks.lance"))?;

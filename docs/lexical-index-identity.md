@@ -26,12 +26,10 @@ profile; raw startup/commit paths cannot silently downgrade it. Original
 citations and vector metadata are unchanged.
 
 `LexicalIndexBinding::for_candidate` only constructs canonical metadata bytes;
-it does not write a file or authorize stamping an existing table. Historical #503 implemented offline sibling preparation with exact row/vector
-verification. That is an existing component, not the required recovery procedure.
-The supported replacement is single-process cache reset and authoritative
-Notion resync (#577), with obsolete transition removal in #578. Historical
-#504 activation/rollback requirements are superseded. The existing component
-checks do not prove that complete reset/resync is implemented.
+it does not write a file or authorize stamping an existing table. The former
+sibling preparation, activation, and rollback framework has been removed.
+The supported recovery is [cache reset and authoritative Notion resync](cache-reset-and-resync.md).
+Legacy transition journals trigger a rebuild; they are never resumed.
 These primitives do not install expansion in the server (#492), automatically
 migrate existing state, or establish retrieval quality (#493).
 

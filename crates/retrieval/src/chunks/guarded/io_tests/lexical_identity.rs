@@ -20,7 +20,7 @@ fn enabled(
     )
 }
 // Explicit test-only fixture installation. Production has no stamping API; the
-// later offline candidate builder must verify all unchanged rows and vectors.
+// compatibility checks remain independent of installed expansion acceptance.
 async fn install(f: &Fixture, plan: LexicalPlanIdentity) -> Vec<u8> {
     let binding = LexicalIndexBinding::for_candidate(
         &f.index,

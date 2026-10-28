@@ -13,15 +13,10 @@ use std::{
 
 use super::lexical_binding::{self, LexicalIndexBinding, LexicalPlanIdentity};
 use super::*;
-mod candidate;
 use crate::commit::{
     CommitError, CommitOutcome, IndexCommitCoordinator, PageAction, PageOperation,
 };
-pub use candidate::{
-    CandidateLimits, OfflineLexicalSource, PreparedLexicalCandidate, RuntimeSourceSnapshot,
-    TransitionCandidateInputs, VerifiedTransitionCandidate, inspect_runtime_source,
-    verify_transition_candidate,
-};
+
 use notion_knowledge_core::{
     embedding::{self, EmbeddingMetadata, EmbeddingProvider},
     indexed::IndexedChunk,
@@ -398,7 +393,7 @@ impl GuardedChunkTable {
         Ok(current)
     }
     /// Execute under one directory/authority fence. Installation additionally
-    /// requires the versioned binding introduced by the explicit transition.
+    /// requires the exact versioned lexical identity binding.
     pub async fn expanded_lexical_search<C>(
         &self,
         query: LexicalQuery,
@@ -755,13 +750,6 @@ impl GuardedChunkTable {
             })
     }
 }
-
-#[cfg(target_os = "linux")]
-pub use candidate::runtime_builder;
-#[cfg(all(feature = "local-lancedb", target_os = "linux"))]
-pub use candidate::runtime_refence;
-#[cfg(target_os = "linux")]
-pub use candidate::transfer as canonical_transfer;
 
 #[cfg(all(test, unix))]
 mod io_tests;

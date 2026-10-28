@@ -43,11 +43,7 @@ pub mod lexical_binding;
 #[cfg(unix)]
 mod guarded;
 #[cfg(unix)]
-pub use guarded::{
-    CandidateLimits, GuardedChunkTable, OfflineLexicalSource, PreparedLexicalCandidate,
-    PreparedPageMutation, RuntimeSourceSnapshot, TransitionCandidateInputs,
-    VerifiedTransitionCandidate, inspect_runtime_source, verify_transition_candidate,
-};
+pub use guarded::{GuardedChunkTable, PreparedPageMutation};
 
 pub const CHUNK_TABLE_SCHEMA_VERSION: &str = "1";
 const CANONICAL_CHUNK_SCHEMA_VERSION: &str = "1";
@@ -1922,13 +1918,6 @@ fn rows_to_batch(
         ],
     )?)
 }
-
-#[cfg(target_os = "linux")]
-pub use guarded::canonical_transfer;
-#[cfg(target_os = "linux")]
-pub use guarded::runtime_builder;
-#[cfg(all(feature = "local-lancedb", target_os = "linux"))]
-pub use guarded::runtime_refence;
 
 #[cfg(test)]
 mod tests {

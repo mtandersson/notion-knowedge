@@ -10,7 +10,8 @@ const VERSION: i64 = 1;
 const MAX_COMPATIBLE_GENERATIONS: i64 = 1024;
 const MAX_COMPATIBILITY_HASH_BYTES: usize = 64 * 1024 * 1024;
 
-/// Explicit offline transition maintenance, never a serving-time schema write.
+/// Fixture setup for historical alias compatibility checks.
+#[cfg(test)]
 pub(super) fn ensure_history_index(db: &Connection) -> Result<(), CommitError> {
     db.execute_batch("CREATE INDEX IF NOT EXISTS main.index_commit_generations_policy_epoch ON index_commit_generations(scope,epoch)").map_err(sql)?;
     validate_history_index(db)

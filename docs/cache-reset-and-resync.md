@@ -92,7 +92,7 @@ content exclusion, and unavailable search while rebuilding. Check that credentia
 and external mutation records remain intact and that no write/upload request is
 issued during recovery. Keep real Notion smoke separately authorized.
 
-Obsolete durable cache recovery removal is tracked by #578; consolidation of
-its tests and CI is #579. These replace conflicting historical mandates in the
+The obsolete durable cache recovery framework and its dedicated fixtures were
+removed in #578; remaining test/CI consolidation is #579. These replace conflicting historical mandates in the
 lexical transition issue chain, while preserving normal identity checks,
 authorization and safe external writes.
