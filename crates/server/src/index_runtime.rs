@@ -99,7 +99,7 @@ impl IndexRuntime {
         let exists = |p: &Path| p.try_exists().map_err(|_| "cache path unavailable");
         let state_exists = exists(state)?;
         let pending = if state_exists {
-            SqliteSyncStateStore::open_existing(state)
+            SqliteSyncStateStore::open_read_only(state)
                 .map_err(|_| "operational state unavailable")?
                 .cache_rebuild_pending()
                 .map_err(|_| "operational state unavailable")?
@@ -136,7 +136,7 @@ impl IndexRuntime {
                 ) {
                     Err(error) if error.is_incompatible_index() => rebuild = true,
                     Err(_) => return Err("index unavailable"),
-                    Ok(table) => match table.inventory_version().await {
+                    Ok(table) => match table.search_snapshot().await {
                         Err(error) if error.is_incompatible_index() => rebuild = true,
                         Err(_) => return Err("index unavailable"),
                         Ok(_) => {}
@@ -218,31 +218,31 @@ impl IndexRuntime {
                 break Err("cache resync incomplete; retry startup");
             }
             if progress.pending.is_empty() {
-                use notion_knowledge_retrieval::chunks::{VectorDistance, VectorIndexConfig};
-                let table = GuardedChunkTable::bind(
-                    self.coordinator.index_directory(),
-                    "chunks",
-                    self.provider.metadata().clone(),
-                    self.coordinator.clone(),
-                )
-                .map_err(|_| "rebuilt cache binding unavailable");
-                let table = match table {
-                    Ok(table) => table,
-                    Err(error) => break Err(error),
-                };
-                let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| now_ms() / 1000);
-                if table
-                    .ensure_vector_index(
-                        VectorIndexConfig {
-                            distance: VectorDistance::Cosine,
-                            ..Default::default()
-                        },
+                match state.renew_lease(&lease, now_ms() / 1000, timeout_seconds as i64 + 30) {
+                    Ok(next) => lease = next,
+                    Err(_) => break Err("cache sync lease unavailable"),
+                }
+                let flag = expired.clone();
+                let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || {
+                    if flag.load(Ordering::SeqCst) {
+                        i64::MAX
+                    } else {
+                        now_ms() / 1000
+                    }
+                });
+                let ready = tokio::time::timeout(
+                    Duration::from_secs(timeout_seconds),
+                    prepare_search_if_missing(
+                        &self.coordinator,
+                        self.provider.metadata(),
                         lease.clone(),
                         clock,
-                    )
-                    .await
-                    .is_err()
-                {
+                    ),
+                )
+                .await;
+                if !matches!(ready, Ok(Ok(()))) {
+                    expired.store(true, Ordering::SeqCst);
+                    let _ = self.coordinator.drain_owned().await;
                     break Err("rebuilt search index unavailable");
                 }
                 break state
@@ -379,6 +379,49 @@ impl IndexRuntime {
         })
     }
 }
+/// Finish derived search maintenance after authoritative sync, including the
+/// first populated page after an empty cache. A healthy snapshot is a no-op.
+pub(crate) async fn prepare_search_if_missing(
+    coordinator: &Arc<IndexCommitCoordinator>,
+    embedding: &notion_knowledge_core::embedding::EmbeddingMetadata,
+    lease: notion_knowledge_core::reconciliation::Lease,
+    clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+) -> Result<(), &'static str> {
+    use notion_knowledge_retrieval::chunks::{VectorDistance, VectorIndexConfig};
+    let table = GuardedChunkTable::bind(
+        coordinator.index_directory(),
+        "chunks",
+        embedding.clone(),
+        coordinator.clone(),
+    )
+    .map_err(|_| "search maintenance binding unavailable")?;
+    match table.search_snapshot().await {
+        Ok(_) => return Ok(()),
+        Err(error) if error.is_incompatible_index() => {}
+        Err(_) => return Err("search storage unavailable"),
+    }
+    table
+        .ensure_startup_indexes(lease.clone(), clock.clone())
+        .await
+        .map_err(|_| "search FTS preparation failed")?;
+    table
+        .ensure_vector_index(
+            VectorIndexConfig {
+                distance: VectorDistance::Cosine,
+                ..Default::default()
+            },
+            lease,
+            clock,
+        )
+        .await
+        .map_err(|_| "search ANN preparation failed")?;
+    table
+        .search_snapshot()
+        .await
+        .map_err(|_| "search unavailable after preparation")?;
+    Ok(())
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum OpenMode {
     Initialize,

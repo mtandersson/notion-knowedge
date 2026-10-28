@@ -476,7 +476,11 @@ pub mod runtime {
                     biased;
                     _=stop.cancelled()=>{ processing.cancel(); return Ok(()); },
                     _=tokio::time::sleep(self.timeout)=>{ processing.cancel(); ProcessingOutcome::Retryable(EventFailure::Unavailable) },
-                    result=self.handler.apply_lifecycle(&page, &operation, self.provider.as_ref(), lease, clock)=> match result {
+                    result=async {
+                        self.handler.apply_lifecycle(&page, &operation, self.provider.as_ref(), lease.clone(), clock.clone()).await?;
+                        crate::index_runtime::prepare_search_if_missing(&self.coordinator, self.provider.metadata(), lease, clock)
+                            .await.map_err(|_| RefreshError::Index)
+                    } => match result {
                         Ok(_)=>ProcessingOutcome::Succeeded,
                         Err(RefreshError::InvalidConfiguration | RefreshError::OutOfScope | RefreshError::PermanentSource)=>ProcessingOutcome::Permanent(EventFailure::Source),
                         Err(RefreshError::Source)=>ProcessingOutcome::Retryable(EventFailure::Source),

@@ -40,6 +40,7 @@ struct ExtraPage {
 }
 #[derive(Clone)]
 struct Model {
+    empty_content: bool,
     markdown: String,
     title: String,
     revision: String,
@@ -60,6 +61,7 @@ struct Model {
 impl Default for Model {
     fn default() -> Self {
         Self {
+            empty_content: false,
             markdown: "# Intro\n\nSaffron ravioli.\n\n## Other\n\nAn evergreen section.\n".into(),
             title: "First".into(),
             revision: "2026-10-10T12:00:00Z".into(),
@@ -156,7 +158,7 @@ impl HttpNotion {
                         ROOT.into()
                     };
                 }
-                let response = if (snapshot.inaccessible_root
+                let mut response = if (snapshot.inaccessible_root
                     && route == format!("/v1/pages/{ROOT}"))
                     || (snapshot.inaccessible_other && route == format!("/v1/pages/{OTHER}"))
                     || (snapshot.inaccessible_page && route == format!("/v1/pages/{PAGE}"))
@@ -237,6 +239,9 @@ impl HttpNotion {
                 } else {
                     json!({"object":"error", "code":"object_not_found"})
                 };
+                if snapshot.empty_content && response["object"] == "page_markdown" {
+                    response["markdown"] = json!("");
+                }
                 let bad = fail.swap(false, Ordering::SeqCst);
                 let status = if bad {
                     503
@@ -779,6 +784,20 @@ async fn read_only_commands_reject_external_wal_before_creating_sqlite_auxiliari
         assert!(!wal.exists());
         assert!(!shm.exists());
     }
+    assert!(
+        IndexRuntime::recover_for_reads(
+            &f.settings,
+            &f.state,
+            authority(),
+            http.client(),
+            f.provider.clone()
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(before, f.snapshot());
+    assert!(!wal.exists());
+    assert!(!shm.exists());
     assert_eq!(http.body_reads.load(Ordering::SeqCst), 0);
     assert_eq!(f.provider.count.load(Ordering::SeqCst), 0);
 }
@@ -2011,8 +2030,8 @@ async fn index_commands_provision_reuse_and_rebuild_search_without_changing_auth
     )
     .unwrap();
     assert!(
-        table.search_snapshot().await.is_err(),
-        "population alone must not imply trained ANN"
+        table.search_snapshot().await.is_ok(),
+        "authoritative reconciliation must prepare serving search indexes"
     );
     let owned = runtime.coordinator.owned_page_ids().unwrap();
     drop(table);
@@ -2227,17 +2246,38 @@ async fn index_rebuild_refuses_foreign_vector_distance_without_replacing_it() {
 
 #[tokio::test]
 async fn lost_or_incompatible_cache_resyncs_without_replaying_external_effects() {
+    use notion_knowledge_core::search::{LexicalQuery, LexicalSearch};
     use notion_knowledge_retrieval::chunks::GuardedChunkTable;
-    for damage in ["deleted", "incompatible", "corrupt"] {
+    for damage in ["deleted", "incompatible", "corrupt", "missing-index"] {
         let http = HttpNotion::start().await;
         let f = Fixture::new(&http).await;
-        counts(
-            &f.command(&http, &["--reconcile", "apply", "seed-cache"])
-                .await,
-            3,
-            0,
-            0,
-        );
+        if damage == "missing-index" {
+            // Populate rows through the core refresh seam without the production
+            // completion hook to simulate lost/unprepared search indexes.
+            let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+            let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
+            let lease = runtime.coordinator.state().acquire_lease(now, 330).unwrap();
+            let clock: Arc<dyn Fn() -> i64 + Send + Sync> =
+                Arc::new(|| notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000);
+            runtime
+                .runner
+                .apply("seed-cache", lease.clone(), clock, f.provider.as_ref())
+                .await
+                .unwrap();
+            runtime
+                .coordinator
+                .state()
+                .release_lease(&lease, now)
+                .unwrap();
+        } else {
+            counts(
+                &f.command(&http, &["--reconcile", "apply", "seed-cache"])
+                    .await,
+                3,
+                0,
+                0,
+            );
+        }
         {
             let db = rusqlite::Connection::open(&f.state).unwrap();
             db.execute_batch(
@@ -2306,6 +2346,24 @@ async fn lost_or_incompatible_cache_resyncs_without_replaying_external_effects()
             table.search_snapshot().await.is_ok(),
             "rebuilt cache must have usable search indexes"
         );
+        let snapshot = table.search_snapshot().await.unwrap();
+        assert!(
+            !snapshot
+                .vector_query(&[1.0, 0.0, 0.0], 3, 1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let query = LexicalQuery {
+            query: "ravioli".into(),
+            limit: 3,
+            page_ids: None,
+            root_page_ids: Some(vec![ROOT.into()]),
+            metadata: Default::default(),
+        };
+        let hits = snapshot.search(query.clone()).await.unwrap();
+        assert!(hits.iter().any(|hit| hit.source.page_id == PAGE));
+        drop(snapshot);
         let db = rusqlite::Connection::open(&f.state).unwrap();
         for (query, expected) in [
             (
@@ -2324,15 +2382,52 @@ async fn lost_or_incompatible_cache_resyncs_without_replaying_external_effects()
         drop(table);
         drop(recovered);
         let reads = http.body_reads.load(Ordering::SeqCst);
-        let _reopened =
-            IndexRuntime::recover(&f.settings, &f.state, authority(), http.client(), provider)
-                .await
-                .unwrap();
+        let _reopened = IndexRuntime::recover(
+            &f.settings,
+            &f.state,
+            authority(),
+            http.client(),
+            provider.clone(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             http.body_reads.load(Ordering::SeqCst),
             reads,
             "healthy restart must reuse the cache"
         );
+        drop(_reopened);
+        if damage == "missing-index" {
+            let mut changed_scope = authority();
+            changed_scope.exclusions.page_ids.insert(PAGE.into());
+            let scoped = IndexRuntime::recover_for_reads(
+                &f.settings,
+                &f.state,
+                changed_scope,
+                http.client(),
+                provider.clone(),
+            )
+            .await
+            .unwrap();
+            let table = GuardedChunkTable::bind(
+                &f.settings.index,
+                "chunks",
+                provider.metadata().clone(),
+                scoped.coordinator,
+            )
+            .unwrap();
+            assert!(table.page_chunks(PAGE).await.unwrap().is_empty());
+            assert!(
+                table
+                    .search_snapshot()
+                    .await
+                    .unwrap()
+                    .search(query)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
         // HttpNotion rejects every non-GET request, including writes/uploads.
     }
 }
@@ -2391,4 +2486,84 @@ async fn failed_cache_resync_stays_pending_and_next_start_retries_from_notion() 
         0,
         2,
     );
+}
+
+#[tokio::test]
+async fn empty_authorized_content_completes_resync_and_search_returns_no_hits() {
+    use notion_knowledge_core::search::{LexicalQuery, LexicalSearch};
+    use notion_knowledge_retrieval::chunks::GuardedChunkTable;
+    let http = HttpNotion::start().await;
+    http.state.lock().unwrap().empty_content = true;
+    let f = Fixture::new(&http).await;
+    fs::remove_dir_all(&f.settings.index).unwrap();
+    let runtime = IndexRuntime::recover(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
+    let table = GuardedChunkTable::bind(
+        &f.settings.index,
+        "chunks",
+        f.provider.metadata().clone(),
+        runtime.coordinator,
+    )
+    .unwrap();
+    let snapshot = table.search_snapshot().await.unwrap();
+    assert_eq!(snapshot.count_rows().await.unwrap(), 0);
+    assert!(
+        snapshot
+            .vector_query(&[1.0, 0.0, 0.0], 3, 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        snapshot
+            .search(LexicalQuery {
+                query: "anything".into(),
+                limit: 3,
+                page_ids: None,
+                root_page_ids: Some(vec![ROOT.into()]),
+                metadata: Default::default()
+            })
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop(snapshot);
+    {
+        let mut model = http.state.lock().unwrap();
+        model.empty_content = false;
+        model.revision = "2026-10-28T12:00:00Z".into();
+        model.root_revision = "2026-10-28T12:00:00Z".into();
+    }
+    let update = f
+        .command(&http, &["--reconcile", "apply", "first-nonempty-content"])
+        .await;
+    assert_eq!(update.exit, 0, "{:?}", update.json);
+    // The same reader can search the first incremental content without restart.
+    let snapshot = table.search_snapshot().await.unwrap();
+    assert!(
+        !snapshot
+            .vector_query(&[1.0, 0.0, 0.0], 3, 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let hits = snapshot
+        .search(LexicalQuery {
+            query: "ravioli".into(),
+            limit: 3,
+            page_ids: None,
+            root_page_ids: Some(vec![ROOT.into()]),
+            metadata: Default::default(),
+        })
+        .await
+        .unwrap();
+    assert!(hits.iter().any(|hit| hit.source.page_id == PAGE));
 }

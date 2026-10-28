@@ -97,17 +97,14 @@ pub mod runtime {
                     Ok(client) => Arc::new(client),
                     Err(_) => return output("configuration", 2),
                 };
-            return match crate::index_runtime::IndexRuntime::reset_and_resync(
-                &settings,
-                &state,
-                scope,
-                source,
-                Arc::new(provider),
-            )
-            .await
-            {
-                Ok(_) => output("complete", 0),
-                Err(_) => output("cache_reset_incomplete", 3),
+            return tokio::select! { biased;
+                _ = stop.cancelled() => output("cancelled", 5),
+                result = crate::index_runtime::IndexRuntime::reset_and_resync(
+                    &settings, &state, scope, source, Arc::new(provider),
+                ) => match result {
+                    Ok(_) => output("complete", 0),
+                    Err(_) => output("cache_reset_incomplete", 3),
+                },
             };
         }
         let embedding = provider.metadata().clone();

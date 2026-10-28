@@ -649,6 +649,9 @@ impl LanceChunkTable {
             ));
         }
         self.validate_vector_index_layout().await?;
+        if self.count_rows().await? == 0 {
+            return Ok(Vec::new());
+        }
         let stats = self
             .table
             .index_stats(CHUNK_VECTOR_INDEX_NAME)
@@ -870,6 +873,9 @@ impl LanceChunkTable {
     async fn lexical_search(&self, query: LexicalQuery) -> Result<Vec<SearchHit>, ChunkTableError> {
         validate_lexical_query(&query)?;
         let snapshot = self.read_snapshot().await?;
+        if snapshot.count_rows().await? == 0 {
+            return Ok(Vec::new());
+        }
         let predicate = snapshot.metadata_predicate(&query).await?;
         let candidate_limit = query.limit.saturating_mul(4).min(400);
         let fields = [

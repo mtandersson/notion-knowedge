@@ -76,9 +76,9 @@ startup/sync seams: create a cache, delete it, restart and verify reconstructed
 scoped results; repeat with unusable derived metadata and a transient sync
 failure. Check unavailable search during rebuilding and subsequent incremental
 updates. Verify preserved credentials/ledgers and zero upstream writes/uploads
-from recovery. The two bounded cache-resync tests in `server/tests/reconciliation_command.rs`
-exercise the shared production startup seam. Current-head CI results are
-recorded in #577; they do not establish deployed or real Notion acceptance.
+from recovery. The bounded cache-resync tests in `server/tests/reconciliation_command.rs`
+exercise the shared production startup seam. Current-head CI must pass before #577 closes; these fixtures do not establish
+deployed or real Notion acceptance.
 
 Actual deployed resource/overload recovery remains #455/#416; real Notion and
 ChatGPT smoke remains separately controlled by #110/#109. Component/spike checks
