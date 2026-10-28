@@ -2224,3 +2224,167 @@ async fn index_rebuild_refuses_foreign_vector_distance_without_replacing_it() {
         0,
     );
 }
+
+#[tokio::test]
+async fn lost_or_incompatible_cache_resyncs_without_replaying_external_effects() {
+    use notion_knowledge_retrieval::chunks::GuardedChunkTable;
+    for damage in ["deleted", "incompatible", "corrupt"] {
+        let http = HttpNotion::start().await;
+        let f = Fixture::new(&http).await;
+        counts(
+            &f.command(&http, &["--reconcile", "apply", "seed-cache"])
+                .await,
+            3,
+            0,
+            0,
+        );
+        {
+            let db = rusqlite::Connection::open(&f.state).unwrap();
+            db.execute_batch(
+                "CREATE TABLE external_write_ledger(id TEXT PRIMARY KEY, result TEXT);
+                INSERT INTO external_write_ledger VALUES('already-written','done');
+                INSERT INTO webhook_events(event_id) VALUES('already-admitted');",
+            )
+            .unwrap();
+            db.execute("INSERT INTO mutation_refresh(workspace_id,mutation_digest,page_id,state) VALUES(?1,'done-write',?2,2)", [WORKSPACE, PAGE]).unwrap();
+        }
+        let provider = if damage == "incompatible" {
+            Arc::new(Provider {
+                metadata: EmbeddingMetadata::new("count".into(), "fixture".into(), "v2".into(), 3)
+                    .unwrap(),
+                ..Provider::new()
+            })
+        } else {
+            f.provider.clone()
+        };
+        if damage == "deleted" {
+            fs::remove_dir_all(&f.settings.index).unwrap();
+        }
+        if damage == "corrupt" {
+            fs::remove_dir_all(f.settings.index.join("chunks.lance")).unwrap();
+            fs::write(f.settings.index.join("chunks.lance"), b"unusable cache").unwrap();
+        }
+        let reads = http.body_reads.load(Ordering::SeqCst);
+        let recovered = if damage == "corrupt" {
+            IndexRuntime::reset_and_resync(
+                &f.settings,
+                &f.state,
+                authority(),
+                http.client(),
+                provider.clone(),
+            )
+            .await
+        } else {
+            IndexRuntime::recover(
+                &f.settings,
+                &f.state,
+                authority(),
+                http.client(),
+                provider.clone(),
+            )
+            .await
+        }
+        .unwrap();
+        assert!(http.body_reads.load(Ordering::SeqCst) > reads);
+        assert_eq!(recovered.coordinator.owned_page_ids().unwrap().len(), 3);
+        assert!(
+            !recovered
+                .coordinator
+                .state()
+                .cache_rebuild_pending()
+                .unwrap()
+        );
+        let table = GuardedChunkTable::bind(
+            &f.settings.index,
+            "chunks",
+            provider.metadata().clone(),
+            recovered.coordinator.clone(),
+        )
+        .unwrap();
+        assert!(!table.page_chunks(PAGE).await.unwrap().is_empty());
+        let db = rusqlite::Connection::open(&f.state).unwrap();
+        for (query, expected) in [
+            (
+                "SELECT result FROM external_write_ledger WHERE id='already-written'",
+                "done",
+            ),
+            ("SELECT event_id FROM webhook_events", "already-admitted"),
+            ("SELECT mutation_digest FROM mutation_refresh", "done-write"),
+        ] {
+            assert_eq!(
+                db.query_row(query, [], |r| r.get::<_, String>(0)).unwrap(),
+                expected
+            );
+        }
+        drop(db);
+        drop(table);
+        drop(recovered);
+        let reads = http.body_reads.load(Ordering::SeqCst);
+        let _reopened =
+            IndexRuntime::recover(&f.settings, &f.state, authority(), http.client(), provider)
+                .await
+                .unwrap();
+        assert_eq!(
+            http.body_reads.load(Ordering::SeqCst),
+            reads,
+            "healthy restart must reuse the cache"
+        );
+        // HttpNotion rejects every non-GET request, including writes/uploads.
+    }
+}
+
+#[tokio::test]
+async fn failed_cache_resync_stays_pending_and_next_start_retries_from_notion() {
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    fs::remove_dir_all(&f.settings.index).unwrap();
+    f.provider.fail.store(true, Ordering::SeqCst);
+    assert!(
+        IndexRuntime::recover(
+            &f.settings,
+            &f.state,
+            authority(),
+            http.client(),
+            f.provider.clone()
+        )
+        .await
+        .is_err()
+    );
+    let state =
+        notion_knowledge_retrieval::sync_state::SqliteSyncStateStore::open_existing(&f.state)
+            .unwrap();
+    assert!(state.cache_rebuild_pending().unwrap());
+    f.provider.fail.store(false, Ordering::SeqCst);
+    let recovered = IndexRuntime::recover(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !recovered
+            .coordinator
+            .state()
+            .cache_rebuild_pending()
+            .unwrap()
+    );
+    assert_eq!(recovered.coordinator.owned_page_ids().unwrap().len(), 3);
+    drop(state);
+    drop(recovered);
+    http.state
+        .lock()
+        .unwrap()
+        .markdown
+        .push_str("\nA subsequent incremental update.");
+    http.state.lock().unwrap().revision = "2026-10-28T12:00:00Z".into();
+    counts(
+        &f.command(&http, &["--reconcile", "apply", "after-cache-resync"])
+            .await,
+        1,
+        0,
+        2,
+    );
+}

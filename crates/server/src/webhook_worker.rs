@@ -255,13 +255,12 @@ pub mod runtime {
             .webhook_state_file
             .clone()
             .ok_or("webhook state required")?;
-        let runtime = crate::index_runtime::IndexRuntime::compose(
+        let runtime = crate::index_runtime::IndexRuntime::recover(
             settings,
             &state_file,
             scope,
             source,
             provider,
-            crate::index_runtime::OpenMode::Initialize,
         )
         .await?;
         let coordinator = runtime.coordinator.clone();

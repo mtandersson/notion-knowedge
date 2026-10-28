@@ -21,6 +21,7 @@ use tokio::sync::oneshot;
 
 use crate::sync_state::SqliteSyncStateStore;
 mod alias_projection;
+mod cache_reset;
 mod offline;
 pub mod transition;
 pub use alias_projection::AliasProjection;

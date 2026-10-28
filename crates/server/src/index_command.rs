@@ -3,6 +3,7 @@
 pub enum Command {
     Ensure,
     Rebuild,
+    Reset,
 }
 impl Command {
     pub fn parse(args: &[String]) -> Result<Self, &'static str> {
@@ -14,7 +15,8 @@ impl Command {
         {
             ["--index", "ensure"] => Ok(Self::Ensure),
             ["--index", "rebuild"] => Ok(Self::Rebuild),
-            _ => Err("expected --index ensure | rebuild"),
+            ["--index", "reset"] => Ok(Self::Reset),
+            _ => Err("expected --index ensure | rebuild | reset"),
         }
     }
 }
@@ -86,6 +88,28 @@ pub mod runtime {
             Ok(p) => p,
             Err(_) => return output("model_configuration", 2),
         };
+        if command == Command::Reset {
+            let crate::config::NotionAuth::Integration(token) = &config.notion_auth else {
+                return output("configuration", 2);
+            };
+            let source =
+                match notion_knowledge_notion::NotionClient::integration(token.expose_secret()) {
+                    Ok(client) => Arc::new(client),
+                    Err(_) => return output("configuration", 2),
+                };
+            return match crate::index_runtime::IndexRuntime::reset_and_resync(
+                &settings,
+                &state,
+                scope,
+                source,
+                Arc::new(provider),
+            )
+            .await
+            {
+                Ok(_) => output("complete", 0),
+                Err(_) => output("cache_reset_incomplete", 3),
+            };
+        }
         let embedding = provider.metadata().clone();
         drop(provider);
         execute(command, &settings, &state, scope, embedding, stop).await
@@ -100,6 +124,11 @@ pub mod runtime {
         embedding: EmbeddingMetadata,
         stop: CancellationToken,
     ) -> Output {
+        if command == Command::Reset {
+            // Full resync requires an authoritative source and provider, supplied
+            // by configured_inner rather than this ANN-only maintenance seam.
+            return output("configuration", 2);
+        }
         if stop.is_cancelled() {
             return output("cancelled", 5);
         }
@@ -184,6 +213,7 @@ pub mod runtime {
                         .rebuild_vector_index(config, lease.clone(), clock)
                         .await
                 }
+                Command::Reset => unreachable!("reset uses authoritative resync"),
             }
         };
         let result = tokio::select! { biased;
