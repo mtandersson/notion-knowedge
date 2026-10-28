@@ -66,15 +66,3 @@ required-features = ["eval-e5"]
 [[example]]
 name = "production-eval"
 required-features = ["local-qwen", "local-lancedb"]
-
-[[example]]
-name = "lexical-candidate"
-required-features = ["local-lancedb"]
-
-[[example]]
-name = "lexical-runtime"
-required-features = ["local-lancedb"]
-
-[[example]]
-name = "lexical-verify"
-required-features = ["local-lancedb"]
