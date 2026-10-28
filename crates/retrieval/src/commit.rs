@@ -899,6 +899,21 @@ impl IndexCommitCoordinator {
         db.query_row("SELECT EXISTS(SELECT 1 FROM index_commit_receipts WHERE generation=?1 AND page_id=?2 AND status IN(0,1,2))",
             params![self.binding.generation, page_id], |r| r.get(0)).map_err(sql)
     }
+    /// Unfinished derived page effects keep search closed, but must not prevent
+    /// an unrelated healthy page from syncing and acknowledging its own work.
+    pub fn has_unfinished_commits(&self) -> Result<bool, CommitError> {
+        self.identities()?;
+        let db = self
+            .state
+            .lock_connection()
+            .map_err(|_| CommitError::Unavailable)?;
+        self.validate_binding(&db)?;
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM index_commit_receipts WHERE generation=?1 AND status IN(0,2))",
+            [&self.binding.generation], |row| row.get(0),
+        ).map_err(sql)
+    }
+
     pub fn receipt(&self, operation_id: &str) -> Result<Option<OperationReceipt>, CommitError> {
         validate(operation_id).map_err(|_| CommitError::InvalidInput)?;
         let db = self

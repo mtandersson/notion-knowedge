@@ -1741,29 +1741,10 @@ async fn commit_search_fixture(runtime: &TestRuntime) {
         runtime.worker.coordinator.clone(),
     )
     .unwrap();
-    let lease = runtime
-        .worker
-        .state
-        .acquire_lease(now_ms() / 1000, 60)
-        .unwrap();
-    guard
-        .ensure_vector_index(
-            notion_knowledge_retrieval::chunks::VectorIndexConfig {
-                num_partitions: Some(1),
-                sample_rate: 8,
-                max_iterations: 20,
-                ..Default::default()
-            },
-            lease.clone(),
-            Arc::new(|| now_ms() / 1000),
-        )
-        .await
-        .unwrap();
-    runtime
-        .worker
-        .state
-        .release_lease(&lease, now_ms() / 1000)
-        .unwrap();
+    assert!(
+        guard.search_snapshot().await.is_ok(),
+        "the production worker prepares serving indexes"
+    );
 }
 async fn wire_stdio(
     handler: notion_knowledge_mcp::KnowledgeServer,

@@ -388,6 +388,14 @@ pub(crate) async fn prepare_search_if_missing(
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
 ) -> Result<(), &'static str> {
     use notion_knowledge_retrieval::chunks::{VectorDistance, VectorIndexConfig};
+    if coordinator
+        .has_unfinished_commits()
+        .map_err(|_| "search coordination unavailable")?
+    {
+        // Search remains unavailable until those effects are resolved. Deferring
+        // ANN maintenance must not turn a healthy refresh into failed work.
+        return Ok(());
+    }
     let table = GuardedChunkTable::bind(
         coordinator.index_directory(),
         "chunks",
