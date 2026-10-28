@@ -214,7 +214,7 @@ jobs:
   test:
     needs: changes
     if: needs.changes.outputs.test == 'true'
-    name: Unit tests (${{ matrix.name || matrix.suite }})
+    name: Unit tests (${{ matrix.suite }})
     strategy:
       fail-fast: false
       matrix:
@@ -231,44 +231,10 @@ jobs:
           - suite: local-lancedb
             shell: spike
             args: -p notion-knowledge-retrieval --features local-lancedb
-          - suite: runtime-choices
-            name: runtime-choices-prepared
-            choice_group: prepared
-            shell: spike
-            args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
-          - suite: runtime-choices
-            name: runtime-choices-legacy
-            choice_group: legacy
-            shell: spike
-            args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
-          - suite: runtime-choices
-            name: runtime-choices-bound-source-activation
-            choice_group: bound-source
-            choice_case: explicit_source_handoff_recovers_with_bound_runtime
-            shell: spike
-            args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
-          - suite: runtime-choices
-            name: runtime-choices-bound-source-runtime
-            choice_group: bound-source
-            choice_case: quarantined_source_handoff_recovers_from_runtime_origin
-            shell: spike
-            args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
-          - suite: runtime-choices
-            name: runtime-choices-bound-target-runtime
-            choice_group: bound-target
-            choice_case: quarantined_target_handoff_recovers_with_bound_runtime
-            shell: spike
-            args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
-          - suite: runtime-choices
-            name: runtime-choices-bound-target-activation
-            choice_group: bound-target
-            choice_case: explicit_target_handoff_recovers_from_activation_origin
-            shell: spike
-            args: -p notion-knowledge-retrieval --features local-lancedb --lib --no-run
     runs-on: ubuntu-latest
-    # Keep every recovery case while bounding each lane. Run 40416906460
-    # exhausted 60m after passing the legacy cases and starting bound tests.
-    timeout-minutes: ${{ matrix.suite == 'local-lancedb' && 60 || matrix.suite == 'runtime-choices' && 60 || 30 }}
+    # Single-process cache recovery is covered by the normal server fixtures.
+    # Retired handoff/rollback matrices are superseded by authoritative resync.
+    timeout-minutes: 30
     env:
       # Retain file/line backtraces without full dependency type/variable DWARF.
       # This setting is included in Cargo snapshot compatibility keys.
@@ -302,59 +268,6 @@ jobs:
       - name: Test offline model comparison examples
         if: matrix.suite == 'local-qwen'
         run: nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-qwen,eval-e5 --example qwen-eval --example e5-eval --locked
-
-      - name: Test offline lexical operators
-        if: matrix.suite == 'local-lancedb'
-        run: |
-          nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --example lexical-candidate --locked
-          CARGO_PROFILE_DEV_DEBUG="$CARGO_PROFILE_TEST_DEBUG" nix develop .#spike --command cargo build -p notion-knowledge-retrieval --features local-lancedb --example lexical-candidate --example lexical-runtime --example lexical-verify --locked
-          NK_LEXICAL_OPERATOR="$GITHUB_WORKSPACE/target/debug/examples/lexical-candidate" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib prepared_abort_operator_retries_real_crash_states --locked -- --ignored
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib pinned_normal_runtime_reopens_legacy_native_probe --locked -- --ignored
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib verified_prior_runtime_legacy_uses_actual_owned_source_without_sql_changes --locked -- --ignored
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" NK_LEXICAL_VERIFY="$GITHUB_WORKSPACE/target/debug/examples/lexical-verify" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib offline_verification_command_legacy_retries_killed_publication --locked -- --ignored
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib pinned_runtime_builds_and_reopens_legacy_candidate_from_bound_current_rows --locked -- --ignored
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib owned_legacy_archive_reuse_then_latest_acknowledged_rows_rebuild --locked -- --ignored
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib prepared_legacy_pair_preserves_exact_archive_and_newer_acknowledged_source --locked -- --ignored
-
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib runtime_journal_legacy_handoff_quarantine_and_retention_preserve_source --locked -- --ignored
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib runtime_publication_recovers_legacy_after_killed_processes --locked -- --ignored
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib runtime_publication_rejects_physical_replacement_and_stale_preparation --locked -- --ignored
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_runtime_source_capture_legacy_preserves_latest_source --locked -- --ignored
-
-      - name: Build runtime choice fixture
-        if: matrix.suite == 'runtime-choices'
-        run: |
-          CARGO_PROFILE_DEV_DEBUG="$CARGO_PROFILE_TEST_DEBUG" nix develop .#spike --command cargo build -p notion-knowledge-retrieval --features local-lancedb --example lexical-runtime --locked
-
-      - name: Test prepared runtime choices
-        if: matrix.choice_group == 'prepared'
-        run: |
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib explicit_source_selection_verifies_latest_rows_and_preserves_quarantine --locked -- --ignored
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_choice_prepared_target_legacy_preserves_source_and_sql --locked -- --ignored
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_choice_prepared_record_recovers_after_killed_processes --locked -- --ignored
-
-      - name: Test legacy runtime choices
-        if: matrix.choice_group == 'legacy'
-        run: |
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib explicit_source_handoff_recovers_with_legacy_runtime --locked -- --ignored
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_target_handoff_recovers_with_legacy_runtime --locked -- --ignored
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib explicit_source_handoff_recovers_after_killed_processes --locked -- --ignored
-          NK_LEXICAL_RUNTIME="$GITHUB_WORKSPACE/target/debug/examples/lexical-runtime" nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib quarantined_target_handoff_recovers_after_killed_processes --locked -- --ignored
-
-      - name: Fetch verified public lexical fixture
-        if: startsWith(matrix.choice_group, 'bound-')
-        run: |
-          curl --fail --location --retry 2 --max-time 60 --max-filesize 2579240 --output "$RUNNER_TEMP/nk-lexical-archive.tar.xz" https://download.freedict.org/dictionaries/eng-swe/2025.11.23/freedict-eng-swe-2025.11.23.src.tar.xz
-          printf '%s  %s\n' 3c9f80c800d4810e34a80c82aca4e468fbc3180099d8b24a4fad7c61324015dc "$RUNNER_TEMP/nk-lexical-archive.tar.xz" | sha256sum --check --status
-
-      # Each bound case exercises several real killed-process windows. Keep
-      # each case in its own 60-minute lane without dropping any coverage.
-      - name: Test ${{ matrix.choice_case }}
-        if: startsWith(matrix.choice_group, 'bound-')
-        env:
-          NK_LEXICAL_TEST_ARCHIVE: ${{ runner.temp }}/nk-lexical-archive.tar.xz
-          NK_LEXICAL_RUNTIME: ${{ github.workspace }}/target/debug/examples/lexical-runtime
-        run: nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --lib "${{ matrix.choice_case }}" --locked -- --ignored
 
       - name: Test production evaluation storage and authorization boundaries
         if: matrix.suite == 'webhook-worker'
