@@ -22,12 +22,7 @@ use tokio::sync::oneshot;
 use crate::sync_state::SqliteSyncStateStore;
 mod alias_projection;
 mod cache_reset;
-mod offline;
-pub mod transition;
 pub use alias_projection::AliasProjection;
-#[cfg(all(feature = "local-lancedb", target_os = "linux"))]
-pub(crate) use offline::{LineageContext, resolve_archive_lineage};
-pub use offline::{OfflineBackup, OwnedOfflineInspection};
 pub(crate) mod projection;
 pub use projection::RelationProjection;
 
@@ -91,57 +86,6 @@ impl CommitBinding {
             generation: generation.into(),
             epoch,
         })
-    }
-    /// Parse canonical descriptive authority sent by an already-owned offline
-    /// verifier. This does not open SQL, initialize a coordinator or grant use.
-    #[cfg(all(target_os = "linux", feature = "local-lancedb"))]
-    pub(crate) fn parse_retained(bytes: &[u8]) -> Result<Self, CommitError> {
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            table: String,
-            workspace: String,
-            roots: Vec<String>,
-            scope: String,
-            generation: String,
-            epoch: u64,
-        }
-        if bytes.len() > 32768 {
-            return Err(CommitError::InvalidInput);
-        }
-        let wire: Wire = serde_json::from_slice(bytes).map_err(|_| CommitError::InvalidInput)?;
-        if wire.scope.len() != 64
-            || !wire
-                .scope
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
-            return Err(CommitError::InvalidInput);
-        }
-        // Validate canonical roots through the original constructor. Retain the
-        // exact trusted source scope digest; never infer a new policy identity.
-        let roots = ReconciliationScope::new(
-            wire.roots.clone(),
-            vec![],
-            "retained-metadata",
-            "retained-metadata",
-        )
-        .map_err(|_| CommitError::InvalidInput)?;
-        if roots.roots() != wire.roots {
-            return Err(CommitError::InvalidInput);
-        }
-        let mut result = Self::new(
-            &wire.table,
-            &wire.workspace,
-            &roots,
-            &wire.generation,
-            wire.epoch,
-        )?;
-        result.scope = wire.scope;
-        if serde_json::to_vec(&result).map_err(|_| CommitError::InvalidInput)? != bytes {
-            return Err(CommitError::InvalidInput);
-        }
-        Ok(result)
     }
     pub fn table(&self) -> &str {
         &self.table
@@ -709,7 +653,6 @@ impl IndexCommitCoordinator {
         Ok(guard)
     }
     pub(crate) fn validate_binding(&self, db: &Connection) -> Result<(), CommitError> {
-        transition::check_admission(self)?;
         let token: String = db
             .query_row(
                 "SELECT identity FROM index_commit_state_identity WHERE singleton=1",

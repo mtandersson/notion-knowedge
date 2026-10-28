@@ -1,7 +1,23 @@
 use super::*;
 use notion_knowledge_core::reconciliation::ReconciliationJournal;
 
+// Recognize the fixed legacy artifact only to discard and rebuild an older
+// installation. No legacy journal contents or transition phases are admitted.
+fn legacy_journal_path(state: &Path) -> Result<PathBuf, CommitError> {
+    let mut name = state
+        .file_name()
+        .ok_or(CommitError::InvalidInput)?
+        .to_os_string();
+    name.push(".lexical-transition-v1.json");
+    Ok(state.with_file_name(name))
+}
+
 impl IndexCommitCoordinator {
+    /// An older installation with an unfinished handoff must rebuild its cache.
+    pub fn has_legacy_cache_journal(state: &Path) -> Result<bool, CommitError> {
+        legacy_journal_path(state)?.try_exists().map_err(io)
+    }
+
     /// Startup-only reset for this single-process service. Preserve the state
     /// database and all upstream-effect records; discard only known cache
     /// artifacts. No old generation or runtime is needed to reconstruct it.
@@ -92,7 +108,7 @@ impl IndexCommitCoordinator {
             for path in [
                 index.join(ANCHOR),
                 index.join(".nk-lexical-binding-v1.json"),
-                transition::journal_path(state)?,
+                legacy_journal_path(state)?,
             ] {
                 match fs::remove_file(path) {
                     Ok(()) => {}
@@ -110,6 +126,25 @@ impl IndexCommitCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_handoff_artifact_is_discarded_without_resuming_it() {
+        let root = tempfile::tempdir().unwrap();
+        let index = root.path().join("index");
+        let state = root.path().join("state.sqlite");
+        let journal = root.path().join("state.sqlite.lexical-transition-v1.json");
+        assert!(!IndexCommitCoordinator::has_legacy_cache_journal(&state).unwrap());
+        fs::write(&journal, b"unreadable obsolete handoff contents").unwrap();
+        assert!(IndexCommitCoordinator::has_legacy_cache_journal(&state).unwrap());
+        IndexCommitCoordinator::reset_cache(&index, &state, 1).unwrap();
+        assert!(!journal.exists());
+        assert!(
+            SqliteSyncStateStore::open(&state)
+                .unwrap()
+                .cache_rebuild_pending()
+                .unwrap()
+        );
+    }
 
     #[test]
     fn refused_state_aliases_preserve_operational_and_derived_rows() {
