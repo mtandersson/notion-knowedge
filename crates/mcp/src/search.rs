@@ -72,12 +72,12 @@ impl SearchRequest {
 }
 
 pub fn tool() -> Tool {
-    let ids = json!({"type":"array","minItems":1,"maxItems":100,"items":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"}});
+    let ids = json!({"type":"array","minItems":1,"maxItems":100,"items":{"type":"string","minLength":1,"maxLength":128,"pattern":crate::NONBLANK_TEXT_PATTERN}});
     let range = json!({"type":"object","additionalProperties":false,"minProperties":1,"properties":{
         "from":{"type":"string","maxLength":128,"format":"date-time"},"until":{"type":"string","maxLength":128,"format":"date-time"}
     }});
-    let property_id = json!({"type":"string","minLength":1,"maxLength":128,"pattern":"\\S"});
-    let list = json!({"type":"array","maxItems":100,"items":{"type":"string","minLength":1,"maxLength":4096,"pattern":"\\S"}});
+    let property_id = json!({"type":"string","minLength":1,"maxLength":128,"pattern":crate::NONBLANK_TEXT_PATTERN});
+    let list = json!({"type":"array","maxItems":100,"items":{"type":"string","minLength":1,"maxLength":4096,"pattern":crate::NONBLANK_TEXT_PATTERN}});
     let mut values = vec![
         json!({"type":"object","additionalProperties":false,"required":["type"],"properties":{"type":{"const":"null"},"value":{"type":"null"}}}),
     ];
@@ -99,7 +99,7 @@ pub fn tool() -> Tool {
     }
     let properties = json!({"type":"array","minItems":1,"maxItems":20,"items":{"oneOf":[
         {"type":"object","additionalProperties":false,"required":["operator","property_id","value"],"properties":{"operator":{"const":"equals"},"property_id":property_id,"value":{"oneOf":values}}},
-        {"type":"object","additionalProperties":false,"required":["operator","property_id","value"],"properties":{"operator":{"const":"contains"},"property_id":property_id,"value":{"type":"string","minLength":1,"maxLength":4096,"pattern":"\\S"}}},
+        {"type":"object","additionalProperties":false,"required":["operator","property_id","value"],"properties":{"operator":{"const":"contains"},"property_id":property_id,"value":{"type":"string","minLength":1,"maxLength":4096,"pattern":crate::NONBLANK_TEXT_PATTERN}}},
         {"type":"object","additionalProperties":false,"required":["operator","property_id","range"],"properties":{"operator":{"const":"date"},"property_id":property_id,"range":range}}
     ]}});
     let metadata = json!({"type":"object","additionalProperties":false,"properties":{
@@ -107,7 +107,7 @@ pub fn tool() -> Tool {
         "page_kind":{"type":"string","enum":["standalone","database"]},"edited":range,"properties":properties
     }});
     let input = json!({"type":"object","additionalProperties":false,"required":["query","limit","mode"],"properties":{
-        "query":{"type":"string","minLength":1,"maxLength":4096,"pattern":"\\S","description":"Natural-language question or exact terms."},
+        "query":{"type":"string","minLength":1,"maxLength":4096,"pattern":crate::NONBLANK_TEXT_PATTERN,"description":"Natural-language question or exact terms."},
         "limit":{"type":"integer","minimum":1,"maximum":100},
         "mode":{"type":"string","enum":["semantic","lexical","hybrid"]},
         "filters":{"type":"object","additionalProperties":false,"properties":{"page_ids":ids,"root_page_ids":ids,"metadata":metadata}}

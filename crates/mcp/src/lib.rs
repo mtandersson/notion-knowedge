@@ -28,6 +28,11 @@ use tool_budget::ToolBudget;
 /// Enforced for both stdio and Streamable HTTP after adapter composition.
 const MAX_TOOL_OUTPUT_BYTES: usize = 512 * 1024;
 
+// Connectors may full-match schema patterns. Match the whole value, including
+// multiline content, while still requiring non-whitespace. Anchoring also
+// avoids repeated search attempts for a long whitespace-only value.
+const NONBLANK_TEXT_PATTERN: &str = r"^[\s\S]*\S[\s\S]*$";
+
 struct BoundedJsonWriter {
     bytes: usize,
 }
