@@ -2260,6 +2260,192 @@ async fn index_rebuild_refuses_foreign_vector_distance_without_replacing_it() {
 }
 
 #[tokio::test]
+async fn ordinary_reconciliation_repairs_missing_rows_without_a_source_revision_change() {
+    use notion_knowledge_core::search::{
+        LexicalQuery, LexicalSearch, SemanticQuery, SemanticSearch,
+    };
+    use notion_knowledge_core::sync_state::SyncStateStore;
+    use notion_knowledge_retrieval::chunks::{
+        GuardedChunkTable, LanceChunkTable, LanceSemanticSearch,
+    };
+
+    for remove_all in [false, true] {
+        let http = HttpNotion::start().await;
+        let f = Fixture::new(&http).await;
+        counts(
+            &f.command(&http, &["--reconcile", "apply", "seed"]).await,
+            3,
+            0,
+            0,
+        );
+        let runtime = f.open(&http, OpenMode::ReadOnly).await;
+        let checkpoint = runtime.coordinator.state().page_state(PAGE).unwrap();
+        drop(runtime);
+        let db = rusqlite::Connection::open(&f.state).unwrap();
+        db.execute_batch(
+            "CREATE TABLE external_write_ledger(id TEXT PRIMARY KEY, result TEXT);
+             INSERT INTO external_write_ledger VALUES('already-written','done');
+             INSERT INTO webhook_events(event_id) VALUES('already-admitted');",
+        )
+        .unwrap();
+        db.execute("INSERT INTO mutation_refresh(workspace_id,mutation_digest,page_id,state) VALUES(?1,'done-write',?2,2)", [WORKSPACE, PAGE]).unwrap();
+        drop(db);
+
+        // Lose only derived rows; retain the operational checkpoint and source
+        // revision. No writer is active during this deliberate fixture damage.
+        let table =
+            LanceChunkTable::open(&f.settings.index, "chunks", f.provider.metadata().clone())
+                .await
+                .unwrap();
+        let mut original = table.page_chunks(PAGE).await.unwrap();
+        original.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
+        let retained = original
+            .iter()
+            .filter(|chunk| !remove_all && !chunk.text.contains("ravioli"))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(retained.len() < original.len());
+        assert!(remove_all || !retained.is_empty());
+        table
+            .apply_page_diff(f.provider.as_ref(), PAGE, &retained)
+            .await
+            .unwrap();
+        drop(table);
+        let embeds = f.provider.count.load(Ordering::SeqCst);
+        let dry = f.command(&http, &["--reconcile", "dry-run"]).await;
+        assert_eq!(dry.exit, 0, "{dry:?}");
+        assert_eq!(dry.json["scanned"], 3);
+        assert_eq!(dry.json["planned_refresh"], 0);
+        assert_eq!(dry.json["planned_delete"], 0);
+        counts(
+            &f.command(&http, &["--reconcile", "apply", "repair"]).await,
+            1,
+            0,
+            2,
+        );
+        assert_eq!(
+            f.provider.count.load(Ordering::SeqCst) - embeds,
+            original.len() - retained.len(),
+            "only missing rows need embeddings"
+        );
+        let runtime = f.open(&http, OpenMode::ReadOnly).await;
+        assert_eq!(
+            runtime.coordinator.state().page_state(PAGE).unwrap(),
+            checkpoint
+        );
+        let table = GuardedChunkTable::bind(
+            &f.settings.index,
+            "chunks",
+            f.provider.metadata().clone(),
+            runtime.coordinator.clone(),
+        )
+        .unwrap();
+        let mut repaired = table.page_chunks(PAGE).await.unwrap();
+        repaired.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
+        assert_eq!(repaired, original);
+        let snapshot = Arc::new(table.search_snapshot().await.unwrap());
+        let lexical = LexicalQuery {
+            query: "ravioli".into(),
+            limit: 10,
+            page_ids: Some(vec![PAGE.into()]),
+            root_page_ids: Some(vec![ROOT.into()]),
+            metadata: Default::default(),
+        };
+        let semantic_query = SemanticQuery {
+            query: "ravioli".into(),
+            limit: 10,
+            page_ids: lexical.page_ids.clone(),
+            root_page_ids: lexical.root_page_ids.clone(),
+            metadata: Default::default(),
+        };
+        let semantic = LanceSemanticSearch::new(snapshot.clone(), f.provider.clone(), 1).unwrap();
+        let lexical_hits = snapshot.search(lexical.clone()).await.unwrap();
+        let semantic_hits = semantic.search(semantic_query.clone()).await.unwrap();
+        assert!(!lexical_hits.is_empty());
+        assert_eq!(semantic_hits.len(), original.len());
+        for hit in lexical_hits.iter().chain(&semantic_hits) {
+            let chunk = original
+                .iter()
+                .find(|c| c.chunk_id == hit.source.chunk_id)
+                .unwrap();
+            assert_eq!(hit.source.page_id, PAGE);
+            assert_eq!(hit.source.title, "First");
+            assert_eq!(hit.source.url, format!("https://www.notion.so/{PAGE}"));
+            assert_eq!(hit.source.last_edited_time, "2026-10-10T12:00:00Z");
+            assert_eq!(hit.source.heading_path, chunk.metadata.heading_path);
+            assert_eq!(hit.text, chunk.text);
+        }
+        drop(semantic);
+        drop(snapshot);
+        drop(table);
+        drop(runtime);
+        let embeds = f.provider.count.load(Ordering::SeqCst);
+        counts(
+            &f.command(&http, &["--reconcile", "apply", "after-repair"])
+                .await,
+            0,
+            0,
+            3,
+        );
+        assert_eq!(f.provider.count.load(Ordering::SeqCst), embeds);
+
+        let runtime = if remove_all {
+            let mut scope = authority();
+            scope.exclusions.page_ids.insert(PAGE.into());
+            IndexRuntime::recover_for_reads(
+                &f.settings,
+                &f.state,
+                scope,
+                http.client(),
+                f.provider.clone(),
+            )
+            .await
+            .unwrap()
+        } else {
+            http.change(|m| {
+                m.hide_page = true;
+                m.archived = true;
+            });
+            counts(
+                &f.command(&http, &["--reconcile", "apply", "after-deletion"])
+                    .await,
+                0,
+                1,
+                2,
+            );
+            f.open(&http, OpenMode::ReadOnly).await
+        };
+        let table = GuardedChunkTable::bind(
+            &f.settings.index,
+            "chunks",
+            f.provider.metadata().clone(),
+            runtime.coordinator,
+        )
+        .unwrap();
+        assert!(table.page_chunks(PAGE).await.unwrap().is_empty());
+        let snapshot = Arc::new(table.search_snapshot().await.unwrap());
+        assert!(snapshot.search(lexical).await.unwrap().is_empty());
+        let semantic = LanceSemanticSearch::new(snapshot, f.provider.clone(), 1).unwrap();
+        assert!(semantic.search(semantic_query).await.unwrap().is_empty());
+        let db = rusqlite::Connection::open(&f.state).unwrap();
+        for (query, expected) in [
+            (
+                "SELECT result FROM external_write_ledger WHERE id='already-written'",
+                "done",
+            ),
+            ("SELECT event_id FROM webhook_events", "already-admitted"),
+            ("SELECT mutation_digest FROM mutation_refresh", "done-write"),
+        ] {
+            assert_eq!(
+                db.query_row(query, [], |r| r.get::<_, String>(0)).unwrap(),
+                expected
+            );
+        }
+        // The HTTP fixture rejects every non-GET request throughout.
+    }
+}
+
+#[tokio::test]
 async fn lost_or_incompatible_cache_resyncs_without_replaying_external_effects() {
     use notion_knowledge_core::search::{LexicalQuery, LexicalSearch};
     use notion_knowledge_retrieval::chunks::GuardedChunkTable;
