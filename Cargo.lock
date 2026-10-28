@@ -4770,6 +4770,7 @@ dependencies = [
  "notion-knowledge-core",
  "notion-knowledge-notion",
  "notion-knowledge-retrieval",
+ "regex",
  "rmcp",
  "serde",
  "serde_json",
