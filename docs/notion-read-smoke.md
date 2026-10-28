@@ -111,5 +111,6 @@ a deliberate fresh run with a new diagnostic path only after reconciliation.
 No cleanup runs automatically. Retain the named smoke data and evidence until
 investigation is complete. An operator may deliberately remove only this known
 disposable **derived** directory after stopping its processes; keep model assets,
-other runtime state and authoritative Notion content. Live source cleanup and
-any later write/upload approval belong to #556/#557, with #110 remaining open.
+other runtime state and authoritative Notion content. The separate [guarded write/upload harness](notion-write-smoke.md) implements
+#556 without authorizing a live run. Live source cleanup and write/upload approval
+belong to #557, with #110 remaining open.
