@@ -8,10 +8,10 @@ import tempfile
 import unittest
 
 SCRIPT = Path(__file__).with_name('ci-jobs.py').resolve()
-ALL = {'agent-layout', 'fmt', 'clippy', 'check', 'test', 'build', 'container',
+ALL = {'agent-layout', 'fmt', 'clippy', 'check', 'test', 'native-build', 'native-test', 'build', 'container',
        'dependencies', 'secrets'}
 SECURITY = {'dependencies', 'secrets'}
-WORKSPACE = {'fmt', 'clippy', 'check', 'test', 'build', 'container'}
+WORKSPACE = {'fmt', 'clippy', 'check', 'test', 'native-build', 'native-test', 'build', 'container'}
 
 
 def git(repo, *args):
@@ -61,7 +61,7 @@ class Selection(unittest.TestCase):
             'scripts/check-agent-layout.sh': {'agent-layout'},
             'crates/core/src/lib.rs': WORKSPACE,
             'crates/server/tests/http.rs': WORKSPACE,
-            'eval/retrieval/personal-knowledge-v1.json': {'test'},
+            'eval/retrieval/personal-knowledge-v1.json': {'test', 'native-build', 'native-test'},
             'Cargo.lock': WORKSPACE,
             'Cargo.toml': WORKSPACE,
             'crates/core/Cargo.toml': WORKSPACE,
@@ -174,6 +174,28 @@ class Gate(unittest.TestCase):
             self.assertNotEqual(self.gate(needs).returncode, 0)
 
 
+class NativeTestDistribution(unittest.TestCase):
+    def test_native_execution_consumes_binaries_while_other_suites_start_independently(self):
+        workflow = SCRIPT.parents[1].joinpath('.github/workflows/ci.yml').read_text()
+        direct = workflow.split('  test:\n', 1)[1].split('  native-build:\n', 1)[0]
+        build = workflow.split('  native-build:\n', 1)[1].split('  native-test:\n', 1)[0]
+        run = workflow.split('  native-test:\n', 1)[1].split('  build:\n', 1)[0]
+        self.assertIn('needs: changes', direct)
+        self.assertNotIn('needs: [changes, native-build]', direct)
+        self.assertIn('suite: workspace', direct)
+        self.assertIn('suite: local-qwen', direct)
+        self.assertIn('--lib --tests --example production-eval --no-run', build)
+        self.assertIn('--doc --locked', build)
+        self.assertIn('scripts/test-compression-compat.py', build)
+        self.assertIn('needs: [changes, native-build]', run)
+        self.assertIn('.#test-runtime --command python3', run)
+        self.assertIn('actions/download-artifact@', run)
+        self.assertIn('ref: ${{ github.sha }}', build)
+        self.assertIn('ref: ${{ github.sha }}', run)
+        self.assertNotIn('cargo-cache', run)
+        self.assertNotIn('--command cargo', run)
+
+
 class ContainerRegistryCachePublication(unittest.TestCase):
     """Registry manifests are published only by trusted main, after smoke."""
 
@@ -230,7 +252,8 @@ class ContainerRegistryCachePublication(unittest.TestCase):
     def test_registry_export_is_main_only_and_required_smoke_is_not_optional(self):
         self.check_contract(self.workflow)
         self.assertEqual(self.workflow.count(
-            "if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'"), 4)
+            "if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'"),
+            self.workflow.count("uses: ./.github/actions/cargo-cache-save"))
         pr = self.workflow.split('\n  container:\n', 1)[1].split('\n  container-main:\n', 1)[0]
         self.assertEqual(pr.count(
             "if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'"), 3)

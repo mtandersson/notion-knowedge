@@ -33,6 +33,11 @@
           security = pkgs.mkShellNoCC {
             packages = with pkgs; [ cargo-audit gitleaks git python3 ];
           };
+          test-runtime = pkgs.mkShellNoCC {
+            packages = [ pkgs.python3 (pkgs.lib.getLib pkgs.openssl) ]
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.stdenv.cc.cc.lib ];
+            RUST_BACKTRACE = "1";
+          };
           spike = pkgs.mkShell {
             packages = with pkgs; [ spikeToolchain pkg-config openssl protobuf python3 curl time ];
             RUST_BACKTRACE = "1";

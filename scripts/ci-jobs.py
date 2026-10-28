@@ -7,9 +7,9 @@ from pathlib import PurePosixPath
 import subprocess
 import sys
 
-JOBS = ('agent-layout', 'fmt', 'clippy', 'check', 'test', 'build', 'container',
+JOBS = ('agent-layout', 'fmt', 'clippy', 'check', 'test', 'native-build', 'native-test', 'build', 'container',
         'dependencies', 'secrets')
-RUST = {'fmt', 'clippy', 'check', 'test', 'build'}
+RUST = {'fmt', 'clippy', 'check', 'test', 'native-build', 'native-test', 'build'}
 SECURITY = {'dependencies', 'secrets'}
 
 
@@ -24,7 +24,7 @@ def path_jobs(path):
     ):
         return set()
     if path.startswith('eval/'):
-        return {'test'}
+        return {'test', 'native-build', 'native-test'}
     if path.startswith('crates/') and '/tests/' in path and path.endswith('.rs'):
         # Docker's context allowlist includes every .rs file, even tests.
         return RUST | {'container'}
