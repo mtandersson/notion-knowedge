@@ -11,7 +11,7 @@ fn dictionary() -> crate::lexical_dictionary::Dictionary {
 #[tokio::test]
 async fn configured_search_reserves_before_model_work_and_releases_on_cancel_or_deadline() {
     use crate::{chunks::bounded::CandidateBudget, lexical_runtime::LexicalSearchRuntime};
-    use notion_knowledge_core::search::{SemanticQuery, SemanticSearch};
+    use notion_knowledge_core::search::{LexicalQuery, SemanticQuery, SemanticSearch};
     struct WaitingProvider {
         metadata: EmbeddingMetadata,
         started: Arc<tokio::sync::Notify>,
