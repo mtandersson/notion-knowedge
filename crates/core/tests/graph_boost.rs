@@ -43,7 +43,10 @@ fn graph_ranking_preserves_bounded_dictionary_evidence() {
     for config in [GraphBoostConfig::default(), on(1, 0.2, 8)] {
         let graph = GraphFixture::with_edges(vec![]);
         let output = rank_candidates(vec![candidate.clone()], &graph, config, 1, None).unwrap();
-        assert_eq!(output[0].hit.lexical_matches, [evidence.clone()]);
+        assert_eq!(
+            output[0].hit.lexical_matches.as_slice(),
+            std::slice::from_ref(&evidence)
+        );
         assert_eq!(output[0].hit.score, 0.5);
     }
     candidate.matched_paths = vec![RetrievalPath::Semantic];
