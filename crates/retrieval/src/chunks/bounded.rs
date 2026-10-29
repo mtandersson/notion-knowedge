@@ -1030,7 +1030,7 @@ mod ranking_tests {
     }
     fn derived(ordinal: u8) -> LexicalMatch {
         LexicalMatch::LexicalDictionaryV1 {
-            manifest_digest: "public-asset-digest".into(),
+            manifest_digest: "a".repeat(64),
             field: "title".into(),
             planner_ordinal: ordinal,
         }
