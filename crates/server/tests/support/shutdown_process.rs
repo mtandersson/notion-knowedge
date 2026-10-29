@@ -64,11 +64,14 @@ fn native_process_fixture() {
         })
         .await
         .unwrap();
+        // The parent observes existence, so publish only the complete payload.
+        let ready = control.join("ready.json.tmp");
         std::fs::write(
-            control.join("ready.json"),
+            &ready,
             json!({"index":runtime.index,"state":runtime.db}).to_string(),
         )
         .unwrap();
+        std::fs::rename(ready, control.join("ready.json")).unwrap();
         // Parent first obtains an actual HTTP200 durable receipt, while no
         // transaction is held. Then this native owned effect takes the fence.
         wait_file(&control.join("begin")).await;
