@@ -321,6 +321,12 @@ pub(crate) async fn compose_oauth_index(
         .search_snapshot()
         .await
         .map_err(|_| "retrieval index unavailable or incompatible")?;
+    if plan.is_some() {
+        table
+            .probe_lexical_cache()
+            .await
+            .map_err(|_| "retrieval exact-ID readiness unavailable")?;
+    }
     let (coordinator, table) = if writable {
         // Validate existing vector metadata before opening writable authority.
         let coordinator = IndexCommitCoordinator::open_existing(

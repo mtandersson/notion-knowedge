@@ -46,6 +46,15 @@ fn now() -> i64 {
 }
 
 pub async fn seed(dir: &Path, scope: &LifecycleScope, page_id: &str) -> Seeded {
+    seed_with_plan(dir, scope, page_id, None).await
+}
+
+async fn seed_with_plan(
+    dir: &Path,
+    scope: &LifecycleScope,
+    page_id: &str,
+    plan: Option<notion_knowledge_retrieval::chunks::lexical_binding::LexicalCachePlan>,
+) -> Seeded {
     let index = dir.join("content-index");
     let state = dir.join("content-state.sqlite");
     fs::create_dir(&index).unwrap();
@@ -64,19 +73,34 @@ pub async fn seed(dir: &Path, scope: &LifecycleScope, page_id: &str) -> Seeded {
     let provider: Arc<dyn EmbeddingProvider> = Arc::new(LocalProvider(
         EmbeddingMetadata::new("oauth-fixture".into(), "local".into(), "1".into(), 3).unwrap(),
     ));
-    let table = GuardedChunkTable::bind(
-        &index,
-        "chunks",
-        provider.metadata().clone(),
-        coordinator.clone(),
-    )
-    .unwrap();
     let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(now);
     let lease = coordinator.state().acquire_lease(now(), 120).unwrap();
-    table
-        .create_empty(lease.clone(), clock.clone())
+    let table = if let Some(plan) = plan {
+        GuardedChunkTable::create_fresh_lexical(
+            &index,
+            "chunks",
+            provider.metadata().clone(),
+            coordinator.clone(),
+            plan.identity(),
+            lease.clone(),
+            clock.clone(),
+        )
         .await
+        .unwrap()
+    } else {
+        let table = GuardedChunkTable::bind(
+            &index,
+            "chunks",
+            provider.metadata().clone(),
+            coordinator.clone(),
+        )
         .unwrap();
+        table
+            .create_empty(lease.clone(), clock.clone())
+            .await
+            .unwrap();
+        table
+    };
     let text = "Saffron private evidence";
     let revision = "2026-10-17T00:00:00Z";
     let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
@@ -166,5 +190,79 @@ pub async fn seed(dir: &Path, scope: &LifecycleScope, page_id: &str) -> Seeded {
         index,
         state,
         provider,
+    }
+}
+
+#[tokio::test]
+async fn configured_oauth_lexical_reads_require_native_exact_id_readiness() {
+    use notion_knowledge_core::backend::PageId;
+    use notion_knowledge_retrieval::{
+        chunks::lexical_binding::LexicalCachePlan, lexical_dictionary::test_fixtures::dictionary,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let scope = LifecycleScope {
+        workspace_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into(),
+        roots: vec![PageId("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".into())],
+        generation: 1,
+        exclusions: Default::default(),
+    };
+    let dictionary = Arc::new(dictionary(&[("saffron", "saffran")]));
+    let plan = LexicalCachePlan::verified(dictionary.clone()).unwrap();
+    let seeded = seed_with_plan(
+        dir.path(),
+        &scope,
+        "cccccccc-cccc-cccc-cccc-cccccccccccc",
+        Some(plan),
+    )
+    .await;
+    let lexical = crate::lexical_expansion::Settings::parse(&mut |key| match key {
+        "NK_LEXICAL_EXPANSION" => Some("true".into()),
+        "NK_LEXICAL_ASSET_BUNDLE" => Some("/tmp/unused-oauth-dictionary".into()),
+        "NK_LEXICAL_ASSET_SHA256" => Some(dictionary.manifest_digest().into()),
+        _ => None,
+    })
+    .unwrap()
+    .unwrap()
+    .with_verified_dictionary(dictionary)
+    .unwrap();
+    let mut config = crate::config::Config::from_lookup(|_| None).unwrap();
+    config.notion_scope = Some(scope);
+    config.webhook_state_file = Some(seeded.state.clone());
+    config.retrieval = Some(crate::webhook_worker::WorkerSettings {
+        lexical: Some(lexical),
+        alias_sources: notion_knowledge_core::aliases::AliasSources::new(true, vec![]).unwrap(),
+        index: seeded.index.clone(),
+        assets: "/tmp/unused-oauth-model".into(),
+        poll_ms: 100,
+        timeout_seconds: 30,
+    });
+    let before = fs::read(&seeded.state).unwrap();
+    let (_, _, table) = crate::retrieval_runtime::compose_oauth_index(
+        notion_knowledge_mcp::KnowledgeServer::default(),
+        &config,
+        seeded.provider.clone(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(fs::read(&seeded.state).unwrap(), before);
+    table.probe_lexical_cache().await.unwrap();
+    // Keep catalog entries/identity intact while removing only this fixture's
+    // native index payload. Layout validation alone cannot prove usable search.
+    fs::remove_dir_all(seeded.index.join("chunks.lance/_indices")).unwrap();
+    assert!(table.search_snapshot().await.is_ok());
+    assert!(table.probe_lexical_cache().await.is_err());
+    for writable in [false, true] {
+        assert!(
+            crate::retrieval_runtime::compose_oauth_index(
+                notion_knowledge_mcp::KnowledgeServer::default(),
+                &config,
+                seeded.provider.clone(),
+                writable,
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(fs::read(&seeded.state).unwrap(), before);
     }
 }
