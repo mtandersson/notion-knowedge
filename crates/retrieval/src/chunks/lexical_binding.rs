@@ -6,11 +6,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs::OpenOptions,
-    io::Read,
+    io::{Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::Path,
+    sync::Arc,
 };
 
+// Keep the artifact path stable so older metadata is refused and reset,
+// rather than silently ignored when its payload format changes.
 pub(crate) const FILE: &str = ".nk-lexical-binding-v1.json";
 const MAX_BYTES: u64 = 32 * 1024;
 fn incompatible() -> ChunkTableError {
@@ -67,6 +70,29 @@ impl LexicalPlanIdentity {
     }
 }
 
+/// A verified identity and the immutable local asset handle it describes.
+/// Configuration owns this value; tool inputs cannot construct a dictionary.
+#[derive(Debug, Clone)]
+pub struct LexicalCachePlan {
+    dictionary: Arc<Dictionary>,
+    identity: LexicalPlanIdentity,
+}
+impl LexicalCachePlan {
+    pub fn verified(dictionary: Arc<Dictionary>) -> Result<Self, ChunkTableError> {
+        let identity = LexicalPlanIdentity::verified(&dictionary)?;
+        Ok(Self {
+            dictionary,
+            identity,
+        })
+    }
+    pub fn identity(&self) -> &LexicalPlanIdentity {
+        &self.identity
+    }
+    pub fn dictionary(&self) -> &Dictionary {
+        &self.dictionary
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StorageIdentity {
@@ -113,28 +139,23 @@ pub struct LexicalIndexBinding {
     epoch: u64,
     device: u64,
     inode: u64,
-    source_snapshot_sha256: String,
 }
 impl LexicalIndexBinding {
-    /// Construct identity metadata for a verified canonical snapshot and native
+    /// Construct identity metadata for a fresh authoritative cache and native
     /// index profile. Construction alone never grants installation authority.
     /// This function does not write files or change coordinator authority.
-    pub fn for_candidate(
+    pub fn for_cache(
         directory: &Path,
         embedding: EmbeddingMetadata,
         authority: &CommitBinding,
         plan: LexicalPlanIdentity,
-        source_snapshot_sha256: &str,
     ) -> Result<Self, ChunkTableError> {
-        if !valid_digest(source_snapshot_sha256) {
-            return Err(incompatible());
-        }
         let metadata = std::fs::metadata(directory)?;
         if !metadata.is_dir() {
             return Err(incompatible());
         }
         Ok(Self {
-            version: 1,
+            version: 2,
             embedding,
             storage: StorageIdentity::current(),
             plan,
@@ -146,7 +167,6 @@ impl LexicalIndexBinding {
             epoch: authority.epoch(),
             device: metadata.dev(),
             inode: metadata.ino(),
-            source_snapshot_sha256: source_snapshot_sha256.into(),
         })
     }
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, ChunkTableError> {
@@ -166,18 +186,25 @@ impl LexicalIndexBinding {
         authority: &CommitBinding,
         plan: &LexicalPlanIdentity,
     ) -> Result<(), ChunkTableError> {
-        let expected = Self::for_candidate(
-            directory,
-            embedding.clone(),
-            authority,
-            plan.clone(),
-            &self.source_snapshot_sha256,
-        )?;
+        let expected = Self::for_cache(directory, embedding.clone(), authority, plan.clone())?;
         if expected != *self {
             return Err(incompatible());
         }
         Ok(())
     }
+}
+
+pub(crate) fn write_fresh(
+    directory: &Path,
+    binding: &LexicalIndexBinding,
+) -> Result<(), ChunkTableError> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(directory.join(FILE))?;
+    file.write_all(&binding.canonical_bytes()?)?;
+    Ok(())
 }
 
 pub(crate) fn read(directory: &Path) -> Result<Option<LexicalIndexBinding>, ChunkTableError> {
@@ -188,7 +215,8 @@ pub(crate) fn read(directory: &Path) -> Result<Option<LexicalIndexBinding>, Chun
     {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(incompatible()),
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Err(incompatible()),
+        Err(e) => return Err(e.into()),
     };
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.nlink() != 1 || metadata.len() > MAX_BYTES {

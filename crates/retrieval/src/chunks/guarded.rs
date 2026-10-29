@@ -144,7 +144,7 @@ impl GuardedChunkTable {
         Self::bind_inner(directory.as_ref(), table_name, embedding, coordinator, None)
     }
 
-    /// Require the offline-installed exact plan. Never stamps missing metadata.
+    /// Require the configured exact plan. Reads never stamp missing metadata.
     pub fn bind_with_lexical_plan(
         directory: impl AsRef<Path>,
         table_name: &str,
@@ -160,6 +160,61 @@ impl GuardedChunkTable {
             Some(plan),
         )
     }
+    /// Initialize only a fresh cache. Existing rows or binding metadata require
+    /// reset and authoritative resync; this never relabels an existing table.
+    pub async fn create_fresh_lexical(
+        directory: impl AsRef<Path>,
+        table_name: &str,
+        embedding: EmbeddingMetadata,
+        coordinator: Arc<IndexCommitCoordinator>,
+        plan: &LexicalPlanIdentity,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Result<Self, ChunkTableError> {
+        let raw = Self::bind(directory, table_name, embedding, coordinator.clone())?;
+        let directory = raw.index_directory.clone();
+        let name = raw.table_name.clone();
+        let metadata = raw.embedding.clone();
+        let identity = plan.clone();
+        coordinator
+            .maintain(lease, clock, move |context| async move {
+                context.revalidate().map_err(fence_failure)?;
+                lexical_binding::verify(&directory, &None).map_err(failure)?;
+                match std::fs::symlink_metadata(directory.join(format!("{name}.lance"))) {
+                    Ok(_) => return Err(FailureClass::Conflict),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => return Err(FailureClass::Index),
+                }
+                let table = LanceChunkTable::create(&directory, &name, metadata.clone())
+                    .await
+                    .map_err(failure)?;
+                table
+                    .rebuild_fts_index(&FtsIndexConfig::lexical_expansion_v1())
+                    .await
+                    .map_err(failure)?;
+                context.revalidate().map_err(fence_failure)?;
+                let binding = lexical_binding::LexicalIndexBinding::for_cache(
+                    &directory,
+                    metadata,
+                    context.binding(),
+                    identity,
+                )
+                .map_err(failure)?;
+                lexical_binding::write_fresh(&directory, &binding).map_err(failure)?;
+                context.revalidate().map_err(fence_failure)?;
+                Ok(())
+            })
+            .await
+            .map_err(|_| ChunkTableError::InvalidPath)?;
+        Self::bind_with_lexical_plan(
+            &raw.index_directory,
+            &raw.table_name,
+            raw.embedding,
+            coordinator,
+            plan,
+        )
+    }
+
     fn bind_inner(
         directory: &Path,
         table_name: &str,

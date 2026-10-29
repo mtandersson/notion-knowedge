@@ -22,12 +22,11 @@ fn enabled(
 // Explicit test-only fixture installation. Production has no stamping API; the
 // compatibility checks remain independent of installed expansion acceptance.
 async fn install(f: &Fixture, plan: LexicalPlanIdentity) -> Vec<u8> {
-    let binding = LexicalIndexBinding::for_candidate(
+    let binding = LexicalIndexBinding::for_cache(
         &f.index,
         f.embedding.clone(),
         f.coordinator.binding(),
         plan,
-        &"a".repeat(64),
     )
     .unwrap();
     let bytes = binding.canonical_bytes().unwrap();
@@ -50,6 +49,91 @@ async fn install(f: &Fixture, plan: LexicalPlanIdentity) -> Vec<u8> {
         .await
         .unwrap();
     bytes
+}
+
+#[tokio::test]
+async fn fresh_lexical_cache_pins_its_verified_plan_and_never_installs_over_existing_rows() {
+    let f = Fixture::new();
+    let plan = lexical_binding::LexicalCachePlan::verified(Arc::new(dictionary())).unwrap();
+    let table = GuardedChunkTable::create_fresh_lexical(
+        &f.index,
+        "chunks",
+        f.embedding.clone(),
+        f.coordinator.clone(),
+        plan.identity(),
+        f.lease.clone(),
+        clock(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        table
+            .search_snapshot()
+            .await
+            .unwrap()
+            .count_rows()
+            .await
+            .unwrap(),
+        0
+    );
+    let bytes = fs::read(f.index.join(lexical_binding::FILE)).unwrap();
+    let wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(wire["version"], 2);
+    assert!(wire.get("source_snapshot_sha256").is_none());
+    assert!(enabled(&f, plan.identity()).is_ok());
+    assert!(
+        GuardedChunkTable::bind(
+            &f.index,
+            "chunks",
+            f.embedding.clone(),
+            f.coordinator.clone()
+        )
+        .is_err()
+    );
+
+    let old = Fixture::new();
+    old.create().await;
+    let raw = old.guarded();
+    let provider = CountingProvider::new(old.embedding.clone());
+    let prepared = raw
+        .prepare_page(
+            &provider,
+            operation("existing", "source", false),
+            &[chunk("one", "cinnamon", "Spice")],
+        )
+        .await
+        .unwrap();
+    raw.commit_page(prepared, old.lease.clone(), clock(), || async { Ok(()) })
+        .await
+        .unwrap();
+    let version = old.readable().await.table.version().await.unwrap();
+    assert!(
+        GuardedChunkTable::create_fresh_lexical(
+            &old.index,
+            "chunks",
+            old.embedding.clone(),
+            old.coordinator.clone(),
+            plan.identity(),
+            old.lease.clone(),
+            clock(),
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(old.readable().await.table.version().await.unwrap(), version);
+    assert_eq!(raw.page_chunks("page").await.unwrap().len(), 1);
+    assert!(!old.index.join(lexical_binding::FILE).exists());
+
+    let mut previous = wire;
+    previous["version"] = serde_json::json!(1);
+    previous["source_snapshot_sha256"] = serde_json::json!("a".repeat(64));
+    fs::write(
+        f.index.join(lexical_binding::FILE),
+        serde_json::to_vec(&previous).unwrap(),
+    )
+    .unwrap();
+    assert!(enabled(&f, plan.identity()).is_err());
+    assert!(table.page_chunks("page").await.is_err());
 }
 
 #[tokio::test]
@@ -140,7 +224,6 @@ async fn lexical_identity_rejects_changed_plan_authority_storage_and_physical_me
         "device",
         "inode",
         "table",
-        "source_snapshot_sha256",
         "embedding",
         "storage",
         "plan",
@@ -154,7 +237,6 @@ async fn lexical_identity_rejects_changed_plan_authority_storage_and_physical_me
             "embedding" => wire[field]["model_version"] = serde_json::json!("other-model"),
             "storage" => wire[field]["profile"]["with_positions"] = serde_json::json!(false),
             "plan" => wire[field]["asset_sha256"] = serde_json::json!("b".repeat(64)),
-            "source_snapshot_sha256" => wire[field] = serde_json::json!("invalid"),
             _ => wire[field] = serde_json::json!("mismatch"),
         }
         let changed: LexicalIndexBinding = serde_json::from_value(wire).unwrap();
