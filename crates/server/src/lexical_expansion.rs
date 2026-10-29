@@ -20,55 +20,6 @@ pub struct Settings {
     >,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn expansion_defaults_off_and_rejects_implicit_enablement() {
-        assert!(Settings::parse(&mut |_| None).unwrap().is_none());
-        assert!(
-            Settings::parse(&mut |key| (key == "NK_LEXICAL_EXPANSION").then(|| "false".into()))
-                .unwrap()
-                .is_none()
-        );
-        let error =
-            Settings::parse(&mut |key| (key == "NK_LEXICAL_EXPANSION").then(|| "yes".into()))
-                .unwrap_err();
-        assert_eq!(error.setting, "NK_LEXICAL_EXPANSION");
-    }
-    #[cfg(all(unix, feature = "webhook-worker"))]
-    #[test]
-    fn enabled_settings_are_bounded_and_do_not_echo_private_paths() {
-        let parse = |path: &str, digest: &str, count: &str| {
-            Settings::parse(&mut |key| match key {
-                "NK_LEXICAL_EXPANSION" => Some("true".into()),
-                "NK_LEXICAL_ASSET_BUNDLE" => Some(path.into()),
-                "NK_LEXICAL_ASSET_SHA256" => Some(digest.into()),
-                "NK_LEXICAL_MAX_REQUESTS" => Some(count.into()),
-                _ => None,
-            })
-        };
-        let digest = "a".repeat(64);
-        let settings = parse("/tmp/synthetic-private-bundle", &digest, "1")
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            settings.bundle(),
-            Path::new("/tmp/synthetic-private-bundle")
-        );
-        assert_eq!(settings.max_requests(), 1);
-        assert!(!format!("{settings:?}").contains("synthetic-private-bundle"));
-        for (path, hash, count) in [
-            ("synthetic-private-relative", digest.as_str(), "1"),
-            ("/tmp/synthetic-private-bundle", "BAD", "1"),
-            ("/tmp/synthetic-private-bundle", digest.as_str(), "0"),
-            ("/tmp/synthetic-private-bundle", digest.as_str(), "17"),
-        ] {
-            let error = parse(path, hash, count).unwrap_err();
-            assert!(!error.to_string().contains("synthetic-private"));
-        }
-    }
-}
 impl std::fmt::Debug for Settings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LexicalSettings")
@@ -177,5 +128,55 @@ impl Settings {
             .clone()?;
         LexicalCachePlan::verified(dictionary)
             .map_err(|_| "lexical plan unavailable or incompatible")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn expansion_defaults_off_and_rejects_implicit_enablement() {
+        assert!(Settings::parse(&mut |_| None).unwrap().is_none());
+        assert!(
+            Settings::parse(&mut |key| (key == "NK_LEXICAL_EXPANSION").then(|| "false".into()))
+                .unwrap()
+                .is_none()
+        );
+        let error =
+            Settings::parse(&mut |key| (key == "NK_LEXICAL_EXPANSION").then(|| "yes".into()))
+                .unwrap_err();
+        assert_eq!(error.setting, "NK_LEXICAL_EXPANSION");
+    }
+    #[cfg(all(unix, feature = "webhook-worker"))]
+    #[test]
+    fn enabled_settings_are_bounded_and_do_not_echo_private_paths() {
+        let parse = |path: &str, digest: &str, count: &str| {
+            Settings::parse(&mut |key| match key {
+                "NK_LEXICAL_EXPANSION" => Some("true".into()),
+                "NK_LEXICAL_ASSET_BUNDLE" => Some(path.into()),
+                "NK_LEXICAL_ASSET_SHA256" => Some(digest.into()),
+                "NK_LEXICAL_MAX_REQUESTS" => Some(count.into()),
+                _ => None,
+            })
+        };
+        let digest = "a".repeat(64);
+        let settings = parse("/tmp/synthetic-private-bundle", &digest, "1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            settings.bundle(),
+            Path::new("/tmp/synthetic-private-bundle")
+        );
+        assert_eq!(settings.max_requests(), 1);
+        assert!(!format!("{settings:?}").contains("synthetic-private-bundle"));
+        for (path, hash, count) in [
+            ("synthetic-private-relative", digest.as_str(), "1"),
+            ("/tmp/synthetic-private-bundle", "BAD", "1"),
+            ("/tmp/synthetic-private-bundle", digest.as_str(), "0"),
+            ("/tmp/synthetic-private-bundle", digest.as_str(), "17"),
+        ] {
+            let error = parse(path, hash, count).unwrap_err();
+            assert!(!error.to_string().contains("synthetic-private"));
+        }
     }
 }
