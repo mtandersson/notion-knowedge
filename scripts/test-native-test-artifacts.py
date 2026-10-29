@@ -17,6 +17,9 @@ REVISION = 'a' * 40
 
 
 class Bundles(unittest.TestCase):
+    codec = 'zstd'
+    extension = 'zst'
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -49,9 +52,9 @@ class Bundles(unittest.TestCase):
 
     def bundle(self):
         messages = [json.dumps(r) for r in self.records]
-        native.pack(self.root, messages, self.metadata, REVISION, self.root / 'bundles')
+        native.pack(self.root, messages, self.metadata, REVISION, self.root / 'bundles', self.codec)
         shutil.rmtree(self.root / 'target')
-        return self.root / 'bundles/webhook-worker.tar.gz'
+        return self.root / f'bundles/webhook-worker.tar.{self.extension}'
 
     def test_real_execution_restores_embedded_binary_paths_without_build_cache(self):
         scratch = self.root / 'target/debug/incremental/scratch'
@@ -71,7 +74,9 @@ class Bundles(unittest.TestCase):
         results = json.loads(report.read_text())
         self.assertEqual([r['exit_code'] for r in results['tests']], [0])
         self.assertGreater(results['seconds'], 0)
-        with tarfile.open(self.root / 'bundles/local-lancedb.tar.gz') as packed:
+        self.assertGreater(results['unpack_seconds'], 0)
+        self.assertGreaterEqual(results['total_seconds'], results['unpack_seconds'] + results['seconds'])
+        with tarfile.open(self.root / f'bundles/local-lancedb.tar.{self.extension}') as packed:
             manifest = json.load(packed.extractfile('manifest.json'))
         self.assertEqual(manifest['tests'], {'target/debug/deps/retrieval-tests': 'crates/retrieval'})
         self.assertNotIn('target/debug/notion-knowledge-server', manifest['files'])
@@ -93,7 +98,7 @@ class Bundles(unittest.TestCase):
         records = [(path, payload if path == name else data) for path, data in records]
         if name not in {path for path, _ in records}:
             records.append((name, payload))
-        with tarfile.open(archive, 'w:gz') as target:
+        with tarfile.open(archive, f'w:{self.extension}') as target:
             for path, data in records:
                 member = tarfile.TarInfo(path)
                 member.size = len(data)
@@ -112,7 +117,7 @@ class Bundles(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Unexpected archive'):
             native.unpack(self.root, archive, REVISION, 'webhook-worker')
         archive.write_bytes(original)
-        with tarfile.open(archive, 'r:gz') as packed:
+        with tarfile.open(archive, 'r:*') as packed:
             manifest = json.load(packed.extractfile('manifest.json'))
         escaped = 'target/debug/../../../outside'
         manifest['files'][escaped] = '0' * 64
@@ -135,6 +140,11 @@ class Bundles(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Ordinary server'):
             native.pack(self.root, map(json.dumps, self.records), self.metadata, REVISION,
                         self.root / 'bundles')
+
+
+class GzipBaselineBundles(Bundles):
+    codec = 'gzip'
+    extension = 'gz'
 
 
 if __name__ == '__main__':

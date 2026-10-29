@@ -8,6 +8,12 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      native-artifact-codec:
+        description: Native executable archive codec (gzip is the measurement baseline)
+        type: choice
+        options: [zstd, gzip]
+        default: zstd
 
 permissions:
   contents: read
@@ -77,9 +83,6 @@ jobs:
 
       - name: Validate bounded model measurement contracts
         run: python3 scripts/test-measure-model-container.py
-
-      - name: Test native executable artifact delivery
-        run: python3 scripts/test-native-test-artifacts.py
 
       - name: Select relevant jobs
         id: select
@@ -294,6 +297,7 @@ jobs:
     timeout-minutes: 30
     env:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      NATIVE_ARTIFACT_CODEC: ${{ inputs['native-artifact-codec'] || 'zstd' }}
     steps:
       - name: Checkout exact workflow revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -305,6 +309,8 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+      - name: Test native executable artifact delivery
+        run: nix develop .#test-runtime --command python3 scripts/test-native-test-artifacts.py
       - name: Restore pinned Cargo caches
         id: cargo-cache
         uses: ./.github/actions/cargo-cache-restore
@@ -319,7 +325,7 @@ jobs:
           nix develop .#spike --command cargo test -p notion-knowledge-server -p notion-knowledge-retrieval --features notion-knowledge-server/webhook-worker --lib --tests --example production-eval --no-run --message-format=json-render-diagnostics --locked > native-tests.jsonl
           nix develop .#spike --command cargo metadata --no-deps --locked --offline --format-version 1 > native-metadata.json
       - name: Package executable artifacts
-        run: python3 scripts/native-test-artifacts.py pack --messages native-tests.jsonl --metadata native-metadata.json --revision "$GITHUB_SHA" --output dist/native-tests
+        run: nix develop .#test-runtime --command python3 scripts/native-test-artifacts.py pack --messages native-tests.jsonl --metadata native-metadata.json --revision "$GITHUB_SHA" --output dist/native-tests --codec "$NATIVE_ARTIFACT_CODEC"
       - name: Preserve native documentation tests
         run: nix develop .#spike --command cargo test -p notion-knowledge-server -p notion-knowledge-retrieval --features notion-knowledge-server/webhook-worker --doc --locked
       - name: Verify persisted compression compatibility in both directions
@@ -328,7 +334,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-tests-local-lancedb-${{ github.sha }}
-          path: dist/native-tests/local-lancedb.tar.gz
+          path: dist/native-tests/local-lancedb.tar.*
           compression-level: 0
           if-no-files-found: error
           retention-days: 1
@@ -336,7 +342,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-tests-webhook-worker-${{ github.sha }}
-          path: dist/native-tests/webhook-worker.tar.gz
+          path: dist/native-tests/webhook-worker.tar.*
           compression-level: 0
           if-no-files-found: error
           retention-days: 1
@@ -384,7 +390,7 @@ jobs:
       - name: Run native test executables without compilation
         env:
           NATIVE_SUITE: ${{ matrix.suite }}
-        run: nix develop .#test-runtime --command python3 scripts/native-test-artifacts.py run --archive "dist/native-tests/$NATIVE_SUITE.tar.gz" --revision "$GITHUB_SHA" --suite "$NATIVE_SUITE" --report "dist/native-tests/results-$NATIVE_SUITE.json"
+        run: nix develop .#test-runtime --command python3 scripts/native-test-artifacts.py run --archive dist/native-tests/"$NATIVE_SUITE".tar.* --revision "$GITHUB_SHA" --suite "$NATIVE_SUITE" --report "dist/native-tests/results-$NATIVE_SUITE.json"
       - name: Upload execution timings
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
