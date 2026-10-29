@@ -138,6 +138,7 @@ impl SemanticSearch for Search {
             Ok(vec![SearchHit {
                 text: "PRIVATE_CONTENT_SHOULD_NOT_LEAK".into(),
                 score: 0.9,
+                lexical_matches: Vec::new(),
                 matched_paths: vec![],
                 source: SearchSource {
                     page_id: PAGE.into(),

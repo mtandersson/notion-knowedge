@@ -22,6 +22,7 @@ fn hit(page: &str, id: &str, score: f32, joined: bool) -> SearchHit {
             heading_path: vec![],
             block_id: None,
         },
+        lexical_matches: Vec::new(),
         matched_paths: if joined {
             vec![RetrievalPath::Semantic, RetrievalPath::Lexical]
         } else {

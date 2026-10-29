@@ -158,7 +158,7 @@ impl HybridSearch for GraphBoostedHybrid {
 /// even as intermediate nodes in a two-hop traversal. Explicit page filters
 /// enforce an additional fail-closed boundary on all candidate hits.
 pub fn rank_candidates(
-    hits: Vec<SearchHit>,
+    mut hits: Vec<SearchHit>,
     graph: &dyn GraphEdgeStore,
     config: GraphBoostConfig,
     limit: usize,
@@ -169,7 +169,8 @@ pub fn rank_candidates(
         return Err(SearchUnavailable);
     }
     let mut unique = BTreeSet::new();
-    for hit in &hits {
+    for hit in &mut hits {
+        hit.normalize_lexical_matches()?;
         if !hit.score.is_finite()
             || hit.score < 0.0
             || hit.source.page_id.is_empty()

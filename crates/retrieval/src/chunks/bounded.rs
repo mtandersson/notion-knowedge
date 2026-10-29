@@ -310,24 +310,23 @@ mod tests {
     }
 }
 
-/// Additive internal evidence, separate from authoritative source citations.
-/// Contains no private query text or generated phrase strings.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum LexicalMatch {
-    Raw {
-        field: String,
-    },
-    LexicalDictionaryV1 {
-        manifest_digest: String,
-        field: String,
-        planner_ordinal: u8,
-    },
-}
+pub use notion_knowledge_core::search::LexicalMatch;
 #[derive(Debug)]
 pub struct LexicalCandidate {
     pub hit: SearchHit,
     pub matches: Vec<LexicalMatch>,
+}
+impl LexicalCandidate {
+    /// Preserve all bounded evidence when adapting a native candidate to the
+    /// provider-independent public result contract.
+    pub fn into_search_hit(mut self) -> Result<SearchHit, ChunkTableError> {
+        self.hit.matched_paths = vec![notion_knowledge_core::search::RetrievalPath::Lexical];
+        self.hit.lexical_matches = self.matches;
+        self.hit
+            .normalize_lexical_matches()
+            .map_err(|_| bound_error())?;
+        Ok(self.hit)
+    }
 }
 pub struct BoundedLexicalResult {
     pub candidates: Vec<LexicalCandidate>,
@@ -401,6 +400,7 @@ fn merge_hit(
             key,
             LexicalCandidate {
                 hit: SearchHit {
+                    lexical_matches: Vec::new(),
                     matched_paths: vec![],
                     text,
                     score,

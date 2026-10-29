@@ -111,6 +111,10 @@ fn fuse(
         }
         let mut seen = BTreeSet::new();
         for (index, mut hit) in hits.into_iter().enumerate() {
+            hit.normalize_lexical_matches()?;
+            if path == RetrievalPath::Semantic && !hit.lexical_matches.is_empty() {
+                return Err(SearchUnavailable);
+            }
             if !hit.score.is_finite()
                 || hit.source.page_id.is_empty()
                 || hit.source.chunk_id.is_empty()
@@ -145,6 +149,8 @@ fn fuse(
                         return Err(SearchUnavailable);
                     }
                     existing.matched_paths.push(path);
+                    existing.lexical_matches.extend(hit.lexical_matches);
+                    existing.normalize_lexical_matches()?;
                     *score += contribution;
                 }
             }
@@ -180,6 +186,7 @@ mod tests {
         SearchHit {
             text: id.into(),
             score: 999.0,
+            lexical_matches: Vec::new(),
             matched_paths: vec![],
             source: SearchSource {
                 last_edited_time: "2026-10-07T12:00:00Z".into(),

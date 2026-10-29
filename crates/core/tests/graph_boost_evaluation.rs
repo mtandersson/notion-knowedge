@@ -71,6 +71,7 @@ fn hit(page: &str, chunk: &str, score: f32, dual_path: bool) -> SearchHit {
             block_id: None,
             last_edited_time: "2026-03-02T00:00:00Z".into(),
         },
+        lexical_matches: Vec::new(),
         matched_paths: if dual_path {
             vec![RetrievalPath::Semantic, RetrievalPath::Lexical]
         } else {

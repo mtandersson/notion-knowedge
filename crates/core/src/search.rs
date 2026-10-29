@@ -37,6 +37,58 @@ pub struct SearchHit {
     pub source: SearchSource,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub matched_paths: Vec<RetrievalPath>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub lexical_matches: Vec<LexicalMatch>,
+}
+
+/// Bounded public match evidence, separate from authoritative source citations.
+/// Contains no query text, generated phrase strings or private asset paths.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LexicalMatch {
+    Raw {
+        field: String,
+    },
+    LexicalDictionaryV1 {
+        manifest_digest: String,
+        field: String,
+        planner_ordinal: u8,
+    },
+}
+
+impl SearchHit {
+    /// Refuse incomplete/invalid adapter evidence before canonicalizing order.
+    /// Empty evidence preserves existing disabled-mode serialization.
+    pub fn normalize_lexical_matches(&mut self) -> Result<(), SearchUnavailable> {
+        if self.lexical_matches.len() > 20 {
+            return Err(SearchUnavailable);
+        }
+        for evidence in &self.lexical_matches {
+            let valid = match evidence {
+                LexicalMatch::Raw { field } => {
+                    matches!(field.as_str(), "page_id" | "chunk_id" | "title" | "text")
+                }
+                LexicalMatch::LexicalDictionaryV1 {
+                    manifest_digest,
+                    field,
+                    planner_ordinal,
+                } => {
+                    manifest_digest.len() == 64
+                        && manifest_digest
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                        && matches!(field.as_str(), "title" | "text")
+                        && *planner_ordinal < 8
+                }
+            };
+            if !valid {
+                return Err(SearchUnavailable);
+            }
+        }
+        self.lexical_matches.sort();
+        self.lexical_matches.dedup();
+        Ok(())
+    }
 }
 #[derive(Debug, Clone, Copy)]
 pub struct SearchUnavailable;
