@@ -173,6 +173,8 @@ pub fn rank_candidates(
         hit.normalize_lexical_matches()?;
         if !hit.score.is_finite()
             || hit.score < 0.0
+            || (!hit.lexical_matches.is_empty()
+                && !hit.matched_paths.contains(&RetrievalPath::Lexical))
             || hit.source.page_id.is_empty()
             || hit.source.chunk_id.is_empty()
             || !unique.insert((hit.source.page_id.clone(), hit.source.chunk_id.clone()))

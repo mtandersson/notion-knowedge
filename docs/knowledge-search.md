@@ -57,6 +57,16 @@ timestamp stored with the indexed chunk; it is not the local indexing time.
 `matched_paths` records lexical/semantic retrieval evidence and `score` records
 mode-specific rank evidence. Hybrid fusion rejects conflicting edit timestamps.
 
+Configured adapters can additionally return `lexical_matches`: at most 20
+sorted, deduplicated match records. A raw record identifies its matched field;
+a `lexical_dictionary_v1` record carries the public dictionary manifest digest,
+title/body field and bounded planner ordinal. It contains no query text,
+generated phrase or local asset path. Fusion retains this evidence when a
+chunk also matches semantically, and graph reranking preserves it. Invalid
+adapter evidence fails the complete request. Empty evidence is omitted, so
+existing disabled/raw-only results retain their wire format. This result
+contract does not enable dictionary expansion or establish retrieval quality.
+
 Composition roots can call `KnowledgeServer::with_snippet_chars(1..=2000)` to
 choose a Unicode character budget (default 2000). The production adapters remove
 URL targets from full stored text before

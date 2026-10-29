@@ -199,6 +199,121 @@ mod tests {
             },
         }
     }
+    fn dictionary_match() -> crate::search::LexicalMatch {
+        crate::search::LexicalMatch::LexicalDictionaryV1 {
+            manifest_digest: "a".repeat(64),
+            field: "title".into(),
+            planner_ordinal: 0,
+        }
+    }
+    #[test]
+    fn overlapping_rankers_preserve_dictionary_evidence_without_changing_rrf() {
+        let baseline = fuse(
+            vec![hit("joined")],
+            vec![hit("joined")],
+            ReciprocalRankFusion::default(),
+            1,
+        )
+        .unwrap();
+        let mut lexical = hit("joined");
+        let raw = crate::search::LexicalMatch::Raw {
+            field: "text".into(),
+        };
+        lexical.lexical_matches = vec![dictionary_match(), raw.clone(), dictionary_match()];
+        let output = fuse(
+            vec![hit("joined")],
+            vec![lexical],
+            ReciprocalRankFusion::default(),
+            1,
+        )
+        .unwrap();
+        assert_eq!(output[0].score, baseline[0].score);
+        assert_eq!(output[0].text, baseline[0].text);
+        assert_eq!(output[0].source.chunk_id, baseline[0].source.chunk_id);
+        assert_eq!(
+            output[0].matched_paths,
+            [RetrievalPath::Semantic, RetrievalPath::Lexical]
+        );
+        assert_eq!(output[0].lexical_matches, [raw, dictionary_match()]);
+        let mut invalid_semantic = hit("joined");
+        invalid_semantic.lexical_matches = vec![dictionary_match()];
+        assert!(
+            fuse(
+                vec![invalid_semantic],
+                vec![],
+                ReciprocalRankFusion::default(),
+                1
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn public_evidence_is_optional_bounded_canonical_and_validated() {
+        use crate::search::LexicalMatch;
+        let mut result = hit("source");
+        assert!(
+            serde_json::to_value(&result)
+                .unwrap()
+                .get("lexical_matches")
+                .is_none()
+        );
+        result.lexical_matches = ["page_id", "chunk_id", "title", "text"]
+            .into_iter()
+            .map(|field| LexicalMatch::Raw {
+                field: field.into(),
+            })
+            .collect();
+        for ordinal in 0..8 {
+            for field in ["title", "text"] {
+                result
+                    .lexical_matches
+                    .push(LexicalMatch::LexicalDictionaryV1 {
+                        manifest_digest: "a".repeat(64),
+                        field: field.into(),
+                        planner_ordinal: ordinal,
+                    });
+            }
+        }
+        result.lexical_matches.reverse();
+        result.normalize_lexical_matches().unwrap();
+        assert_eq!(result.lexical_matches.len(), 20);
+        assert!(
+            result
+                .lexical_matches
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
+        result.lexical_matches.push(dictionary_match());
+        assert!(result.normalize_lexical_matches().is_err());
+        for evidence in [
+            LexicalMatch::Raw {
+                field: "root_page_id".into(),
+            },
+            LexicalMatch::LexicalDictionaryV1 {
+                manifest_digest: "a".repeat(64),
+                field: "page_id".into(),
+                planner_ordinal: 0,
+            },
+            LexicalMatch::LexicalDictionaryV1 {
+                manifest_digest: "A".repeat(64),
+                field: "text".into(),
+                planner_ordinal: 0,
+            },
+            LexicalMatch::LexicalDictionaryV1 {
+                manifest_digest: "a".repeat(63),
+                field: "text".into(),
+                planner_ordinal: 0,
+            },
+            LexicalMatch::LexicalDictionaryV1 {
+                manifest_digest: "a".repeat(64),
+                field: "text".into(),
+                planner_ordinal: 8,
+            },
+        ] {
+            result.lexical_matches = vec![evidence];
+            assert!(result.normalize_lexical_matches().is_err());
+        }
+    }
     #[test]
     fn disagreement_merges_shared_chunks_and_retains_single_path_candidates() {
         let results = fuse(

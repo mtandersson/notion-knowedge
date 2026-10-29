@@ -1082,6 +1082,15 @@ mod ranking_tests {
         assert_eq!(candidate.hit.text, "Original source text");
         assert_eq!(candidate.hit.source.url, "https://example.invalid/source");
         assert!(has_raw(&candidate));
+        let expected = candidate.matches.clone();
+        let public = candidate.into_search_hit().unwrap();
+        assert_eq!(public.lexical_matches, expected);
+        assert_eq!(
+            public.matched_paths,
+            [notion_knowledge_core::search::RetrievalPath::Lexical]
+        );
+        assert_eq!(public.text, "Original source text");
+        assert_eq!(public.score, 2.5);
     }
     #[test]
     fn expansion_cpu_overflow_fails_and_releases_admission() {

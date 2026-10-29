@@ -30,6 +30,35 @@ fn hit(page: &str, id: &str, score: f32, joined: bool) -> SearchHit {
         },
     }
 }
+#[test]
+fn graph_ranking_preserves_bounded_dictionary_evidence() {
+    use notion_knowledge_core::search::LexicalMatch;
+    let evidence = LexicalMatch::LexicalDictionaryV1 {
+        manifest_digest: "a".repeat(64),
+        field: "text".into(),
+        planner_ordinal: 2,
+    };
+    let mut candidate = hit("root-a", "chunk", 0.5, true);
+    candidate.lexical_matches = vec![evidence.clone()];
+    for config in [GraphBoostConfig::default(), on(1, 0.2, 8)] {
+        let graph = GraphFixture::with_edges(vec![]);
+        let output = rank_candidates(vec![candidate.clone()], &graph, config, 1, None).unwrap();
+        assert_eq!(output[0].hit.lexical_matches, [evidence.clone()]);
+        assert_eq!(output[0].hit.score, 0.5);
+    }
+    candidate.matched_paths = vec![RetrievalPath::Semantic];
+    let graph = GraphFixture::with_edges(vec![]);
+    assert!(
+        rank_candidates(
+            vec![candidate],
+            &graph,
+            GraphBoostConfig::default(),
+            1,
+            None
+        )
+        .is_err()
+    );
+}
 fn edge(from: &str, to: &str) -> GraphEdge {
     GraphEdge::new(
         from.into(),
