@@ -19,12 +19,17 @@ use notion_knowledge_core::{
     sync_state::PageSyncState,
 };
 use notion_knowledge_retrieval::{
-    chunks::{GuardedChunkTable, LanceSemanticSearch, VectorDistance, VectorIndexConfig},
+    chunks::{
+        GuardedChunkTable, LanceSemanticSearch, VectorDistance, VectorIndexConfig,
+        bounded::CandidateBudget,
+        lexical_binding::{LexicalCachePlan, LexicalIndexBinding},
+    },
     commit::{
         CommitBinding, CommitOutcome, IndexCommitCoordinator, PageAction, PageOperation,
         RelationProjection,
     },
     graph::CommittedGraph,
+    lexical_runtime::LexicalSearchRuntime,
     planner::production_scope,
 };
 use serde::{Deserialize, Serialize};
@@ -279,7 +284,19 @@ pub async fn run(
     directory: &Path,
     r: Request,
 ) -> Result<Value, Error> {
+    run_with_lexical(provider, directory, r, None).await
+}
+
+pub async fn run_with_lexical(
+    provider: Arc<dyn EmbeddingProvider>,
+    directory: &Path,
+    r: Request,
+    lexical: Option<LexicalCachePlan>,
+) -> Result<Value, Error> {
     let started = Instant::now();
+    if lexical.is_some() && r.graph_boost.as_ref().is_some_and(|b| b.enabled) {
+        return Err("lexical evaluation requires graph OFF".into());
+    }
     let scope = scope();
     let gate = RootScopeGate::new(
         Arc::new(Authority(
@@ -291,7 +308,17 @@ pub async fn run(
         scope.clone(),
     )?;
     let corpus_hash = hash(&serde_json::to_vec(&r.pages)?);
-    let config = json!({"vector":"IVF_FLAT", "distance":"Cosine", "partitions":1,"nprobes":1,"sample_rate":8,"max_iterations":20,"fts":"production default body/title/identifier indices", "rrf":{"rank_constant":60,"semantic_weight":1,"lexical_weight":1,"candidate_limit":100}});
+    let mut config = json!({"vector":"IVF_FLAT", "distance":"Cosine", "partitions":1,"nprobes":1,"sample_rate":8,"max_iterations":20,"fts":"production default body/title/identifier indices", "rrf":{"rank_constant":60,"semantic_weight":1,"lexical_weight":1,"candidate_limit":100}});
+    if let Some(plan) = &lexical {
+        config["lexical"] = json!({
+            "plan": plan.identity(), "plan_sha256": plan.identity().sha256(),
+            "admission": 1, "deadline_seconds": 60,
+            "adapter": "notion_knowledge_retrieval::lexical_runtime::LexicalSearchRuntime",
+        });
+        config["fts"] = json!(
+            "production lexical-expansion-v1 positional body/title and raw identifier profile"
+        );
+    }
     let mapping: BTreeMap<_, _> = r.pages.iter().flat_map(|p| p.chunks.iter().map(|c| (c.id.clone(), json!({"page_id":page_id(&p.id),"chunk_id":chunk_id(&c.id),"root_page_id":ROOT,"indexed_last_edited_time":revision(p)})))).collect();
     let manifest = json!({"schema_version":1,"dataset_id":r.dataset_id,"as_of":r.as_of,"corpus_sha256":corpus_hash,"model":provider.metadata(),"preprocessing":"raw unchanged chunk.text, no title/status/date prefix and no query instruction", "configuration":config,"sources":mapping,"workspace_id":WORKSPACE,"root_page_id":ROOT});
     let index = directory.join("index");
@@ -318,16 +345,45 @@ pub async fn run(
         }
         IndexCommitCoordinator::open_read_only(&index, &state, binding)?
     };
-    let table = GuardedChunkTable::bind(
-        &index,
-        "chunks",
-        provider.metadata().clone(),
-        coordinator.clone(),
-    )?;
+    let table = if let Some(plan) = &lexical {
+        if initial {
+            let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(now);
+            let lease = coordinator.state().acquire_lease(now(), 3600)?;
+            let table = GuardedChunkTable::create_fresh_lexical(
+                &index,
+                "chunks",
+                provider.metadata().clone(),
+                coordinator.clone(),
+                plan.identity(),
+                lease.clone(),
+                clock,
+            )
+            .await?;
+            coordinator.state().release_lease(&lease, now())?;
+            table
+        } else {
+            GuardedChunkTable::bind_with_lexical_plan(
+                &index,
+                "chunks",
+                provider.metadata().clone(),
+                coordinator.clone(),
+                plan.identity(),
+            )?
+        }
+    } else {
+        GuardedChunkTable::bind(
+            &index,
+            "chunks",
+            provider.metadata().clone(),
+            coordinator.clone(),
+        )?
+    };
     if initial {
         let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(now);
         let lease = coordinator.state().acquire_lease(now(), 3600)?;
-        table.create_empty(lease.clone(), clock.clone()).await?;
+        if lexical.is_none() {
+            table.create_empty(lease.clone(), clock.clone()).await?;
+        }
         for page in &r.pages {
             let id = page_id(&page.id);
             let permit = gate.authorize(&PageId(id.clone())).await?;
@@ -459,19 +515,36 @@ pub async fn run(
     if snapshot.count_rows().await? != expected {
         return Err("incomplete persisted corpus".into());
     }
-    let semantic = Arc::new(LanceSemanticSearch::new(
-        snapshot.clone(),
-        provider.clone(),
-        1,
-    )?);
-    let hybrid: Arc<dyn HybridSearch> = Arc::new(
-        HybridFusion::new(
-            semantic.clone(),
+    let (semantic, lexical_search, hybrid): (
+        Arc<dyn SemanticSearch>,
+        Arc<dyn LexicalSearch>,
+        Arc<dyn HybridSearch>,
+    ) = if let Some(plan) = &lexical {
+        table.probe_lexical_cache().await?;
+        let runtime = Arc::new(LexicalSearchRuntime::new(
+            table.clone(),
+            provider.clone(),
+            plan.clone(),
+            CandidateBudget::new(1)?,
+            std::time::Duration::from_secs(60),
+        )?);
+        (runtime.clone(), runtime.clone(), runtime)
+    } else {
+        let semantic = Arc::new(LanceSemanticSearch::new(
             snapshot.clone(),
-            ReciprocalRankFusion::default(),
-        )
-        .map_err(|_| "invalid fusion")?,
-    );
+            provider.clone(),
+            1,
+        )?);
+        let hybrid = Arc::new(
+            HybridFusion::new(
+                semantic.clone(),
+                snapshot.clone(),
+                ReciprocalRankFusion::default(),
+            )
+            .map_err(|_| "invalid fusion")?,
+        );
+        (semantic, snapshot.clone(), hybrid)
+    };
     let hybrid: Arc<dyn HybridSearch> = if let Some(b) = &r.graph_boost {
         Arc::new(
             GraphBoostedHybrid::new(
@@ -505,7 +578,7 @@ pub async fn run(
             .map_err(|_| "root probe unavailable")?
             .is_empty()
         || !LexicalSearch::search(
-            snapshot.as_ref(),
+            lexical_search.as_ref(),
             LexicalQuery {
                 query: denied_query.query,
                 limit: 1,
@@ -553,7 +626,7 @@ pub async fn run(
             "vector" => semantic.search(query).await,
             "fts" => {
                 LexicalSearch::search(
-                    snapshot.as_ref(),
+                    lexical_search.as_ref(),
                     LexicalQuery {
                         query: query.query,
                         limit: query.limit,
@@ -611,8 +684,12 @@ pub async fn run(
                 return Err("source expansion changed fixed content".into());
             }
             ranked.push(*id);
-            scores
-                .push(json!({"source_id":id,"score":hit.score,"matched_paths":hit.matched_paths}));
+            let mut evidence =
+                json!({"source_id":id,"score":hit.score,"matched_paths":hit.matched_paths});
+            if lexical.is_some() {
+                evidence["lexical_matches"] = serde_json::to_value(&hit.lexical_matches)?;
+            }
+            scores.push(evidence);
         }
         results.push(json!({"query_id":q.id,"ranked_source_ids":ranked,"baseline_scores":scores}));
         timings.push(json!({"query_id":q.id,"language":q.language,"category":q.category,"search_and_authorization_ms":timer.elapsed().as_secs_f64()*1000.}));
@@ -633,6 +710,18 @@ pub async fn run(
     )?;
     log.write_all(b"\n")?;
     let mut output = json!({"schema_version":1,"dataset_id":r.dataset_id,"mode":r.mode,"index_signature":signature,"results":results});
+    if let Some(plan) = &lexical {
+        output["lexical_identity"] = serde_json::to_value(LexicalIndexBinding::for_cache(
+            &index,
+            provider.metadata().clone(),
+            coordinator.binding(),
+            plan.identity().clone(),
+        )?)?;
+        output["input_sha256"] = json!(hash(&serde_json::to_vec(&json!({
+            "dataset_id": r.dataset_id, "as_of": r.as_of, "pages": r.pages,
+            "queries": r.queries.iter().map(|q| json!({"id":q.id,"text":q.text,"language":q.language,"category":q.category})).collect::<Vec<_>>()
+        }))?));
+    }
     if let Some(b) = r.graph_boost {
         output["graph_boost"] = serde_json::to_value(b)?;
     }
