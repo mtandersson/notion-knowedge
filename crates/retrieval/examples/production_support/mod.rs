@@ -314,6 +314,11 @@ pub async fn run_with_lexical(
             "plan": plan.identity(), "plan_sha256": plan.identity().sha256(),
             "admission": 1, "deadline_seconds": 60,
             "adapter": "notion_knowledge_retrieval::lexical_runtime::LexicalSearchRuntime",
+            "compiler": env!("NK_LEXICAL_COMPILER"),
+            "source_revision": env!("NK_LEXICAL_SOURCE_REVISION"),
+            "candidate_bytes": notion_knowledge_retrieval::chunks::bounded::CANDIDATE_BYTES,
+            "candidate_rows": notion_knowledge_retrieval::chunks::bounded::CANDIDATE_ROWS,
+            "coverage": "bounded native candidates; not an exhaustive corpus scan",
         });
         config["fts"] = json!(
             "production lexical-expansion-v1 positional body/title and raw identifier profile"
@@ -711,6 +716,8 @@ pub async fn run_with_lexical(
     log.write_all(b"\n")?;
     let mut output = json!({"schema_version":1,"dataset_id":r.dataset_id,"mode":r.mode,"index_signature":signature,"results":results});
     if let Some(plan) = &lexical {
+        output["result_limit"] = json!(r.top_k);
+        output["candidate_coverage"] = config["lexical"].clone();
         output["lexical_identity"] = serde_json::to_value(LexicalIndexBinding::for_cache(
             &index,
             provider.metadata().clone(),
@@ -722,8 +729,23 @@ pub async fn run_with_lexical(
             "queries": r.queries.iter().map(|q| json!({"id":q.id,"text":q.text,"language":q.language,"category":q.category})).collect::<Vec<_>>()
         }))?));
     }
-    if let Some(b) = r.graph_boost {
+    if let Some(b) = &r.graph_boost {
         output["graph_boost"] = serde_json::to_value(b)?;
+    }
+    if lexical.is_some() {
+        // The metrics harness consumes ranks only. Preserve the complete adapter
+        // evidence alongside it so identities and match provenance are not lost.
+        let input = json!({"dataset_id":r.dataset_id,"as_of":r.as_of,"mode":r.mode,
+            "top_k":r.top_k,"pages":r.pages,
+            "queries":r.queries.iter().map(|q| json!({"id":q.id,"text":q.text,"language":q.language,"category":q.category})).collect::<Vec<_>>()});
+        fs::write(
+            directory.join(format!("input-{}.json", r.mode)),
+            serde_json::to_vec_pretty(&input)?,
+        )?;
+        fs::write(
+            directory.join(format!("adapter-{}.json", r.mode)),
+            serde_json::to_vec_pretty(&output)?,
+        )?;
     }
     Ok(output)
 }
@@ -751,6 +773,115 @@ mod tests {
         parse(&json!({"schema_version":1,"dataset_id":dataset["dataset_id"],"as_of":dataset["as_of"],"mode":"fts","top_k":3,"pages":dataset["pages"],
             "queries":queries}).to_string()).unwrap()
     }
+    #[cfg(feature = "test-fixtures")]
+    #[tokio::test]
+    async fn enabled_evaluation_retains_shipping_dictionary_evidence_and_reuses_its_snapshot() {
+        use notion_knowledge_retrieval::lexical_dictionary::test_fixtures::dictionary;
+        let parent = tempfile::tempdir().unwrap();
+        let directory = parent.path().join("enabled");
+        let provider: Arc<dyn EmbeddingProvider> = Arc::new(BoundaryProvider(
+            EmbeddingMetadata::new("fixture".into(), "boundary-only".into(), "1".into(), 3)
+                .unwrap(),
+        ));
+        let plan =
+            LexicalCachePlan::verified(Arc::new(dictionary(&[("saffron", "saffran")]))).unwrap();
+        let request = |mode: &str| {
+            parse(&json!({
+            "schema_version":1, "dataset_id":"independent-bilingual-boundary", "as_of":"2026-03-02",
+            "mode":mode, "top_k":3,
+            "pages":[{"id":"source", "title":"Saffran", "language":"sv", "status":"active",
+                "updated_at":"2026-03-02", "links":[], "chunks":[{"id":"chunk", "text":"Saffran ravioli."}]}],
+            "queries":[
+                {"id":"english", "text":"saffron", "language":"en", "category":"semantic"},
+                {"id":"swedish", "text":"saffran", "language":"sv", "category":"semantic"},
+                {"id":"phrase", "text":"\"Saffran ravioli\"", "language":"sv", "category":"exact"},
+                {"id":"identifier", "text":page_id("source"), "language":"en", "category":"exact"},
+                {"id":"unsupported", "text":"zzxxyy", "language":"en", "category":"semantic"}
+            ]
+        }).to_string()).unwrap()
+        };
+        let first = run_with_lexical(
+            provider.clone(),
+            &directory,
+            request("fts"),
+            Some(plan.clone()),
+        )
+        .await
+        .unwrap();
+        let repeated = run_with_lexical(
+            provider.clone(),
+            &directory,
+            request("fts"),
+            Some(plan.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first, repeated);
+        assert_eq!(first["results"].as_array().unwrap().len(), 5);
+        assert_eq!(first["results"][4]["ranked_source_ids"], json!([]));
+        for row in &first["results"].as_array().unwrap()[..4] {
+            assert_eq!(row["ranked_source_ids"], json!(["chunk"]));
+        }
+        let evidence = &first["results"][0]["baseline_scores"][0]["lexical_matches"];
+        assert!(
+            evidence
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["kind"] == "lexical_dictionary_v1"
+                    && m["manifest_digest"] == plan.dictionary().manifest_digest())
+        );
+        for row in &first["results"].as_array().unwrap()[2..4] {
+            assert!(
+                !row["baseline_scores"]
+                    .to_string()
+                    .contains("lexical_dictionary_v1")
+            );
+        }
+        let hybrid = run_with_lexical(
+            provider.clone(),
+            &directory,
+            request("hybrid"),
+            Some(plan.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first["index_signature"], hybrid["index_signature"]);
+        assert_eq!(first["lexical_identity"], hybrid["lexical_identity"]);
+        assert_eq!(first["input_sha256"], hybrid["input_sha256"]);
+        assert!(
+            hybrid["results"][0]["baseline_scores"]
+                .to_string()
+                .contains("lexical_dictionary_v1")
+        );
+        assert!(
+            first["candidate_coverage"]["coverage"]
+                .as_str()
+                .unwrap()
+                .contains("bounded")
+        );
+        // Enabled/disabled and different assets never relabel this existing cache.
+        assert!(
+            run(provider.clone(), &directory, request("fts"))
+                .await
+                .is_err()
+        );
+        let other =
+            LexicalCachePlan::verified(Arc::new(dictionary(&[("cinnamon", "kanel")]))).unwrap();
+        assert!(
+            run_with_lexical(provider.clone(), &directory, request("fts"), Some(other))
+                .await
+                .is_err()
+        );
+        let binding = directory.join("index/.nk-lexical-binding-v1.json");
+        fs::remove_file(binding).unwrap();
+        assert!(
+            run_with_lexical(provider, &directory, request("fts"), Some(plan))
+                .await
+                .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn fixed_snapshot_reuses_real_indexes_and_rejects_changes_or_missing_state() {
         let root = std::env::temp_dir().join(format!(

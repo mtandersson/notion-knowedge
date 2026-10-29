@@ -54,6 +54,63 @@ expansion, source identity and edit timestamps. Reads must leave committed
 index/state bytes unchanged. Its authority is a fixed local fixture, not live
 Notion or OAuth evidence.
 
+## Optional installed lexical expansion (#594)
+
+The adapter defaults to its original disabled path. To evaluate the expansion
+installed by #492, supply trusted operator environment settings:
+
+```sh
+export NK_LEXICAL_EXPANSION=true
+export NK_LEXICAL_ASSET_BUNDLE=/absolute/path/to/verified-lexical.bundle
+export NK_LEXICAL_ASSET_SHA256=<exact-lowercase-bundle-sha256>
+```
+
+Prepare that separately attributed bundle using the pinned public archive and
+[offline asset command](../../docs/multilingual-lexical-runtime.md), from the
+same committed source, lockfile and compiler as this executable. The normal
+Qwen assets and two-argument adapter command below stay the same. Assets are
+verified before model loading or cache creation; no query can choose them.
+
+Use **new, absent state directories** for each enabled corpus. The adapter uses
+`GuardedChunkTable::create_fresh_lexical` to install the supported native profile,
+then commits unchanged source chunks through the production coordinator. Reads
+use the same `LexicalSearchRuntime` as shipping semantic/lexical/hybrid search,
+with default admission 1 and deadline 60 seconds. This example uses those fixed
+shipping defaults; it does not read server admission/deadline overrides.
+Existing incompatible/missing evaluation state is refused. Discard only that
+run's disposable evaluation directory and rerun with a new directory; no
+existing cache is relabeled. Enabled graph runs are rejected: keep graph OFF.
+
+Run both complete unchanged datasets with the existing metrics harness and
+repeat against the same persisted directories. In addition to the ranking
+report, retain the entire run directories: `manifest.json`, `snapshot.json`,
+`input-{mode}.json` and `adapter-{mode}.json`. The metrics harness consumes ranks;
+the adapter files preserve complete ranked IDs including zero-hit rows, native
+scores/paths, public dictionary match evidence, canonical source mappings,
+input digests and asset/storage/plan/compiler identities. Timings remain in
+`measurements.jsonl` outside deterministic adapter responses. Copy adapter files
+before repeating if retaining both physical run outputs for byte comparison.
+
+`candidate_coverage` explicitly describes bounded native candidates and records
+the candidate row/byte envelope; `result_limit` records requested top-k. These
+are not exhaustive corpus scans or proof of complete dictionary coverage.
+Resource/deadline failures abort the requested run rather than publishing partial
+or vector-only substitute results. Complete-candidate diagnostics remain #493.
+
+The bounded joined test uses a literal dependency fixture solely to prove
+wiring, bilingual evidence, exact ID/phrase behavior, zero hits, unchanged
+snapshot reuse and refusal of missing/mismatched bindings. It is not quality
+evidence. Run it with the native feature set, including `test-fixtures`:
+
+```sh
+nix develop .#spike --command cargo test -p notion-knowledge-retrieval \
+  --example production-eval --features local-qwen,local-lancedb,test-fixtures --locked
+```
+
+This wiring does not replace the historical results below. #493 must run the
+real Qwen backend on both complete corpora, retain repeat evidence and report
+both original policies before any new quality or cutover claim.
+
 ## Measured results, 2026-10-18
 
 Release adapter commit `62f1cd085f4c1e2fa3eb2d5606899b2697f99f11`
