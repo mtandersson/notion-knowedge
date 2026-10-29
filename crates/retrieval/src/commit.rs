@@ -592,6 +592,20 @@ impl IndexCommitCoordinator {
     /// Fence a read snapshot against concurrent commits and unfinished effects.
     #[cfg(feature = "local-lancedb")]
     pub(crate) fn search_guard(&self) -> Result<File, CommitError> {
+        let guard = self.index_read_guard()?;
+        if self
+            .state
+            .cache_rebuild_pending()
+            .map_err(|_| CommitError::Unavailable)?
+        {
+            return Err(CommitError::Conflict);
+        }
+        Ok(guard)
+    }
+    /// Internal readiness inspection may run while authoritative rebuild is
+    /// pending. It cannot authorize serving content to a request.
+    #[cfg(feature = "local-lancedb")]
+    pub(crate) fn index_read_guard(&self) -> Result<File, CommitError> {
         // Readers may nest (graph + vector/FTS) while sharing one committed
         // revision. Writers still use exclusive try_acquire/acquire locks.
         let guard = File::open(&self.index_path).map_err(io)?;

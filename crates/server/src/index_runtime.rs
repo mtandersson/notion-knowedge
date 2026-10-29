@@ -9,7 +9,7 @@ use notion_knowledge_core::{
 };
 use notion_knowledge_notion::NotionClient;
 use notion_knowledge_retrieval::{
-    chunks::GuardedChunkTable,
+    chunks::{GuardedChunkTable, lexical_binding::LexicalCachePlan},
     commit::{CommitBinding, IndexCommitCoordinator},
     planner::{AuthoritativeReconciliationPlanner, production_scope},
     refresh::AuthoritativePageRefresh,
@@ -24,6 +24,8 @@ pub struct IndexRuntime {
     pub runner: AuthoritativeReconciliationRunner,
     pub provider: Arc<dyn EmbeddingProvider>,
     alias_sources: notion_knowledge_core::aliases::AliasSources,
+    table: GuardedChunkTable,
+    lexical: Option<LexicalCachePlan>,
 }
 impl IndexRuntime {
     /// Production startup for a disposable cache. Compatibility errors reset
@@ -42,8 +44,11 @@ impl IndexRuntime {
             scope,
             source,
             provider,
-            false,
-            OpenMode::Initialize,
+            RecoveryOptions {
+                reset: false,
+                mode: OpenMode::Initialize,
+                lexical: None,
+            },
         )
         .await
     }
@@ -61,8 +66,11 @@ impl IndexRuntime {
             scope,
             source,
             provider,
-            false,
-            OpenMode::ReadOnly,
+            RecoveryOptions {
+                reset: false,
+                mode: OpenMode::ReadOnly,
+                lexical: None,
+            },
         )
         .await
     }
@@ -80,10 +88,52 @@ impl IndexRuntime {
             scope,
             source,
             provider,
-            true,
-            OpenMode::Initialize,
+            RecoveryOptions {
+                reset: true,
+                mode: OpenMode::Initialize,
+                lexical: None,
+            },
         )
         .await
+    }
+
+    /// Typed preparation seam for a configured lexical cache. It is not an
+    /// environment switch or an installed search-expansion runtime.
+    pub async fn recover_lexical_cache(
+        settings: &WorkerSettings,
+        state: &Path,
+        scope: LifecycleScope,
+        source: Arc<NotionClient>,
+        provider: Arc<dyn EmbeddingProvider>,
+        plan: LexicalCachePlan,
+        mode: OpenMode,
+    ) -> Result<Self, &'static str> {
+        Self::recover_with_reset(
+            settings,
+            state,
+            scope,
+            source,
+            provider,
+            RecoveryOptions {
+                reset: false,
+                mode,
+                lexical: Some(plan),
+            },
+        )
+        .await
+    }
+    pub fn chunks(&self) -> &GuardedChunkTable {
+        &self.table
+    }
+    pub fn lexical_plan(&self) -> Option<&LexicalCachePlan> {
+        self.lexical.as_ref()
+    }
+    pub async fn prepare_search(
+        &self,
+        lease: notion_knowledge_core::reconciliation::Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Result<(), &'static str> {
+        prepare_table_search(&self.table, &self.coordinator, lease, clock).await
     }
 
     async fn recover_with_reset(
@@ -92,8 +142,7 @@ impl IndexRuntime {
         scope: LifecycleScope,
         source: Arc<NotionClient>,
         provider: Arc<dyn EmbeddingProvider>,
-        force: bool,
-        healthy_mode: OpenMode,
+        options: RecoveryOptions,
     ) -> Result<Self, &'static str> {
         use notion_knowledge_retrieval::{commit::CommitError, sync_state::SqliteSyncStateStore};
         let exists = |p: &Path| p.try_exists().map_err(|_| "cache path unavailable");
@@ -108,7 +157,7 @@ impl IndexRuntime {
         };
         let legacy_journal = IndexCommitCoordinator::has_legacy_cache_journal(state)
             .map_err(|_| "cache path unavailable")?;
-        let mut rebuild = force
+        let mut rebuild = options.reset
             || pending
             || !state_exists
             || legacy_journal
@@ -128,19 +177,26 @@ impl IndexRuntime {
             match IndexCommitCoordinator::open_read_only(&settings.index, state, binding) {
                 Err(CommitError::BindingMismatch) => rebuild = true,
                 Err(_) => return Err("index authority unavailable"),
-                Ok(coordinator) => match GuardedChunkTable::bind(
+                Ok(coordinator) => match bind_cache(
                     &settings.index,
-                    "chunks",
                     provider.metadata().clone(),
                     coordinator,
+                    options.lexical.as_ref(),
                 ) {
                     Err(error) if error.is_incompatible_index() => rebuild = true,
                     Err(_) => return Err("index unavailable"),
-                    Ok(table) => match table.search_snapshot().await {
-                        Err(error) if error.is_incompatible_index() => rebuild = true,
-                        Err(_) => return Err("index unavailable"),
-                        Ok(_) => {}
-                    },
+                    Ok(table) => {
+                        let ready = if options.lexical.is_some() {
+                            Box::pin(table.probe_lexical_cache()).await
+                        } else {
+                            table.verify_search_indexes().await
+                        };
+                        match ready {
+                            Err(error) if error.is_incompatible_index() => rebuild = true,
+                            Err(_) => return Err("index unavailable"),
+                            Ok(()) => {}
+                        }
+                    }
                 },
             }
         }
@@ -154,7 +210,7 @@ impl IndexRuntime {
             .map_err(|_| "cache reset unavailable")?
             .map_err(|_| "cache reset unavailable")?;
         }
-        let runtime = Self::compose(
+        let runtime = Self::compose_cache(
             settings,
             state,
             scope,
@@ -163,8 +219,9 @@ impl IndexRuntime {
             if rebuild {
                 OpenMode::Initialize
             } else {
-                healthy_mode
+                options.mode
             },
+            options.lexical,
         )
         .await?;
         if rebuild {
@@ -230,15 +287,15 @@ impl IndexRuntime {
                         now_ms() / 1000
                     }
                 });
-                let ready = tokio::time::timeout(
-                    Duration::from_secs(timeout_seconds),
-                    prepare_search_if_missing(
-                        &self.coordinator,
-                        self.provider.metadata(),
-                        lease.clone(),
-                        clock,
-                    ),
-                )
+                let ready = tokio::time::timeout(Duration::from_secs(timeout_seconds), async {
+                    self.prepare_search(lease.clone(), clock).await?;
+                    if self.lexical.is_some() {
+                        Box::pin(self.table.probe_lexical_cache())
+                            .await
+                            .map_err(|_| "lexical search probe failed")?;
+                    }
+                    Ok::<(), &'static str>(())
+                })
                 .await;
                 if !matches!(ready, Ok(Ok(()))) {
                     expired.store(true, Ordering::SeqCst);
@@ -279,6 +336,18 @@ impl IndexRuntime {
         provider: Arc<dyn EmbeddingProvider>,
         mode: OpenMode,
     ) -> Result<Self, &'static str> {
+        Self::compose_cache(settings, state, scope, source, provider, mode, None).await
+    }
+
+    async fn compose_cache(
+        settings: &WorkerSettings,
+        state: &Path,
+        scope: LifecycleScope,
+        source: Arc<NotionClient>,
+        provider: Arc<dyn EmbeddingProvider>,
+        mode: OpenMode,
+        lexical: Option<LexicalCachePlan>,
+    ) -> Result<Self, &'static str> {
         let journal = production_scope(&scope).map_err(|_| "invalid index scope")?;
         let binding = CommitBinding::new(
             "chunks",
@@ -302,11 +371,11 @@ impl IndexRuntime {
         } else {
             let checked = IndexCommitCoordinator::open_read_only(&index, &state, binding.clone())
                 .map_err(|_| "existing index authority unavailable or incompatible")?;
-            let guard = GuardedChunkTable::bind(
+            let guard = bind_cache(
                 &index,
-                "chunks",
                 provider.metadata().clone(),
                 checked.clone(),
+                lexical.as_ref(),
             )
             .map_err(|_| "index binding incompatible")?;
             guard
@@ -324,27 +393,55 @@ impl IndexRuntime {
                 .map_err(|_| "index authority unavailable or incompatible")?
             }
         };
-        let guard = GuardedChunkTable::bind(
-            &settings.index,
-            "chunks",
-            provider.metadata().clone(),
-            coordinator.clone(),
-        )
-        .map_err(|_| "index binding incompatible")?;
-        if mode == OpenMode::Initialize {
+        let guard = if mode == OpenMode::Initialize {
             let lease = coordinator
                 .state()
                 .acquire_lease(now_ms() / 1000, 330)
                 .map_err(|_| "index writer busy")?;
             let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| now_ms() / 1000);
-            let result = if settings.index.join("chunks.lance").exists() {
-                guard.ensure_startup_indexes(lease.clone(), clock).await
-            } else {
-                guard.create_empty(lease.clone(), clock).await
-            };
+            let result: Result<GuardedChunkTable, &'static str> = async {
+                if let Some(plan) = &lexical
+                    && !settings.index.join("chunks.lance").exists()
+                {
+                    return Box::pin(GuardedChunkTable::create_fresh_lexical(
+                        &settings.index,
+                        "chunks",
+                        provider.metadata().clone(),
+                        coordinator.clone(),
+                        plan.identity(),
+                        lease.clone(),
+                        clock,
+                    ))
+                    .await
+                    .map_err(|_| "fresh lexical cache unavailable");
+                }
+                let guard = bind_cache(
+                    &settings.index,
+                    provider.metadata().clone(),
+                    coordinator.clone(),
+                    lexical.as_ref(),
+                )
+                .map_err(|_| "index binding incompatible")?;
+                let result = if settings.index.join("chunks.lance").exists() {
+                    guard.ensure_startup_indexes(lease.clone(), clock).await
+                } else {
+                    guard.create_empty(lease.clone(), clock).await
+                };
+                result.map_err(|_| "index unavailable or incompatible")?;
+                Ok(guard)
+            }
+            .await;
             let _ = coordinator.state().release_lease(&lease, now_ms() / 1000);
-            result.map_err(|_| "index unavailable or incompatible")?;
-        }
+            result?
+        } else {
+            bind_cache(
+                &settings.index,
+                provider.metadata().clone(),
+                coordinator.clone(),
+                lexical.as_ref(),
+            )
+            .map_err(|_| "index binding incompatible")?
+        };
         let handler = AuthoritativePageRefresh::new(
             source.clone(),
             guard.clone(),
@@ -358,10 +455,14 @@ impl IndexRuntime {
         )
         .map_err(|_| "authoritative handler incompatible")?
         .with_alias_sources(settings.alias_sources.clone());
-        let planner =
-            AuthoritativeReconciliationPlanner::new(source, guard, coordinator.clone(), scope)
-                .map_err(|_| "authoritative planner incompatible")?
-                .with_alias_sources(settings.alias_sources.clone());
+        let planner = AuthoritativeReconciliationPlanner::new(
+            source,
+            guard.clone(),
+            coordinator.clone(),
+            scope,
+        )
+        .map_err(|_| "authoritative planner incompatible")?
+        .with_alias_sources(settings.alias_sources.clone());
         let runner = AuthoritativeReconciliationRunner::new(
             planner,
             handler.clone(),
@@ -376,6 +477,8 @@ impl IndexRuntime {
             runner,
             provider,
             alias_sources: settings.alias_sources.clone(),
+            table: guard,
+            lexical,
         })
     }
 }
@@ -387,15 +490,6 @@ pub(crate) async fn prepare_search_if_missing(
     lease: notion_knowledge_core::reconciliation::Lease,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
 ) -> Result<(), &'static str> {
-    use notion_knowledge_retrieval::chunks::{VectorDistance, VectorIndexConfig};
-    if coordinator
-        .has_unfinished_commits()
-        .map_err(|_| "search coordination unavailable")?
-    {
-        // Search remains unavailable until those effects are resolved. Deferring
-        // ANN maintenance must not turn a healthy refresh into failed work.
-        return Ok(());
-    }
     let table = GuardedChunkTable::bind(
         coordinator.index_directory(),
         "chunks",
@@ -403,7 +497,23 @@ pub(crate) async fn prepare_search_if_missing(
         coordinator.clone(),
     )
     .map_err(|_| "search maintenance binding unavailable")?;
-    match table.search_snapshot().await {
+    prepare_table_search(&table, coordinator, lease, clock).await
+}
+
+async fn prepare_table_search(
+    table: &GuardedChunkTable,
+    coordinator: &Arc<IndexCommitCoordinator>,
+    lease: notion_knowledge_core::reconciliation::Lease,
+    clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+) -> Result<(), &'static str> {
+    use notion_knowledge_retrieval::chunks::{VectorDistance, VectorIndexConfig};
+    if coordinator
+        .has_unfinished_commits()
+        .map_err(|_| "search coordination unavailable")?
+    {
+        return Ok(());
+    }
+    match table.verify_search_indexes().await {
         Ok(_) => return Ok(()),
         Err(error) if error.is_incompatible_index() => {}
         Err(_) => return Err("search storage unavailable"),
@@ -424,10 +534,34 @@ pub(crate) async fn prepare_search_if_missing(
         .await
         .map_err(|_| "search ANN preparation failed")?;
     table
-        .search_snapshot()
+        .verify_search_indexes()
         .await
         .map_err(|_| "search unavailable after preparation")?;
     Ok(())
+}
+
+struct RecoveryOptions {
+    reset: bool,
+    mode: OpenMode,
+    lexical: Option<LexicalCachePlan>,
+}
+
+fn bind_cache(
+    directory: &Path,
+    embedding: notion_knowledge_core::embedding::EmbeddingMetadata,
+    coordinator: Arc<IndexCommitCoordinator>,
+    lexical: Option<&LexicalCachePlan>,
+) -> Result<GuardedChunkTable, notion_knowledge_retrieval::chunks::ChunkTableError> {
+    match lexical {
+        Some(plan) => GuardedChunkTable::bind_with_lexical_plan(
+            directory,
+            "chunks",
+            embedding,
+            coordinator,
+            plan.identity(),
+        ),
+        None => GuardedChunkTable::bind(directory, "chunks", embedding, coordinator),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

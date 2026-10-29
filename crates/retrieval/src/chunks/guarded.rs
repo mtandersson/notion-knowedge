@@ -410,6 +410,59 @@ impl GuardedChunkTable {
             .map_err(|_| ChunkTableError::InvalidPath)?;
         self.open_search_snapshot().await
     }
+    /// Inspect search layout without admitting content while rebuild is pending.
+    pub async fn verify_search_indexes(&self) -> Result<(), ChunkTableError> {
+        let _guard = self
+            .coordinator
+            .index_read_guard()
+            .map_err(|_| ChunkTableError::InvalidPath)?;
+        self.open_search_snapshot().await?;
+        Ok(())
+    }
+
+    /// Readiness probes stay inside the startup boundary and expose no content.
+    /// A real cached page ID must be found through the native exact-ID profile.
+    pub async fn probe_lexical_cache(&self) -> Result<(), ChunkTableError> {
+        let _guard = self
+            .coordinator
+            .index_read_guard()
+            .map_err(|_| ChunkTableError::InvalidPath)?;
+        let snapshot = self.open_search_snapshot().await?;
+        let mut stream = snapshot
+            .table
+            .query()
+            .select(Select::columns(&["page_id"]))
+            .limit(1)
+            .execute()
+            .await?;
+        let Some(batch) = stream.try_next().await? else {
+            return Ok(());
+        };
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| ChunkTableError::InvalidSchema("invalid page identity column".into()))?;
+        let id = ids.value(0).to_owned();
+        let query = LexicalQuery {
+            query: id.clone(),
+            limit: 1,
+            page_ids: Some(vec![id.clone()]),
+            root_page_ids: None,
+            metadata: Default::default(),
+        };
+        let hits = snapshot.lexical_search(query).await?;
+        if !hits.iter().any(|hit| hit.source.page_id == id) {
+            return Err(ChunkTableError::InvalidSchema(
+                "exact-ID readiness probe failed".into(),
+            ));
+        }
+        Ok(())
+    }
+
     async fn open_search_snapshot(&self) -> Result<LanceChunkTable, ChunkTableError> {
         let current = open_current(
             &self.index_directory,

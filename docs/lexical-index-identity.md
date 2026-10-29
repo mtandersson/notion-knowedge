@@ -36,12 +36,24 @@ Payload format 2 removes the obsolete initial-source handoff digest. The artifac
 filename stays stable so an older file is refused and reset instead of ignored.
 The supported recovery is [cache reset and authoritative Notion resync](cache-reset-and-resync.md).
 Legacy transition journals trigger a rebuild; they are never resumed.
-These primitives do not install expansion in the server (#492), automatically
-migrate existing state, or establish retrieval quality (#493).
+`IndexRuntime::recover_lexical_cache` accepts the verified plan as trusted
+configuration. Missing or incompatible cache metadata resets derived state and
+resyncs the current authorized Notion scope. Operational credentials, external
+effect ledgers and admitted refresh work remain intact. Permission and arbitrary
+storage failures remain errors. Content reads are refused while rebuild is
+pending; startup verifies the rebuilt search layout and probes a real cached
+page ID through native FTS before admitting reads. Empty authorized caches are
+valid. A healthy read-only reopen neither resyncs nor writes.
+
+The runtime retains the same immutable dictionary handle and plan used to bind
+its cache. This typed preparation seam does not install expansion in shipping
+search (#492) or establish retrieval quality (#493).
 
 Verification:
 
 ```sh
 nix develop .#spike --command cargo test -p notion-knowledge-retrieval \
   --features local-lancedb --lib lexical_identity --locked --offline
+nix develop .#spike --command cargo test -p notion-knowledge-server \
+  --features webhook-worker --test reconciliation_command lexical_cache_ --locked --offline
 ```

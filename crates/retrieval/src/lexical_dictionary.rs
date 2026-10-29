@@ -220,10 +220,13 @@ impl Dictionary {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+/// Deterministic data fixtures for adapter integration tests. Shipping feature
+/// configurations do not include this constructor; no environment/tool input
+/// can select it as an asset loader.
+#[cfg(any(test, feature = "test-fixtures"))]
+pub mod test_fixtures {
     use super::*;
-    pub(crate) fn dictionary(pairs: &[(&str, &str)]) -> Dictionary {
+    pub fn dictionary(pairs: &[(&str, &str)]) -> Dictionary {
         let mut edges = Vec::new();
         for (i, (source, target)) in pairs.iter().enumerate() {
             let source = literal(source).unwrap();
@@ -247,6 +250,12 @@ pub(crate) mod tests {
             manifest_digest,
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    pub(crate) use super::test_fixtures::dictionary;
+    use super::*;
     fn texts(plan: &Plan) -> Vec<&str> {
         plan.phrases().iter().map(Phrase::text).collect()
     }

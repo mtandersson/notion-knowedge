@@ -6,6 +6,8 @@ repository.workspace = true
 
 [features]
 default = []
+# Data fixtures only; never selected by shipping configuration.
+test-fixtures = []
 # Opt-in comparison example only; never selected by shipping provider configuration.
 eval-e5 = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
 local-qwen = ["dep:candle-core", "dep:candle-nn", "dep:fastembed", "dep:tokenizers"]
