@@ -111,7 +111,7 @@ pub mod runtime {
                         result = async {
                             let progress = self.index.runner.apply_next(&run, lease.clone(), clock.clone(), self.index.provider.as_ref()).await?;
                             if progress.pending.is_empty() && progress.failed_pages() == 0 && progress.run_failures.is_empty() {
-                                crate::index_runtime::prepare_search_if_missing(coordinator, self.index.provider.metadata(), lease.clone(), clock)
+                                crate::index_runtime::prepare_search_if_missing(coordinator, &self.index.handler, lease.clone(), clock)
                                     .await.map_err(|_| RunnerError::Journal(JournalError::Unavailable))?;
                             }
                             Ok::<_, RunnerError>(progress)

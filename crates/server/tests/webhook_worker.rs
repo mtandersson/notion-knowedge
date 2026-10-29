@@ -158,7 +158,16 @@ impl HttpNotion {
                     mutations.fetch_add(1, Ordering::SeqCst);
                 }
                 let snapshot = values.lock().unwrap().clone();
-                let mut response = if route == format!("/v1/pages/{PAGE}/markdown") {
+                let mut response = if route == format!("/v1/blocks/{ROOT}/children?page_size=100") {
+                    json!({"object":"list","results":[
+                        {"object":"block","id":PAGE,"type":"child_page","archived":false,"has_children":false,"parent":{"type":"page_id","page_id":ROOT},"child_page":{"title":snapshot.title}},
+                        {"object":"block","id":OTHER,"type":"child_page","archived":false,"has_children":false,"parent":{"type":"page_id","page_id":ROOT},"child_page":{"title":"Separate"}}
+                    ],"has_more":false,"next_cursor":null})
+                } else if route.starts_with("/v1/blocks/") && route.contains("/children") {
+                    json!({"object":"list","results":[],"has_more":false,"next_cursor":null})
+                } else if route == format!("/v1/pages/{ROOT}/markdown") {
+                    json!({"object":"page_markdown","id":ROOT,"markdown":"","truncated":false,"unknown_block_ids":[]})
+                } else if route == format!("/v1/pages/{PAGE}/markdown") {
                     bodies.fetch_add(1, Ordering::SeqCst);
                     json!({
                         "object": "page_markdown",
@@ -1574,6 +1583,12 @@ async fn unsupported_authoritative_content_and_unowned_out_of_scope_page_fail_pe
 }
 
 fn retrieval_config(runtime: &TestRuntime) -> notion_knowledge_server::config::Config {
+    retrieval_config_with(runtime, |_| None)
+}
+fn retrieval_config_with(
+    runtime: &TestRuntime,
+    mut extra: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> notion_knowledge_server::config::Config {
     let values = std::collections::BTreeMap::from([
         ("NK_RETRIEVAL", "true"),
         ("NK_NOTION_AUTH", "integration"),
@@ -1590,7 +1605,7 @@ fn retrieval_config(runtime: &TestRuntime) -> notion_knowledge_server::config::C
         ),
     ]);
     notion_knowledge_server::config::Config::from_lookup(|name| {
-        values.get(name).map(std::ffi::OsString::from)
+        extra(name).or_else(|| values.get(name).map(std::ffi::OsString::from))
     })
     .unwrap()
 }
@@ -1723,6 +1738,174 @@ async fn installed_retrieval(
         runtime.worker.provider.clone(),
     )
     .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configured_lexical_expansion_preserves_scoped_content_and_rebuilds_after_cache_loss() {
+    use notion_knowledge_retrieval::lexical_dictionary::test_fixtures::dictionary;
+    use notion_knowledge_server::root_scope::Transport;
+    let runtime = TestRuntime::new().await;
+    {
+        let mut source = runtime.source.state.lock().unwrap();
+        source.title = "Saffran".into();
+        source.markdown = "Saffran ravioli. Råd om kryddor.".into();
+    }
+    let dictionary = Arc::new(dictionary(&[("saffron", "saffran")]));
+    let digest = dictionary.manifest_digest().to_owned();
+    let mut config = retrieval_config_with(&runtime, |name| match name {
+        "NK_LEXICAL_EXPANSION" => Some("true".into()),
+        "NK_LEXICAL_ASSET_BUNDLE" => Some("/tmp/unused-typed-dictionary".into()),
+        "NK_LEXICAL_ASSET_SHA256" => Some(digest.clone().into()),
+        _ => None,
+    });
+    let settings = config.retrieval.as_mut().unwrap();
+    settings.lexical = Some(
+        settings
+            .lexical
+            .take()
+            .unwrap()
+            .with_verified_dictionary(dictionary)
+            .unwrap(),
+    );
+    let handler = installed_retrieval(&runtime, &config, Transport::Stdio)
+        .await
+        .unwrap();
+    let mut requests = vec![
+        search_request(2, "lexical", json!({"page_ids":[PAGE]})),
+        search_request(3, "hybrid", json!({"page_ids":[PAGE]})),
+    ];
+    for (id, query) in [
+        (4, "saffran"),
+        (5, PAGE),
+        (6, "\"Saffran ravioli\""),
+        (7, "unmatchedxyz"),
+    ] {
+        let mut request = search_request(id, "lexical", json!({"page_ids":[PAGE]}));
+        request["params"]["arguments"]["query"] = json!(query);
+        requests.push(request);
+    }
+    requests.push(search_request(
+        8,
+        "lexical",
+        json!({"metadata":{"workspace_ids":[FOREIGN]}}),
+    ));
+    requests.push(search_request(
+        9,
+        "lexical",
+        json!({"root_page_ids":[FOREIGN]}),
+    ));
+    let responses = wire_stdio(handler, requests).await;
+    for response in &responses[1..=5] {
+        let hits = response["result"]["structuredContent"]["results"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{response}"));
+        assert!(!hits.is_empty());
+        assert!(hits.iter().all(|hit| hit["source"]["page_id"] == PAGE));
+        assert!(hits[0]["text"].as_str().unwrap().contains("Saffran"));
+    }
+    for response in &responses[1..=2] {
+        let records = response["result"]["structuredContent"]["results"][0]["lexical_matches"]
+            .as_array()
+            .unwrap();
+        assert!(
+            records
+                .iter()
+                .any(|record| record["kind"] == "lexical_dictionary_v1"
+                    && record["manifest_digest"] == digest)
+        );
+    }
+    for response in &responses[4..=5] {
+        assert!(
+            !response["result"]["structuredContent"]
+                .to_string()
+                .contains("lexical_dictionary_v1")
+        );
+    }
+    for response in &responses[6..] {
+        assert_eq!(
+            response["result"]["structuredContent"]["results"],
+            json!([])
+        );
+    }
+    {
+        let mut source = runtime.source.state.lock().unwrap();
+        source.markdown.push_str(" Extra mejram.");
+        source.revision = "2026-10-10T12:00:01Z".into();
+    }
+    let command = notion_knowledge_server::reconciliation_command::Command::parse(
+        &["--reconcile", "apply", "lexical-configured-refresh"].map(str::to_owned),
+    )
+    .unwrap();
+    let updated = notion_knowledge_server::reconciliation_command::runtime::execute(
+        command,
+        config.retrieval.as_ref().unwrap(),
+        &runtime.db,
+        config.notion_scope.clone().unwrap(),
+        runtime.source.client(),
+        runtime.worker.provider.clone(),
+        CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(updated.exit, 0, "{}", updated.json);
+    let reads = runtime.source.attempts.load(Ordering::SeqCst);
+    let embeddings = runtime.embeddings.load(Ordering::SeqCst);
+    let healthy = installed_retrieval(&runtime, &config, Transport::Stdio)
+        .await
+        .unwrap();
+    assert_eq!(runtime.source.attempts.load(Ordering::SeqCst), reads);
+    assert_eq!(runtime.embeddings.load(Ordering::SeqCst), embeddings);
+    let refreshed = wire_stdio(
+        healthy,
+        vec![search_request(2, "lexical", json!({"page_ids":[PAGE]}))],
+    )
+    .await;
+    assert!(
+        refreshed[1]["result"]["structuredContent"]
+            .to_string()
+            .contains("mejram")
+    );
+    let corrupt = runtime._dir.path().join("corrupt-lexical.bundle");
+    std::fs::write(&corrupt, b"invalid bundle").unwrap();
+    let bad = retrieval_config_with(&runtime, |name| match name {
+        "NK_LEXICAL_EXPANSION" => Some("true".into()),
+        "NK_LEXICAL_ASSET_BUNDLE" => Some(corrupt.as_os_str().to_owned()),
+        "NK_LEXICAL_ASSET_SHA256" => Some(digest.clone().into()),
+        _ => None,
+    });
+    let state_before = std::fs::read(&runtime.db).unwrap();
+    let cache_before = storage_files(&runtime.index);
+    let reads = runtime.source.attempts.load(Ordering::SeqCst);
+    assert!(
+        installed_retrieval(&runtime, &bad, Transport::Stdio)
+            .await
+            .is_err()
+    );
+    assert_eq!(runtime.source.attempts.load(Ordering::SeqCst), reads);
+    assert_eq!(std::fs::read(&runtime.db).unwrap(), state_before);
+    assert_eq!(storage_files(&runtime.index), cache_before);
+    std::fs::remove_dir_all(&runtime.index).unwrap();
+    let rebuilt = installed_retrieval(&runtime, &config, Transport::Stdio)
+        .await
+        .unwrap();
+    let response = wire_stdio(
+        rebuilt.clone(),
+        vec![search_request(2, "lexical", json!({"page_ids":[PAGE]}))],
+    )
+    .await;
+    assert!(
+        response[1]["result"]["structuredContent"]
+            .to_string()
+            .contains("lexical_dictionary_v1")
+    );
+    runtime.source.state.lock().unwrap().parent = FOREIGN.into();
+    let denied = wire_stdio(
+        rebuilt,
+        vec![search_request(2, "lexical", json!({"page_ids":[PAGE]}))],
+    )
+    .await;
+    assert_eq!(denied[1]["result"]["isError"], true);
+    assert!(denied[1]["result"]["structuredContent"].is_null());
+    assert_eq!(runtime.source.writes.load(Ordering::SeqCst), 0);
 }
 async fn commit_search_fixture(runtime: &TestRuntime) {
     for page in [PAGE, OTHER] {

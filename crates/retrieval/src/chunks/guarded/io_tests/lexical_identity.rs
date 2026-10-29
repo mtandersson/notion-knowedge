@@ -7,6 +7,103 @@ use crate::chunks::{
 fn dictionary() -> crate::lexical_dictionary::Dictionary {
     crate::lexical_dictionary::tests::dictionary(&[("cinnamon", "kanel")])
 }
+
+#[tokio::test]
+async fn configured_search_reserves_before_model_work_and_releases_on_cancel_or_deadline() {
+    use crate::{chunks::bounded::CandidateBudget, lexical_runtime::LexicalSearchRuntime};
+    use notion_knowledge_core::search::{SemanticQuery, SemanticSearch};
+    struct WaitingProvider {
+        metadata: EmbeddingMetadata,
+        started: Arc<tokio::sync::Notify>,
+    }
+    impl notion_knowledge_core::embedding::EmbeddingProvider for WaitingProvider {
+        fn metadata(&self) -> &EmbeddingMetadata {
+            &self.metadata
+        }
+        fn embed_batch<'a>(
+            &'a self,
+            _: &'a [String],
+        ) -> notion_knowledge_core::embedding::EmbeddingFuture<'a> {
+            self.started.notify_one();
+            Box::pin(std::future::pending())
+        }
+    }
+    let f = Fixture::new();
+    let plan = lexical_binding::LexicalCachePlan::verified(Arc::new(dictionary())).unwrap();
+    let table = GuardedChunkTable::create_fresh_lexical(
+        &f.index,
+        "chunks",
+        f.embedding.clone(),
+        f.coordinator.clone(),
+        plan.identity(),
+        f.lease.clone(),
+        clock(),
+    )
+    .await
+    .unwrap();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let provider = Arc::new(WaitingProvider {
+        metadata: f.embedding.clone(),
+        started: started.clone(),
+    });
+    let pool = CandidateBudget::new(1).unwrap();
+    let search = Arc::new(
+        LexicalSearchRuntime::new(
+            table.clone(),
+            provider.clone(),
+            plan.clone(),
+            pool.clone(),
+            std::time::Duration::from_secs(30),
+        )
+        .unwrap(),
+    );
+    let query = || SemanticQuery {
+        query: "cinnamon".into(),
+        limit: 1,
+        page_ids: None,
+        root_page_ids: None,
+        metadata: Default::default(),
+    };
+    let running = search.clone();
+    let task = tokio::spawn(async move { SemanticSearch::search(running.as_ref(), query()).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+        .await
+        .unwrap();
+    assert!(
+        pool.try_reserve().is_err(),
+        "admission must precede model execution"
+    );
+    assert!(
+        notion_knowledge_core::search::LexicalSearch::search(
+            search.as_ref(),
+            LexicalQuery {
+                query: "cinnamon".into(),
+                limit: 1,
+                page_ids: None,
+                root_page_ids: None,
+                metadata: Default::default()
+            }
+        )
+        .await
+        .is_err()
+    );
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(pool.try_reserve().is_ok());
+    let timed = LexicalSearchRuntime::new(
+        table,
+        provider,
+        plan,
+        pool.clone(),
+        std::time::Duration::from_nanos(1),
+    )
+    .unwrap();
+    assert!(SemanticSearch::search(&timed, query()).await.is_err());
+    assert!(pool.try_reserve().is_ok());
+    let fence = std::fs::File::open(&f.index).unwrap();
+    fence.try_lock().unwrap();
+    fence.unlock().unwrap();
+}
 fn enabled(
     f: &Fixture,
     plan: &LexicalPlanIdentity,

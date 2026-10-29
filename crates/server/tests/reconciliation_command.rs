@@ -368,6 +368,7 @@ impl Fixture {
         notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Off);
         let dir = tempfile::tempdir().unwrap();
         let settings = WorkerSettings {
+            lexical: None,
             alias_sources: notion_knowledge_core::aliases::AliasSources::new(true, vec![]).unwrap(),
             index: dir.path().join("index"),
             assets: dir.path().join("assets"),

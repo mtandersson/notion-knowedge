@@ -10,6 +10,102 @@ struct Fixture {
     fail: bool,
     invalid_output: u8,
 }
+
+struct CancellableSearch {
+    started: Arc<tokio::sync::Notify>,
+    dropped: Arc<tokio::sync::Notify>,
+}
+struct SearchDropSignal(Arc<tokio::sync::Notify>);
+impl Drop for SearchDropSignal {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
+impl SemanticSearch for CancellableSearch {
+    fn search(&self, _: SemanticQuery) -> SearchFuture<'_> {
+        Box::pin(async move {
+            let _signal = SearchDropSignal(self.dropped.clone());
+            self.started.notify_one();
+            std::future::pending().await
+        })
+    }
+}
+
+#[tokio::test]
+async fn client_cancellation_drops_read_work_without_closing_the_mcp_session() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(tokio::sync::Notify::new());
+    let handler = scope_fixture::secured(
+        KnowledgeServer::with_search(Arc::new(CancellableSearch {
+            started: started.clone(),
+            dropped: dropped.clone(),
+        }))
+        .with_tool_capacity(1),
+    );
+    let (client, server) = tokio::io::duplex(65536);
+    let task = tokio::spawn(async move {
+        handler
+            .serve(server)
+            .await
+            .unwrap()
+            .waiting()
+            .await
+            .unwrap();
+    });
+    let (read, mut write) = tokio::io::split(client);
+    let mut reader = BufReader::new(read);
+    let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"cancellation-fixture","version":"1"}}});
+    write
+        .write_all(format!("{initialize}\n").as_bytes())
+        .await
+        .unwrap();
+    let mut line = String::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        reader.read_line(&mut line),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let initialized = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
+    let search = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"knowledge_search","arguments":{"query":"synthetic cancellation","limit":1,"mode":"semantic"}}});
+    write
+        .write_all(format!("{initialized}\n{search}\n").as_bytes())
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+        .await
+        .unwrap();
+    let cancel = json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":2,"reason":"fixture cancellation"}});
+    write
+        .write_all(format!("{cancel}\n").as_bytes())
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), dropped.notified())
+        .await
+        .unwrap();
+    let tools = json!({"jsonrpc":"2.0","id":3,"method":"tools/list"});
+    write
+        .write_all(format!("{tools}\n").as_bytes())
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            line.clear();
+            assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+            let response: Value = serde_json::from_str(&line).unwrap();
+            if response["id"] == 3 {
+                assert!(response["result"]["tools"].is_array());
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    drop(write);
+    task.abort();
+    let _ = task.await;
+}
 impl SemanticSearch for Fixture {
     fn search(&self, query: SemanticQuery) -> SearchFuture<'_> {
         self.calls.lock().unwrap().push(query);

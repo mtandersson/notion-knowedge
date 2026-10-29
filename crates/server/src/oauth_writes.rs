@@ -371,6 +371,7 @@ mod tests {
         assert!(!ledger.exists());
         config.webhook_state_file = Some(dir.path().join("state"));
         config.retrieval = Some(crate::webhook_worker::WorkerSettings {
+            lexical: None,
             index: alias,
             assets: dir.path().join("assets"),
             poll_ms: 100,

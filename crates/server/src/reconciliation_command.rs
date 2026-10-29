@@ -206,6 +206,9 @@ pub mod runtime {
             Ok(s) => Arc::new(s),
             Err(_) => return Output::error("configuration", 2),
         };
+        if crate::index_runtime::configured_plan(&settings).is_err() {
+            return Output::error("configuration", 2);
+        }
         let provider = match notion_knowledge_retrieval::qwen::QwenProvider::load(
             notion_knowledge_retrieval::qwen::QwenConfig::cpu(&settings.assets),
         )
@@ -429,7 +432,7 @@ pub mod runtime {
                 {
                     crate::index_runtime::prepare_search_if_missing(
                         &runtime.coordinator,
-                        runtime.provider.metadata(),
+                        &runtime.handler,
                         lease.clone(),
                         clock,
                     )

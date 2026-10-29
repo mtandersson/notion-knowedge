@@ -1,5 +1,9 @@
 # Installed local hybrid retrieval
 
+Optional [bilingual lexical expansion](multilingual-lexical-runtime.md) uses
+separately verified local assets and defaults OFF. Existing source authorization
+and cache-recovery boundaries remain in force.
+
 The operator can explicitly install semantic, lexical and hybrid search in the
 ordinary MCP server. Defaults remain unavailable. This read activation requires
 Unix and a binary built with `webhook-worker`, which already includes the pinned

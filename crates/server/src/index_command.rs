@@ -35,7 +35,7 @@ pub mod runtime {
         reconciliation::{JournalError, ReconciliationJournal},
     };
     use notion_knowledge_retrieval::{
-        chunks::{GuardedChunkTable, VectorDistance, VectorIndexConfig},
+        chunks::{VectorDistance, VectorIndexConfig},
         commit::{CommitBinding, IndexCommitCoordinator},
         planner::production_scope,
     };
@@ -80,6 +80,9 @@ pub mod runtime {
         // Validate exact external assets in the shipping runtime, even though
         // ANN training consumes already committed vectors and makes no API call.
         use notion_knowledge_core::embedding::EmbeddingProvider;
+        if crate::index_runtime::configured_plan(&settings).is_err() {
+            return output("configuration", 2);
+        }
         let provider = match notion_knowledge_retrieval::qwen::QwenProvider::load(
             notion_knowledge_retrieval::qwen::QwenConfig::cpu(&settings.assets),
         )
@@ -143,17 +146,21 @@ pub mod runtime {
             Ok(b) => b,
             Err(_) => return output("configuration", 2),
         };
+        let plan = match crate::index_runtime::configured_plan(settings) {
+            Ok(plan) => plan,
+            Err(_) => return output("index_state_configuration", 2),
+        };
         // Inspect existing authority and vectors before any writable open.
         let inspected =
             match IndexCommitCoordinator::open_read_only(&settings.index, state, binding.clone()) {
                 Ok(c) => c,
                 Err(_) => return output("index_state_configuration", 2),
             };
-        let table = match GuardedChunkTable::bind(
+        let table = match crate::index_runtime::bind_cache(
             &settings.index,
-            "chunks",
             embedding.clone(),
             inspected.clone(),
+            plan.as_ref(),
         ) {
             Ok(t) => t,
             Err(_) => return output("index_state_configuration", 2),
@@ -168,11 +175,11 @@ pub mod runtime {
                 Ok(c) => c,
                 Err(_) => return output("index_state_configuration", 2),
             };
-        let table = match GuardedChunkTable::bind(
+        let table = match crate::index_runtime::bind_cache(
             &settings.index,
-            "chunks",
             embedding,
             coordinator.clone(),
+            plan.as_ref(),
         ) {
             Ok(t) => t,
             Err(_) => return output("index_state_configuration", 2),
