@@ -10,6 +10,10 @@ pub const COMPONENT: &str = "retrieval";
 #[cfg(feature = "local-lancedb")]
 pub mod chunks;
 
+/// Configured single-process lexical and hybrid search over one guarded snapshot.
+#[cfg(all(unix, feature = "local-lancedb"))]
+pub mod lexical_runtime;
+
 #[cfg(feature = "local-qwen")]
 pub mod qwen;
 

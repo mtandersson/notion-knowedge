@@ -410,6 +410,48 @@ impl GuardedChunkTable {
             .map_err(|_| ChunkTableError::InvalidPath)?;
         self.open_search_snapshot().await
     }
+
+    pub(crate) fn require_lexical_plan(
+        &self,
+        plan: &lexical_binding::LexicalCachePlan,
+    ) -> Result<(), ChunkTableError> {
+        if self.lexical_binding.as_ref().is_some_and(|binding| {
+            binding.plan() == plan.identity() && plan.identity().matches(plan.dictionary())
+        }) {
+            Ok(())
+        } else {
+            Err(ChunkTableError::InvalidSchema(
+                "configured lexical plan is not bound".into(),
+            ))
+        }
+    }
+
+    /// Keep both rankers and metadata filtering on one committed revision.
+    /// Only retrieval adapters may execute inside this read fence.
+    pub(crate) async fn search_with_snapshot<F, Fut>(
+        &self,
+        operation: F,
+    ) -> Result<Vec<SearchHit>, SearchUnavailable>
+    where
+        F: FnOnce(LanceChunkTable) -> Fut,
+        Fut: Future<Output = Result<Vec<SearchHit>, SearchUnavailable>>,
+    {
+        let _guard = self
+            .coordinator
+            .search_guard()
+            .map_err(|_| SearchUnavailable)?;
+        let snapshot = self
+            .open_search_snapshot()
+            .await
+            .map_err(|_| SearchUnavailable)?;
+        let results = operation(snapshot).await?;
+        self.coordinator
+            .identities()
+            .map_err(|_| SearchUnavailable)?;
+        lexical_binding::verify(&self.index_directory, &self.lexical_binding)
+            .map_err(|_| SearchUnavailable)?;
+        Ok(results)
+    }
     /// Inspect search layout without admitting content while rebuild is pending.
     pub async fn verify_search_indexes(&self) -> Result<(), ChunkTableError> {
         let _guard = self

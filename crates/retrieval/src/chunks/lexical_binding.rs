@@ -51,6 +51,7 @@ impl LexicalPlanIdentity {
             executor_sha256: digest(
                 concat!(
                     include_str!("bounded.rs"),
+                    include_str!("../lexical_runtime.rs"),
                     include_str!("../lexical_dictionary.rs")
                 )
                 .as_bytes(),
