@@ -1794,7 +1794,13 @@ async fn configured_lexical_expansion_preserves_scoped_content_and_rebuilds_afte
         "lexical",
         json!({"root_page_ids":[FOREIGN]}),
     ));
+    let query_embeddings = runtime.embeddings.load(Ordering::SeqCst);
     let responses = wire_stdio(handler, requests).await;
+    assert_eq!(
+        runtime.embeddings.load(Ordering::SeqCst),
+        query_embeddings + 1,
+        "only the requested hybrid semantic branch may embed a query"
+    );
     for response in &responses[1..=5] {
         let hits = response["result"]["structuredContent"]["results"]
             .as_array()
