@@ -457,9 +457,19 @@ impl LanceChunkTable {
     ) -> Result<BoundedLexicalResult, ChunkTableError> {
         validate_lexical_query(&query)?;
         let mut reservation = pool.try_reserve()?;
+        self.expanded_lexical_reserved(query, dictionary, &mut reservation)
+            .await
+    }
+    pub(crate) async fn expanded_lexical_reserved(
+        &self,
+        query: LexicalQuery,
+        dictionary: &Dictionary,
+        reservation: &mut CandidateReservation,
+    ) -> Result<BoundedLexicalResult, ChunkTableError> {
+        validate_lexical_query(&query)?;
         let snapshot = self.read_snapshot().await?;
         let predicate = snapshot
-            .bounded_metadata_predicate(&query, &mut reservation)
+            .bounded_metadata_predicate(&query, reservation)
             .await?;
         let limit = query.limit.saturating_mul(4).min(400);
         let mut best = HashMap::new();
@@ -476,7 +486,7 @@ impl LanceChunkTable {
                     &query.query,
                     limit,
                     predicate.as_deref(),
-                    &mut reservation,
+                    reservation,
                 )
                 .await?;
             let start = Instant::now();
@@ -515,7 +525,7 @@ impl LanceChunkTable {
                         },
                         limit,
                         predicate.as_deref(),
-                        &mut reservation,
+                        reservation,
                     )
                     .await?;
                 let start = Instant::now();

@@ -771,7 +771,8 @@ impl Config {
                 "must be at least NK_WEBHOOK_DEBOUNCE_MS",
             )
         })?;
-        let webhook_worker = crate::webhook_worker::WorkerSettings::parse(
+        let lexical = crate::lexical_expansion::Settings::parse(&mut lookup)?;
+        let mut webhook_worker = crate::webhook_worker::WorkerSettings::parse(
             &mut lookup,
             &webhook,
             notion_scope.as_ref(),
@@ -786,14 +787,14 @@ impl Config {
                 "requires authenticated Notion integration",
             ));
         }
-        let reconciliation_index = if reconciliation_schedule.is_some() {
+        let mut reconciliation_index = if reconciliation_schedule.is_some() {
             Some(crate::webhook_worker::WorkerSettings::index_settings(
                 &mut lookup,
             )?)
         } else {
             None
         };
-        let retrieval = if retrieval_enabled {
+        let mut retrieval = if retrieval_enabled {
             if !cfg!(all(unix, feature = "webhook-worker")) || notion_scope.is_none() {
                 return Err(invalid(
                     "NK_RETRIEVAL",
@@ -806,6 +807,17 @@ impl Config {
         } else {
             None
         };
+        // All installed views retain the same verified immutable dictionary.
+        for settings in [
+            &mut webhook_worker,
+            &mut reconciliation_index,
+            &mut retrieval,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            settings.lexical = lexical.clone();
+        }
         let max_upload_files = optional(&mut lookup, "NK_MAX_UPLOAD_FILES", "4")?
             .parse::<usize>()
             .ok()

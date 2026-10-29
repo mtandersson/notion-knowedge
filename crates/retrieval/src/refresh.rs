@@ -91,6 +91,10 @@ pub struct AuthoritativePageRefresh {
     chunk_config: ChunkConfig,
 }
 impl AuthoritativePageRefresh {
+    /// Retain the exact configured binding for post-refresh search maintenance.
+    pub fn chunks(&self) -> &GuardedChunkTable {
+        &self.guard
+    }
     /// Accept only paired, trusted Notion workspace and persistent SQLite
     /// index binding. Do not infer either of them from incoming webhook events.
     pub fn new(

@@ -4,6 +4,7 @@ use std::{ffi::OsString, path::PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct WorkerSettings {
+    pub lexical: Option<crate::lexical_expansion::Settings>,
     pub alias_sources: notion_knowledge_core::aliases::AliasSources,
     pub index: PathBuf,
     pub assets: PathBuf,
@@ -84,6 +85,7 @@ impl WorkerSettings {
         };
         let alias_sources = notion_knowledge_core::aliases::AliasSources::new(title, property_ids)
             .map_err(|_| error("NK_ALIAS_PROPERTY_IDS", "requires at least one source, at most 32 valid property IDs of at most 128 bytes"))?;
+        let lexical = crate::lexical_expansion::Settings::parse(lookup)?;
         let mut number = |name, default, min, max| {
             let value = lookup(name)
                 .map(|v| v.into_string().ok().and_then(|s| s.parse::<u64>().ok()))
@@ -93,6 +95,7 @@ impl WorkerSettings {
                 .ok_or_else(|| error(name, "outside documented integer range"))
         };
         Ok(Self {
+            lexical,
             alias_sources,
             index,
             assets,
@@ -244,6 +247,7 @@ pub mod runtime {
             notion_knowledge_notion::NotionClient::integration(token.expose_secret())
                 .map_err(|_| "Notion client unavailable")?,
         );
+        crate::index_runtime::configured_plan(settings)?;
         let provider = Arc::new(
             notion_knowledge_retrieval::qwen::QwenProvider::load(
                 notion_knowledge_retrieval::qwen::QwenConfig::cpu(&settings.assets),
@@ -478,7 +482,7 @@ pub mod runtime {
                     _=tokio::time::sleep(self.timeout)=>{ processing.cancel(); ProcessingOutcome::Retryable(EventFailure::Unavailable) },
                     result=async {
                         self.handler.apply_lifecycle(&page, &operation, self.provider.as_ref(), lease.clone(), clock.clone()).await?;
-                        crate::index_runtime::prepare_search_if_missing(&self.coordinator, self.provider.metadata(), lease, clock)
+                        crate::index_runtime::prepare_search_if_missing(&self.coordinator, &self.handler, lease, clock)
                             .await.map_err(|_| RefreshError::Index)
                     } => match result {
                         Ok(_)=>ProcessingOutcome::Succeeded,

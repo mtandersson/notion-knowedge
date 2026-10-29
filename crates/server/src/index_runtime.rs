@@ -47,7 +47,7 @@ impl IndexRuntime {
             RecoveryOptions {
                 reset: false,
                 mode: OpenMode::Initialize,
-                lexical: None,
+                lexical: configured_plan(settings)?,
             },
         )
         .await
@@ -69,7 +69,7 @@ impl IndexRuntime {
             RecoveryOptions {
                 reset: false,
                 mode: OpenMode::ReadOnly,
-                lexical: None,
+                lexical: configured_plan(settings)?,
             },
         )
         .await
@@ -91,7 +91,7 @@ impl IndexRuntime {
             RecoveryOptions {
                 reset: true,
                 mode: OpenMode::Initialize,
-                lexical: None,
+                lexical: configured_plan(settings)?,
             },
         )
         .await
@@ -339,7 +339,13 @@ impl IndexRuntime {
         // Keep the native composition future out of every caller's stack frame.
         // Both legacy composition and configured recovery share this boundary.
         Box::pin(Self::compose_cache(
-            settings, state, scope, source, provider, mode, None,
+            settings,
+            state,
+            scope,
+            source,
+            provider,
+            mode,
+            configured_plan(settings)?,
         ))
         .await
     }
@@ -491,18 +497,21 @@ impl IndexRuntime {
 /// first populated page after an empty cache. A healthy snapshot is a no-op.
 pub(crate) async fn prepare_search_if_missing(
     coordinator: &Arc<IndexCommitCoordinator>,
-    embedding: &notion_knowledge_core::embedding::EmbeddingMetadata,
+    handler: &AuthoritativePageRefresh,
     lease: notion_knowledge_core::reconciliation::Lease,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
 ) -> Result<(), &'static str> {
-    let table = GuardedChunkTable::bind(
-        coordinator.index_directory(),
-        "chunks",
-        embedding.clone(),
-        coordinator.clone(),
-    )
-    .map_err(|_| "search maintenance binding unavailable")?;
-    prepare_table_search(&table, coordinator, lease, clock).await
+    prepare_table_search(handler.chunks(), coordinator, lease, clock).await
+}
+
+pub(crate) fn configured_plan(
+    settings: &WorkerSettings,
+) -> Result<Option<LexicalCachePlan>, &'static str> {
+    settings
+        .lexical
+        .as_ref()
+        .map(crate::lexical_expansion::Settings::load_plan)
+        .transpose()
 }
 
 async fn prepare_table_search(
@@ -551,7 +560,7 @@ struct RecoveryOptions {
     lexical: Option<LexicalCachePlan>,
 }
 
-fn bind_cache(
+pub(crate) fn bind_cache(
     directory: &Path,
     embedding: notion_knowledge_core::embedding::EmbeddingMetadata,
     coordinator: Arc<IndexCommitCoordinator>,

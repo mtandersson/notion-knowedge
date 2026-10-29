@@ -654,22 +654,23 @@ impl KnowledgeServer {
                     }
                     search::SearchMode::Hybrid => None,
                 };
-                let results = match input.mode {
+                if context.ct.is_cancelled() {
+                    return Ok(error("retrieval_unavailable: search cancelled"));
+                }
+                let search = match input.mode {
                     search::SearchMode::Semantic => {
                         let Some(adapter) = &self.search else {
                             return Ok(error(
                                 "mode_unavailable: semantic search adapter is not configured; no search was performed",
                             ));
                         };
-                        adapter
-                            .search(notion_knowledge_core::search::SemanticQuery {
-                                query: input.query,
-                                limit,
-                                page_ids,
-                                root_page_ids,
-                                metadata,
-                            })
-                            .await
+                        adapter.search(notion_knowledge_core::search::SemanticQuery {
+                            query: input.query,
+                            limit,
+                            page_ids,
+                            root_page_ids,
+                            metadata,
+                        })
                     }
                     search::SearchMode::Lexical => {
                         let Some(adapter) = &self.lexical_search else {
@@ -677,15 +678,13 @@ impl KnowledgeServer {
                                 "mode_unavailable: lexical search adapter is not configured; no search was performed",
                             ));
                         };
-                        adapter
-                            .search(notion_knowledge_core::search::LexicalQuery {
-                                query: input.query,
-                                limit,
-                                page_ids,
-                                root_page_ids,
-                                metadata,
-                            })
-                            .await
+                        adapter.search(notion_knowledge_core::search::LexicalQuery {
+                            query: input.query,
+                            limit,
+                            page_ids,
+                            root_page_ids,
+                            metadata,
+                        })
                     }
                     search::SearchMode::Hybrid => {
                         let Some(adapter) = &self.hybrid_search else {
@@ -693,16 +692,20 @@ impl KnowledgeServer {
                                 "mode_unavailable: hybrid search is not configured; no search was performed",
                             ));
                         };
-                        adapter
-                            .search(notion_knowledge_core::search::SemanticQuery {
-                                query: input.query,
-                                limit,
-                                page_ids,
-                                root_page_ids,
-                                metadata,
-                            })
-                            .await
+                        adapter.search(notion_knowledge_core::search::SemanticQuery {
+                            query: input.query,
+                            limit,
+                            page_ids,
+                            root_page_ids,
+                            metadata,
+                        })
                     }
+                };
+                // Reads may stop promptly; mutation/receipt execution is kept
+                // outside this cancellation boundary.
+                let results = tokio::select! { biased;
+                    _ = context.ct.cancelled() => Err(notion_knowledge_core::search::SearchUnavailable),
+                    result = search => result,
                 };
                 match results {
                     Ok(mut results)
@@ -718,6 +721,9 @@ impl KnowledgeServer {
                     {
                         // Indexed source metadata is not authorization evidence.
                         for hit in &results {
+                            if context.ct.is_cancelled() {
+                                return Ok(error("retrieval_unavailable: search cancelled"));
+                            }
                             let page =
                                 notion_knowledge_core::backend::PageId(hit.source.page_id.clone());
                             let Ok(permit) = gate.authorize(&page).await else {

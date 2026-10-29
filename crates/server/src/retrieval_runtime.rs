@@ -131,6 +131,8 @@ pub async fn configured(
         .retrieval
         .as_ref()
         .ok_or("retrieval settings unavailable")?;
+    // Reject unusable lexical assets before loading the larger model.
+    crate::index_runtime::configured_plan(settings)?;
     let NotionAuth::Integration(token) = &config.notion_auth else {
         return Err("authoritative retrieval source unavailable");
     };
@@ -159,6 +161,7 @@ pub async fn compose(
     if config.retrieval.is_none() || !crate::root_scope::trusted_transport(config, transport) {
         return Ok(handler);
     }
+    let plan = crate::index_runtime::configured_plan(config.retrieval.as_ref().unwrap())?;
     validate_recovery_paths(config)?;
     let settings = config
         .retrieval
@@ -168,40 +171,39 @@ pub async fn compose(
         .notion_scope
         .clone()
         .ok_or("retrieval scope unavailable")?;
-    let runtime = crate::index_runtime::IndexRuntime::recover_for_reads(
-        settings,
-        config
-            .webhook_state_file
-            .as_deref()
-            .ok_or("retrieval state unavailable")?,
-        scope.clone(),
-        source.clone(),
-        provider.clone(),
-    )
-    .await?;
+    validate_plan(settings, plan.as_ref())?;
+    let state = config
+        .webhook_state_file
+        .as_deref()
+        .ok_or("retrieval state unavailable")?;
+    let runtime = if let Some(plan) = plan.clone() {
+        crate::index_runtime::IndexRuntime::recover_lexical_cache(
+            settings,
+            state,
+            scope.clone(),
+            source.clone(),
+            provider.clone(),
+            plan,
+            crate::index_runtime::OpenMode::ReadOnly,
+        )
+        .await?
+    } else {
+        crate::index_runtime::IndexRuntime::recover_for_reads(
+            settings,
+            state,
+            scope.clone(),
+            source.clone(),
+            provider.clone(),
+        )
+        .await?
+    };
     validate_owned(config)?;
-    let table = GuardedChunkTable::bind(
-        &settings.index,
-        "chunks",
-        provider.metadata().clone(),
-        runtime.coordinator.clone(),
-    )
-    .map_err(|_| "retrieval binding incompatible")?;
+    let table = runtime.chunks().clone();
     table
         .search_snapshot()
         .await
         .map_err(|_| "retrieval index unavailable or incompatible")?;
-    let hybrid = ScopedHybrid {
-        table: table.clone(),
-        provider: provider.clone(),
-    };
-    let semantic: Arc<dyn SemanticSearch> = Arc::new(ScopedSearch {
-        table: table.clone(),
-        provider,
-    });
-    let lexical: Arc<dyn LexicalSearch> = Arc::new(ScopedLexical {
-        table: table.clone(),
-    });
+    let adapters = search_adapters(settings, table.clone(), provider, plan)?;
     let handler = handler
         .and_source_expansion(
             Arc::new(table),
@@ -210,9 +212,9 @@ pub async fn compose(
         .and_authoritative_scope(source.clone(), scope)
         .map(|h| {
             h.and_fresh_source(source)
-                .and_search(semantic)
-                .and_lexical_search(lexical)
-                .and_hybrid_search(Arc::new(hybrid))
+                .and_search(adapters.semantic)
+                .and_lexical_search(adapters.lexical)
+                .and_hybrid_search(adapters.hybrid)
         })?;
     if config.graph_boost.enabled {
         if config.graph_index.as_ref() != Some(&settings.index) {
@@ -241,6 +243,7 @@ pub(crate) async fn configured_oauth(
         .retrieval
         .as_ref()
         .ok_or("retrieval settings unavailable")?;
+    crate::index_runtime::configured_plan(settings)?;
     let provider = Arc::new(
         notion_knowledge_retrieval::qwen::QwenProvider::load(
             notion_knowledge_retrieval::qwen::QwenConfig::cpu(&settings.assets),
@@ -284,6 +287,7 @@ pub(crate) async fn compose_oauth_index(
         .retrieval
         .as_ref()
         .ok_or("retrieval settings unavailable")?;
+    let plan = crate::index_runtime::configured_plan(settings)?;
     let scope = config
         .notion_scope
         .as_ref()
@@ -306,17 +310,23 @@ pub(crate) async fn compose_oauth_index(
         binding.clone(),
     )
     .map_err(|_| "existing index authority unavailable or incompatible")?;
-    let table = GuardedChunkTable::bind(
+    let table = crate::index_runtime::bind_cache(
         &settings.index,
-        "chunks",
         provider.metadata().clone(),
         coordinator.clone(),
+        plan.as_ref(),
     )
     .map_err(|_| "retrieval binding incompatible")?;
     table
         .search_snapshot()
         .await
         .map_err(|_| "retrieval index unavailable or incompatible")?;
+    if plan.is_some() {
+        table
+            .probe_lexical_cache()
+            .await
+            .map_err(|_| "retrieval exact-ID readiness unavailable")?;
+    }
     let (coordinator, table) = if writable {
         // Validate existing vector metadata before opening writable authority.
         let coordinator = IndexCommitCoordinator::open_existing(
@@ -328,31 +338,24 @@ pub(crate) async fn compose_oauth_index(
             binding,
         )
         .map_err(|_| "existing index authority unavailable or incompatible")?;
-        let table = GuardedChunkTable::bind(
+        let table = crate::index_runtime::bind_cache(
             &settings.index,
-            "chunks",
             provider.metadata().clone(),
             coordinator.clone(),
+            plan.as_ref(),
         )
         .map_err(|_| "retrieval binding incompatible")?;
         (coordinator, table)
     } else {
         (coordinator, table)
     };
+    let adapters = search_adapters(settings, table.clone(), provider, plan)?;
     let handler = handler
         .with_request_bound_content()
         .with_root_page_ids(scope.roots.iter().map(|root| root.0.clone()).collect())?
-        .and_search(Arc::new(ScopedSearch {
-            table: table.clone(),
-            provider: provider.clone(),
-        }))
-        .and_lexical_search(Arc::new(ScopedLexical {
-            table: table.clone(),
-        }))
-        .and_hybrid_search(Arc::new(ScopedHybrid {
-            table: table.clone(),
-            provider,
-        }))
+        .and_search(adapters.semantic)
+        .and_lexical_search(adapters.lexical)
+        .and_hybrid_search(adapters.hybrid)
         .and_source_expansion(
             Arc::new(table.clone()),
             scope.roots.iter().map(|root| root.0.clone()).collect(),
@@ -374,6 +377,66 @@ pub(crate) async fn compose_oauth_index(
     } else {
         Ok((handler, coordinator, table))
     }
+}
+
+fn validate_plan(
+    settings: &crate::webhook_worker::WorkerSettings,
+    plan: Option<&notion_knowledge_retrieval::chunks::lexical_binding::LexicalCachePlan>,
+) -> Result<(), &'static str> {
+    match (settings.lexical.as_ref(), plan) {
+        (None, None) => Ok(()),
+        (Some(settings), Some(plan))
+            if settings.expected_sha256() == plan.dictionary().manifest_digest() =>
+        {
+            Ok(())
+        }
+        _ => Err("lexical configuration and verified plan differ"),
+    }
+}
+
+struct SearchAdapters {
+    semantic: Arc<dyn SemanticSearch>,
+    lexical: Arc<dyn LexicalSearch>,
+    hybrid: Arc<dyn HybridSearch>,
+}
+fn search_adapters(
+    settings: &crate::webhook_worker::WorkerSettings,
+    table: GuardedChunkTable,
+    provider: Arc<dyn EmbeddingProvider>,
+    plan: Option<notion_knowledge_retrieval::chunks::lexical_binding::LexicalCachePlan>,
+) -> Result<SearchAdapters, &'static str> {
+    validate_plan(settings, plan.as_ref())?;
+    if let Some(plan) = plan {
+        let pool = notion_knowledge_retrieval::chunks::bounded::CandidateBudget::new(
+            settings.lexical.as_ref().unwrap().max_requests(),
+        )
+        .map_err(|_| "lexical admission unavailable")?;
+        let search = Arc::new(
+            notion_knowledge_retrieval::lexical_runtime::LexicalSearchRuntime::new(
+                table,
+                provider,
+                plan,
+                pool,
+                std::time::Duration::from_secs(settings.timeout_seconds),
+            )
+            .map_err(|_| "configured lexical retrieval unavailable")?,
+        );
+        return Ok(SearchAdapters {
+            semantic: search.clone(),
+            lexical: search.clone(),
+            hybrid: search,
+        });
+    }
+    Ok(SearchAdapters {
+        semantic: Arc::new(ScopedSearch {
+            table: table.clone(),
+            provider: provider.clone(),
+        }),
+        lexical: Arc::new(ScopedLexical {
+            table: table.clone(),
+        }),
+        hybrid: Arc::new(ScopedHybrid { table, provider }),
+    })
 }
 
 struct ScopedSearch {

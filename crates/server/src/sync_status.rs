@@ -10,6 +10,8 @@ pub struct LocalStatus {
     inbox: Option<(String, String, String)>,
     #[cfg(all(unix, feature = "webhook-worker"))]
     index: Option<(PathBuf, notion_knowledge_retrieval::commit::CommitBinding)>,
+    #[cfg(all(unix, feature = "webhook-worker"))]
+    lexical: Option<crate::lexical_expansion::Settings>,
 }
 impl LocalStatus {
     pub fn from_config(config: &Config) -> Self {
@@ -27,29 +29,38 @@ impl LocalStatus {
             _ => None,
         };
         #[cfg(all(unix, feature = "webhook-worker"))]
-        let index = config
+        let index_settings = config
             .webhook_worker
             .as_ref()
             .or(config.reconciliation_index.as_ref())
-            .zip(config.notion_scope.as_ref())
-            .and_then(|(settings, scope)| {
-                let journal = notion_knowledge_retrieval::planner::production_scope(scope).ok()?;
-                let binding = notion_knowledge_retrieval::commit::CommitBinding::new(
-                    "chunks",
-                    &scope.workspace_id,
-                    &journal,
-                    &scope.generation.to_string(),
-                    scope.generation,
-                )
-                .ok()?;
-                Some((settings.index.clone(), binding))
-            });
+            .or(config.retrieval.as_ref());
+        #[cfg(all(unix, feature = "webhook-worker"))]
+        let lexical = index_settings.and_then(|settings| settings.lexical.clone());
+        #[cfg(all(unix, feature = "webhook-worker"))]
+        let index =
+            index_settings
+                .zip(config.notion_scope.as_ref())
+                .and_then(|(settings, scope)| {
+                    let journal =
+                        notion_knowledge_retrieval::planner::production_scope(scope).ok()?;
+                    let binding = notion_knowledge_retrieval::commit::CommitBinding::new(
+                        "chunks",
+                        &scope.workspace_id,
+                        &journal,
+                        &scope.generation.to_string(),
+                        scope.generation,
+                    )
+                    .ok()?;
+                    Some((settings.index.clone(), binding))
+                });
         Self {
             state: config.webhook_state_file.clone(),
             work: Arc::new(tokio::sync::Semaphore::new(config.mcp_tool_capacity)),
             inbox,
             #[cfg(all(unix, feature = "webhook-worker"))]
             index,
+            #[cfg(all(unix, feature = "webhook-worker"))]
+            lexical,
         }
     }
     async fn inspect(&self) -> SyncStatus {
@@ -90,11 +101,20 @@ impl LocalStatus {
             .flatten()
             {
                 let metadata = notion_knowledge_retrieval::qwen::metadata();
-                let table = notion_knowledge_retrieval::chunks::GuardedChunkTable::bind(
+                let plan = match self
+                    .lexical
+                    .as_ref()
+                    .map(crate::lexical_expansion::Settings::load_plan)
+                    .transpose()
+                {
+                    Ok(plan) => plan,
+                    Err(_) => return result,
+                };
+                let table = crate::index_runtime::bind_cache(
                     &self.index.as_ref().unwrap().0,
-                    "chunks",
                     metadata.clone(),
                     coordinator.clone(),
+                    plan.as_ref(),
                 );
                 if let Ok(table) = table
                     && let Ok(version) = table.inventory_version().await
