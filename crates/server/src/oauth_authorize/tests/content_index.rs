@@ -247,9 +247,30 @@ async fn configured_oauth_lexical_reads_require_native_exact_id_readiness() {
     .unwrap();
     assert_eq!(fs::read(&seeded.state).unwrap(), before);
     table.probe_lexical_cache().await.unwrap();
-    // Keep catalog entries/identity intact while removing only this fixture's
-    // native index payload. Layout validation alone cannot prove usable search.
-    fs::remove_dir_all(seeded.index.join("chunks.lance/_indices")).unwrap();
+    // Keep metadata.lance (used to infer index type) intact, but remove the
+    // pinned Lance format's posting lists from this fixture's native indexes.
+    fn remove_postings(path: &Path) -> usize {
+        fs::read_dir(path)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    remove_postings(&path)
+                } else if path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .ends_with("invert.lance")
+                {
+                    fs::remove_file(path).unwrap();
+                    1
+                } else {
+                    0
+                }
+            })
+            .sum()
+    }
+    assert!(remove_postings(&seeded.index.join("chunks.lance/_indices")) > 0);
     assert!(table.search_snapshot().await.is_ok());
     assert!(table.probe_lexical_cache().await.is_err());
     for writable in [false, true] {

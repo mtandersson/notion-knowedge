@@ -87,9 +87,30 @@ async fn configured_search_reserves_before_model_work_and_releases_on_cancel_or_
         .await
         .is_err()
     );
+    async fn assert_fence_released(index: &std::path::Path) {
+        let fence = std::fs::File::open(index).unwrap();
+        // Parallel libtests spawn children. A fork-before-exec can briefly
+        // inherit the open file description even after our reader drops it.
+        // A retained search guard still fails this bounded acquisition.
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                match fence.try_lock() {
+                    Ok(()) => break,
+                    Err(std::fs::TryLockError::WouldBlock) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    }
+                    Err(error) => panic!("exclusive search fence unavailable: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("cancelled search must promptly release its read fence");
+        fence.unlock().unwrap();
+    }
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     assert!(pool.try_reserve().is_ok());
+    assert_fence_released(&f.index).await;
     let timed = LexicalSearchRuntime::new(
         table,
         provider,
@@ -100,9 +121,7 @@ async fn configured_search_reserves_before_model_work_and_releases_on_cancel_or_
     .unwrap();
     assert!(SemanticSearch::search(&timed, query()).await.is_err());
     assert!(pool.try_reserve().is_ok());
-    let fence = std::fs::File::open(&f.index).unwrap();
-    fence.try_lock().unwrap();
-    fence.unlock().unwrap();
+    assert_fence_released(&f.index).await;
 }
 fn enabled(
     f: &Fixture,
