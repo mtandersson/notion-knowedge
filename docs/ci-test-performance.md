@@ -94,3 +94,37 @@ are recorded in the [delivery PR](https://github.com/mtandersson/notion-knowedge
 before #579 closes. Those results must prove real native execution in the Nix
 runtime and practical budgets; packaging fixtures and this baseline alone do
 not establish a speedup or complete delivery.
+
+## Executable archive compression
+
+Native executable archives use Zstandard level 3 through the pinned Nix Python
+3.14 runtime. The existing `line-tables-only` Rust debug profile is unchanged:
+executables retain filename/line backtraces, symbols and executable contents.
+No stripping or rebuilding occurs when packaging or extracting an archive.
+The [Cargo profile contract](https://doc.rust-lang.org/cargo/reference/profiles.html#debug)
+describes the retained diagnostics, and [Python's archive documentation](https://docs.python.org/3.14/library/tarfile.html)
+describes its Zstandard support. Integrity contracts exercise both codecs in the
+compiler-free Nix shell before the native build proceeds.
+
+Footprints report each suite's executable bytes, archive bytes, codec and
+`pack_seconds` (hashing plus archive creation). Runner reports retain the
+execution-only `seconds` field and add `unpack_seconds` (decompression, extraction
+and digest verification) and `total_seconds` (unpack plus execution and harness
+overhead). GitHub step timestamps supply upload and download durations. These
+measurements do not include compiler setup in test-execution time.
+
+The default for PR and main CI is Zstandard. A trusted manual run can select
+the prior gzip level-1 baseline without changing the source or test inventory:
+
+```sh
+gh workflow run ci.yml --ref <measurement-branch> -f native-artifact-codec=gzip
+gh workflow run ci.yml --ref <measurement-branch> -f native-artifact-codec=zstd
+```
+
+The codec does not affect the Cargo snapshot key or compiler settings. Both
+manual runs use the same required CI jobs and native suites; the input does not
+skip checks or add test lanes. Artifact paths retain their suite and source
+identity, safe extraction and individual file digests. Retention and runtime
+budgets are unchanged. Measured comparison evidence is recorded in
+[PR #592](https://github.com/mtandersson/notion-knowedge/pull/592); until both hosted
+runs finish, this is a candidate compression change, not a measured speedup.

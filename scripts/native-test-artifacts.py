@@ -33,7 +33,10 @@ def relative_file(root, path):
     return path.relative_to(root).as_posix()
 
 
-def pack(root, messages, metadata, revision, output):
+def pack(root, messages, metadata, revision, output, codec='zstd'):
+    modes = {'gzip': ('gz', {'compresslevel': 1}), 'zstd': ('zst', {'level': 3})}
+    require(codec in modes, 'Unsupported archive codec')
+    extension, options = modes[codec]
     root = root.resolve()
     require(metadata['workspace_root'] == str(root), 'Cargo workspace differs')
     require(re.fullmatch('[0-9a-f]{40}', revision), 'Exact source revision required')
@@ -60,12 +63,13 @@ def pack(root, messages, metadata, revision, output):
     output.mkdir(parents=True, exist_ok=True)
     report = {}
     for suite, tests in suites.items():
+        started = time.monotonic()
         require(tests, f'No test executables for {suite}')
         files = sorted(set(tests) | runtime[suite])
         manifest = {'version': 1, 'revision': revision, 'workspace': str(root), 'suite': suite,
                     'tests': dict(sorted(tests.items())), 'files': {p: digest(root / p) for p in files}}
-        archive_path = output / f'{suite}.tar.gz'
-        with tarfile.open(archive_path, 'w:gz', compresslevel=1, dereference=True) as archive:
+        archive_path = output / f'{suite}.tar.{extension}'
+        with tarfile.open(archive_path, f'w:{extension}', dereference=True, **options) as archive:
             data = json.dumps(manifest, sort_keys=True).encode()
             entry = tarfile.TarInfo('manifest.json')
             entry.size = len(data)
@@ -74,14 +78,15 @@ def pack(root, messages, metadata, revision, output):
                 archive.add(root / name, arcname=name, recursive=False)
         report[suite] = {'tests': len(tests), 'runtime_binaries': len(runtime[suite]),
                          'executable_bytes': sum((root / p).stat().st_size for p in files),
-                         'archive_bytes': archive_path.stat().st_size}
+                         'archive_bytes': archive_path.stat().st_size, 'codec': codec,
+                         'pack_seconds': time.monotonic() - started}
     (output / 'footprint.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report, sort_keys=True), flush=True)
 
 
 def unpack(root, archive_path, revision, suite):
     root = root.resolve()
-    with tarfile.open(archive_path, 'r:gz') as archive:
+    with tarfile.open(archive_path, 'r:*') as archive:
         members = archive.getmembers()
         require(len({m.name for m in members}) == len(members), 'Duplicate archive paths')
         header = archive.getmember('manifest.json')
@@ -118,7 +123,9 @@ def unpack(root, archive_path, revision, suite):
 
 
 def run(root, archive, revision, suite, report_path, timeout=180, budget=240):
+    run_started = time.monotonic()
     manifest = unpack(root, archive, revision, suite)
+    unpack_seconds = time.monotonic() - run_started
     results = []
     try:
         for executable, directory in manifest['tests'].items():
@@ -138,7 +145,9 @@ def run(root, archive, revision, suite, report_path, timeout=180, budget=240):
     finally:
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(json.dumps({'suite': suite, 'revision': revision, 'tests': results,
-                                          'seconds': sum(r['seconds'] for r in results)}, indent=2) + '\n')
+                                          'seconds': sum(r['seconds'] for r in results),
+                                          'unpack_seconds': unpack_seconds,
+                                          'total_seconds': time.monotonic() - run_started}, indent=2) + '\n')
     require(sum(r['seconds'] for r in results) <= budget, 'Suite execution budget exceeded')
 
 
@@ -149,6 +158,7 @@ def main():
     build.add_argument('--messages', type=Path, required=True)
     build.add_argument('--metadata', type=Path, required=True)
     build.add_argument('--output', type=Path, required=True)
+    build.add_argument('--codec', choices=('zstd', 'gzip'), default='zstd')
     execute = commands.add_parser('run')
     execute.add_argument('--archive', type=Path, required=True)
     execute.add_argument('--suite', choices=PACKAGES.values(), required=True)
@@ -159,7 +169,7 @@ def main():
     root = Path.cwd().resolve()
     if args.command == 'pack':
         with args.messages.open() as messages:
-            pack(root, messages, json.loads(args.metadata.read_text()), args.revision, args.output)
+            pack(root, messages, json.loads(args.metadata.read_text()), args.revision, args.output, args.codec)
     else:
         run(root, args.archive, args.revision, args.suite, args.report)
 
