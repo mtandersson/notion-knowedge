@@ -1,0 +1,73 @@
+name: Complete lexical quality measurement
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/lexical-quality.yml
+      - scripts/measure-lexical-quality.py
+      - scripts/test-measure-lexical-quality.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lexical-quality-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  measure:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      CARGO_BUILD_JOBS: "2"
+      RAYON_NUM_THREADS: "2"
+      OMP_NUM_THREADS: "2"
+      TOKENIZERS_PARALLELISM: "false"
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Restore existing release Cargo inputs
+        uses: ./.github/actions/cargo-cache-restore
+        with:
+          job: build
+          profile: release
+      - name: Check evidence collection contracts
+        run: python3 scripts/test-measure-lexical-quality.py
+      - name: Build the actual release adapters once
+        run: nix develop .#spike --command cargo build -p notion-knowledge-retrieval --example production-eval --example lexical-asset --features local-qwen,local-lancedb --release --locked
+      - name: Download pinned public assets before offline measurement
+        env:
+          ASSET_DIRECTORY: ${{ runner.temp }}/lexical-quality-assets
+        run: |
+          mkdir -p "$ASSET_DIRECTORY/qwen"
+          for asset in config.json tokenizer.json model.safetensors; do
+            curl --fail --location --retry 3 --output "$ASSET_DIRECTORY/qwen/$asset" "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/resolve/97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3/$asset"
+          done
+          curl --fail --location --retry 3 --output "$ASSET_DIRECTORY/dictionary.tar.xz" https://download.freedict.org/dictionaries/eng-swe/2025.11.23/freedict-eng-swe-2025.11.23.src.tar.xz
+          nix develop .#spike --command target/release/examples/lexical-asset "$ASSET_DIRECTORY/dictionary.tar.xz" "$ASSET_DIRECTORY/lexical.bundle" > "$ASSET_DIRECTORY/bundle-info.json"
+      - name: Measure both complete unchanged corpora and repeat
+        env:
+          NK_LEXICAL_EXPANSION: "true"
+          NK_LEXICAL_ASSET_BUNDLE: ${{ runner.temp }}/lexical-quality-assets/lexical.bundle
+        run: |
+          export NK_LEXICAL_ASSET_SHA256
+          NK_LEXICAL_ASSET_SHA256=$(python3 -c 'import json,os; print(json.load(open(os.path.join(os.environ["RUNNER_TEMP"],"lexical-quality-assets/bundle-info.json")))["sha256"])')
+          nix develop .#spike --command python3 scripts/measure-lexical-quality.py --binary target/release/examples/production-eval --assets "$RUNNER_TEMP/lexical-quality-assets/qwen" --bundle-info "$RUNNER_TEMP/lexical-quality-assets/bundle-info.json" --output dist/lexical-quality
+      - name: Retain complete evidence, including failed attempts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lexical-quality-${{ github.event.pull_request.head.sha || github.sha }}
+          path: dist/lexical-quality
+          if-no-files-found: warn
+          retention-days: 30
