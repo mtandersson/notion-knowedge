@@ -210,7 +210,7 @@ impl IndexRuntime {
             .map_err(|_| "cache reset unavailable")?
             .map_err(|_| "cache reset unavailable")?;
         }
-        let runtime = Self::compose_cache(
+        let runtime = Box::pin(Self::compose_cache(
             settings,
             state,
             scope,
@@ -222,7 +222,7 @@ impl IndexRuntime {
                 options.mode
             },
             options.lexical,
-        )
+        ))
         .await?;
         if rebuild {
             runtime.resync_cache(settings.timeout_seconds).await?;
@@ -336,7 +336,12 @@ impl IndexRuntime {
         provider: Arc<dyn EmbeddingProvider>,
         mode: OpenMode,
     ) -> Result<Self, &'static str> {
-        Self::compose_cache(settings, state, scope, source, provider, mode, None).await
+        // Keep the native composition future out of every caller's stack frame.
+        // Both legacy composition and configured recovery share this boundary.
+        Box::pin(Self::compose_cache(
+            settings, state, scope, source, provider, mode, None,
+        ))
+        .await
     }
 
     async fn compose_cache(
