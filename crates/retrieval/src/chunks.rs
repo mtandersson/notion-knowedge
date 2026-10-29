@@ -347,6 +347,7 @@ impl LanceSemanticSearch {
             .await?
             .into_iter()
             .map(|hit| SearchHit {
+                lexical_matches: Vec::new(),
                 matched_paths: Vec::new(),
                 text: notion_knowledge_core::search::snippet(&hit.text, 2000),
                 // Native distance is lower-is-better for every supported metric.
@@ -900,6 +901,7 @@ impl LanceChunkTable {
                 }
                 let key = (hit.page_id.clone(), hit.chunk_id.clone());
                 let candidate = SearchHit {
+                    lexical_matches: Vec::new(),
                     matched_paths: Vec::new(),
                     text: notion_knowledge_core::search::snippet(&hit.text, 2000),
                     score,

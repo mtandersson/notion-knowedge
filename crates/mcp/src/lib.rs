@@ -740,6 +740,14 @@ impl KnowledgeServer {
                             if let Some(path) = single_path {
                                 hit.matched_paths = vec![path];
                             }
+                            if hit.normalize_lexical_matches().is_err()
+                                || (!hit.lexical_matches.is_empty()
+                                    && !hit.matched_paths.contains(
+                                        &notion_knowledge_core::search::RetrievalPath::Lexical,
+                                    ))
+                            {
+                                return Ok(error("retrieval_unavailable: invalid search evidence"));
+                            }
                             hit.text = notion_knowledge_core::search::snippet(
                                 &hit.text,
                                 self.snippet_chars,
