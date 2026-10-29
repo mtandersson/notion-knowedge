@@ -454,6 +454,238 @@ impl Fixture {
         files
     }
 }
+
+#[tokio::test]
+async fn lexical_cache_rebuild_blocks_reads_and_preserves_external_work() {
+    use notion_knowledge_core::search::{LexicalQuery, LexicalSearch};
+    use notion_knowledge_retrieval::{
+        chunks::{GuardedChunkTable, lexical_binding::LexicalCachePlan},
+        lexical_dictionary::test_fixtures::dictionary,
+    };
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    let existing = f.open(&http, OpenMode::ReadOnly).await;
+    let binding = existing.coordinator.binding().clone();
+    drop(existing);
+    {
+        let db = rusqlite::Connection::open(&f.state).unwrap();
+        db.execute_batch(
+            "CREATE TABLE external_write_ledger(id TEXT PRIMARY KEY, result TEXT);
+             INSERT INTO external_write_ledger VALUES('already-written','done');
+             INSERT INTO webhook_events(event_id) VALUES('already-admitted');",
+        )
+        .unwrap();
+        db.execute("INSERT INTO mutation_refresh(workspace_id,mutation_digest,page_id,state) VALUES(?1,'done-write',?2,2)", [WORKSPACE, PAGE]).unwrap();
+    }
+    let plan = LexicalCachePlan::verified(Arc::new(dictionary(&[("saffron", "saffran")]))).unwrap();
+    http.pause.armed.store(true, Ordering::SeqCst);
+    let source = http.client();
+    let recovery = IndexRuntime::recover_lexical_cache(
+        &f.settings,
+        &f.state,
+        authority(),
+        source,
+        f.provider.clone(),
+        plan.clone(),
+        OpenMode::Initialize,
+    );
+    tokio::pin!(recovery);
+    tokio::select! {
+        result = &mut recovery => panic!("recovery must wait for its authoritative read: {}", result.is_ok()),
+        _ = http.pause.started.notified() => {}
+    }
+    let coordinator = notion_knowledge_retrieval::commit::IndexCommitCoordinator::open_read_only(
+        &f.settings.index,
+        &f.state,
+        binding,
+    )
+    .unwrap();
+    assert!(coordinator.state().cache_rebuild_pending().unwrap());
+    let table = GuardedChunkTable::bind_with_lexical_plan(
+        &f.settings.index,
+        "chunks",
+        f.provider.metadata().clone(),
+        coordinator,
+        plan.identity(),
+    )
+    .unwrap();
+    assert!(
+        table.search_snapshot().await.is_err(),
+        "partially rebuilt content must not be served"
+    );
+    http.pause.proceed.notify_one();
+    let runtime = recovery.await.unwrap();
+    assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
+    assert!(
+        runtime
+            .lexical_plan()
+            .unwrap()
+            .identity()
+            .matches(plan.dictionary())
+    );
+    let snapshot = runtime.chunks().search_snapshot().await.unwrap();
+    for text in ["ravioli", PAGE] {
+        let hits = snapshot
+            .search(LexicalQuery {
+                query: text.into(),
+                limit: 3,
+                page_ids: Some(vec![PAGE.into()]),
+                root_page_ids: Some(vec![ROOT.into()]),
+                metadata: Default::default(),
+            })
+            .await
+            .unwrap();
+        assert!(hits.iter().any(|hit| hit.source.page_id == PAGE));
+    }
+    assert!(
+        !snapshot
+            .vector_query(&[1.0, 0.0, 0.0], 3, 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop(snapshot);
+    drop(runtime);
+    let reads = http.body_reads.load(Ordering::SeqCst);
+    let embeds = f.provider.count.load(Ordering::SeqCst);
+    let before = f.snapshot();
+    let healthy = IndexRuntime::recover_lexical_cache(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+        plan.clone(),
+        OpenMode::ReadOnly,
+    )
+    .await
+    .unwrap();
+    assert_eq!(http.body_reads.load(Ordering::SeqCst), reads);
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), embeds);
+    assert_eq!(
+        f.snapshot(),
+        before,
+        "healthy read-only recovery must not write"
+    );
+    drop(healthy);
+
+    // Metadata damage and cache loss both use the same authoritative resync.
+    for damage in ["missing-binding", "mismatched-plan", "deleted-cache"] {
+        let path = f.settings.index.join(".nk-lexical-binding-v1.json");
+        match damage {
+            "missing-binding" => fs::remove_file(path).unwrap(),
+            "mismatched-plan" => {
+                use notion_knowledge_retrieval::chunks::lexical_binding::LexicalIndexBinding;
+                let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                value["plan"]["asset_sha256"] = json!("a".repeat(64));
+                let changed: LexicalIndexBinding = serde_json::from_value(value).unwrap();
+                fs::write(path, changed.canonical_bytes().unwrap()).unwrap();
+            }
+            _ => fs::remove_dir_all(&f.settings.index).unwrap(),
+        }
+        let reads = http.body_reads.load(Ordering::SeqCst);
+        let recovered = IndexRuntime::recover_lexical_cache(
+            &f.settings,
+            &f.state,
+            authority(),
+            http.client(),
+            f.provider.clone(),
+            plan.clone(),
+            OpenMode::ReadOnly,
+        )
+        .await
+        .unwrap();
+        assert!(http.body_reads.load(Ordering::SeqCst) > reads, "{damage}");
+        assert!(
+            !recovered
+                .chunks()
+                .page_chunks(PAGE)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(recovered.chunks().search_snapshot().await.is_ok());
+    }
+    let db = rusqlite::Connection::open(&f.state).unwrap();
+    for (query, expected) in [
+        ("SELECT result FROM external_write_ledger", "done"),
+        ("SELECT event_id FROM webhook_events", "already-admitted"),
+        ("SELECT mutation_digest FROM mutation_refresh", "done-write"),
+    ] {
+        assert_eq!(
+            db.query_row(query, [], |r| r.get::<_, String>(0)).unwrap(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn lexical_cache_failed_resync_remains_unavailable_and_retries_current_scope() {
+    use notion_knowledge_retrieval::{
+        chunks::lexical_binding::LexicalCachePlan, lexical_dictionary::test_fixtures::dictionary,
+    };
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    let plan = LexicalCachePlan::verified(Arc::new(dictionary(&[("saffron", "saffran")]))).unwrap();
+    f.provider.fail.store(true, Ordering::SeqCst);
+    assert!(
+        IndexRuntime::recover_lexical_cache(
+            &f.settings,
+            &f.state,
+            authority(),
+            http.client(),
+            f.provider.clone(),
+            plan.clone(),
+            OpenMode::Initialize,
+        )
+        .await
+        .is_err()
+    );
+    let state =
+        notion_knowledge_retrieval::sync_state::SqliteSyncStateStore::open_read_only(&f.state)
+            .unwrap();
+    assert!(state.cache_rebuild_pending().unwrap());
+    drop(state);
+    f.provider.fail.store(false, Ordering::SeqCst);
+    let recovered = IndexRuntime::recover_lexical_cache(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+        plan,
+        OpenMode::Initialize,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !recovered
+            .chunks()
+            .page_chunks(PAGE)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop(recovered);
+    let mut scope = authority();
+    scope.exclusions.page_ids.insert(PAGE.into());
+    let changed =
+        LexicalCachePlan::verified(Arc::new(dictionary(&[("cinnamon", "kanel")]))).unwrap();
+    let scoped = IndexRuntime::recover_lexical_cache(
+        &f.settings,
+        &f.state,
+        scope,
+        http.client(),
+        f.provider.clone(),
+        changed,
+        OpenMode::ReadOnly,
+    )
+    .await
+    .unwrap();
+    assert!(scoped.chunks().page_chunks(PAGE).await.unwrap().is_empty());
+    assert!(!scoped.coordinator.state().cache_rebuild_pending().unwrap());
+    assert!(scoped.chunks().search_snapshot().await.is_ok());
+}
 fn counts(out: &Output, changed: u64, deleted: u64, unchanged: u64) {
     assert_eq!(out.exit, 0, "{:?}", out.json);
     assert_eq!(out.json["changed"], changed);

@@ -144,7 +144,7 @@ impl GuardedChunkTable {
         Self::bind_inner(directory.as_ref(), table_name, embedding, coordinator, None)
     }
 
-    /// Require the offline-installed exact plan. Never stamps missing metadata.
+    /// Require the configured exact plan. Reads never stamp missing metadata.
     pub fn bind_with_lexical_plan(
         directory: impl AsRef<Path>,
         table_name: &str,
@@ -160,6 +160,61 @@ impl GuardedChunkTable {
             Some(plan),
         )
     }
+    /// Initialize only a fresh cache. Existing rows or binding metadata require
+    /// reset and authoritative resync; this never relabels an existing table.
+    pub async fn create_fresh_lexical(
+        directory: impl AsRef<Path>,
+        table_name: &str,
+        embedding: EmbeddingMetadata,
+        coordinator: Arc<IndexCommitCoordinator>,
+        plan: &LexicalPlanIdentity,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Result<Self, ChunkTableError> {
+        let raw = Self::bind(directory, table_name, embedding, coordinator.clone())?;
+        let directory = raw.index_directory.clone();
+        let name = raw.table_name.clone();
+        let metadata = raw.embedding.clone();
+        let identity = plan.clone();
+        coordinator
+            .maintain(lease, clock, move |context| async move {
+                context.revalidate().map_err(fence_failure)?;
+                lexical_binding::verify(&directory, &None).map_err(failure)?;
+                match std::fs::symlink_metadata(directory.join(format!("{name}.lance"))) {
+                    Ok(_) => return Err(FailureClass::Conflict),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => return Err(FailureClass::Index),
+                }
+                let table = LanceChunkTable::create(&directory, &name, metadata.clone())
+                    .await
+                    .map_err(failure)?;
+                table
+                    .rebuild_fts_index(&FtsIndexConfig::lexical_expansion_v1())
+                    .await
+                    .map_err(failure)?;
+                context.revalidate().map_err(fence_failure)?;
+                let binding = lexical_binding::LexicalIndexBinding::for_cache(
+                    &directory,
+                    metadata,
+                    context.binding(),
+                    identity,
+                )
+                .map_err(failure)?;
+                lexical_binding::write_fresh(&directory, &binding).map_err(failure)?;
+                context.revalidate().map_err(fence_failure)?;
+                Ok(())
+            })
+            .await
+            .map_err(|_| ChunkTableError::InvalidPath)?;
+        Self::bind_with_lexical_plan(
+            &raw.index_directory,
+            &raw.table_name,
+            raw.embedding,
+            coordinator,
+            plan,
+        )
+    }
+
     fn bind_inner(
         directory: &Path,
         table_name: &str,
@@ -355,6 +410,59 @@ impl GuardedChunkTable {
             .map_err(|_| ChunkTableError::InvalidPath)?;
         self.open_search_snapshot().await
     }
+    /// Inspect search layout without admitting content while rebuild is pending.
+    pub async fn verify_search_indexes(&self) -> Result<(), ChunkTableError> {
+        let _guard = self
+            .coordinator
+            .index_read_guard()
+            .map_err(|_| ChunkTableError::InvalidPath)?;
+        self.open_search_snapshot().await?;
+        Ok(())
+    }
+
+    /// Readiness probes stay inside the startup boundary and expose no content.
+    /// A real cached page ID must be found through the native exact-ID profile.
+    pub async fn probe_lexical_cache(&self) -> Result<(), ChunkTableError> {
+        let _guard = self
+            .coordinator
+            .index_read_guard()
+            .map_err(|_| ChunkTableError::InvalidPath)?;
+        let snapshot = self.open_search_snapshot().await?;
+        let mut stream = snapshot
+            .table
+            .query()
+            .select(Select::columns(&["page_id"]))
+            .limit(1)
+            .execute()
+            .await?;
+        let Some(batch) = stream.try_next().await? else {
+            return Ok(());
+        };
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| ChunkTableError::InvalidSchema("invalid page identity column".into()))?;
+        let id = ids.value(0).to_owned();
+        let query = LexicalQuery {
+            query: id.clone(),
+            limit: 1,
+            page_ids: Some(vec![id.clone()]),
+            root_page_ids: None,
+            metadata: Default::default(),
+        };
+        let hits = snapshot.lexical_search(query).await?;
+        if !hits.iter().any(|hit| hit.source.page_id == id) {
+            return Err(ChunkTableError::InvalidSchema(
+                "exact-ID readiness probe failed".into(),
+            ));
+        }
+        Ok(())
+    }
+
     async fn open_search_snapshot(&self) -> Result<LanceChunkTable, ChunkTableError> {
         let current = open_current(
             &self.index_directory,
