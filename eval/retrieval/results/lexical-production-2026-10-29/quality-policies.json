@@ -1,0 +1,72 @@
+{
+  "personal": {
+    "g1": {
+      "checks": {
+        "recall_at_5": true,
+        "mrr": false,
+        "ndcg_at_5": false,
+        "exact_name_top3": true
+      },
+      "passed": false
+    },
+    "cutover_offline": {
+      "checks": {
+        "fts": {
+          "recall_at_5": false,
+          "mrr": false,
+          "ndcg_at_5": false,
+          "language_recall_at_5": false,
+          "category_recall_at_5": false
+        },
+        "hybrid": {
+          "recall_at_5": false,
+          "mrr": false,
+          "ndcg_at_5": false,
+          "language_recall_at_5": false,
+          "category_recall_at_5": false
+        }
+      },
+      "exact_name_top3": {
+        "fts": true,
+        "hybrid": true
+      },
+      "passed": false
+    },
+    "live_pilot_and_cutover": "unmeasured; offline results cannot establish acceptance"
+  },
+  "exact": {
+    "g1": {
+      "checks": {
+        "recall_at_5": true,
+        "mrr": true,
+        "ndcg_at_5": true,
+        "exact_name_top3": true
+      },
+      "passed": true
+    },
+    "cutover_offline": {
+      "checks": {
+        "fts": {
+          "recall_at_5": true,
+          "mrr": true,
+          "ndcg_at_5": true,
+          "language_recall_at_5": true,
+          "category_recall_at_5": true
+        },
+        "hybrid": {
+          "recall_at_5": true,
+          "mrr": true,
+          "ndcg_at_5": true,
+          "language_recall_at_5": true,
+          "category_recall_at_5": true
+        }
+      },
+      "exact_name_top3": {
+        "fts": true,
+        "hybrid": true
+      },
+      "passed": true
+    },
+    "live_pilot_and_cutover": "unmeasured; offline results cannot establish acceptance"
+  }
+}

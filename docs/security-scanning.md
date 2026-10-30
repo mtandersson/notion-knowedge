@@ -68,8 +68,11 @@ A confirmed synthetic false positive can be suppressed with its exact
 with why it cannot authenticate, the tracking issue, owner and review date.
 This suppresses that historical occurrence only; a later copy or another rule
 still fails. Do not exclude entire paths, commits or rules. Inline
-`gitleaks:allow` comments are deliberately ignored by the gate. There are
-currently no secret-scanner exceptions. Review changes to scanners, their
+`gitleaks:allow` comments are deliberately ignored by the gate. The only historical secret-scanner exception is the exact #493 occurrence of
+the public Qwen tokenizer SHA256 in a measurement record. It equals the pinned
+provider asset digest and cannot authenticate. New records use explicit
+file/digest entries and pass the complete ruleset. The exception does not cover
+a later copy, another file, another commit or another rule. Review changes to scanners, their
 configuration and exception lists as changes to the security policy.
 
 ## Verify the gates

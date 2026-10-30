@@ -1,0 +1,135 @@
+{
+  "as_of": "2026-03-02",
+  "configuration": {
+    "distance": "Cosine",
+    "fts": "production lexical-expansion-v1 positional body/title and raw identifier profile",
+    "lexical": {
+      "adapter": "notion_knowledge_retrieval::lexical_runtime::LexicalSearchRuntime",
+      "admission": 1,
+      "candidate_bytes": 100663296,
+      "candidate_rows": 8000,
+      "compiler": "rustc 1.98.1 (48a229cea 2026-09-01);binary: rustc;commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985;commit-date: 2026-09-01;host: x86_64-unknown-linux-gnu;release: 1.98.1;LLVM version: 22.1.8;",
+      "coverage": "bounded native candidates; not an exhaustive corpus scan",
+      "deadline_seconds": 60,
+      "plan": {
+        "asset_sha256": "15cb13f8c730598103361c6bd3aae240ce61e1d63fd83f9322b116f7f4f40df7",
+        "embedding_text_contract": "canonical-indexed-chunk-v1;embedding-input=chunk.text;unchanged-vector-space",
+        "executor_sha256": "e8fb0903f0105d467b777aa74037c1e22ca9e150d15b41010937ba252c0d1ab2",
+        "importer_sha256": "ad68694720ed1e3f19d25b242b500a3371a8c6e54b4c328ba2ecb3e598c1290c",
+        "lock_sha256": "cc0a537d23ebf163be0a986abc5916231fea47f37b44d3ef4076bfe1f208a2a8"
+      },
+      "plan_sha256": "921a113c8bc03c4b771eea64d9019f5d55a5f544465b984de4fdc849981a2b8b",
+      "source_revision": "65dd30c52e7486902c39632dad8c650b49f7f27e"
+    },
+    "max_iterations": 20,
+    "nprobes": 1,
+    "partitions": 1,
+    "rrf": {
+      "candidate_limit": 100,
+      "lexical_weight": 1,
+      "rank_constant": 60,
+      "semantic_weight": 1
+    },
+    "sample_rate": 8,
+    "vector": "IVF_FLAT"
+  },
+  "corpus_sha256": "dfe4206d18b61b10b58e3dae7cd021729912ac9e2d2ff3b05570d57b3729f174",
+  "dataset_id": "personal-knowledge-fixtures-v1",
+  "model": {
+    "dimension": 1024,
+    "model_id": "Qwen/Qwen3-Embedding-0.6B",
+    "model_version": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3:fastembed7.1.0:candle0.11.0:tokenizers0.23.2:last-token:left-padding:l2:exact-text:untruncated-v1",
+    "provider_id": "local-fastembed-candle-cpu-f32",
+    "schema_version": "1"
+  },
+  "preprocessing": "raw unchanged chunk.text, no title/status/date prefix and no query instruction",
+  "root_page_id": "22222222-2222-2222-2222-222222222222",
+  "schema_version": 1,
+  "sources": {
+    "fixture:chunk:bike-old:service": {
+      "chunk_id": "48359b1a01acc382baa35c82556eebb57bfe451ec7c0340d551684aeabfdc585",
+      "indexed_last_edited_time": "2025-02-12T00:00:00Z",
+      "page_id": "f447f0e5-cff8-c91b-21e5-6159f5c47dc0",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    },
+    "fixture:chunk:bike:service": {
+      "chunk_id": "060c93e04ad228ef0325d565988726ee8032b49ce93bbfbce4a3c3030f1fb573",
+      "indexed_last_edited_time": "2026-02-12T00:00:00Z",
+      "page_id": "2195b03c-d08c-9229-9e20-226bcc90a885",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    },
+    "fixture:chunk:energy-decision:decision": {
+      "chunk_id": "cf32c8f0e98e6ebc181555a164fbf64d5abdd5bc893bd4bf0471928b99529c5a",
+      "indexed_last_edited_time": "2026-02-10T00:00:00Z",
+      "page_id": "99b4270e-b51a-646c-374a-bb42f43c6054",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    },
+    "fixture:chunk:garden-old:plan": {
+      "chunk_id": "cfb43c73607ebf8bd6011dcb5e8a8534462f8828d1516b7ee9cedf547593b92e",
+      "indexed_last_edited_time": "2025-08-30T00:00:00Z",
+      "page_id": "6848bf7c-b14d-a35d-b338-95b96bd5f6b8",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    },
+    "fixture:chunk:lighthouse-review:notes": {
+      "chunk_id": "46efb7592f4232f17442ba43ab524a881c588ba83ca531b8da3c90fca0307733",
+      "indexed_last_edited_time": "2026-02-18T00:00:00Z",
+      "page_id": "f69aa94f-7991-8ac3-e981-afeed63e53d5",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    },
+    "fixture:chunk:odling-review:notes": {
+      "chunk_id": "df43f9943ad091a0ee8a53048a42b80375f9df4cd9883e2afd68a7f6456b5ae5",
+      "indexed_last_edited_time": "2026-03-02T00:00:00Z",
+      "page_id": "cf7eb121-9a4f-9f68-b430-dea6c3801072",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    },
+    "fixture:chunk:odling:plan": {
+      "chunk_id": "791f7c6bc519ccb53f33177df39afdde3d14385d1737d9c33b05a139935983ce",
+      "indexed_last_edited_time": "2026-03-02T00:00:00Z",
+      "page_id": "c670c18a-7c71-52e2-7b32-8672e6336e16",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    },
+    "fixture:chunk:odling:watering": {
+      "chunk_id": "b38b8bde03c6c0df72c797d2348f8b5ad6ba7dae5f5b3f4dd55aaf748bd1e478",
+      "indexed_last_edited_time": "2026-03-02T00:00:00Z",
+      "page_id": "c670c18a-7c71-52e2-7b32-8672e6336e16",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    },
+    "fixture:chunk:project-lighthouse-old:overview": {
+      "chunk_id": "7d6571da1cd4b2e874e8c9d409c0e37f5216a190f2de4fef7bd819f72c8c6056",
+      "indexed_last_edited_time": "2025-11-15T00:00:00Z",
+      "page_id": "28870818-9e1f-8831-e16c-3b6f68a41c89",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    },
+    "fixture:chunk:project-lighthouse:decision": {
+      "chunk_id": "c82e394481ce411aaa7fc33ad785812556b5ea1f71f1fb3a551b1da2119a8176",
+      "indexed_last_edited_time": "2026-02-18T00:00:00Z",
+      "page_id": "307bc1bb-e76a-85a3-cf84-1a68e7af7032",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    },
+    "fixture:chunk:project-lighthouse:overview": {
+      "chunk_id": "d2bda5c1dba6bcf6a69821ab4681ae2135a5a00b8060fc00f76a06a3141a89b7",
+      "indexed_last_edited_time": "2026-02-18T00:00:00Z",
+      "page_id": "307bc1bb-e76a-85a3-cf84-1a68e7af7032",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    },
+    "fixture:chunk:reading:queue": {
+      "chunk_id": "a5a19686c9d57ada3df24a9f23cbd70b35bebb73ae5fdc5c0f64c8eb3efb51b8",
+      "indexed_last_edited_time": "2026-01-20T00:00:00Z",
+      "page_id": "515e896e-6ad3-8110-8b73-154d6cdfae88",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    },
+    "fixture:chunk:study:routine": {
+      "chunk_id": "db1aa377eb86be5a686e4e04e5d6cd4337df91f68fe1a0ae52a2ecc0c76b8b38",
+      "indexed_last_edited_time": "2026-01-22T00:00:00Z",
+      "page_id": "560b55ea-7621-7f56-abb4-91a926775f1a",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    },
+    "fixture:chunk:travel:list": {
+      "chunk_id": "6315a1638801c5c4ba04ff53d864f074c8aba8c2e56370aaf44bd6bc49905bc9",
+      "indexed_last_edited_time": "2026-02-01T00:00:00Z",
+      "page_id": "21b8354b-3dca-2b20-c6c9-b4e81dad2caf",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    }
+  },
+  "workspace_id": "44444444-4444-4444-4444-444444444444"
+}

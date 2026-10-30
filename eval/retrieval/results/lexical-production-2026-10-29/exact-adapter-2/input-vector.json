@@ -1,0 +1,170 @@
+{
+  "as_of": "2026-10-01",
+  "dataset_id": "exact-identifiers-fictional-v1",
+  "mode": "vector",
+  "pages": [
+    {
+      "chunks": [
+        {
+          "id": "fixture:chunk:order-good:record",
+          "text": "Invoice ORD7241B records delivery of the repaired monitor to the studio."
+        }
+      ],
+      "id": "fixture:page:order-good",
+      "language": "en",
+      "links": [],
+      "status": "active",
+      "title": "Order ORD7241B",
+      "updated_at": "2026-10-01"
+    },
+    {
+      "chunks": [
+        {
+          "id": "fixture:chunk:order-near:record",
+          "text": "Invoice ORD7241C records delivery of the replacement cable, not the monitor."
+        }
+      ],
+      "id": "fixture:page:order-near",
+      "language": "en",
+      "links": [],
+      "status": "archived",
+      "title": "Order ORD7241C",
+      "updated_at": "2026-10-01"
+    },
+    {
+      "chunks": [
+        {
+          "id": "fixture:chunk:issue-good:record",
+          "text": "ISSUE-7B42 tracks the completed backup integrity investigation."
+        }
+      ],
+      "id": "fixture:page:issue-good",
+      "language": "en",
+      "links": [],
+      "status": "active",
+      "title": "Issue ISSUE-7B42",
+      "updated_at": "2026-10-01"
+    },
+    {
+      "chunks": [
+        {
+          "id": "fixture:chunk:issue-near:record",
+          "text": "ISSUE-7B43 tracks an unrelated backup dashboard layout correction."
+        }
+      ],
+      "id": "fixture:page:issue-near",
+      "language": "en",
+      "links": [],
+      "status": "active",
+      "title": "Issue ISSUE-7B43",
+      "updated_at": "2026-10-01"
+    },
+    {
+      "chunks": [
+        {
+          "id": "fixture:chunk:name-good:record",
+          "text": "Elin Åberg is the contact for the fictional library return."
+        }
+      ],
+      "id": "fixture:page:name-good",
+      "language": "en",
+      "links": [],
+      "status": "active",
+      "title": "Elin Åberg",
+      "updated_at": "2026-10-01"
+    },
+    {
+      "chunks": [
+        {
+          "id": "fixture:chunk:name-near:record",
+          "text": "Elin Ågren is the contact for the fictional loan request."
+        }
+      ],
+      "id": "fixture:page:name-near",
+      "language": "en",
+      "links": [],
+      "status": "active",
+      "title": "Elin Ågren",
+      "updated_at": "2026-10-01"
+    },
+    {
+      "chunks": [
+        {
+          "id": "fixture:chunk:mixed-good:record",
+          "text": "Asset AbC731x is the calibrated sensor assigned to testing."
+        }
+      ],
+      "id": "fixture:page:mixed-good",
+      "language": "en",
+      "links": [],
+      "status": "active",
+      "title": "Device AbC731x",
+      "updated_at": "2026-10-01"
+    },
+    {
+      "chunks": [
+        {
+          "id": "fixture:chunk:mixed-near:record",
+          "text": "Asset AbC731y is a different sensor and has not been calibrated."
+        }
+      ],
+      "id": "fixture:page:mixed-near",
+      "language": "en",
+      "links": [],
+      "status": "active",
+      "title": "Device AbC731y",
+      "updated_at": "2026-10-01"
+    }
+  ],
+  "queries": [
+    {
+      "category": "exact_name",
+      "id": "order-en",
+      "language": "en",
+      "text": "Find the record for order ORD7241B."
+    },
+    {
+      "category": "exact_name",
+      "id": "order-sv",
+      "language": "sv",
+      "text": "Hitta posten för order ORD7241B."
+    },
+    {
+      "category": "exact_name",
+      "id": "issue-en",
+      "language": "en",
+      "text": "Find issue ISSUE-7B42."
+    },
+    {
+      "category": "exact_name",
+      "id": "issue-sv",
+      "language": "sv",
+      "text": "Hitta ärende ISSUE-7B42."
+    },
+    {
+      "category": "exact_name",
+      "id": "name-en",
+      "language": "en",
+      "text": "Find the contact Elin Åberg."
+    },
+    {
+      "category": "exact_name",
+      "id": "name-sv",
+      "language": "sv",
+      "text": "Hitta kontakten Elin Åberg."
+    },
+    {
+      "category": "exact_name",
+      "id": "mixed-en",
+      "language": "en",
+      "text": "Find asset AbC731x."
+    },
+    {
+      "category": "exact_name",
+      "id": "mixed-sv",
+      "language": "sv",
+      "text": "Hitta enheten abc731X."
+    }
+  ],
+  "top_k": 10
+}

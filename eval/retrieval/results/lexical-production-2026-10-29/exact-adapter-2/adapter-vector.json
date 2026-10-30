@@ -1,0 +1,592 @@
+{
+  "candidate_coverage": {
+    "adapter": "notion_knowledge_retrieval::lexical_runtime::LexicalSearchRuntime",
+    "admission": 1,
+    "candidate_bytes": 100663296,
+    "candidate_rows": 8000,
+    "compiler": "rustc 1.98.1 (48a229cea 2026-09-01);binary: rustc;commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985;commit-date: 2026-09-01;host: x86_64-unknown-linux-gnu;release: 1.98.1;LLVM version: 22.1.8;",
+    "coverage": "bounded native candidates; not an exhaustive corpus scan",
+    "deadline_seconds": 60,
+    "plan": {
+      "asset_sha256": "15cb13f8c730598103361c6bd3aae240ce61e1d63fd83f9322b116f7f4f40df7",
+      "embedding_text_contract": "canonical-indexed-chunk-v1;embedding-input=chunk.text;unchanged-vector-space",
+      "executor_sha256": "e8fb0903f0105d467b777aa74037c1e22ca9e150d15b41010937ba252c0d1ab2",
+      "importer_sha256": "ad68694720ed1e3f19d25b242b500a3371a8c6e54b4c328ba2ecb3e598c1290c",
+      "lock_sha256": "cc0a537d23ebf163be0a986abc5916231fea47f37b44d3ef4076bfe1f208a2a8"
+    },
+    "plan_sha256": "921a113c8bc03c4b771eea64d9019f5d55a5f544465b984de4fdc849981a2b8b",
+    "source_revision": "65dd30c52e7486902c39632dad8c650b49f7f27e"
+  },
+  "dataset_id": "exact-identifiers-fictional-v1",
+  "index_signature": "15562078eefc0f325426ee9197de391150290748233686b4666b37c31c343867",
+  "input_sha256": "4a2255e6cf41d62cc51b44f8317a0ca771ffcf20ab785da6642cae21e22f0545",
+  "lexical_identity": {
+    "device": 2049,
+    "embedding": {
+      "dimension": 1024,
+      "model_id": "Qwen/Qwen3-Embedding-0.6B",
+      "model_version": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3:fastembed7.1.0:candle0.11.0:tokenizers0.23.2:last-token:left-padding:l2:exact-text:untruncated-v1",
+      "provider_id": "local-fastembed-candle-cpu-f32",
+      "schema_version": "1"
+    },
+    "epoch": 1,
+    "generation": "1",
+    "inode": 9699809,
+    "plan": {
+      "asset_sha256": "15cb13f8c730598103361c6bd3aae240ce61e1d63fd83f9322b116f7f4f40df7",
+      "embedding_text_contract": "canonical-indexed-chunk-v1;embedding-input=chunk.text;unchanged-vector-space",
+      "executor_sha256": "e8fb0903f0105d467b777aa74037c1e22ca9e150d15b41010937ba252c0d1ab2",
+      "importer_sha256": "ad68694720ed1e3f19d25b242b500a3371a8c6e54b4c328ba2ecb3e598c1290c",
+      "lock_sha256": "cc0a537d23ebf163be0a986abc5916231fea47f37b44d3ef4076bfe1f208a2a8"
+    },
+    "roots": [
+      "22222222-2222-2222-2222-222222222222"
+    ],
+    "scope": "9c02b55e2b8dd421e96d35f6bf25b8c55d437b0498943ae5730182e30a684061",
+    "storage": {
+      "backend": "lancedb=0.39.0;lance=12.0.0",
+      "canonical_schema": "1",
+      "fields": [
+        [
+          "chunks_fts_text_v1",
+          "text"
+        ],
+        [
+          "chunks_fts_title_v1",
+          "title"
+        ],
+        [
+          "chunks_fts_page_id_v1",
+          "page_id"
+        ],
+        [
+          "chunks_fts_chunk_id_v1",
+          "chunk_id"
+        ]
+      ],
+      "implementation_sha256": "b6bd1af2dcb4278d89812567baf547ccc2717e0afaaa93f07991a62412196e2a",
+      "profile": {
+        "ascii_folding": false,
+        "block_size": 128,
+        "language": "Swedish",
+        "remove_stop_words": true,
+        "stem": true,
+        "with_positions": true
+      },
+      "raw_identifier_profile": "raw;case-sensitive;no-stem;no-stopwords;no-ascii-folding",
+      "schema": "1"
+    },
+    "table": "chunks",
+    "version": 2,
+    "workspace": "44444444-4444-4444-4444-444444444444"
+  },
+  "mode": "vector",
+  "result_limit": 10,
+  "results": [
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.36234110593795776,
+          "source_id": "fixture:chunk:order-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.37691032886505127,
+          "source_id": "fixture:chunk:order-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.4569820761680603,
+          "source_id": "fixture:chunk:issue-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.4733508825302124,
+          "source_id": "fixture:chunk:mixed-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.4914122223854065,
+          "source_id": "fixture:chunk:issue-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5079097747802734,
+          "source_id": "fixture:chunk:mixed-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6476792097091675,
+          "source_id": "fixture:chunk:name-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6651239395141602,
+          "source_id": "fixture:chunk:name-good:record"
+        }
+      ],
+      "query_id": "order-en",
+      "ranked_source_ids": [
+        "fixture:chunk:order-good:record",
+        "fixture:chunk:order-near:record",
+        "fixture:chunk:issue-good:record",
+        "fixture:chunk:mixed-good:record",
+        "fixture:chunk:issue-near:record",
+        "fixture:chunk:mixed-near:record",
+        "fixture:chunk:name-near:record",
+        "fixture:chunk:name-good:record"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.4964463710784912,
+          "source_id": "fixture:chunk:order-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5041508674621582,
+          "source_id": "fixture:chunk:order-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5579769015312195,
+          "source_id": "fixture:chunk:mixed-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5757040977478027,
+          "source_id": "fixture:chunk:issue-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5870994329452515,
+          "source_id": "fixture:chunk:issue-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5883485078811646,
+          "source_id": "fixture:chunk:mixed-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6974023580551147,
+          "source_id": "fixture:chunk:name-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7260468006134033,
+          "source_id": "fixture:chunk:name-good:record"
+        }
+      ],
+      "query_id": "order-sv",
+      "ranked_source_ids": [
+        "fixture:chunk:order-near:record",
+        "fixture:chunk:order-good:record",
+        "fixture:chunk:mixed-good:record",
+        "fixture:chunk:issue-good:record",
+        "fixture:chunk:issue-near:record",
+        "fixture:chunk:mixed-near:record",
+        "fixture:chunk:name-near:record",
+        "fixture:chunk:name-good:record"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.24479103088378906,
+          "source_id": "fixture:chunk:issue-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.2616734504699707,
+          "source_id": "fixture:chunk:issue-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.4509330987930298,
+          "source_id": "fixture:chunk:mixed-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.4873613715171814,
+          "source_id": "fixture:chunk:order-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.4921673536300659,
+          "source_id": "fixture:chunk:mixed-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5029212236404419,
+          "source_id": "fixture:chunk:order-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.662803590297699,
+          "source_id": "fixture:chunk:name-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7085696458816528,
+          "source_id": "fixture:chunk:name-good:record"
+        }
+      ],
+      "query_id": "issue-en",
+      "ranked_source_ids": [
+        "fixture:chunk:issue-good:record",
+        "fixture:chunk:issue-near:record",
+        "fixture:chunk:mixed-near:record",
+        "fixture:chunk:order-near:record",
+        "fixture:chunk:mixed-good:record",
+        "fixture:chunk:order-good:record",
+        "fixture:chunk:name-near:record",
+        "fixture:chunk:name-good:record"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.3119075298309326,
+          "source_id": "fixture:chunk:issue-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.38572919368743896,
+          "source_id": "fixture:chunk:issue-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.4950326085090637,
+          "source_id": "fixture:chunk:mixed-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.4994625449180603,
+          "source_id": "fixture:chunk:mixed-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5215535163879395,
+          "source_id": "fixture:chunk:order-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5665372610092163,
+          "source_id": "fixture:chunk:order-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.657685399055481,
+          "source_id": "fixture:chunk:name-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6835443377494812,
+          "source_id": "fixture:chunk:name-good:record"
+        }
+      ],
+      "query_id": "issue-sv",
+      "ranked_source_ids": [
+        "fixture:chunk:issue-good:record",
+        "fixture:chunk:issue-near:record",
+        "fixture:chunk:mixed-near:record",
+        "fixture:chunk:mixed-good:record",
+        "fixture:chunk:order-near:record",
+        "fixture:chunk:order-good:record",
+        "fixture:chunk:name-near:record",
+        "fixture:chunk:name-good:record"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.30974000692367554,
+          "source_id": "fixture:chunk:name-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.3147714138031006,
+          "source_id": "fixture:chunk:name-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5185893774032593,
+          "source_id": "fixture:chunk:mixed-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5325956344604492,
+          "source_id": "fixture:chunk:mixed-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5488954782485962,
+          "source_id": "fixture:chunk:order-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5603908896446228,
+          "source_id": "fixture:chunk:order-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6256778836250305,
+          "source_id": "fixture:chunk:issue-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6345111131668091,
+          "source_id": "fixture:chunk:issue-near:record"
+        }
+      ],
+      "query_id": "name-en",
+      "ranked_source_ids": [
+        "fixture:chunk:name-near:record",
+        "fixture:chunk:name-good:record",
+        "fixture:chunk:mixed-good:record",
+        "fixture:chunk:mixed-near:record",
+        "fixture:chunk:order-near:record",
+        "fixture:chunk:order-good:record",
+        "fixture:chunk:issue-good:record",
+        "fixture:chunk:issue-near:record"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.3783944845199585,
+          "source_id": "fixture:chunk:name-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.43270862102508545,
+          "source_id": "fixture:chunk:name-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7270476818084717,
+          "source_id": "fixture:chunk:mixed-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7364323139190674,
+          "source_id": "fixture:chunk:mixed-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.8041812777519226,
+          "source_id": "fixture:chunk:order-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.8307798504829407,
+          "source_id": "fixture:chunk:issue-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.8321581482887268,
+          "source_id": "fixture:chunk:issue-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.8400319814682007,
+          "source_id": "fixture:chunk:order-good:record"
+        }
+      ],
+      "query_id": "name-sv",
+      "ranked_source_ids": [
+        "fixture:chunk:name-good:record",
+        "fixture:chunk:name-near:record",
+        "fixture:chunk:mixed-good:record",
+        "fixture:chunk:mixed-near:record",
+        "fixture:chunk:order-near:record",
+        "fixture:chunk:issue-near:record",
+        "fixture:chunk:issue-good:record",
+        "fixture:chunk:order-good:record"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.19212067127227783,
+          "source_id": "fixture:chunk:mixed-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.319749653339386,
+          "source_id": "fixture:chunk:mixed-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.485873818397522,
+          "source_id": "fixture:chunk:order-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5143544673919678,
+          "source_id": "fixture:chunk:order-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5246267318725586,
+          "source_id": "fixture:chunk:issue-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5527135133743286,
+          "source_id": "fixture:chunk:issue-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6132537126541138,
+          "source_id": "fixture:chunk:name-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6142287850379944,
+          "source_id": "fixture:chunk:name-near:record"
+        }
+      ],
+      "query_id": "mixed-en",
+      "ranked_source_ids": [
+        "fixture:chunk:mixed-good:record",
+        "fixture:chunk:mixed-near:record",
+        "fixture:chunk:order-near:record",
+        "fixture:chunk:order-good:record",
+        "fixture:chunk:issue-good:record",
+        "fixture:chunk:issue-near:record",
+        "fixture:chunk:name-good:record",
+        "fixture:chunk:name-near:record"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.25434595346450806,
+          "source_id": "fixture:chunk:mixed-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.4067925810813904,
+          "source_id": "fixture:chunk:mixed-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5604203939437866,
+          "source_id": "fixture:chunk:order-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6093356609344482,
+          "source_id": "fixture:chunk:order-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6110039949417114,
+          "source_id": "fixture:chunk:issue-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6269140839576721,
+          "source_id": "fixture:chunk:issue-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.646390438079834,
+          "source_id": "fixture:chunk:name-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6616401672363281,
+          "source_id": "fixture:chunk:name-near:record"
+        }
+      ],
+      "query_id": "mixed-sv",
+      "ranked_source_ids": [
+        "fixture:chunk:mixed-good:record",
+        "fixture:chunk:mixed-near:record",
+        "fixture:chunk:order-near:record",
+        "fixture:chunk:order-good:record",
+        "fixture:chunk:issue-near:record",
+        "fixture:chunk:issue-good:record",
+        "fixture:chunk:name-good:record",
+        "fixture:chunk:name-near:record"
+      ]
+    }
+  ],
+  "schema_version": 1
+}

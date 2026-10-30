@@ -1,0 +1,14 @@
+{
+  "baseline_sha256": "a7bc23f22d4fbac1f5367717b751b282d52dd2f1fa09303f3f89df8ee53e27ed",
+  "baseline": {
+    "queries": 24,
+    "queries_missing_relevant_candidates": 8,
+    "mean_best_recall_at_5_with_observed_candidates": 0.7777777777777778
+  },
+  "enabled": {
+    "queries": 24,
+    "queries_missing_relevant_candidates": 6,
+    "mean_best_recall_at_5_with_observed_candidates": 0.8541666666666666
+  },
+  "interpretation": "Candidate availability diagnostic, not relevance or policy acceptance."
+}

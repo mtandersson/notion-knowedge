@@ -12,6 +12,17 @@ Optional graph runs use the committed relation projection and the existing
 graph reranker. No relevance judgments enter indexing or ranking. The harness
 alone combines ranked IDs with judgments after retrieval.
 
+## Current launch quality policy — 2026-10-30
+
+The owner relaxed numeric ranking floors and long quality pilots into
+post-launch improvement goals. The [complete installed lexical results](results/lexical-production-2026-10-29/README.md)
+retain both unchanged corpora, repeat determinism and the original failed
+numeric verdicts. They remain honest historical evidence, not current numeric
+launch blockers. Candidate coverage improves while broad hybrid ranking
+regresses; exact lookups pass. Further ranking work follows production feedback.
+Real functional/safety smoke remains required under the [current policy](../../docs/cutover-gates.md).
+Historical comparisons below do not override that explicit owner decision.
+
 ## Corpus and configuration
 
 The personal-knowledge corpus contains 12 fictional pages, 14 fixed chunks and

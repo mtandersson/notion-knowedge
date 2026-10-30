@@ -1,0 +1,1936 @@
+{
+  "candidate_coverage": {
+    "adapter": "notion_knowledge_retrieval::lexical_runtime::LexicalSearchRuntime",
+    "admission": 1,
+    "candidate_bytes": 100663296,
+    "candidate_rows": 8000,
+    "compiler": "rustc 1.98.1 (48a229cea 2026-09-01);binary: rustc;commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985;commit-date: 2026-09-01;host: x86_64-unknown-linux-gnu;release: 1.98.1;LLVM version: 22.1.8;",
+    "coverage": "bounded native candidates; not an exhaustive corpus scan",
+    "deadline_seconds": 60,
+    "plan": {
+      "asset_sha256": "15cb13f8c730598103361c6bd3aae240ce61e1d63fd83f9322b116f7f4f40df7",
+      "embedding_text_contract": "canonical-indexed-chunk-v1;embedding-input=chunk.text;unchanged-vector-space",
+      "executor_sha256": "e8fb0903f0105d467b777aa74037c1e22ca9e150d15b41010937ba252c0d1ab2",
+      "importer_sha256": "ad68694720ed1e3f19d25b242b500a3371a8c6e54b4c328ba2ecb3e598c1290c",
+      "lock_sha256": "cc0a537d23ebf163be0a986abc5916231fea47f37b44d3ef4076bfe1f208a2a8"
+    },
+    "plan_sha256": "921a113c8bc03c4b771eea64d9019f5d55a5f544465b984de4fdc849981a2b8b",
+    "source_revision": "65dd30c52e7486902c39632dad8c650b49f7f27e"
+  },
+  "dataset_id": "personal-knowledge-fixtures-v1",
+  "index_signature": "c7a4e920bfd1e2cfa63b2554ed5409fc2aa3a70bea9488de1ad58a2a4673e63b",
+  "input_sha256": "13118ad10a9e3d8553db98d5f2d25f4de34c8b2b0ce8c63728790503b6932755",
+  "lexical_identity": {
+    "device": 2049,
+    "embedding": {
+      "dimension": 1024,
+      "model_id": "Qwen/Qwen3-Embedding-0.6B",
+      "model_version": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3:fastembed7.1.0:candle0.11.0:tokenizers0.23.2:last-token:left-padding:l2:exact-text:untruncated-v1",
+      "provider_id": "local-fastembed-candle-cpu-f32",
+      "schema_version": "1"
+    },
+    "epoch": 1,
+    "generation": "1",
+    "inode": 9699356,
+    "plan": {
+      "asset_sha256": "15cb13f8c730598103361c6bd3aae240ce61e1d63fd83f9322b116f7f4f40df7",
+      "embedding_text_contract": "canonical-indexed-chunk-v1;embedding-input=chunk.text;unchanged-vector-space",
+      "executor_sha256": "e8fb0903f0105d467b777aa74037c1e22ca9e150d15b41010937ba252c0d1ab2",
+      "importer_sha256": "ad68694720ed1e3f19d25b242b500a3371a8c6e54b4c328ba2ecb3e598c1290c",
+      "lock_sha256": "cc0a537d23ebf163be0a986abc5916231fea47f37b44d3ef4076bfe1f208a2a8"
+    },
+    "roots": [
+      "22222222-2222-2222-2222-222222222222"
+    ],
+    "scope": "9c02b55e2b8dd421e96d35f6bf25b8c55d437b0498943ae5730182e30a684061",
+    "storage": {
+      "backend": "lancedb=0.39.0;lance=12.0.0",
+      "canonical_schema": "1",
+      "fields": [
+        [
+          "chunks_fts_text_v1",
+          "text"
+        ],
+        [
+          "chunks_fts_title_v1",
+          "title"
+        ],
+        [
+          "chunks_fts_page_id_v1",
+          "page_id"
+        ],
+        [
+          "chunks_fts_chunk_id_v1",
+          "chunk_id"
+        ]
+      ],
+      "implementation_sha256": "b6bd1af2dcb4278d89812567baf547ccc2717e0afaaa93f07991a62412196e2a",
+      "profile": {
+        "ascii_folding": false,
+        "block_size": 128,
+        "language": "Swedish",
+        "remove_stop_words": true,
+        "stem": true,
+        "with_positions": true
+      },
+      "raw_identifier_profile": "raw;case-sensitive;no-stem;no-stopwords;no-ascii-folding",
+      "schema": "1"
+    },
+    "table": "chunks",
+    "version": 2,
+    "workspace": "44444444-4444-4444-4444-444444444444"
+  },
+  "mode": "vector",
+  "result_limit": 10,
+  "results": [
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.2163195013999939,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.35976606607437134,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5081539154052734,
+          "source_id": "fixture:chunk:project-lighthouse:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5323945879936218,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5778727531433105,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.669119119644165,
+          "source_id": "fixture:chunk:travel:list"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6700867414474487,
+          "source_id": "fixture:chunk:reading:queue"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6789854764938354,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7114618420600891,
+          "source_id": "fixture:chunk:bike-old:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7378776669502258,
+          "source_id": "fixture:chunk:odling:plan"
+        }
+      ],
+      "query_id": "semantic-energy-en",
+      "ranked_source_ids": [
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:travel:list",
+        "fixture:chunk:reading:queue",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:odling:plan"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.21919184923171997,
+          "source_id": "fixture:chunk:reading:queue"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.29992979764938354,
+          "source_id": "fixture:chunk:study:routine"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5500105619430542,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6228697896003723,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6598544120788574,
+          "source_id": "fixture:chunk:travel:list"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6779327392578125,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6856070756912231,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6994959712028503,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7339932918548584,
+          "source_id": "fixture:chunk:project-lighthouse:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7560130953788757,
+          "source_id": "fixture:chunk:odling:watering"
+        }
+      ],
+      "query_id": "semantic-memory-en",
+      "ranked_source_ids": [
+        "fixture:chunk:reading:queue",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:travel:list",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:odling:watering"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.4819977879524231,
+          "source_id": "fixture:chunk:travel:list"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6245110034942627,
+          "source_id": "fixture:chunk:odling:plan"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6484330296516418,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6643203496932983,
+          "source_id": "fixture:chunk:odling:watering"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6886651515960693,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6977856159210205,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7159949541091919,
+          "source_id": "fixture:chunk:study:routine"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7255722284317017,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7288086414337158,
+          "source_id": "fixture:chunk:bike-old:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7329437732696533,
+          "source_id": "fixture:chunk:reading:queue"
+        }
+      ],
+      "query_id": "semantic-watering-en",
+      "ranked_source_ids": [
+        "fixture:chunk:travel:list",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:reading:queue"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.2695908546447754,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.29697632789611816,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.31250137090682983,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.385384738445282,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.4411303400993347,
+          "source_id": "fixture:chunk:project-lighthouse:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6512941122055054,
+          "source_id": "fixture:chunk:travel:list"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6693710088729858,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.68574059009552,
+          "source_id": "fixture:chunk:reading:queue"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6882617473602295,
+          "source_id": "fixture:chunk:odling:plan"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7087928056716919,
+          "source_id": "fixture:chunk:bike-old:service"
+        }
+      ],
+      "query_id": "exact-project-en",
+      "ranked_source_ids": [
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:travel:list",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:reading:queue",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:bike-old:service"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.363592267036438,
+          "source_id": "fixture:chunk:bike-old:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.42722439765930176,
+          "source_id": "fixture:chunk:bike:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.44247865676879883,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.45236635208129883,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.4951029419898987,
+          "source_id": "fixture:chunk:project-lighthouse:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5302184820175171,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5327727794647217,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.599543571472168,
+          "source_id": "fixture:chunk:travel:list"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6683772206306458,
+          "source_id": "fixture:chunk:odling:watering"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.679449200630188,
+          "source_id": "fixture:chunk:odling-review:notes"
+        }
+      ],
+      "query_id": "exact-bike-en",
+      "ranked_source_ids": [
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:bike:service",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:travel:list",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:odling-review:notes"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.4541388750076294,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5246068239212036,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5271296501159668,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5276134014129639,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5835949182510376,
+          "source_id": "fixture:chunk:reading:queue"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6027402877807617,
+          "source_id": "fixture:chunk:project-lighthouse:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6592152118682861,
+          "source_id": "fixture:chunk:study:routine"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6972500681877136,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7006316184997559,
+          "source_id": "fixture:chunk:bike-old:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7162385582923889,
+          "source_id": "fixture:chunk:travel:list"
+        }
+      ],
+      "query_id": "exact-reading-en",
+      "ranked_source_ids": [
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:reading:queue",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:travel:list"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.394369900226593,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.44892317056655884,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.45024627447128296,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.4957749843597412,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5491277575492859,
+          "source_id": "fixture:chunk:project-lighthouse:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6231678128242493,
+          "source_id": "fixture:chunk:bike-old:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.657903790473938,
+          "source_id": "fixture:chunk:bike:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6787391901016235,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6795554161071777,
+          "source_id": "fixture:chunk:travel:list"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7084883451461792,
+          "source_id": "fixture:chunk:garden-old:plan"
+        }
+      ],
+      "query_id": "status-active-en",
+      "ranked_source_ids": [
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:bike:service",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:travel:list",
+        "fixture:chunk:garden-old:plan"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5011643171310425,
+          "source_id": "fixture:chunk:bike:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5259594917297363,
+          "source_id": "fixture:chunk:bike-old:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6295251250267029,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6310391426086426,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6314598321914673,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6730897426605225,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6979738473892212,
+          "source_id": "fixture:chunk:travel:list"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7195915579795837,
+          "source_id": "fixture:chunk:project-lighthouse:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7451232671737671,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7482109069824219,
+          "source_id": "fixture:chunk:garden-old:plan"
+        }
+      ],
+      "query_id": "date-bike-en",
+      "ranked_source_ids": [
+        "fixture:chunk:bike:service",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:travel:list",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:garden-old:plan"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.3471238613128662,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.3686313033103943,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5554273128509521,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6106983423233032,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6432980298995972,
+          "source_id": "fixture:chunk:project-lighthouse:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6644901633262634,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6708990335464478,
+          "source_id": "fixture:chunk:bike-old:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7001683712005615,
+          "source_id": "fixture:chunk:bike:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7333073616027832,
+          "source_id": "fixture:chunk:reading:queue"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7490158081054688,
+          "source_id": "fixture:chunk:garden-old:plan"
+        }
+      ],
+      "query_id": "date-review-en",
+      "ranked_source_ids": [
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:bike:service",
+        "fixture:chunk:reading:queue",
+        "fixture:chunk:garden-old:plan"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.28995245695114136,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.3720540404319763,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.43652331829071045,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5019146203994751,
+          "source_id": "fixture:chunk:project-lighthouse:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5317538976669312,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6889035701751709,
+          "source_id": "fixture:chunk:reading:queue"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7285546660423279,
+          "source_id": "fixture:chunk:garden-old:plan"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7307025194168091,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7341138124465942,
+          "source_id": "fixture:chunk:odling:plan"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7639654874801636,
+          "source_id": "fixture:chunk:travel:list"
+        }
+      ],
+      "query_id": "link-energy-en",
+      "ranked_source_ids": [
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:reading:queue",
+        "fixture:chunk:garden-old:plan",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:travel:list"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.47966063022613525,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5930776596069336,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.620612382888794,
+          "source_id": "fixture:chunk:bike-old:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6402925252914429,
+          "source_id": "fixture:chunk:reading:queue"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6639924049377441,
+          "source_id": "fixture:chunk:garden-old:plan"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6658791899681091,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6700848340988159,
+          "source_id": "fixture:chunk:odling:plan"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6790226697921753,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6912459135055542,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7097280025482178,
+          "source_id": "fixture:chunk:study:routine"
+        }
+      ],
+      "query_id": "link-garden-en",
+      "ranked_source_ids": [
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:reading:queue",
+        "fixture:chunk:garden-old:plan",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:study:routine"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5412670373916626,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5695630311965942,
+          "source_id": "fixture:chunk:reading:queue"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6037634611129761,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6633237600326538,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6753802299499512,
+          "source_id": "fixture:chunk:study:routine"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6774218678474426,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7210600972175598,
+          "source_id": "fixture:chunk:project-lighthouse:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7389354109764099,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7522039413452148,
+          "source_id": "fixture:chunk:travel:list"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.784246027469635,
+          "source_id": "fixture:chunk:odling:watering"
+        }
+      ],
+      "query_id": "link-study-en",
+      "ranked_source_ids": [
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:reading:queue",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:travel:list",
+        "fixture:chunk:odling:watering"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5028470754623413,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6109845638275146,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6141344308853149,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6877526044845581,
+          "source_id": "fixture:chunk:project-lighthouse:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6986521482467651,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7219089269638062,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7281796932220459,
+          "source_id": "fixture:chunk:bike-old:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7398102283477783,
+          "source_id": "fixture:chunk:reading:queue"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7398812770843506,
+          "source_id": "fixture:chunk:odling:watering"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.74713534116745,
+          "source_id": "fixture:chunk:odling:plan"
+        }
+      ],
+      "query_id": "semantic-energy-sv",
+      "ranked_source_ids": [
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:reading:queue",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:odling:plan"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.467354953289032,
+          "source_id": "fixture:chunk:study:routine"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5275405645370483,
+          "source_id": "fixture:chunk:reading:queue"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6739984750747681,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6846829652786255,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7111625671386719,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7319842576980591,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7466386556625366,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7628433704376221,
+          "source_id": "fixture:chunk:odling:watering"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.8006740212440491,
+          "source_id": "fixture:chunk:project-lighthouse:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.8024419546127319,
+          "source_id": "fixture:chunk:travel:list"
+        }
+      ],
+      "query_id": "semantic-memory-sv",
+      "ranked_source_ids": [
+        "fixture:chunk:study:routine",
+        "fixture:chunk:reading:queue",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:travel:list"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5053837895393372,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5120646953582764,
+          "source_id": "fixture:chunk:odling:plan"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6491053104400635,
+          "source_id": "fixture:chunk:garden-old:plan"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6766427159309387,
+          "source_id": "fixture:chunk:study:routine"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6976251006126404,
+          "source_id": "fixture:chunk:odling:watering"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.722620964050293,
+          "source_id": "fixture:chunk:travel:list"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.736401379108429,
+          "source_id": "fixture:chunk:bike-old:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7481433153152466,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7554685473442078,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7728587985038757,
+          "source_id": "fixture:chunk:reading:queue"
+        }
+      ],
+      "query_id": "semantic-watering-sv",
+      "ranked_source_ids": [
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:garden-old:plan",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:travel:list",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:reading:queue"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.42716866731643677,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.45709872245788574,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5094713568687439,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5416200160980225,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6819503307342529,
+          "source_id": "fixture:chunk:project-lighthouse:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7060816287994385,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7454490661621094,
+          "source_id": "fixture:chunk:odling:plan"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7716889381408691,
+          "source_id": "fixture:chunk:garden-old:plan"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7938734889030457,
+          "source_id": "fixture:chunk:bike-old:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7996691465377808,
+          "source_id": "fixture:chunk:travel:list"
+        }
+      ],
+      "query_id": "exact-project-sv",
+      "ranked_source_ids": [
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:garden-old:plan",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:travel:list"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.3535575866699219,
+          "source_id": "fixture:chunk:bike-old:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.35704416036605835,
+          "source_id": "fixture:chunk:bike:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6751023530960083,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6789082288742065,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6855106353759766,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6957941055297852,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.714607834815979,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.728602409362793,
+          "source_id": "fixture:chunk:project-lighthouse:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7423660159111023,
+          "source_id": "fixture:chunk:travel:list"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7517881393432617,
+          "source_id": "fixture:chunk:odling:watering"
+        }
+      ],
+      "query_id": "exact-bike-sv",
+      "ranked_source_ids": [
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:bike:service",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:travel:list",
+        "fixture:chunk:odling:watering"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5944269895553589,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6490006446838379,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6730087995529175,
+          "source_id": "fixture:chunk:reading:queue"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6748300790786743,
+          "source_id": "fixture:chunk:study:routine"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6929107904434204,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6949588060379028,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.695794939994812,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7375048398971558,
+          "source_id": "fixture:chunk:project-lighthouse:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7464827299118042,
+          "source_id": "fixture:chunk:bike-old:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.8048115968704224,
+          "source_id": "fixture:chunk:odling:plan"
+        }
+      ],
+      "query_id": "exact-reading-sv",
+      "ranked_source_ids": [
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:reading:queue",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:odling:plan"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5663553476333618,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5954020023345947,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6083940267562866,
+          "source_id": "fixture:chunk:bike:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6121822595596313,
+          "source_id": "fixture:chunk:bike-old:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6349204182624817,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6400785446166992,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6903663873672485,
+          "source_id": "fixture:chunk:odling:plan"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6987017393112183,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7236684560775757,
+          "source_id": "fixture:chunk:project-lighthouse:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7301141023635864,
+          "source_id": "fixture:chunk:garden-old:plan"
+        }
+      ],
+      "query_id": "status-active-sv",
+      "ranked_source_ids": [
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:bike:service",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:garden-old:plan"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.34074991941452026,
+          "source_id": "fixture:chunk:bike:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.4558005928993225,
+          "source_id": "fixture:chunk:bike-old:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.690821647644043,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7043154239654541,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7139996290206909,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7150395512580872,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7494372129440308,
+          "source_id": "fixture:chunk:project-lighthouse:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7503310441970825,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7713706493377686,
+          "source_id": "fixture:chunk:garden-old:plan"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7879207730293274,
+          "source_id": "fixture:chunk:odling:plan"
+        }
+      ],
+      "query_id": "date-bike-sv",
+      "ranked_source_ids": [
+        "fixture:chunk:bike:service",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:garden-old:plan",
+        "fixture:chunk:odling:plan"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.4974515438079834,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5146032571792603,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5662212371826172,
+          "source_id": "fixture:chunk:bike:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5746039152145386,
+          "source_id": "fixture:chunk:bike-old:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6526007652282715,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6901601552963257,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7247051000595093,
+          "source_id": "fixture:chunk:garden-old:plan"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7520802021026611,
+          "source_id": "fixture:chunk:odling:plan"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7548817992210388,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7590814232826233,
+          "source_id": "fixture:chunk:project-lighthouse:decision"
+        }
+      ],
+      "query_id": "date-review-sv",
+      "ranked_source_ids": [
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:bike:service",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:garden-old:plan",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:project-lighthouse:decision"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.44422030448913574,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5431336760520935,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6094887852668762,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6716915369033813,
+          "source_id": "fixture:chunk:project-lighthouse:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6857302188873291,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7311105728149414,
+          "source_id": "fixture:chunk:odling:plan"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7375764846801758,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7581045627593994,
+          "source_id": "fixture:chunk:garden-old:plan"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.8132433891296387,
+          "source_id": "fixture:chunk:odling:watering"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.8226935863494873,
+          "source_id": "fixture:chunk:bike-old:service"
+        }
+      ],
+      "query_id": "link-energy-sv",
+      "ranked_source_ids": [
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:garden-old:plan",
+        "fixture:chunk:odling:watering",
+        "fixture:chunk:bike-old:service"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.4474479556083679,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5460643172264099,
+          "source_id": "fixture:chunk:garden-old:plan"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.5682734847068787,
+          "source_id": "fixture:chunk:odling:plan"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6679996848106384,
+          "source_id": "fixture:chunk:bike-old:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7302366495132446,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7398787140846252,
+          "source_id": "fixture:chunk:bike:service"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7591836452484131,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.767325758934021,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7685306072235107,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7917408347129822,
+          "source_id": "fixture:chunk:odling:watering"
+        }
+      ],
+      "query_id": "link-garden-sv",
+      "ranked_source_ids": [
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:garden-old:plan",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:bike-old:service",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:bike:service",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:odling:watering"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6291519403457642,
+          "source_id": "fixture:chunk:project-lighthouse-old:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6690081357955933,
+          "source_id": "fixture:chunk:reading:queue"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6843321323394775,
+          "source_id": "fixture:chunk:lighthouse-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.6868294477462769,
+          "source_id": "fixture:chunk:study:routine"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7289077043533325,
+          "source_id": "fixture:chunk:energy-decision:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7464743852615356,
+          "source_id": "fixture:chunk:odling-review:notes"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.7774584889411926,
+          "source_id": "fixture:chunk:project-lighthouse:decision"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.780112087726593,
+          "source_id": "fixture:chunk:project-lighthouse:overview"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.8293067216873169,
+          "source_id": "fixture:chunk:odling:plan"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [],
+          "score": -0.8372365236282349,
+          "source_id": "fixture:chunk:odling:watering"
+        }
+      ],
+      "query_id": "link-study-sv",
+      "ranked_source_ids": [
+        "fixture:chunk:project-lighthouse-old:overview",
+        "fixture:chunk:reading:queue",
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:study:routine",
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:project-lighthouse:overview",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:odling:watering"
+      ]
+    }
+  ],
+  "schema_version": 1
+}

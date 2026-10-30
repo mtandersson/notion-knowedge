@@ -1,3 +1,9 @@
 # Exact commit:path:rule:line fingerprints only. Document each synthetic false
 # positive with rationale, tracking issue, owner and review date.
-# See docs/security-scanning.md. No current exceptions.
+# See docs/security-scanning.md.
+
+# Public Qwen tokenizer SHA256, identical to crates/retrieval/src/qwen.rs ASSETS;
+# this digest authenticates no service. The new file/digest representation scans
+# clean. Historical occurrence only; tracking #493; owner: repository maintainers;
+# review date: 2026-10-30. No path, commit-wide or rule-wide exclusion.
+3564b52a6c26c10bb1e88267896c28853984c7cf:eval/retrieval/results/lexical-production-2026-10-29/provenance.json:generic-api-key:17
