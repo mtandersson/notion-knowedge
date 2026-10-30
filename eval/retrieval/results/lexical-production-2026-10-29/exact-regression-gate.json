@@ -1,0 +1,22 @@
+{
+  "fts": {
+    "top1": 8,
+    "top3": 8,
+    "total": 8,
+    "by_language": {
+      "en": 4,
+      "sv": 4
+    },
+    "passed": true
+  },
+  "hybrid": {
+    "top1": 8,
+    "top3": 8,
+    "total": 8,
+    "by_language": {
+      "en": 4,
+      "sv": 4
+    },
+    "passed": true
+  }
+}

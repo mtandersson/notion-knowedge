@@ -1,0 +1,910 @@
+{
+  "candidate_coverage": {
+    "adapter": "notion_knowledge_retrieval::lexical_runtime::LexicalSearchRuntime",
+    "admission": 1,
+    "candidate_bytes": 100663296,
+    "candidate_rows": 8000,
+    "compiler": "rustc 1.98.1 (48a229cea 2026-09-01);binary: rustc;commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985;commit-date: 2026-09-01;host: x86_64-unknown-linux-gnu;release: 1.98.1;LLVM version: 22.1.8;",
+    "coverage": "bounded native candidates; not an exhaustive corpus scan",
+    "deadline_seconds": 60,
+    "plan": {
+      "asset_sha256": "15cb13f8c730598103361c6bd3aae240ce61e1d63fd83f9322b116f7f4f40df7",
+      "embedding_text_contract": "canonical-indexed-chunk-v1;embedding-input=chunk.text;unchanged-vector-space",
+      "executor_sha256": "e8fb0903f0105d467b777aa74037c1e22ca9e150d15b41010937ba252c0d1ab2",
+      "importer_sha256": "ad68694720ed1e3f19d25b242b500a3371a8c6e54b4c328ba2ecb3e598c1290c",
+      "lock_sha256": "cc0a537d23ebf163be0a986abc5916231fea47f37b44d3ef4076bfe1f208a2a8"
+    },
+    "plan_sha256": "921a113c8bc03c4b771eea64d9019f5d55a5f544465b984de4fdc849981a2b8b",
+    "source_revision": "65dd30c52e7486902c39632dad8c650b49f7f27e"
+  },
+  "dataset_id": "exact-identifiers-fictional-v1",
+  "index_signature": "15562078eefc0f325426ee9197de391150290748233686b4666b37c31c343867",
+  "input_sha256": "4a2255e6cf41d62cc51b44f8317a0ca771ffcf20ab785da6642cae21e22f0545",
+  "lexical_identity": {
+    "device": 2049,
+    "embedding": {
+      "dimension": 1024,
+      "model_id": "Qwen/Qwen3-Embedding-0.6B",
+      "model_version": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3:fastembed7.1.0:candle0.11.0:tokenizers0.23.2:last-token:left-padding:l2:exact-text:untruncated-v1",
+      "provider_id": "local-fastembed-candle-cpu-f32",
+      "schema_version": "1"
+    },
+    "epoch": 1,
+    "generation": "1",
+    "inode": 9699809,
+    "plan": {
+      "asset_sha256": "15cb13f8c730598103361c6bd3aae240ce61e1d63fd83f9322b116f7f4f40df7",
+      "embedding_text_contract": "canonical-indexed-chunk-v1;embedding-input=chunk.text;unchanged-vector-space",
+      "executor_sha256": "e8fb0903f0105d467b777aa74037c1e22ca9e150d15b41010937ba252c0d1ab2",
+      "importer_sha256": "ad68694720ed1e3f19d25b242b500a3371a8c6e54b4c328ba2ecb3e598c1290c",
+      "lock_sha256": "cc0a537d23ebf163be0a986abc5916231fea47f37b44d3ef4076bfe1f208a2a8"
+    },
+    "roots": [
+      "22222222-2222-2222-2222-222222222222"
+    ],
+    "scope": "9c02b55e2b8dd421e96d35f6bf25b8c55d437b0498943ae5730182e30a684061",
+    "storage": {
+      "backend": "lancedb=0.39.0;lance=12.0.0",
+      "canonical_schema": "1",
+      "fields": [
+        [
+          "chunks_fts_text_v1",
+          "text"
+        ],
+        [
+          "chunks_fts_title_v1",
+          "title"
+        ],
+        [
+          "chunks_fts_page_id_v1",
+          "page_id"
+        ],
+        [
+          "chunks_fts_chunk_id_v1",
+          "chunk_id"
+        ]
+      ],
+      "implementation_sha256": "b6bd1af2dcb4278d89812567baf547ccc2717e0afaaa93f07991a62412196e2a",
+      "profile": {
+        "ascii_folding": false,
+        "block_size": 128,
+        "language": "Swedish",
+        "remove_stop_words": true,
+        "stem": true,
+        "with_positions": true
+      },
+      "raw_identifier_profile": "raw;case-sensitive;no-stem;no-stopwords;no-ascii-folding",
+      "schema": "1"
+    },
+    "table": "chunks",
+    "version": 2,
+    "workspace": "44444444-4444-4444-4444-444444444444"
+  },
+  "mode": "hybrid",
+  "result_limit": 10,
+  "results": [
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            },
+            {
+              "field": "title",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.032786883413791656,
+          "source_id": "fixture:chunk:order-good:record"
+        },
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            },
+            {
+              "field": "title",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.032258063554763794,
+          "source_id": "fixture:chunk:order-near:record"
+        },
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.03125763311982155,
+          "source_id": "fixture:chunk:issue-good:record"
+        },
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.03079838864505291,
+          "source_id": "fixture:chunk:name-near:record"
+        },
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.03077651560306549,
+          "source_id": "fixture:chunk:mixed-good:record"
+        },
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.030330881476402283,
+          "source_id": "fixture:chunk:name-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.015384615398943424,
+          "source_id": "fixture:chunk:issue-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.01515151560306549,
+          "source_id": "fixture:chunk:mixed-near:record"
+        }
+      ],
+      "query_id": "order-en",
+      "ranked_source_ids": [
+        "fixture:chunk:order-good:record",
+        "fixture:chunk:order-near:record",
+        "fixture:chunk:issue-good:record",
+        "fixture:chunk:name-near:record",
+        "fixture:chunk:mixed-good:record",
+        "fixture:chunk:name-good:record",
+        "fixture:chunk:issue-near:record",
+        "fixture:chunk:mixed-near:record"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            },
+            {
+              "field": "title",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.032522473484277725,
+          "source_id": "fixture:chunk:order-good:record"
+        },
+        {
+          "lexical_matches": [
+            {
+              "field": "title",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.032522473484277725,
+          "source_id": "fixture:chunk:order-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.01587301678955555,
+          "source_id": "fixture:chunk:mixed-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.015625,
+          "source_id": "fixture:chunk:issue-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.015384615398943424,
+          "source_id": "fixture:chunk:issue-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.01515151560306549,
+          "source_id": "fixture:chunk:mixed-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.014925372786819935,
+          "source_id": "fixture:chunk:name-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.014705882407724857,
+          "source_id": "fixture:chunk:name-good:record"
+        }
+      ],
+      "query_id": "order-sv",
+      "ranked_source_ids": [
+        "fixture:chunk:order-good:record",
+        "fixture:chunk:order-near:record",
+        "fixture:chunk:mixed-good:record",
+        "fixture:chunk:issue-good:record",
+        "fixture:chunk:issue-near:record",
+        "fixture:chunk:mixed-near:record",
+        "fixture:chunk:name-near:record",
+        "fixture:chunk:name-good:record"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            },
+            {
+              "field": "title",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.032786883413791656,
+          "source_id": "fixture:chunk:issue-good:record"
+        },
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            },
+            {
+              "field": "title",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.032258063554763794,
+          "source_id": "fixture:chunk:issue-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.01587301678955555,
+          "source_id": "fixture:chunk:mixed-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.015625,
+          "source_id": "fixture:chunk:order-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.015384615398943424,
+          "source_id": "fixture:chunk:mixed-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.01515151560306549,
+          "source_id": "fixture:chunk:order-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.014925372786819935,
+          "source_id": "fixture:chunk:name-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.014705882407724857,
+          "source_id": "fixture:chunk:name-good:record"
+        }
+      ],
+      "query_id": "issue-en",
+      "ranked_source_ids": [
+        "fixture:chunk:issue-good:record",
+        "fixture:chunk:issue-near:record",
+        "fixture:chunk:mixed-near:record",
+        "fixture:chunk:order-near:record",
+        "fixture:chunk:mixed-good:record",
+        "fixture:chunk:order-good:record",
+        "fixture:chunk:name-near:record",
+        "fixture:chunk:name-good:record"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            },
+            {
+              "field": "title",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.032786883413791656,
+          "source_id": "fixture:chunk:issue-good:record"
+        },
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            },
+            {
+              "field": "title",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.032258063554763794,
+          "source_id": "fixture:chunk:issue-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.01587301678955555,
+          "source_id": "fixture:chunk:mixed-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.015625,
+          "source_id": "fixture:chunk:mixed-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.015384615398943424,
+          "source_id": "fixture:chunk:order-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.01515151560306549,
+          "source_id": "fixture:chunk:order-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.014925372786819935,
+          "source_id": "fixture:chunk:name-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.014705882407724857,
+          "source_id": "fixture:chunk:name-good:record"
+        }
+      ],
+      "query_id": "issue-sv",
+      "ranked_source_ids": [
+        "fixture:chunk:issue-good:record",
+        "fixture:chunk:issue-near:record",
+        "fixture:chunk:mixed-near:record",
+        "fixture:chunk:mixed-good:record",
+        "fixture:chunk:order-near:record",
+        "fixture:chunk:order-good:record",
+        "fixture:chunk:name-near:record",
+        "fixture:chunk:name-good:record"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            },
+            {
+              "field": "title",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.032522473484277725,
+          "source_id": "fixture:chunk:name-good:record"
+        },
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            },
+            {
+              "field": "title",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.032522473484277725,
+          "source_id": "fixture:chunk:name-near:record"
+        },
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.03102453052997589,
+          "source_id": "fixture:chunk:order-good:record"
+        },
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.03102453052997589,
+          "source_id": "fixture:chunk:mixed-good:record"
+        },
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.03100961446762085,
+          "source_id": "fixture:chunk:order-near:record"
+        },
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.03030998818576336,
+          "source_id": "fixture:chunk:issue-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.015625,
+          "source_id": "fixture:chunk:mixed-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.014705882407724857,
+          "source_id": "fixture:chunk:issue-near:record"
+        }
+      ],
+      "query_id": "name-en",
+      "ranked_source_ids": [
+        "fixture:chunk:name-good:record",
+        "fixture:chunk:name-near:record",
+        "fixture:chunk:order-good:record",
+        "fixture:chunk:mixed-good:record",
+        "fixture:chunk:order-near:record",
+        "fixture:chunk:issue-good:record",
+        "fixture:chunk:mixed-near:record",
+        "fixture:chunk:issue-near:record"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            },
+            {
+              "field": "title",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.032786883413791656,
+          "source_id": "fixture:chunk:name-good:record"
+        },
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            },
+            {
+              "field": "title",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.032258063554763794,
+          "source_id": "fixture:chunk:name-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.01587301678955555,
+          "source_id": "fixture:chunk:mixed-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.015625,
+          "source_id": "fixture:chunk:mixed-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.015384615398943424,
+          "source_id": "fixture:chunk:order-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.01515151560306549,
+          "source_id": "fixture:chunk:issue-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.014925372786819935,
+          "source_id": "fixture:chunk:issue-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.014705882407724857,
+          "source_id": "fixture:chunk:order-good:record"
+        }
+      ],
+      "query_id": "name-sv",
+      "ranked_source_ids": [
+        "fixture:chunk:name-good:record",
+        "fixture:chunk:name-near:record",
+        "fixture:chunk:mixed-good:record",
+        "fixture:chunk:mixed-near:record",
+        "fixture:chunk:order-near:record",
+        "fixture:chunk:issue-near:record",
+        "fixture:chunk:issue-good:record",
+        "fixture:chunk:order-good:record"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            },
+            {
+              "field": "title",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.032786883413791656,
+          "source_id": "fixture:chunk:mixed-good:record"
+        },
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.032258063554763794,
+          "source_id": "fixture:chunk:mixed-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.01587301678955555,
+          "source_id": "fixture:chunk:order-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.015625,
+          "source_id": "fixture:chunk:order-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.015384615398943424,
+          "source_id": "fixture:chunk:issue-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.01515151560306549,
+          "source_id": "fixture:chunk:issue-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.014925372786819935,
+          "source_id": "fixture:chunk:name-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.014705882407724857,
+          "source_id": "fixture:chunk:name-near:record"
+        }
+      ],
+      "query_id": "mixed-en",
+      "ranked_source_ids": [
+        "fixture:chunk:mixed-good:record",
+        "fixture:chunk:mixed-near:record",
+        "fixture:chunk:order-near:record",
+        "fixture:chunk:order-good:record",
+        "fixture:chunk:issue-good:record",
+        "fixture:chunk:issue-near:record",
+        "fixture:chunk:name-good:record",
+        "fixture:chunk:name-near:record"
+      ]
+    },
+    {
+      "baseline_scores": [
+        {
+          "lexical_matches": [
+            {
+              "field": "text",
+              "kind": "raw"
+            },
+            {
+              "field": "title",
+              "kind": "raw"
+            }
+          ],
+          "matched_paths": [
+            "semantic",
+            "lexical"
+          ],
+          "score": 0.032786883413791656,
+          "source_id": "fixture:chunk:mixed-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.016129031777381897,
+          "source_id": "fixture:chunk:mixed-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.01587301678955555,
+          "source_id": "fixture:chunk:order-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.015625,
+          "source_id": "fixture:chunk:order-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.015384615398943424,
+          "source_id": "fixture:chunk:issue-near:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.01515151560306549,
+          "source_id": "fixture:chunk:issue-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.014925372786819935,
+          "source_id": "fixture:chunk:name-good:record"
+        },
+        {
+          "lexical_matches": [],
+          "matched_paths": [
+            "semantic"
+          ],
+          "score": 0.014705882407724857,
+          "source_id": "fixture:chunk:name-near:record"
+        }
+      ],
+      "query_id": "mixed-sv",
+      "ranked_source_ids": [
+        "fixture:chunk:mixed-good:record",
+        "fixture:chunk:mixed-near:record",
+        "fixture:chunk:order-near:record",
+        "fixture:chunk:order-good:record",
+        "fixture:chunk:issue-near:record",
+        "fixture:chunk:issue-good:record",
+        "fixture:chunk:name-good:record",
+        "fixture:chunk:name-near:record"
+      ]
+    }
+  ],
+  "schema_version": 1
+}

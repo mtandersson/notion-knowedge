@@ -45,6 +45,7 @@ class EvidenceContracts(unittest.TestCase):
         report = copy.deepcopy(original)
         next(row for row in report["results"] if row["mode"] == "fts" and row["query_id"] == "a")["ranked_source_ids"] = []
         self.assertFalse(measurement.policies(dataset, report)["cutover_offline"]["passed"])
+        self.assertFalse(measurement.policies(dataset, report)["g1"]["passed"])
         report = copy.deepcopy(original)
         next(row for row in report["results"] if row["mode"] == "hybrid" and row["query_id"] == "b")["metrics"]["recall_at_5"] = .89999
         self.assertFalse(measurement.policies(dataset, report)["cutover_offline"]["passed"])

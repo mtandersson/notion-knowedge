@@ -1,0 +1,44 @@
+{
+  "source_revision": "65dd30c52e7486902c39632dad8c650b49f7f27e",
+  "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8",
+  "build_profile": "release",
+  "graph": "OFF",
+  "quality_top_k": 10,
+  "binary_sha256": "c76ae79fd4e41de317311b5e798754ae300fa50a4b515334ab93be1f2e5e819c",
+  "lock_sha256": "cc0a537d23ebf163be0a986abc5916231fea47f37b44d3ef4076bfe1f208a2a8",
+  "bundle": {
+    "sha256": "15cb13f8c730598103361c6bd3aae240ce61e1d63fd83f9322b116f7f4f40df7",
+    "payload_bytes": 3798927,
+    "relations": 127216,
+    "importer_identity_sha256": "ad68694720ed1e3f19d25b242b500a3371a8c6e54b4c328ba2ecb3e598c1290c"
+  },
+  "model_asset_sha256": {
+    "config.json": "b5bf1f51fc45be473a54718cef92448d90a1be001bf9b9a44b8c7f10a19feaa9",
+    "tokenizer.json": "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a",
+    "model.safetensors": "0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd"
+  },
+  "datasets": {
+    "personal": "b96d4eba5be7ea7b9d48be12ce088d455f38868fe09b658ce06319ced9888efe",
+    "exact": "8fce43d4b85e79fd2d60a9bd9f0b5e8b0f4d0eec423505bd6c01d5cbff6268a3"
+  },
+  "repeats": {
+    "personal": {
+      "ranking_sha256": "4b0d686c645841f3b7063790e5b2baede8b731f4e0904fb922c1c1903dad0aaa",
+      "byte_identical": true,
+      "adapter_sha256": {
+        "vector": "3c10cad97fbed6c5022837bb440fd9ace23166cb81518912c29315fa57caabe5",
+        "fts": "496e89cf66fac16d456d137697602f61cc60ca4abfd6fb5da82536abf81cdcc5",
+        "hybrid": "a2ad54e69b12a1936338ddd5d251fbd46fe35289c5d5181f885f3067f760d63c"
+      }
+    },
+    "exact": {
+      "ranking_sha256": "5a01f9371221c38a2966453b2c072d7a1aafb4e0adf92d71e87db162d1e3de92",
+      "byte_identical": true,
+      "adapter_sha256": {
+        "vector": "42ed31934b31cf62d4986d807a1ae4cacf67e1781659f3b40d4f1c58307d7406",
+        "fts": "835bf116d34bb922f7539f9a9c76dea891f66415225675ac60581c832bfa1233",
+        "hybrid": "820c27a1e774bb1394da46cd519a2ff7de6be388e6b9886072c2643e68cf7cc0"
+      }
+    }
+  }
+}

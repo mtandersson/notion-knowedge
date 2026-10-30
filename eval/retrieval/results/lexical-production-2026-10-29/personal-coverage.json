@@ -1,0 +1,362 @@
+{
+  "schema_version": 1,
+  "dataset_id": "personal-knowledge-fixtures-v1",
+  "corpus_chunks": 14,
+  "requested_top_k": 100,
+  "complete_candidate_coverage": true,
+  "interpretation": "oracle_ceiling",
+  "overall": {
+    "queries": 24,
+    "queries_missing_relevant_candidates": 6,
+    "mean_best_recall_at_5_with_observed_candidates": 0.8541666666666666
+  },
+  "cohorts": {
+    "language": {
+      "en": {
+        "queries": 12,
+        "queries_missing_relevant_candidates": 2,
+        "mean_best_recall_at_5_with_observed_candidates": 0.8888888888888888
+      },
+      "sv": {
+        "queries": 12,
+        "queries_missing_relevant_candidates": 4,
+        "mean_best_recall_at_5_with_observed_candidates": 0.8194444444444445
+      }
+    },
+    "category": {
+      "cross_link": {
+        "queries": 6,
+        "queries_missing_relevant_candidates": 1,
+        "mean_best_recall_at_5_with_observed_candidates": 0.8333333333333334
+      },
+      "date_status": {
+        "queries": 6,
+        "queries_missing_relevant_candidates": 2,
+        "mean_best_recall_at_5_with_observed_candidates": 0.9166666666666666
+      },
+      "exact_name": {
+        "queries": 6,
+        "queries_missing_relevant_candidates": 0,
+        "mean_best_recall_at_5_with_observed_candidates": 1.0
+      },
+      "semantic": {
+        "queries": 6,
+        "queries_missing_relevant_candidates": 3,
+        "mean_best_recall_at_5_with_observed_candidates": 0.6666666666666666
+      }
+    }
+  },
+  "results": [
+    {
+      "query_id": "semantic-energy-en",
+      "language": "en",
+      "category": "semantic",
+      "candidate_count": 5,
+      "relevant_count": 1,
+      "matched_relevant_ids": [
+        "fixture:chunk:project-lighthouse:overview"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "semantic-memory-en",
+      "language": "en",
+      "category": "semantic",
+      "candidate_count": 3,
+      "relevant_count": 2,
+      "matched_relevant_ids": [
+        "fixture:chunk:reading:queue",
+        "fixture:chunk:study:routine"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "semantic-watering-en",
+      "language": "en",
+      "category": "semantic",
+      "candidate_count": 8,
+      "relevant_count": 2,
+      "matched_relevant_ids": [],
+      "missing_relevant_ids": [
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:odling:watering"
+      ],
+      "best_recall_at_5_with_observed_candidates": 0.0
+    },
+    {
+      "query_id": "exact-project-en",
+      "language": "en",
+      "category": "exact_name",
+      "candidate_count": 5,
+      "relevant_count": 2,
+      "matched_relevant_ids": [
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:project-lighthouse:overview"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "exact-bike-en",
+      "language": "en",
+      "category": "exact_name",
+      "candidate_count": 8,
+      "relevant_count": 1,
+      "matched_relevant_ids": [
+        "fixture:chunk:bike:service"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "exact-reading-en",
+      "language": "en",
+      "category": "exact_name",
+      "candidate_count": 4,
+      "relevant_count": 1,
+      "matched_relevant_ids": [
+        "fixture:chunk:reading:queue"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "status-active-en",
+      "language": "en",
+      "category": "date_status",
+      "candidate_count": 7,
+      "relevant_count": 6,
+      "matched_relevant_ids": [
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:project-lighthouse:overview"
+      ],
+      "missing_relevant_ids": [
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:odling:watering"
+      ],
+      "best_recall_at_5_with_observed_candidates": 0.6666666666666666
+    },
+    {
+      "query_id": "date-bike-en",
+      "language": "en",
+      "category": "date_status",
+      "candidate_count": 6,
+      "relevant_count": 1,
+      "matched_relevant_ids": [
+        "fixture:chunk:bike:service"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "date-review-en",
+      "language": "en",
+      "category": "date_status",
+      "candidate_count": 8,
+      "relevant_count": 1,
+      "matched_relevant_ids": [
+        "fixture:chunk:lighthouse-review:notes"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "link-energy-en",
+      "language": "en",
+      "category": "cross_link",
+      "candidate_count": 5,
+      "relevant_count": 2,
+      "matched_relevant_ids": [
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:project-lighthouse:decision"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "link-garden-en",
+      "language": "en",
+      "category": "cross_link",
+      "candidate_count": 12,
+      "relevant_count": 1,
+      "matched_relevant_ids": [
+        "fixture:chunk:odling-review:notes"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "link-study-en",
+      "language": "en",
+      "category": "cross_link",
+      "candidate_count": 7,
+      "relevant_count": 1,
+      "matched_relevant_ids": [
+        "fixture:chunk:reading:queue"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "semantic-energy-sv",
+      "language": "sv",
+      "category": "semantic",
+      "candidate_count": 5,
+      "relevant_count": 1,
+      "matched_relevant_ids": [
+        "fixture:chunk:project-lighthouse:overview"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "semantic-memory-sv",
+      "language": "sv",
+      "category": "semantic",
+      "candidate_count": 1,
+      "relevant_count": 2,
+      "matched_relevant_ids": [
+        "fixture:chunk:study:routine"
+      ],
+      "missing_relevant_ids": [
+        "fixture:chunk:reading:queue"
+      ],
+      "best_recall_at_5_with_observed_candidates": 0.5
+    },
+    {
+      "query_id": "semantic-watering-sv",
+      "language": "sv",
+      "category": "semantic",
+      "candidate_count": 3,
+      "relevant_count": 2,
+      "matched_relevant_ids": [
+        "fixture:chunk:odling:watering"
+      ],
+      "missing_relevant_ids": [
+        "fixture:chunk:odling-review:notes"
+      ],
+      "best_recall_at_5_with_observed_candidates": 0.5
+    },
+    {
+      "query_id": "exact-project-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "candidate_count": 5,
+      "relevant_count": 2,
+      "matched_relevant_ids": [
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:project-lighthouse:overview"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "exact-bike-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "candidate_count": 4,
+      "relevant_count": 1,
+      "matched_relevant_ids": [
+        "fixture:chunk:bike:service"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "exact-reading-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "candidate_count": 3,
+      "relevant_count": 1,
+      "matched_relevant_ids": [
+        "fixture:chunk:reading:queue"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "status-active-sv",
+      "language": "sv",
+      "category": "date_status",
+      "candidate_count": 8,
+      "relevant_count": 6,
+      "matched_relevant_ids": [
+        "fixture:chunk:lighthouse-review:notes",
+        "fixture:chunk:odling-review:notes",
+        "fixture:chunk:odling:plan",
+        "fixture:chunk:project-lighthouse:decision",
+        "fixture:chunk:project-lighthouse:overview"
+      ],
+      "missing_relevant_ids": [
+        "fixture:chunk:odling:watering"
+      ],
+      "best_recall_at_5_with_observed_candidates": 0.8333333333333334
+    },
+    {
+      "query_id": "date-bike-sv",
+      "language": "sv",
+      "category": "date_status",
+      "candidate_count": 5,
+      "relevant_count": 1,
+      "matched_relevant_ids": [
+        "fixture:chunk:bike:service"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "date-review-sv",
+      "language": "sv",
+      "category": "date_status",
+      "candidate_count": 9,
+      "relevant_count": 1,
+      "matched_relevant_ids": [
+        "fixture:chunk:lighthouse-review:notes"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "link-energy-sv",
+      "language": "sv",
+      "category": "cross_link",
+      "candidate_count": 5,
+      "relevant_count": 2,
+      "matched_relevant_ids": [
+        "fixture:chunk:energy-decision:decision",
+        "fixture:chunk:project-lighthouse:decision"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "link-garden-sv",
+      "language": "sv",
+      "category": "cross_link",
+      "candidate_count": 4,
+      "relevant_count": 1,
+      "matched_relevant_ids": [
+        "fixture:chunk:odling-review:notes"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "link-study-sv",
+      "language": "sv",
+      "category": "cross_link",
+      "candidate_count": 1,
+      "relevant_count": 1,
+      "matched_relevant_ids": [],
+      "missing_relevant_ids": [
+        "fixture:chunk:reading:queue"
+      ],
+      "best_recall_at_5_with_observed_candidates": 0.0
+    }
+  ],
+  "execution_scope": "Complete tiny-corpus candidate list for the bounded installed plan; not complete linguistic coverage."
+}

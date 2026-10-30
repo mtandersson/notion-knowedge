@@ -47,7 +47,7 @@ def cohorts(report):
 
 
 def policies(dataset, report):
-    """Original offline floors; passing these cannot establish live cutover."""
+    """Historical proposed floors for comparison, not current launch blockers."""
     grouped = cohorts(report)
     checks = {}
     for mode in ("fts", "hybrid"):
@@ -68,7 +68,7 @@ def policies(dataset, report):
     ) for mode in ("fts", "hybrid")}
     hybrid = report["summary"]["hybrid"]["metrics"]
     g1 = {name: hybrid[name] >= .80 for name in ("recall_at_5", "mrr", "ndcg_at_5")}
-    g1["exact_name_top3"] = exact["hybrid"]
+    g1["exact_name_top3"] = exact["fts"] and exact["hybrid"]
     return {
         "g1": {"checks": g1, "passed": all(g1.values())},
         "cutover_offline": {"checks": checks, "exact_name_top3": exact,

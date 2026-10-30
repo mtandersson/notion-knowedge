@@ -1,3 +1,9 @@
+> Launch policy update, 2026-10-30: numeric ranking floors and long quality
+> pilots are post-launch improvement goals, per the owner's explicit decision.
+> Complete measurements remain honest regression evidence; they no longer
+> block launch solely on aggregate scores. Real functional/safety smoke remains
+> required. See [current policy](../../docs/cutover-gates.md).
+
 # Personal-knowledge retrieval dataset
 
 The [measured Qwen baseline](QWEN_BASELINE.md) records real pinned-model

@@ -1,0 +1,99 @@
+{
+  "as_of": "2026-10-01",
+  "configuration": {
+    "distance": "Cosine",
+    "fts": "production lexical-expansion-v1 positional body/title and raw identifier profile",
+    "lexical": {
+      "adapter": "notion_knowledge_retrieval::lexical_runtime::LexicalSearchRuntime",
+      "admission": 1,
+      "candidate_bytes": 100663296,
+      "candidate_rows": 8000,
+      "compiler": "rustc 1.98.1 (48a229cea 2026-09-01);binary: rustc;commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985;commit-date: 2026-09-01;host: x86_64-unknown-linux-gnu;release: 1.98.1;LLVM version: 22.1.8;",
+      "coverage": "bounded native candidates; not an exhaustive corpus scan",
+      "deadline_seconds": 60,
+      "plan": {
+        "asset_sha256": "15cb13f8c730598103361c6bd3aae240ce61e1d63fd83f9322b116f7f4f40df7",
+        "embedding_text_contract": "canonical-indexed-chunk-v1;embedding-input=chunk.text;unchanged-vector-space",
+        "executor_sha256": "e8fb0903f0105d467b777aa74037c1e22ca9e150d15b41010937ba252c0d1ab2",
+        "importer_sha256": "ad68694720ed1e3f19d25b242b500a3371a8c6e54b4c328ba2ecb3e598c1290c",
+        "lock_sha256": "cc0a537d23ebf163be0a986abc5916231fea47f37b44d3ef4076bfe1f208a2a8"
+      },
+      "plan_sha256": "921a113c8bc03c4b771eea64d9019f5d55a5f544465b984de4fdc849981a2b8b",
+      "source_revision": "65dd30c52e7486902c39632dad8c650b49f7f27e"
+    },
+    "max_iterations": 20,
+    "nprobes": 1,
+    "partitions": 1,
+    "rrf": {
+      "candidate_limit": 100,
+      "lexical_weight": 1,
+      "rank_constant": 60,
+      "semantic_weight": 1
+    },
+    "sample_rate": 8,
+    "vector": "IVF_FLAT"
+  },
+  "corpus_sha256": "d7f5af951f33a659bcbb91aef0dbce4bde959d798631b9462b84756136810776",
+  "dataset_id": "exact-identifiers-fictional-v1",
+  "model": {
+    "dimension": 1024,
+    "model_id": "Qwen/Qwen3-Embedding-0.6B",
+    "model_version": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3:fastembed7.1.0:candle0.11.0:tokenizers0.23.2:last-token:left-padding:l2:exact-text:untruncated-v1",
+    "provider_id": "local-fastembed-candle-cpu-f32",
+    "schema_version": "1"
+  },
+  "preprocessing": "raw unchanged chunk.text, no title/status/date prefix and no query instruction",
+  "root_page_id": "22222222-2222-2222-2222-222222222222",
+  "schema_version": 1,
+  "sources": {
+    "fixture:chunk:issue-good:record": {
+      "chunk_id": "09e928d4ebc3f32855a3f891e54095967e8fe01cd27fd17323ca2b5452bf6c04",
+      "indexed_last_edited_time": "2026-10-01T00:00:00Z",
+      "page_id": "85d16765-f734-b5fc-87f8-ef80cc89d805",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    },
+    "fixture:chunk:issue-near:record": {
+      "chunk_id": "8fcbe2fb3ff0012d5a7b9e6f0c64889726d3ec1b527c86690f603b6d99664624",
+      "indexed_last_edited_time": "2026-10-01T00:00:00Z",
+      "page_id": "b7d4b741-4543-3364-3c1c-ed96a5e91671",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    },
+    "fixture:chunk:mixed-good:record": {
+      "chunk_id": "34716eeffca16fe4fb6ff215b0ddc48c78049e8ee12f2102ad23a31726f16ed1",
+      "indexed_last_edited_time": "2026-10-01T00:00:00Z",
+      "page_id": "5859806f-6697-c25c-41f7-0252b9145b67",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    },
+    "fixture:chunk:mixed-near:record": {
+      "chunk_id": "921982fde2157c9bccb649398d1c2fcbcfe43c0f22e8255ea4ee26ee839bc8bf",
+      "indexed_last_edited_time": "2026-10-01T00:00:00Z",
+      "page_id": "17df6a11-d7b5-b201-43af-0afde794f3f6",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    },
+    "fixture:chunk:name-good:record": {
+      "chunk_id": "425b51e3b27da7b21959cffd07fd19ba5c3f3847566c80e4ead863673178717f",
+      "indexed_last_edited_time": "2026-10-01T00:00:00Z",
+      "page_id": "d8bef8a9-0f2d-8aad-263c-41f676f10c8e",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    },
+    "fixture:chunk:name-near:record": {
+      "chunk_id": "76948d5f72a308ac6f84f3d4a9816caa76cc69187a9f204bd59c0fc1461b1122",
+      "indexed_last_edited_time": "2026-10-01T00:00:00Z",
+      "page_id": "7ae439e9-a379-aca2-688d-b3ee6fab40a3",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    },
+    "fixture:chunk:order-good:record": {
+      "chunk_id": "9b4d11afba480727b6e0e8b814490c7d00b7d6ba931bea861b160ea6945f4218",
+      "indexed_last_edited_time": "2026-10-01T00:00:00Z",
+      "page_id": "121ca2c3-f2d7-702c-65d6-5d4353d0a1e7",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    },
+    "fixture:chunk:order-near:record": {
+      "chunk_id": "c8219041c6780165b1cfbb899e1d034d1dc28931e45a2219632b4563c1d17074",
+      "indexed_last_edited_time": "2026-10-01T00:00:00Z",
+      "page_id": "684f0368-4620-8ddf-3eee-23c80d9c817b",
+      "root_page_id": "22222222-2222-2222-2222-222222222222"
+    }
+  },
+  "workspace_id": "44444444-4444-4444-4444-444444444444"
+}

@@ -1,3 +1,10 @@
+> Quality policy update, 2026-10-30: the owner made numeric ranking targets
+> and long quality pilots post-launch improvement goals. This design does not
+> require further language features before production. Existing historical
+> measurements and original failed verdicts stay unchanged. Functional search,
+> attribution, exact lookup, authorization and mutation safety remain required;
+> see [current launch quality policy](../cutover-gates.md).
+
 # Versioned multilingual lexical expansion (#472)
 
 Status: proposed contract for independent review. No runtime feature, decision
@@ -234,16 +241,16 @@ and byte-repeat evidence. Keep independent judgments out of all ranking inputs.
 Repeat the complete-candidate diagnostic and identify truncated observations.
 Retain the failing baseline and exact-identifier gates.
 
-Both existing policies remain binding: G1 in
-[ChatGPT cutover acceptance](../chatgpt-cutover-acceptance.md) requires hybrid
-Recall@5/MRR/nDCG@5 at least 0.80; the separate primary
-[cutover gate](../cutover-gates.md) requires **FTS and hybrid** Recall@5 at least
-0.95 and MRR/nDCG@5 at least 0.90, plus language/category Recall@5 floors of 0.90 and the
-exact-ID requirements retained by #461. Neither this design nor improvement against baseline
-passes a failed floor. Do not remove questions, revise judgments, lower targets
-or enable graph boost. Pilot/live acceptance remains separately required.
+The original proposed numeric policies are retained for historical comparison:
+G1 used hybrid Recall/MRR/nDCG >= 0.80, and primary cutover used FTS AND hybrid
+Recall@5 >= 0.95 and MRR/nDCG@5 >= 0.90 with cohort floors. The owner explicitly
+made these post-launch improvement goals on 2026-10-30; they are no longer
+launch blockers. Preserve the unchanged questions, judgments, reports and failed
+old verdicts instead of claiming that a policy revision improved retrieval.
+Functional source attribution, exact lookups, authorization, safe mutations and
+real deployment smoke remain required under the [current policy](../cutover-gates.md).
 
-If translation cannot repair morphology, semantic paraphrase, status metadata
-or linked-source intent, #468/#461/#12/#1 remain open. Decompose further generic
-linguistic, metadata or authorized navigation improvements into focused children
-with reviewed contracts; do not expand this dictionary into an answer map.
+Residual morphology, paraphrase, metadata or linked-source weaknesses belong in
+the post-launch backlog. Do not start further language machinery merely to meet
+the superseded floors. Production feedback and an owner decision should justify
+additional work, with focused reviewed contracts and no fixture answer maps.

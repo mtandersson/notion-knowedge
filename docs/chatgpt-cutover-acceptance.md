@@ -15,6 +15,19 @@ mock test or OAuth *discovery* response does not meet a production gate.
 Any `not runnable`, unknown denominator, unavailable feature, unreviewed
 security finding or missing evidence below means **no cutover**.
 
+## User-approved quality policy revision — 2026-10-30
+
+The owner explicitly chose usable production first and ranking improvement
+from real feedback afterward. The proposed 0.80 hybrid floors, stricter
+0.95/0.90 cutover floors, cohort floors and 30-day/50-query quality pilot are
+post-launch improvement goals. They do not block launch. Preserve all historical
+scores and old failed verdicts as evidence; do not claim those targets passed.
+
+Functional retrieval, exact lookups, correct source attribution, OAuth/root
+boundaries, safe mutations, explicit failures, sync and cache recovery remain
+required. Optional dictionary expansion and graph remain default OFF. Newly
+identified ranking refinements belong in the post-launch backlog.
+
 ## Evidence and decision protocol
 
 The operator must use one pinned production candidate (server Git SHA, model
@@ -29,8 +42,8 @@ commit or log private page bodies, tokens, signed URLs, uploaded files, or full
 user queries. An error or a fallback to the official connector is not a
 successful custom-MCP result.
 
-Apply each gate below as pass/fail/not runnable. All gates must pass on the
-**same release candidate**. Safety gates have zero tolerance; a later passing
+Apply each gate below as pass/fail/not runnable. All required functional and safety gates must pass on the
+**same release candidate**. G1b is a post-launch observation, not a blocker. Safety gates have zero tolerance; a later passing
 attempt cannot erase a critical earlier failure without an investigated fix
 and new full run. Retain evidence and sign-off date; do not claim results from
 unit tests alone. Run the checks after deployment, not solely on localhost.
@@ -40,22 +53,20 @@ unit tests alone. Run the checks after deployment, not solely on localhost.
 | ID | Required result | Minimum evidence |
 | --- | --- | --- |
 | G0 — Security and availability | 100% of the authorization negatives deny access *before* data retrieval or mutation; **zero** successful cross-workspace, wrong-user, excluded-root, stale-grant or unauthenticated access. Authenticated ChatGPT discovers only real supported tools. No unresolved critical/high security defects. | Production-style OAuth/PKCE + grant-binding end-to-end suite (#117, #127–#129), hosted/private ChatGPT connection smoke (#109), and operator review of logs and routes. A tunnel/no-auth test is not sufficient. |
-| G1 — Retrieval quality | Fixed evaluation dataset: **hybrid macro Recall@5 ≥ 0.80, nDCG@5 ≥ 0.80 and MRR ≥ 0.80**; **every exact_name query** has a grade-3 hit in top 3 for **both FTS and hybrid**. The real pinned adapter must return valid results for every query. No ungrounded or out-of-scope source citation. | Run the actual evaluation adapter on [personal-knowledge-v1](../eval/retrieval/personal-knowledge-v1.json) through [retrieval-eval.py](../scripts/retrieval-eval.py), `--modes vector,fts,hybrid --top-k 10`. Capture the JSON, inspect each exact-name query's graded top 3, and record model/index identity. The synthetic contract stub does **not** count. |
-| G1b — Observed search quality | In at least **30 consecutive pilot days** and **50** diverse, independently source-judged Swedish/English production-intent questions, ≥ **95%** of expected authorized pages appear in top 5; **100%** of accepted answers have correct page attribution; **zero** silent stale/error substitutions. | A sampling log by category (paraphrase, exact title/ID, dates, linked pages, absent answer), with denominators and independent source read-backs. This preserves the staged acceptance policy of #114. |
+| G1 — Usable retrieval | The real adapter returns valid results for every unchanged corpus query and passes representative authorized English/Swedish search/read and exact-lookup smoke checks. Citations identify actual allowed content; empty/unavailable outcomes stay explicit. Record ranking limitations without an aggregate numeric release floor. | Complete production-backed corpus results, model/index identity, exact-lookup regression evidence and actual functional smoke; no synthetic stub substituted for production |
+| G1b — Post-launch improvement | Observe real usage and fix ranking problems when they affect the owner. The former 30-day/50-query and 95% quality targets are optional improvement goals, not a launch waiting period. Source attribution and authorization remain correctness requirements. | Private production feedback and sanitized issue reports; retain denominators when publishing metrics |
 | G2 — Direct files | At least **5 image and 5 non-image** supported file cases, including small and near-configured-limit sizes, succeed directly from ChatGPT to the **intended Notion page** with native block, content/type and read-back verification; **100%** pass. Unsupported/oversize cases fail safely and do not leave an attached partial file. **Zero** Drive staging or Agent Handover invocations. | Real ChatGPT file-parameter tests (#66–#75), durable per-case target/block references and safe metadata; do not use an upload stub or an official-connector fallback to count a pass. |
 | G3 — Scoped read/write workflows | **100%** of the read and write smoke cases below pass, including create, append, targeted edit, property update, read-back, stale-write conflict, duplicate retry and denied out-of-scope mutation. Each user intent produces **at most one** authoritative write. No false success on timeout, source mismatch or unknown result. | Invoke production semantic tools through the actual ChatGPT connector with test-root permissions (#76–#83, #87, #117); independently re-fetch the authoritative Notion page. No destructive test on real pages. |
 | G4 — Freshness and retry safety | In ≥ **100** timestamped synthetic create/update/delete/move events across a minimum **7-day** pilot, ≥ **95%** reach *correct* searchable state in ≤ **5 minutes** and ≥ **99%** in ≤ **15 minutes** measured from accepted source event to verified lexical **and** vector results. A complete authorized reconciliation runs at least every **24 hours**. **Zero** silently lost events, stale-owner commits or unauthorized tombstones; failures remain inspectable/retryable. | Worker inbox and reconciliation evidence (#55–#58, #242–#255), source reads plus actual index queries, and failure/replay tests. Separate API outage time from normal latency; an unavailable source must be reported, never silently excluded from the denominator. |
 | G5 — Recovery | On an isolated **100-page disposable** corpus, a fresh authorized rebuild to both retrieval modes, safe checkpoint/replay reconciliation and source/provenance verification complete within **60 minutes** of operator start. The Notion source has **zero expected data loss**; locally unacknowledged work is either replayed or explicitly flagged, never silently discarded. | Follow [local-state recovery](local-state-recovery.md), back up/restore operational SQLite to staging, rebuild a distinct derived index from Notion, exercise interrupted apply-before-ack, and validate scope and vector identity. Retain old generation for rollback. This is an acceptance target, **not** a currently supported production restore command. |
 | G6 — Standalone ChatGPT | With the **official Notion connector disconnected in a test ChatGPT workspace**, all applicable S1–S4, F1–F4, W1–W5 and Y1–Y4 workflows succeed solely via the custom MCP; **zero** invisible fallback to official Notion, Handover or Drive. The C3 rollback drill is separately evaluated with official routing restored. One full negative/security pass follows connector removal. | Human-observed ChatGPT invocation/response traces, tool discovery and authoritative Notion read-back. Any missing capability blocks primary cutover. |
 
-**These numerical targets are provisional acceptance policy, not measured
-quality or availability claims.** Pin this policy for the trial *before*
-measuring it; a failing metric should lead to a fix or a separately reviewed
-threshold change, not an unrecorded relaxation. Use the existing dataset's
-graded *chunk*-level metric definitions. The exact-name rule means at least
-one grade-3 judged chunk among the first three, **not** necessarily that all
-chunks from a page must appear. Inspect actual adapter output: the harness'
-exit status 0 means valid execution, not passing relevance.
+The previous numeric retrieval targets remain historical/advisory under the
+2026-10-30 owner decision. Keep the existing graded chunk metrics and unchanged
+questions/judgments for honest comparisons. A successful harness exit proves
+valid execution, not good ranking; the functional smoke still needs real,
+correctly attributed source results. Ranking shortfalls alone no longer block
+production use or require additional language machinery.
 
 Suggested reproducible evaluation (replace the adapter with the actual pinned
 production-backed invocation, not the contract stub):
@@ -72,9 +83,9 @@ Run the same dataset on the same built index for every mode. The JSON
 `summary.hybrid.metrics` carries the three macro metrics; inspect
 `results` where `category == "exact_name"` for both modes and match
 `grades` with the ranked chunk list. Record any failure by query ID, never
-copy private query text into evidence. Future exact-identifier cases (#100)
-and a true CI quality gate (#103) may strengthen this policy; they cannot be
-replaced by the existing harness' deterministic stub.
+copy private query text into evidence. Exact-identifier regression evidence and metrics remain useful after launch;
+new numeric release gates require an explicit owner decision. A deterministic
+stub is not functional production evidence.
 
 ## Operational smoke matrix
 
@@ -115,10 +126,10 @@ runbook.
 
 ## Cutover decision and rollback
 
-An operator and independent reviewer must check all G0–G6 gate groups and the
-full smoke matrix, sign the evidence record, and explicitly authorize the
+An operator and independent reviewer must check the required functional/safety G0–G6 checks and the
+full smoke matrix (G1b remains advisory), sign the evidence record, and explicitly authorize the
 client-side change. First preserve a working official connection as the
-fallback during the dual-connector pilot (#114); **only** after G0–G6 pass
+fallback during the dual-connector pilot (#114); **only** after the required functional/safety checks pass
 should the operator disable it for the controlled primary cutover. Observe
 the rollout, including missed changes, citation accuracy and error/fallback
 classification; restore official routing on any privacy, authorization,
@@ -141,7 +152,7 @@ custom MCP must remain disabled until repaired and retested. See
 | Approved Notion workspace/root fingerprint | *unfilled* |
 | G0–G6 results with links to private evidence | *not run* |
 | S1–C4 case status and failure investigations | *not run* |
-| 30-day search sample and 7-day freshness samples | *not run* |
+| Functional search smoke; optional post-launch quality sample | *not run* |
 | Rollback drill result and explicit approval | *not run* |
 
 **Decision for this issue:** the policy and operator test plan can be merged

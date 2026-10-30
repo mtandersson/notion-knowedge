@@ -1,0 +1,258 @@
+{
+  "schema_version": 1,
+  "dataset_id": "exact-identifiers-fictional-v1",
+  "as_of": "2026-10-01",
+  "provenance": "Hand-authored fictional exact lookup and near-miss cases. No live Notion data, order IDs, real people or secrets.",
+  "pages": [
+    {
+      "id": "fixture:page:order-good",
+      "title": "Order ORD7241B",
+      "language": "en",
+      "status": "active",
+      "updated_at": "2026-10-01",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:order-good:record",
+          "text": "Invoice ORD7241B records delivery of the repaired monitor to the studio."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:order-near",
+      "title": "Order ORD7241C",
+      "language": "en",
+      "status": "archived",
+      "updated_at": "2026-10-01",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:order-near:record",
+          "text": "Invoice ORD7241C records delivery of the replacement cable, not the monitor."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:issue-good",
+      "title": "Issue ISSUE-7B42",
+      "language": "en",
+      "status": "active",
+      "updated_at": "2026-10-01",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:issue-good:record",
+          "text": "ISSUE-7B42 tracks the completed backup integrity investigation."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:issue-near",
+      "title": "Issue ISSUE-7B43",
+      "language": "en",
+      "status": "active",
+      "updated_at": "2026-10-01",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:issue-near:record",
+          "text": "ISSUE-7B43 tracks an unrelated backup dashboard layout correction."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:name-good",
+      "title": "Elin Åberg",
+      "language": "en",
+      "status": "active",
+      "updated_at": "2026-10-01",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:name-good:record",
+          "text": "Elin Åberg is the contact for the fictional library return."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:name-near",
+      "title": "Elin Ågren",
+      "language": "en",
+      "status": "active",
+      "updated_at": "2026-10-01",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:name-near:record",
+          "text": "Elin Ågren is the contact for the fictional loan request."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:mixed-good",
+      "title": "Device AbC731x",
+      "language": "en",
+      "status": "active",
+      "updated_at": "2026-10-01",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:mixed-good:record",
+          "text": "Asset AbC731x is the calibrated sensor assigned to testing."
+        }
+      ]
+    },
+    {
+      "id": "fixture:page:mixed-near",
+      "title": "Device AbC731y",
+      "language": "en",
+      "status": "active",
+      "updated_at": "2026-10-01",
+      "links": [],
+      "chunks": [
+        {
+          "id": "fixture:chunk:mixed-near:record",
+          "text": "Asset AbC731y is a different sensor and has not been calibrated."
+        }
+      ]
+    }
+  ],
+  "queries": [
+    {
+      "id": "order-en",
+      "language": "en",
+      "category": "exact_name",
+      "text": "Find the record for order ORD7241B.",
+      "intent": "Identify the exact order without confusing the near-match record; retain letter/digit and Unicode distinctions.",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:order-good:record",
+          "grade": 3,
+          "rationale": "Exact order identifier or name matches the selected record."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:order-near:record"
+      ]
+    },
+    {
+      "id": "order-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "text": "Hitta posten för order ORD7241B.",
+      "intent": "Identify the exact order without confusing the near-match record; retain letter/digit and Unicode distinctions.",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:order-good:record",
+          "grade": 3,
+          "rationale": "Exact order identifier or name matches the selected record."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:order-near:record"
+      ]
+    },
+    {
+      "id": "issue-en",
+      "language": "en",
+      "category": "exact_name",
+      "text": "Find issue ISSUE-7B42.",
+      "intent": "Identify the exact issue without confusing the near-match record; retain letter/digit and Unicode distinctions.",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:issue-good:record",
+          "grade": 3,
+          "rationale": "Exact issue identifier or name matches the selected record."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:issue-near:record"
+      ]
+    },
+    {
+      "id": "issue-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "text": "Hitta ärende ISSUE-7B42.",
+      "intent": "Identify the exact issue without confusing the near-match record; retain letter/digit and Unicode distinctions.",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:issue-good:record",
+          "grade": 3,
+          "rationale": "Exact issue identifier or name matches the selected record."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:issue-near:record"
+      ]
+    },
+    {
+      "id": "name-en",
+      "language": "en",
+      "category": "exact_name",
+      "text": "Find the contact Elin Åberg.",
+      "intent": "Identify the exact name without confusing the near-match record; retain letter/digit and Unicode distinctions.",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:name-good:record",
+          "grade": 3,
+          "rationale": "Exact name identifier or name matches the selected record."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:name-near:record"
+      ]
+    },
+    {
+      "id": "name-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "text": "Hitta kontakten Elin Åberg.",
+      "intent": "Identify the exact name without confusing the near-match record; retain letter/digit and Unicode distinctions.",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:name-good:record",
+          "grade": 3,
+          "rationale": "Exact name identifier or name matches the selected record."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:name-near:record"
+      ]
+    },
+    {
+      "id": "mixed-en",
+      "language": "en",
+      "category": "exact_name",
+      "text": "Find asset AbC731x.",
+      "intent": "Identify the exact mixed without confusing the near-match record; retain letter/digit and Unicode distinctions.",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:mixed-good:record",
+          "grade": 3,
+          "rationale": "Exact mixed identifier or name matches the selected record."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:mixed-near:record"
+      ]
+    },
+    {
+      "id": "mixed-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "text": "Hitta enheten abc731X.",
+      "intent": "Identify the exact mixed without confusing the near-match record; retain letter/digit and Unicode distinctions.",
+      "relevant": [
+        {
+          "source_id": "fixture:chunk:mixed-good:record",
+          "grade": 3,
+          "rationale": "Exact mixed identifier or name matches the selected record."
+        }
+      ],
+      "excluded_source_ids": [
+        "fixture:chunk:mixed-near:record"
+      ]
+    }
+  ]
+}

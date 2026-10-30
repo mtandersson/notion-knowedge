@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "dataset_id": "exact-identifiers-fictional-v1",
+  "corpus_chunks": 8,
+  "requested_top_k": 100,
+  "complete_candidate_coverage": true,
+  "interpretation": "oracle_ceiling",
+  "overall": {
+    "queries": 8,
+    "queries_missing_relevant_candidates": 0,
+    "mean_best_recall_at_5_with_observed_candidates": 1.0
+  },
+  "cohorts": {
+    "language": {
+      "en": {
+        "queries": 4,
+        "queries_missing_relevant_candidates": 0,
+        "mean_best_recall_at_5_with_observed_candidates": 1.0
+      },
+      "sv": {
+        "queries": 4,
+        "queries_missing_relevant_candidates": 0,
+        "mean_best_recall_at_5_with_observed_candidates": 1.0
+      }
+    },
+    "category": {
+      "exact_name": {
+        "queries": 8,
+        "queries_missing_relevant_candidates": 0,
+        "mean_best_recall_at_5_with_observed_candidates": 1.0
+      }
+    }
+  },
+  "results": [
+    {
+      "query_id": "order-en",
+      "language": "en",
+      "category": "exact_name",
+      "candidate_count": 6,
+      "relevant_count": 1,
+      "matched_relevant_ids": [
+        "fixture:chunk:order-good:record"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "order-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "candidate_count": 2,
+      "relevant_count": 1,
+      "matched_relevant_ids": [
+        "fixture:chunk:order-good:record"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "issue-en",
+      "language": "en",
+      "category": "exact_name",
+      "candidate_count": 2,
+      "relevant_count": 1,
+      "matched_relevant_ids": [
+        "fixture:chunk:issue-good:record"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "issue-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "candidate_count": 2,
+      "relevant_count": 1,
+      "matched_relevant_ids": [
+        "fixture:chunk:issue-good:record"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "name-en",
+      "language": "en",
+      "category": "exact_name",
+      "candidate_count": 6,
+      "relevant_count": 1,
+      "matched_relevant_ids": [
+        "fixture:chunk:name-good:record"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "name-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "candidate_count": 2,
+      "relevant_count": 1,
+      "matched_relevant_ids": [
+        "fixture:chunk:name-good:record"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "mixed-en",
+      "language": "en",
+      "category": "exact_name",
+      "candidate_count": 2,
+      "relevant_count": 1,
+      "matched_relevant_ids": [
+        "fixture:chunk:mixed-good:record"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    },
+    {
+      "query_id": "mixed-sv",
+      "language": "sv",
+      "category": "exact_name",
+      "candidate_count": 1,
+      "relevant_count": 1,
+      "matched_relevant_ids": [
+        "fixture:chunk:mixed-good:record"
+      ],
+      "missing_relevant_ids": [],
+      "best_recall_at_5_with_observed_candidates": 1.0
+    }
+  ],
+  "execution_scope": "Complete tiny-corpus candidate list for the bounded installed plan; not complete linguistic coverage."
+}
