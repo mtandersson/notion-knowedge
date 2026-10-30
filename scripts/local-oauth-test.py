@@ -22,6 +22,7 @@ def main():
     result = {"done": False, "success": False}
 
     class Callback(BaseHTTPRequestHandler):
+        timeout = 5
         def log_message(self, *_args):
             pass
 

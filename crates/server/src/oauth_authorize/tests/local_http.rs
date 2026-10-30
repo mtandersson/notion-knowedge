@@ -53,31 +53,49 @@ async fn local_http_browser_flow_keeps_cookie_pkce_and_owner_binding() {
     let provider = tokio::spawn(async move {
         axum::serve(
             provider_socket,
-            Router::new().route(
-                "/v1/oauth/token",
-                post(move |axum::Json(request): axum::Json<serde_json::Value>| {
-                    let expected_callback = expected_callback.clone();
-                    async move {
-                        assert_eq!(request["redirect_uri"], expected_callback);
-                        axum::Json(grant("workspace-a", "user-a"))
-                    }
-                }),
-            ),
+            Router::new()
+                .route(
+                    "/v1/oauth/token",
+                    post(move |axum::Json(request): axum::Json<serde_json::Value>| {
+                        let expected_callback = expected_callback.clone();
+                        async move {
+                            assert_eq!(request["redirect_uri"], expected_callback);
+                            axum::Json(grant("workspace-a", "user-a"))
+                        }
+                    }),
+                )
+                .route(
+                    "/v1/oauth/introspect",
+                    post(|| async { axum::Json(serde_json::json!({"active": true})) }),
+                ),
         )
         .await
         .unwrap();
     });
-    Arc::get_mut(&mut login)
-        .unwrap()
-        .callback
-        .as_mut()
-        .unwrap()
-        .client = NotionTokenClient::new(
+    let provider_client = NotionTokenClient::new(
         config.notion_oauth_redirect.as_ref().unwrap(),
         "client-secret",
     )
     .unwrap()
     .for_local_fixture(&endpoint);
+    let callback_runtime = Arc::get_mut(&mut login).unwrap().callback.as_mut().unwrap();
+    callback_runtime.client = provider_client.clone();
+    callback_runtime.credentials = NotionOAuthRuntime::fixture_with_clock(
+        runtime.grant_store(),
+        provider_client,
+        config
+            .notion_oauth_callback
+            .as_ref()
+            .unwrap()
+            .allowed
+            .clone(),
+        Arc::new(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        }),
+    );
     let router = crate::oauth_discovery::router_with_login(
         bind,
         config.oauth_discovery.unwrap(),
@@ -163,23 +181,39 @@ async fn local_http_browser_flow_keeps_cookie_pkce_and_owner_binding() {
         .unwrap()
         .1
         .into_owned();
-    let request = TokenRequest {
-        grant_type: "authorization_code",
-        client_id: "local-test",
-        redirect_uri: "http://localhost:3301/callback",
-        resource: &resource,
-        code: &code,
-        code_verifier: VERIFIER,
-    };
-    let sealed = runtime.grant_store().load_for_refresh().unwrap().unwrap();
-    let approved = ApprovedNotionGrant {
-        grant_id: sealed.grant_id(),
-        epoch: sealed.epoch(),
-        workspace_id: sealed.workspace_id(),
-        owner_type: "user",
-        owner_user_id: sealed.owner_user_id(),
-    };
-    assert!(login.flow.redeem(&request, &approved).is_ok());
+    let mut body = reqwest::Url::parse("https://form.invalid").unwrap();
+    body.query_pairs_mut().extend_pairs([
+        ("grant_type", "authorization_code"),
+        ("client_id", "local-test"),
+        ("redirect_uri", "http://localhost:3301/callback"),
+        ("resource", resource.as_str()),
+        ("code", code.as_str()),
+        ("code_verifier", VERIFIER),
+    ]);
+    let form = body.query().unwrap();
+    let redeemed = client
+        .post(format!("{issuer}/token"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(form.to_owned())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(redeemed.status(), StatusCode::OK);
+    let token: serde_json::Value = redeemed.json().await.unwrap();
+    assert!(
+        token["access_token"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+    assert_eq!(token["token_type"], "Bearer");
+    let replayed_code = client
+        .post(format!("{issuer}/token"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(form.to_owned())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replayed_code.status(), StatusCode::BAD_REQUEST);
     let replay = client
         .get(&callback_url)
         .header("cookie", cookie.split(';').next().unwrap())
