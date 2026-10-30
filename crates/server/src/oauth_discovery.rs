@@ -74,6 +74,7 @@ impl OAuthDiscovery {
             issuer: issuer.into(),
             resource: resource.into(),
             local_http: true,
+            writes_enabled: false,
         })
     }
 
