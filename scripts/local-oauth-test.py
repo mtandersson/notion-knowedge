@@ -28,6 +28,14 @@ def main():
 
         def do_GET(self):
             url = urlsplit(self.path)
+            if (url.path == "/start" and not url.query
+                    and self.headers.get("Host") == "localhost:3301"):
+                self.send_response(302)
+                self.send_header("Location", authorization)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.end_headers()
+                return
             params = parse_qs(url.query, keep_blank_values=True)
             valid = (url.path == "/callback" and len(self.path) <= 8192
                      and self.headers.get("Host") == "localhost:3301"
@@ -78,7 +86,7 @@ def main():
             "code_challenge": challenge, "code_challenge_method": "S256",
         })
         print("Open this URL in your local browser (expires in five minutes):", flush=True)
-        print(authorization, flush=True)
+        print("http://localhost:3301/start", flush=True)
         deadline = time.monotonic() + 300
         while not result["done"] and time.monotonic() < deadline:
             server.handle_request()
