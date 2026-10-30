@@ -82,25 +82,24 @@ or expanding the allowed roots.
    use custom retrieval for selected authorized **read-only** tasks. Keep
    official reads available as explicit fallback; compare failures and
    drift against the same source pages.
-4. **Prefer custom search:** consider reducing *official search calls only*
-   when the last **30 observed pilot days**, with at least **50 mixed
-   source-grounded test queries**, show: at least **95%** of expected
-   in-scope pages within top 5, **100%** correct/stable source attribution
-   for answers using a result, **zero** successful out-of-scope retrievals,
-   and **zero** silently masked stale/error results. Log query class,
-   expected/not-found status and failures without storing private query text.
-   These are **proposed migration thresholds**, not measured results.
-5. **Write/file and primary cutover:** stay on the official connector until
-   relevant upload/write/security features and smoke tests ship. [the primary cutover gates](cutover-gates.md) (#115) define
-   the final numerical quality, freshness, recovery, file and write
-   acceptance requirements before the official connector may be disabled.
-   Passing the read-only pilot does **not** authorize that final step.
+4. **Prefer custom search:** after representative authorized English/Swedish
+   and exact-lookup smoke checks succeed, verify relevant scoped sources,
+   stable citations and explicit empty/unavailable outcomes. The owner-approved
+   2026-10-30 policy makes the former 30-day/50-query/95% ranking pilot a
+   post-launch improvement goal, not a waiting period. Correct attribution,
+   scope enforcement and honest stale/error handling remain required. Keep
+   private feedback and improve ranking when real usage warrants it.
+5. **Write/file and primary cutover:** keep the official connector available
+   until actual upload/write/security capabilities and live smoke checks pass.
+   The [current cutover policy](cutover-gates.md) defines functional, safety,
+   freshness and recovery acceptance. Read-only search alone does not authorize
+   writes, file transfer, wider scope or disconnecting the fallback.
 
-If a metric cannot be measured, coverage is too sparse, a critical authorization
-finding is open, or the authoritative connector is not available as fallback,
-the stage is **not** passed. Avoid false confidence from counting tool
-invocations rather than completed supported workflows. Do not disable a
-working official connection merely to remove duplicate tools.
+A missing functional smoke, critical authorization finding or unavailable
+required capability is not a pass. Aggregate ranking scores and the advisory
+quality-pilot duration alone no longer block the search rollout. Count completed
+supported workflows, not tool invocations, and retain a working fallback until
+actual required workflows are verified.
 
 ## Operational smoke checklist (dry-run first)
 
