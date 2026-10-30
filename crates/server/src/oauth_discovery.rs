@@ -20,6 +20,7 @@ use serde_json::json;
 pub struct OAuthDiscovery {
     issuer: String,
     resource: String,
+    local_http: bool,
     writes_enabled: bool,
 }
 
@@ -37,6 +38,7 @@ impl OAuthDiscovery {
         Ok(Self {
             issuer: issuer.to_owned(),
             resource: resource.to_owned(),
+            local_http: false,
             writes_enabled: false,
         })
     }
@@ -52,6 +54,34 @@ impl OAuthDiscovery {
             vec!["knowledge:read"]
         }
     }
+    /// Explicit local development only: no DNS aliases or non-loopback listener.
+    pub(crate) fn local_http(
+        issuer: &str,
+        resource: &str,
+        bind: SocketAddr,
+    ) -> Result<Self, &'static str> {
+        if !bind.ip().is_loopback() || !local_http_url(issuer, "") {
+            return Err("NK_OAUTH_ISSUER");
+        }
+        let uri: Uri = issuer.parse().map_err(|_| "NK_OAUTH_ISSUER")?;
+        if uri.port_u16() != Some(bind.port()) {
+            return Err("NK_OAUTH_ISSUER");
+        }
+        if resource != format!("{issuer}/mcp") {
+            return Err("NK_OAUTH_RESOURCE");
+        }
+        Ok(Self {
+            issuer: issuer.into(),
+            resource: resource.into(),
+            local_http: true,
+            writes_enabled: false,
+        })
+    }
+
+    pub(crate) fn is_local_http(&self) -> bool {
+        self.local_http
+    }
+
     pub(crate) fn resource(&self) -> &str {
         &self.resource
     }
@@ -70,6 +100,18 @@ impl OAuthDiscovery {
                 .expect("validated resource")
         )
     }
+}
+
+/// Only the literal localhost name with an explicit nonzero canonical port.
+/// Kept separate from production URI validation.
+pub(crate) fn local_http_url(value: &str, path: &str) -> bool {
+    let Ok(uri) = value.parse::<Uri>() else {
+        return false;
+    };
+    let Some(port) = uri.port_u16().filter(|p| *p > 0) else {
+        return false;
+    };
+    value == format!("http://localhost:{port}{path}")
 }
 
 fn canonical_https(value: &str, required_path: &str) -> bool {

@@ -25,6 +25,7 @@ use crate::{
 #[derive(Clone)]
 pub struct Settings {
     client: Client,
+    local_http: bool,
 }
 impl std::fmt::Debug for Settings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -35,11 +36,27 @@ impl Settings {
     pub fn new(client_id: &str, redirect_uri: &str, resource: &str) -> Result<Self, Error> {
         Ok(Self {
             client: Client::new(client_id, redirect_uri, resource)?,
+            local_http: false,
         })
+    }
+    pub(crate) fn for_discovery(
+        client_id: &str,
+        redirect_uri: &str,
+        discovery: &crate::oauth_discovery::OAuthDiscovery,
+    ) -> Result<Self, Error> {
+        if discovery.is_local_http() {
+            Ok(Self {
+                client: Client::local_http(client_id, redirect_uri, discovery.resource())?,
+                local_http: true,
+            })
+        } else {
+            Self::new(client_id, redirect_uri, discovery.resource())
+        }
     }
 }
 
 pub struct Login {
+    local_http: bool,
     flow: AuthorizationFlow,
     redirect: NotionOAuthRedirect,
     callback: Option<CallbackRuntime>,
@@ -96,6 +113,21 @@ impl Login {
             cleanup.await.map_err(|_| Error::TemporarilyUnavailable)?;
         }
         Ok(())
+    }
+
+    fn cookie_name(&self) -> &'static str {
+        if self.local_http {
+            "nk-oauth-local"
+        } else {
+            "__Host-nk-oauth"
+        }
+    }
+    fn cookie(&self, value: &str, max_age: u32) -> String {
+        let secure = if self.local_http { "" } else { " Secure;" };
+        format!(
+            "{}={value}; Path=/;{secure} HttpOnly; SameSite=Lax; Max-Age={max_age}",
+            self.cookie_name()
+        )
     }
 
     pub(crate) fn content_factory(
@@ -186,6 +218,7 @@ impl Login {
             })
             .transpose()?;
         Ok(Some(Arc::new(Self {
+            local_http: settings.local_http,
             flow: AuthorizationFlow::new(
                 settings.client.clone(),
                 policy.allowed.authorization_identity(),
@@ -282,10 +315,7 @@ pub async fn authorize(
         Ok((url, browser)) => {
             // One pending login per browser. Starting another replaces the
             // cookie and safely invalidates that browser's earlier attempt.
-            let cookie = format!(
-                "__Host-nk-oauth={}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=120",
-                browser.expose()
-            );
+            let cookie = login.cookie(browser.expose(), 120);
             (
                 StatusCode::FOUND,
                 [
@@ -314,7 +344,7 @@ pub async fn authorize(
 }
 
 /// Reject ambiguous cookie headers before consuming state or contacting Notion.
-fn browser_cookie(headers: &HeaderMap) -> Option<&str> {
+fn browser_cookie<'a>(headers: &'a HeaderMap, expected_name: &str) -> Option<&'a str> {
     let mut found = None;
     let mut size = 0usize;
     for header in headers.get_all(header::COOKIE) {
@@ -327,7 +357,7 @@ fn browser_cookie(headers: &HeaderMap) -> Option<&str> {
             let Some((name, value)) = part.trim().split_once('=') else {
                 continue;
             };
-            if name == "__Host-nk-oauth" {
+            if name == expected_name {
                 if found.is_some() {
                     return None;
                 }
@@ -354,7 +384,7 @@ pub async fn callback(
     let Ok(_permit) = runtime.admission.clone().try_acquire_owned() else {
         return callback_unavailable();
     };
-    let result = match browser_cookie(&headers) {
+    let result = match browser_cookie(&headers, login.cookie_name()) {
         Some(cookie) => {
             NotionCallback::new(&login.redirect, &runtime.client, &runtime.allowed)
                 .complete_browser_persist_and_approve(
@@ -379,14 +409,12 @@ pub async fn callback(
                 .query_pairs_mut()
                 .append_pair("code", approved.code.expose())
                 .append_pair("state", &approved.state);
+            let cleared_cookie = login.cookie("", 0);
             (
                 StatusCode::FOUND,
                 [
                     (header::LOCATION, destination.as_str()),
-                    (
-                        header::SET_COOKIE,
-                        "__Host-nk-oauth=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0",
-                    ),
+                    (header::SET_COOKIE, cleared_cookie.as_str()),
                     (header::CACHE_CONTROL, "no-store"),
                     (header::REFERRER_POLICY, "no-referrer"),
                 ],

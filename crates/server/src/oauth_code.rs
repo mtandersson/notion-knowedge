@@ -61,6 +61,23 @@ impl Client {
             resource: resource.to_owned(),
         })
     }
+    pub(crate) fn local_http(
+        client_id: &str,
+        redirect_uri: &str,
+        resource: &str,
+    ) -> Result<Self, Error> {
+        if !opaque_identifier(client_id, 1, 128)
+            || !crate::oauth_discovery::local_http_url(redirect_uri, "/callback")
+            || !crate::oauth_discovery::local_http_url(resource, "/mcp")
+        {
+            return Err(Error::InvalidRequest);
+        }
+        Ok(Self {
+            client_id: client_id.into(),
+            redirect_uri: redirect_uri.into(),
+            resource: resource.into(),
+        })
+    }
 }
 
 fn opaque_identifier(value: &str, min: usize, max: usize) -> bool {

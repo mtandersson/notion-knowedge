@@ -124,3 +124,9 @@ nix develop .#format --command cargo fmt --all -- --check
 
 The process-level `oauth_discovery` suite also tests the actual HTTP redirect,
 security cookie, parameter denial, Host protection and continued token/MCP denial.
+
+## Local development without TLS
+
+The explicit loopback-only [local OAuth test](local-oauth-test.md) uses
+`NK_OAUTH_LOCAL_HTTP=true` with fixed localhost URLs and a separate development
+cookie. This exception does not change production HTTPS/cookie requirements.
