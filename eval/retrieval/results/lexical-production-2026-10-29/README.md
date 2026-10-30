@@ -135,3 +135,11 @@ The retained measurement predates the owner-approved policy relaxation. A
 subsequent historical-policy helper correction checks exact-name top-3 for both
 FTS and hybrid, matching the old written rule; both modes pass that check here,
 so the retained verdicts are unchanged. No ranking binary or corpus changed.
+
+The published provenance renders model assets as explicit file/digest entries
+to avoid a generic API-key false positive on the public tokenizer checksum.
+Digest values equal the raw hosted artifact and the provider's pinned assets.
+`original_artifact_provenance_sha256` retains the original provenance-byte
+identity. Other captured evidence, including repeated native responses, is
+byte-preserved. A single reviewed historical scanner fingerprint covers the
+old occurrence; no path or scanner rule is disabled.

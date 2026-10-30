@@ -12,11 +12,6 @@
     "relations": 127216,
     "importer_identity_sha256": "ad68694720ed1e3f19d25b242b500a3371a8c6e54b4c328ba2ecb3e598c1290c"
   },
-  "model_asset_sha256": {
-    "config.json": "b5bf1f51fc45be473a54718cef92448d90a1be001bf9b9a44b8c7f10a19feaa9",
-    "tokenizer.json": "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a",
-    "model.safetensors": "0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd"
-  },
   "datasets": {
     "personal": "b96d4eba5be7ea7b9d48be12ce088d455f38868fe09b658ce06319ced9888efe",
     "exact": "8fce43d4b85e79fd2d60a9bd9f0b5e8b0f4d0eec423505bd6c01d5cbff6268a3"
@@ -40,5 +35,20 @@
         "hybrid": "820c27a1e774bb1394da46cd519a2ff7de6be388e6b9886072c2643e68cf7cc0"
       }
     }
-  }
+  },
+  "model_assets": [
+    {
+      "file": "config.json",
+      "sha256": "b5bf1f51fc45be473a54718cef92448d90a1be001bf9b9a44b8c7f10a19feaa9"
+    },
+    {
+      "file": "tokenizer.json",
+      "sha256": "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a"
+    },
+    {
+      "file": "model.safetensors",
+      "sha256": "0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd"
+    }
+  ],
+  "original_artifact_provenance_sha256": "a55bc5c636c8ff6bc1b7b6d751b3b4fe5546b111a1c81f291dbee49387fa8714"
 }

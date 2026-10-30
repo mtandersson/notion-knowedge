@@ -98,7 +98,7 @@ def measure(binary, assets, bundle_info, output):
         "build_profile": "release", "graph": "OFF", "quality_top_k": 10,
         "binary_sha256": digest(binary), "lock_sha256": digest(ROOT / "Cargo.lock"),
         "bundle": json.loads(bundle_info.read_text(encoding="utf-8")),
-        "model_asset_sha256": {name: digest(assets / name) for name in ("config.json", "tokenizer.json", "model.safetensors")},
+        "model_assets": [{"file": name, "sha256": digest(assets / name)} for name in ("config.json", "tokenizer.json", "model.safetensors")],
         "datasets": {}, "repeats": {},
     }
     verdicts = {}
