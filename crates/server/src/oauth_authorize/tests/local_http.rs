@@ -37,7 +37,7 @@ async fn local_http_browser_flow_keeps_cookie_pkce_and_owner_binding() {
         settings
             .iter()
             .find(|(k, _)| *k == name)
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| std::ffi::OsString::from(v))
     })
     .unwrap();
     let runtime = NotionOAuthRuntime::from_config(&config).unwrap().unwrap();
