@@ -228,6 +228,12 @@ impl Config {
                 invalid("NK_TOOL_BLOCKLIST", "unknown or malformed capability")
             }
         })?;
+        let oauth_local_http = match optional(&mut lookup, "NK_OAUTH_LOCAL_HTTP", "false")?.as_str()
+        {
+            "true" => true,
+            "false" => false,
+            _ => return Err(invalid("NK_OAUTH_LOCAL_HTTP", "must be true or false")),
+        };
         let oauth_issuer = lookup("NK_OAUTH_ISSUER")
             .map(|value| text(value, "NK_OAUTH_ISSUER"))
             .transpose()?;
@@ -235,10 +241,24 @@ impl Config {
             .map(|value| text(value, "NK_OAUTH_RESOURCE"))
             .transpose()?;
         let oauth_discovery = match (oauth_issuer, oauth_resource) {
-            (None, None) => None,
+            (None, None) if !oauth_local_http => None,
+            (None, None) => {
+                return Err(invalid(
+                    "NK_OAUTH_ISSUER",
+                    "required for local OAuth testing",
+                ));
+            }
             (Some(issuer), Some(resource)) => Some(
-                crate::oauth_discovery::OAuthDiscovery::new(&issuer, &resource)
-                    .map_err(|key| invalid(key, "must be a canonical HTTPS origin/resource"))?,
+                if oauth_local_http {
+                    crate::oauth_discovery::OAuthDiscovery::local_http(
+                        &issuer,
+                        &resource,
+                        SocketAddr::new(host, port),
+                    )
+                } else {
+                    crate::oauth_discovery::OAuthDiscovery::new(&issuer, &resource)
+                }
+                .map_err(|key| invalid(key, "invalid OAuth origin/resource or listener"))?,
             ),
             (None, Some(_)) => {
                 return Err(invalid(
@@ -848,7 +868,7 @@ impl Config {
                     ));
                 }
                 Some(
-                    crate::oauth_authorize::Settings::new(&id, &redirect, discovery.resource())
+                    crate::oauth_authorize::Settings::for_discovery(&id, &redirect, discovery)
                         .map_err(|_| {
                             invalid(
                                 "NK_OAUTH_CLIENT_REDIRECT_URI",
@@ -980,6 +1000,66 @@ mod tests {
                 .find(|(name, _)| *name == key)
                 .map(|(_, value)| OsString::from(value))
         })
+    }
+
+    #[test]
+    fn local_oauth_requires_explicit_mode_and_matching_loopback_endpoints() {
+        let settings = [
+            ("NK_OAUTH_LOCAL_HTTP", "true"),
+            ("NK_HTTP_PORT", "3300"),
+            ("NK_OAUTH_ISSUER", "http://localhost:3300"),
+            ("NK_OAUTH_RESOURCE", "http://localhost:3300/mcp"),
+        ];
+        assert!(
+            parse(&settings)
+                .unwrap()
+                .oauth_discovery
+                .unwrap()
+                .is_local_http()
+        );
+        for (key, value) in [
+            ("NK_OAUTH_LOCAL_HTTP", "false"),
+            ("NK_OAUTH_LOCAL_HTTP", "TRUE"),
+            ("NK_HTTP_HOST", "0.0.0.0"),
+            ("NK_HTTP_HOST", "192.0.2.1"),
+            ("NK_HTTP_PORT", "3301"),
+            ("NK_OAUTH_ISSUER", "http://localhost.evil:3300"),
+            ("NK_OAUTH_ISSUER", "http://127.0.0.1:3300"),
+            ("NK_OAUTH_ISSUER", "http://localhost:03300"),
+            ("NK_OAUTH_ISSUER", "http://localhost:3300?x=1"),
+            ("NK_OAUTH_RESOURCE", "http://localhost:3301/mcp"),
+            ("NK_OAUTH_RESOURCE", "https://other.example.com/mcp"),
+        ] {
+            let mut values = settings.to_vec();
+            values.retain(|(name, _)| *name != key);
+            values.push((key, value));
+            assert!(parse(&values).is_err(), "{key}={value}");
+        }
+        assert!(parse(&[("NK_OAUTH_LOCAL_HTTP", "true")]).is_err());
+        let discovery = crate::oauth_discovery::OAuthDiscovery::local_http(
+            "http://localhost:3300",
+            "http://localhost:3300/mcp",
+            "127.0.0.1:3300".parse().unwrap(),
+        )
+        .unwrap();
+        for callback in [
+            "https://example.com/callback",
+            "http://127.0.0.1:3301/callback",
+            "http://localhost:3301/callback?x=1",
+        ] {
+            assert!(
+                crate::oauth_authorize::Settings::for_discovery("local-test", callback, &discovery)
+                    .is_err()
+            );
+        }
+        assert!(
+            crate::oauth_authorize::Settings::for_discovery(
+                "local-test",
+                "http://localhost:3301/callback",
+                &discovery
+            )
+            .is_ok()
+        );
     }
 
     #[test]

@@ -315,6 +315,7 @@ impl Harness {
             .as_secs();
         let refresh_elapsed = clock.clone();
         let login = Arc::new(Login {
+            local_http: false,
             flow: AuthorizationFlow::new(
                 Client::new(
                     "chatgpt",
@@ -1362,3 +1363,5 @@ mod installed_files;
 
 #[cfg(all(unix, feature = "webhook-worker"))]
 mod file_configuration;
+
+mod local_http;
