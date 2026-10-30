@@ -72,17 +72,19 @@ async fn local_http_browser_flow_keeps_cookie_pkce_and_owner_binding() {
         .await
         .unwrap();
     });
-    let provider_client = NotionTokenClient::new(
-        config.notion_oauth_redirect.as_ref().unwrap(),
-        "client-secret",
-    )
-    .unwrap()
-    .for_local_fixture(&endpoint);
+    let provider_client = || {
+        NotionTokenClient::new(
+            config.notion_oauth_redirect.as_ref().unwrap(),
+            "client-secret",
+        )
+        .unwrap()
+        .for_local_fixture(&endpoint)
+    };
     let callback_runtime = Arc::get_mut(&mut login).unwrap().callback.as_mut().unwrap();
-    callback_runtime.client = provider_client.clone();
+    callback_runtime.client = provider_client();
     callback_runtime.credentials = NotionOAuthRuntime::fixture_with_clock(
         runtime.grant_store(),
-        provider_client,
+        provider_client(),
         config
             .notion_oauth_callback
             .as_ref()
