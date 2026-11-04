@@ -1112,6 +1112,21 @@ async fn scheduled_server_workers(
     CancellationToken,
     tokio::task::JoinHandle<std::io::Result<()>>,
 ) {
+    scheduled_server_budgets(f, source, timeout, timeout, attempts, webhook_enabled).await
+}
+
+async fn scheduled_server_budgets(
+    f: &Fixture,
+    source: &HttpNotion,
+    timeout: std::time::Duration,
+    inventory_timeout: std::time::Duration,
+    attempts: i64,
+    webhook_enabled: bool,
+) -> (
+    Arc<notion_knowledge_server::webhook_worker::runtime::Worker>,
+    CancellationToken,
+    tokio::task::JoinHandle<std::io::Result<()>>,
+) {
     use notion_knowledge_server::{
         scheduled_reconciliation::{Settings, runtime::Worker as Scheduled},
         webhook_worker::runtime::Worker,
@@ -1141,7 +1156,7 @@ async fn scheduled_server_workers(
             },
             poll: std::time::Duration::from_millis(10),
             timeout,
-            inventory_timeout: timeout,
+            inventory_timeout,
         })),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3060,5 +3075,44 @@ async fn cache_inventory_can_outlive_page_budget_while_page_refresh_stays_bounde
         ))
         .unwrap()
             > 0
+    );
+}
+
+#[tokio::test]
+async fn scheduled_inventory_uses_its_budget_before_bounded_page_work() {
+    use std::time::Duration;
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    http.pause.armed.store(true, Ordering::SeqCst);
+    f.provider.pause.store(true, Ordering::SeqCst);
+    let (worker, stop, server) = scheduled_server_budgets(
+        &f,
+        &http,
+        Duration::from_secs(1),
+        Duration::from_secs(60),
+        1,
+        false,
+    )
+    .await;
+    let observed = tokio::time::timeout(Duration::from_secs(15), async {
+        http.pause.started.notified().await;
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        http.pause.proceed.notify_one();
+        f.provider.entered.notified().await;
+        await_schedule(&worker, |s| s.attempts > 0).await
+    })
+    .await;
+    stop.cancel();
+    server.await.unwrap().unwrap();
+    let schedule =
+        observed.expect("inventory must survive the page budget and page work must then expire");
+    let run = schedule.active_run.unwrap();
+    assert!(
+        !worker
+            .coordinator
+            .reconciliation_progress(&run)
+            .unwrap()
+            .pending
+            .is_empty()
     );
 }
