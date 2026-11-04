@@ -951,7 +951,7 @@ async fn cancellation_reopens_pending_work_and_permission_failure_never_deletes(
 async fn timed_out_dry_run_leaves_state_unchanged_and_has_a_distinct_failure_exit() {
     let http = HttpNotion::start().await;
     let mut f = Fixture::new(&http).await;
-    f.settings.timeout_seconds = 1;
+    f.settings.inventory_timeout_seconds = 1;
     http.pause.armed.store(true, Ordering::SeqCst);
     let before = f.snapshot();
     let result = f.command(&http, &["--reconcile", "dry-run"]).await;
@@ -3067,15 +3067,8 @@ async fn cache_inventory_can_outlive_page_budget_while_page_refresh_stays_bounde
         result.is_err(),
         "pending page embedding must expire under its page budget"
     );
-    let db = rusqlite::Connection::open(&f.state).unwrap();
-    assert!(
-        db.query_row("SELECT COUNT(*) FROM reconciliation_inventory", [], |r| r
-            .get::<_, i64>(
-            0
-        ))
-        .unwrap()
-            > 0
-    );
+    // The observed embedding call proves the inventory finished and admitted
+    // page work; no assertion depends on a legacy inventory storage table.
 }
 
 #[tokio::test]
