@@ -39,13 +39,33 @@ python3 scripts/smoke-notion-write.py \
   --prepare-sources /absolute/private-smoke/synthetic
 ```
 
-The new directory and files are private. Publish **exactly those bytes** using
-your existing private, short-lived HTTPS source setup on the server's configured
-exact host allowlist. The harness does not start a file server, open a firewall,
-make files public or weaken the installed secure downloader. Keep download URLs,
-signing credentials and source setup out of transcripts, logs and Git. File audit
-must confirm the expected observed kind and tiny byte count (68-byte image and
-54-byte text); the server validates and downloads the actual source bytes.
+The generated directory and files are private. The same two payloads are also
+available as public, non-sensitive [PNG](examples/notion-smoke/smoke.png) and
+[text](examples/notion-smoke/smoke.txt) fixtures. They contain no user data.
+Use their commit-pinned raw GitHub URLs to avoid provisioning a file server:
+
+```sh
+fixture_commit=$(git rev-parse HEAD)
+printf 'https://raw.githubusercontent.com/mtandersson/notion-knowedge/%s/docs/examples/notion-smoke/smoke.png\n' "$fixture_commit"
+printf 'https://raw.githubusercontent.com/mtandersson/notion-knowedge/%s/docs/examples/notion-smoke/smoke.txt\n' "$fixture_commit"
+```
+
+Run this from the reviewed checkout containing these files. Add the exact host
+`raw.githubusercontent.com` to `NK_FILE_SOURCE_HOSTS` and use the resulting URLs
+in the private settings below. The hostname alone is not authorization to mutate
+Notion. Keep the immutable revision in the private live acceptance evidence.
+The expected files are:
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `smoke.png` | 68 | `5e3d382db4dd83d59aa5742793ad6b7903409e865c83bcbc54835049f043bc15` |
+| `smoke.txt` | 54 | `a199a34cc1adf65810a4fba4b5eb074ff5bb906a82557c6e3e73cd5c9b31ffd3` |
+
+An existing approved HTTPS source host may instead publish exactly the generated
+bytes. The harness starts no file server or tunnel and preserves the installed
+secure downloader's exact host, HTTPS and address restrictions. Keep any private
+download URLs or signing credentials out of transcripts, logs and Git. File audit
+must confirm the expected observed kind and tiny byte count.
 
 Prepare `/absolute/private-smoke/settings.json` locally (0600) beneath an
 operator-owned private directory. All UUIDs are canonical lowercase; configure:
