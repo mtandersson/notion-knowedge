@@ -3116,3 +3116,43 @@ async fn scheduled_inventory_uses_its_budget_before_bounded_page_work() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn explicit_retry_replans_with_inventory_budget_then_keeps_the_page_deadline() {
+    use std::time::Duration;
+    let http = HttpNotion::start().await;
+    let mut f = Fixture::new(&http).await;
+    f.provider.fail.store(true, Ordering::SeqCst);
+    let seeded = f
+        .command(&http, &["--reconcile", "apply", "failed-retry-budget"])
+        .await;
+    assert_eq!(seeded.exit, 3);
+    f.provider.fail.store(false, Ordering::SeqCst);
+    f.settings.timeout_seconds = 1;
+    f.settings.inventory_timeout_seconds = 60;
+    http.pause.armed.store(true, Ordering::SeqCst);
+    f.provider.pause.store(true, Ordering::SeqCst);
+    let release_inventory = async {
+        tokio::time::timeout(Duration::from_secs(10), http.pause.started.notified())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        http.pause.proceed.notify_one();
+        tokio::time::timeout(Duration::from_secs(10), f.provider.entered.notified())
+            .await
+            .unwrap();
+    };
+    let (out, _) = tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(
+            f.command(
+                &http,
+                &["--reconcile", "retry", "failed-retry-budget", PAGE]
+            ),
+            release_inventory
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(out.exit, 3);
+    assert_eq!(out.json["status"], "timeout");
+}

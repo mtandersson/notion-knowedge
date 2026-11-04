@@ -14,7 +14,7 @@ Configure `NK_NOTION_AUTH=integration`, secret `NOTION_TOKEN`,
 `NK_WEBHOOK_INDEX_DIR`, `NK_WEBHOOK_STATE_FILE`, `NK_WEBHOOK_QWEN_ASSETS` and
 `NK_WEBHOOK_TIMEOUT_SECONDS` (1–300, default 60) as the serving worker.
 Whole-scope inventory uses `NK_RECONCILIATION_INVENTORY_TIMEOUT_SECONDS`
-(1..86400, default 900). This includes dry-run, initial planning, and the full
+(1..3570, default 900). This includes dry-run, initial planning, and the full
 replan performed for an explicit failed-page retry. Ordinary page attempts keep
 `NK_WEBHOOK_TIMEOUT_SECONDS`; individual upstream HTTP deadlines are unchanged.
 The same distinction applies to cache reset/resync and periodic reconciliation.

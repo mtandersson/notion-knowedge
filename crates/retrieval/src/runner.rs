@@ -204,6 +204,21 @@ impl AuthoritativeReconciliationRunner {
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
         provider: &dyn EmbeddingProvider,
     ) -> Result<DurableProgress, RunnerError> {
+        self.prepare_retry_page(run, page, lease.clone(), clock.clone())
+            .await?;
+        self.apply_prepared_retry_page(run, page, lease, clock, provider)
+            .await
+    }
+
+    /// Replan and admit an explicitly requested retry. This performs inventory
+    /// only; callers may release its deadline before admitting page work.
+    pub async fn prepare_retry_page(
+        &self,
+        run: &str,
+        page: &str,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Result<(), RunnerError> {
         self.coordinator
             .state()
             .start_or_resume(&lease, clock(), run, &self.scope)?;
@@ -221,6 +236,32 @@ impl AuthoritativeReconciliationRunner {
             .clone();
         self.coordinator
             .retry_reconciliation_proposal(&lease, clock(), run, &candidate)?;
+        Ok(())
+    }
+
+    /// Apply only the explicitly admitted retry under its page-sized lease.
+    pub async fn apply_prepared_retry_page(
+        &self,
+        run: &str,
+        page: &str,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+        provider: &dyn EmbeddingProvider,
+    ) -> Result<DurableProgress, RunnerError> {
+        self.coordinator
+            .state()
+            .start_or_resume(&lease, clock(), run, &self.scope)?;
+        let (candidate, replan) = self.coordinator.reconciliation_page_proposal(run, page)?;
+        if !replan
+            || !self
+                .coordinator
+                .reconciliation_progress(run)?
+                .pending
+                .iter()
+                .any(|id| id == page)
+        {
+            return Err(JournalError::InvalidTransition.into());
+        }
         self.apply_one(
             ExpectedReconciliation {
                 run: run.into(),

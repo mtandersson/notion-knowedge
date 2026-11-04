@@ -377,14 +377,11 @@ pub mod runtime {
             return Output::error("run_configuration", 2);
         }
         let mut retry = retry;
+        let mut retry_prepared = false;
         let output = loop {
-            let timeout = if retry.is_some() {
-                // Explicit page retry first replans the complete source inventory.
-                Duration::from_secs(
-                    settings
-                        .inventory_timeout_seconds
-                        .max(settings.timeout_seconds),
-                )
+            let preparing_retry = retry.is_some() && !retry_prepared;
+            let timeout = if preparing_retry {
+                Duration::from_secs(settings.inventory_timeout_seconds)
             } else {
                 match runtime.reconciliation_timeout(
                     &run,
@@ -413,7 +410,7 @@ pub mod runtime {
                     now_ms() / 1000
                 }
             });
-            let page = retry.take();
+            let page = retry.as_ref();
             let aliases = std::mem::take(&mut rebuild_aliases);
             let rebuild = std::mem::take(&mut rebuild_relations);
             let work = async {
@@ -429,17 +426,25 @@ pub mod runtime {
                         .begin_relation_rebuild(&run, lease.clone(), clock.clone())
                         .await?;
                 }
-                let progress = if let Some(page) = &page {
-                    runtime
-                        .runner
-                        .retry_page(
-                            &run,
-                            page,
-                            lease.clone(),
-                            clock.clone(),
-                            runtime.provider.as_ref(),
-                        )
-                        .await?
+                let progress = if let Some(page) = page {
+                    if preparing_retry {
+                        runtime
+                            .runner
+                            .prepare_retry_page(&run, page, lease.clone(), clock.clone())
+                            .await?;
+                        runtime.coordinator.reconciliation_progress(&run)?
+                    } else {
+                        runtime
+                            .runner
+                            .apply_prepared_retry_page(
+                                &run,
+                                page,
+                                lease.clone(),
+                                clock.clone(),
+                                runtime.provider.as_ref(),
+                            )
+                            .await?
+                    }
                 } else {
                     runtime
                         .runner
@@ -487,7 +492,13 @@ pub mod runtime {
                 );
             }
             match result {
-                Some(Ok(p)) if !p.pending.is_empty() => {}
+                Some(Ok(p)) if !p.pending.is_empty() => {
+                    if preparing_retry {
+                        retry_prepared = true;
+                    } else {
+                        retry = None;
+                    }
+                }
                 Some(Ok(_)) => break status(&runtime, &run, "finished", None),
                 Some(Err(
                     RunnerError::Journal(

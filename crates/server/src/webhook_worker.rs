@@ -106,7 +106,7 @@ impl WorkerSettings {
                 "NK_RECONCILIATION_INVENTORY_TIMEOUT_SECONDS",
                 900,
                 1,
-                86400,
+                3570,
             )?,
         })
     }
@@ -699,7 +699,7 @@ mod inventory_settings_tests {
         );
         let configured = parse(&[
             ("NK_WEBHOOK_TIMEOUT_SECONDS", "2"),
-            ("NK_RECONCILIATION_INVENTORY_TIMEOUT_SECONDS", "86400"),
+            ("NK_RECONCILIATION_INVENTORY_TIMEOUT_SECONDS", "3570"),
         ])
         .unwrap();
         assert_eq!(
@@ -707,9 +707,9 @@ mod inventory_settings_tests {
                 configured.timeout_seconds,
                 configured.inventory_timeout_seconds
             ),
-            (2, 86400)
+            (2, 3570)
         );
-        for value in ["", "0", "86401", "-1", "secret-sentinel"] {
+        for value in ["", "0", "3571", "-1", "secret-sentinel"] {
             let error =
                 parse(&[("NK_RECONCILIATION_INVENTORY_TIMEOUT_SECONDS", value)]).unwrap_err();
             assert_eq!(error.setting, "NK_RECONCILIATION_INVENTORY_TIMEOUT_SECONDS");
