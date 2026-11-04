@@ -67,6 +67,30 @@ files, keys, model weights, derived indexes, Git metadata and build outputs are
 excluded. When adding other required source assets, review the allowlist rather
 than broadening it to local runtime data.
 
+## Download the tested server binary
+
+A successful **Container smoke** job also publishes
+`notion-knowledge-server-webhook-worker-Linux-X64` for seven days. This small
+archive contains the release server copied from the exact immutable image after
+container, offline retrieval and Compose smoke pass, plus `manifest.json` with
+Cargo version, source revision, platform, source image ID and binary SHA-256.
+The export creates no running application and performs no additional build.
+
+Download it from the selected successful CI run:
+
+```sh
+gh run download RUN_ID --repo mtandersson/notion-knowedge \
+  --name notion-knowledge-server-webhook-worker-Linux-X64 --dir /private/server-artifact
+```
+
+Verify the manifest revision against that run's checkout and verify the extracted
+binary's SHA-256 before installation. PR runs use GitHub's test-merge revision.
+The binary is Linux amd64 and dynamically linked against the image's runtime
+libraries; a native installation must supply compatible libraries and an ELF
+loader. Model assets, private configuration and state are supplied separately.
+The existing `notion-knowledge-server-Linux-X64` **Release build** artifact uses
+default Cargo features and is a distinct executable without this indexing runtime.
+
 ## Docker Rust dependency layers
 
 The Dockerfile uses pinned `cargo-chef 0.1.78` atop the same immutable

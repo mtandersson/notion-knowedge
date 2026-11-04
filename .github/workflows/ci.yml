@@ -489,6 +489,9 @@ jobs:
       - name: Test cached image identity rejection
         run: python3 scripts/test-container-smoke.py
 
+      - name: Test runtime artifact export contracts
+        run: python3 scripts/test-package-container-server.py
+
       - name: Verify actual Docker context excludes runtime and private data
         run: python3 scripts/test-container-context.py
 
@@ -504,6 +507,7 @@ jobs:
           PY
 
       - name: Build and load final runtime image
+        id: runtime-image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -535,6 +539,17 @@ jobs:
         run: |
           docker tag notion-knowledge:smoke notion-knowledge:local
           python3 scripts/smoke-compose.py --prebuilt
+
+      - name: Package tested feature-enabled server
+        run: python3 scripts/package-container-server.py --image "${{ steps.runtime-image.outputs.imageid }}" --revision "$GITHUB_SHA"
+
+      - name: Upload tested feature-enabled server
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: notion-knowledge-server-webhook-worker-Linux-X64
+          path: dist/container-server/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
 
       # Keep an independent, pinned compiler cache manifest in GHCR: previous
       # hosted evidence showed that lazy final-image exports can lose builder
