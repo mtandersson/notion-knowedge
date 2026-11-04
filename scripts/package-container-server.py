@@ -45,7 +45,7 @@ def package(image, revision, output, runner=docker):
     require(not destination.exists(), 'Refusing to overwrite an artifact')
     name = 'nk-artifact-' + uuid.uuid4().hex
     created = False
-    with tempfile.TemporaryDirectory(prefix='nk-container-artifact-') as temporary:
+    with tempfile.TemporaryDirectory(prefix='nk-container-artifact-', dir=output) as temporary:
         temporary = Path(temporary)
         try:
             runner('create', '--name', name, '--pull=never', '--network=none', '--read-only', image_id,
