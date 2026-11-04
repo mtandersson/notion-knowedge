@@ -390,6 +390,7 @@ impl Harness {
                     assets: "/tmp/unused-oauth-provider".into(),
                     poll_ms: 100,
                     timeout_seconds: 30,
+                    inventory_timeout_seconds: 900,
                 });
                 crate::retrieval_runtime::compose_oauth_queries(handler, &settings, seeded.provider)
                     .await

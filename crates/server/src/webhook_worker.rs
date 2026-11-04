@@ -10,6 +10,7 @@ pub struct WorkerSettings {
     pub assets: PathBuf,
     pub poll_ms: u64,
     pub timeout_seconds: u64,
+    pub inventory_timeout_seconds: u64,
 }
 impl WorkerSettings {
     pub(crate) fn parse(
@@ -101,6 +102,12 @@ impl WorkerSettings {
             assets,
             poll_ms: number("NK_WEBHOOK_POLL_MS", 1000, 10, 60000)?,
             timeout_seconds: number("NK_WEBHOOK_TIMEOUT_SECONDS", 60, 1, 300)?,
+            inventory_timeout_seconds: number(
+                "NK_RECONCILIATION_INVENTORY_TIMEOUT_SECONDS",
+                900,
+                1,
+                86400,
+            )?,
         })
     }
 }
@@ -277,6 +284,7 @@ pub mod runtime {
                 settings: policy,
                 poll: Duration::from_millis(settings.poll_ms),
                 timeout: Duration::from_secs(settings.timeout_seconds),
+                inventory_timeout: Duration::from_secs(settings.inventory_timeout_seconds),
             })
         });
         Ok(Some(Worker {
@@ -665,5 +673,47 @@ mod alias_settings_tests {
         assert!(parse(&[("NK_ALIAS_PROPERTY_IDS", &oversized)]).is_err());
         let long_id = serde_json::to_string(&vec!["x".repeat(129)]).unwrap();
         assert!(parse(&[("NK_ALIAS_PROPERTY_IDS", &long_id)]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod inventory_settings_tests {
+    use super::*;
+
+    #[test]
+    fn inventory_deadline_is_independent_bounded_and_configurable() {
+        let parse = |values: &[(&str, &str)]| {
+            WorkerSettings::index_settings(&mut |key| match key {
+                "NK_WEBHOOK_INDEX_DIR" => Some("/tmp/index".into()),
+                "NK_WEBHOOK_QWEN_ASSETS" => Some("/tmp/assets".into()),
+                _ => values
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| OsString::from(value)),
+            })
+        };
+        let default = parse(&[]).unwrap();
+        assert_eq!(
+            (default.timeout_seconds, default.inventory_timeout_seconds),
+            (60, 900)
+        );
+        let configured = parse(&[
+            ("NK_WEBHOOK_TIMEOUT_SECONDS", "2"),
+            ("NK_RECONCILIATION_INVENTORY_TIMEOUT_SECONDS", "86400"),
+        ])
+        .unwrap();
+        assert_eq!(
+            (
+                configured.timeout_seconds,
+                configured.inventory_timeout_seconds
+            ),
+            (2, 86400)
+        );
+        for value in ["", "0", "86401", "-1", "secret-sentinel"] {
+            let error =
+                parse(&[("NK_RECONCILIATION_INVENTORY_TIMEOUT_SECONDS", value)]).unwrap_err();
+            assert_eq!(error.setting, "NK_RECONCILIATION_INVENTORY_TIMEOUT_SECONDS");
+            assert!(!error.to_string().contains("secret-sentinel"));
+        }
     }
 }

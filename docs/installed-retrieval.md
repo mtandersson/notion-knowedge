@@ -142,3 +142,10 @@ For arbitrary unusable cache files, stop the service and run `--index reset`
 with the normal Notion scope, integration credential and offline model settings.
 This preserves credentials and external-effect records; `--index rebuild`
 continues to mean ANN-only maintenance, not reconstruction of missing content.
+
+Whole-scope planning during reset/resync uses the separate
+`NK_RECONCILIATION_INVENTORY_TIMEOUT_SECONDS` budget (1..86400, default 900).
+`NK_WEBHOOK_TIMEOUT_SECONDS` still bounds individual page attempts and search
+index preparation. Configure a whole-process/service deadline with enough time
+for model loading, inventory and subsequent page work; a page deadline is not
+a deadline for the entire root traversal. No timeout change grants source access.

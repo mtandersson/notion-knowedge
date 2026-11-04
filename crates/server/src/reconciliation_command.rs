@@ -311,7 +311,7 @@ pub mod runtime {
         if command == Command::DryRun {
             let result = tokio::select! { biased;
                 _ = stop.cancelled() => return Output::error("cancelled", 5),
-                _ = tokio::time::sleep(Duration::from_secs(settings.timeout_seconds)) => return Output::error("timeout", 3),
+                _ = tokio::time::sleep(Duration::from_secs(settings.inventory_timeout_seconds)) => return Output::error("timeout", 3),
                 result = inspected.runner.dry_run() => result,
             };
             return match result {
@@ -356,11 +356,10 @@ pub mod runtime {
             Command::Retry { run, page } => (run, Some(page)),
             _ => unreachable!(),
         };
-        let mut lease = match runtime
-            .coordinator
-            .state()
-            .acquire_lease(now_ms() / 1000, settings.timeout_seconds as i64 + 30)
-        {
+        let mut lease = match runtime.coordinator.state().acquire_lease(
+            now_ms() / 1000,
+            settings.inventory_timeout_seconds as i64 + 30,
+        ) {
             Ok(l) => l,
             Err(JournalError::Busy) => return Output::error("busy", 4),
             Err(_) => return Output::error("state_failure", 3),
@@ -379,6 +378,32 @@ pub mod runtime {
         }
         let mut retry = retry;
         let output = loop {
+            let timeout = if retry.is_some() {
+                // Explicit page retry first replans the complete source inventory.
+                Duration::from_secs(
+                    settings
+                        .inventory_timeout_seconds
+                        .max(settings.timeout_seconds),
+                )
+            } else {
+                match runtime.reconciliation_timeout(
+                    &run,
+                    Duration::from_secs(settings.timeout_seconds),
+                    Duration::from_secs(settings.inventory_timeout_seconds),
+                ) {
+                    Ok(timeout) => timeout,
+                    Err(_) => break Output::error("state_failure", 3),
+                }
+            };
+            lease = match runtime.coordinator.state().renew_lease(
+                &lease,
+                now_ms() / 1000,
+                timeout.as_secs() as i64 + 30,
+            ) {
+                Ok(lease) => lease,
+                Err(_) => break status(&runtime, &run, "lease_lost", Some(4)),
+            };
+
             let attempt = stop.child_token();
             let cancelled = attempt.clone();
             let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || {
@@ -443,7 +468,7 @@ pub mod runtime {
             };
             let result = tokio::select! { biased;
                 _ = stop.cancelled() => { attempt.cancel(); None },
-                _ = tokio::time::sleep(Duration::from_secs(settings.timeout_seconds)) => { attempt.cancel(); Some(Err(RunnerError::Journal(JournalError::LeaseLost))) },
+                _ = tokio::time::sleep(timeout) => { attempt.cancel(); Some(Err(RunnerError::Journal(JournalError::LeaseLost))) },
                 result = work => Some(result),
             };
             if attempt.is_cancelled() {
@@ -462,16 +487,7 @@ pub mod runtime {
                 );
             }
             match result {
-                Some(Ok(p)) if !p.pending.is_empty() => {
-                    match runtime.coordinator.state().renew_lease(
-                        &lease,
-                        now_ms() / 1000,
-                        settings.timeout_seconds as i64 + 30,
-                    ) {
-                        Ok(l) => lease = l,
-                        Err(_) => break status(&runtime, &run, "lease_lost", Some(4)),
-                    }
-                }
+                Some(Ok(p)) if !p.pending.is_empty() => {}
                 Some(Ok(_)) => break status(&runtime, &run, "finished", None),
                 Some(Err(
                     RunnerError::Journal(

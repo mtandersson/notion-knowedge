@@ -376,6 +376,7 @@ mod tests {
             assets: dir.path().join("assets"),
             poll_ms: 100,
             timeout_seconds: 20,
+            inventory_timeout_seconds: 900,
             alias_sources: notion_knowledge_core::aliases::AliasSources::new(true, vec![]).unwrap(),
         });
         assert_eq!(

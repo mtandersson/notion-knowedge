@@ -68,6 +68,7 @@ pub mod runtime {
         pub settings: Settings,
         pub poll: Duration,
         pub timeout: Duration,
+        pub inventory_timeout: Duration,
     }
     impl Worker {
         pub async fn run(&self, stop: CancellationToken) -> Result<(), &'static str> {
@@ -85,7 +86,7 @@ pub mod runtime {
             }
             let coordinator = &self.index.coordinator;
             let state = coordinator.state();
-            let ttl = self.timeout.as_secs() as i64 + 30;
+            let ttl = self.inventory_timeout.as_secs().max(self.timeout.as_secs()) as i64 + 30;
             let mut lease = match state.acquire_lease(now_ms() / 1000, ttl) {
                 Ok(l) => l,
                 Err(JournalError::Busy) => return Ok(false),
@@ -102,12 +103,17 @@ pub mod runtime {
                 };
                 let run = schedule.active_run.ok_or("scheduled run unavailable")?;
                 loop {
+                    let timeout = self.index.reconciliation_timeout(&run, self.timeout, self.inventory_timeout)
+                        .map_err(|_| "scheduled state unavailable")?;
+                    lease = state.renew_lease(&lease, now_ms()/1000, timeout.as_secs() as i64 + 30)
+                        .map_err(|_| "scheduled lease lost")?;
+
                     let attempt = stop.child_token();
                     let cancelled = attempt.clone();
                     let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || if cancelled.is_cancelled() { i64::MAX } else { now_ms()/1000 });
                     let result = tokio::select! { biased;
                         _ = stop.cancelled() => { attempt.cancel(); None },
-                        _ = tokio::time::sleep(self.timeout) => { attempt.cancel(); Some(Err(RunnerError::Journal(JournalError::Unavailable))) },
+                        _ = tokio::time::sleep(timeout) => { attempt.cancel(); Some(Err(RunnerError::Journal(JournalError::Unavailable))) },
                         result = async {
                             let progress = self.index.runner.apply_next(&run, lease.clone(), clock.clone(), self.index.provider.as_ref()).await?;
                             if progress.pending.is_empty() && progress.failed_pages() == 0 && progress.run_failures.is_empty() {
@@ -133,7 +139,7 @@ pub mod runtime {
                                 return Ok(true)
                             }
                             if p.pending.is_empty() { return Ok(true) }
-                            lease = state.renew_lease(&lease, now_ms()/1000, ttl).map_err(|_| "scheduled lease lost")?;
+
                         }
                         Some(Err(RunnerError::Journal(JournalError::Busy | JournalError::LeaseLost))) => return Ok(false),
                         Some(Err(RunnerError::InvalidConfiguration | RunnerError::Journal(JournalError::ScopeMismatch | JournalError::InvalidInput | JournalError::InvalidTransition))) => return Err("scheduled authority invalid"),
