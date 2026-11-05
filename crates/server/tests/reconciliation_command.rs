@@ -3193,8 +3193,9 @@ async fn new_and_resumed_manual_inventory_allow_short_writer_admission_while_rea
             assert_writer_available_during_inventory(&f.state);
             http.pause.proceed.notify_one();
         };
+        let arguments = ["--reconcile", operation, run];
         let (out, _) = tokio::time::timeout(Duration::from_secs(15), async {
-            tokio::join!(f.command(&http, &["--reconcile", operation, run]), release)
+            tokio::join!(f.command(&http, &arguments), release)
         })
         .await
         .unwrap();
