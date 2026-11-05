@@ -336,16 +336,7 @@ impl AuthoritativeReconciliationPlanner {
         if !plan.errors.is_empty() {
             plan.traversal_complete = false;
         }
-        if self.local_inventory().await? != plan.local
-            || self
-                .guard
-                .inventory_version()
-                .await
-                .map_err(|_| PlanError::Index)?
-                != index_version
-        {
-            return Err(PlanError::Conflict);
-        }
+        self.validate_local_snapshot(&plan).await?;
         if !plan.traversal_complete {
             for page in &plan.pages {
                 if page.difference == Difference::Orphan {
@@ -356,6 +347,26 @@ impl AuthoritativeReconciliationPlanner {
             plan.pages.retain(|p| p.difference != Difference::Orphan);
         }
         Ok(plan)
+    }
+
+    /// Read-only planning may precede writer admission. Recheck its local
+    /// predecessor under the admitted lease before recording any proposals.
+    pub(crate) async fn validate_local_snapshot(
+        &self,
+        plan: &ReconciliationPlan,
+    ) -> Result<(), PlanError> {
+        if &plan.binding != self.coordinator.binding()
+            || self.local_inventory().await? != plan.local
+            || self
+                .guard
+                .inventory_version()
+                .await
+                .map_err(|_| PlanError::Index)?
+                != plan.index_version
+        {
+            return Err(PlanError::Conflict);
+        }
+        Ok(())
     }
     async fn inspect(
         &self,

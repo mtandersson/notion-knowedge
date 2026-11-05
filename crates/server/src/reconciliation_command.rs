@@ -356,10 +356,11 @@ pub mod runtime {
             Command::Retry { run, page } => (run, Some(page)),
             _ => unreachable!(),
         };
-        let mut lease = match runtime.coordinator.state().acquire_lease(
-            now_ms() / 1000,
-            settings.inventory_timeout_seconds as i64 + 30,
-        ) {
+        let mut lease = match runtime
+            .coordinator
+            .state()
+            .acquire_lease(now_ms() / 1000, settings.timeout_seconds as i64 + 30)
+        {
             Ok(l) => l,
             Err(JournalError::Busy) => return Output::error("busy", 4),
             Err(_) => return Output::error("state_failure", 3),
@@ -380,18 +381,58 @@ pub mod runtime {
         let mut retry_prepared = false;
         let output = loop {
             let preparing_retry = retry.is_some() && !retry_prepared;
-            let timeout = if preparing_retry {
-                Duration::from_secs(settings.inventory_timeout_seconds)
+            let projection_prelude = rebuild_aliases || rebuild_relations;
+            let inventory = if projection_prelude {
+                false
+            } else if preparing_retry {
+                true
             } else {
-                match runtime.reconciliation_timeout(
-                    &run,
-                    Duration::from_secs(settings.timeout_seconds),
-                    Duration::from_secs(settings.inventory_timeout_seconds),
-                ) {
-                    Ok(timeout) => timeout,
+                match runtime.inventory_pending(&run) {
+                    Ok(inventory) => inventory,
                     Err(_) => break Output::error("state_failure", 3),
                 }
             };
+            let prepared = if inventory {
+                // Keep the existing run identity/status during planning, but
+                // release writer ownership before the long source read.
+                if runtime
+                    .coordinator
+                    .state()
+                    .start_or_resume(&lease, now_ms() / 1000, &run, &runtime.scope)
+                    .is_err()
+                {
+                    break Output::error("run_configuration", 2);
+                }
+                if runtime
+                    .coordinator
+                    .state()
+                    .release_lease(&lease, now_ms() / 1000)
+                    .is_err()
+                {
+                    break status(&runtime, &run, "lease_lost", Some(4));
+                }
+                let plan = tokio::select! { biased;
+                    _ = stop.cancelled() => break status(&runtime, &run, "cancelled", Some(5)),
+                    _ = tokio::time::sleep(Duration::from_secs(settings.inventory_timeout_seconds)) => break status(&runtime, &run, "timeout", Some(3)),
+                    result = runtime.runner.dry_run() => match result {
+                        Ok(plan) => plan,
+                        Err(_) => break status(&runtime, &run, "work_failure", Some(3)),
+                    },
+                };
+                lease = match runtime
+                    .coordinator
+                    .state()
+                    .acquire_lease(now_ms() / 1000, settings.timeout_seconds as i64 + 30)
+                {
+                    Ok(lease) => lease,
+                    Err(JournalError::Busy) => break status(&runtime, &run, "busy", Some(4)),
+                    Err(_) => break Output::error("state_failure", 3),
+                };
+                Some(plan)
+            } else {
+                None
+            };
+            let timeout = Duration::from_secs(settings.timeout_seconds);
             lease = match runtime.coordinator.state().renew_lease(
                 &lease,
                 now_ms() / 1000,
@@ -419,18 +460,26 @@ pub mod runtime {
                         .runner
                         .begin_alias_rebuild(&run, lease.clone(), clock.clone())
                         .await?;
+                    return Ok(None);
                 }
                 if rebuild {
                     runtime
                         .runner
                         .begin_relation_rebuild(&run, lease.clone(), clock.clone())
                         .await?;
+                    return Ok(None);
                 }
                 let progress = if let Some(page) = page {
                     if preparing_retry {
                         runtime
                             .runner
-                            .prepare_retry_page(&run, page, lease.clone(), clock.clone())
+                            .record_retry_plan(
+                                &run,
+                                page,
+                                prepared.as_ref().ok_or(RunnerError::InvalidConfiguration)?,
+                                lease.clone(),
+                                clock.clone(),
+                            )
                             .await?;
                         runtime.coordinator.reconciliation_progress(&run)?
                     } else {
@@ -445,6 +494,11 @@ pub mod runtime {
                             )
                             .await?
                     }
+                } else if let Some(plan) = prepared {
+                    runtime
+                        .runner
+                        .record_inventory_plan(&run, &plan, lease.clone(), clock.clone())
+                        .await?
                 } else {
                     runtime
                         .runner
@@ -469,7 +523,7 @@ pub mod runtime {
                     .await
                     .map_err(|_| RunnerError::Journal(JournalError::Unavailable))?;
                 }
-                Ok(progress)
+                Ok(Some(progress))
             };
             let result = tokio::select! { biased;
                 _ = stop.cancelled() => { attempt.cancel(); None },
@@ -492,7 +546,8 @@ pub mod runtime {
                 );
             }
             match result {
-                Some(Ok(p)) if !p.pending.is_empty() => {
+                Some(Ok(None)) => {}
+                Some(Ok(Some(p))) if !p.pending.is_empty() => {
                     if preparing_retry {
                         retry_prepared = true;
                     } else {

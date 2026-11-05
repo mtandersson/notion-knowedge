@@ -14,12 +14,14 @@ Configure `NK_NOTION_AUTH=integration`, secret `NOTION_TOKEN`,
 `NK_WEBHOOK_INDEX_DIR`, `NK_WEBHOOK_STATE_FILE`, `NK_WEBHOOK_QWEN_ASSETS` and
 `NK_WEBHOOK_TIMEOUT_SECONDS` (1–300, default 60) as the serving worker.
 Whole-scope inventory uses `NK_RECONCILIATION_INVENTORY_TIMEOUT_SECONDS`
-(1..3570, default 900). This includes dry-run, initial planning, and the full
+(1..86400, default 900). This includes dry-run, initial planning, and the full
 replan performed for an explicit failed-page retry. Ordinary page attempts keep
 `NK_WEBHOOK_TIMEOUT_SECONDS`; individual upstream HTTP deadlines are unchanged.
 The same distinction applies to cache reset/resync and periodic reconciliation.
-The writer lease matches the admitted attempt budget plus its existing cleanup
-margin; it is renewed only between attempts, never while owned work is live.
+Read-only inventory does not hold a writer lease. Recording the completed plan
+rechecks its local predecessor under fresh writer admission. Plan recording,
+page attempts and search preparation keep the shorter page budget and its
+existing lease cleanup margin. Leases renew only between owned attempts.
 
 Manual execution does not require `NK_WEBHOOK_WORKER=true` or verified webhook
 subscription/signing configuration. It never changes configured scope.

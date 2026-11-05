@@ -103,6 +103,39 @@ impl AuthoritativeReconciliationRunner {
     pub async fn dry_run(&self) -> Result<ReconciliationPlan, RunnerError> {
         self.planner.plan().await.map_err(RunnerError::Planning)
     }
+
+    /// Admit an already prepared read-only inventory under a fresh writer
+    /// lease. A changed local predecessor conflicts instead of recording a
+    /// plan against stale cache state. Source effects still revalidate on apply.
+    pub async fn record_inventory_plan(
+        &self,
+        run: &str,
+        plan: &ReconciliationPlan,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Result<DurableProgress, RunnerError> {
+        let current =
+            self.coordinator
+                .state()
+                .start_or_resume(&lease, clock(), run, &self.scope)?;
+        if current.phase != RunPhase::Inventory {
+            // Another admitted operator may have recorded this run while the
+            // caller was planning. Preserve that plan instead of replacing it.
+            return Ok(self.coordinator.reconciliation_progress(run)?);
+        }
+        self.planner
+            .validate_local_snapshot(plan)
+            .await
+            .map_err(RunnerError::Planning)?;
+        self.coordinator
+            .record_reconciliation_plan(&lease, clock(), run, plan)?;
+        let progress = self.coordinator.reconciliation_progress(run)?;
+        if progress.pending.is_empty() && progress.failed.is_empty() {
+            self.coordinator
+                .complete_reconciliation_plan(&lease, clock(), run)?;
+        }
+        Ok(progress)
+    }
     /// The caller supplies the shared writer lease. Each page is bounded by that
     /// lease; renew between calls, never extend an already detached commit's bound.
     /// Dropping this observer retains a pending page and any live owned commit.
@@ -164,8 +197,7 @@ impl AuthoritativeReconciliationRunner {
                 .start_or_resume(&lease, clock(), run, &self.scope)?;
         if current.phase == RunPhase::Inventory {
             let plan = self.dry_run().await?;
-            self.coordinator
-                .record_reconciliation_plan(&lease, clock(), run, &plan)?;
+            return self.record_inventory_plan(run, &plan, lease, clock).await;
         } else if current.phase != RunPhase::Completed {
             self.coordinator.reconciliation_plan(run)?;
             let progress = self.coordinator.reconciliation_progress(run)?;
@@ -223,7 +255,28 @@ impl AuthoritativeReconciliationRunner {
             .state()
             .start_or_resume(&lease, clock(), run, &self.scope)?;
         let fresh = self.dry_run().await?;
-        let mut candidate = DurablePlan::from_planner(run, &fresh)?
+        self.record_retry_plan(run, page, &fresh, lease, clock)
+            .await
+    }
+
+    /// Record the retry proposal after read-only replanning and fresh writer
+    /// admission. This does not perform the page refresh itself.
+    pub async fn record_retry_plan(
+        &self,
+        run: &str,
+        page: &str,
+        plan: &ReconciliationPlan,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Result<(), RunnerError> {
+        self.coordinator
+            .state()
+            .start_or_resume(&lease, clock(), run, &self.scope)?;
+        self.planner
+            .validate_local_snapshot(plan)
+            .await
+            .map_err(RunnerError::Planning)?;
+        let mut candidate = DurablePlan::from_planner(run, plan)?
             .pages
             .remove(page)
             .ok_or(JournalError::InvalidTransition)?;
