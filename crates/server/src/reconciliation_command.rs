@@ -311,7 +311,7 @@ pub mod runtime {
         if command == Command::DryRun {
             let result = tokio::select! { biased;
                 _ = stop.cancelled() => return Output::error("cancelled", 5),
-                _ = tokio::time::sleep(Duration::from_secs(settings.timeout_seconds)) => return Output::error("timeout", 3),
+                _ = tokio::time::sleep(Duration::from_secs(settings.inventory_timeout_seconds)) => return Output::error("timeout", 3),
                 result = inspected.runner.dry_run() => result,
             };
             return match result {
@@ -356,11 +356,10 @@ pub mod runtime {
             Command::Retry { run, page } => (run, Some(page)),
             _ => unreachable!(),
         };
-        let mut lease = match runtime
-            .coordinator
-            .state()
-            .acquire_lease(now_ms() / 1000, settings.timeout_seconds as i64 + 30)
-        {
+        let mut lease = match runtime.coordinator.state().acquire_lease(
+            now_ms() / 1000,
+            settings.inventory_timeout_seconds as i64 + 30,
+        ) {
             Ok(l) => l,
             Err(JournalError::Busy) => return Output::error("busy", 4),
             Err(_) => return Output::error("state_failure", 3),
@@ -378,7 +377,30 @@ pub mod runtime {
             return Output::error("run_configuration", 2);
         }
         let mut retry = retry;
+        let mut retry_prepared = false;
         let output = loop {
+            let preparing_retry = retry.is_some() && !retry_prepared;
+            let timeout = if preparing_retry {
+                Duration::from_secs(settings.inventory_timeout_seconds)
+            } else {
+                match runtime.reconciliation_timeout(
+                    &run,
+                    Duration::from_secs(settings.timeout_seconds),
+                    Duration::from_secs(settings.inventory_timeout_seconds),
+                ) {
+                    Ok(timeout) => timeout,
+                    Err(_) => break Output::error("state_failure", 3),
+                }
+            };
+            lease = match runtime.coordinator.state().renew_lease(
+                &lease,
+                now_ms() / 1000,
+                timeout.as_secs() as i64 + 30,
+            ) {
+                Ok(lease) => lease,
+                Err(_) => break status(&runtime, &run, "lease_lost", Some(4)),
+            };
+
             let attempt = stop.child_token();
             let cancelled = attempt.clone();
             let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || {
@@ -388,7 +410,7 @@ pub mod runtime {
                     now_ms() / 1000
                 }
             });
-            let page = retry.take();
+            let page = retry.as_ref();
             let aliases = std::mem::take(&mut rebuild_aliases);
             let rebuild = std::mem::take(&mut rebuild_relations);
             let work = async {
@@ -404,17 +426,25 @@ pub mod runtime {
                         .begin_relation_rebuild(&run, lease.clone(), clock.clone())
                         .await?;
                 }
-                let progress = if let Some(page) = &page {
-                    runtime
-                        .runner
-                        .retry_page(
-                            &run,
-                            page,
-                            lease.clone(),
-                            clock.clone(),
-                            runtime.provider.as_ref(),
-                        )
-                        .await?
+                let progress = if let Some(page) = page {
+                    if preparing_retry {
+                        runtime
+                            .runner
+                            .prepare_retry_page(&run, page, lease.clone(), clock.clone())
+                            .await?;
+                        runtime.coordinator.reconciliation_progress(&run)?
+                    } else {
+                        runtime
+                            .runner
+                            .apply_prepared_retry_page(
+                                &run,
+                                page,
+                                lease.clone(),
+                                clock.clone(),
+                                runtime.provider.as_ref(),
+                            )
+                            .await?
+                    }
                 } else {
                     runtime
                         .runner
@@ -443,7 +473,7 @@ pub mod runtime {
             };
             let result = tokio::select! { biased;
                 _ = stop.cancelled() => { attempt.cancel(); None },
-                _ = tokio::time::sleep(Duration::from_secs(settings.timeout_seconds)) => { attempt.cancel(); Some(Err(RunnerError::Journal(JournalError::LeaseLost))) },
+                _ = tokio::time::sleep(timeout) => { attempt.cancel(); Some(Err(RunnerError::Journal(JournalError::LeaseLost))) },
                 result = work => Some(result),
             };
             if attempt.is_cancelled() {
@@ -463,13 +493,10 @@ pub mod runtime {
             }
             match result {
                 Some(Ok(p)) if !p.pending.is_empty() => {
-                    match runtime.coordinator.state().renew_lease(
-                        &lease,
-                        now_ms() / 1000,
-                        settings.timeout_seconds as i64 + 30,
-                    ) {
-                        Ok(l) => lease = l,
-                        Err(_) => break status(&runtime, &run, "lease_lost", Some(4)),
+                    if preparing_retry {
+                        retry_prepared = true;
+                    } else {
+                        retry = None;
                     }
                 }
                 Some(Ok(_)) => break status(&runtime, &run, "finished", None),

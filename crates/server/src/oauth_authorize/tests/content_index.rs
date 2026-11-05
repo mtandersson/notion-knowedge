@@ -235,6 +235,7 @@ async fn configured_oauth_lexical_reads_require_native_exact_id_readiness() {
         assets: "/tmp/unused-oauth-model".into(),
         poll_ms: 100,
         timeout_seconds: 30,
+        inventory_timeout_seconds: 900,
     });
     let before = fs::read(&seeded.state).unwrap();
     let (_, _, table) = crate::retrieval_runtime::compose_oauth_index(

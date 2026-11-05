@@ -5,7 +5,7 @@ use notion_knowledge_core::{
     chunking::ChunkConfig,
     embedding::EmbeddingProvider,
     lifecycle::LifecycleScope,
-    reconciliation::{ReconciliationJournal, ReconciliationScope},
+    reconciliation::{JournalError, ReconciliationJournal, ReconciliationScope, RunPhase},
 };
 use notion_knowledge_notion::NotionClient;
 use notion_knowledge_retrieval::{
@@ -225,12 +225,13 @@ impl IndexRuntime {
         ))
         .await?;
         if rebuild {
-            runtime.resync_cache(settings.timeout_seconds).await?;
+            runtime.resync_cache(settings).await?;
         }
         Ok(runtime)
     }
 
-    async fn resync_cache(&self, timeout_seconds: u64) -> Result<(), &'static str> {
+    async fn resync_cache(&self, settings: &WorkerSettings) -> Result<(), &'static str> {
+        let timeout_seconds = settings.timeout_seconds;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::Duration;
         struct Attempt(Arc<AtomicBool>);
@@ -241,9 +242,26 @@ impl IndexRuntime {
         }
         let state = self.coordinator.state();
         let mut lease = state
-            .acquire_lease(now_ms() / 1000, timeout_seconds as i64 + 30)
+            .acquire_lease(
+                now_ms() / 1000,
+                settings.inventory_timeout_seconds as i64 + 30,
+            )
             .map_err(|_| "cache sync writer busy")?;
         let result = loop {
+            let timeout = match self.reconciliation_timeout(
+                "cache-reset",
+                Duration::from_secs(timeout_seconds),
+                Duration::from_secs(settings.inventory_timeout_seconds),
+            ) {
+                Ok(timeout) => timeout,
+                Err(_) => break Err("cache sync state unavailable"),
+            };
+            lease = match state.renew_lease(&lease, now_ms() / 1000, timeout.as_secs() as i64 + 30)
+            {
+                Ok(lease) => lease,
+                Err(_) => break Err("cache sync lease unavailable"),
+            };
+
             let expired = Arc::new(AtomicBool::new(false));
             let _attempt = Attempt(expired.clone());
             let flag = expired.clone();
@@ -255,7 +273,7 @@ impl IndexRuntime {
                 }
             });
             let attempt = tokio::time::timeout(
-                Duration::from_secs(timeout_seconds),
+                timeout,
                 self.runner
                     .apply_next("cache-reset", lease.clone(), clock, self.provider.as_ref()),
             )
@@ -313,6 +331,22 @@ impl IndexRuntime {
         };
         let _ = state.release_lease(&lease, now_ms() / 1000);
         result
+    }
+
+    /// A complete source inventory has its own bound. Resume/page attempts
+    /// retain the shorter page budget; the caller renews only between attempts.
+    pub(crate) fn reconciliation_timeout(
+        &self,
+        run: &str,
+        page: std::time::Duration,
+        inventory: std::time::Duration,
+    ) -> Result<std::time::Duration, JournalError> {
+        match self.coordinator.state().run(run, &self.scope) {
+            Ok(run) if run.phase == RunPhase::Inventory => Ok(inventory),
+            Ok(_) => Ok(page),
+            Err(JournalError::InvalidTransition) => Ok(inventory),
+            Err(error) => Err(error),
+        }
     }
 
     /// Local operator composition only; no caller may choose a workspace/root.

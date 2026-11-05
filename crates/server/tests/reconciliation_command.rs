@@ -374,6 +374,7 @@ impl Fixture {
             assets: dir.path().join("assets"),
             poll_ms: 1000,
             timeout_seconds: 60,
+            inventory_timeout_seconds: 900,
         };
         fs::create_dir(&settings.index).unwrap();
         let state = dir.path().join("state.sqlite");
@@ -950,7 +951,7 @@ async fn cancellation_reopens_pending_work_and_permission_failure_never_deletes(
 async fn timed_out_dry_run_leaves_state_unchanged_and_has_a_distinct_failure_exit() {
     let http = HttpNotion::start().await;
     let mut f = Fixture::new(&http).await;
-    f.settings.timeout_seconds = 1;
+    f.settings.inventory_timeout_seconds = 1;
     http.pause.armed.store(true, Ordering::SeqCst);
     let before = f.snapshot();
     let result = f.command(&http, &["--reconcile", "dry-run"]).await;
@@ -1111,6 +1112,21 @@ async fn scheduled_server_workers(
     CancellationToken,
     tokio::task::JoinHandle<std::io::Result<()>>,
 ) {
+    scheduled_server_budgets(f, source, timeout, timeout, attempts, webhook_enabled).await
+}
+
+async fn scheduled_server_budgets(
+    f: &Fixture,
+    source: &HttpNotion,
+    timeout: std::time::Duration,
+    inventory_timeout: std::time::Duration,
+    attempts: i64,
+    webhook_enabled: bool,
+) -> (
+    Arc<notion_knowledge_server::webhook_worker::runtime::Worker>,
+    CancellationToken,
+    tokio::task::JoinHandle<std::io::Result<()>>,
+) {
     use notion_knowledge_server::{
         scheduled_reconciliation::{Settings, runtime::Worker as Scheduled},
         webhook_worker::runtime::Worker,
@@ -1140,6 +1156,7 @@ async fn scheduled_server_workers(
             },
             poll: std::time::Duration::from_millis(10),
             timeout,
+            inventory_timeout,
         })),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2984,4 +3001,151 @@ async fn empty_authorized_content_completes_resync_and_search_returns_no_hits() 
         .await
         .unwrap();
     assert!(hits.iter().any(|hit| hit.source.page_id == PAGE));
+}
+
+#[tokio::test]
+async fn manual_inventory_uses_its_budget_and_expires_without_source_mutations() {
+    use std::time::Duration;
+    let http = HttpNotion::start().await;
+    let mut f = Fixture::new(&http).await;
+    f.settings.timeout_seconds = 1;
+    f.settings.inventory_timeout_seconds = 60;
+    http.pause.armed.store(true, Ordering::SeqCst);
+    let release = async {
+        tokio::time::timeout(Duration::from_secs(10), http.pause.started.notified())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        http.pause.proceed.notify_one();
+    };
+    let (out, _) = tokio::join!(f.command(&http, &["--reconcile", "dry-run"]), release);
+    assert_eq!(out.exit, 0, "{}", out.json);
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), 0);
+
+    f.settings.inventory_timeout_seconds = 1;
+    f.settings.timeout_seconds = 60;
+    http.pause.armed.store(true, Ordering::SeqCst);
+    let out = f.command(&http, &["--reconcile", "dry-run"]).await;
+    assert_eq!(out.exit, 3);
+    assert_eq!(out.json["status"], "timeout");
+    http.pause.proceed.notify_one();
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn cache_inventory_can_outlive_page_budget_while_page_refresh_stays_bounded() {
+    use std::time::Duration;
+    let http = HttpNotion::start().await;
+    let mut f = Fixture::new(&http).await;
+    f.settings.timeout_seconds = 1;
+    f.settings.inventory_timeout_seconds = 60;
+    http.pause.armed.store(true, Ordering::SeqCst);
+    f.provider.pause.store(true, Ordering::SeqCst);
+    let source_and_page = async {
+        tokio::time::timeout(Duration::from_secs(10), http.pause.started.notified())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        http.pause.proceed.notify_one();
+        tokio::time::timeout(Duration::from_secs(10), f.provider.entered.notified())
+            .await
+            .unwrap();
+    };
+    let recovery = IndexRuntime::reset_and_resync(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    );
+    let (result, _) = tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(recovery, source_and_page)
+    })
+    .await
+    .unwrap();
+    assert!(
+        result.is_err(),
+        "pending page embedding must expire under its page budget"
+    );
+    // The observed embedding call proves the inventory finished and admitted
+    // page work; no assertion depends on a legacy inventory storage table.
+}
+
+#[tokio::test]
+async fn scheduled_inventory_uses_its_budget_before_bounded_page_work() {
+    use std::time::Duration;
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    http.pause.armed.store(true, Ordering::SeqCst);
+    f.provider.pause.store(true, Ordering::SeqCst);
+    let (worker, stop, server) = scheduled_server_budgets(
+        &f,
+        &http,
+        Duration::from_secs(1),
+        Duration::from_secs(60),
+        1,
+        false,
+    )
+    .await;
+    let observed = tokio::time::timeout(Duration::from_secs(15), async {
+        http.pause.started.notified().await;
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        http.pause.proceed.notify_one();
+        f.provider.entered.notified().await;
+        await_schedule(&worker, |s| s.attempts > 0).await
+    })
+    .await;
+    stop.cancel();
+    server.await.unwrap().unwrap();
+    let schedule =
+        observed.expect("inventory must survive the page budget and page work must then expire");
+    let run = schedule.active_run.unwrap();
+    assert!(
+        !worker
+            .coordinator
+            .reconciliation_progress(&run)
+            .unwrap()
+            .pending
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn explicit_retry_replans_with_inventory_budget_then_keeps_the_page_deadline() {
+    use std::time::Duration;
+    let http = HttpNotion::start().await;
+    let mut f = Fixture::new(&http).await;
+    f.provider.fail.store(true, Ordering::SeqCst);
+    let seeded = f
+        .command(&http, &["--reconcile", "apply", "failed-retry-budget"])
+        .await;
+    assert_eq!(seeded.exit, 3);
+    f.provider.fail.store(false, Ordering::SeqCst);
+    f.settings.timeout_seconds = 1;
+    f.settings.inventory_timeout_seconds = 60;
+    http.pause.armed.store(true, Ordering::SeqCst);
+    f.provider.pause.store(true, Ordering::SeqCst);
+    let release_inventory = async {
+        tokio::time::timeout(Duration::from_secs(10), http.pause.started.notified())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        http.pause.proceed.notify_one();
+        tokio::time::timeout(Duration::from_secs(10), f.provider.entered.notified())
+            .await
+            .unwrap();
+    };
+    let (out, _) = tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(
+            f.command(
+                &http,
+                &["--reconcile", "retry", "failed-retry-budget", PAGE]
+            ),
+            release_inventory
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(out.exit, 3);
+    assert_eq!(out.json["status"], "timeout");
 }

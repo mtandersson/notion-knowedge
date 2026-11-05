@@ -295,6 +295,7 @@ async fn installed_status_validates_real_index_metadata_without_model_assets_or_
             assets: dir.path().join("no-model-assets"),
             poll_ms: 10,
             timeout_seconds: 1,
+            inventory_timeout_seconds: 900,
         });
         let before = snapshot(dir.path());
         let responses = wire(&config).await;
