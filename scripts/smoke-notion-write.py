@@ -74,8 +74,11 @@ class HTTP:
                     total += len(line)
                     require(line and total <= read.LIMIT, "MCP SSE response ended or exceeded bound")
                     if line in (b"\n", b"\r\n") and data:
-                        reply = json.loads(b"\n".join(data))
+                        payload = b"\n".join(data)
                         data = []
+                        if not payload.strip():
+                            continue
+                        reply = json.loads(payload)
                         if reply.get("id") == self.identity:
                             break
                     elif line.startswith(b"data:"):

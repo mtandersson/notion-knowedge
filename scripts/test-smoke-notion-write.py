@@ -70,11 +70,15 @@ class Contracts(unittest.TestCase):
                     self.close_connection = True
                     return
                 body = json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}).encode()
-                if owner.mode == "sse":
+                if owner.mode.startswith("sse"):
                     body = b": heartbeat\n\nevent: message\ndata: " + body + b"\n\n"
+                    if owner.mode == "sse-empty":
+                        body = b"data:\n\ndata: \r\n\r\ndata: \t\n\n" + body
+                    elif owner.mode == "sse-malformed":
+                        body = b"data: {invalid-json}\n\n" + body
                 self.send_response(200)
                 self.send_header("Mcp-Session-Id", "private-session")
-                self.send_header("Content-Type", "text/event-stream" if owner.mode == "sse" else "application/json")
+                self.send_header("Content-Type", "text/event-stream" if owner.mode.startswith("sse") else "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -184,7 +188,7 @@ class Contracts(unittest.TestCase):
         return self.manifest()
 
     def test_json_and_sse_real_http_confine_all_effects_to_created_child(self):
-        for mode in ("", "sse"):
+        for mode in ("", "sse", "sse-empty"):
             with self.subTest(mode=mode):
                 self.mode = mode
                 smoke.execute(self.args)
@@ -198,6 +202,16 @@ class Contracts(unittest.TestCase):
                 # Fresh run owns a new report and idempotency keys; never resume old evidence.
                 self.args.diagnostics += "-next"
                 self.calls = []
+
+    def test_nonempty_malformed_sse_stops_before_any_effect(self):
+        self.mode = "sse-malformed"
+        with self.assertRaises(json.JSONDecodeError):
+            smoke.execute(self.args)
+        report = json.loads((Path(self.args.diagnostics) / "result.json").read_text())
+        self.assertEqual(report["phase"], "discovery")
+        self.assertEqual(report["outcome"], "failed")
+        self.assertEqual(report["effects"], {})
+        self.assertEqual(self.calls, [])
 
     def test_lost_create_response_never_retries_or_guesses_child_identity(self):
         report = self.run_failure("lost-create")
