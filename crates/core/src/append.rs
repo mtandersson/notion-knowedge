@@ -90,8 +90,8 @@ fn fingerprint(request: &AppendRequest) -> String {
 /// Notion may accept another edit between the final check and the PATCH.
 ///
 /// Strict readback requires the complete original Markdown byte prefix
-/// *unchanged* followed by the exact new Markdown. Provider-side formatting or
-/// ambiguous readback is classified unknown rather than silently accepted.
+/// *unchanged* followed by the new Markdown, allowing one optional final LF.
+/// Other formatting changes or ambiguous readback remain unknown.
 pub async fn append_once(
     reader: &dyn NotionRead,
     writer: &dyn NotionWrite,
@@ -230,7 +230,10 @@ pub async fn append_once(
     if after.page.id != request.page_id
         || after.page.archived
         || !after.markdown.starts_with(&before.markdown)
-        || after.markdown[before.markdown.len()..] != request.markdown
+        || !crate::revision::written_markdown_matches(
+            &request.markdown,
+            &after.markdown[before.markdown.len()..],
+        )
     {
         return Err(AppendError::OutcomeUnknown);
     }

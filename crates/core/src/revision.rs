@@ -55,6 +55,14 @@ pub fn markdown_sha256(markdown: &str) -> String {
     format!("{:x}", Sha256::digest(markdown.as_bytes()))
 }
 
+/// Notion may omit a single final LF when exporting persisted Markdown.
+/// Only post-write verification uses this allowance; revision hashes stay exact.
+pub(crate) fn written_markdown_matches(expected: &str, actual: &str) -> bool {
+    expected == actual
+        || expected.strip_suffix('\n') == Some(actual)
+        || actual.strip_suffix('\n') == Some(expected)
+}
+
 /// Compare caller preconditions against one fresh authoritative page read.
 ///
 /// All supplied conditions must match. No local index is consulted, no
@@ -168,4 +176,25 @@ pub fn compare_content_snapshot(
         return Err(RevisionError::Conflict(meta));
     }
     Ok(meta)
+}
+
+#[cfg(test)]
+mod written_markdown_contract {
+    use super::written_markdown_matches;
+
+    #[test]
+    fn only_one_terminal_line_feed_may_differ() {
+        for (expected, actual, matches) in [
+            ("paragraph\n", "paragraph", true),
+            ("paragraph", "paragraph\n", true),
+            ("paragraph\n", "paragraph\n", true),
+            ("paragraph\n\n", "paragraph", false),
+            ("one\ntwo\n", "onetwo", false),
+            ("    code\n", "code", false),
+            ("paragraph  \n", "paragraph", false),
+            ("paragraph\r\n", "paragraph", false),
+        ] {
+            assert_eq!(written_markdown_matches(expected, actual), matches);
+        }
+    }
 }

@@ -139,7 +139,7 @@ pub async fn create_once_and_refresh(
                 || content.page.archived
                 || content.page.url != created.url
                 || content.page.title != request.title
-                || content.markdown != request.markdown
+                || !crate::revision::written_markdown_matches(&request.markdown, &content.markdown)
             {
                 return Err(CreateError::OutcomeUnknown);
             }
