@@ -86,7 +86,7 @@ pub mod runtime {
             }
             let coordinator = &self.index.coordinator;
             let state = coordinator.state();
-            let ttl = self.inventory_timeout.as_secs().max(self.timeout.as_secs()) as i64 + 30;
+            let ttl = self.timeout.as_secs() as i64 + 30;
             let mut lease = match state.acquire_lease(now_ms() / 1000, ttl) {
                 Ok(l) => l,
                 Err(JournalError::Busy) => return Ok(false),
@@ -103,25 +103,51 @@ pub mod runtime {
                 };
                 let run = schedule.active_run.ok_or("scheduled run unavailable")?;
                 loop {
-                    let timeout = self.index.reconciliation_timeout(&run, self.timeout, self.inventory_timeout)
+                    let inventory = self.index.inventory_pending(&run)
                         .map_err(|_| "scheduled state unavailable")?;
-                    lease = state.renew_lease(&lease, now_ms()/1000, timeout.as_secs() as i64 + 30)
-                        .map_err(|_| "scheduled lease lost")?;
-
                     let attempt = stop.child_token();
                     let cancelled = attempt.clone();
                     let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || if cancelled.is_cancelled() { i64::MAX } else { now_ms()/1000 });
-                    let result = tokio::select! { biased;
+                    let prepared = if inventory {
+                        state.release_lease(&lease, now_ms()/1000).map_err(|_| "scheduled lease lost")?;
+                        let plan = tokio::select! { biased;
+                            _ = stop.cancelled() => { attempt.cancel(); Err(RunnerError::Journal(JournalError::Unavailable)) },
+                            _ = tokio::time::sleep(self.inventory_timeout) => { attempt.cancel(); Err(RunnerError::Journal(JournalError::Unavailable)) },
+                            result = self.index.runner.dry_run() => result,
+                        };
+                        lease = match state.acquire_lease(now_ms()/1000, ttl) {
+                            Ok(lease) => lease,
+                            Err(JournalError::Busy) => return Ok(false),
+                            Err(_) => return Err("scheduled lease unavailable"),
+                        };
+                        // Rebind the existing scheduled run even when planning
+                        // failed, so failure/checkpoint records use this fence.
+                        state.start_or_resume(&lease, now_ms()/1000, &run, &self.index.scope)
+                            .map_err(|_| "scheduled run unavailable")?;
+                        plan.map(Some)
+                    } else {
+                        Ok(None)
+                    };
+                    lease = state.renew_lease(&lease, now_ms()/1000, ttl)
+                        .map_err(|_| "scheduled lease lost")?;
+                    let result = match prepared {
+                        Err(error) => Some(Err(error)),
+                        Ok(prepared) => tokio::select! { biased;
                         _ = stop.cancelled() => { attempt.cancel(); None },
-                        _ = tokio::time::sleep(timeout) => { attempt.cancel(); Some(Err(RunnerError::Journal(JournalError::Unavailable))) },
+                        _ = tokio::time::sleep(self.timeout) => { attempt.cancel(); Some(Err(RunnerError::Journal(JournalError::Unavailable))) },
                         result = async {
-                            let progress = self.index.runner.apply_next(&run, lease.clone(), clock.clone(), self.index.provider.as_ref()).await?;
+                            let progress = if let Some(plan) = prepared {
+                                self.index.runner.record_inventory_plan(&run, &plan, lease.clone(), clock.clone()).await?
+                            } else {
+                                self.index.runner.apply_next(&run, lease.clone(), clock.clone(), self.index.provider.as_ref()).await?
+                            };
                             if progress.pending.is_empty() && progress.failed_pages() == 0 && progress.run_failures.is_empty() {
                                 crate::index_runtime::prepare_search_if_missing(coordinator, &self.index.handler, lease.clone(), clock)
                                     .await.map_err(|_| RunnerError::Journal(JournalError::Unavailable))?;
                             }
                             Ok::<_, RunnerError>(progress)
                         } => Some(result),
+                        },
                     };
                     if attempt.is_cancelled() {
                         coordinator.drain_owned().await.map_err(|_| "scheduled drain failed")?;

@@ -144,7 +144,10 @@ This preserves credentials and external-effect records; `--index rebuild`
 continues to mean ANN-only maintenance, not reconstruction of missing content.
 
 Whole-scope planning during reset/resync uses the separate
-`NK_RECONCILIATION_INVENTORY_TIMEOUT_SECONDS` budget (1..3570, default 900).
+`NK_RECONCILIATION_INVENTORY_TIMEOUT_SECONDS` budget (1..86400, default 900).
+Planning runs without a writer lease; recording its result takes a fresh short
+lease and rejects a changed local predecessor. A long crawl therefore does not
+extend stale writer ownership after interruption.
 `NK_WEBHOOK_TIMEOUT_SECONDS` still bounds individual page attempts and search
 index preparation. Configure a whole-process/service deadline with enough time
 for model loading, inventory and subsequent page work; a page deadline is not

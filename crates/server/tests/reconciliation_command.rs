@@ -3038,13 +3038,14 @@ async fn cache_inventory_can_outlive_page_budget_while_page_refresh_stays_bounde
     let http = HttpNotion::start().await;
     let mut f = Fixture::new(&http).await;
     f.settings.timeout_seconds = 1;
-    f.settings.inventory_timeout_seconds = 60;
+    f.settings.inventory_timeout_seconds = 7200;
     http.pause.armed.store(true, Ordering::SeqCst);
     f.provider.pause.store(true, Ordering::SeqCst);
     let source_and_page = async {
         tokio::time::timeout(Duration::from_secs(10), http.pause.started.notified())
             .await
             .unwrap();
+        assert_writer_available_during_inventory(&f.state);
         tokio::time::sleep(Duration::from_millis(1100)).await;
         http.pause.proceed.notify_one();
         tokio::time::timeout(Duration::from_secs(10), f.provider.entered.notified())
@@ -3082,13 +3083,14 @@ async fn scheduled_inventory_uses_its_budget_before_bounded_page_work() {
         &f,
         &http,
         Duration::from_secs(1),
-        Duration::from_secs(60),
+        Duration::from_secs(7200),
         1,
         false,
     )
     .await;
     let observed = tokio::time::timeout(Duration::from_secs(15), async {
         http.pause.started.notified().await;
+        assert_writer_available_during_inventory(&f.state);
         tokio::time::sleep(Duration::from_millis(1100)).await;
         http.pause.proceed.notify_one();
         f.provider.entered.notified().await;
@@ -3122,13 +3124,14 @@ async fn explicit_retry_replans_with_inventory_budget_then_keeps_the_page_deadli
     assert_eq!(seeded.exit, 3);
     f.provider.fail.store(false, Ordering::SeqCst);
     f.settings.timeout_seconds = 1;
-    f.settings.inventory_timeout_seconds = 60;
+    f.settings.inventory_timeout_seconds = 7200;
     http.pause.armed.store(true, Ordering::SeqCst);
     f.provider.pause.store(true, Ordering::SeqCst);
     let release_inventory = async {
         tokio::time::timeout(Duration::from_secs(10), http.pause.started.notified())
             .await
             .unwrap();
+        assert_writer_available_during_inventory(&f.state);
         tokio::time::sleep(Duration::from_millis(1100)).await;
         http.pause.proceed.notify_one();
         tokio::time::timeout(Duration::from_secs(10), f.provider.entered.notified())
@@ -3148,4 +3151,89 @@ async fn explicit_retry_replans_with_inventory_budget_then_keeps_the_page_deadli
     .unwrap();
     assert_eq!(out.exit, 3);
     assert_eq!(out.json["status"], "timeout");
+}
+
+fn assert_writer_available_during_inventory(path: &std::path::Path) {
+    let state = notion_knowledge_retrieval::sync_state::SqliteSyncStateStore::open(path).unwrap();
+    let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
+    let lease = state
+        .acquire_lease(now, 30)
+        .expect("read-only inventory must not retain writer ownership");
+    state.release_lease(&lease, now).unwrap();
+}
+
+#[tokio::test]
+async fn new_and_resumed_manual_inventory_allow_short_writer_admission_while_reading() {
+    use std::time::Duration;
+    for (operation, run) in [
+        ("apply", "fresh-read-plan"),
+        ("resume", "resumed-read-plan"),
+    ] {
+        let http = HttpNotion::start().await;
+        let mut f = Fixture::new(&http).await;
+        f.settings.inventory_timeout_seconds = 7200;
+        if operation == "resume" {
+            let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+            let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
+            let lease = runtime.coordinator.state().acquire_lease(now, 30).unwrap();
+            runtime
+                .coordinator
+                .state()
+                .start_or_resume(&lease, now, run, &runtime.scope)
+                .unwrap();
+            runtime
+                .coordinator
+                .state()
+                .release_lease(&lease, now)
+                .unwrap();
+        }
+        http.pause.armed.store(true, Ordering::SeqCst);
+        let release = async {
+            http.pause.started.notified().await;
+            assert_writer_available_during_inventory(&f.state);
+            http.pause.proceed.notify_one();
+        };
+        let (out, _) = tokio::time::timeout(Duration::from_secs(15), async {
+            tokio::join!(f.command(&http, &["--reconcile", operation, run]), release)
+        })
+        .await
+        .unwrap();
+        assert_eq!(out.exit, 0, "{}", out.json);
+    }
+}
+
+#[tokio::test]
+async fn inventory_recording_rejects_a_local_predecessor_changed_after_planning() {
+    use notion_knowledge_retrieval::{planner::PlanError, runner::RunnerError};
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+    let plan = runtime.runner.dry_run().await.unwrap();
+    f.populate(&http, "newer-local-state").await;
+    let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
+    let lease = runtime.coordinator.state().acquire_lease(now, 30).unwrap();
+    let result = runtime
+        .runner
+        .record_inventory_plan(
+            "stale-read-plan",
+            &plan,
+            lease.clone(),
+            Arc::new(|| notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(RunnerError::Planning(PlanError::Conflict))
+    ));
+    assert!(
+        runtime
+            .coordinator
+            .reconciliation_progress("stale-read-plan")
+            .is_err()
+    );
+    runtime
+        .coordinator
+        .state()
+        .release_lease(&lease, now)
+        .unwrap();
 }

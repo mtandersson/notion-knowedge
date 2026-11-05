@@ -119,7 +119,9 @@ impl AuthoritativeReconciliationRunner {
                 .state()
                 .start_or_resume(&lease, clock(), run, &self.scope)?;
         if current.phase != RunPhase::Inventory {
-            return Err(JournalError::InvalidTransition.into());
+            // Another admitted operator may have recorded this run while the
+            // caller was planning. Preserve that plan instead of replacing it.
+            return Ok(self.coordinator.reconciliation_progress(run)?);
         }
         self.planner
             .validate_local_snapshot(plan)

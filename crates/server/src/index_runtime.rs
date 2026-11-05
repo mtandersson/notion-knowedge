@@ -242,22 +242,41 @@ impl IndexRuntime {
         }
         let state = self.coordinator.state();
         let mut lease = state
-            .acquire_lease(
-                now_ms() / 1000,
-                settings.inventory_timeout_seconds as i64 + 30,
-            )
+            .acquire_lease(now_ms() / 1000, timeout_seconds as i64 + 30)
             .map_err(|_| "cache sync writer busy")?;
         let result = loop {
-            let timeout = match self.reconciliation_timeout(
-                "cache-reset",
-                Duration::from_secs(timeout_seconds),
-                Duration::from_secs(settings.inventory_timeout_seconds),
-            ) {
-                Ok(timeout) => timeout,
+            let inventory = match self.inventory_pending("cache-reset") {
+                Ok(inventory) => inventory,
                 Err(_) => break Err("cache sync state unavailable"),
             };
-            lease = match state.renew_lease(&lease, now_ms() / 1000, timeout.as_secs() as i64 + 30)
-            {
+            let prepared = if inventory {
+                if state
+                    .start_or_resume(&lease, now_ms() / 1000, "cache-reset", &self.scope)
+                    .is_err()
+                {
+                    break Err("cache sync state unavailable");
+                }
+                if state.release_lease(&lease, now_ms() / 1000).is_err() {
+                    break Err("cache sync lease unavailable");
+                }
+                let plan = match tokio::time::timeout(
+                    Duration::from_secs(settings.inventory_timeout_seconds),
+                    self.runner.dry_run(),
+                )
+                .await
+                {
+                    Ok(Ok(plan)) => plan,
+                    _ => break Err("cache inventory failed; retry startup"),
+                };
+                lease = match state.acquire_lease(now_ms() / 1000, timeout_seconds as i64 + 30) {
+                    Ok(lease) => lease,
+                    Err(_) => break Err("cache sync writer busy"),
+                };
+                Some(plan)
+            } else {
+                None
+            };
+            lease = match state.renew_lease(&lease, now_ms() / 1000, timeout_seconds as i64 + 30) {
                 Ok(lease) => lease,
                 Err(_) => break Err("cache sync lease unavailable"),
             };
@@ -272,11 +291,17 @@ impl IndexRuntime {
                     now_ms() / 1000
                 }
             });
-            let attempt = tokio::time::timeout(
-                timeout,
-                self.runner
-                    .apply_next("cache-reset", lease.clone(), clock, self.provider.as_ref()),
-            )
+            let attempt = tokio::time::timeout(Duration::from_secs(timeout_seconds), async {
+                if let Some(plan) = prepared {
+                    self.runner
+                        .record_inventory_plan("cache-reset", &plan, lease.clone(), clock)
+                        .await
+                } else {
+                    self.runner
+                        .apply_next("cache-reset", lease.clone(), clock, self.provider.as_ref())
+                        .await
+                }
+            })
             .await;
             let progress = match attempt {
                 Ok(Ok(progress)) => progress,
@@ -333,18 +358,12 @@ impl IndexRuntime {
         result
     }
 
-    /// A complete source inventory has its own bound. Resume/page attempts
-    /// retain the shorter page budget; the caller renews only between attempts.
-    pub(crate) fn reconciliation_timeout(
-        &self,
-        run: &str,
-        page: std::time::Duration,
-        inventory: std::time::Duration,
-    ) -> Result<std::time::Duration, JournalError> {
+    /// An absent or inventory-phase run still needs read-only planning before
+    /// writer admission. Other phases retain their existing page attempts.
+    pub(crate) fn inventory_pending(&self, run: &str) -> Result<bool, JournalError> {
         match self.coordinator.state().run(run, &self.scope) {
-            Ok(run) if run.phase == RunPhase::Inventory => Ok(inventory),
-            Ok(_) => Ok(page),
-            Err(JournalError::InvalidTransition) => Ok(inventory),
+            Ok(run) => Ok(run.phase == RunPhase::Inventory),
+            Err(JournalError::InvalidTransition) => Ok(true),
             Err(error) => Err(error),
         }
     }
