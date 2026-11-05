@@ -36,7 +36,8 @@ revision preflight, and the **durable**, separate `WriteIdempotencyStore`.
    the first network mutation**. A crash, timeout or 5xx after this point never
    causes automatic retry. The Notion adapter uses a single PATCH.
 5. Re-read the complete page authoritatively. Only a readback with the *exact
-   original Markdown prefix*, followed by the *exact inserted Markdown*, an
+   original Markdown prefix*, followed by the inserted Markdown (with one
+   optional final LF to account for Notion export formatting), an
    active matching page ID and a trusted Notion URL becomes a verified receipt.
    No unrelated original bytes may be changed.
 6. Acquire and revalidate fresh post-write physical scope (the write itself

@@ -58,6 +58,10 @@ exact target, heading, old body and replacement; only its authenticated peer's
 explicit acceptance can approve that intent. Fresh scope/revision/content checks
 run again after approval.
 
+Create and append verify complete authoritative readback. Requested and exported
+Markdown may differ by one final LF; all other content comparisons remain exact,
+including the existing prefix for append. Revision hashes remain byte-exact.
+
 Write and index statuses are separate. A verified write can report queued,
 running, completed, failed or unavailable indexing. Refresh uses the normal
 canonical hash/diff path; it cannot repeat an upstream mutation. Replaying a

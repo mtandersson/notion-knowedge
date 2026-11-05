@@ -129,6 +129,7 @@ struct Source {
     audit: Arc<Audit>,
     deny: AtomicBool,
     bad_readback: AtomicBool,
+    omit_final_lf: AtomicBool,
     wrong_parent: AtomicBool,
     pause: AtomicBool,
     entered: Notify,
@@ -195,6 +196,9 @@ impl NotionWrite for Source {
                 let mut pages = self.pages.lock().unwrap();
                 let d = pages.get_mut(&q.page_id.0).unwrap();
                 d.body.push_str(&q.markdown);
+                if self.omit_final_lf.load(Ordering::SeqCst) && d.body.ends_with('\n') {
+                    d.body.pop();
+                }
                 d.revision += 1;
             }
             self.after_effect().await;
@@ -204,6 +208,10 @@ impl NotionWrite for Source {
     fn create_page(&self, q: CreatePage) -> BackendFuture<'_, Page> {
         Box::pin(async move {
             self.before_effect();
+            let mut body = q.markdown;
+            if self.omit_final_lf.load(Ordering::SeqCst) && body.ends_with('\n') {
+                body.pop();
+            }
             self.pages.lock().unwrap().insert(
                 CHILD.into(),
                 Document {
@@ -213,7 +221,7 @@ impl NotionWrite for Source {
                         q.parent_page_id.0
                     }),
                     title: q.title,
-                    body: q.markdown,
+                    body,
                     revision: 1,
                 },
             );
@@ -383,6 +391,7 @@ impl Fixture {
             audit: audit.clone(),
             deny: AtomicBool::new(false),
             bad_readback: AtomicBool::new(false),
+            omit_final_lf: AtomicBool::new(false),
             wrong_parent: AtomicBool::new(false),
             pause: AtomicBool::new(false),
             entered: Notify::new(),
@@ -529,6 +538,29 @@ async fn create_append_and_section_dispatch_verify_source_and_return_separate_in
         assert_eq!(events.first().unwrap().outcome(), AuditOutcome::Attempted);
         assert_eq!(events.last().unwrap().outcome(), AuditOutcome::Succeeded);
         assert_eq!(events[1].target_page_id(), Some(target));
+    }
+}
+
+#[tokio::test]
+async fn normalized_final_line_feed_preserves_verified_receipts_and_once_only_replay() {
+    for (name, args) in [
+        ("knowledge_create_page", create("normalized-create-key")),
+        ("knowledge_append", append("normalized-append-key")),
+    ] {
+        let f = Fixture::new();
+        f.source.omit_final_lf.store(true, Ordering::SeqCst);
+        let handler = f.server(true);
+        let response = invoke(handler.clone(), name, args.clone()).await;
+        let out = output(&response);
+        assert_eq!(out["write"]["status"], "verified", "{response}");
+        assert_eq!(out["write"]["replayed"], false);
+        assert_eq!(out["audit"]["status"], "recorded");
+        assert_eq!(out["index"]["status"], "queued");
+        let replay = invoke(handler, name, args).await;
+        assert_eq!(output(&replay)["write"]["replayed"], true);
+        assert_eq!(f.source.effects.load(Ordering::SeqCst), 1);
+        let events = f.audit.events.lock().unwrap();
+        assert_eq!(events[1].outcome(), AuditOutcome::Succeeded);
     }
 }
 
