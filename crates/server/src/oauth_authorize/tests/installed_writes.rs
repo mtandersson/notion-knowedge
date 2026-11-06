@@ -702,6 +702,17 @@ async fn shipping_http_lifecycle_installs_dispatcher_and_drains_on_shutdown() {
     })
     .await
     .unwrap();
+    let ready = h
+        .client
+        .get(format!("http://{address}/readyz"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ready.status(), StatusCode::OK);
+    assert_eq!(
+        ready.json::<Value>().await.unwrap()["dependencies"]["index"],
+        "healthy"
+    );
     let code = h
         .approved_code_with_scope("knowledge:read knowledge:write")
         .await;

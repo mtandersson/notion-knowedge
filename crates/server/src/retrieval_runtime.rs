@@ -203,7 +203,13 @@ pub async fn compose(
         .search_snapshot()
         .await
         .map_err(|_| "retrieval index unavailable or incompatible")?;
+    let exact_id = plan.is_some();
     let adapters = search_adapters(settings, table.clone(), provider, plan)?;
+    let handler = if matches!(transport, Transport::Http) {
+        handler.with_index_health_probe(crate::index_readiness::observe(table.clone(), exact_id))
+    } else {
+        handler
+    };
     let handler = handler
         .and_source_expansion(
             Arc::new(table),
@@ -349,9 +355,11 @@ pub(crate) async fn compose_oauth_index(
     } else {
         (coordinator, table)
     };
+    let exact_id = plan.is_some();
     let adapters = search_adapters(settings, table.clone(), provider, plan)?;
     let handler = handler
         .with_request_bound_content()
+        .with_index_health_probe(crate::index_readiness::observe(table.clone(), exact_id))
         .with_root_page_ids(scope.roots.iter().map(|root| root.0.clone()).collect())?
         .and_search(adapters.semantic)
         .and_lexical_search(adapters.lexical)

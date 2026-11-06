@@ -248,6 +248,16 @@ async fn configured_oauth_lexical_reads_require_native_exact_id_readiness() {
     .unwrap();
     assert_eq!(fs::read(&seeded.state).unwrap(), before);
     table.probe_lexical_cache().await.unwrap();
+    use notion_knowledge_core::health::{DependencyState, HealthProbe};
+    let readiness = crate::index_readiness::observe(table.clone(), true);
+    assert_eq!(readiness.state(), DependencyState::Healthy);
+    let moved = dir.path().join("temporarily-moved-index");
+    fs::rename(&seeded.index, &moved).unwrap();
+    readiness.check_now().await;
+    assert_eq!(readiness.state(), DependencyState::Unavailable);
+    fs::rename(&moved, &seeded.index).unwrap();
+    readiness.check_now().await;
+    assert_eq!(readiness.state(), DependencyState::Healthy);
     // Keep metadata.lance (used to infer index type) intact, but remove the
     // pinned Lance format's posting lists from this fixture's native indexes.
     fn remove_postings(path: &Path) -> usize {
@@ -274,6 +284,8 @@ async fn configured_oauth_lexical_reads_require_native_exact_id_readiness() {
     assert!(remove_postings(&seeded.index.join("chunks.lance/_indices")) > 0);
     assert!(table.search_snapshot().await.is_ok());
     assert!(table.probe_lexical_cache().await.is_err());
+    readiness.check_now().await;
+    assert_eq!(readiness.state(), DependencyState::Unavailable);
     for writable in [false, true] {
         assert!(
             crate::retrieval_runtime::compose_oauth_index(

@@ -58,6 +58,9 @@ pub mod file_ingestion;
 pub mod retrieval_runtime;
 
 #[cfg(all(unix, feature = "webhook-worker"))]
+mod index_readiness;
+
+#[cfg(all(unix, feature = "webhook-worker"))]
 pub mod graph_runtime;
 
 /// Browser entry point for staged Notion authorization.
