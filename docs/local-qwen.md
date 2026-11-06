@@ -56,10 +56,17 @@ Construct `QwenConfig::cpu(assets)`, change its public fields as needed, and cal
 - `device`: explicit `QwenDevice::Cpu`; this build supports CPU only. CUDA and
   Metal requests fail with `UnsupportedModel`, rather than silently falling
   back. Accelerator implementation and verification are future work.
-- `max_tokens`: 1..=4096 per text; default 512. Oversized text is rejected,
+- `max_tokens`: 1..=4096 per text; default 1024. Oversized text is rejected,
   never truncated. No input may exceed 32 KiB, and a call may contain at most
   256 KiB total. Each padded runtime batch is limited to 4096 tokens combined.
   These bounds constrain work; they are not a measured memory guarantee.
+
+The CPU default accommodates ordinary attachment Markdown whose UUID-heavy media
+identities can exceed 512 tokens even below the runtime's 1,000-character chunk
+target. Character chunking is a soft bound; an oversized atomic Markdown block
+can still exceed the token budget and fail explicitly. Increasing admission
+does not change the text, model, pooling or existing accepted vectors. The
+single-text inference batch and external process memory cap remain necessary.
 
 Empty calls return no vectors without inference. Blank strings and over-budget
 inputs return sanitized typed errors. All input token and padded-batch budgets
