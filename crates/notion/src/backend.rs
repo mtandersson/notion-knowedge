@@ -5,7 +5,20 @@ use notion_knowledge_core::backend::{
     Page, PageContent, PageId, ReplacePageContent, UpdateSectionContent,
 };
 
+impl NotionClient {
+    /// Stable local comparison of hosted-media identities. This does not read,
+    /// authorize, rewrite a mutation payload or return download capabilities.
+    /// Fresh reads and explicit raw Markdown hash preconditions stay lossless.
+    pub fn comparison_markdown(markdown: &str) -> std::borrow::Cow<'_, str> {
+        crate::media_identity::canonical_markdown(markdown)
+    }
+}
+
 impl NotionRead for NotionClient {
+    fn comparison_markdown<'a>(&self, markdown: &'a str) -> std::borrow::Cow<'a, str> {
+        Self::comparison_markdown(markdown)
+    }
+
     fn fetch_page<'a>(&'a self, page_id: &'a PageId) -> BackendFuture<'a, Page> {
         Box::pin(NotionClient::fetch_page(self, &page_id.0))
     }

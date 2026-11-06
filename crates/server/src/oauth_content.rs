@@ -107,6 +107,10 @@ impl RequestBoundSource for BoundSource {
     }
 }
 impl NotionRead for BoundSource {
+    fn comparison_markdown<'a>(&self, markdown: &'a str) -> std::borrow::Cow<'a, str> {
+        NotionClient::comparison_markdown(markdown)
+    }
+
     fn fetch_page<'a>(&'a self, page: &'a PageId) -> BackendFuture<'a, Page> {
         Box::pin(
             self.operation(

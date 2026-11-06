@@ -35,8 +35,8 @@ revision preflight, and the **durable**, separate `WriteIdempotencyStore`.
 4. Revalidate ancestry, then **durably mark the reservation uncertain before
    the first network mutation**. A crash, timeout or 5xx after this point never
    causes automatic retry. The Notion adapter uses a single PATCH.
-5. Re-read the complete page authoritatively. Only a readback with the *exact
-   original Markdown prefix*, followed by the inserted Markdown (with one
+5. Re-read the complete page authoritatively. Only a readback with the original Markdown prefix
+   in the provider comparison view, followed by the inserted Markdown (with one
    optional final LF to account for Notion export formatting), an
    active matching page ID and a trusted Notion URL becomes a verified receipt.
    No unrelated original bytes may be changed.
@@ -45,6 +45,14 @@ revision preflight, and the **durable**, separate `WriteIdempotencyStore`.
    returning success. If any post-PATCH verification or ledger write fails,
    return `OutcomeUnknown`. Reconciliation must be deliberate and based on
    authoritative evidence; never infer failure from a network timeout.
+
+Notion comparisons ignore only temporary signing credentials in recognized
+hosted-media destinations, using the same policy as canonical indexing. Asset
+paths, non-authentication query fields, captions, ordinary links and code remain
+significant. This comparison does not alter the submitted append or fresh reads;
+explicit Markdown SHA-256 preconditions still apply to the exact raw response.
+Other providers compare every byte unless they supply their own transport-only
+comparison view.
 
 The ledger must be durable and must survive restarts: use
 `SqliteIdempotencyStore::open_existing` in production, not the disposable

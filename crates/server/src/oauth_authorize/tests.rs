@@ -209,6 +209,7 @@ impl Harness {
         let document = Arc::new(std::sync::Mutex::new(None::<(String, u64)>));
         let page_document = document.clone();
         let markdown_document = document.clone();
+        let markdown_generation = page_reads.clone();
         let provider_router = provider_router.route("/v1/pages/{id}", axum::routing::get(move |axum::extract::Path(id): axum::extract::Path<String>, headers: HeaderMap| {
             let root = root.clone(); let status = page_state.clone(); let reads = reads.clone();
             let wait = page_wait.clone(); let pause = pause.clone(); let document = page_document.clone();
@@ -222,9 +223,9 @@ impl Harness {
                     "properties":{"Title":{"id":"title","type":"title","title":[{"plain_text":"Saffron private evidence"}]}}
                 })))
             }
-        })).route("/v1/pages/{id}/markdown", axum::routing::get(move |axum::extract::Path(id):axum::extract::Path<String>, headers:HeaderMap| { let document = markdown_document.clone(); async move {
+        })).route("/v1/pages/{id}/markdown", axum::routing::get(move |axum::extract::Path(id):axum::extract::Path<String>, headers:HeaderMap| { let document = markdown_document.clone(); let generation = markdown_generation.clone(); async move {
             assert!(matches!(headers["authorization"].to_str().unwrap(), "Bearer provider-access-secret" | "Bearer rotated-access-secret"));
-            axum::Json(serde_json::json!({"object":"page_markdown","id":id,"markdown":document.lock().unwrap().as_ref().map_or_else(|| "Saffron private evidence fresh content".to_owned(), |d| d.0.clone()), "truncated":false,"unknown_block_ids":[]}))
+            axum::Json(serde_json::json!({"object":"page_markdown","id":id,"markdown":document.lock().unwrap().as_ref().map_or_else(|| "Saffron private evidence fresh content".to_owned(), |d| d.0.replace("ROTATING_MEDIA_AUTH", &generation.load(Ordering::SeqCst).to_string())), "truncated":false,"unknown_block_ids":[]}))
         }}));
         let mutation_status = Arc::new(AtomicUsize::new(200));
         let mutations = Arc::new(AtomicUsize::new(0));
