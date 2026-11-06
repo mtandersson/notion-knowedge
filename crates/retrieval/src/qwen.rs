@@ -52,7 +52,7 @@ impl QwenConfig {
             assets: assets.into(),
             batch_size: 1,
             device: QwenDevice::Cpu,
-            max_tokens: 512,
+            max_tokens: 1024,
         }
     }
     fn validate(&self) -> Result<(), EmbeddingError> {
@@ -356,6 +356,34 @@ mod tests {
             calls,
         )
     }
+    #[tokio::test]
+    async fn cpu_context_admits_attachment_sized_text_without_truncation() {
+        let (provider, calls) = fake(QwenConfig::cpu("unused"), false);
+        // The runtime reports token counts independently of character length.
+        // UUID-heavy attachment Markdown can exceed 512 tokens below 1,000 chars.
+        let texts = ["530", "768", "1024"].map(str::to_owned);
+        let vectors = provider.embed_batch(&texts).await.unwrap();
+        assert_eq!(vectors.len(), texts.len());
+        assert_eq!(
+            *calls.lock().unwrap(),
+            texts.iter().cloned().map(|s| vec![s]).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            provider.embed_batch(&["1025".into()]).await,
+            Err(EmbeddingError::InvalidInput)
+        );
+        assert_eq!(calls.lock().unwrap().len(), texts.len());
+
+        let mut smaller = QwenConfig::cpu("unused");
+        smaller.max_tokens = 512;
+        let (provider, calls) = fake(smaller, false);
+        assert_eq!(
+            provider.embed_batch(&["530".into()]).await,
+            Err(EmbeddingError::InvalidInput)
+        );
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn batches_preserve_input_order_and_duplicates() {
         let mut c = QwenConfig::cpu("unused");
