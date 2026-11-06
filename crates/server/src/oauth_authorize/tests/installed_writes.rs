@@ -199,14 +199,15 @@ async fn oauth_append_preserves_raw_hashes_and_verifies_rotating_media_once() {
         &token,
         &session,
         "knowledge_get",
-        json!({"refs":[{"kind":"page","id":PAGE}],"freshness":"fresh"}),
+        json!({"refs":[{"kind":"page","id":PAGE}],"max_chars":65536,"freshness":"fresh"}),
     )
     .await;
+    assert_ne!(fresh["result"]["isError"], true, "{fresh}");
     let source = &fresh["result"]["structuredContent"]["sources"][0];
     assert!(
         source["text"]
             .as_str()
-            .unwrap()
+            .unwrap_or_else(|| panic!("fresh source text missing: {fresh}"))
             .contains("X-Amz-Signature=")
     );
     let revision = source["provenance"]["refreshed_last_edited_time"]
