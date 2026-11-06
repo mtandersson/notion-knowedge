@@ -3,7 +3,7 @@
 //! revalidate source revision, physical ancestry and owner generation.
 use std::sync::Arc;
 
-use crate::{NotionClient, links::extract_relationships};
+use crate::{NotionClient, links::extract_relationships, media_identity::canonical_content};
 use notion_knowledge_core::{
     backend::{BackendError, BackendErrorKind, PageContent, PageId},
     chunking::{ChunkConfig, chunk_document},
@@ -84,7 +84,7 @@ impl NotionClient {
             return Err(failure(BackendErrorKind::PermissionDenied));
         }
 
-        let before = self.read_content(&selected.0).await?;
+        let before = canonical_content(self.read_content(&selected.0).await?);
         if before.page.id != *selected || before.page.archived {
             return Err(failure(BackendErrorKind::Conflict));
         }
@@ -126,7 +126,7 @@ impl NotionClient {
         // Source may change between metadata and Markdown reads, or during
         // the local chunk preparation. Compare *all* authoritative fields,
         // not just timestamps, then physically revalidate original ancestry.
-        let after = self.read_content(&selected.0).await?;
+        let after = canonical_content(self.read_content(&selected.0).await?);
         if before != after {
             return Err(failure(BackendErrorKind::Conflict));
         }
@@ -352,6 +352,44 @@ mod tests {
                 .iter()
                 .all(|chunk| chunk.metadata.title == "Renamed")
         );
+    }
+
+    // Every authoritative read rotates credentials while the page revision and
+    // asset remain unchanged. Preparation and the final commit check must agree.
+    fn rotate_media(routes: &mut [Route]) {
+        let mut generation = 0;
+        for (path, value) in routes {
+            if path.ends_with("/markdown") {
+                generation += 1;
+                value["markdown"] =
+                    crate::media_identity::tests::body(&generation.to_string()).into();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn hosted_media_rotation_keeps_snapshot_identity_and_commit_authority() {
+        use crate::relation_proposal::RelationProposalAdapter;
+        let mut initial = full("unused", "Current");
+        rotate_media(&mut initial);
+        let (first, _) = prepare(initial, &[]).await.unwrap();
+        let mut second_routes = full("unused", "Current");
+        rotate_media(&mut second_routes);
+        let (second, _) = prepare(second_routes, &first.chunks).await.unwrap();
+        assert_eq!(first.document, second.document);
+        assert_eq!(first.chunks, second.chunks);
+
+        let mut routes = full("unused", "Current");
+        routes.extend(chain(ROOT));
+        routes.extend(full("unused", "Current")[4..8].iter().cloned());
+        routes.extend(chain(ROOT));
+        rotate_media(&mut routes);
+        let (client, server) = fixture(routes).await;
+        let adapter = RelationProposalAdapter::new(client, scope()).unwrap();
+        let prepared = proposal(&adapter).await.unwrap();
+        let _authority = adapter.revalidate(&prepared).await.unwrap();
+        assert_eq!(prepared.snapshot().document, first.document);
+        server.await.unwrap();
     }
 
     #[tokio::test]

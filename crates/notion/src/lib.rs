@@ -25,6 +25,8 @@ pub mod crawl;
 
 pub mod content;
 
+mod media_identity;
+
 pub mod links;
 
 /// Scoped graph projection from parsed Notion page links and mentions.

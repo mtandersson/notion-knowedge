@@ -313,7 +313,9 @@ impl RelationProposalAdapter {
             .revalidate_lifecycle(&proposal.snapshot.evidence, &scope)
             .await?;
         let page = &proposal.snapshot.source.page.id.0;
-        if self.client.read_content(page).await? != proposal.snapshot.source {
+        if crate::media_identity::canonical_content(self.client.read_content(page).await?)
+            != proposal.snapshot.source
+        {
             return Err(conflict());
         }
         let (edges, targets, evidence) = self
@@ -336,7 +338,9 @@ impl RelationProposalAdapter {
             return Err(conflict());
         }
         // Bracket candidate work with the full authoritative source, then its chain.
-        if self.client.read_content(page).await? != proposal.snapshot.source {
+        if crate::media_identity::canonical_content(self.client.read_content(page).await?)
+            != proposal.snapshot.source
+        {
             return Err(conflict());
         }
         self.client

@@ -1,6 +1,7 @@
 //! Read-only scoped canonical snapshots; no index or embedding side effects.
 use crate::{
-    NotionClient, link_graph::page_link_edges, links::extract_relationships, pages::page_id,
+    NotionClient, link_graph::page_link_edges, links::extract_relationships,
+    media_identity::canonical_content, pages::page_id,
 };
 use notion_knowledge_core::{
     backend::{BackendError, BackendErrorKind, Page, PageContent, PageId},
@@ -207,7 +208,7 @@ impl NotionClient {
         let mut documents = Vec::new();
         let mut chunks = Vec::new();
         for discovered in &discovery.pages {
-            let content = self.read_content(&discovered.id).await?;
+            let content = canonical_content(self.read_content(&discovered.id).await?);
             if content.page.archived {
                 return Err(error(BackendErrorKind::Conflict));
             }
