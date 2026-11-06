@@ -125,6 +125,9 @@ fn html_media_edits(
     let mut reader = Reader::from_str(source);
     // Inline end tags arrive separately from their opening tag.
     reader.config_mut().check_end_names = false;
+    reader.config_mut().allow_unmatched_ends = true;
+    // Notion HTML can contain literal Markdown URLs and ordinary ampersands.
+    reader.config_mut().allow_dangling_amp = true;
     let mut local_edits = Vec::new();
     loop {
         match reader.read_event() {
