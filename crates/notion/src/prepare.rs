@@ -393,6 +393,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn media_asset_and_user_link_changes_still_reject_commit() {
+        use crate::relation_proposal::RelationProposalAdapter;
+        for user_link in [false, true] {
+            let original = crate::media_identity::tests::body("original");
+            let original = if user_link {
+                original.replace("![Image caption]", "[User link]")
+            } else {
+                original
+            };
+            let mut routes = full(&original, "Current");
+            routes.extend(chain(ROOT));
+            let changed = if user_link {
+                original.replace("original", "changed")
+            } else {
+                original.replace("example.png", "different.png")
+            };
+            routes.push((
+                format!("pages/{PAGE}"),
+                metadata(PAGE, ROOT, "Current", REVISION),
+            ));
+            routes.push((format!("pages/{PAGE}/markdown"), markdown(&changed)));
+            let (client, server) = fixture(routes).await;
+            let adapter = RelationProposalAdapter::new(client, scope()).unwrap();
+            let prepared = proposal(&adapter).await.unwrap();
+            assert_eq!(
+                adapter.revalidate(&prepared).await.err().unwrap().kind,
+                BackendErrorKind::Conflict
+            );
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn changed_section_keeps_unmodified_chunk_identity() {
         let a = "# Title\n\nStable paragraph.\n\n## Different\n\nOld content.\n";
         let b = "# Title\n\nStable paragraph.\n\n## Different\n\nNew content.\n";

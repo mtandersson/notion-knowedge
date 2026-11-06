@@ -46,3 +46,15 @@ Protocol references:
 The separate [relationship normalization step](notion-links.md) extracts page
 links, mentions and relation-property edges from this lossless content without
 fetching targets or expanding discovery scope.
+
+Canonical indexing separately removes temporary AWS signing fields only from
+recognized Notion-hosted media destinations (inline images and enhanced media
+`src`/`source` attributes). This keeps page hashes, chunk identities and guarded
+refresh checks stable when download credentials rotate. Asset paths,
+non-authentication query fields, captions, ordinary links, code and all page
+metadata remain significant. Unsupported URL forms remain exact.
+
+These cached media URLs are asset identities, not download capabilities. Use a
+fresh authoritative page read for current download URLs; `read_content` itself
+never applies this projection. Complete-content and physical scope checks still
+apply to both paths.
