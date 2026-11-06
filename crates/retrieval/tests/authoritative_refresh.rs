@@ -42,6 +42,7 @@ struct ExtraPage {
 #[derive(Clone)]
 struct Model {
     markdown: String,
+    rotate_media: bool,
     title: String,
     revision: String,
     parent: String,
@@ -64,6 +65,7 @@ impl Default for Model {
     fn default() -> Self {
         Self {
             markdown: "# Intro\n\nSaffron ravioli.\n\n## Other\n\nAn evergreen section.\n".into(),
+            rotate_media: false,
             title: "First".into(),
             revision: "2026-10-10T12:00:00Z".into(),
             parent: ROOT.into(),
@@ -216,7 +218,9 @@ impl HttpNotion {
                     json!({
                         "object": "page_markdown",
                         "id": PAGE,
-                        "markdown": snapshot.markdown,
+                        "markdown": if snapshot.rotate_media {
+                            snapshot.markdown.replace("AUTH_GENERATION", &bodies.load(Ordering::SeqCst).to_string())
+                        } else { snapshot.markdown },
                         "truncated": false,
                         "unknown_block_ids": []
                     })
@@ -481,6 +485,77 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hosted_media_rotation_commits_without_reembedding_and_asset_changes_refresh() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let url = "https://prod-files-secure.s3.us-west-2.amazonaws.com/11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222/synthetic.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AUTH_GENERATION&X-Amz-Date=AUTH_GENERATION&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=AUTH_GENERATION&x-id=GetObject";
+    source.change(|model| {
+        model.rotate_media = true;
+        model.markdown =
+            format!("![Synthetic image]({url})\n\n<file src=\"{url}\">Synthetic document</file>\n");
+    });
+    let client = source.client();
+    // Public authoritative reads remain lossless and expose current URLs.
+    let raw_first = client.read_content(PAGE).await.unwrap();
+    let raw_second = client.read_content(PAGE).await.unwrap();
+    assert_eq!(raw_first.page, raw_second.page);
+    assert_ne!(raw_first.markdown, raw_second.markdown);
+    assert!(raw_second.markdown.contains("X-Amz-Signature="));
+    let handler = index.handler(client);
+    let provider = CountingProvider::new(index.embed.clone());
+    let page = PageId(PAGE.into());
+    let root = PageId(ROOT.into());
+    let first = handler
+        .refresh_page(
+            &page,
+            &root,
+            "media-first",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.outcome, CommitOutcome::Applied);
+    let chunks = index.guarded().page_chunks(PAGE).await.unwrap();
+    assert!(!chunks.is_empty());
+    let count = provider.embeddings();
+    let second = handler
+        .refresh_page(
+            &page,
+            &root,
+            "media-second",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.diff.added, 0);
+    assert_eq!(second.diff.removed, 0);
+    assert_eq!(provider.embeddings(), count);
+    assert_eq!(chunks, index.guarded().page_chunks(PAGE).await.unwrap());
+    source.change(|model| {
+        model.markdown = model.markdown.replace("synthetic.png", "different.png");
+    });
+    let third = handler
+        .refresh_page(
+            &page,
+            &root,
+            "media-changed",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(third.outcome, CommitOutcome::Applied);
+    assert!(third.diff.added > 0);
+    assert!(provider.embeddings() > count);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
