@@ -3,7 +3,7 @@
 use std::{borrow::Cow, ops::Range};
 
 use notion_knowledge_core::backend::PageContent;
-use pulldown_cmark::{Event, Parser, Tag};
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use quick_xml::{Reader, events::Event as XmlEvent};
 use reqwest::Url;
 
@@ -105,12 +105,103 @@ fn media_identity(raw: &str, html: bool) -> Option<String> {
     Some(identity)
 }
 
+fn html_media_edits(
+    markdown: &str,
+    range: Range<usize>,
+    literal_tags: &mut Vec<String>,
+    comments: &mut Vec<Range<usize>>,
+) -> Vec<(Range<usize>, String)> {
+    let source = &markdown[range.clone()];
+    let mut reader = Reader::from_str(source);
+    // Inline end tags arrive separately from their opening tag.
+    reader.config_mut().check_end_names = false;
+    let mut local_edits = Vec::new();
+    loop {
+        match reader.read_event() {
+            Ok(XmlEvent::Start(tag) | XmlEvent::Empty(tag)) => {
+                let name = String::from_utf8_lossy(tag.name().as_ref()).to_ascii_lowercase();
+                if matches!(name.as_str(), "pre" | "code" | "script" | "style") {
+                    literal_tags.push(name);
+                    continue;
+                }
+                if !literal_tags.is_empty()
+                    || !matches!(name.as_str(), "image" | "file" | "pdf" | "audio" | "video")
+                {
+                    continue;
+                }
+                for attribute in tag.attributes() {
+                    let Ok(attribute) = attribute else {
+                        local_edits.clear();
+                        break;
+                    };
+                    if !matches!(attribute.key.as_ref(), b"src" | b"source") {
+                        continue;
+                    }
+                    // Reader borrows the original source. Only edit an
+                    // exact borrowed value; no unsafe pointer access.
+                    let Cow::Borrowed(bytes) = attribute.value else {
+                        continue;
+                    };
+                    let Some(offset) =
+                        (bytes.as_ptr() as usize).checked_sub(source.as_ptr() as usize)
+                    else {
+                        continue;
+                    };
+                    if source.as_bytes().get(offset..offset + bytes.len()) != Some(bytes) {
+                        continue;
+                    }
+                    let Ok(raw) = std::str::from_utf8(bytes) else {
+                        continue;
+                    };
+                    if let Some(identity) = media_identity(raw, true) {
+                        local_edits.push((
+                            range.start + offset..range.start + offset + bytes.len(),
+                            identity,
+                        ));
+                    }
+                }
+            }
+            Ok(XmlEvent::End(tag)) => {
+                if literal_tags
+                    .last()
+                    .is_some_and(|last| last.as_bytes().eq_ignore_ascii_case(tag.name().as_ref()))
+                {
+                    literal_tags.pop();
+                }
+            }
+            Ok(XmlEvent::Eof) => break,
+            Err(quick_xml::Error::Syntax(quick_xml::errors::SyntaxError::UnclosedComment)) => {
+                // A CommonMark HTML block can end at a blank line while its
+                // HTML comment continues. Protect that literal region even
+                // when subsequent lines arrive as Markdown image events.
+                let start = range.start + reader.error_position() as usize;
+                let end = markdown[start..]
+                    .find("-->")
+                    .map_or(markdown.len(), |end| start + end + 3);
+                comments.push(start..end);
+                local_edits.clear();
+                break;
+            }
+            Err(_) => {
+                local_edits.clear();
+                break;
+            }
+            _ => {}
+        }
+    }
+    local_edits
+}
+
 fn canonical_markdown(markdown: &str) -> Cow<'_, str> {
     if !markdown.contains("X-Amz-") {
         return Cow::Borrowed(markdown);
     }
     let mut edits: Vec<(Range<usize>, String)> = Vec::new();
     let mut literal_tags = Vec::new();
+    let mut comments = Vec::new();
+    // Block HTML is emitted line by line; parse it together so multiline
+    // comments remain comments rather than exposing their embedded tags.
+    let mut html_block: Option<Range<usize>> = None;
     for (event, range) in Parser::new(markdown).into_offset_iter() {
         match event {
             Event::Start(Tag::Image { dest_url, .. }) if literal_tags.is_empty() => {
@@ -128,86 +219,44 @@ fn canonical_markdown(markdown: &str) -> Cow<'_, str> {
                     }
                 }
             }
-            Event::Html(_) | Event::InlineHtml(_) => {
-                let source = &markdown[range.clone()];
-                let mut reader = Reader::from_str(source);
-                let mut local_edits = Vec::new();
-                loop {
-                    match reader.read_event() {
-                        Ok(XmlEvent::Start(tag) | XmlEvent::Empty(tag)) => {
-                            let name =
-                                String::from_utf8_lossy(tag.name().as_ref()).to_ascii_lowercase();
-                            if matches!(name.as_str(), "pre" | "code" | "script" | "style") {
-                                literal_tags.push(name);
-                                continue;
-                            }
-                            if !literal_tags.is_empty()
-                                || !matches!(
-                                    name.as_str(),
-                                    "image" | "file" | "pdf" | "audio" | "video"
-                                )
-                            {
-                                continue;
-                            }
-                            for attribute in tag.attributes() {
-                                let Ok(attribute) = attribute else {
-                                    local_edits.clear();
-                                    break;
-                                };
-                                if !matches!(attribute.key.as_ref(), b"src" | b"source") {
-                                    continue;
-                                }
-                                // Reader borrows the original source. Only edit an
-                                // exact borrowed value; no unsafe pointer access.
-                                let Cow::Borrowed(bytes) = attribute.value else {
-                                    continue;
-                                };
-                                let Some(offset) =
-                                    (bytes.as_ptr() as usize).checked_sub(source.as_ptr() as usize)
-                                else {
-                                    continue;
-                                };
-                                if source.as_bytes().get(offset..offset + bytes.len())
-                                    != Some(bytes)
-                                {
-                                    continue;
-                                }
-                                let Ok(raw) = std::str::from_utf8(bytes) else {
-                                    continue;
-                                };
-                                if let Some(identity) = media_identity(raw, true) {
-                                    local_edits.push((
-                                        range.start + offset..range.start + offset + bytes.len(),
-                                        identity,
-                                    ));
-                                }
-                            }
-                        }
-                        Ok(XmlEvent::End(tag)) => {
-                            if literal_tags.last().is_some_and(|last| {
-                                last.as_bytes().eq_ignore_ascii_case(tag.name().as_ref())
-                            }) {
-                                literal_tags.pop();
-                            }
-                        }
-                        Ok(XmlEvent::Eof) => break,
-                        Err(_) => {
-                            local_edits.clear();
-                            break;
-                        }
-                        _ => {}
-                    }
+            Event::Start(Tag::HtmlBlock) => html_block = Some(range),
+            Event::End(TagEnd::HtmlBlock) => {
+                if let Some(range) = html_block.take() {
+                    edits.extend(html_media_edits(
+                        markdown,
+                        range,
+                        &mut literal_tags,
+                        &mut comments,
+                    ));
                 }
-                edits.extend(local_edits);
+            }
+            Event::Html(_) if html_block.is_some() => {
+                let block = html_block.as_mut().unwrap();
+                block.end = block.end.max(range.end);
+            }
+            Event::Html(_) | Event::InlineHtml(_) => {
+                edits.extend(html_media_edits(
+                    markdown,
+                    range,
+                    &mut literal_tags,
+                    &mut comments,
+                ));
             }
             _ => {}
         }
     }
     edits.sort_by_key(|(range, _)| range.start);
+    comments.sort_by_key(|range| range.start);
+    let mut next_comment = 0;
+    let mut comment_end = 0;
     let mut result = String::new();
     let mut cursor = 0;
     for (range, identity) in edits {
-        if range.start < cursor {
+        while next_comment < comments.len() && comments[next_comment].start < range.end {
+            comment_end = comment_end.max(comments[next_comment].end);
+            next_comment += 1;
+        }
+        if range.start < cursor || range.start < comment_end {
             continue;
         }
         result.push_str(&markdown[cursor..range.start]);
@@ -288,6 +337,23 @@ pub(crate) mod tests {
             body("first").replace("X-Amz-Signature=first", "missing=signature"),
         ] {
             assert_eq!(canonical_markdown(&text), text);
+        }
+    }
+
+    #[test]
+    fn media_after_literal_regions_is_still_projected() {
+        let literal = body("literal");
+        let media = body("media");
+        for prefix in [
+            format!("<!-- {literal} -->\n\n"),
+            format!("<div><!-- {literal} --></div>\n\n"),
+            format!("<pre>{literal}</pre>\n\n"),
+            format!("<code>![literal]({})</code>\n\n", signed("literal")),
+        ] {
+            assert_eq!(
+                canonical_markdown(&(prefix.clone() + &media)),
+                prefix + &canonical_markdown(&media)
+            );
         }
     }
 
