@@ -107,10 +107,20 @@ fn media_identity(raw: &str, html: bool) -> Option<String> {
 
 fn html_media_edits(
     markdown: &str,
-    range: Range<usize>,
+    mut range: Range<usize>,
     literal_tags: &mut Vec<String>,
     comments: &mut Vec<Range<usize>>,
 ) -> Vec<(Range<usize>, String)> {
+    // A previous block may have opened a comment that extends into this one.
+    // Its literal tags must not alter state; still parse active bytes after -->.
+    for comment in comments.iter() {
+        if comment.contains(&range.start) {
+            range.start = comment.end.min(range.end);
+        }
+    }
+    if range.is_empty() {
+        return Vec::new();
+    }
     let source = &markdown[range.clone()];
     let mut reader = Reader::from_str(source);
     // Inline end tags arrive separately from their opening tag.
@@ -347,6 +357,7 @@ pub(crate) mod tests {
         for prefix in [
             format!("<!-- {literal} -->\n\n"),
             format!("<div><!-- {literal} --></div>\n\n"),
+            "<div><!--\n\n<code>\n\n--></div>\n\n".into(),
             format!("<pre>{literal}</pre>\n\n"),
             format!("<code>![literal]({})</code>\n\n", signed("literal")),
         ] {
