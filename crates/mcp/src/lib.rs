@@ -63,6 +63,7 @@ fn output_fits_budget(output: &impl serde::Serialize) -> bool {
 /// The semantic contract is shared by stdio and Streamable HTTP.
 #[derive(Clone)]
 pub struct KnowledgeServer {
+    index_health: Option<Arc<dyn notion_knowledge_core::health::HealthProbe>>,
     search: Option<Arc<dyn notion_knowledge_core::search::SemanticSearch>>,
     hybrid_search: Option<Arc<dyn notion_knowledge_core::search::HybridSearch>>,
     lexical_search: Option<Arc<dyn notion_knowledge_core::search::LexicalSearch>>,
@@ -97,6 +98,7 @@ pub struct KnowledgeServer {
 impl Default for KnowledgeServer {
     fn default() -> Self {
         Self {
+            index_health: None,
             snippet_chars: 2000,
             max_upload_files: upload::DEFAULT_MAX_FILES,
             file_ingestion: None,
@@ -125,6 +127,21 @@ impl Default for KnowledgeServer {
 }
 
 impl KnowledgeServer {
+    /// A payload-free observation of the same installed index used by tools.
+    pub fn with_index_health_probe(
+        mut self,
+        probe: Arc<dyn notion_knowledge_core::health::HealthProbe>,
+    ) -> Self {
+        self.index_health = Some(probe);
+        self
+    }
+
+    pub fn index_health_probe(
+        &self,
+    ) -> Option<Arc<dyn notion_knowledge_core::health::HealthProbe>> {
+        self.index_health.clone()
+    }
+
     /// Query ports may be shared; upstream authority must come from each request.
     pub fn with_request_bound_content(mut self) -> Self {
         self.root_gate = None;

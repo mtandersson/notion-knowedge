@@ -48,10 +48,14 @@ or unconfigured local index returns HTTP 503 with `status: "not_ready"`:
 }
 ```
 
-The current bootstrap has no index adapter, so `/readyz` deliberately returns
-503 until #145 wires the production index. Future required local dependencies
-must be added to this gate explicitly rather than inheriting aggregate upstream
-health implicitly.
+An installed HTTP retrieval runtime uses a probe of its actual serving index,
+including OAuth read/write mode. It begins with the successful startup validation
+and checks the same guarded index every 30 seconds, with a five-second check
+deadline. A failed check reports unavailable; an observation older than 90 seconds
+reports unknown. Diagnostic requests read only this bounded snapshot and never
+call Notion, load another model, or repair the cache. The observer stops when the
+serving handler and diagnostics are dropped. The unconfigured bootstrap still
+returns 503. Upstream Notion health remains independent of local readiness.
 
 ### Dependency diagnostics: `GET /health`
 

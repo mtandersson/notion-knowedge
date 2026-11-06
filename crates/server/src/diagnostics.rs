@@ -55,6 +55,11 @@ impl Diagnostics {
         self
     }
 
+    pub fn with_index_probe(mut self, index: Arc<dyn HealthProbe>) -> Self {
+        self.index = index;
+        self
+    }
+
     pub fn read_only(&self) -> bool {
         self.read_only
     }

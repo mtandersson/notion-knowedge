@@ -247,6 +247,9 @@ pub(crate) async fn serve_with_oauth(
     let bind = settings.http_bind;
     let shutdown_timeout = Duration::from_secs(settings.shutdown_timeout_seconds);
     let mut diagnostics = crate::diagnostics::bootstrap(&settings);
+    if let Some(probe) = handler.index_health_probe() {
+        diagnostics = diagnostics.with_index_probe(probe);
+    }
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let cancellation = shutdown;
     let session_manager = Arc::new(crate::session_limits::BoundedSessions::new(
