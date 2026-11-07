@@ -14,6 +14,11 @@ local index/operational-state compatibility. `TBD` is a **draft**, not a publish
 
 ### Index/state migrations
 - Additive SQLite schema 13 stores scoped authoritative reconciliation success receipts. Earlier completions remain unknown; status inspection never migrates state. Back up durable state before a writer upgrades it.
+- Published Candle core/NN 0.11.1 replaces the temporary ZIP backport. Production
+  Qwen, isolated Qwen/Lance spike and E5 evaluation vector identities change;
+  previous runtime indexes are incompatible and require an explicit rebuild
+  from authorized source content. Do not relabel old vectors or remove protected
+  SQLite, credentials or mutation receipts. This change adds no SQLite migration.
 
 ## [0.1.0] - TBD
 

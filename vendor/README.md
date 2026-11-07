@@ -22,14 +22,14 @@ stack requires Arrow 58; upgrading Arrow alone cannot replace that graph. The
 two manifest patches select published zstd 0.14.3, zstd-safe 8.2.0 and zstd-sys
 2.1.2+zstd.1.5.7 without changing Arrow/Lance APIs or storage versions. This
 removes RUSTSEC-2026-0391/0398/0403/0410 and the affected zstd-safe unsoundness
-warnings without advisory suppression. The Candle/ZIP backport was removed after matching registry Candle 0.11.1
-shipped ZIP 9.1.3 support (#420).
+warnings without advisory suppression. The Candle/ZIP backport was removed
+after matching registry Candle 0.11.1 shipped ZIP 9.1.3 support (#420).
 
 Both the workspace and standalone Qwen/Lance spike patch these two consumers.
 Remove each patch when a compatible published consumer accepts patched zstd;
 recheck both locked graphs, persisted compression interoperability and full CI.
 Do not replace the model/tokenization/vector identity or migrate stored indexes
-as part of this dependency-only update.
+as part of these compression-only patches.
 
 Compression compatibility can be reproduced with:
 

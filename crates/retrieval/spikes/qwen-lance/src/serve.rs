@@ -128,7 +128,12 @@ impl Adapter {
                 );
                 let score = 1.0 - distances.value(row);
                 ensure!(score.is_finite(), "invalid score");
-                if !selected(&query, &chunk) || !query.metadata.matches_metadata(&chunk.metadata).map_err(anyhow::Error::msg)? {
+                if !selected(&query, &chunk)
+                    || !query
+                        .metadata
+                        .matches_metadata(&chunk.metadata)
+                        .map_err(anyhow::Error::msg)?
+                {
                     continue;
                 }
                 results.push(hit(chunk, score));
