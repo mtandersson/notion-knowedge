@@ -7,7 +7,7 @@ workspace/root policy; it does not claim an OAuth person's identity or grant.
 
 Activation is explicit and off by default. Use a Unix `webhook-worker` binary,
 configure trusted integration credentials/scope, `NK_HTTP_AUTH=bearer` with a
-private local token, `NK_RETRIEVAL=true`, and either the existing verified
+private local value, `NK_RETRIEVAL=true`, and either the existing verified
 webhook worker or periodic reconciliation. Set `NK_READ_ONLY=false` and
 `NK_INTEGRATION_WRITES=true`, then supply absolute, private durable paths in
 `NK_INTEGRATION_WRITE_LEDGER_FILE` and `NK_INTEGRATION_WRITE_AUDIT_FILE`.

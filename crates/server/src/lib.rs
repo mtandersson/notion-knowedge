@@ -4,10 +4,10 @@ pub mod config;
 pub mod diagnostics;
 pub mod file_recovery_command;
 pub mod http;
-pub mod lexical_expansion;
-pub mod oauth_writes;
 #[cfg(all(unix, feature = "webhook-worker"))]
 pub mod integration_writes;
+pub mod lexical_expansion;
+pub mod oauth_writes;
 pub mod shutdown;
 pub mod state_migration;
 
