@@ -7,6 +7,13 @@ and [the OAuth trust model](oauth-trust-model.md). Static bearer credentials do
 not establish a Notion user/workspace, grant epoch, scopes or token revocation.
 Do not treat this mode as a substitute for those production controls.
 
+For the owner-selected [private tunnel deployment](private-chatgpt-tunnel.md),
+the same loopback bearer can protect the tunnel-to-server HTTP hop. ChatGPT
+uses **No authentication** for that connection; the tunnel client supplies
+the local credential. This does not establish a per-person OAuth identity or
+grant lifecycle. The tunnel/workspace access policy and fixed server-side
+Notion integration/root scope form that deployment's access boundary.
+
 ## Configuration
 
 The default `NK_HTTP_AUTH=none` preserves the existing local bootstrap.

@@ -1,5 +1,17 @@
 # Primary ChatGPT cutover acceptance gates (#115)
 
+## Scope: installation and client routing
+
+The owner clarified on 2026-11-07 that local MCP stdio or protected HTTP testing
+with real configured adapters is sufficient to verify product behavior. These
+gates apply only to an installation choosing ChatGPT and a separately authorized
+replacement of the official connector. They do not require a tunnel, ChatGPT
+workspace or runtime API key before accepting local product tests or merging
+completed documentation. Keep unverified installation checks open in #559;
+local success does not establish actual ChatGPT connectivity or cutover.
+
+## Cutover decision
+
 **Decision:** Do not disable the official Notion connector until every gate below
 is **PASS** on the same release candidate and authorized production-like
 deployment. A published design, unit test, fake adapter, or isolated experiment
@@ -21,10 +33,10 @@ and 30-day/50-query quality pilot are **post-launch improvement goals**, not
 launch blockers. Keep historical measurements and failures unchanged; do not
 rename a failed old target as a pass.
 
-Launch still requires a real authorized functional search/read/file/write smoke,
+Cutover for this installation still requires a real authorized functional search/read/file/write smoke,
 correct source attribution, stable exact lookups, explicit empty/unavailable
-outcomes, OAuth and scope enforcement, mutation safety, and working sync/cache
-recovery. No quality exception permits disclosure or corruption. Bilingual
+outcomes, selected access-boundary and root-scope enforcement, mutation safety,
+and working sync/cache recovery. No quality exception permits disclosure or corruption. Bilingual
 expansion and graph remain optional and default OFF. Further ranking work is
 backlog work driven by production feedback, not a prerequisite for first use.
 
@@ -32,7 +44,7 @@ backlog work driven by production feedback, not a prerequisite for first use.
 
 | Gate | Pass criterion | Evidence to retain (sanitized) | Failure disposition |
 | --- | --- | --- | --- |
-| 0. Authorized connection | ChatGPT completes real OAuth/PKCE and Notion grant, permits **only** the configured user/workspace and roots; invalid state, expired/replayed tokens and out-of-scope reads/writes expose zero data. Production HTTP must not fall back to unauthenticated development mode. | Release SHA, configuration fingerprint without secrets, positive and negative end-to-end test IDs and outcomes | BLOCK; keep official connector |
+| 0. Authorized connection | Verify the selected installation boundary: private tunnel workspace/transport access with fixed integration/root scope, or OAuth/PKCE with the configured person/workspace grant. Deny calls through a disabled tunnel route, or invalid state and expired/replayed OAuth tokens, as applicable; out-of-scope reads/writes expose zero data in either mode. HTTP must retain the selected transport protection; tunnel access does not establish per-person OAuth identity. | Release SHA, configuration fingerprint without secrets, selected-boundary positive and negative end-to-end test IDs and outcomes | BLOCK; keep official connector |
 | 1. Usable retrieval | The actual configured adapter completes the unchanged evaluation corpus and a representative authorized English/Swedish search/read smoke. Verify relevant allowed sources, exact lookups, stable citations, and explicit empty/unavailable outcomes. Record known ranking limitations; aggregate Recall/MRR/nDCG and lengthy quality pilots are advisory after launch. | Corpus/model/index identities, complete measured reports and private functional smoke outcomes | BLOCK on broken functionality, unsafe attribution/scope, or missing real smoke; ranking-score shortfalls become post-launch work |
 | 2. Authoritative reads and safe writes | On a disposable authorized Notion root, fresh read matches exact Notion content and timestamp; 10 distinct authorized create/append/update operations succeed with authoritative read-back, expected scoped index refresh and no duplicate effects on induced retries; rejected root and user operations cause **zero** writes. Report partial/index failure explicitly, never claim that an unverified write failed. | Per-operation test IDs, source-side before/after checks, sanitized outcome, index state and retry checks; no page bodies/tokens | BLOCK; do not substitute index state for authoritative proof |
 | 3. Native image/file workflow | Through ChatGPT → **custom MCP → native Notion file/image blocks**, at least 10 image and 10 other-file/PDF trials succeed without Google Drive, Agent Handover, manual upload or the official connector. Check file bytes/size/hash where supported, MIME, attached block, independent authoritative read-back, and scoped authorization; reject bad source URL, wrong root, oversize and expired credentials without internal fetch or partial disclosure. | Test artifact hashes/sizes (not private bytes), Notion block IDs in restricted evidence, fail/deny results and proof of direct route | BLOCK if any required supported type needs a workaround |
