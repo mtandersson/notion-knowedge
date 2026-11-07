@@ -75,13 +75,17 @@ admission and drain workers/owned commits under the configurable
 valid search calls in the default bootstrap return an explicit retrieval-unavailable tool error. The isolated [semantic MCP spike](docs/semantic-mcp-spike.md) explicitly configures real local semantic retrieval through this same handler and transport wiring.
 Calls to unknown tools return protocol errors.
 
-### Optional local HTTP bearer fallback
+### Protected local HTTP and private ChatGPT tunnel
 
-For development and emergency diagnostics only, set `NK_HTTP_AUTH=bearer`
+For a protected local HTTP hop, set `NK_HTTP_AUTH=bearer`
 and provide a randomly generated `NK_HTTP_BEARER_TOKEN`. The MCP endpoint then
 requires a valid bearer token on **every HTTP request**, including session
-continuation and SSE. This mode is opt-in, restricted to a loopback listener
-and **not** the production ChatGPT OAuth model (#117). Health endpoints retain
+continuation and SSE. This mode is opt-in and restricted to a loopback listener.
+The owner-selected [private ChatGPT tunnel deployment](docs/private-chatgpt-tunnel.md)
+uses this credential between the tunnel client and server, with **No authentication**
+selected in ChatGPT and fixed server-side Notion integration/root scope. Verify
+tunnel/workspace access separately; the local bearer provides no per-person OAuth
+identity or grant lifecycle. Health endpoints retain
 an independent policy via `NK_HTTP_HEALTH_AUTH=none|bearer`.
 See [development bearer authentication](docs/development-bearer-auth.md)
 for configuration, security limits and tests.
