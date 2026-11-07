@@ -225,7 +225,7 @@ async fn oauth_append_preserves_raw_hashes_and_verifies_rotating_media_once() {
         )
     );
     let mut strict = args.clone();
-    strict["idempotency_key"] = json!("media-raw-hash");
+    strict["idempotency_key"] = json!("media-raw-hash-once");
     strict["expected_markdown_sha256"] = json!(canonical_hash);
     let rejected = call(&h, &endpoint, &token, &session, "knowledge_append", strict).await;
     assert_eq!(
