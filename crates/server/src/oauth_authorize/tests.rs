@@ -15,6 +15,8 @@ const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 const CLIENT_REDIRECT: &str = "https://chatgpt.example.com/callback?registered=value";
 
 struct Harness {
+    #[cfg(feature = "webhook-worker")]
+    provider_port: u16,
     _dir: tempfile::TempDir,
     #[cfg(feature = "webhook-worker")]
     files: Arc<file_provider::Files>,
@@ -429,6 +431,8 @@ impl Harness {
             axum::serve(socket, router).await.unwrap();
         });
         Self {
+            #[cfg(feature = "webhook-worker")]
+            provider_port,
             #[cfg(feature = "webhook-worker")]
             files,
             _dir: dir,
@@ -1355,6 +1359,9 @@ mod grant_refresh;
 #[cfg(all(unix, feature = "webhook-worker"))]
 #[path = "tests/installed_writes.rs"]
 mod installed_writes;
+
+#[cfg(all(unix, feature = "webhook-worker"))]
+mod installed_integration_writes;
 
 #[cfg(all(unix, feature = "webhook-worker"))]
 mod file_intents;
