@@ -71,7 +71,7 @@ impl QwenConfig {
 pub fn metadata() -> EmbeddingMetadata {
     EmbeddingMetadata::new("local-fastembed-candle-cpu-f32".into(),
         "Qwen/Qwen3-Embedding-0.6B".into(),
-        format!("{REVISION}:fastembed7.1.0:candle0.11.0:tokenizers0.23.2:last-token:left-padding:l2:exact-text:untruncated-v1"),
+        format!("{REVISION}:fastembed7.1.0:candle0.11.1:tokenizers0.23.2:last-token:left-padding:l2:exact-text:untruncated-v1"),
         DIMENSION).expect("constant valid model identity")
 }
 trait BatchRuntime: Send {
@@ -296,6 +296,21 @@ mod tests {
             Err(EmbeddingError::UnsupportedModel)
         );
         std::fs::remove_file(p).unwrap();
+    }
+    #[test]
+    fn previous_candle_runtime_identity_requires_index_rebuild() {
+        let current = metadata();
+        let previous = EmbeddingMetadata::new(
+            current.provider_id().into(),
+            current.model_id().into(),
+            format!("{REVISION}:fastembed7.1.0:candle0.11.0:tokenizers0.23.2:last-token:left-padding:l2:exact-text:untruncated-v1"),
+            DIMENSION,
+        )
+        .unwrap();
+        assert_eq!(
+            current.ensure_compatible(&previous),
+            Err(EmbeddingError::IncompatibleIndex)
+        );
     }
     #[test]
     fn persisted_identity_round_trips_and_cannot_overwrite_existing_record() {

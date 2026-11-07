@@ -76,7 +76,7 @@ impl E5 {
                 "eval-candle-cpu-f32".into(),
                 "intfloat/multilingual-e5-small".into(),
                 format!(
-                    "{REVISION}:candle0.11.0:tokenizers0.23.2:masked-mean:l2:query-passage-prefix:untruncated-v1"
+                    "{REVISION}:candle0.11.1:tokenizers0.23.2:masked-mean:l2:query-passage-prefix:untruncated-v1"
                 ),
                 384,
             )?,

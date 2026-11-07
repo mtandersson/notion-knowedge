@@ -45,6 +45,19 @@ The production identity deliberately differs from the isolated spike's
 old spike vectors or claim an automatic migration; rebuild under the selected
 provider. The spike binaries and their prototype indexes remain experimental.
 
+## Candle 0.11.1 compatibility boundary (#420)
+
+The provider now uses published Candle core/NN 0.11.1 with ZIP 9.1.3, replacing
+our temporary core backport. The release also changes CPU kernels and tensor
+operations, so identical vectors to Candle 0.11.0 are not assumed. Weights,
+tokenizer assets, fastembed version, exact-text input, padding and pooling are
+unchanged; the runtime component of the vector identity is now `candle0.11.1`.
+Existing 0.11.0 indexes must fail compatibility checks and be explicitly rebuilt
+from authorized source content using [cache reset/resync](cache-reset-and-resync.md).
+Never relabel old vectors or delete protected operational/mutation state.
+The isolated spike and E5 evaluation identities also record the new core runtime;
+historical evaluation reports keep their original identities and measurements.
+
 ## Configuration and execution
 
 Construct `QwenConfig::cpu(assets)`, change its public fields as needed, and call

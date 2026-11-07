@@ -32,7 +32,7 @@ upstream revision before loading. Never edit assets during execution.
 
 Qwen/Qwen3-Embedding-0.6B revision
 `97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3`, 1024 float32 dimensions, CPU F32
-inference, Candle 0.11.0 / fastembed 7.1.0. Documents use raw text; the query has
+inference, Candle core/NN 0.11.1 / fastembed 7.1.0. Documents use raw text; the query has
 Qwen's `Instruct: ...\nQuery: ...` retrieval template. Tokenization uses left
 batch padding, no extra EOS and no truncation; pooling uses the last real token
 followed by L2 normalization. The executable only exposes its tiny fixtures;
@@ -41,6 +41,11 @@ The async provider currently performs synchronous CPU work while polled; model
 execution is not cancellable once started. Production needs bounded worker
 execution and cancellation semantics. Owned safetensor bytes avoid unsafe mmap
 lifetime assumptions but increase transient memory.
+
+The Candle 0.11.1 update changes CPU/tensor implementation as well as ZIP.
+The spike identity now includes `candle0.11.1`; existing spike indexes without
+that runtime component are incompatible and must be rebuilt into a new directory.
+No old vectors are relabeled and no bitwise equivalence is claimed.
 
 LanceDB 0.39.0 / Arrow 58.4.0 schema: UTF8 `chunk_id`, UTF8 `text`, UTF8 `chunk_record` (serialized canonical schema-v1 IndexedChunk),
 FixedSizeList<Float32,1024> `vector`. Schema metadata contains the complete core

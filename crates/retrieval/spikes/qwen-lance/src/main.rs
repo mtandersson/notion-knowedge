@@ -69,7 +69,7 @@ fn metadata() -> Result<EmbeddingMetadata> {
         "spike-fastembed-candle-cpu-f32".into(),
         "Qwen/Qwen3-Embedding-0.6B".into(),
         format!(
-            "{REVISION}:fastembed7.1.0:last-token:left-padding:l2:query-instruction-v1:untruncated"
+            "{REVISION}:fastembed7.1.0:candle0.11.1:last-token:left-padding:l2:query-instruction-v1:untruncated"
         ),
         DIM,
     )?)
@@ -511,6 +511,21 @@ mod tests {
                 .unwrap()
                 .to_string()
                 .contains("missing model asset: config.json")
+        );
+    }
+    #[test]
+    fn previous_candle_runtime_identity_requires_index_rebuild() {
+        let current = metadata().unwrap();
+        let previous = EmbeddingMetadata::new(
+            current.provider_id().into(),
+            current.model_id().into(),
+            format!("{REVISION}:fastembed7.1.0:last-token:left-padding:l2:query-instruction-v1:untruncated"),
+            DIM,
+        )
+        .unwrap();
+        assert_eq!(
+            current.ensure_compatible(&previous),
+            Err(EmbeddingError::IncompatibleIndex)
         );
     }
     #[test]
