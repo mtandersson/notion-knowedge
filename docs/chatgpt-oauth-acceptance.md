@@ -1,7 +1,12 @@
 # Production ChatGPT OAuth connection acceptance
 
+For the owner-selected private tunnel deployment in #559, use
+[private ChatGPT tunnel acceptance](private-chatgpt-tunnel.md). That deployment
+selects **No authentication** in ChatGPT and does not require this OAuth browser
+flow. The procedure below applies when MCP OAuth is the chosen access boundary.
+
 Use this read-only operator procedure after [production setup](oauth-production-setup.md).
-It prepares #559's live acceptance; this checklist itself does not establish a
+This checklist itself does not establish a
 working production connection. #117's [HTTP tests](oauth-e2e-tests.md) use a fake
 Notion provider. #216's [ChatGPT experiment](chatgpt-spike.md) demonstrated a
 private development connection without production OAuth. Neither proves this flow.
