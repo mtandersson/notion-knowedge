@@ -112,18 +112,25 @@ async fn private_integration_http_guards_writes_and_refreshes_once_without_oauth
     )
     .await
     .unwrap();
+    let scheduled = Arc::new(crate::scheduled_reconciliation::runtime::Worker {
+        index,
+        settings: config.reconciliation_schedule.clone().unwrap(),
+        poll: Duration::from_millis(20),
+        timeout: Duration::from_secs(10),
+        inventory_timeout: Duration::from_secs(30),
+    });
     let worker = Arc::new(Worker {
         webhook_enabled: false,
-        scheduled: None,
-        state: index.coordinator.state().clone(),
+        scheduled: Some(scheduled.clone()),
+        state: scheduled.index.coordinator.state().clone(),
         scope: notion_knowledge_core::webhook::InboxScope {
             workspace_id: WORKSPACE.into(),
             subscription_id: "periodic".into(),
         },
         integration: String::new(),
-        coordinator: index.coordinator.clone(),
-        handler: index.handler.clone(),
-        provider: index.provider.clone(),
+        coordinator: scheduled.index.coordinator.clone(),
+        handler: scheduled.index.handler.clone(),
+        provider: scheduled.index.provider.clone(),
         poll: Duration::from_millis(20),
         timeout: Duration::from_secs(10),
         log_enabled: false,
@@ -139,6 +146,26 @@ async fn private_integration_http_guards_writes_and_refreshes_once_without_oauth
     let pause = worker
         .state
         .acquire_lease(crate::webhook_worker::runtime::now_ms() / 1000, 120)
+        .unwrap();
+    let now = crate::webhook_worker::runtime::now_ms() / 1000;
+    let policy = &scheduled.settings;
+    // Keep the full inventory scheduled for later. Mutation refresh must run
+    // promptly between periodic inventories, with webhook ingress disabled.
+    worker
+        .coordinator
+        .register_schedule(
+            &pause,
+            now,
+            crate::scheduled_reconciliation::runtime::ID,
+            notion_knowledge_retrieval::schedule::SchedulePolicy::new(
+                policy.interval,
+                policy.attempts,
+                policy.backoff,
+                policy.maximum_backoff,
+            )
+            .unwrap(),
+            now + policy.interval,
+        )
         .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     config.http_bind = listener.local_addr().unwrap();
