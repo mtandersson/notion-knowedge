@@ -100,3 +100,18 @@ explicitly; local HTTP checks and the earlier development spike cannot establish
 actual ChatGPT acceptance. Full approved-root sync, write/file acceptance and
 primary cutover remain tracked separately and are not waived by this transport
 choice. #559 stays open until its live checks and teardown are verified.
+
+## Verified local checkpoint — 2026-11-07
+
+The reviewed shipping artifact for merged PR #634 passed an operator-local,
+read-only HTTP check under a 4 GiB memory limit with swap disabled. Semantic,
+lexical and hybrid search, indexed and fresh reads, and retrieval of the retained
+fixture's two existing attachments passed. Unauthenticated requests returned
+401; an unknown reference was denied. Only read tools were advertised, and
+durable source-effect records were unchanged. The temporary listener was stopped
+after verification; the existing executable and service were preserved.
+
+This establishes local retrieval readiness. Actual ChatGPT tunnel discovery,
+reads, refresh, restart and disable/re-enable checks remain pending, as does
+full approved-root sync. Keep this PR draft until the actual connection checks
+and independent review are complete.
