@@ -50,6 +50,29 @@ pub(crate) fn unverifiable(markdown: &str) -> bool {
     let mut cursor = 0;
     while let Some(relative) = markdown[cursor..].find('<') {
         let start = cursor + relative;
+        // Script/style bodies are raw text: embedded tag-looking strings must
+        // not alter the literal state or swallow their actual closing tag.
+        if let Some(name) = literal_tags
+            .last()
+            .filter(|name| matches!(name.as_str(), "script" | "style"))
+        {
+            if let Some(rest) = markdown[start..].strip_prefix("</") {
+                let length = rest
+                    .find(|ch: char| ch.is_whitespace() || ch == '>')
+                    .unwrap_or(rest.len());
+                if rest[..length].eq_ignore_ascii_case(name) {
+                    let suffix = &rest[length..];
+                    let trimmed = suffix.trim_start();
+                    if trimmed.starts_with('>') {
+                        cursor = start + 2 + length + suffix.len() - trimmed.len() + 1;
+                        literal_tags.pop();
+                        continue;
+                    }
+                }
+            }
+            cursor = start + 1;
+            continue;
+        }
         // Match existing Markdown escapes and ignore comments/code/fences,
         // including fences nested inside enhanced wrappers.
         let escaped = markdown[..start]
@@ -100,7 +123,7 @@ pub(crate) fn unverifiable(markdown: &str) -> bool {
         reader.config_mut().allow_unmatched_ends = true;
         match reader.read_event() {
             Ok(Event::Start(tag) | Event::Empty(tag)) => {
-                let tag_name = String::from_utf8_lossy(tag.name().as_ref()).into_owned();
+                let tag_name = String::from_utf8_lossy(tag.name().as_ref()).to_ascii_lowercase();
                 if matches!(tag_name.as_str(), "code" | "pre" | "script" | "style") {
                     if !raw.ends_with("/>") {
                         if literal_tags.len() == MAX_REFERENCES {
@@ -146,7 +169,7 @@ pub(crate) fn unverifiable(markdown: &str) -> bool {
                 });
             }
             Ok(Event::End(tag)) => {
-                let tag_name = String::from_utf8_lossy(tag.name().as_ref()).into_owned();
+                let tag_name = String::from_utf8_lossy(tag.name().as_ref()).to_ascii_lowercase();
                 if literal_tags.last() == Some(&tag_name) {
                     literal_tags.pop();
                     continue;

@@ -161,6 +161,9 @@ mod tests {
             format!(
                 "<synced-block-reference url=\"https://notion.so/{ID}\">\nKnown text.\n</synced-block-reference>"
             ),
+            format!(
+                "<synced_block_reference url=\"https://notion.so/{ID}\">\n```html\n<synced_block_reference />\n```\n</synced_block_reference>"
+            ),
         ] {
             let (content, requests) = read(200, response(&markdown).to_string()).await;
             assert_eq!(content.unwrap().markdown, markdown);
@@ -214,6 +217,10 @@ mod tests {
             format!("\\{}", reference.replace("</", "\\</")),
             format!("<!--\n{reference}\n-->"),
             format!("<code>{reference}</code>"),
+            format!("<CODE>{reference}</CODE>"),
+            format!("<PRE>{reference}</PRE>"),
+            format!("<SCRIPT>{reference}</SCRIPT>"),
+            format!("<STYLE>{reference}</STYLE>"),
             format!("<callout>\n\t```html\n\t{reference}\n\t```\n</callout>"),
         ] {
             assert_eq!(
@@ -224,6 +231,27 @@ mod tests {
                     .markdown,
                 markdown
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_literal_text_cannot_hide_following_unresolved_content() {
+        let reference = format!(
+            "<synced_block_reference url=\"https://notion.so/{ID}\"></synced_block_reference>"
+        );
+        for prefix in [
+            r#"<script>const example = "<code>";</script>"#,
+            r#"<style>example: "<pre>";</style>"#,
+            r#"<SCRIPT>const example = "<code data-x='";</SCRIPT >"#,
+            r#"<STYLE>example: '<synced_block_reference url="unfinished';</STYLE>"#,
+        ] {
+            let markdown = format!("{prefix}\n{reference}");
+            let (result, requests) = read(200, response(&markdown).to_string()).await;
+            assert_eq!(
+                result.unwrap_err().kind,
+                BackendErrorKind::UnsupportedContent
+            );
+            assert_eq!(requests.len(), 2);
         }
     }
 
