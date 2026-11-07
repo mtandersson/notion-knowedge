@@ -81,6 +81,7 @@ impl NotionClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use notion_knowledge_core::backend::{NotionRead, PageId};
     use serde_json::{Value, json};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     const ID: &str = "12345678-1234-1234-1234-123456789abc";
@@ -110,7 +111,8 @@ mod tests {
             }
             requests
         });
-        let result = client.read_content(ID).await;
+        // Fresh MCP reads use this production port; validation must apply here too.
+        let result = NotionRead::read_content(&client, &PageId(ID.into())).await;
         (result, server.await.unwrap())
     }
     fn response(markdown: &str) -> Value {
