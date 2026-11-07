@@ -2266,6 +2266,53 @@ async fn intentional_synced_references_preserve_physical_inventory_completeness(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unresolved_synced_content_fails_its_host_without_stopping_independent_pages() {
+    use notion_knowledge_retrieval::durable_plan::DurableFailure;
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    source.change(|m| {
+        m.copied_reference = true;
+        m.markdown = format!("Host text.\n<synced_block_reference url=\"https://notion.so/{PAGE}\">\n</synced_block_reference>");
+    });
+    let provider = CountingProvider::new(index.embed.clone());
+    let service = runner(&index, &source);
+    let progress = service
+        .apply("unresolved-copy", index.lease.clone(), clock(), &provider)
+        .await
+        .unwrap();
+    assert_eq!(
+        progress.failed.get(PAGE),
+        Some(&DurableFailure::UnsupportedSource)
+    );
+    assert_eq!(progress.failed.len(), 1);
+    assert_eq!(progress.changed, 2);
+    assert!(progress.pending.is_empty());
+    assert!(progress.run_failures.is_empty());
+    assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+    assert_eq!(
+        index.coordinator.last_successful_reconciliation().unwrap(),
+        None
+    );
+    source.change(|m| {
+        m.markdown = format!("<synced_block_reference url=\"https://notion.so/{PAGE}\">Verified inline text.</synced_block_reference>");
+    });
+    let recovered = service
+        .retry_page(
+            "unresolved-copy",
+            PAGE,
+            index.lease.clone(),
+            clock(),
+            &provider,
+        )
+        .await
+        .unwrap();
+    assert!(recovered.failed.is_empty());
+    assert_eq!(recovered.changed, 3);
+    assert!(!index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn planner_absence_access_failures_and_races_never_authorize_deletion() {
     use notion_knowledge_retrieval::planner::{Difference, PlanError};
     let index = Fixture::new();

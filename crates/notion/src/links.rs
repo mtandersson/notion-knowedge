@@ -182,17 +182,16 @@ fn enhanced(markdown: &str) -> Vec<EnhancedTag> {
     }
     tags
 }
-/// Extract graph-ready links and relation-property edges, retaining diagnostics.
-/// Does not fetch targets, authorize traversal, persist a graph or hash content.
-pub fn extract_relationships(content: &PageContent) -> Relationships {
+// Shared literal-aware projection for enhanced Markdown consumers. It retains
+// byte offsets while exposing fences nested in Notion's HTML/tab wrappers.
+fn mask_html(markdown: &str) -> (String, Vec<Range<usize>>) {
     // Notion wrappers can make CommonMark treat their child text as an HTML
     // block. Mask enhanced tags (including closing/wrapper tags) with spaces,
     // preserving byte positions and newlines before parsing Markdown children.
-    let tags = enhanced(&content.markdown);
-    let mut masked = content.markdown.as_bytes().to_vec();
+    let mut masked = markdown.as_bytes().to_vec();
     let mut html_ranges = Vec::new();
     let mut ignored_ranges = Vec::new();
-    for (event, range) in Parser::new_ext(&content.markdown, Options::all()).into_offset_iter() {
+    for (event, range) in Parser::new_ext(markdown, Options::all()).into_offset_iter() {
         if matches!(event, Event::Html(_) | Event::InlineHtml(_)) {
             html_ranges.push(range);
         }
@@ -200,11 +199,11 @@ pub fn extract_relationships(content: &PageContent) -> Relationships {
     // Comments can occur in the middle of a wrapper HTML event. Find their
     // actual spans, rather than assuming an event contains just one tag.
     let mut cursor = 0;
-    while let Some(relative) = content.markdown[cursor..].find("<!--") {
+    while let Some(relative) = markdown[cursor..].find("<!--") {
         let start = cursor + relative;
-        let end = content.markdown[start + 4..]
+        let end = markdown[start + 4..]
             .find("-->")
-            .map_or(content.markdown.len(), |n| start + 4 + n + 3);
+            .map_or(markdown.len(), |n| start + 4 + n + 3);
         if html_ranges
             .iter()
             .any(|range| range.start <= start && start < range.end)
@@ -256,6 +255,32 @@ pub fn extract_relationships(content: &PageContent) -> Relationships {
         }
     }
     let masked = String::from_utf8(masked).expect("mask preserves UTF-8");
+    (masked, ignored_ranges)
+}
+
+pub(crate) fn literal_ranges(markdown: &str) -> Vec<Range<usize>> {
+    let (masked, mut ranges) = mask_html(markdown);
+    let mut code_start = None;
+    for (event, range) in Parser::new_ext(&masked, Options::all()).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(_)) => code_start = Some(range.start),
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some(start) = code_start.take() {
+                    ranges.push(start..range.end);
+                }
+            }
+            Event::Code(_) => ranges.push(range),
+            _ => {}
+        }
+    }
+    ranges
+}
+
+/// Extract graph-ready links and relation-property edges, retaining diagnostics.
+/// Does not fetch targets, authorize traversal, persist a graph or hash content.
+pub fn extract_relationships(content: &PageContent) -> Relationships {
+    let tags = enhanced(&content.markdown);
+    let (masked, ignored_ranges) = mask_html(&content.markdown);
     let mut references = Vec::new();
     let mut code_ranges = ignored_ranges;
     let mut code_start = None;

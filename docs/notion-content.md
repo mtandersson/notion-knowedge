@@ -18,6 +18,15 @@ A `truncated` response or any `unknown_block_ids` fails with
 well as record-limit truncation. This read does not fetch those subtrees or
 return a misleading partial success. Empty Markdown is a valid empty page.
 Malformed/wrong-object/wrong-ID responses and responses over 8 MiB fail closed.
+Live copied synced references with empty bodies also return `UnsupportedContent`:
+the response does not establish whether the original is empty, inaccessible or
+unresolved. This is unverifiable completeness, not a claim that missing text
+exists. Nonempty inline reference bodies are retained; ordinary empty pages,
+empty original synced blocks, and literal code/escaped examples remain valid.
+Validation is local and bounded to 128 copied references per page, with no
+original lookup, copied-child probe, fallback or expansion of physical scope.
+Malformed/unclosed reference tags and explicit reference notices also remain
+unavailable. Both indexing preparation and fresh reads use this exact reader.
 Upstream failures use sanitized core error classes; private response bodies,
 content and credentials are never logged. There is no cache; requests use the
 [shared limiter and bounded retry policy](notion-rate-limits.md).

@@ -2868,6 +2868,31 @@ async fn lost_or_incompatible_cache_resyncs_without_replaying_external_effects()
 }
 
 #[tokio::test]
+async fn unresolved_synced_content_keeps_cache_rebuild_unavailable() {
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    http.state.lock().unwrap().markdown = format!(
+        "<synced_block_reference url=\"https://notion.so/{PAGE}\">\n</synced_block_reference>"
+    );
+    fs::remove_dir_all(&f.settings.index).unwrap();
+    assert!(
+        IndexRuntime::recover(
+            &f.settings,
+            &f.state,
+            authority(),
+            http.client(),
+            f.provider.clone()
+        )
+        .await
+        .is_err()
+    );
+    let state =
+        notion_knowledge_retrieval::sync_state::SqliteSyncStateStore::open_existing(&f.state)
+            .unwrap();
+    assert!(state.cache_rebuild_pending().unwrap());
+}
+
+#[tokio::test]
 async fn failed_cache_resync_stays_pending_and_next_start_retries_from_notion() {
     let http = HttpNotion::start().await;
     let f = Fixture::new(&http).await;
