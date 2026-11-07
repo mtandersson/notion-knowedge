@@ -42,6 +42,14 @@ validate model load, readiness and recovery under those limits. A configuration
 `--check` does not load the model or establish usable retrieval. Keep durable
 source-effect records and existing OAuth grant state intact.
 
+Bound connections before they consume application descriptors. The application
+body/session budgets run after HTTP connection admission; they cannot protect
+against incomplete headers exhausting the listener's descriptors. Use a measured
+private proxy envelope from [resource containment](production-resource-limits.md),
+or an equivalently verified transport boundary. Preserve the local bearer and
+backend Host/Origin policy through that hop. Keep operator health access direct
+and private so proxy saturation does not consume its capacity.
+
 ## Configure the tunnel
 
 Follow current [Secure MCP Tunnel guidance](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
@@ -115,3 +123,10 @@ This establishes local retrieval readiness. Actual ChatGPT tunnel discovery,
 reads, refresh, restart and disable/re-enable checks remain pending, as does
 full approved-root sync. Keep this PR draft until the actual connection checks
 and independent review are complete.
+
+A separate temporary loopback proxy check demonstrated connection/rate rejection
+and a five-second incomplete-header deadline. During 1,100 owned connection
+attempts, backend readiness stayed available and authenticated MCP discovery
+recovered afterward. Backend descriptor use peaked at 19 with upstream
+connections bounded at eight. This verifies that temporary proxy configuration;
+the final tunnel route and its effective limits still need acceptance.
