@@ -58,6 +58,14 @@ literal credential in a tracked profile or command argument. Keep its operator
 health/admin listener on loopback too. Direct stdio is another supported private
 transport, but does not use the HTTP bearer settings above.
 
+With the inspected client v0.0.19, static MCP headers are scoped to the configured
+server origin/path; discovery requests receive the discovery header map too.
+Forwarded connector headers take precedence over static headers. An existing
+OAuth connection can therefore replace the local `Authorization` header:
+verify **No authentication** on the actual selected connection. Keep
+`log.http_raw_unsafe` / `LOG_HTTP_RAW_UNSAFE` disabled; raw HTTP dumps can include
+the final credential and source bodies. Treat client logs as private.
+
 Verify unauthenticated `/mcp` requests return 401, then verify authenticated
 initialization and tool discovery. Run the owned tunnel client and check its
 actual readiness and polling. An expired runtime key requires replacement;
@@ -69,6 +77,11 @@ In ChatGPT's custom MCP connection UI, select **Tunnel**, the verified tunnel,
 and **No authentication**. These are separate selections; tunnel transport does
 not automatically change an existing OAuth connection's authentication choice.
 See [custom MCP connections](https://developers.openai.com/api/docs/guides/custom-mcp-server).
+
+Keep the local URL and its authority unchanged while testing. The server's
+loopback Host/Origin checks remain active behind the tunnel; forwarding the
+private endpoint does not authorize a public Host or browser Origin. Diagnose
+a 403 at those checks separately from a 401 at the local bearer gate.
 
 Record the deployed revision, date, selected connection and sanitized outcomes:
 
