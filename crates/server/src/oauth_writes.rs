@@ -12,26 +12,40 @@ impl Settings {
         lookup: &mut impl FnMut(&str) -> Option<OsString>,
         enabled: bool,
     ) -> Result<Option<Self>, ConfigError> {
-        let ledger = lookup("NK_OAUTH_WRITE_LEDGER_FILE");
-        let audit = lookup("NK_OAUTH_WRITE_AUDIT_FILE");
+        Self::parse_keys(
+            lookup,
+            enabled,
+            "NK_OAUTH_WRITES",
+            "NK_OAUTH_WRITE_LEDGER_FILE",
+            "NK_OAUTH_WRITE_AUDIT_FILE",
+        )
+    }
+    pub(crate) fn parse_keys(
+        lookup: &mut impl FnMut(&str) -> Option<OsString>,
+        enabled: bool,
+        activation: &'static str,
+        ledger_key: &'static str,
+        audit_key: &'static str,
+    ) -> Result<Option<Self>, ConfigError> {
+        let ledger = lookup(ledger_key);
+        let audit = lookup(audit_key);
         if !enabled {
             if ledger.is_some() || audit.is_some() {
                 return Err(invalid(
-                    "NK_OAUTH_WRITES",
-                    "write stores require explicit OAuth write activation",
+                    activation,
+                    "write stores require explicit write activation",
                 ));
             }
             return Ok(None);
         }
         if !cfg!(all(unix, feature = "webhook-worker")) {
             return Err(invalid(
-                "NK_OAUTH_WRITES",
+                activation,
                 "requires Unix and the webhook-worker feature",
             ));
         }
         let path = |value: Option<OsString>, setting| {
-            let path =
-                PathBuf::from(value.ok_or_else(|| invalid(setting, "required for OAuth writes"))?);
+            let path = PathBuf::from(value.ok_or_else(|| invalid(setting, "required for writes"))?);
             crate::file_ingestion::validate_audit_path(&path).map_err(|_| {
                 invalid(
                     setting,
@@ -41,12 +55,12 @@ impl Settings {
             Ok::<_, ConfigError>(path)
         };
         let settings = Self {
-            ledger: path(ledger, "NK_OAUTH_WRITE_LEDGER_FILE")?,
-            audit: path(audit, "NK_OAUTH_WRITE_AUDIT_FILE")?,
+            ledger: path(ledger, ledger_key)?,
+            audit: path(audit, audit_key)?,
         };
         if settings.ledger == settings.audit {
             return Err(invalid(
-                "NK_OAUTH_WRITE_AUDIT_FILE",
+                audit_key,
                 "must be separate from the mutation ledger",
             ));
         }
@@ -261,11 +275,19 @@ mod installed {
 
 #[cfg(unix)]
 pub fn validate_distinct(config: &crate::config::Config) -> Result<(), &'static str> {
-    use std::os::unix::fs::MetadataExt;
     let stores = config
         .oauth_write_stores
         .as_ref()
         .ok_or("OAuth write stores unavailable")?;
+    validate_stores(config, stores)
+}
+
+#[cfg(unix)]
+pub fn validate_stores(
+    config: &crate::config::Config,
+    stores: &Settings,
+) -> Result<(), &'static str> {
+    use std::os::unix::fs::MetadataExt;
     let mut paths = vec![stores.ledger.as_path(), stores.audit.as_path()];
     if let Some(files) = &config.file_ingestion {
         paths.push(files.audit_file.as_path());
@@ -420,6 +442,11 @@ mod tests {
         });
         assert!(validate_distinct(&config).is_err());
     }
+}
+
+#[cfg(not(unix))]
+pub fn validate_stores(_: &crate::config::Config, _: &Settings) -> Result<(), &'static str> {
+    Err("Mutation stores require Unix")
 }
 
 #[cfg(not(unix))]

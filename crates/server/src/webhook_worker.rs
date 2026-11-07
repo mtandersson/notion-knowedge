@@ -311,9 +311,8 @@ pub mod runtime {
     impl Worker {
         pub async fn run(&self, stop: CancellationToken) -> Result<(), &'static str> {
             if let Some(scheduled) = &self.scheduled {
-                if !self.webhook_enabled {
-                    return scheduled.run(stop).await;
-                }
+                // Integration mutations/files also need prompt refresh when
+                // periodic reconciliation is installed without webhook ingress.
                 let stop_on_exit = stop.clone();
                 let scheduled_loop = async {
                     let _guard = stop_on_exit.drop_guard();
@@ -387,6 +386,7 @@ pub mod runtime {
             }
             let state = self.state.clone();
             let admission_stop = stop.clone();
+            let webhook_enabled = self.webhook_enabled;
             let claim = blocking(move || {
                 if admission_stop.is_cancelled() {
                     return Ok(None);
@@ -410,7 +410,9 @@ pub mod runtime {
                         .claim(&scope, now_ms() / 1000, duration)
                         .map(|e| e.map(|(c, e)| Work::Event(c, e)))
                 };
-                let webhook = if page_first {
+                let webhook = if !webhook_enabled {
+                    Ok(None)
+                } else if page_first {
                     page()?.map_or_else(event, |p| Ok(Some(p)))
                 } else {
                     event()?.map_or_else(page, |p| Ok(Some(p)))

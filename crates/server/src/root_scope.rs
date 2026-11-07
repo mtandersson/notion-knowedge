@@ -26,6 +26,9 @@ pub async fn compose(
     config: &Config,
     transport: Transport,
 ) -> Result<KnowledgeServer, &'static str> {
+    if config.integration_write_stores.is_some() {
+        return Err("integration writes require the installed HTTP sync worker");
+    }
     // An unsuitable transport must not install even lazy private-state readers.
     if (config.retrieval.is_some() || config.graph_index.is_some())
         && !trusted_transport(config, transport)

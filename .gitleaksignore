@@ -7,3 +7,9 @@
 # clean. Historical occurrence only; tracking #493; owner: repository maintainers;
 # review date: 2026-10-30. No path, commit-wide or rule-wide exclusion.
 3564b52a6c26c10bb1e88267896c28853984c7cf:eval/retrieval/results/lexical-production-2026-10-29/provenance.json:generic-api-key:17
+
+# Historical prose "token" followed by the public NK_RETRIEVAL=true flag;
+# neither is a credential and neither authenticates. The current wording scans
+# clean. Tracking #633; owner: repository maintainers; review date: 2026-11-07.
+# Exact historical occurrence only; no path, commit-wide or rule exclusion.
+46b42f24983b835081e50f2639e19547e3e4947f:docs/integration-semantic-writes.md:generic-api-key:10

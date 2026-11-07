@@ -197,8 +197,52 @@ pub async fn compose(
         )
         .await?
     };
+    attach_existing(
+        handler,
+        config,
+        transport,
+        source,
+        provider,
+        runtime.chunks().clone(),
+        runtime.coordinator,
+    )
+    .await
+}
+
+/// Attach queries to the sync worker's existing model, table and coordinator.
+pub(crate) async fn attach_existing(
+    handler: KnowledgeServer,
+    config: &Config,
+    transport: Transport,
+    source: Arc<NotionClient>,
+    provider: Arc<dyn EmbeddingProvider>,
+    table: GuardedChunkTable,
+    coordinator: Arc<notion_knowledge_retrieval::commit::IndexCommitCoordinator>,
+) -> Result<KnowledgeServer, &'static str> {
     validate_owned(config)?;
-    let table = runtime.chunks().clone();
+    let settings = config
+        .retrieval
+        .as_ref()
+        .ok_or("retrieval settings unavailable")?;
+    let scope = config
+        .notion_scope
+        .clone()
+        .ok_or("retrieval scope unavailable")?;
+    let policy = notion_knowledge_retrieval::planner::production_scope(&scope)
+        .map_err(|_| "retrieval scope unavailable")?;
+    if !coordinator
+        .binding()
+        .matches_policy(&scope.workspace_id, &policy)
+        || table.binding() != coordinator.binding()
+        || std::fs::canonicalize(coordinator.index_directory()).ok()
+            != Some(
+                std::fs::canonicalize(&settings.index)
+                    .map_err(|_| "retrieval index unavailable")?,
+            )
+    {
+        return Err("shared retrieval authority mismatch");
+    }
+    let plan = crate::index_runtime::configured_plan(settings)?;
     table
         .search_snapshot()
         .await
@@ -228,7 +272,7 @@ pub async fn compose(
         }
         handler.and_graph_boost(
             Arc::new(notion_knowledge_retrieval::graph::CommittedGraph::new(
-                runtime.coordinator,
+                coordinator,
             )),
             config.graph_boost,
         )
