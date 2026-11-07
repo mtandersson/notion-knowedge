@@ -27,8 +27,9 @@ The policy fields control:
 - `cpus`, `memory_bytes`, `pids`, `nofile`: Docker CPU quota, hard memory plus
   equal memory/swap ceiling (no additional swap), PID and descriptor limits.
 - `tmp_bytes`: writable `/tmp` tmpfs ceiling; the root filesystem stays read-only.
-  Tmpfs memory counts against the cgroup. Additional writable mounts require
-  separate filesystem quotas; this does not bound the total state/index disk.
+  Tmpfs memory counts against the cgroup. This does not bound persistent
+  state/index disk use; measure its growth and rebuild reserve, and monitor the
+  actual paths with private warning/critical alerts.
 - `log_bytes`, `log_files`: bounded Docker local log rotation. Proxy access logs
   are disabled to avoid recording OAuth codes and private requests.
 - `proxy_connections`: one NGINX worker's total connection slots, including
@@ -87,8 +88,12 @@ oversize, slow headers/body/readers, per-client and total connection saturation,
 rate overload, upstream stall and provider failure with nonsecret fixtures on
 the actual deployment. Demonstrate bounded rejection, private health/recovery
 headroom, graceful shutdown, restart and durable receipt recovery. Recheck the
-same effective limits after restart. Set private state/index filesystem quotas
-and warning/critical alerts with tested delivery and sufficient rebuild reserve.
+same effective limits after restart. Measure persistent state/index disk headroom
+and sufficient rebuild reserve. Verify private warning/critical alerts and
+recovery on the actual monitored paths. A local observer is sufficient; hard
+persistent-volume quotas and an external notification destination are optional,
+not additional #455 completion gates. This matches the
+[measurement acceptance scope](model-container-measurement.md).
 Local tests of the renderer or a disposable proxy cannot satisfy these gates.
 
 Repository checks use credential-free fixtures:
