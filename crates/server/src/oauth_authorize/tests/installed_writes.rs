@@ -134,6 +134,147 @@ pub(super) async fn call(
     resource::reply(rpc(h,url,token,Some(session),json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":name,"arguments":args}})).await).await
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oauth_append_preserves_raw_hashes_and_verifies_rotating_media_once() {
+    let h = Harness::with_authority(
+        grant(WORKSPACE, "user-a"),
+        StatusCode::OK,
+        None,
+        Duration::ZERO,
+        Some(scope()),
+        true,
+    )
+    .await;
+    fs::set_permissions(h._dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let url = "https://prod-files-secure.s3.us-west-2.amazonaws.com/11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222/photo.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ROTATING_MEDIA_AUTH&X-Amz-Date=ROTATING_MEDIA_AUTH&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=ROTATING_MEDIA_AUTH";
+    // Consecutive lines match the provider's real attachment Markdown shape.
+    let body = format!(
+        "![Photo]({url})\n<file src=\"{}\">Document</file>",
+        url.replace("photo.png", "document.txt")
+    );
+    *h.document.lock().unwrap() = Some((body.clone(), 0));
+    let seed = content_index::seed(h._dir.path(), &scope(), PAGE).await;
+    let mut settings = config(&h, &seed);
+    let stores = settings.oauth_write_stores.as_ref().unwrap();
+    let ledger_path = stores.ledger.clone();
+    let audit_path = stores.audit.clone();
+    drop(
+        notion_knowledge_retrieval::idempotency::SqliteIdempotencyStore::initialize_new(
+            &ledger_path,
+        )
+        .unwrap(),
+    );
+    let runtime = crate::oauth_writes::compose(
+        notion_knowledge_mcp::KnowledgeServer::default(),
+        &settings,
+        h.login.callback.as_ref().unwrap().credentials.clone(),
+        seed.provider.clone(),
+    )
+    .await
+    .unwrap();
+    let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    settings.http_bind = socket.local_addr().unwrap();
+    let endpoint = format!("http://{}/mcp", settings.http_bind);
+    let stop = CancellationToken::new();
+    let router = crate::http::mcp_transport(
+        &settings,
+        runtime.handler.clone(),
+        Arc::new(crate::session_limits::BoundedSessions::new(
+            8,
+            Duration::from_secs(30),
+        )),
+        stop.clone(),
+        Some(h.login.clone()),
+    );
+    let serving = tokio::spawn(async move {
+        axum::serve(socket, router).await.unwrap();
+    });
+    let code = h
+        .approved_code_with_scope("knowledge:read knowledge:write")
+        .await;
+    let token = resource::redeem(&h, &code).await;
+    let session = connect(&h, &endpoint, &token).await;
+    let fresh = call(
+        &h,
+        &endpoint,
+        &token,
+        &session,
+        "knowledge_get",
+        json!({"refs":[{"kind":"page","id":PAGE}],"max_chars":65536,"freshness":"fresh"}),
+    )
+    .await;
+    assert_ne!(fresh["result"]["isError"], true, "{fresh}");
+    let source = &fresh["result"]["structuredContent"]["sources"][0];
+    assert!(
+        source["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("fresh source text missing: {fresh}"))
+            .contains("X-Amz-Signature=")
+    );
+    let revision = source["provenance"]["refreshed_last_edited_time"]
+        .as_str()
+        .unwrap();
+    let addition = "\nAdditional verified paragraph\n";
+    let args = json!({"root_page_id":ROOT,"page_id":PAGE,"markdown":addition,"idempotency_key":"media-append-once","expected_last_edited_time":revision});
+
+    // A normalized hash is never substituted for an explicit raw hash.
+    use sha2::{Digest, Sha256};
+    let canonical_hash = format!(
+        "{:x}",
+        Sha256::digest(
+            notion_knowledge_notion::NotionClient::comparison_markdown(&body).as_bytes()
+        )
+    );
+    let mut strict = args.clone();
+    strict["idempotency_key"] = json!("media-raw-hash-once");
+    strict["expected_markdown_sha256"] = json!(canonical_hash);
+    let rejected = call(&h, &endpoint, &token, &session, "knowledge_append", strict).await;
+    assert_eq!(
+        rejected["result"]["structuredContent"]["write"]["status"], "revision_conflict",
+        "{rejected}"
+    );
+    assert_eq!(h.mutations.load(Ordering::SeqCst), 0);
+
+    let written = call(
+        &h,
+        &endpoint,
+        &token,
+        &session,
+        "knowledge_append",
+        args.clone(),
+    )
+    .await;
+    assert_eq!(
+        written["result"]["structuredContent"]["write"]["status"], "verified",
+        "{written}"
+    );
+    let replay = call(&h, &endpoint, &token, &session, "knowledge_append", args).await;
+    assert_eq!(
+        replay["result"]["structuredContent"]["write"]["replayed"], true,
+        "{replay}"
+    );
+    assert_eq!(h.mutations.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        h.document.lock().unwrap().as_ref().unwrap().0,
+        format!("{body}{addition}")
+    );
+    let ledger = rusqlite::Connection::open(&ledger_path).unwrap();
+    assert_eq!(
+        ledger
+            .query_row(
+                "SELECT count(*) FROM mutation_claims WHERE status='committed' AND page_id=?1",
+                [PAGE],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    let audit = rusqlite::Connection::open(&audit_path).unwrap();
+    assert!(audit.query_row("SELECT count(*) FROM agent_audit_events WHERE tool='page_append' AND outcome='succeeded' AND target_page_id=?1", [PAGE], |row| row.get::<_, i64>(0)).unwrap() >= 1);
+    stop.cancel();
+    serving.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn configured_oauth_create_refresh_search_and_replay_share_durable_authority() {
     let h = Harness::with_authority(
         grant(WORKSPACE, "user-a"),

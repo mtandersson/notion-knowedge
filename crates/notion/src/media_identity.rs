@@ -205,7 +205,7 @@ fn html_media_edits(
     local_edits
 }
 
-fn canonical_markdown(markdown: &str) -> Cow<'_, str> {
+pub(crate) fn canonical_markdown(markdown: &str) -> Cow<'_, str> {
     if !markdown.contains("X-Amz-") {
         return Cow::Borrowed(markdown);
     }

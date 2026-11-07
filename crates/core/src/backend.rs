@@ -1,6 +1,7 @@
 //! Authoritative page contracts. API JSON, credentials and transport errors stay
 //! inside adapters; these types are not derived search/index records.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -94,6 +95,14 @@ impl std::error::Error for BackendError {}
 
 /// Fresh reads, independent of the disposable retrieval cache.
 pub trait NotionRead: Send + Sync {
+    /// Local comparison view; only provider-generated transport credentials may
+    /// be projected. Preserve meaningful content and resource identity. Never
+    /// use this view for raw hash preconditions, payloads or fresh read results.
+    /// The default compares every original byte.
+    fn comparison_markdown<'a>(&self, markdown: &'a str) -> Cow<'a, str> {
+        Cow::Borrowed(markdown)
+    }
+
     fn fetch_page<'a>(&'a self, page_id: &'a PageId) -> BackendFuture<'a, Page>;
     fn read_content<'a>(&'a self, page_id: &'a PageId) -> BackendFuture<'a, PageContent>;
 }

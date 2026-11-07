@@ -204,7 +204,8 @@ pub async fn append_once(
                 RevisionError::Read(_) => AppendError::Unavailable,
             }
         })?;
-    if fresh.markdown != before.markdown {
+    let before_comparison = reader.comparison_markdown(&before.markdown);
+    if reader.comparison_markdown(&fresh.markdown) != before_comparison {
         return Err(AppendError::RevisionConflict(final_meta));
     }
 
@@ -227,13 +228,14 @@ pub async fn append_once(
         .read_content(&request.page_id)
         .await
         .map_err(|_| AppendError::OutcomeUnknown)?;
-    if after.page.id != request.page_id
-        || after.page.archived
-        || !after.markdown.starts_with(&before.markdown)
-        || !crate::revision::written_markdown_matches(
-            &request.markdown,
-            &after.markdown[before.markdown.len()..],
-        )
+    if after.page.id != request.page_id || after.page.archived {
+        return Err(AppendError::OutcomeUnknown);
+    }
+    let after_comparison = reader.comparison_markdown(&after.markdown);
+    let inserted = reader.comparison_markdown(&request.markdown);
+    if !after_comparison
+        .strip_prefix(before_comparison.as_ref())
+        .is_some_and(|suffix| crate::revision::written_markdown_matches(&inserted, suffix))
     {
         return Err(AppendError::OutcomeUnknown);
     }
