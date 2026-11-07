@@ -411,7 +411,7 @@ pub mod runtime {
                         .map(|e| e.map(|(c, e)| Work::Event(c, e)))
                 };
                 let webhook = if !webhook_enabled {
-                    None
+                    Ok(None)
                 } else if page_first {
                     page()?.map_or_else(event, |p| Ok(Some(p)))
                 } else {
