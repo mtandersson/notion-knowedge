@@ -2261,8 +2261,8 @@ async fn intentional_synced_references_preserve_physical_inventory_completeness(
     assert!(plan.run_errors.is_empty());
     assert_eq!(plan.scanned, 3);
     assert_eq!(plan.planned_refresh(), 3);
-    assert_eq!(source.bodies.load(Ordering::SeqCst), 0);
-    assert_eq!(source.foreign_bodies.load(Ordering::SeqCst), 0);
+    assert_eq!(source.body_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(source.foreign_body_reads.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
