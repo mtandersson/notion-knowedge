@@ -93,6 +93,9 @@ operator configuration and a durable mutation ledger. Read-only is the default;
 section updates additionally require trusted user confirmation. OAuth file/image
 installation remains separate.
 
+For a private integration-backed HTTP connection, [guarded integration writes](docs/integration-semantic-writes.md)
+have a separate explicit activation and share the existing sync worker.
+
 ### Payload limits
 
 The Streamable HTTP `/mcp` endpoint accepts at most **4 MiB** per POST body
