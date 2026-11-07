@@ -77,6 +77,18 @@ pub async fn compose(
         worker.coordinator.clone(),
     )
     .await?;
+    let handler = if let Some(index) = &config.graph_index {
+        if std::fs::canonicalize(index).ok()
+            != std::fs::canonicalize(worker.coordinator.index_directory()).ok()
+        {
+            return Err("integration graph index must match the shared sync worker");
+        }
+        handler.and_related_graph(Arc::new(
+            notion_knowledge_retrieval::graph::CommittedGraph::new(worker.coordinator.clone()),
+        ))?
+    } else {
+        handler
+    };
     let mutations = MutationRuntime::new(
         source,
         scope,

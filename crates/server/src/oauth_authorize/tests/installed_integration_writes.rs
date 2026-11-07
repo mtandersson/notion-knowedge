@@ -50,6 +50,8 @@ async fn private_integration_http_guards_writes_and_refreshes_once_without_oauth
         ("NK_HTTP_BEARER_TOKEN", TOKEN),
         ("NK_READ_ONLY", "false"),
         ("NK_RETRIEVAL", "true"),
+        ("NK_GRAPH", "true"),
+        ("NK_GRAPH_BOOST", "true"),
         ("NK_INTEGRATION_WRITES", "true"),
         ("NK_RECONCILIATION_INTERVAL_SECONDS", "3600"),
         ("NK_WEBHOOK_POLL_MS", "20"),
@@ -218,6 +220,7 @@ async fn private_integration_http_guards_writes_and_refreshes_once_without_oauth
         "{listing}"
     );
     assert!(!names.contains(&"knowledge_update_section"));
+    assert!(names.contains(&"knowledge_related"), "{listing}");
     let rejected=call(&h,&endpoint,TOKEN,&session,"knowledge_append",json!({"root_page_id":ROOT,"page_id":FOREIGN,"markdown":"denied","expected_last_edited_time":"2026-10-17T00:00:00Z","idempotency_key":"integration-denied-append"})).await;
     assert_eq!(
         rejected["result"]["structuredContent"]["write"]["status"], "not_authorized",
