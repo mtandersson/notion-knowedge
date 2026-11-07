@@ -145,6 +145,25 @@ pub async fn serve_composed(
     >,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> io::Result<()> {
+    #[cfg(all(unix, feature = "webhook-worker"))]
+    let handler = if settings.integration_write_stores.is_some() {
+        crate::integration_writes::configured(
+            handler,
+            &settings,
+            worker
+                .as_deref()
+                .ok_or_else(|| io::Error::other("integration write worker unavailable"))?,
+        )
+        .await
+        .map_err(io::Error::other)?
+    } else if settings.oauth_discovery.is_some() {
+        notion_knowledge_mcp::KnowledgeServer::default()
+    } else {
+        crate::root_scope::compose(handler, &settings, crate::root_scope::Transport::Http)
+            .await
+            .map_err(io::Error::other)?
+    };
+    #[cfg(not(all(unix, feature = "webhook-worker")))]
     let handler = if settings.oauth_discovery.is_some() {
         // Install OAuth request-bound readers in serve_installed, where they
         // share the credential runtime. Keep integration composition out here.

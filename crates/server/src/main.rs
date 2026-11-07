@@ -162,14 +162,20 @@ async fn run() -> ExitCode {
             Err(_) => { eprintln!("Notion OAuth grant could not be forgotten; stop credential users and check private state."); ExitCode::FAILURE },
         };
     }
-    if all_args == ["--initialize-oauth-write-ledger"] {
-        let Some(settings) = &config.oauth_write_stores else {
-            eprintln!("OAuth write ledger initialization requires complete write configuration.");
+    let integration_ledger = all_args == ["--initialize-integration-write-ledger"];
+    if integration_ledger || all_args == ["--initialize-oauth-write-ledger"] {
+        let stores = if integration_ledger {
+            &config.integration_write_stores
+        } else {
+            &config.oauth_write_stores
+        };
+        let Some(settings) = stores else {
+            eprintln!("Mutation ledger initialization requires complete write configuration.");
             return ExitCode::from(2);
         };
-        if notion_knowledge_server::oauth_writes::validate_distinct(&config).is_err() {
+        if notion_knowledge_server::oauth_writes::validate_stores(&config, settings).is_err() {
             eprintln!(
-                "OAuth write ledger initialization requires distinct protected durable storage."
+                "Mutation ledger initialization requires distinct protected durable storage."
             );
             return ExitCode::from(2);
         }
@@ -177,12 +183,12 @@ async fn run() -> ExitCode {
             &settings.ledger,
         ) {
             Ok(_) => {
-                println!("OAuth mutation ledger initialized; preserve it across index rebuilds.");
+                println!("Mutation ledger initialized; preserve it across index rebuilds.");
                 ExitCode::SUCCESS
             }
             Err(_) => {
                 eprintln!(
-                    "OAuth mutation ledger initialization failed; existing ledgers are never replaced."
+                    "Mutation ledger initialization failed; existing ledgers are never replaced."
                 );
                 ExitCode::FAILURE
             }

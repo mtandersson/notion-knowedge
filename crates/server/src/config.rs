@@ -26,6 +26,8 @@ pub struct Config {
     pub read_only: bool,
     pub oauth_writes: bool,
     pub oauth_write_stores: Option<crate::oauth_writes::Settings>,
+    /// Explicit guarded writes for the private integration-backed HTTP transport.
+    pub integration_write_stores: Option<crate::oauth_writes::Settings>,
     /// Explicit second gate for destructive operations; defaults disabled.
     pub destructive_writes_enabled: bool,
     pub capability_policy: notion_knowledge_mcp::capabilities::CapabilityPolicy,
@@ -920,6 +922,34 @@ impl Config {
             ));
         }
         let oauth_write_stores = crate::oauth_writes::Settings::parse(&mut lookup, oauth_writes)?;
+        let integration_writes =
+            match optional(&mut lookup, "NK_INTEGRATION_WRITES", "false")?.as_str() {
+                "false" => false,
+                "true" => true,
+                _ => return Err(invalid("NK_INTEGRATION_WRITES", "must be true or false")),
+            };
+        if integration_writes
+            && (read_only
+                || oauth_discovery.is_some()
+                || !matches!(notion_auth, NotionAuth::Integration(_))
+                || notion_scope.is_none()
+                || bearer_fallback.is_none()
+                || retrieval.is_none()
+                || webhook_state_file.is_none()
+                || (webhook_worker.is_none() && reconciliation_schedule.is_none()))
+        {
+            return Err(invalid(
+                "NK_INTEGRATION_WRITES",
+                "requires writable integration scope, loopback bearer, retrieval and the shared sync worker without OAuth discovery",
+            ));
+        }
+        let integration_write_stores = crate::oauth_writes::Settings::parse_keys(
+            &mut lookup,
+            integration_writes,
+            "NK_INTEGRATION_WRITES",
+            "NK_INTEGRATION_WRITE_LEDGER_FILE",
+            "NK_INTEGRATION_WRITE_AUDIT_FILE",
+        )?;
         if oauth_writes && (retrieval.is_none() || webhook_state_file.is_none()) {
             return Err(invalid(
                 "NK_OAUTH_WRITES",
@@ -953,6 +983,7 @@ impl Config {
             read_only,
             oauth_writes,
             oauth_write_stores,
+            integration_write_stores,
             destructive_writes_enabled,
             capability_policy,
             bearer_fallback,
