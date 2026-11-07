@@ -8,6 +8,19 @@ authoritative system for pages, properties and files; LanceDB is derived.
 Read-only routing and rollback during the interim are defined in
 [dual-connector migration](dual-connector-migration.md).
 
+## Scope: optional ChatGPT installation and routing decision
+
+The owner clarified on 2026-11-07 that product behavior can be verified through
+local MCP stdio or protected HTTP with real configured adapters. The ChatGPT
+checks in this document govern a particular installation and the separate
+decision to replace the official connector; they are not product release or
+local test prerequisites. Tunnel credentials, workspace association and actual
+ChatGPT discovery remain [installation acceptance](private-chatgpt-tunnel.md)
+work in #559. Missing installation evidence means no claim of successful
+ChatGPT access or cutover, not failure of independently verified local behavior.
+
+## Historical cutover baseline
+
 As of this issue, the ordinary server still has an unavailable retrieval
 bootstrap, and authenticated private HTTP access, production full sync,
 file ingestion and verified write tools are not all integrated. A local spike,

@@ -1,4 +1,23 @@
-# Private ChatGPT connection through Secure MCP Tunnel
+# Optional private ChatGPT installation through Secure MCP Tunnel
+
+## Product verification and installation acceptance
+
+The owner clarified on 2026-11-07 that the tunnel is an installation choice,
+not a product readiness prerequisite. Verify the product through its local MCP
+stdio or protected HTTP transport: initialization, tool schemas, real scoped
+search/read results, citations, authorization negatives, enabled mutation/file
+behavior and recovery as applicable. Use the real configured adapters and
+approved test scope; a configuration check or unavailable bootstrap alone is
+insufficient. These local checks can establish product behavior without a
+ChatGPT account, tunnel runtime key, workspace association or browser interaction.
+
+For an installation that chooses ChatGPT, separately verify that installation's
+transport, account/workspace access and discovered catalog using the procedure
+below. Local success does not establish actual ChatGPT connectivity. Conversely,
+an expired tunnel credential or pending ChatGPT setup does not block product
+tests or a completed documentation PR. Issue #559 tracks the remaining live
+installation evidence; merging this runbook does not close it or authorize
+primary-connector cutover.
 
 The owner selected this deployment for #559 on 2026-11-07:
 
@@ -79,7 +98,7 @@ initialization and tool discovery. Run the owned tunnel client and check its
 actual readiness and polling. An expired runtime key requires replacement;
 restarting the daemon cannot repair it. Do not stop or modify unrelated tunnels.
 
-## Actual ChatGPT acceptance
+## Per-installation ChatGPT acceptance
 
 In ChatGPT's custom MCP connection UI, select **Tunnel**, the verified tunnel,
 and **No authentication**. These are separate selections; tunnel transport does
@@ -107,7 +126,9 @@ Store only sanitized observations in the repository. Mark missing evidence
 explicitly; local HTTP checks and the earlier development spike cannot establish
 actual ChatGPT acceptance. Full approved-root sync, write/file acceptance and
 primary cutover remain tracked separately and are not waived by this transport
-choice. #559 stays open until its live checks and teardown are verified.
+choice. #559 stays open until its live installation checks and teardown are
+verified. This acceptance is required for claiming that installation works,
+not for accepting locally verified product behavior.
 
 ## Verified local checkpoint — 2026-11-07
 
@@ -119,10 +140,12 @@ fixture's two existing attachments passed. Unauthenticated requests returned
 durable source-effect records were unchanged. The temporary listener was stopped
 after verification; the existing executable and service were preserved.
 
-This establishes local retrieval readiness. Actual ChatGPT tunnel discovery,
-reads, refresh, restart and disable/re-enable checks remain pending, as does
-full approved-root sync. Keep this PR draft until the actual connection checks
-and independent review are complete.
+This establishes the checked local read-only retrieval behavior, not untested
+write/file operations or full approved-root sync. Actual ChatGPT tunnel discovery,
+reads, refresh, restart and disable/re-enable checks remain pending in #559.
+The prepared installation's runtime credential was rejected as expired; a valid
+credential, workspace association and access still need verification. The
+runbook can be reviewed and merged independently of those operator steps.
 
 A separate temporary loopback proxy check demonstrated connection/rate rejection
 and a five-second incomplete-header deadline. During 1,100 owned connection

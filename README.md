@@ -90,6 +90,13 @@ an independent policy via `NK_HTTP_HEALTH_AUTH=none|bearer`.
 See [development bearer authentication](docs/development-bearer-auth.md)
 for configuration, security limits and tests.
 
+Product verification uses local MCP stdio or protected HTTP with the real
+configured adapters and approved test scope. Secure MCP Tunnel and actual
+ChatGPT connection checks are separate, optional installation acceptance;
+pending credentials or workspace setup do not block local product testing.
+Local success does not claim that a ChatGPT installation or primary-connector
+cutover has passed.
+
 ### Optional production OAuth writes
 
 [OAuth semantic writes](docs/oauth-semantic-writes.md) require explicit complete

@@ -1,5 +1,17 @@
 # Primary ChatGPT cutover acceptance gates (#115)
 
+## Scope: installation and client routing
+
+The owner clarified on 2026-11-07 that local MCP stdio or protected HTTP testing
+with real configured adapters is sufficient to verify product behavior. These
+gates apply only to an installation choosing ChatGPT and a separately authorized
+replacement of the official connector. They do not require a tunnel, ChatGPT
+workspace or runtime API key before accepting local product tests or merging
+completed documentation. Keep unverified installation checks open in #559;
+local success does not establish actual ChatGPT connectivity or cutover.
+
+## Cutover decision
+
 **Decision:** Do not disable the official Notion connector until every gate below
 is **PASS** on the same release candidate and authorized production-like
 deployment. A published design, unit test, fake adapter, or isolated experiment
