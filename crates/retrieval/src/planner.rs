@@ -285,12 +285,13 @@ impl AuthoritativeReconciliationPlanner {
             .await
         {
             Ok(report) => {
-                plan.traversal_complete = !report.skipped.iter().any(|s| {
-                    matches!(
-                        s.reason,
-                        SkipReason::Inaccessible | SkipReason::SyncedReference
-                    )
-                });
+                // Copied synced content is not a physical child subtree. Its
+                // completeness belongs to the host page's content attempt;
+                // discovery must never follow it to widen root authority.
+                plan.traversal_complete = !report
+                    .skipped
+                    .iter()
+                    .any(|s| s.reason == SkipReason::Inaccessible);
                 for skipped in &report.skipped {
                     if skipped.reason == SkipReason::Inaccessible {
                         plan.errors
