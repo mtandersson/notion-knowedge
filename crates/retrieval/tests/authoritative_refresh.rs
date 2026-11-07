@@ -2318,6 +2318,7 @@ async fn planner_absence_access_failures_and_races_never_authorize_deletion() {
     let index = Fixture::new();
     index.create().await;
     let source = HttpNotion::start().await;
+    source.change(|m| m.copied_reference = true);
     let provider = CountingProvider::new(index.embed.clone());
     index
         .handler(source.client())
