@@ -56,8 +56,8 @@ impl SqliteSyncStateStore {
             .map_err(|_| JournalError::Unavailable)
     }
 
-    /// Completion is recorded only after a successful fresh inventory and all
-    /// its page refreshes. This is a sync flag, not a cache handoff journal.
+    /// Clear the rebuild flag after inventory and independent page attempts have
+    /// produced a usable cache. Source failures remain in the reconciliation run.
     pub fn finish_cache_rebuild(&self, lease: &Lease, now: i64) -> Result<(), JournalError> {
         let mut db = self
             .lock_connection()

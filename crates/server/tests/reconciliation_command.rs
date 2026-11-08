@@ -41,6 +41,7 @@ struct ExtraPage {
 #[derive(Clone)]
 struct Model {
     empty_content: bool,
+    unsupported_page_content: bool,
     markdown: String,
     title: String,
     revision: String,
@@ -62,6 +63,7 @@ impl Default for Model {
     fn default() -> Self {
         Self {
             empty_content: false,
+            unsupported_page_content: false,
             markdown: "# Intro\n\nSaffron ravioli.\n\n## Other\n\nAn evergreen section.\n".into(),
             title: "First".into(),
             revision: "2026-10-10T12:00:00Z".into(),
@@ -184,7 +186,7 @@ impl HttpNotion {
                         "object": "page_markdown",
                         "id": PAGE,
                         "markdown": snapshot.markdown,
-                        "truncated": false,
+                        "truncated": snapshot.unsupported_page_content,
                         "unknown_block_ids": []
                     })
                 } else if route == format!("/v1/pages/{PAGE}") {
@@ -2889,28 +2891,103 @@ async fn lost_or_incompatible_cache_resyncs_without_replaying_external_effects()
 }
 
 #[tokio::test]
-async fn unresolved_synced_content_keeps_cache_rebuild_unavailable() {
+async fn cache_sync_indexes_available_text_without_resolving_template_references() {
     let http = HttpNotion::start().await;
     let f = Fixture::new(&http).await;
     http.state.lock().unwrap().markdown = format!(
-        "<synced_block_reference url=\"https://notion.so/{PAGE}\">\n</synced_block_reference>"
+        "Available recipe text.\n<synced_block_reference url=\"https://notion.so/{PAGE}\">\n</synced_block_reference>"
     );
     fs::remove_dir_all(&f.settings.index).unwrap();
+    let runtime = IndexRuntime::recover(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
     assert!(
-        IndexRuntime::recover(
-            &f.settings,
-            &f.state,
-            authority(),
-            http.client(),
-            f.provider.clone()
-        )
-        .await
-        .is_err()
+        runtime
+            .chunks()
+            .page_chunks(PAGE)
+            .await
+            .unwrap()
+            .iter()
+            .any(|c| c.text.contains("Available recipe text."))
     );
-    let state =
-        notion_knowledge_retrieval::sync_state::SqliteSyncStateStore::open_existing(&f.state)
-            .unwrap();
-    assert!(state.cache_rebuild_pending().unwrap());
+    assert!(
+        !runtime
+            .chunks()
+            .search_snapshot()
+            .await
+            .unwrap()
+            .vector_query(&[1.0, 0.0, 0.0], 3, 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn unreadable_page_does_not_block_embedded_search_and_next_sync_can_recover_it() {
+    use notion_knowledge_retrieval::durable_plan::DurableFailure;
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    http.state.lock().unwrap().unsupported_page_content = true;
+    fs::remove_dir_all(&f.settings.index).unwrap();
+    let embedded = f.provider.count.load(Ordering::SeqCst);
+    let runtime = IndexRuntime::recover(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    )
+    .await
+    .unwrap();
+    let progress = runtime
+        .coordinator
+        .reconciliation_progress("cache-reset")
+        .unwrap();
+    assert_eq!(
+        progress.failed.get(PAGE),
+        Some(&DurableFailure::UnsupportedSource)
+    );
+    assert_eq!(progress.changed, 2);
+    assert!(progress.pending.is_empty());
+    assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
+    assert!(runtime.chunks().page_chunks(PAGE).await.unwrap().is_empty());
+    assert!(
+        !runtime
+            .chunks()
+            .page_chunks(OTHER)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(f.provider.count.load(Ordering::SeqCst) > embedded);
+    assert!(
+        !runtime
+            .chunks()
+            .search_snapshot()
+            .await
+            .unwrap()
+            .vector_query(&[1.0, 0.0, 0.0], 3, 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop(runtime);
+    http.state.lock().unwrap().unsupported_page_content = false;
+    counts(
+        &f.command(&http, &["--reconcile", "apply", "next-cache-sync"])
+            .await,
+        1,
+        0,
+        2,
+    );
 }
 
 #[tokio::test]

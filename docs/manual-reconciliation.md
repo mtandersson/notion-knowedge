@@ -53,10 +53,11 @@ before credentials or state are used. Successful pages cannot be retried, and
 resume never retries failed pages implicitly. Planning/access failures appear
 separately; use a new run after repairing discovery/permissions. Intentional
 non-traversal of copied synced references does not make physical inventory
-incomplete. Unverifiable copied content instead fails its host page as
-`UnsupportedSource`; independent manual/scheduled page work continues. Actual
-inaccessible physical subtrees still prevent orphan deletion. Automatic cache
-reset/startup retains its fail-fast, unavailable-until-complete behavior.
+incomplete. Index the content Notion returns without resolving template originals.
+Unreadable pages remain in the existing error report while independent page work
+continues, including during cache startup/reset. Actual inaccessible physical
+subtrees still prevent orphan deletion. Index/storage and credential failures
+still prevent serving an unusable cache.
 
 `rebuild-relations` atomically starts inventory and invalidates only derived
 relation completeness through owned, fenced maintenance, then uses the same

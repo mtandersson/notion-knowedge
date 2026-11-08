@@ -311,9 +311,24 @@ impl IndexRuntime {
                     break Err("cache resync failed; retry startup");
                 }
             };
-            if !progress.failed.is_empty()
-                || !progress.planning_failures.is_empty()
-                || !progress.run_failures.is_empty()
+            // An unreadable source page does not invalidate other cached pages.
+            // Keep its existing failure record for status/retry, while storage,
+            // ownership and credential failures still prevent serving this cache.
+            if progress
+                .failed
+                .values()
+                .chain(progress.planning_failures.values())
+                .chain(progress.run_failures.values())
+                .any(|failure| {
+                    use notion_knowledge_retrieval::durable_plan::DurableFailure;
+                    matches!(
+                        failure,
+                        DurableFailure::Index
+                            | DurableFailure::Ownership
+                            | DurableFailure::Unauthenticated
+                            | DurableFailure::TraversalUnauthenticated
+                    )
+                })
             {
                 break Err("cache resync incomplete; retry startup");
             }
@@ -344,6 +359,17 @@ impl IndexRuntime {
                     expired.store(true, Ordering::SeqCst);
                     let _ = self.coordinator.drain_owned().await;
                     break Err("rebuilt search index unavailable");
+                }
+                if progress.failed_pages() > 0 || !progress.run_failures.is_empty() {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "operation": "cache_sync",
+                            "status": "ready_with_skips",
+                            "skipped_pages": progress.failed_pages(),
+                            "discovery_errors": progress.run_failures.len(),
+                        })
+                    );
                 }
                 break state
                     .finish_cache_rebuild(&lease, now_ms() / 1000)
