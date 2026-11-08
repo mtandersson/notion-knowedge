@@ -1266,6 +1266,9 @@ async fn actual_scheduled_http_preserves_deadline_restart_and_unchanged_next_cyc
     assert_eq!(worker.coordinator.schedule("periodic").unwrap(), finished);
     assert_eq!(http.body_reads.load(Ordering::SeqCst), bodies);
     assert_eq!(f.provider.count.load(Ordering::SeqCst), embeddings);
+    // Manual schedule changes require quiescent owned workers.
+    stop.cancel();
+    server.await.unwrap().unwrap();
     let now = now_ms() / 1000;
     let lease = worker.state.acquire_lease(now, 30).unwrap();
     worker
@@ -1282,6 +1285,8 @@ async fn actual_scheduled_http_preserves_deadline_restart_and_unchanged_next_cyc
         )
         .unwrap();
     worker.state.release_lease(&lease, now).unwrap();
+    let (worker, stop, server) =
+        scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
     await_schedule(&worker, |s| s.cycle == 2 && s.active_run.is_none()).await;
     // The unchanged cycle still revalidates authoritative relation membership.
     assert!(http.body_reads.load(Ordering::SeqCst) > bodies);
