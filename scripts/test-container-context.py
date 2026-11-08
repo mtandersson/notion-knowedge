@@ -16,13 +16,12 @@ def main():
     required = {
         "Cargo.toml", "Cargo.lock", "crates/server/Cargo.toml",
         "crates/server/src/main.rs", "crates/retrieval/migrations/0001_initial.sql",
-        "vendor/candle-core/Cargo.toml", "vendor/candle-core/Cargo.toml.orig",
         "vendor/arrow-ipc/Cargo.toml", "vendor/arrow-ipc/src/lib.rs",
         "vendor/arrow-ipc/LICENSE.txt", "vendor/arrow-ipc/NOTICE.txt",
         "vendor/lance-encoding/Cargo.toml", "vendor/lance-encoding/build.rs",
         "vendor/lance-encoding/protos/encodings_v2_0.proto",
         "vendor/lance-encoding/protos/encodings_v2_1.proto",
-        "vendor/candle-core/src/lib.rs", "vendor/candle-core/LICENSE", "vendor/README.md",
+        "vendor/README.md",
     }
     forbidden = {
         ".env", ".env.local", "credentials.json", "private.key", "runtime/state.sqlite",
@@ -30,6 +29,7 @@ def main():
         "crates/retrieval/models/model.safetensors", "crates/retrieval/models/config.json",
         "crates/retrieval/models/tokenizer.json", "crates/retrieval/index/chunks.lance/data/file.lance",
         "crates/retrieval/state/state.sqlite", "crates/retrieval/private-notes.txt",
+        "vendor/candle-core/Cargo.toml", "vendor/candle-core/src/lib.rs",
         "vendor/candle-core/models/model.safetensors", "vendor/candle-core/tests/test.pt",
         "vendor/candle-core/src/credentials.json",
     }

@@ -1672,8 +1672,23 @@ async fn actual_scheduled_http_transient_source_attempts_back_off_then_exhaust_w
     use notion_knowledge_retrieval::schedule::{ScheduleEventKind, ScheduleStatus};
     let http = HttpNotion::start().await;
     let f = Fixture::new(&http).await;
-    let (worker, stop, server) =
-        scheduled_server_attempts(&f, &http, std::time::Duration::from_millis(50), 2).await;
+    // Stall the source during inventory so its deadline determines the retry path.
+    http.pause.armed.store(true, Ordering::SeqCst);
+    let (worker, stop, server) = scheduled_server_budgets(
+        &f,
+        &http,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(1),
+        2,
+        false,
+    )
+    .await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        http.pause.started.notified(),
+    )
+    .await
+    .unwrap();
     let waiting = await_schedule(&worker, |s| s.status == ScheduleStatus::RetryWait).await;
     assert_eq!(waiting.attempts, 1);
     assert_eq!(

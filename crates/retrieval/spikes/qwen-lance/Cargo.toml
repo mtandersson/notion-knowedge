@@ -15,8 +15,8 @@ notion-knowledge-core = { path = "../../../core" }
 anyhow = "1"
 arrow-array = "58.4"
 arrow-schema = "58.4"
-candle-core = "=0.11.0"
-candle-nn = "=0.11.0"
+candle-core = "=0.11.1"
+candle-nn = "=0.11.1"
 fastembed = { version = "=7.1.0", default-features = false, features = ["qwen3", "ort-load-dynamic"] }
 futures = "0.3"
 # 0.39.0 references Error::Http even in embedded-only builds. Runtime is local.
@@ -32,6 +32,5 @@ debug = 0
 debug = 0
 
 [patch.crates-io]
-candle-core = { path = "../../../../vendor/candle-core" }
 arrow-ipc = { path = "../../../../vendor/arrow-ipc" }
 lance-encoding = { path = "../../../../vendor/lance-encoding" }

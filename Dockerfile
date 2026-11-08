@@ -21,7 +21,7 @@ RUN cargo install cargo-chef --version 0.1.78 --locked
 WORKDIR /build
 
 # Source edits rerun prepare, but unchanged Cargo graph emits the same recipe.
-# The vendor tree is a required local security-patched dependencies.
+# Arrow IPC and Lance encoding retain local compression security patches.
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
@@ -31,7 +31,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 ARG VERSION
 COPY --from=planner /build/recipe.json recipe.json
-# The path-patched Candle dependency must exist during the locked cook phase.
+# The Arrow IPC / Lance encoding patches must exist during locked cook.
 COPY vendor ./vendor
 RUN cargo chef cook --release --locked --package notion-knowledge-server \
     --features webhook-worker --recipe-path recipe.json
