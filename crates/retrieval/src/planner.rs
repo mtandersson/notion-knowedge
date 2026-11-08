@@ -4,7 +4,7 @@ use crate::{
     commit::{AliasProjection, CommitBinding, IndexCommitCoordinator, RelationProjection},
 };
 use futures::{StreamExt, stream};
-use notion_knowledge_core::logging::{SyncPhase, SyncProgressLog};
+use notion_knowledge_core::logging::{SyncPhase, SyncProgressLog, sync_task};
 use notion_knowledge_core::{
     aliases::AliasSources,
     backend::{BackendErrorKind, Page, PageId},
@@ -319,10 +319,14 @@ impl AuthoritativeReconciliationPlanner {
         let complete = plan.traversal_complete;
         let discovered = &discovered;
         let mut inspections = stream::iter(ids)
-            .map(|id| async move {
-                let result = self
-                    .inspect(&id, discovered.contains(&id), local.get(&id), complete)
-                    .await;
+            .enumerate()
+            .map(|(task, id)| async move {
+                let result = sync_task(
+                    SyncPhase::Planning,
+                    task + 1,
+                    self.inspect(&id, discovered.contains(&id), local.get(&id), complete),
+                )
+                .await;
                 (id, result)
             })
             .buffer_unordered(8);

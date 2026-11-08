@@ -48,6 +48,11 @@ URLs or content. Discovery totals are unknown until traversal finishes; progress
 does not imply indexing or search readiness. Startup still prepares the complete
 available subset before serving it.
 
+Individual HTTP events include a `worker` label such as `discovery-17` or
+`planning-8`, plus `runtime_thread`. The worker identifies an async fetch branch
+and keeps one correlation ID across its requests; its runtime thread may change
+between awaits. Multiple HTTP requests can overlap on the same runtime thread.
+
 For a corrupt cache file that cannot be classified as an identity/schema
 mismatch, stop the service and run the explicit trusted operator command with
 the normal scope, Notion credential and offline embedding settings:
