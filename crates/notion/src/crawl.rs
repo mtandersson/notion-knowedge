@@ -1,7 +1,7 @@
 //! Walk physical ancestry only, never global search or cross-page references.
 use crate::{NotionClient, pages::page_id};
 use futures_util::{StreamExt, stream::FuturesUnordered};
-use notion_knowledge_core::logging::{SyncPhase, SyncProgressLog};
+use notion_knowledge_core::logging::{SyncPhase, SyncProgressLog, sync_task};
 use notion_knowledge_core::{
     backend::{BackendError, BackendErrorKind, BackendFuture, PageId},
     discovery::{
@@ -248,12 +248,16 @@ impl NotionClient {
                 .pop_front()
                 .expect("configured roots precede children");
             visited.insert((node.kind, node.id.clone()));
-            self.crawl_node(
-                &node,
-                (&permitted_roots, &rules),
-                &mut queue,
-                &mut pages,
-                &mut skipped,
+            sync_task(
+                SyncPhase::Discovery,
+                visited.len(),
+                self.crawl_node(
+                    &node,
+                    (&permitted_roots, &rules),
+                    &mut queue,
+                    &mut pages,
+                    &mut skipped,
+                ),
             )
             .await?;
             if !pages.contains_key(&node.id) {
@@ -288,19 +292,23 @@ impl NotionClient {
                     processed += 1;
                     continue;
                 }
+                let task = visited.len();
                 pending.push(async move {
                     let mut children = VecDeque::new();
                     let mut pages = BTreeMap::new();
                     let mut skipped = BTreeMap::new();
-                    let result = self
-                        .crawl_node(
+                    let result = sync_task(
+                        SyncPhase::Discovery,
+                        task,
+                        self.crawl_node(
                             &node,
                             (permitted_roots, rules),
                             &mut children,
                             &mut pages,
                             &mut skipped,
-                        )
-                        .await;
+                        ),
+                    )
+                    .await;
                     (node, result, children, pages, skipped)
                 });
             }

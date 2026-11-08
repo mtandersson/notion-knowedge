@@ -13,6 +13,7 @@ static LOG_LEVEL: AtomicU8 = AtomicU8::new(Level::Info as u8);
 
 tokio::task_local! {
     static REQUEST_ID: CorrelationId;
+    static SYNC_TASK: (SyncPhase, usize);
 }
 
 /// The only accepted event fields are fixed enums, numeric durations/statuses
@@ -101,6 +102,31 @@ pub enum SyncPhase {
     PreparingSearch,
 }
 
+impl SyncPhase {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Discovery => "discovery",
+            Self::Planning => "planning",
+            Self::Indexing => "indexing",
+            Self::PreparingSearch => "preparing_search",
+        }
+    }
+}
+
+/// An async fetch branch may move between runtime threads. Keep its numeric
+/// worker label and correlation ID stable across its HTTP requests.
+pub async fn sync_task<T>(phase: SyncPhase, task: usize, future: impl Future<Output = T>) -> T {
+    SYNC_TASK
+        .scope((phase, task), scope(CorrelationId::new(), future))
+        .await
+}
+
+fn sync_worker() -> Option<String> {
+    SYNC_TASK
+        .try_with(|(phase, task)| format!("{}-{task}", phase.label()))
+        .ok()
+}
+
 /// Periodic operator progress contains counts only, never source identifiers.
 pub struct SyncProgressLog {
     phase: SyncPhase,
@@ -137,12 +163,7 @@ impl SyncProgressLog {
         if LOG_LEVEL.load(Ordering::Relaxed) < Level::Info as u8 {
             return;
         }
-        let phase = match self.phase {
-            SyncPhase::Discovery => "discovery",
-            SyncPhase::Planning => "planning",
-            SyncPhase::Indexing => "indexing",
-            SyncPhase::PreparingSearch => "preparing_search",
-        };
+        let phase = self.phase.label();
         let _ = writeln!(
             std::io::stderr().lock(),
             "{}",
@@ -151,6 +172,7 @@ impl SyncProgressLog {
                 "status": if finished { "completed" } else { "running" },
                 "processed": processed, "total": total, "pages": pages,
                 "skipped": skipped, "elapsed_seconds": self.started.elapsed().as_secs(),
+            "runtime_thread": format!("{:?}", std::thread::current().id()),
             })
         );
     }
@@ -229,6 +251,8 @@ pub fn event_json(
         "duration_ms": elapsed.as_millis(),
         "outcome": outcome.label(),
         "http_status": status,
+        "worker": sync_worker(),
+        "runtime_thread": format!("{:?}", std::thread::current().id()),
     })
     .to_string()
 }
@@ -315,7 +339,9 @@ mod tests {
         assert_eq!(parsed["outcome"], "failed");
         assert_eq!(parsed["http_status"], 503);
         assert_eq!(parsed["duration_ms"], 13);
-        assert_eq!(parsed.as_object().unwrap().len(), 7);
+        assert_eq!(parsed.as_object().unwrap().len(), 9);
+        assert!(parsed["worker"].is_null());
+        assert!(parsed["runtime_thread"].as_str().is_some());
         assert!(!line.contains("authorization"));
         assert!(!line.contains("token"));
         assert!(!line.contains("url"));
@@ -334,6 +360,15 @@ mod tests {
 
     #[tokio::test]
     async fn task_scope_propagates_but_does_not_leak_across_requests() {
+        sync_task(SyncPhase::Discovery, 3, async {
+            assert_eq!(sync_worker().as_deref(), Some("discovery-3"));
+            let id = current_id();
+            tokio::task::yield_now().await;
+            assert_eq!(sync_worker().as_deref(), Some("discovery-3"));
+            assert_eq!(current_id(), id);
+        })
+        .await;
+        assert!(sync_worker().is_none());
         let requested = CorrelationId::new();
         let actual = scope(requested.clone(), async {
             let same = current_id();
