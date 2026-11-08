@@ -256,6 +256,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn raw_html_fences_do_not_hide_following_copied_references() {
+        let markdown = format!(
+            "<script>\nconst template = `\n```\n`;\n</script>\n<synced_block_reference url=\"https://notion.so/{ID}\"></synced_block_reference>"
+        );
+        let example = format!("{markdown}\n");
+        let split = example.find("<synced_block_reference").unwrap();
+        let literal = format!(
+            "{}\n```xml\n{}\n```\n",
+            &example[..split],
+            &example[split..]
+        );
+        assert!(read(200, response(&literal).to_string()).await.0.is_ok());
+        let (result, _) = read(200, response(&markdown).to_string()).await;
+        assert_eq!(
+            result.unwrap_err().kind,
+            BackendErrorKind::UnsupportedContent
+        );
+    }
+
+    #[tokio::test]
     async fn synced_reference_validation_has_a_finite_page_budget() {
         let reference = format!(
             "<synced_block_reference url=\"https://notion.so/{ID}\">Known text.</synced_block_reference>\n"

@@ -56,22 +56,12 @@ pub(crate) fn unverifiable(markdown: &str) -> bool {
             .last()
             .filter(|name| matches!(name.as_str(), "script" | "style"))
         {
-            if let Some(rest) = markdown[start..].strip_prefix("</") {
-                let length = rest
-                    .find(|ch: char| ch.is_whitespace() || ch == '>')
-                    .unwrap_or(rest.len());
-                if rest[..length].eq_ignore_ascii_case(name) {
-                    let suffix = &rest[length..];
-                    let trimmed = suffix.trim_start();
-                    if trimmed.starts_with('>') {
-                        cursor = start + 2 + length + suffix.len() - trimmed.len() + 1;
-                        literal_tags.pop();
-                        continue;
-                    }
-                }
+            if let Some(end) = crate::links::raw_html_end(&markdown[start..], name) {
+                cursor = start + end;
+                literal_tags.pop();
+                continue;
             }
-            cursor = start + 1;
-            continue;
+            return !pending.is_empty();
         }
         // Match existing Markdown escapes and ignore comments/code/fences,
         // including fences nested inside enhanced wrappers.
