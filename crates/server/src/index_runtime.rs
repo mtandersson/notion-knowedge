@@ -17,6 +17,26 @@ use notion_knowledge_retrieval::{
 };
 use std::{path::Path, sync::Arc};
 
+pub(crate) fn has_fatal_sync_failure(
+    progress: &notion_knowledge_retrieval::durable_plan::DurableProgress,
+) -> bool {
+    progress
+        .failed
+        .values()
+        .chain(progress.planning_failures.values())
+        .chain(progress.run_failures.values())
+        .any(|failure| {
+            use notion_knowledge_retrieval::durable_plan::DurableFailure;
+            matches!(
+                failure,
+                DurableFailure::Index
+                    | DurableFailure::Ownership
+                    | DurableFailure::Unauthenticated
+                    | DurableFailure::TraversalUnauthenticated
+            )
+        })
+}
+
 pub struct IndexRuntime {
     pub coordinator: Arc<IndexCommitCoordinator>,
     pub scope: ReconciliationScope,
@@ -314,22 +334,7 @@ impl IndexRuntime {
             // An unreadable source page does not invalidate other cached pages.
             // Keep its existing failure record for status/retry, while storage,
             // ownership and credential failures still prevent serving this cache.
-            if progress
-                .failed
-                .values()
-                .chain(progress.planning_failures.values())
-                .chain(progress.run_failures.values())
-                .any(|failure| {
-                    use notion_knowledge_retrieval::durable_plan::DurableFailure;
-                    matches!(
-                        failure,
-                        DurableFailure::Index
-                            | DurableFailure::Ownership
-                            | DurableFailure::Unauthenticated
-                            | DurableFailure::TraversalUnauthenticated
-                    )
-                })
-            {
+            if has_fatal_sync_failure(&progress) {
                 break Err("cache resync incomplete; retry startup");
             }
             if progress.pending.is_empty() {

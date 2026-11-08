@@ -161,9 +161,11 @@ credentials and upstream error strings are excluded. Run status retains existing
 sanitized page-failure identifiers for targeted explicit retry.
 
 Retryable run-level failures retain the active run and use exponential capped
-backoff; exhaustion stops automatic admission. Actual failed pages and planning
-failures hold the cycle after remaining independent safe pending pages are handled,
-without implicit retry or spending the transient budget. Held or exhausted runs
+backoff; exhaustion stops automatic admission. After independent page work drains,
+source-only skips retain their error evidence and end the cycle at the next normal
+interval, so the daily/weekly catch-up can try them again without manual repair.
+Index, ownership and credential failures still hold the cycle without spending
+the transient budget. Held or exhausted runs
 reserve no webhook admission; unrelated events continue while failure evidence
 remains available for explicit recovery. Checkpointed healthy pending runs reserve
 admission until resume or explicit abandonment, without consuming inbox attempts.

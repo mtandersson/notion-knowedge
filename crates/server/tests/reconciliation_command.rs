@@ -3253,6 +3253,101 @@ async fn cache_inventory_can_outlive_page_budget_while_page_refresh_stays_bounde
 }
 
 #[tokio::test]
+async fn periodic_sync_retries_unreadable_pages_on_the_next_normal_cycle() {
+    use notion_knowledge_retrieval::schedule::{
+        SchedulePolicy, ScheduleReconfiguration, ScheduleStatus,
+    };
+    use notion_knowledge_server::scheduled_reconciliation::{Settings, runtime::Worker};
+    use notion_knowledge_server::webhook_worker::runtime::now_ms;
+    use std::time::Duration;
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    http.state.lock().unwrap().unsupported_page_content = true;
+    let worker = Worker {
+        index: f.open(&http, OpenMode::ExistingWrite).await,
+        settings: Settings {
+            interval: 86400,
+            attempts: 1,
+            backoff: 1,
+            maximum_backoff: 1,
+        },
+        poll: Duration::from_secs(1),
+        timeout: Duration::from_secs(60),
+        inventory_timeout: Duration::from_secs(60),
+    };
+    assert!(worker.tick(CancellationToken::new()).await.unwrap());
+    let coordinator = &worker.index.coordinator;
+    let first = coordinator.schedule("periodic").unwrap();
+    assert_eq!(first.status, ScheduleStatus::Ready);
+    assert!(first.active_run.is_none());
+    assert!(first.next_deadline >= now_ms() / 1000 + 86390);
+    assert!(
+        worker
+            .index
+            .chunks()
+            .page_chunks(PAGE)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !worker
+            .index
+            .chunks()
+            .search_snapshot()
+            .await
+            .unwrap()
+            .vector_query(&[1.0, 0.0, 0.0], 3, 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        coordinator
+            .last_successful_reconciliation()
+            .unwrap()
+            .is_none()
+    );
+    // Advance the existing schedule explicitly; no day-long sleep or poll loop.
+    http.state.lock().unwrap().unsupported_page_content = false;
+    let now = now_ms() / 1000;
+    let state = coordinator.state();
+    let lease = state.acquire_lease(now, 30).unwrap();
+    coordinator
+        .reconfigure_schedule(
+            &lease,
+            now,
+            "periodic",
+            &ScheduleReconfiguration {
+                previous_binding: coordinator.binding().clone(),
+                policy: SchedulePolicy::new(86400, 1, 1, 1).unwrap(),
+                next_deadline: now,
+            },
+        )
+        .unwrap();
+    state.release_lease(&lease, now).unwrap();
+    assert!(worker.tick(CancellationToken::new()).await.unwrap());
+    let second = coordinator.schedule("periodic").unwrap();
+    assert_eq!(second.status, ScheduleStatus::Ready);
+    assert!(second.active_run.is_none());
+    assert!(
+        !worker
+            .index
+            .chunks()
+            .page_chunks(PAGE)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        coordinator
+            .last_successful_reconciliation()
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn scheduled_inventory_uses_its_budget_before_bounded_page_work() {
     use notion_knowledge_server::scheduled_reconciliation::{Settings, runtime::Worker};
     use std::time::Duration;

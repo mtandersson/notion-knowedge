@@ -141,7 +141,7 @@ pub mod runtime {
                             } else {
                                 self.index.runner.apply_next(&run, lease.clone(), clock.clone(), self.index.provider.as_ref()).await?
                             };
-                            if progress.pending.is_empty() && progress.failed_pages() == 0 && progress.run_failures.is_empty() {
+                            if progress.pending.is_empty() && !crate::index_runtime::has_fatal_sync_failure(&progress) {
                                 crate::index_runtime::prepare_search_if_missing(coordinator, &self.index.handler, lease.clone(), clock)
                                     .await.map_err(|_| RunnerError::Journal(JournalError::Unavailable))?;
                             }
@@ -161,7 +161,15 @@ pub mod runtime {
                     match result {
                         Some(Ok(p)) => {
                             if p.pending.is_empty() && (p.failed_pages() > 0 || !p.run_failures.is_empty()) {
-                                coordinator.hold_schedule(&lease, now_ms()/1000, ID).map_err(|_| "scheduled hold unavailable")?;
+                                if crate::index_runtime::has_fatal_sync_failure(&p) {
+                                    coordinator.hold_schedule(&lease, now_ms()/1000, ID).map_err(|_| "scheduled hold unavailable")?;
+                                } else {
+                                    // Preserve source failures, then try the source again on
+                                    // the normal interval instead of requiring manual repair.
+                                    let now = now_ms()/1000;
+                                    let next = now.checked_add(self.settings.interval).ok_or("scheduled deadline unavailable")?;
+                                    coordinator.abandon_schedule(&lease, now, ID, next).map_err(|_| "scheduled source skips unavailable")?;
+                                }
                                 return Ok(true)
                             }
                             if p.pending.is_empty() { return Ok(true) }
