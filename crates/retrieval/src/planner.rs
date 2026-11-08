@@ -318,13 +318,12 @@ impl AuthoritativeReconciliationPlanner {
         let local = &plan.local;
         let complete = plan.traversal_complete;
         let discovered = &discovered;
-        let mut inspections = stream::iter(ids.iter())
+        let mut inspections = stream::iter(ids)
             .map(|id| async move {
-                (
-                    id,
-                    self.inspect(id, discovered.contains(id), local.get(id), complete)
-                        .await,
-                )
+                let result = self
+                    .inspect(&id, discovered.contains(&id), local.get(&id), complete)
+                    .await;
+                (id, result)
             })
             .buffer_unordered(8);
         let mut processed = 0;
