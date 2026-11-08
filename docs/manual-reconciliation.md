@@ -51,7 +51,12 @@ binding. `retry` requires a failed application page in an open run and replans
 that page explicitly. Unknown, extra or mixed transport/operator arguments fail
 before credentials or state are used. Successful pages cannot be retried, and
 resume never retries failed pages implicitly. Planning/access failures appear
-separately; use a new run after repairing discovery/permissions.
+separately; use a new run after repairing discovery/permissions. Intentional
+non-traversal of copied synced references does not make physical inventory
+incomplete. Unverifiable copied content instead fails its host page as
+`UnsupportedSource`; independent manual/scheduled page work continues. Actual
+inaccessible physical subtrees still prevent orphan deletion. Automatic cache
+reset/startup retains its fail-fast, unavailable-until-complete behavior.
 
 `rebuild-relations` atomically starts inventory and invalidates only derived
 relation completeness through owned, fenced maintenance, then uses the same

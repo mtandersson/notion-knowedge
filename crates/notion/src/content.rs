@@ -64,7 +64,10 @@ impl NotionClient {
         if content.object != "page_markdown" || page_id(&content.id).ok().as_ref() != Some(&id) {
             return Err(error(BackendErrorKind::Internal));
         }
-        if content.truncated || !content.unknown_block_ids.is_empty() {
+        if content.truncated
+            || !content.unknown_block_ids.is_empty()
+            || crate::reference_completeness::unverifiable(&content.markdown)
+        {
             return Err(error(BackendErrorKind::UnsupportedContent));
         }
         // Do not trim/indent/rewrite: tabs encode children, spaces and fences encode code.
@@ -78,6 +81,7 @@ impl NotionClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use notion_knowledge_core::backend::{NotionRead, PageId};
     use serde_json::{Value, json};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     const ID: &str = "12345678-1234-1234-1234-123456789abc";
@@ -107,7 +111,8 @@ mod tests {
             }
             requests
         });
-        let result = client.read_content(ID).await;
+        // Fresh MCP reads use this production port; validation must apply here too.
+        let result = NotionRead::read_content(&client, &PageId(ID.into())).await;
         (result, server.await.unwrap())
     }
     fn response(markdown: &str) -> Value {
@@ -144,6 +149,154 @@ mod tests {
             );
         }
     }
+    #[tokio::test]
+    async fn inline_synced_content_and_empty_originals_are_complete_without_following_references() {
+        for markdown in [
+            String::new(),
+            format!("<synced_block url=\"https://notion.so/{ID}\">\n</synced_block>"),
+            format!("<synced-block url=\"https://notion.so/{ID}\" />"),
+            format!(
+                "<synced_block_reference url=\"https://notion.so/{ID}\">\n\tKnown text.\n</synced_block_reference>"
+            ),
+            format!(
+                "<synced-block-reference url=\"https://notion.so/{ID}\">\nKnown text.\n</synced-block-reference>"
+            ),
+            format!(
+                "<synced_block_reference url=\"https://notion.so/{ID}\">\n```html\n<synced_block_reference />\n```\n</synced_block_reference>"
+            ),
+        ] {
+            let (content, requests) = read(200, response(&markdown).to_string()).await;
+            assert_eq!(content.unwrap().markdown, markdown);
+            assert_eq!(
+                requests.len(),
+                2,
+                "content validation must never fetch an original"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unresolved_copied_content_never_returns_a_complete_page() {
+        for (name, body) in [
+            ("synced_block_reference", ""),
+            ("synced_block_reference", "\n\t \n"),
+            ("synced-block-reference", "\n\n"),
+            ("synced_block_reference", "\n<!-- no rendered content -->\n"),
+        ] {
+            let markdown = format!(
+                "Visible host text.\n<{name} url=\"https://notion.so/{ID}\">{body}</{name}>"
+            );
+            let (result, requests) = read(200, response(&markdown).to_string()).await;
+            assert_eq!(
+                result.unwrap_err().kind,
+                BackendErrorKind::UnsupportedContent
+            );
+            assert_eq!(requests.len(), 2);
+        }
+        for markdown in [
+            format!("<synced_block_reference url=\"https://notion.so/{ID}\"/>"),
+            format!("<synced_block_reference url=\"https://notion.so/{ID}\">unfinished"),
+            "</synced_block_reference>".into(),
+            "<synced_block_reference>text</synced_block_reference>".into(),
+            "<synced_block_reference url=\"https://example.test/outside\">text</synced_block_reference>".into(),
+            format!("<synced_block_reference url=\"https://notion.so/{ID}\" notice=\"unavailable\">text</synced_block_reference>"),
+            format!("<synced_block_reference url=\"https://notion.so/{ID}\">text</synced-block-reference>"),
+        ] {
+            assert_eq!(read(200, response(&markdown).to_string()).await.0.unwrap_err().kind, BackendErrorKind::UnsupportedContent);
+        }
+    }
+
+    #[tokio::test]
+    async fn copied_reference_examples_are_literal_in_code_comments_and_escapes() {
+        let reference = format!(
+            "<synced_block_reference url=\"https://notion.so/{ID}\"></synced_block_reference>"
+        );
+        for markdown in [
+            format!("```html\n{reference}\n```"),
+            format!("`{reference}`"),
+            format!("\\{}", reference.replace("</", "\\</")),
+            format!("<!--\n{reference}\n-->"),
+            format!("<code>{reference}</code>"),
+            format!("<CODE>{reference}</CODE>"),
+            format!("<PRE>{reference}</PRE>"),
+            format!("<SCRIPT>{reference}</SCRIPT>"),
+            format!("<STYLE>{reference}</STYLE>"),
+            format!("<callout>\n\t```html\n\t{reference}\n\t```\n</callout>"),
+        ] {
+            assert_eq!(
+                read(200, response(&markdown).to_string())
+                    .await
+                    .0
+                    .unwrap()
+                    .markdown,
+                markdown
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_literal_text_cannot_hide_following_unresolved_content() {
+        let reference = format!(
+            "<synced_block_reference url=\"https://notion.so/{ID}\"></synced_block_reference>"
+        );
+        for prefix in [
+            r#"<script>const example = "<code>";</script>"#,
+            r#"<style>example: "<pre>";</style>"#,
+            r#"<style>example: "</☃☃</</";</style>"#,
+            r#"<SCRIPT>const example = "<code data-x='";</SCRIPT >"#,
+            r#"<STYLE>example: '<synced_block_reference url="unfinished';</STYLE>"#,
+        ] {
+            let markdown = format!("{prefix}\n{reference}");
+            let (result, requests) = read(200, response(&markdown).to_string()).await;
+            assert_eq!(
+                result.unwrap_err().kind,
+                BackendErrorKind::UnsupportedContent
+            );
+            assert_eq!(requests.len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_html_fences_do_not_hide_following_copied_references() {
+        let markdown = format!(
+            "<script>\nconst template = `\n```\n`;\n</script>\n<synced_block_reference url=\"https://notion.so/{ID}\"></synced_block_reference>"
+        );
+        let example = format!("{markdown}\n");
+        let split = example.find("<synced_block_reference").unwrap();
+        let literal = format!(
+            "{}\n```xml\n{}\n```\n",
+            &example[..split],
+            &example[split..]
+        );
+        assert!(read(200, response(&literal).to_string()).await.0.is_ok());
+        let (result, _) = read(200, response(&markdown).to_string()).await;
+        assert_eq!(
+            result.unwrap_err().kind,
+            BackendErrorKind::UnsupportedContent
+        );
+    }
+
+    #[tokio::test]
+    async fn synced_reference_validation_has_a_finite_page_budget() {
+        let reference = format!(
+            "<synced_block_reference url=\"https://notion.so/{ID}\">Known text.</synced_block_reference>\n"
+        );
+        assert!(
+            read(200, response(&reference.repeat(128)).to_string())
+                .await
+                .0
+                .is_ok()
+        );
+        assert_eq!(
+            read(200, response(&reference.repeat(129)).to_string())
+                .await
+                .0
+                .unwrap_err()
+                .kind,
+            BackendErrorKind::UnsupportedContent
+        );
+    }
+
     #[tokio::test]
     async fn incomplete_or_malformed_content_never_returns_partial_success() {
         let mut cases = vec![(Value::Null, BackendErrorKind::Internal)];

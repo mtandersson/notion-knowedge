@@ -25,6 +25,8 @@ pub mod crawl;
 
 pub mod content;
 
+mod reference_completeness;
+
 mod media_identity;
 
 pub mod links;

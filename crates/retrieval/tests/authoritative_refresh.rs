@@ -49,6 +49,7 @@ struct Model {
     archived: bool,
     root_revision: String,
     hide_page: bool,
+    copied_reference: bool,
     inaccessible_other: bool,
     inaccessible_foreign: bool,
     foreign_parent: String,
@@ -72,6 +73,7 @@ impl Default for Model {
             archived: false,
             root_revision: "2026-10-10T11:00:00Z".into(),
             hide_page: false,
+            copied_reference: false,
             inaccessible_other: false,
             inaccessible_foreign: false,
             foreign_parent: "workspace".into(),
@@ -203,6 +205,9 @@ impl HttpNotion {
                     let mut children = vec![
                         json!({"object":"block","id":OTHER,"type":"child_page","archived":false,"has_children":false,"parent":{"type":"page_id","page_id":ROOT},"child_page":{"title":"Separate"}}),
                     ];
+                    if snapshot.copied_reference {
+                        children.push(json!({"object":"block","id":"66666666-6666-6666-6666-666666666666","type":"synced_block","archived":false,"has_children":true,"parent":{"type":"page_id","page_id":ROOT},"synced_block":{"synced_from":{"block_id":FOREIGN}}}));
+                    }
                     for (id, page) in &snapshot.extra {
                         if page.visible {
                             children.push(json!({"object":"block","id":id,"type":"child_page","archived":false,"has_children":false,"parent":{"type":"page_id","page_id":ROOT},"child_page":{"title":page.title}}));
@@ -2245,11 +2250,75 @@ async fn planner_dry_run_missing_metadata_stale_unchanged_restored_and_empty_pag
     );
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn intentional_synced_references_preserve_physical_inventory_completeness() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    source.change(|m| m.copied_reference = true);
+    let plan = planner(&index, &source).plan().await.unwrap();
+    assert!(plan.traversal_complete);
+    assert!(plan.errors.is_empty());
+    assert!(plan.run_errors.is_empty());
+    assert_eq!(plan.scanned, 3);
+    assert_eq!(plan.planned_refresh(), 3);
+    assert_eq!(source.body_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(source.foreign_body_reads.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unresolved_synced_content_fails_its_host_without_stopping_independent_pages() {
+    use notion_knowledge_retrieval::durable_plan::DurableFailure;
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    source.change(|m| {
+        m.copied_reference = true;
+        m.markdown = format!("Host text.\n<synced_block_reference url=\"https://notion.so/{PAGE}\">\n</synced_block_reference>");
+    });
+    let provider = CountingProvider::new(index.embed.clone());
+    let service = runner(&index, &source);
+    let progress = service
+        .apply("unresolved-copy", index.lease.clone(), clock(), &provider)
+        .await
+        .unwrap();
+    assert_eq!(
+        progress.failed.get(PAGE),
+        Some(&DurableFailure::UnsupportedSource)
+    );
+    assert_eq!(progress.failed.len(), 1);
+    assert_eq!(progress.changed, 2);
+    assert!(progress.pending.is_empty());
+    assert!(progress.run_failures.is_empty());
+    assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+    assert_eq!(
+        index.coordinator.last_successful_reconciliation().unwrap(),
+        None
+    );
+    source.change(|m| {
+        m.markdown = format!("<synced_block_reference url=\"https://notion.so/{PAGE}\">Verified inline text.</synced_block_reference>");
+    });
+    let recovered = service
+        .retry_page(
+            "unresolved-copy",
+            PAGE,
+            index.lease.clone(),
+            clock(),
+            &provider,
+        )
+        .await
+        .unwrap();
+    assert!(recovered.failed.is_empty());
+    assert_eq!(recovered.changed, 3);
+    assert!(!index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn planner_absence_access_failures_and_races_never_authorize_deletion() {
     use notion_knowledge_retrieval::planner::{Difference, PlanError};
     let index = Fixture::new();
     index.create().await;
     let source = HttpNotion::start().await;
+    source.change(|m| m.copied_reference = true);
     let provider = CountingProvider::new(index.embed.clone());
     index
         .handler(source.client())

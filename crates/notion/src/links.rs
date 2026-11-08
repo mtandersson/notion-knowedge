@@ -182,17 +182,16 @@ fn enhanced(markdown: &str) -> Vec<EnhancedTag> {
     }
     tags
 }
-/// Extract graph-ready links and relation-property edges, retaining diagnostics.
-/// Does not fetch targets, authorize traversal, persist a graph or hash content.
-pub fn extract_relationships(content: &PageContent) -> Relationships {
+// Shared literal-aware projection for enhanced Markdown consumers. It retains
+// byte offsets while exposing fences nested in Notion's HTML/tab wrappers.
+fn mask_html(markdown: &str) -> (String, Vec<Range<usize>>) {
     // Notion wrappers can make CommonMark treat their child text as an HTML
     // block. Mask enhanced tags (including closing/wrapper tags) with spaces,
     // preserving byte positions and newlines before parsing Markdown children.
-    let tags = enhanced(&content.markdown);
-    let mut masked = content.markdown.as_bytes().to_vec();
+    let mut masked = markdown.as_bytes().to_vec();
     let mut html_ranges = Vec::new();
     let mut ignored_ranges = Vec::new();
-    for (event, range) in Parser::new_ext(&content.markdown, Options::all()).into_offset_iter() {
+    for (event, range) in Parser::new_ext(markdown, Options::all()).into_offset_iter() {
         if matches!(event, Event::Html(_) | Event::InlineHtml(_)) {
             html_ranges.push(range);
         }
@@ -200,11 +199,11 @@ pub fn extract_relationships(content: &PageContent) -> Relationships {
     // Comments can occur in the middle of a wrapper HTML event. Find their
     // actual spans, rather than assuming an event contains just one tag.
     let mut cursor = 0;
-    while let Some(relative) = content.markdown[cursor..].find("<!--") {
+    while let Some(relative) = markdown[cursor..].find("<!--") {
         let start = cursor + relative;
-        let end = content.markdown[start + 4..]
+        let end = markdown[start + 4..]
             .find("-->")
-            .map_or(content.markdown.len(), |n| start + 4 + n + 3);
+            .map_or(markdown.len(), |n| start + 4 + n + 3);
         if html_ranges
             .iter()
             .any(|range| range.start <= start && start < range.end)
@@ -256,6 +255,94 @@ pub fn extract_relationships(content: &PageContent) -> Relationships {
         }
     }
     let masked = String::from_utf8(masked).expect("mask preserves UTF-8");
+    (masked, ignored_ranges)
+}
+
+// The same raw closing rule is used by copied-reference validation. XML-like
+// Notion markup permits whitespace before '>', unlike CommonMark's raw block end.
+pub(crate) fn raw_html_end(markdown: &str, name: &str) -> Option<usize> {
+    for (start, _) in markdown.match_indices("</") {
+        let rest = &markdown[start + 2..];
+        // Compare the fixed literal name first: unrelated malformed closers
+        // must not repeatedly scan the remainder of an 8 MiB page.
+        let length = name.len();
+        if rest
+            .get(..length)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(name))
+        {
+            let suffix = &rest[length..];
+            let trimmed = suffix.trim_start();
+            if trimmed.starts_with('>') {
+                return Some(start + 2 + length + suffix.len() - trimmed.len() + 1);
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn literal_ranges(markdown: &str) -> Vec<Range<usize>> {
+    let (masked, mut ranges) = mask_html(markdown);
+    let mut masked = masked.into_bytes();
+    let mut raw_block: Option<(Range<usize>, String)> = None;
+    // The original CommonMark pass knows where raw script/style blocks end.
+    // Their data must not become Markdown fences after HTML tags are masked.
+    for (event, range) in Parser::new_ext(markdown, Options::all()).into_offset_iter() {
+        match event {
+            Event::Start(Tag::HtmlBlock) => {
+                let opening = markdown[range.clone()].trim_start();
+                let name = opening
+                    .strip_prefix('<')
+                    .unwrap_or("")
+                    .split(|ch: char| ch.is_whitespace() || ch == '>' || ch == '/')
+                    .next()
+                    .unwrap_or("");
+                if name.eq_ignore_ascii_case("script") || name.eq_ignore_ascii_case("style") {
+                    raw_block = Some((range, name.to_ascii_lowercase()));
+                }
+            }
+            Event::Html(_) => {
+                if let Some((block, _)) = raw_block.as_mut() {
+                    block.end = block.end.max(range.end);
+                }
+            }
+            Event::End(TagEnd::HtmlBlock) => {
+                if let Some((mut block, name)) = raw_block.take() {
+                    if let Some(end) = raw_html_end(&markdown[block.clone()], &name) {
+                        block.end = block.start + end;
+                    }
+                    for byte in &mut masked[block.clone()] {
+                        if !matches!(*byte, b'\n' | b'\r') {
+                            *byte = b' ';
+                        }
+                    }
+                    ranges.push(block);
+                }
+            }
+            _ => {}
+        }
+    }
+    let masked = String::from_utf8(masked).expect("mask preserves UTF-8");
+    let mut code_start = None;
+    for (event, range) in Parser::new_ext(&masked, Options::all()).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(_)) => code_start = Some(range.start),
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some(start) = code_start.take() {
+                    ranges.push(start..range.end);
+                }
+            }
+            Event::Code(_) => ranges.push(range),
+            _ => {}
+        }
+    }
+    ranges
+}
+
+/// Extract graph-ready links and relation-property edges, retaining diagnostics.
+/// Does not fetch targets, authorize traversal, persist a graph or hash content.
+pub fn extract_relationships(content: &PageContent) -> Relationships {
+    let tags = enhanced(&content.markdown);
+    let (masked, ignored_ranges) = mask_html(&content.markdown);
     let mut references = Vec::new();
     let mut code_ranges = ignored_ranges;
     let mut code_start = None;

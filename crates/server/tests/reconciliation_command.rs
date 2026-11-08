@@ -1266,6 +1266,9 @@ async fn actual_scheduled_http_preserves_deadline_restart_and_unchanged_next_cyc
     assert_eq!(worker.coordinator.schedule("periodic").unwrap(), finished);
     assert_eq!(http.body_reads.load(Ordering::SeqCst), bodies);
     assert_eq!(f.provider.count.load(Ordering::SeqCst), embeddings);
+    // Manual schedule changes require quiescent owned workers.
+    stop.cancel();
+    server.await.unwrap().unwrap();
     let now = now_ms() / 1000;
     let lease = worker.state.acquire_lease(now, 30).unwrap();
     worker
@@ -1282,6 +1285,8 @@ async fn actual_scheduled_http_preserves_deadline_restart_and_unchanged_next_cyc
         )
         .unwrap();
     worker.state.release_lease(&lease, now).unwrap();
+    let (worker, stop, server) =
+        scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
     await_schedule(&worker, |s| s.cycle == 2 && s.active_run.is_none()).await;
     // The unchanged cycle still revalidates authoritative relation membership.
     assert!(http.body_reads.load(Ordering::SeqCst) > bodies);
@@ -1759,6 +1764,9 @@ async fn actual_scheduled_http_manual_periodic_and_webhook_contention_preserves_
     let (scheduled, resumed_stop, resumed_server) =
         scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
     await_schedule(&scheduled, |s| s.cycle == 1 && s.active_run.is_none()).await;
+    // Drain owned workers before asserting stable graph and alias projections.
+    resumed_stop.cancel();
+    resumed_server.await.unwrap().unwrap();
     assert!(
         scheduled
             .coordinator
@@ -1777,8 +1785,6 @@ async fn actual_scheduled_http_manual_periodic_and_webhook_contention_preserves_
             .unwrap(),
         vec![PAGE]
     );
-    resumed_stop.cancel();
-    resumed_server.await.unwrap().unwrap();
     http.change(|m| {
         m.relation_name = Some("Webhook relations".into());
         m.title = "Apple".into();
@@ -2865,6 +2871,31 @@ async fn lost_or_incompatible_cache_resyncs_without_replaying_external_effects()
         }
         // HttpNotion rejects every non-GET request, including writes/uploads.
     }
+}
+
+#[tokio::test]
+async fn unresolved_synced_content_keeps_cache_rebuild_unavailable() {
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    http.state.lock().unwrap().markdown = format!(
+        "<synced_block_reference url=\"https://notion.so/{PAGE}\">\n</synced_block_reference>"
+    );
+    fs::remove_dir_all(&f.settings.index).unwrap();
+    assert!(
+        IndexRuntime::recover(
+            &f.settings,
+            &f.state,
+            authority(),
+            http.client(),
+            f.provider.clone()
+        )
+        .await
+        .is_err()
+    );
+    let state =
+        notion_knowledge_retrieval::sync_state::SqliteSyncStateStore::open_existing(&f.state)
+            .unwrap();
+    assert!(state.cache_rebuild_pending().unwrap());
 }
 
 #[tokio::test]
