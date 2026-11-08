@@ -263,10 +263,13 @@ fn mask_html(markdown: &str) -> (String, Vec<Range<usize>>) {
 pub(crate) fn raw_html_end(markdown: &str, name: &str) -> Option<usize> {
     for (start, _) in markdown.match_indices("</") {
         let rest = &markdown[start + 2..];
-        let length = rest
-            .find(|ch: char| ch.is_whitespace() || ch == '>')
-            .unwrap_or(rest.len());
-        if rest[..length].eq_ignore_ascii_case(name) {
+        // Compare the fixed literal name first: unrelated malformed closers
+        // must not repeatedly scan the remainder of an 8 MiB page.
+        let length = name.len();
+        if rest
+            .get(..length)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(name))
+        {
             let suffix = &rest[length..];
             let trimmed = suffix.trim_start();
             if trimmed.starts_with('>') {

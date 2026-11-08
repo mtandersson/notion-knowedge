@@ -242,6 +242,7 @@ mod tests {
         for prefix in [
             r#"<script>const example = "<code>";</script>"#,
             r#"<style>example: "<pre>";</style>"#,
+            r#"<style>example: "</☃☃</</";</style>"#,
             r#"<SCRIPT>const example = "<code data-x='";</SCRIPT >"#,
             r#"<STYLE>example: '<synced_block_reference url="unfinished';</STYLE>"#,
         ] {
