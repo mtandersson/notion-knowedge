@@ -496,7 +496,7 @@ pub mod runtime {
                             .await.map_err(|_| RefreshError::Index)
                     } => match result {
                         Ok(_)=>ProcessingOutcome::Succeeded,
-                        Err(RefreshError::InvalidConfiguration | RefreshError::OutOfScope | RefreshError::PermanentSource)=>ProcessingOutcome::Permanent(EventFailure::Source),
+                        Err(RefreshError::InvalidConfiguration | RefreshError::OutOfScope | RefreshError::PermanentSource | RefreshError::Unauthenticated)=>ProcessingOutcome::Permanent(EventFailure::Source),
                         Err(RefreshError::Source)=>ProcessingOutcome::Retryable(EventFailure::Source),
                         Err(RefreshError::Index)=>ProcessingOutcome::Retryable(EventFailure::Index),
                         Err(RefreshError::Conflict)=>ProcessingOutcome::Retryable(EventFailure::Conflict),

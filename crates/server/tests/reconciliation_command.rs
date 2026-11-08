@@ -42,6 +42,8 @@ struct ExtraPage {
 struct Model {
     empty_content: bool,
     unsupported_page_content: bool,
+    unauthenticated_content: bool,
+    unauthenticated_page_metadata: bool,
     markdown: String,
     title: String,
     revision: String,
@@ -64,6 +66,8 @@ impl Default for Model {
         Self {
             empty_content: false,
             unsupported_page_content: false,
+            unauthenticated_content: false,
+            unauthenticated_page_metadata: false,
             markdown: "# Intro\n\nSaffron ravioli.\n\n## Other\n\nAn evergreen section.\n".into(),
             title: "First".into(),
             revision: "2026-10-10T12:00:00Z".into(),
@@ -160,8 +164,13 @@ impl HttpNotion {
                         ROOT.into()
                     };
                 }
-                let mut response = if (snapshot.inaccessible_root
-                    && route == format!("/v1/pages/{ROOT}"))
+                let mut response = if (snapshot.unauthenticated_content
+                    && route == format!("/v1/pages/{PAGE}/markdown"))
+                    || (snapshot.unauthenticated_page_metadata
+                        && route == format!("/v1/pages/{PAGE}"))
+                {
+                    json!({"object":"error", "code":"unauthorized"})
+                } else if (snapshot.inaccessible_root && route == format!("/v1/pages/{ROOT}"))
                     || (snapshot.inaccessible_other && route == format!("/v1/pages/{OTHER}"))
                     || (snapshot.inaccessible_page && route == format!("/v1/pages/{PAGE}"))
                 {
@@ -247,6 +256,8 @@ impl HttpNotion {
                 let bad = fail.swap(false, Ordering::SeqCst);
                 let status = if bad {
                     503
+                } else if response["code"] == "unauthorized" {
+                    401
                 } else if response.get("code").is_some() {
                     404
                 } else {
@@ -2988,6 +2999,52 @@ async fn unreadable_page_does_not_block_embedded_search_and_next_sync_can_recove
         0,
         2,
     );
+}
+
+#[tokio::test]
+async fn application_authentication_failure_keeps_cache_rebuild_unavailable() {
+    use notion_knowledge_retrieval::durable_plan::DurableFailure;
+    for after_embedding in [false, true] {
+        let http = HttpNotion::start().await;
+        let f = Fixture::new(&http).await;
+        if after_embedding {
+            *f.provider.boundary_pause.lock().unwrap() = Some(http.pause.clone());
+        } else {
+            http.state.lock().unwrap().unauthenticated_content = true;
+        }
+        fs::remove_dir_all(&f.settings.index).unwrap();
+        let recover = IndexRuntime::recover(
+            &f.settings,
+            &f.state,
+            authority(),
+            http.client(),
+            f.provider.clone(),
+        );
+        let revoke = async {
+            if after_embedding {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    http.pause.started.notified(),
+                )
+                .await
+                .unwrap();
+                http.state.lock().unwrap().unauthenticated_page_metadata = true;
+                http.pause.proceed.notify_one();
+            }
+        };
+        let (result, ()) = tokio::join!(recover, revoke);
+        assert!(result.is_err());
+        let runtime = f.open(&http, OpenMode::ReadOnly).await;
+        assert!(runtime.coordinator.state().cache_rebuild_pending().unwrap());
+        let progress = runtime
+            .coordinator
+            .reconciliation_progress("cache-reset")
+            .unwrap();
+        assert!(matches!(
+            progress.failed.get(PAGE),
+            Some(DurableFailure::Unauthenticated | DurableFailure::Index)
+        ));
+    }
 }
 
 #[tokio::test]

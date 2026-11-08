@@ -404,6 +404,7 @@ impl AuthoritativeReconciliationRunner {
                     }
                     RefreshError::OutOfScope => DurableFailure::Permission,
                     RefreshError::PermanentSource => DurableFailure::UnsupportedSource,
+                    RefreshError::Unauthenticated => DurableFailure::Unauthenticated,
                     RefreshError::Source => DurableFailure::Source,
                     RefreshError::Index | RefreshError::Unavailable => DurableFailure::Index,
                 };

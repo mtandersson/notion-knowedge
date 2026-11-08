@@ -360,6 +360,13 @@ impl IndexRuntime {
                     let _ = self.coordinator.drain_owned().await;
                     break Err("rebuilt search index unavailable");
                 }
+                if self
+                    .runner
+                    .complete("cache-reset", &lease, now_ms() / 1000)
+                    .is_err()
+                {
+                    break Err("cache sync completion unavailable");
+                }
                 if progress.failed_pages() > 0 || !progress.run_failures.is_empty() {
                     eprintln!(
                         "{}",
