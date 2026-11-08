@@ -4797,6 +4797,7 @@ name = "notion-knowledge-notion"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "futures-util",
  "notion-knowledge-core",
  "notion-knowledge-retrieval",
  "pulldown-cmark",

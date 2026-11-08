@@ -93,6 +93,69 @@ pub fn set_level(level: Level) {
     LOG_LEVEL.store(level as u8, Ordering::Relaxed);
 }
 
+#[derive(Clone, Copy)]
+pub enum SyncPhase {
+    Discovery,
+    Planning,
+    Indexing,
+    PreparingSearch,
+}
+
+/// Periodic operator progress contains counts only, never source identifiers.
+pub struct SyncProgressLog {
+    phase: SyncPhase,
+    started: Instant,
+    last: Option<Instant>,
+}
+
+impl SyncProgressLog {
+    pub fn new(phase: SyncPhase) -> Self {
+        Self {
+            phase,
+            started: Instant::now(),
+            last: None,
+        }
+    }
+
+    pub fn report(
+        &mut self,
+        processed: usize,
+        total: Option<usize>,
+        pages: usize,
+        skipped: usize,
+        finished: bool,
+    ) {
+        let now = Instant::now();
+        if !finished
+            && self
+                .last
+                .is_some_and(|last| now.duration_since(last) < Duration::from_secs(10))
+        {
+            return;
+        }
+        self.last = Some(now);
+        if LOG_LEVEL.load(Ordering::Relaxed) < Level::Info as u8 {
+            return;
+        }
+        let phase = match self.phase {
+            SyncPhase::Discovery => "discovery",
+            SyncPhase::Planning => "planning",
+            SyncPhase::Indexing => "indexing",
+            SyncPhase::PreparingSearch => "preparing_search",
+        };
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "{}",
+            serde_json::json!({
+                "operation": "cache_sync", "phase": phase,
+                "status": if finished { "completed" } else { "running" },
+                "processed": processed, "total": total, "pages": pages,
+                "skipped": skipped, "elapsed_seconds": self.started.elapsed().as_secs(),
+            })
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum Operation {
     HttpRequest,

@@ -1,5 +1,7 @@
 //! Walk physical ancestry only, never global search or cross-page references.
 use crate::{NotionClient, pages::page_id};
+use futures_util::{StreamExt, stream::FuturesUnordered};
+use notion_knowledge_core::logging::{SyncPhase, SyncProgressLog};
 use notion_knowledge_core::{
     backend::{BackendError, BackendErrorKind, BackendFuture, PageId},
     discovery::{
@@ -15,6 +17,7 @@ const VERSION: &str = "2026-03-11";
 // Fail explicitly rather than silently truncate enormous/malformed graphs.
 const MAX_NODES: usize = 100_000;
 const MAX_LIST_PAGES: usize = 10_000;
+const FETCH_CONCURRENCY: usize = 8;
 fn error(kind: BackendErrorKind) -> BackendError {
     BackendError {
         kind,
@@ -235,16 +238,45 @@ impl NotionClient {
         let mut visited = BTreeSet::new();
         let mut pages = BTreeMap::new();
         let mut skipped = BTreeMap::new();
-        while let Some(node) = queue.pop_front() {
-            if !visited.insert((node.kind, node.id.clone())) {
-                continue;
+        let mut progress = SyncProgressLog::new(SyncPhase::Discovery);
+        let mut processed = 0;
+        progress.report(0, None, 0, 0, false);
+        // Resolve all configured roots before any descendant may use them as
+        // ancestry authority. Descendants can then share this stable root set.
+        for _ in 0..roots.len() {
+            let node = queue
+                .pop_front()
+                .expect("configured roots precede children");
+            visited.insert((node.kind, node.id.clone()));
+            self.crawl_node(
+                &node,
+                (&permitted_roots, &rules),
+                &mut queue,
+                &mut pages,
+                &mut skipped,
+            )
+            .await?;
+            if !pages.contains_key(&node.id) {
+                permitted_roots.remove(&node.id);
             }
-            if visited.len() > MAX_NODES {
+            processed += 1;
+            progress.report(processed, None, pages.len(), skipped.len(), false);
+            if visited.len() > MAX_NODES || queue.len() > MAX_NODES {
                 return Err(error(BackendErrorKind::Internal));
             }
-            // Resolve configured roots even when excluded: an unknown root is
-            // never a successful empty authorization scope.
-            if node.parent.is_some() {
+        }
+        let permitted_roots = &permitted_roots;
+        let rules = &rules;
+        let mut pending = FuturesUnordered::new();
+        loop {
+            while pending.len() < FETCH_CONCURRENCY {
+                let Some(node) = queue.pop_front() else { break };
+                if !visited.insert((node.kind, node.id.clone())) {
+                    continue;
+                }
+                if visited.len() > MAX_NODES {
+                    return Err(error(BackendErrorKind::Internal));
+                }
                 let source = match node.kind {
                     Kind::Page => Some(SourceType::Page),
                     Kind::Database => Some(SourceType::Database),
@@ -253,18 +285,32 @@ impl NotionClient {
                 };
                 if let Some(reason) = source.and_then(|source| rules.exclusion(&node.id, source)) {
                     skipped.insert(node.id.clone(), reason);
+                    processed += 1;
                     continue;
                 }
+                pending.push(async move {
+                    let mut children = VecDeque::new();
+                    let mut pages = BTreeMap::new();
+                    let mut skipped = BTreeMap::new();
+                    let result = self
+                        .crawl_node(
+                            &node,
+                            (permitted_roots, rules),
+                            &mut children,
+                            &mut pages,
+                            &mut skipped,
+                        )
+                        .await;
+                    (node, result, children, pages, skipped)
+                });
             }
-            let result = self
-                .crawl_node(
-                    &node,
-                    (&permitted_roots, &rules),
-                    &mut queue,
-                    &mut pages,
-                    &mut skipped,
-                )
-                .await;
+            let Some((node, result, children, found_pages, found_skips)) = pending.next().await
+            else {
+                break;
+            };
+            queue.extend(children);
+            pages.extend(found_pages);
+            skipped.extend(found_skips);
             if let Err(e) = result {
                 // A configured root must be readable. Only descendants' access
                 // failures are legitimate skips; outage/rate-limit never succeed.
@@ -274,13 +320,13 @@ impl NotionClient {
                     return Err(e);
                 }
             }
-            if node.parent.is_none() && !pages.contains_key(&node.id) {
-                permitted_roots.remove(&node.id);
-            }
-            if queue.len() > MAX_NODES {
+            processed += 1;
+            progress.report(processed, None, pages.len(), skipped.len(), false);
+            if queue.len() + pending.len() > MAX_NODES {
                 return Err(error(BackendErrorKind::Internal));
             }
         }
+        progress.report(processed, Some(processed), pages.len(), skipped.len(), true);
         Ok(DiscoveryReport {
             roots: roots.into_iter().collect(),
             pages: pages.into_values().collect(),
@@ -644,6 +690,12 @@ mod tests {
     async fn mock(
         steps: Vec<(String, u16, Value)>,
     ) -> (NotionClient, tokio::task::JoinHandle<Vec<String>>) {
+        mock_with_overlapping_requests(steps, None).await
+    }
+    async fn mock_with_overlapping_requests(
+        mut steps: Vec<(String, u16, Value)>,
+        hold: Option<[String; 2]>,
+    ) -> (NotionClient, tokio::task::JoinHandle<Vec<String>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut client = NotionClient::integration("test-credential")
             .unwrap()
@@ -651,7 +703,8 @@ mod tests {
         client.api_root = format!("http://{}/v1", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
             let mut requests = Vec::new();
-            for (expected, status, value) in steps {
+            let mut held = Vec::new();
+            for _ in 0..steps.len() {
                 let (mut socket, _) =
                     tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
                         .await
@@ -679,10 +732,15 @@ mod tests {
                     }
                 }
                 let request = String::from_utf8(bytes).unwrap();
-                assert!(
-                    request.starts_with(&format!("{expected} HTTP/1.1\r\n")),
-                    "expected {expected}, got {request}"
-                );
+                // Independent endpoints may interleave; repeated observations
+                // of the same endpoint retain their original response order.
+                let index = steps
+                    .iter()
+                    .position(|(expected, _, _)| {
+                        request.starts_with(&format!("{expected} HTTP/1.1\r\n"))
+                    })
+                    .unwrap_or_else(|| panic!("unexpected request: {request}"));
+                let (expected, status, value) = steps.remove(index);
                 assert!(
                     request
                         .to_lowercase()
@@ -694,8 +752,19 @@ mod tests {
                         .contains("authorization: bearer test-credential\r\n")
                 );
                 let body = value.to_string();
-                socket.write_all(format!("HTTP/1.1 {status} Response\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
                 requests.push(request);
+                let replies = if hold.as_ref().is_some_and(|paths| paths.contains(&expected)) {
+                    held.push((socket, status, body));
+                    if held.len() < 2 {
+                        continue;
+                    }
+                    std::mem::take(&mut held)
+                } else {
+                    vec![(socket, status, body)]
+                };
+                for (mut socket, status, body) in replies {
+                    socket.write_all(format!("HTTP/1.1 {status} Response\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+                }
             }
             requests
         });
@@ -703,6 +772,44 @@ mod tests {
     }
     fn roots() -> Vec<PageId> {
         vec![PageId(ROOT.into())]
+    }
+    #[tokio::test]
+    async fn independent_page_and_block_fetches_overlap() {
+        let (client, task) = mock_with_overlapping_requests(
+            vec![
+                get(
+                    format!("pages/{ROOT}"),
+                    page_value(ROOT, json!({"type":"workspace","workspace":true})),
+                ),
+                children(
+                    ROOT,
+                    vec![
+                        block(CHILD, ROOT, "child_page", false),
+                        block(BLOCK, ROOT, "paragraph", true),
+                    ],
+                ),
+                get(
+                    format!("pages/{CHILD}"),
+                    page_value(CHILD, parent_value("page_id", ROOT)),
+                ),
+                get(
+                    format!("blocks/{BLOCK}"),
+                    block(BLOCK, ROOT, "paragraph", true),
+                ),
+                children(CHILD, vec![]),
+                children(BLOCK, vec![]),
+            ],
+            Some([
+                format!("GET /v1/pages/{CHILD}"),
+                format!("GET /v1/blocks/{BLOCK}"),
+            ]),
+        )
+        .await;
+        // Neither sibling response is released until both requests arrive.
+        let report = client.crawl_roots(&roots()).await.unwrap();
+        assert_eq!(report.pages.len(), 2);
+        assert!(report.skipped.is_empty());
+        assert_eq!(task.await.unwrap().len(), 6);
     }
     #[tokio::test]
     async fn selected_snapshot_preserves_provenance_without_following_links() {
