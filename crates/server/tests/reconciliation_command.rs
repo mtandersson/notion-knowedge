@@ -90,6 +90,7 @@ struct RequestPause {
 struct HttpNotion {
     state: Arc<Mutex<Model>>,
     body_reads: Arc<AtomicUsize>,
+    source_unavailable: Arc<AtomicBool>,
     server: tokio::task::JoinHandle<()>,
     port: u16,
     pause: Arc<RequestPause>,
@@ -99,13 +100,13 @@ impl HttpNotion {
         let state = Arc::new(Mutex::new(Model::default()));
         let attempts = Arc::new(AtomicUsize::new(0));
         let body_reads = Arc::new(AtomicUsize::new(0));
-        let fail_once = Arc::new(AtomicBool::new(false));
+        let source_unavailable = Arc::new(AtomicBool::new(false));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let values = state.clone();
         let counts = attempts.clone();
         let bodies = body_reads.clone();
-        let fail = fail_once.clone();
+        let unavailable = source_unavailable.clone();
         let pause = Arc::new(RequestPause::default());
         let boundary = pause.clone();
         let server = tokio::spawn(async move {
@@ -242,7 +243,7 @@ impl HttpNotion {
                 if snapshot.empty_content && response["object"] == "page_markdown" {
                     response["markdown"] = json!("");
                 }
-                let bad = fail.swap(false, Ordering::SeqCst);
+                let bad = unavailable.load(Ordering::SeqCst);
                 let status = if bad {
                     503
                 } else if response.get("code").is_some() {
@@ -257,6 +258,7 @@ impl HttpNotion {
         Self {
             state,
             body_reads,
+            source_unavailable,
             server,
             port,
             pause,
@@ -1672,8 +1674,9 @@ async fn actual_scheduled_http_transient_source_attempts_back_off_then_exhaust_w
     use notion_knowledge_retrieval::schedule::{ScheduleEventKind, ScheduleStatus};
     let http = HttpNotion::start().await;
     let f = Fixture::new(&http).await;
+    http.source_unavailable.store(true, Ordering::SeqCst);
     let (worker, stop, server) =
-        scheduled_server_attempts(&f, &http, std::time::Duration::from_millis(50), 2).await;
+        scheduled_server_attempts(&f, &http, std::time::Duration::from_secs(5), 2).await;
     let waiting = await_schedule(&worker, |s| s.status == ScheduleStatus::RetryWait).await;
     assert_eq!(waiting.attempts, 1);
     assert_eq!(
