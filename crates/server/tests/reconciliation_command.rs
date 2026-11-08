@@ -1764,6 +1764,9 @@ async fn actual_scheduled_http_manual_periodic_and_webhook_contention_preserves_
     let (scheduled, resumed_stop, resumed_server) =
         scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
     await_schedule(&scheduled, |s| s.cycle == 1 && s.active_run.is_none()).await;
+    // Drain owned workers before asserting stable graph and alias projections.
+    resumed_stop.cancel();
+    resumed_server.await.unwrap().unwrap();
     assert!(
         scheduled
             .coordinator
@@ -1782,8 +1785,6 @@ async fn actual_scheduled_http_manual_periodic_and_webhook_contention_preserves_
             .unwrap(),
         vec![PAGE]
     );
-    resumed_stop.cancel();
-    resumed_server.await.unwrap().unwrap();
     http.change(|m| {
         m.relation_name = Some("Webhook relations".into());
         m.title = "Apple".into();
