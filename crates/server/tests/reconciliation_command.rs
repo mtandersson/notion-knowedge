@@ -3074,36 +3074,49 @@ async fn cache_inventory_can_outlive_page_budget_while_page_refresh_stays_bounde
 
 #[tokio::test]
 async fn scheduled_inventory_uses_its_budget_before_bounded_page_work() {
+    use notion_knowledge_server::scheduled_reconciliation::{Settings, runtime::Worker};
     use std::time::Duration;
     let http = HttpNotion::start().await;
     let f = Fixture::new(&http).await;
+    // This budget contract owns one scheduled attempt. Combined HTTP-worker
+    // contention and periodic mutation refresh have separate integration cases.
+    let worker = Worker {
+        index: f.open(&http, OpenMode::ExistingWrite).await,
+        settings: Settings {
+            interval: 60,
+            attempts: 1,
+            backoff: 1,
+            maximum_backoff: 1,
+        },
+        poll: Duration::from_millis(10),
+        timeout: Duration::from_secs(1),
+        inventory_timeout: Duration::from_secs(7200),
+    };
     http.pause.armed.store(true, Ordering::SeqCst);
     f.provider.pause.store(true, Ordering::SeqCst);
-    let (worker, stop, server) = scheduled_server_budgets(
-        &f,
-        &http,
-        Duration::from_secs(1),
-        Duration::from_secs(7200),
-        1,
-        false,
-    )
-    .await;
-    let observed = tokio::time::timeout(Duration::from_secs(15), async {
+    let observed = async {
         http.pause.started.notified().await;
         assert_writer_available_during_inventory(&f.state);
         tokio::time::sleep(Duration::from_millis(1100)).await;
         http.pause.proceed.notify_one();
         f.provider.entered.notified().await;
-        await_schedule(&worker, |s| s.attempts > 0).await
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(worker.tick(CancellationToken::new()), observed)
     })
-    .await;
-    stop.cancel();
-    server.await.unwrap().unwrap();
-    let schedule =
-        observed.expect("inventory must survive the page budget and page work must then expire");
+    .await
+    .expect("inventory must survive the page budget and page work must then expire");
+    assert!(result.unwrap());
+    let schedule = worker.index.coordinator.schedule("periodic").unwrap();
+    assert_eq!(schedule.attempts, 1);
+    assert_eq!(
+        schedule.status,
+        notion_knowledge_retrieval::schedule::ScheduleStatus::Exhausted
+    );
     let run = schedule.active_run.unwrap();
     assert!(
         !worker
+            .index
             .coordinator
             .reconciliation_progress(&run)
             .unwrap()
