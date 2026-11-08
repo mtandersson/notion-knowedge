@@ -251,6 +251,7 @@ impl IndexRuntime {
     }
 
     async fn resync_cache(&self, settings: &WorkerSettings) -> Result<(), &'static str> {
+        use notion_knowledge_core::logging::{SyncPhase, SyncProgressLog};
         let timeout_seconds = settings.timeout_seconds;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::Duration;
@@ -264,6 +265,7 @@ impl IndexRuntime {
         let mut lease = state
             .acquire_lease(now_ms() / 1000, timeout_seconds as i64 + 30)
             .map_err(|_| "cache sync writer busy")?;
+        let mut progress_log = None;
         let result = loop {
             let inventory = match self.inventory_pending("cache-reset") {
                 Ok(inventory) => inventory,
@@ -337,6 +339,16 @@ impl IndexRuntime {
             if has_fatal_sync_failure(&progress) {
                 break Err("cache resync incomplete; retry startup");
             }
+            let total = progress.successful.len() + progress.failed.len() + progress.pending.len();
+            progress_log
+                .get_or_insert_with(|| SyncProgressLog::new(SyncPhase::Indexing))
+                .report(
+                    total - progress.pending.len(),
+                    Some(total),
+                    progress.changed as usize,
+                    progress.failed_pages(),
+                    progress.pending.is_empty(),
+                );
             if progress.pending.is_empty() {
                 match state.renew_lease(&lease, now_ms() / 1000, timeout_seconds as i64 + 30) {
                     Ok(next) => lease = next,
@@ -350,6 +362,14 @@ impl IndexRuntime {
                         now_ms() / 1000
                     }
                 });
+                let mut preparing = SyncProgressLog::new(SyncPhase::PreparingSearch);
+                preparing.report(
+                    0,
+                    None,
+                    progress.changed as usize,
+                    progress.failed_pages(),
+                    false,
+                );
                 let ready = tokio::time::timeout(Duration::from_secs(timeout_seconds), async {
                     self.prepare_search(lease.clone(), clock).await?;
                     if self.lexical.is_some() {
@@ -365,6 +385,13 @@ impl IndexRuntime {
                     let _ = self.coordinator.drain_owned().await;
                     break Err("rebuilt search index unavailable");
                 }
+                preparing.report(
+                    1,
+                    Some(1),
+                    progress.changed as usize,
+                    progress.failed_pages(),
+                    true,
+                );
                 if self
                     .runner
                     .complete("cache-reset", &lease, now_ms() / 1000)

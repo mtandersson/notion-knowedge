@@ -3,6 +3,8 @@ use crate::{
     chunks::GuardedChunkTable,
     commit::{AliasProjection, CommitBinding, IndexCommitCoordinator, RelationProjection},
 };
+use futures::{StreamExt, stream};
+use notion_knowledge_core::logging::{SyncPhase, SyncProgressLog, sync_task};
 use notion_knowledge_core::{
     aliases::AliasSources,
     backend::{BackendErrorKind, Page, PageId},
@@ -310,16 +312,27 @@ impl AuthoritativeReconciliationPlanner {
             .cloned()
             .chain(plan.local.keys().cloned())
             .collect();
-        for id in ids {
-            match self
-                .inspect(
-                    &id,
-                    discovered.contains(&id),
-                    plan.local.get(&id),
-                    plan.traversal_complete,
+        let mut progress = SyncProgressLog::new(SyncPhase::Planning);
+        let total = ids.len();
+        progress.report(0, Some(total), 0, plan.errors.len(), false);
+        let local = &plan.local;
+        let complete = plan.traversal_complete;
+        let discovered = &discovered;
+        let mut inspections = stream::iter(ids)
+            .enumerate()
+            .map(|(task, id)| async move {
+                let result = sync_task(
+                    SyncPhase::Planning,
+                    task + 1,
+                    self.inspect(&id, discovered.contains(&id), local.get(&id), complete),
                 )
-                .await
-            {
+                .await;
+                (id, result)
+            })
+            .buffer_unordered(8);
+        let mut processed = 0;
+        while let Some((id, result)) = inspections.next().await {
+            match result {
                 Ok(Some(page)) => {
                     plan.inspected_ids.insert(id.clone());
                     plan.scanned += 1;
@@ -330,13 +343,30 @@ impl AuthoritativeReconciliationPlanner {
                     plan.scanned += 1;
                 }
                 Err(error) => {
-                    plan.errors.insert(id, error);
+                    plan.errors.insert(id.clone(), error);
                 }
             }
+            processed += 1;
+            progress.report(
+                processed,
+                Some(total),
+                plan.pages.len(),
+                plan.errors.len(),
+                false,
+            );
         }
+        drop(inspections);
+        progress.report(
+            processed,
+            Some(total),
+            plan.pages.len(),
+            plan.errors.len(),
+            true,
+        );
         if !plan.errors.is_empty() {
             plan.traversal_complete = false;
         }
+        plan.pages.sort_by(|a, b| a.page_id.cmp(&b.page_id));
         self.validate_local_snapshot(&plan).await?;
         if !plan.traversal_complete {
             for page in &plan.pages {
@@ -389,6 +419,17 @@ impl AuthoritativeReconciliationPlanner {
                 .await
                 .map_err(|error| source_error(error.kind))?;
             let identity = metadata_identity(&page, &evidence);
+            // A missing page always needs refresh. Relation completeness and
+            // repeated snapshot checks cannot change that decision. Apply still
+            // prepares fresh content and validates scope/metadata before commit.
+            if local.is_none() {
+                return Ok(Some(PlannedPage {
+                    page_id: id.into(),
+                    difference: Difference::Missing,
+                    evidence,
+                    metadata_identity: Some(identity),
+                }));
+            }
             let edges = self
                 .relations
                 .inspect_metadata(&page, &evidence)

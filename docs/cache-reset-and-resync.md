@@ -32,6 +32,27 @@ inventory execution and unusable assets still leave startup unavailable and the
 flag pending. The next start retries recovery; arbitrary storage errors do not
 trigger destructive reset.
 
+Discovery overlaps up to eight independent page/block/database branches; cursors
+within a paginated endpoint remain ordered. Planning also checks up to eight
+pages at a time, using the same shared Notion rate limiter and retry policy.
+Missing pages are proposed for refresh without redundant relation-completeness
+reads; apply still checks fresh content, exact metadata and physical scope before
+indexing. Existing cached pages retain their completeness checks.
+
+Operator stderr/journald includes `operation=cache_sync` progress at phase start,
+roughly every ten seconds as work completes, and phase completion. `phase` is
+`discovery`, `planning`, `indexing` or `preparing_search`. Counts report processed
+objects/pages, the total when known, available/planned/changed pages for that
+phase, skipped items and elapsed seconds. They contain no page titles, IDs,
+URLs or content. Discovery totals are unknown until traversal finishes; progress
+does not imply indexing or search readiness. Startup still prepares the complete
+available subset before serving it.
+
+Individual HTTP events include a `worker` label such as `discovery-17` or
+`planning-8`, plus `runtime_thread`. The worker identifies an async fetch branch
+and keeps one correlation ID across its requests; its runtime thread may change
+between awaits. Multiple HTTP requests can overlap on the same runtime thread.
+
 For a corrupt cache file that cannot be classified as an identity/schema
 mismatch, stop the service and run the explicit trusted operator command with
 the normal scope, Notion credential and offline embedding settings:
