@@ -2266,8 +2266,7 @@ async fn intentional_synced_references_preserve_physical_inventory_completeness(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unresolved_synced_content_fails_its_host_without_stopping_independent_pages() {
-    use notion_knowledge_retrieval::durable_plan::DurableFailure;
+async fn available_host_text_is_indexed_without_resolving_template_references() {
     let index = Fixture::new();
     index.create().await;
     let source = HttpNotion::start().await;
@@ -2276,40 +2275,16 @@ async fn unresolved_synced_content_fails_its_host_without_stopping_independent_p
         m.markdown = format!("Host text.\n<synced_block_reference url=\"https://notion.so/{PAGE}\">\n</synced_block_reference>");
     });
     let provider = CountingProvider::new(index.embed.clone());
-    let service = runner(&index, &source);
-    let progress = service
-        .apply("unresolved-copy", index.lease.clone(), clock(), &provider)
+    let progress = runner(&index, &source)
+        .apply("available-copy", index.lease.clone(), clock(), &provider)
         .await
         .unwrap();
-    assert_eq!(
-        progress.failed.get(PAGE),
-        Some(&DurableFailure::UnsupportedSource)
-    );
-    assert_eq!(progress.failed.len(), 1);
-    assert_eq!(progress.changed, 2);
+    assert!(progress.failed.is_empty());
+    assert_eq!(progress.changed, 3);
     assert!(progress.pending.is_empty());
     assert!(progress.run_failures.is_empty());
-    assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
-    assert_eq!(
-        index.coordinator.last_successful_reconciliation().unwrap(),
-        None
-    );
-    source.change(|m| {
-        m.markdown = format!("<synced_block_reference url=\"https://notion.so/{PAGE}\">Verified inline text.</synced_block_reference>");
-    });
-    let recovered = service
-        .retry_page(
-            "unresolved-copy",
-            PAGE,
-            index.lease.clone(),
-            clock(),
-            &provider,
-        )
-        .await
-        .unwrap();
-    assert!(recovered.failed.is_empty());
-    assert_eq!(recovered.changed, 3);
     assert!(!index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+    assert_eq!(source.foreign_body_reads.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

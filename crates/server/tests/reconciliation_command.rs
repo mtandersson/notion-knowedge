@@ -41,6 +41,9 @@ struct ExtraPage {
 #[derive(Clone)]
 struct Model {
     empty_content: bool,
+    unsupported_page_content: bool,
+    unauthenticated_content: bool,
+    unauthenticated_page_metadata: bool,
     markdown: String,
     title: String,
     revision: String,
@@ -62,6 +65,9 @@ impl Default for Model {
     fn default() -> Self {
         Self {
             empty_content: false,
+            unsupported_page_content: false,
+            unauthenticated_content: false,
+            unauthenticated_page_metadata: false,
             markdown: "# Intro\n\nSaffron ravioli.\n\n## Other\n\nAn evergreen section.\n".into(),
             title: "First".into(),
             revision: "2026-10-10T12:00:00Z".into(),
@@ -158,8 +164,13 @@ impl HttpNotion {
                         ROOT.into()
                     };
                 }
-                let mut response = if (snapshot.inaccessible_root
-                    && route == format!("/v1/pages/{ROOT}"))
+                let mut response = if (snapshot.unauthenticated_content
+                    && route == format!("/v1/pages/{PAGE}/markdown"))
+                    || (snapshot.unauthenticated_page_metadata
+                        && route == format!("/v1/pages/{PAGE}"))
+                {
+                    json!({"object":"error", "code":"unauthorized"})
+                } else if (snapshot.inaccessible_root && route == format!("/v1/pages/{ROOT}"))
                     || (snapshot.inaccessible_other && route == format!("/v1/pages/{OTHER}"))
                     || (snapshot.inaccessible_page && route == format!("/v1/pages/{PAGE}"))
                 {
@@ -184,7 +195,7 @@ impl HttpNotion {
                         "object": "page_markdown",
                         "id": PAGE,
                         "markdown": snapshot.markdown,
-                        "truncated": false,
+                        "truncated": snapshot.unsupported_page_content,
                         "unknown_block_ids": []
                     })
                 } else if route == format!("/v1/pages/{PAGE}") {
@@ -245,6 +256,8 @@ impl HttpNotion {
                 let bad = fail.swap(false, Ordering::SeqCst);
                 let status = if bad {
                     503
+                } else if response["code"] == "unauthorized" {
+                    401
                 } else if response.get("code").is_some() {
                     404
                 } else {
@@ -2889,28 +2902,149 @@ async fn lost_or_incompatible_cache_resyncs_without_replaying_external_effects()
 }
 
 #[tokio::test]
-async fn unresolved_synced_content_keeps_cache_rebuild_unavailable() {
+async fn cache_sync_indexes_available_text_without_resolving_template_references() {
     let http = HttpNotion::start().await;
     let f = Fixture::new(&http).await;
     http.state.lock().unwrap().markdown = format!(
-        "<synced_block_reference url=\"https://notion.so/{PAGE}\">\n</synced_block_reference>"
+        "Available recipe text.\n<synced_block_reference url=\"https://notion.so/{PAGE}\">\n</synced_block_reference>"
     );
     fs::remove_dir_all(&f.settings.index).unwrap();
+    let runtime = IndexRuntime::recover(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
     assert!(
-        IndexRuntime::recover(
+        runtime
+            .chunks()
+            .page_chunks(PAGE)
+            .await
+            .unwrap()
+            .iter()
+            .any(|c| c.text.contains("Available recipe text."))
+    );
+    assert!(
+        !runtime
+            .chunks()
+            .search_snapshot()
+            .await
+            .unwrap()
+            .vector_query(&[1.0, 0.0, 0.0], 3, 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn unreadable_page_does_not_block_embedded_search_and_next_sync_can_recover_it() {
+    use notion_knowledge_retrieval::durable_plan::DurableFailure;
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    http.state.lock().unwrap().unsupported_page_content = true;
+    fs::remove_dir_all(&f.settings.index).unwrap();
+    let embedded = f.provider.count.load(Ordering::SeqCst);
+    let runtime = IndexRuntime::recover(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    )
+    .await
+    .unwrap();
+    let progress = runtime
+        .coordinator
+        .reconciliation_progress("cache-reset")
+        .unwrap();
+    assert_eq!(
+        progress.failed.get(PAGE),
+        Some(&DurableFailure::UnsupportedSource)
+    );
+    assert_eq!(progress.changed, 2);
+    assert!(progress.pending.is_empty());
+    assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
+    assert!(runtime.chunks().page_chunks(PAGE).await.unwrap().is_empty());
+    assert!(
+        !runtime
+            .chunks()
+            .page_chunks(OTHER)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(f.provider.count.load(Ordering::SeqCst) > embedded);
+    assert!(
+        !runtime
+            .chunks()
+            .search_snapshot()
+            .await
+            .unwrap()
+            .vector_query(&[1.0, 0.0, 0.0], 3, 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop(runtime);
+    http.state.lock().unwrap().unsupported_page_content = false;
+    counts(
+        &f.command(&http, &["--reconcile", "apply", "next-cache-sync"])
+            .await,
+        1,
+        0,
+        2,
+    );
+}
+
+#[tokio::test]
+async fn application_authentication_failure_keeps_cache_rebuild_unavailable() {
+    use notion_knowledge_retrieval::durable_plan::DurableFailure;
+    for after_embedding in [false, true] {
+        let http = HttpNotion::start().await;
+        let f = Fixture::new(&http).await;
+        if after_embedding {
+            *f.provider.boundary_pause.lock().unwrap() = Some(http.pause.clone());
+        } else {
+            http.state.lock().unwrap().unauthenticated_content = true;
+        }
+        fs::remove_dir_all(&f.settings.index).unwrap();
+        let recover = IndexRuntime::recover(
             &f.settings,
             &f.state,
             authority(),
             http.client(),
-            f.provider.clone()
-        )
-        .await
-        .is_err()
-    );
-    let state =
-        notion_knowledge_retrieval::sync_state::SqliteSyncStateStore::open_existing(&f.state)
+            f.provider.clone(),
+        );
+        let revoke = async {
+            if after_embedding {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    http.pause.started.notified(),
+                )
+                .await
+                .unwrap();
+                http.state.lock().unwrap().unauthenticated_page_metadata = true;
+                http.pause.proceed.notify_one();
+            }
+        };
+        let (result, ()) = tokio::join!(recover, revoke);
+        assert!(result.is_err());
+        let runtime = f.open(&http, OpenMode::ReadOnly).await;
+        assert!(runtime.coordinator.state().cache_rebuild_pending().unwrap());
+        let progress = runtime
+            .coordinator
+            .reconciliation_progress("cache-reset")
             .unwrap();
-    assert!(state.cache_rebuild_pending().unwrap());
+        assert!(matches!(
+            progress.failed.get(PAGE),
+            Some(DurableFailure::Unauthenticated | DurableFailure::Index)
+        ));
+    }
 }
 
 #[tokio::test]
@@ -3116,6 +3250,101 @@ async fn cache_inventory_can_outlive_page_budget_while_page_refresh_stays_bounde
     );
     // The observed embedding call proves the inventory finished and admitted
     // page work; no assertion depends on a legacy inventory storage table.
+}
+
+#[tokio::test]
+async fn periodic_sync_retries_unreadable_pages_on_the_next_normal_cycle() {
+    use notion_knowledge_retrieval::schedule::{
+        SchedulePolicy, ScheduleReconfiguration, ScheduleStatus,
+    };
+    use notion_knowledge_server::scheduled_reconciliation::{Settings, runtime::Worker};
+    use notion_knowledge_server::webhook_worker::runtime::now_ms;
+    use std::time::Duration;
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    http.state.lock().unwrap().unsupported_page_content = true;
+    let worker = Worker {
+        index: f.open(&http, OpenMode::ExistingWrite).await,
+        settings: Settings {
+            interval: 86400,
+            attempts: 1,
+            backoff: 1,
+            maximum_backoff: 1,
+        },
+        poll: Duration::from_secs(1),
+        timeout: Duration::from_secs(60),
+        inventory_timeout: Duration::from_secs(60),
+    };
+    assert!(worker.tick(CancellationToken::new()).await.unwrap());
+    let coordinator = &worker.index.coordinator;
+    let first = coordinator.schedule("periodic").unwrap();
+    assert_eq!(first.status, ScheduleStatus::Ready);
+    assert!(first.active_run.is_none());
+    assert!(first.next_deadline >= now_ms() / 1000 + 86390);
+    assert!(
+        worker
+            .index
+            .chunks()
+            .page_chunks(PAGE)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !worker
+            .index
+            .chunks()
+            .search_snapshot()
+            .await
+            .unwrap()
+            .vector_query(&[1.0, 0.0, 0.0], 3, 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        coordinator
+            .last_successful_reconciliation()
+            .unwrap()
+            .is_none()
+    );
+    // Advance the existing schedule explicitly; no day-long sleep or poll loop.
+    http.state.lock().unwrap().unsupported_page_content = false;
+    let now = now_ms() / 1000;
+    let state = coordinator.state();
+    let lease = state.acquire_lease(now, 30).unwrap();
+    coordinator
+        .reconfigure_schedule(
+            &lease,
+            now,
+            "periodic",
+            &ScheduleReconfiguration {
+                previous_binding: coordinator.binding().clone(),
+                policy: SchedulePolicy::new(86400, 1, 1, 1).unwrap(),
+                next_deadline: now,
+            },
+        )
+        .unwrap();
+    state.release_lease(&lease, now).unwrap();
+    assert!(worker.tick(CancellationToken::new()).await.unwrap());
+    let second = coordinator.schedule("periodic").unwrap();
+    assert_eq!(second.status, ScheduleStatus::Ready);
+    assert!(second.active_run.is_none());
+    assert!(
+        !worker
+            .index
+            .chunks()
+            .page_chunks(PAGE)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        coordinator
+            .last_successful_reconciliation()
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]

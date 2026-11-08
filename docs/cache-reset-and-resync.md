@@ -21,13 +21,16 @@ allowlist of derived SQLite bookkeeping, and removes only the canonical chunks
 table and its known binding/journal artifacts. It preserves the directory and
 operational SQLite file, admitted webhook work, mutation/file refresh intents
 and unrelated application tables. A single pending-sync flag remains until the
-fresh inventory, page refreshes and search index preparation all succeed.
+inventory and independent page attempts produce a usable search index.
 
-Each inventory/page attempt uses the configured timeout. Failed resync leaves
-startup unavailable and the flag pending; the next start resets partial derived
-output and retries. Use normal supervisor restart/backoff for unavailable
-Notion or assets. Resource/permission and arbitrary storage errors do not cause
-an automatic destructive reset.
+Each inventory/page attempt uses the configured timeout. Unreadable source pages
+remain visible in existing reconciliation errors while readable pages become
+searchable. Template references are kept as returned by Notion, without fetching
+their originals or requiring source repairs. A later sync can recover skipped
+pages. Storage/index failures, invalid ownership, invalid credentials, failed
+inventory execution and unusable assets still leave startup unavailable and the
+flag pending. The next start retries recovery; arbitrary storage errors do not
+trigger destructive reset.
 
 For a corrupt cache file that cannot be classified as an identity/schema
 mismatch, stop the service and run the explicit trusted operator command with
@@ -37,7 +40,8 @@ the normal scope, Notion credential and offline embedding settings:
 notion-knowledge-server --index reset
 ```
 
-Exit 0 reports complete reset/resync; exit 3 reports an incomplete reset/resync.
+Exit 0 reports `complete` or `ready_with_skips`; skipped content remains in sync
+status and is not claimed indexed. Exit 3 reports an unusable reset/resync.
 Invalid configuration exits 2. This command only reads Notion; it never replays
 a write or upload. Existing `--index rebuild` remains ANN-only maintenance over
 stored rows, while `--index reset` reconstructs content from Notion. The command
@@ -74,7 +78,8 @@ configured workspace, roots and exclusions on every recovered page.
 
 Interrupted rebuilding can discard partial derived results and restart sync.
 It needs no durable old/new index handoff. Keep admission unavailable until the
-cache is valid for the configured scope and identity. Expose bounded progress,
+cache is valid for the configured scope and identity. Individual source failures
+do not invalidate the successfully indexed subset. Expose bounded progress,
 errors and retries through existing operational reporting. Once ready, ordinary
 incremental synchronization continues.
 

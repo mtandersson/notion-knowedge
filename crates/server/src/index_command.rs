@@ -105,7 +105,12 @@ pub mod runtime {
                 result = crate::index_runtime::IndexRuntime::reset_and_resync(
                     &settings, &state, scope, source, Arc::new(provider),
                 ) => match result {
-                    Ok(_) => output("complete", 0),
+                    Ok(runtime) => match runtime.coordinator.reconciliation_progress("cache-reset") {
+                        Ok(progress) if progress.failed_pages() > 0 || !progress.run_failures.is_empty() =>
+                            output("ready_with_skips", 0),
+                        Ok(_) => output("complete", 0),
+                        Err(_) => output("cache_status_unavailable", 3),
+                    },
                     Err(_) => output("cache_reset_incomplete", 3),
                 },
             };

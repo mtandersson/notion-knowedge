@@ -8,6 +8,11 @@ Notion is the authoritative source of truth. Local retrieval state is derived,
 disposable, and rebuildable. The architecture decision is recorded in
 [ADR 0001](docs/adr/0001-runtime-and-component-boundaries.md).
 
+Sync is one-way: download available Notion content, generate local embeddings,
+and search the resulting cache. Unreadable pages do not block independent pages;
+embedded template references are not resolved or repaired. Change webhooks keep
+the cache current, with periodic reconciliation to catch missed events.
+
 > The repository name currently uses `notion-knowedge`; package names use
 > `notion-knowledge-*`.
 

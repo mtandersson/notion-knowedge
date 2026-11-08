@@ -27,6 +27,16 @@ use crate::{
     },
 };
 
+// Owned operations use a coarse failure port. Invalid credentials must remain
+// fatal there, rather than being flattened into a skippable source/conflict error.
+fn source_revalidation_failure(kind: BackendErrorKind) -> FailureClass {
+    match kind {
+        BackendErrorKind::Unauthenticated => FailureClass::Unavailable,
+        BackendErrorKind::Conflict => FailureClass::Conflict,
+        _ => FailureClass::Source,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefreshError {
     InvalidConfiguration,
@@ -34,6 +44,7 @@ pub enum RefreshError {
     Source,
     /// A sanitized source contract/authentication failure; automatic retry cannot repair it.
     PermanentSource,
+    Unauthenticated,
     Index,
     Conflict,
     Unavailable,
@@ -205,9 +216,10 @@ impl AuthoritativePageRefresh {
                 .await
                 .map_err(|error| match error.kind {
                     BackendErrorKind::Conflict => RefreshError::Conflict,
-                    BackendErrorKind::Unauthenticated
-                    | BackendErrorKind::InvalidInput
-                    | BackendErrorKind::UnsupportedContent => RefreshError::PermanentSource,
+                    BackendErrorKind::Unauthenticated => RefreshError::Unauthenticated,
+                    BackendErrorKind::InvalidInput | BackendErrorKind::UnsupportedContent => {
+                        RefreshError::PermanentSource
+                    }
                     _ => RefreshError::Source,
                 })?;
         if let Some(expected) = &expected {
@@ -436,13 +448,7 @@ impl AuthoritativePageRefresh {
                             .relations
                             .revalidate_removal(&evidence)
                             .await
-                            .map_err(|error| {
-                                if error.kind == BackendErrorKind::Conflict {
-                                    FailureClass::Conflict
-                                } else {
-                                    FailureClass::Source
-                                }
-                            })
+                            .map_err(|error| source_revalidation_failure(error.kind))
                     },
                     owned_clock.clone(),
                     expires_at,
@@ -510,9 +516,10 @@ impl AuthoritativePageRefresh {
             .map_err(|e| match e.kind {
                 BackendErrorKind::PermissionDenied => RefreshError::OutOfScope,
                 BackendErrorKind::Conflict => RefreshError::Conflict,
-                BackendErrorKind::InvalidInput
-                | BackendErrorKind::UnsupportedContent
-                | BackendErrorKind::Unauthenticated => RefreshError::PermanentSource,
+                BackendErrorKind::Unauthenticated => RefreshError::Unauthenticated,
+                BackendErrorKind::InvalidInput | BackendErrorKind::UnsupportedContent => {
+                    RefreshError::PermanentSource
+                }
                 _ => RefreshError::Source,
             })?;
 
@@ -599,11 +606,18 @@ impl AuthoritativePageRefresh {
                 let expected_metadata = metadata_identity.clone();
                 let expected_chunks = new.clone();
                 self.check_owned_snapshot(lease, clock, move |context| async move {
-                    let _authority = handler
-                        .relations
-                        .revalidate(&proposal)
-                        .await
-                        .map_err(|_| FailureClass::Conflict)?;
+                    let _authority =
+                        handler
+                            .relations
+                            .revalidate(&proposal)
+                            .await
+                            .map_err(|error| {
+                                if error.kind == BackendErrorKind::Unauthenticated {
+                                    FailureClass::Unavailable
+                                } else {
+                                    FailureClass::Conflict
+                                }
+                            })?;
                     context.revalidate().map_err(|_| FailureClass::Conflict)?;
                     let mut current = handler
                         .guard
@@ -782,13 +796,7 @@ impl AuthoritativePageRefresh {
                             .relations
                             .revalidate(&relation_proposal)
                             .await
-                            .map_err(|error| {
-                                if error.kind == BackendErrorKind::Conflict {
-                                    FailureClass::Conflict
-                                } else {
-                                    FailureClass::Source
-                                }
-                            })
+                            .map_err(|error| source_revalidation_failure(error.kind))
                     },
                     owned_clock.clone(),
                     expires_at,
@@ -876,7 +884,7 @@ impl AuthoritativePageRefresh {
                 .notion
                 .fetch_page(&expected.page.page_id)
                 .await
-                .map_err(|_| FailureClass::Source)?;
+                .map_err(|error| source_revalidation_failure(error.kind))?;
             if crate::planner::metadata_identity(&page, evidence) != *identity {
                 return Err(FailureClass::Conflict);
             }
@@ -884,13 +892,7 @@ impl AuthoritativePageRefresh {
         self.notion
             .revalidate_lifecycle(evidence, &self.scope)
             .await
-            .map_err(|error| {
-                if error.kind == BackendErrorKind::Conflict {
-                    FailureClass::Conflict
-                } else {
-                    FailureClass::Source
-                }
-            })
+            .map_err(|error| source_revalidation_failure(error.kind))
     }
 
     /// An unchanged canonical page still verifies the full source/relation
@@ -907,7 +909,13 @@ impl AuthoritativePageRefresh {
             .notion
             .lifecycle(&PageId(expected.page.page_id.clone()), &self.scope)
             .await
-            .map_err(|_| RefreshError::Source)?;
+            .map_err(|error| {
+                if error.kind == BackendErrorKind::Unauthenticated {
+                    RefreshError::Unauthenticated
+                } else {
+                    RefreshError::Source
+                }
+            })?;
         let checkpoint = self
             .coordinator
             .state()
@@ -930,7 +938,13 @@ impl AuthoritativePageRefresh {
                 self.chunk_config,
             )
             .await
-            .map_err(|_| RefreshError::Source)?;
+            .map_err(|error| {
+                if error.kind == BackendErrorKind::Unauthenticated {
+                    RefreshError::Unauthenticated
+                } else {
+                    RefreshError::Source
+                }
+            })?;
         let mut prepared_chunks = proposal.snapshot().chunks.clone();
         let mut previous_chunks = previous;
         prepared_chunks.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
@@ -1072,7 +1086,13 @@ impl AuthoritativePageRefresh {
             .notion
             .lifecycle(&PageId(page.clone()), &self.scope)
             .await
-            .map_err(|_| RefreshError::Source)?;
+            .map_err(|error| {
+                if error.kind == BackendErrorKind::Unauthenticated {
+                    RefreshError::Unauthenticated
+                } else {
+                    RefreshError::Source
+                }
+            })?;
         let proposal = if let LifecycleStatus::Allowed { roots } = &evidence.status {
             let previous = self.guard.page_chunks(&page).await?;
             Some(
@@ -1084,7 +1104,13 @@ impl AuthoritativePageRefresh {
                         self.chunk_config,
                     )
                     .await
-                    .map_err(|_| RefreshError::Source)?,
+                    .map_err(|error| {
+                        if error.kind == BackendErrorKind::Unauthenticated {
+                            RefreshError::Unauthenticated
+                        } else {
+                            RefreshError::Source
+                        }
+                    })?,
             )
         } else {
             None
