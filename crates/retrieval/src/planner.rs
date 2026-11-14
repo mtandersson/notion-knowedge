@@ -263,6 +263,22 @@ impl AuthoritativeReconciliationPlanner {
     /// The dry-run and apply sibling share this typed plan. No operational
     /// metadata, content extraction, embedding, or acknowledgments are written.
     pub async fn plan(&self) -> Result<ReconciliationPlan, PlanError> {
+        self.plan_report(None).await
+    }
+
+    /// Use a completed startup traversal after early independently authorized
+    /// page refreshes. Capture the local predecessor AFTER those writes finish.
+    pub async fn plan_discovered(
+        &self,
+        report: notion_knowledge_core::discovery::DiscoveryReport,
+    ) -> Result<ReconciliationPlan, PlanError> {
+        self.plan_report(Some(report)).await
+    }
+
+    async fn plan_report(
+        &self,
+        report: Option<notion_knowledge_core::discovery::DiscoveryReport>,
+    ) -> Result<ReconciliationPlan, PlanError> {
         let index_version = self
             .guard
             .inventory_version()
@@ -281,11 +297,15 @@ impl AuthoritativeReconciliationPlanner {
             traversal_complete: false,
         };
         let mut discovered = BTreeSet::new();
-        match self
-            .notion
-            .crawl_with_exclusions(&self.scope.roots, &self.scope.exclusions)
-            .await
-        {
+        let discovery = match report {
+            Some(report) => Ok(report),
+            None => {
+                self.notion
+                    .crawl_with_exclusions(&self.scope.roots, &self.scope.exclusions)
+                    .await
+            }
+        };
+        match discovery {
             Ok(report) => {
                 // Copied synced content is not a physical child subtree. Its
                 // completeness belongs to the host page's content attempt;

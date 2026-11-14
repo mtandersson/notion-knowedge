@@ -204,6 +204,26 @@ impl NotionClient {
         roots: &[PageId],
         rules: &ExclusionRules,
     ) -> Result<DiscoveryReport, BackendError> {
+        self.crawl_observed(roots, rules, None).await
+    }
+
+    /// Bounded startup handoff of physically discovered identities. Consumers
+    /// must independently authorize fresh content; this is not deletion authority.
+    pub async fn crawl_with_pages(
+        &self,
+        roots: &[PageId],
+        rules: &ExclusionRules,
+        pages: tokio::sync::mpsc::Sender<PageId>,
+    ) -> Result<DiscoveryReport, BackendError> {
+        self.crawl_observed(roots, rules, Some(&pages)).await
+    }
+
+    async fn crawl_observed(
+        &self,
+        roots: &[PageId],
+        rules: &ExclusionRules,
+        observer: Option<&tokio::sync::mpsc::Sender<PageId>>,
+    ) -> Result<DiscoveryReport, BackendError> {
         let rules = ExclusionRules {
             page_ids: rules
                 .page_ids
@@ -253,7 +273,7 @@ impl NotionClient {
                 visited.len(),
                 self.crawl_node(
                     &node,
-                    (&permitted_roots, &rules),
+                    (&permitted_roots, &rules, observer),
                     &mut queue,
                     &mut pages,
                     &mut skipped,
@@ -302,7 +322,7 @@ impl NotionClient {
                         task,
                         self.crawl_node(
                             &node,
-                            (permitted_roots, rules),
+                            (permitted_roots, rules, observer),
                             &mut children,
                             &mut pages,
                             &mut skipped,
@@ -335,6 +355,7 @@ impl NotionClient {
             }
         }
         progress.report(processed, Some(processed), pages.len(), skipped.len(), true);
+        notion_knowledge_core::logging::sync_total_pages(pages.len());
         Ok(DiscoveryReport {
             roots: roots.into_iter().collect(),
             pages: pages.into_values().collect(),
@@ -469,12 +490,16 @@ impl NotionClient {
     async fn crawl_node(
         &self,
         node: &Node,
-        scope: (&BTreeSet<String>, &ExclusionRules),
+        scope: (
+            &BTreeSet<String>,
+            &ExclusionRules,
+            Option<&tokio::sync::mpsc::Sender<PageId>>,
+        ),
         queue: &mut VecDeque<Node>,
         pages: &mut BTreeMap<String, DiscoveredPage>,
         skipped: &mut BTreeMap<String, SkipReason>,
     ) -> Result<(), BackendError> {
-        let (roots, rules) = scope;
+        let (roots, rules, observer) = scope;
         {
             let endpoint = match node.kind {
                 Kind::Page => "pages",
@@ -553,6 +578,16 @@ impl NotionClient {
             }
             if node.kind == Kind::Page {
                 pages.insert(node.id.clone(), page(&value, &node.id)?);
+                notion_knowledge_core::logging::sync_count(
+                    notion_knowledge_core::logging::SyncCount::DiscoveredPage,
+                    1,
+                );
+                if let Some(observer) = observer {
+                    observer
+                        .send(PageId(node.id.clone()))
+                        .await
+                        .map_err(|_| error(BackendErrorKind::Unavailable))?;
+                }
                 if rules.descendants_of.contains(&node.id) {
                     skipped.insert(node.id.clone(), SkipReason::ExcludedDescendants);
                     return Ok(());

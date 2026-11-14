@@ -37,6 +37,26 @@ pub(crate) fn has_fatal_sync_failure(
         })
 }
 
+struct SyncEmbedding<'a>(&'a dyn EmbeddingProvider);
+impl EmbeddingProvider for SyncEmbedding<'_> {
+    fn metadata(&self) -> &notion_knowledge_core::embedding::EmbeddingMetadata {
+        self.0.metadata()
+    }
+    fn embed_batch<'a>(
+        &'a self,
+        texts: &'a [String],
+    ) -> notion_knowledge_core::embedding::EmbeddingFuture<'a> {
+        Box::pin(async move {
+            let vectors = self.0.embed_batch(texts).await?;
+            notion_knowledge_core::logging::sync_count(
+                notion_knowledge_core::logging::SyncCount::EmbeddedChunk,
+                vectors.len(),
+            );
+            Ok(vectors)
+        })
+    }
+}
+
 pub struct IndexRuntime {
     pub coordinator: Arc<IndexCommitCoordinator>,
     pub scope: ReconciliationScope,
@@ -46,6 +66,8 @@ pub struct IndexRuntime {
     alias_sources: notion_knowledge_core::aliases::AliasSources,
     table: GuardedChunkTable,
     lexical: Option<LexicalCachePlan>,
+    source: Arc<NotionClient>,
+    source_scope: LifecycleScope,
 }
 impl IndexRuntime {
     /// Production startup for a disposable cache. Compatibility errors reset
@@ -250,7 +272,144 @@ impl IndexRuntime {
         Ok(runtime)
     }
 
+    /// Stream only initial/reset-cache population. Final discovery still owns
+    /// inventory/deletion decisions; ordinary reconciliation is unchanged.
+    async fn stream_initial_pages(
+        &self,
+        settings: &WorkerSettings,
+        lease: &mut notion_knowledge_core::reconciliation::Lease,
+    ) -> Result<notion_knowledge_core::discovery::DiscoveryReport, &'static str> {
+        use notion_knowledge_core::{
+            logging::{SyncPhase, SyncProgressLog, sync_task},
+            root_scope::RootScopeGate,
+        };
+        use notion_knowledge_retrieval::refresh::RefreshError;
+        let (send, mut receive) = tokio::sync::mpsc::channel(8);
+        let crawl = self.source.crawl_with_pages(
+            &self.source_scope.roots,
+            &self.source_scope.exclusions,
+            send,
+        );
+        let consume = async {
+            let gate = RootScopeGate::new(self.source.clone(), self.source_scope.clone())
+                .map_err(|_| "cache scope unavailable")?;
+            let mut progress = SyncProgressLog::new(SyncPhase::Indexing);
+            let mut processed = 0;
+            let mut persisted = 0;
+            let mut skipped = 0;
+            let state = self.coordinator.state();
+            let ttl = settings.timeout_seconds as i64 + 30;
+            loop {
+                let page = tokio::select! {
+                    page = receive.recv() => match page { Some(page) => page, None => break },
+                    _ = tokio::time::sleep(std::time::Duration::from_secs((ttl as u64 / 3).max(1))) => {
+                        *lease = state.renew_lease(lease, now_ms()/1000, ttl).map_err(|_| "cache sync lease unavailable")?;
+                        continue;
+                    }
+                };
+                *lease = state
+                    .renew_lease(lease, now_ms() / 1000, ttl)
+                    .map_err(|_| "cache sync lease unavailable")?;
+                processed += 1;
+                let permit = match gate.authorize(&page).await {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        skipped += 1;
+                        notion_knowledge_core::logging::sync_count(
+                            notion_knowledge_core::logging::SyncCount::SkippedPage,
+                            1,
+                        );
+                        continue;
+                    }
+                };
+                let root = self
+                    .source_scope
+                    .roots
+                    .iter()
+                    .find(|root| permit.belongs_to_any(std::slice::from_ref(&root.0)))
+                    .ok_or("cache source authority unavailable")?;
+                *lease = state
+                    .renew_lease(lease, now_ms() / 1000, ttl)
+                    .map_err(|_| "cache sync lease unavailable")?;
+                struct Attempt(Arc<std::sync::atomic::AtomicBool>);
+                impl Drop for Attempt {
+                    fn drop(&mut self) {
+                        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                let expired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let _attempt = Attempt(expired.clone());
+                let flag = expired.clone();
+                let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || {
+                    if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                        i64::MAX
+                    } else {
+                        now_ms() / 1000
+                    }
+                });
+                let operation = format!(
+                    "initial-{}",
+                    notion_knowledge_core::logging::CorrelationId::new().as_str()
+                );
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(settings.timeout_seconds),
+                    sync_task(
+                        SyncPhase::Indexing,
+                        processed,
+                        Box::pin(self.handler.refresh_page(
+                            &page,
+                            root,
+                            &operation,
+                            &SyncEmbedding(self.provider.as_ref()),
+                            lease.clone(),
+                            clock,
+                        )),
+                    ),
+                )
+                .await;
+                expired.store(true, std::sync::atomic::Ordering::SeqCst);
+                self.coordinator
+                    .drain_owned()
+                    .await
+                    .map_err(|_| "cache sync drain failed")?;
+                match result {
+                    Ok(Ok(_)) => {
+                        persisted += 1;
+                        notion_knowledge_core::logging::sync_count(
+                            notion_knowledge_core::logging::SyncCount::CommittedPage,
+                            1,
+                        );
+                    }
+                    Ok(Err(
+                        RefreshError::Source
+                        | RefreshError::PermanentSource
+                        | RefreshError::OutOfScope,
+                    )) => {
+                        skipped += 1;
+                        notion_knowledge_core::logging::sync_count(
+                            notion_knowledge_core::logging::SyncCount::SkippedPage,
+                            1,
+                        );
+                    }
+                    _ => return Err("cache streaming refresh failed"),
+                }
+                progress.report(processed, None, persisted, skipped, false);
+            }
+            progress.report(processed, Some(processed), persisted, skipped, true);
+            Ok::<(), &'static str>(())
+        };
+        let (report, ()) = tokio::try_join!(
+            async { Box::pin(crawl).await.map_err(|_| "cache inventory failed") },
+            Box::pin(consume)
+        )?;
+        Ok(report)
+    }
+
     async fn resync_cache(&self, settings: &WorkerSettings) -> Result<(), &'static str> {
+        notion_knowledge_core::logging::with_sync_progress(self.resync_cache_inner(settings)).await
+    }
+
+    async fn resync_cache_inner(&self, settings: &WorkerSettings) -> Result<(), &'static str> {
         use notion_knowledge_core::logging::{SyncPhase, SyncProgressLog};
         let timeout_seconds = settings.timeout_seconds;
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -272,28 +431,37 @@ impl IndexRuntime {
                 Err(_) => break Err("cache sync state unavailable"),
             };
             let prepared = if inventory {
+                let plan = match tokio::time::timeout(
+                    Duration::from_secs(settings.inventory_timeout_seconds),
+                    async {
+                        let report =
+                            Box::pin(self.stream_initial_pages(settings, &mut lease)).await?;
+                        state
+                            .release_lease(&lease, now_ms() / 1000)
+                            .map_err(|_| "cache sync lease unavailable")?;
+                        Box::pin(self.runner.dry_run_discovered(report))
+                            .await
+                            .map_err(|_| "cache inventory planning failed")
+                    },
+                )
+                .await
+                {
+                    Ok(Ok(plan)) => plan,
+                    _ => {
+                        let _ = self.coordinator.drain_owned().await;
+                        break Err("cache inventory failed; retry startup");
+                    }
+                };
+                lease = match state.acquire_lease(now_ms() / 1000, timeout_seconds as i64 + 30) {
+                    Ok(lease) => lease,
+                    Err(_) => break Err("cache sync writer busy"),
+                };
                 if state
                     .start_or_resume(&lease, now_ms() / 1000, "cache-reset", &self.scope)
                     .is_err()
                 {
                     break Err("cache sync state unavailable");
                 }
-                if state.release_lease(&lease, now_ms() / 1000).is_err() {
-                    break Err("cache sync lease unavailable");
-                }
-                let plan = match tokio::time::timeout(
-                    Duration::from_secs(settings.inventory_timeout_seconds),
-                    self.runner.dry_run(),
-                )
-                .await
-                {
-                    Ok(Ok(plan)) => plan,
-                    _ => break Err("cache inventory failed; retry startup"),
-                };
-                lease = match state.acquire_lease(now_ms() / 1000, timeout_seconds as i64 + 30) {
-                    Ok(lease) => lease,
-                    Err(_) => break Err("cache sync writer busy"),
-                };
                 Some(plan)
             } else {
                 None
@@ -320,7 +488,12 @@ impl IndexRuntime {
                         .await
                 } else {
                     self.runner
-                        .apply_next("cache-reset", lease.clone(), clock, self.provider.as_ref())
+                        .apply_next(
+                            "cache-reset",
+                            lease.clone(),
+                            clock,
+                            &SyncEmbedding(self.provider.as_ref()),
+                        )
                         .await
                 }
             })
@@ -405,6 +578,7 @@ impl IndexRuntime {
                         serde_json::json!({
                             "operation": "cache_sync",
                             "status": "ready_with_skips",
+                            "sync_progress": notion_knowledge_core::logging::current_sync_progress(),
                             "skipped_pages": progress.failed_pages(),
                             "discovery_errors": progress.run_failures.len(),
                         })
@@ -585,10 +759,10 @@ impl IndexRuntime {
         .map_err(|_| "authoritative handler incompatible")?
         .with_alias_sources(settings.alias_sources.clone());
         let planner = AuthoritativeReconciliationPlanner::new(
-            source,
+            source.clone(),
             guard.clone(),
             coordinator.clone(),
-            scope,
+            scope.clone(),
         )
         .map_err(|_| "authoritative planner incompatible")?
         .with_alias_sources(settings.alias_sources.clone());
@@ -608,6 +782,8 @@ impl IndexRuntime {
             alias_sources: settings.alias_sources.clone(),
             table: guard,
             lexical,
+            source,
+            source_scope: scope,
         })
     }
 }

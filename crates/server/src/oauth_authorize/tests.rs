@@ -1004,13 +1004,32 @@ async fn identity_policy_denials_have_correlated_payload_free_logs() {
         assert_eq!(event["outcome"], "rejected");
         assert_eq!(event["level"], "warn");
         assert!(event["http_status"].is_null());
-        let fields = event.as_object().unwrap().keys().map(String::as_str)
+        let fields = event
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
             .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(fields, std::collections::BTreeSet::from([
-            "timestamp_unix_ms", "level", "correlation_id", "operation",
-            "duration_ms", "outcome", "http_status", "runtime_thread", "worker",
-        ]));
-        assert!(event["runtime_thread"].as_str().unwrap().starts_with("ThreadId("));
+        assert_eq!(
+            fields,
+            std::collections::BTreeSet::from([
+                "timestamp_unix_ms",
+                "level",
+                "correlation_id",
+                "operation",
+                "duration_ms",
+                "outcome",
+                "http_status",
+                "runtime_thread",
+                "worker",
+            ])
+        );
+        assert!(
+            event["runtime_thread"]
+                .as_str()
+                .unwrap()
+                .starts_with("ThreadId(")
+        );
         assert!(event["worker"].is_null());
         assert!(events.iter().any(|http| http["operation"] == "http_request"
             && http["http_status"] == 400
