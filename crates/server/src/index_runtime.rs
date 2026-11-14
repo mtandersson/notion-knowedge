@@ -406,7 +406,12 @@ impl IndexRuntime {
     }
 
     async fn resync_cache(&self, settings: &WorkerSettings) -> Result<(), &'static str> {
-        notion_knowledge_core::logging::with_sync_progress(self.resync_cache_inner(settings)).await
+        // Erase the large adapter future at the composition boundary; this
+        // keeps both runtime stack frames and callers' layout queries bounded.
+        let work: std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), &'static str>> + Send + '_>,
+        > = Box::pin(self.resync_cache_inner(settings));
+        notion_knowledge_core::logging::with_sync_progress(work).await
     }
 
     async fn resync_cache_inner(&self, settings: &WorkerSettings) -> Result<(), &'static str> {
@@ -425,6 +430,8 @@ impl IndexRuntime {
             .acquire_lease(now_ms() / 1000, timeout_seconds as i64 + 30)
             .map_err(|_| "cache sync writer busy")?;
         let mut progress_log = None;
+        let mut reported_commits = 0;
+        let mut reported_failures = 0;
         let result = loop {
             let inventory = match self.inventory_pending("cache-reset") {
                 Ok(inventory) => inventory,
@@ -506,6 +513,20 @@ impl IndexRuntime {
                     break Err("cache resync failed; retry startup");
                 }
             };
+            // Report actual application outcomes after the streaming handoff.
+            // Unchanged verification must not count the early page commit again.
+            let commits = progress.changed.saturating_add(progress.deleted) as usize;
+            notion_knowledge_core::logging::sync_count(
+                notion_knowledge_core::logging::SyncCount::CommittedPage,
+                commits.saturating_sub(reported_commits),
+            );
+            let failures = progress.failed_pages();
+            notion_knowledge_core::logging::sync_count(
+                notion_knowledge_core::logging::SyncCount::SkippedPage,
+                failures.saturating_sub(reported_failures),
+            );
+            reported_commits = commits;
+            reported_failures = failures;
             // An unreadable source page does not invalidate other cached pages.
             // Keep its existing failure record for status/retry, while storage,
             // ownership and credential failures still prevent serving this cache.

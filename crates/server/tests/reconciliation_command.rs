@@ -42,6 +42,7 @@ struct ExtraPage {
 struct Model {
     empty_content: bool,
     unsupported_page_content: bool,
+    unsupported_page_once: bool,
     unauthenticated_content: bool,
     unauthenticated_page_metadata: bool,
     markdown: String,
@@ -66,6 +67,7 @@ impl Default for Model {
         Self {
             empty_content: false,
             unsupported_page_content: false,
+            unsupported_page_once: false,
             unauthenticated_content: false,
             unauthenticated_page_metadata: false,
             markdown: "# Intro\n\nSaffron ravioli.\n\n## Other\n\nAn evergreen section.\n".into(),
@@ -157,7 +159,16 @@ impl HttpNotion {
                 if route.ends_with("/markdown") {
                     bodies.fetch_add(1, Ordering::SeqCst);
                 }
-                let snapshot = values.lock().unwrap().clone();
+                let snapshot = {
+                    let mut state = values.lock().unwrap();
+                    let mut snapshot = state.clone();
+                    if route == format!("/v1/pages/{PAGE}/markdown") && state.unsupported_page_once
+                    {
+                        state.unsupported_page_once = false;
+                        snapshot.unsupported_page_content = true;
+                    }
+                    snapshot
+                };
                 if snapshot.race_metadata && route == format!("/v1/pages/{PAGE}") {
                     values.lock().unwrap().title.push('!');
                 }
@@ -3626,4 +3637,80 @@ async fn initial_sync_embeds_and_commits_before_discovery_finishes() {
     assert_eq!(runtime.coordinator.owned_page_ids().unwrap().len(), 3);
     assert!(!runtime.chunks().page_chunks(ROOT).await.unwrap().is_empty());
     assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
+}
+
+#[tokio::test]
+async fn streaming_retries_commit_the_page_skipped_during_early_population() {
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Info);
+    http.state.lock().unwrap().unsupported_page_once = true;
+    fs::remove_dir_all(&f.settings.index).unwrap();
+    let runtime = IndexRuntime::recover(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    )
+    .await
+    .unwrap();
+    let progress = runtime
+        .coordinator
+        .reconciliation_progress("cache-reset")
+        .unwrap();
+    assert_eq!(progress.changed, 1);
+    assert_eq!(progress.unchanged, 2);
+    assert!(progress.failed.is_empty());
+    assert!(!runtime.chunks().page_chunks(PAGE).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn streaming_retry_progress_reports_actual_commits_without_double_counting_unchanged_pages() {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "streaming_retries_commit_the_page_skipped_during_early_population",
+                "--nocapture",
+            ])
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!stderr.contains("fixture-credential"));
+    let events: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let ready = events
+        .iter()
+        .find(|event| {
+            event["operation"] == "cache_sync"
+                && event["phase"] == "preparing_search"
+                && event["status"] == "completed"
+        })
+        .unwrap();
+    let counts = &ready["sync_progress"];
+    assert_eq!(counts["discovered_pages"], 3);
+    assert_eq!(counts["total_pages"], 3);
+    assert_eq!(counts["committed_pages"], 3);
+    assert_eq!(counts["skipped_pages"], 1);
+    assert!(counts["embedded_chunks"].as_u64().unwrap() > 0);
+    for event in events
+        .iter()
+        .filter(|event| event["operation"] == "notion_api" || event["operation"] == "index_commit")
+    {
+        assert!(event["sync_progress"].is_object(), "{event}");
+    }
 }
