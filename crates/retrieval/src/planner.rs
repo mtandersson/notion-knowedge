@@ -202,7 +202,9 @@ impl AuthoritativeReconciliationPlanner {
         self
     }
 
-    pub(crate) fn projection_mode(&self) -> notion_knowledge_notion::relation_proposal::ProjectionMode {
+    pub(crate) fn projection_mode(
+        &self,
+    ) -> notion_knowledge_notion::relation_proposal::ProjectionMode {
         self.relations.projection_mode()
     }
 

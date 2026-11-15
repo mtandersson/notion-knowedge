@@ -158,6 +158,22 @@ impl SyncProgressLog {
         );
     }
 
+    /// Fixed per-page deadline class; never contains source identifiers or errors.
+    pub fn page_timeout(&self) {
+        if LOG_LEVEL.load(Ordering::Relaxed) < Level::Info as u8 {
+            return;
+        }
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "{}",
+            serde_json::json!({
+                "operation": "cache_sync", "phase": self.phase.label(),
+                "status": "page_skipped", "reason": "page_timeout",
+                "sync_progress": current_sync_progress(),
+            })
+        );
+    }
+
     pub fn new(phase: SyncPhase) -> Self {
         Self {
             phase,

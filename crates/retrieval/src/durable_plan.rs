@@ -33,6 +33,7 @@ pub enum DurableFailure {
     Unauthenticated,
     UnsupportedSource,
     EmbeddingInputLimit,
+    PageTimeout,
     Conflict,
     IncompleteTraversal,
     TraversalSource,

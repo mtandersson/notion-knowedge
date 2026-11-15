@@ -275,13 +275,100 @@ impl IndexRuntime {
         Ok(runtime)
     }
 
+    /// Called only after dropping the timed-out observer and expiring its clock.
+    /// Never renew a lease while an old owned commit may still hold its guard.
+    async fn settle_page_timeout(
+        &self,
+        settings: &WorkerSettings,
+        lease: &mut notion_knowledge_core::reconciliation::Lease,
+        operation: &str,
+    ) -> Result<bool, &'static str> {
+        use notion_knowledge_retrieval::commit::ReceiptStatus;
+        use std::time::Duration;
+        let failures = tokio::time::timeout(
+            Duration::from_secs(30),
+            self.coordinator.drain_owned_outcomes(),
+        )
+        .await
+        .map_err(|_| "cache sync drain timeout")?
+        .map_err(|_| "cache sync drain failed")?;
+        if failures
+            .iter()
+            .any(|error| *error != notion_knowledge_retrieval::commit::CommitError::LeaseLost)
+        {
+            return Err("cache sync timed-out owned operation failed");
+        }
+        let applied = match self
+            .coordinator
+            .receipt(operation)
+            .map_err(|_| "cache sync receipt unavailable")?
+        {
+            None => false,
+            Some(receipt)
+                if receipt.status == ReceiptStatus::Applied && receipt.failure.is_none() =>
+            {
+                true
+            }
+            // Effects may have started. Never label an unresolved or failed
+            // commit a harmless page timeout or hide index/authority failures.
+            Some(_) => return Err("cache sync timed-out effects require recovery"),
+        };
+        if self
+            .coordinator
+            .has_unfinished_commits()
+            .map_err(|_| "cache sync receipt unavailable")?
+        {
+            return Err("cache sync effects require recovery");
+        }
+        let state = self.coordinator.state();
+        let ttl = settings.timeout_seconds as i64 + 30;
+        *lease = state
+            .renew_lease(lease, now_ms() / 1000, ttl)
+            .map_err(|_| "cache sync lease unavailable")?;
+        let idle = tokio::time::timeout(
+            Duration::from_secs(settings.timeout_seconds),
+            self.provider.wait_idle(),
+        );
+        tokio::pin!(idle);
+        loop {
+            tokio::select! {
+                result = &mut idle => {
+                    result.map_err(|_| "cache embedding drain timeout")?
+                        .map_err(|_| "cache embedding drain unavailable")?;
+                    break;
+                },
+                _ = tokio::time::sleep(Duration::from_secs((ttl as u64/3).max(1))) => {
+                    *lease = state.renew_lease(lease, now_ms()/1000, ttl)
+                        .map_err(|_| "cache sync lease unavailable")?;
+                }
+            }
+        }
+        *lease = state
+            .renew_lease(lease, now_ms() / 1000, ttl)
+            .map_err(|_| "cache sync lease unavailable")?;
+        tokio::time::timeout(
+            Duration::from_secs(settings.timeout_seconds),
+            self.table.inventory_version(),
+        )
+        .await
+        .map_err(|_| "cache sync snapshot timeout")?
+        .map_err(|_| "cache sync snapshot unavailable")?;
+        Ok(applied)
+    }
+
     /// Stream only initial/reset-cache population. Final discovery still owns
     /// inventory/deletion decisions; ordinary reconciliation is unchanged.
     async fn stream_initial_pages(
         &self,
         settings: &WorkerSettings,
         lease: &mut notion_knowledge_core::reconciliation::Lease,
-    ) -> Result<notion_knowledge_core::discovery::DiscoveryReport, &'static str> {
+    ) -> Result<
+        (
+            notion_knowledge_core::discovery::DiscoveryReport,
+            std::collections::BTreeSet<String>,
+        ),
+        &'static str,
+    > {
         use notion_knowledge_core::{
             logging::{SyncPhase, SyncProgressLog, sync_task},
             root_scope::RootScopeGate,
@@ -300,6 +387,7 @@ impl IndexRuntime {
             let mut processed = 0;
             let mut persisted = 0;
             let mut skipped = 0;
+            let mut timed_out = std::collections::BTreeSet::new();
             let state = self.coordinator.state();
             let ttl = settings.timeout_seconds as i64 + 30;
             loop {
@@ -371,10 +459,12 @@ impl IndexRuntime {
                 )
                 .await;
                 expired.store(true, std::sync::atomic::Ordering::SeqCst);
-                self.coordinator
-                    .drain_owned()
-                    .await
-                    .map_err(|_| "cache sync drain failed")?;
+                if result.is_ok() {
+                    self.coordinator
+                        .drain_owned()
+                        .await
+                        .map_err(|_| "cache sync drain failed")?;
+                }
                 match result {
                     Ok(Ok(_)) => {
                         persisted += 1;
@@ -408,18 +498,37 @@ impl IndexRuntime {
                     Ok(Err(RefreshError::Unavailable)) => {
                         return Err("cache streaming dependency unavailable");
                     }
-                    Err(_) => return Err("cache streaming page timeout"),
+                    Err(_) => {
+                        if self
+                            .settle_page_timeout(settings, lease, &operation)
+                            .await?
+                        {
+                            persisted += 1;
+                            notion_knowledge_core::logging::sync_count(
+                                notion_knowledge_core::logging::SyncCount::CommittedPage,
+                                1,
+                            );
+                        } else {
+                            timed_out.insert(page.0.clone());
+                            skipped += 1;
+                            notion_knowledge_core::logging::sync_count(
+                                notion_knowledge_core::logging::SyncCount::SkippedPage,
+                                1,
+                            );
+                            progress.page_timeout();
+                        }
+                    }
                 }
                 progress.report(processed, None, persisted, skipped, false);
             }
             progress.report(processed, Some(processed), persisted, skipped, true);
-            Ok::<(), &'static str>(())
+            Ok::<_, &'static str>(timed_out)
         };
-        let (report, ()) = tokio::try_join!(
+        let (report, timed_out) = tokio::try_join!(
             async { Box::pin(crawl).await.map_err(|_| "cache inventory failed") },
             Box::pin(consume)
         )?;
-        Ok(report)
+        Ok((report, timed_out))
     }
 
     async fn resync_cache(&self, settings: &WorkerSettings) -> Result<(), &'static str> {
@@ -449,7 +558,9 @@ impl IndexRuntime {
         let mut progress_log = None;
         let mut reported_commits = 0;
         let mut reported_failures = 0;
-        let result = loop {
+        let mut streaming_timeouts = std::collections::BTreeSet::new();
+        let mut timed_out_recovery = std::collections::BTreeSet::new();
+        let result = 'resync: loop {
             let inventory = match self.inventory_pending("cache-reset") {
                 Ok(inventory) => inventory,
                 Err(_) => break Err("cache sync state unavailable"),
@@ -458,8 +569,9 @@ impl IndexRuntime {
                 let plan = match tokio::time::timeout(
                     Duration::from_secs(settings.inventory_timeout_seconds),
                     async {
-                        let report =
+                        let (report, timeouts) =
                             Box::pin(self.stream_initial_pages(settings, &mut lease)).await?;
+                        streaming_timeouts = timeouts;
                         state
                             .release_lease(&lease, now_ms() / 1000)
                             .map_err(|_| "cache sync lease unavailable")?;
@@ -509,6 +621,26 @@ impl IndexRuntime {
                     now_ms() / 1000
                 }
             });
+            let pending_page = if prepared.is_none() {
+                match self.coordinator.reconciliation_progress("cache-reset") {
+                    Ok(progress) => progress.pending.first().cloned(),
+                    Err(_) => break Err("cache sync progress unavailable"),
+                }
+            } else {
+                None
+            };
+            let operation = pending_page
+                .as_ref()
+                .map(|page| {
+                    self.coordinator
+                        .reconciliation_page_proposal("cache-reset", page)
+                        .map(|(proposal, _)| proposal.operation_id)
+                })
+                .transpose();
+            let operation = match operation {
+                Ok(operation) => operation,
+                Err(_) => break Err("cache sync proposal unavailable"),
+            };
             let attempt = tokio::time::timeout(Duration::from_secs(timeout_seconds), async {
                 if let Some(plan) = prepared {
                     self.runner
@@ -528,11 +660,66 @@ impl IndexRuntime {
             .await;
             let progress = match attempt {
                 Ok(Ok(progress)) => progress,
+                Err(_) if operation.is_some() => {
+                    expired.store(true, Ordering::SeqCst);
+                    let page = pending_page.as_ref().expect("operation has page");
+                    match self
+                        .settle_page_timeout(settings, &mut lease, operation.as_ref().unwrap())
+                        .await
+                    {
+                        Ok(true) => {
+                            // Existing recovery/ack path must verify an applied receipt;
+                            // allow one bounded recovery, never an endless timeout loop.
+                            if !timed_out_recovery.insert(page.clone()) {
+                                break Err("cache sync applied receipt recovery timeout");
+                            }
+                            continue;
+                        }
+                        Ok(false) => {
+                            let current =
+                                match self.coordinator.reconciliation_progress("cache-reset") {
+                                    Ok(progress) => progress,
+                                    Err(_) => break Err("cache sync progress unavailable"),
+                                };
+                            if current.failed.contains_key(page) {
+                                // Keep the genuine failure recorded before observer cancellation.
+                                current
+                            } else {
+                                if self.coordinator.fail_reconciliation_page(&lease, now_ms()/1000, "cache-reset", page,
+                                    notion_knowledge_retrieval::durable_plan::DurableFailure::PageTimeout).is_err() {
+                                    break Err("cache sync timeout status unavailable");
+                                }
+                                SyncProgressLog::new(SyncPhase::Indexing).page_timeout();
+                                match self.coordinator.reconciliation_progress("cache-reset") {
+                                    Ok(progress) => progress,
+                                    Err(_) => break Err("cache sync progress unavailable"),
+                                }
+                            }
+                        }
+                        Err(error) => break Err(error),
+                    }
+                }
                 _ => {
                     expired.store(true, Ordering::SeqCst);
                     let _ = self.coordinator.drain_owned().await;
                     break Err("cache resync failed; retry startup");
                 }
+            };
+            let progress = if !streaming_timeouts.is_empty() {
+                for page in std::mem::take(&mut streaming_timeouts) {
+                    if progress.pending.contains(&page) && self.coordinator.fail_reconciliation_page(
+                        &lease, now_ms()/1000, "cache-reset", &page,
+                        notion_knowledge_retrieval::durable_plan::DurableFailure::PageTimeout,
+                    ).is_err() {
+                        break 'resync Err("cache sync timeout status unavailable");
+                    }
+                }
+                match self.coordinator.reconciliation_progress("cache-reset") {
+                    Ok(progress) => progress,
+                    Err(_) => break Err("cache sync progress unavailable"),
+                }
+            } else {
+                progress
             };
             // Report actual application outcomes after the streaming handoff.
             // Unchanged verification must not count the early page commit again.
@@ -921,4 +1108,178 @@ pub enum OpenMode {
     Initialize,
     ExistingWrite,
     ReadOnly,
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+    use notion_knowledge_core::{
+        aliases::AliasSources,
+        backend::PageId,
+        embedding::{EmbeddingFuture, EmbeddingMetadata},
+        reconciliation::{FailureClass, Lease},
+        sync_state::PageSyncState,
+    };
+    use notion_knowledge_retrieval::commit::{
+        CommitError, PageAction, PageOperation, ReceiptStatus,
+    };
+    struct Model(EmbeddingMetadata);
+    impl EmbeddingProvider for Model {
+        fn metadata(&self) -> &EmbeddingMetadata {
+            &self.0
+        }
+        fn embed_batch<'a>(&'a self, _: &'a [String]) -> EmbeddingFuture<'a> {
+            panic!("timeout settlement must never start embeddings")
+        }
+    }
+    async fn fixture() -> (tempfile::TempDir, WorkerSettings, IndexRuntime, Lease) {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = WorkerSettings {
+            projection_mode: Default::default(),
+            lexical: None,
+            alias_sources: AliasSources::new(true, vec![]).unwrap(),
+            index: dir.path().join("index"),
+            assets: dir.path().join("assets"),
+            poll_ms: 10,
+            timeout_seconds: 1,
+            inventory_timeout_seconds: 60,
+        };
+        std::fs::create_dir(&settings.index).unwrap();
+        let scope = LifecycleScope {
+            workspace_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into(),
+            roots: vec![PageId("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".into())],
+            generation: 1,
+            exclusions: Default::default(),
+        };
+        let runtime = IndexRuntime::compose(
+            &settings,
+            &dir.path().join("state.sqlite"),
+            scope,
+            Arc::new(NotionClient::integration("fixture-credential").unwrap()),
+            Arc::new(Model(
+                EmbeddingMetadata::new("fixture".into(), "fixture".into(), "v1".into(), 3).unwrap(),
+            )),
+            OpenMode::Initialize,
+        )
+        .await
+        .unwrap();
+        runtime.coordinator.drain_owned().await.unwrap();
+        let lease = runtime
+            .coordinator
+            .state()
+            .acquire_lease(now_ms() / 1000, 31)
+            .unwrap();
+        (dir, settings, runtime, lease)
+    }
+    fn clock() -> Arc<dyn Fn() -> i64 + Send + Sync> {
+        Arc::new(|| now_ms() / 1000)
+    }
+
+    #[tokio::test]
+    async fn timeout_settlement_preserves_receipt_failures_and_applied_work() {
+        for status in [
+            ReceiptStatus::Pending,
+            ReceiptStatus::Failed,
+            ReceiptStatus::Applied,
+        ] {
+            let (dir, settings, runtime, mut lease) = fixture().await;
+            if status == ReceiptStatus::Pending {
+                rusqlite::Connection::open(dir.path().join("state.sqlite")).unwrap()
+                    .execute_batch("CREATE TRIGGER retain_pending BEFORE UPDATE OF status ON index_commit_receipts WHEN NEW.status=2 BEGIN SELECT RAISE(ABORT,'injected persistence failure'); END;").unwrap();
+            }
+            let checkpoint =
+                PageSyncState::tombstone("cccccccc-cccc-cccc-cccc-cccccccccccc".into(), None)
+                    .unwrap();
+            let operation =
+                PageOperation::new("timed-out", "revision", PageAction::Delete, checkpoint)
+                    .unwrap();
+            let observer = runtime.coordinator.submit(
+                operation,
+                lease.clone(),
+                clock(),
+                move |_| async move {
+                    if status == ReceiptStatus::Applied {
+                        Ok(())
+                    } else {
+                        Err(FailureClass::Index)
+                    }
+                },
+            );
+            // Drain with the receiver still alive: even a successfully queued
+            // result can remain unconsumed by a timed-out observer.
+            runtime.coordinator.drain_owned().await.unwrap();
+            drop(observer);
+            assert_eq!(
+                runtime
+                    .coordinator
+                    .receipt("timed-out")
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                status
+            );
+            let result = runtime
+                .settle_page_timeout(&settings, &mut lease, "timed-out")
+                .await;
+            if status == ReceiptStatus::Applied {
+                assert_eq!(result, Ok(true)); // Caller must use existing recovery/ack.
+            } else {
+                assert!(result.is_err()); // Never relabel unresolved effects PageTimeout.
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_settlement_never_hides_receipt_free_owned_failures_or_real_lease_loss() {
+        for failure in [
+            FailureClass::Index,
+            FailureClass::Unavailable,
+            FailureClass::Conflict,
+        ] {
+            let (_dir, settings, runtime, mut lease) = fixture().await;
+            let observer =
+                runtime
+                    .coordinator
+                    .maintain(lease.clone(), clock(), move |_| async move { Err(failure) });
+            // Keep the result queued, then cancel its observer. Typed drain must
+            // distinguish this from a harmless pre-commit page deadline.
+            drop(observer);
+            assert!(
+                runtime
+                    .settle_page_timeout(&settings, &mut lease, "no-receipt")
+                    .await
+                    .is_err()
+            );
+            assert!(runtime.coordinator.receipt("no-receipt").unwrap().is_none());
+        }
+        for lose_actual_lease in [false, true] {
+            let (_dir, settings, runtime, mut lease) = fixture().await;
+            let observer =
+                runtime
+                    .coordinator
+                    .maintain(lease.clone(), Arc::new(|| i64::MAX), |_| async { Ok(()) });
+            drop(observer);
+            if lose_actual_lease {
+                runtime.coordinator.drain_owned_outcomes().await.unwrap();
+                runtime
+                    .coordinator
+                    .state()
+                    .release_lease(&lease, now_ms() / 1000)
+                    .unwrap();
+                runtime
+                    .coordinator
+                    .state()
+                    .acquire_lease(now_ms() / 1000, 31)
+                    .unwrap();
+            }
+            let result = runtime
+                .settle_page_timeout(&settings, &mut lease, "no-receipt")
+                .await;
+            if lose_actual_lease {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result, Ok(false));
+            }
+        }
+    }
 }

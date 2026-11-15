@@ -298,7 +298,7 @@ pub struct IndexCommitCoordinator {
     state_identity: Identity,
     state_token: String,
     binding: CommitBinding,
-    owned_threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    owned_threads: Mutex<Vec<std::thread::JoinHandle<Option<CommitError>>>>,
 }
 const ANCHOR: &str = ".nk-operational-binding";
 impl IndexCommitCoordinator {
@@ -489,6 +489,11 @@ impl IndexCommitCoordinator {
     /// Wait for an already submitted owned effect before a graceful operator
     /// exit. Cancellation invalidates its clock, but never releases a live guard.
     pub async fn drain_owned(self: &Arc<Self>) -> Result<(), CommitError> {
+        self.drain_owned_outcomes().await.map(|_| ())
+    }
+    /// Retain typed owned failures even when a cancelled observer never consumed
+    /// its oneshot result. A successful send alone does not prove consumption.
+    pub async fn drain_owned_outcomes(self: &Arc<Self>) -> Result<Vec<CommitError>, CommitError> {
         let coordinator = self.clone();
         tokio::task::spawn_blocking(move || {
             let handles: Vec<_> = coordinator
@@ -497,15 +502,21 @@ impl IndexCommitCoordinator {
                 .map_err(|_| CommitError::Unavailable)?
                 .drain(..)
                 .collect();
+            let mut failures = Vec::new();
             for handle in handles {
-                handle.join().map_err(|_| CommitError::Unavailable)?;
+                if let Some(error) = handle.join().map_err(|_| CommitError::Unavailable)? {
+                    failures.push(error);
+                }
             }
-            Ok(())
+            Ok(failures)
         })
         .await
         .map_err(|_| CommitError::Unavailable)?
     }
-    fn track_owned(&self, handle: std::thread::JoinHandle<()>) -> Result<(), CommitError> {
+    fn track_owned(
+        &self,
+        handle: std::thread::JoinHandle<Option<CommitError>>,
+    ) -> Result<(), CommitError> {
         let mut handles = self
             .owned_threads
             .lock()
@@ -1179,7 +1190,9 @@ impl IndexCommitCoordinator {
                     } else {
                         Outcome::Failed
                     });
+                    let failure = result.as_ref().err().cloned();
                     let _ = sender.send(result);
+                    failure
                 })
             });
         let tracked = spawned
@@ -1225,7 +1238,9 @@ impl IndexCommitCoordinator {
                         .block_on(effect(context))
                         .map_err(CommitError::Operation)
                 })();
+                let failure = result.as_ref().err().cloned();
                 let _ = sender.send(result);
+                failure
             });
         let tracked = spawned
             .map_err(io)

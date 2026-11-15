@@ -85,7 +85,29 @@ Normal later sync can retry after a permitted input/configuration correction.
 Model availability, malformed outputs, concurrency/resource exhaustion and index,
 ownership or authentication failures retain their failure handling.
 
-`EmbeddingInputLimit` is new derived reconciliation metadata. Older executables
+With `NK_GRAPH=false`, source content, link text and relation properties remain
+canonical, but optional foreign-target metadata resolution is disabled. References
+are stored as unresolved graph projections, which cannot drive navigation or
+graph boosting. Fresh source authorization and guarded commit validation still
+run. Enabling graph navigation later preserves unresolved references until normal
+reconciliation verifies their targets; unchanged canonical text does not require
+new embeddings. Disabling graph enrichment again conservatively replaces the
+previously resolved source projection. This setting is trusted immutable runtime
+composition and cannot be supplied by source metadata or a prepared proposal.
+
+During initial population, a pre-commit page deadline cancels its observer and
+expires its commit clock before owned work is drained. Blocking embeddings retain
+admission until their work finishes; siblings wait for provider readiness under
+the existing bounds. Unresolved/failed effects and genuine storage, authentication
+or ownership errors remain fatal. An applied receipt uses existing bounded
+recovery rather than being labeled skipped. A safe page deadline emits the fixed
+`page_timeout` reason and becomes `PageTimeout` in durable per-page progress once
+the completed inventory is recorded. Before that point, the failure is visible
+only in startup progress logs. The same run does not immediately retry that page;
+a normal later reconciliation can retry it without requiring source edits.
+The final bootstrap page-application stage uses the same timeout settlement.
+
+`EmbeddingInputLimit` and `PageTimeout` are derived reconciliation metadata. Older executables
 may reject that cache status on downgrade; use the same scoped disposable-cache
 rebuild rather than editing status or relabeling vectors. Preserve the private
 operational backup and external mutation/credential records throughout.

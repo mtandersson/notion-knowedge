@@ -190,7 +190,11 @@ fn validate_inputs(inputs: &[String]) -> Result<(), EmbeddingError> {
 impl EmbeddingProvider for QwenProvider {
     fn wait_idle(&self) -> notion_knowledge_core::embedding::EmbeddingIdleFuture<'_> {
         Box::pin(async move {
-            let permit = self.admission.clone().acquire_owned().await
+            let permit = self
+                .admission
+                .clone()
+                .acquire_owned()
+                .await
                 .map_err(|_| EmbeddingError::Unavailable)?;
             drop(permit);
             Ok(())
@@ -507,7 +511,11 @@ mod tests {
         );
         let idle = p.wait_idle();
         tokio::pin!(idle);
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(20), &mut idle).await.is_err());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut idle)
+                .await
+                .is_err()
+        );
         release_tx.send(()).unwrap();
         idle.await.unwrap();
         let permit = p.admission.clone().acquire_owned().await.unwrap();
