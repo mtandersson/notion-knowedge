@@ -32,6 +32,40 @@ inventory execution and unusable assets still leave startup unavailable and the
 flag pending. The next start retries recovery; arbitrary storage errors do not
 trigger destructive reset.
 
+Initial/reset sync overlaps discovery with useful indexing. A bounded channel
+holds at most eight discovered page IDs; a single consumer freshly authorizes,
+fetches, embeds and durably commits each page while independent discovery
+branches continue. Source bodies are processed one page at a time rather than
+buffering the corpus. The existing writer lease is renewed while waiting for
+more pages; timed-out work is fenced and drained before releasing it. No Notion
+write or upload is issued.
+
+Discovery overlaps up to eight independent page/block/database branches; cursors
+within a paginated endpoint remain ordered. After traversal and early refreshes
+finish, the existing planner captures the current local snapshot and performs
+its bounded checks. Only that completed inventory drives final reconciliation
+and removal decisions. Apply still revalidates fresh metadata and physical scope.
+Already committed pages are verified as unchanged without re-embedding them.
+Source failures remain in the existing reconciliation status; no extra recovery
+ledger or persisted traversal cursor is introduced. Search preparation and serving
+still wait for a valid completed inventory and the available indexed subset.
+
+Operator stderr/journald includes `operation=cache_sync` summaries at phase start,
+roughly every ten seconds as work completes, and phase completion. Every normal
+operation event within a startup sync also includes `sync_progress`: phase,
+`discovered_pages`, `content_reads`, `embedded_chunks`, `committed_pages`,
+`skipped_pages`, and `total_pages`. These are actual metadata discoveries, successful
+content reads, completed embedding outputs and acknowledged page commits; reads
+and commits may repeat for a page during final revalidation. They are not estimates
+of unique indexed sources. The total stays null until traversal completes; no
+workspace-wide page count is guessed. Counts contain no titles, IDs, URLs or text.
+
+Individual requests retain a `worker` label such as `discovery-17` or `indexing-8`
+and `runtime_thread`. Counts and worker context follow owned commit threads as well
+as awaited async requests. Thread identity can change across awaits. Summary
+phase completion is distinct from final search readiness, and progress does not
+claim skipped or inaccessible content was indexed.
+
 For a corrupt cache file that cannot be classified as an identity/schema
 mismatch, stop the service and run the explicit trusted operator command with
 the normal scope, Notion credential and offline embedding settings:

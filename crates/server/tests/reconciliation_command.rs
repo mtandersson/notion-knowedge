@@ -42,6 +42,7 @@ struct ExtraPage {
 struct Model {
     empty_content: bool,
     unsupported_page_content: bool,
+    unsupported_page_once: bool,
     unauthenticated_content: bool,
     unauthenticated_page_metadata: bool,
     markdown: String,
@@ -66,6 +67,7 @@ impl Default for Model {
         Self {
             empty_content: false,
             unsupported_page_content: false,
+            unsupported_page_once: false,
             unauthenticated_content: false,
             unauthenticated_page_metadata: false,
             markdown: "# Intro\n\nSaffron ravioli.\n\n## Other\n\nAn evergreen section.\n".into(),
@@ -99,6 +101,7 @@ struct HttpNotion {
     server: tokio::task::JoinHandle<()>,
     port: u16,
     pause: Arc<RequestPause>,
+    discovery_pause: Arc<RequestPause>,
 }
 impl HttpNotion {
     async fn start() -> Self {
@@ -114,7 +117,10 @@ impl HttpNotion {
         let fail = fail_once.clone();
         let pause = Arc::new(RequestPause::default());
         let boundary = pause.clone();
+        let discovery_pause = Arc::new(RequestPause::default());
+        let discovery = discovery_pause.clone();
         let server = tokio::spawn(async move {
+            let mut pending_responses = tokio::task::JoinSet::new();
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut bytes = Vec::new();
@@ -153,7 +159,16 @@ impl HttpNotion {
                 if route.ends_with("/markdown") {
                     bodies.fetch_add(1, Ordering::SeqCst);
                 }
-                let snapshot = values.lock().unwrap().clone();
+                let snapshot = {
+                    let mut state = values.lock().unwrap();
+                    let mut snapshot = state.clone();
+                    if route == format!("/v1/pages/{PAGE}/markdown") && state.unsupported_page_once
+                    {
+                        state.unsupported_page_once = false;
+                        snapshot.unsupported_page_content = true;
+                    }
+                    snapshot
+                };
                 if snapshot.race_metadata && route == format!("/v1/pages/{PAGE}") {
                     values.lock().unwrap().title.push('!');
                 }
@@ -264,7 +279,22 @@ impl HttpNotion {
                     200
                 };
                 let body = if bad { json!({}) } else { response }.to_string();
-                let _ = stream.write_all(format!("HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+                let payload = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                if route.starts_with(&format!("/v1/blocks/{ROOT}/children"))
+                    && discovery.armed.swap(false, Ordering::SeqCst)
+                {
+                    let barrier = discovery.clone();
+                    pending_responses.spawn(async move {
+                        barrier.started.notify_one();
+                        barrier.proceed.notified().await;
+                        let _ = stream.write_all(payload.as_bytes()).await;
+                    });
+                } else {
+                    let _ = stream.write_all(payload.as_bytes()).await;
+                }
             }
         });
         Self {
@@ -273,6 +303,7 @@ impl HttpNotion {
             server,
             port,
             pause,
+            discovery_pause,
         }
     }
     fn client(&self) -> Arc<NotionClient> {
@@ -2966,7 +2997,10 @@ async fn unreadable_page_does_not_block_embedded_search_and_next_sync_can_recove
         progress.failed.get(PAGE),
         Some(&DurableFailure::UnsupportedSource)
     );
-    assert_eq!(progress.changed, 2);
+    // Startup already persisted readable pages while discovering. The final
+    // reconciliation verifies them as unchanged instead of re-embedding them.
+    assert_eq!(progress.changed + progress.unchanged, 2);
+    assert_eq!(progress.successful.len(), 2);
     assert!(progress.pending.is_empty());
     assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
     assert!(runtime.chunks().page_chunks(PAGE).await.unwrap().is_empty());
@@ -3002,7 +3036,7 @@ async fn unreadable_page_does_not_block_embedded_search_and_next_sync_can_recove
 }
 
 #[tokio::test]
-async fn application_authentication_failure_keeps_cache_rebuild_unavailable() {
+async fn authentication_revocation_at_any_sync_stage_keeps_cache_unavailable() {
     use notion_knowledge_retrieval::durable_plan::DurableFailure;
     for after_embedding in [false, true] {
         let http = HttpNotion::start().await;
@@ -3036,14 +3070,29 @@ async fn application_authentication_failure_keeps_cache_rebuild_unavailable() {
         assert!(result.is_err());
         let runtime = f.open(&http, OpenMode::ReadOnly).await;
         assert!(runtime.coordinator.state().cache_rebuild_pending().unwrap());
-        let progress = runtime
-            .coordinator
-            .reconciliation_progress("cache-reset")
-            .unwrap();
-        assert!(matches!(
-            progress.failed.get(PAGE),
-            Some(DurableFailure::Unauthenticated | DurableFailure::Index)
-        ));
+        // A streaming attempt may fail before the final inventory exists.
+        // In both orders, no unauthorized page is acknowledged and the cache
+        // remains unavailable; an early failure needs no extra recovery ledger.
+        assert!(runtime.chunks().page_chunks(PAGE).await.unwrap().is_empty());
+        match runtime.coordinator.reconciliation_progress("cache-reset") {
+            Ok(progress) => assert!(
+                progress
+                    .failed
+                    .values()
+                    .chain(progress.planning_failures.values())
+                    .chain(progress.run_failures.values())
+                    .any(|failure| matches!(
+                        failure,
+                        DurableFailure::Unauthenticated
+                            | DurableFailure::TraversalUnauthenticated
+                            | DurableFailure::Index
+                    ))
+            ),
+            Err(error) => assert_eq!(
+                error,
+                notion_knowledge_core::reconciliation::JournalError::InvalidTransition
+            ),
+        }
     }
 }
 
@@ -3213,21 +3262,26 @@ async fn manual_inventory_uses_its_budget_and_expires_without_source_mutations()
 }
 
 #[tokio::test]
-async fn cache_inventory_can_outlive_page_budget_while_page_refresh_stays_bounded() {
+async fn streaming_initial_sync_separates_discovery_and_page_budgets() {
     use std::time::Duration;
     let http = HttpNotion::start().await;
     let mut f = Fixture::new(&http).await;
     f.settings.timeout_seconds = 1;
     f.settings.inventory_timeout_seconds = 7200;
-    http.pause.armed.store(true, Ordering::SeqCst);
-    f.provider.pause.store(true, Ordering::SeqCst);
+    http.discovery_pause.armed.store(true, Ordering::SeqCst);
     let source_and_page = async {
-        tokio::time::timeout(Duration::from_secs(10), http.pause.started.notified())
-            .await
-            .unwrap();
-        assert_writer_available_during_inventory(&f.state);
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            http.discovery_pause.started.notified(),
+        )
+        .await
+        .unwrap();
+        await_cached_page(&f.state, ROOT).await;
+        // Discovery may wait longer than a page budget after an earlier page
+        // has already committed. A subsequent embedding keeps its own bound.
         tokio::time::sleep(Duration::from_millis(1100)).await;
-        http.pause.proceed.notify_one();
+        f.provider.pause.store(true, Ordering::SeqCst);
+        http.discovery_pause.proceed.notify_one();
         tokio::time::timeout(Duration::from_secs(10), f.provider.entered.notified())
             .await
             .unwrap();
@@ -3248,8 +3302,15 @@ async fn cache_inventory_can_outlive_page_budget_while_page_refresh_stays_bounde
         result.is_err(),
         "pending page embedding must expire under its page budget"
     );
-    // The observed embedding call proves the inventory finished and admitted
-    // page work; no assertion depends on a legacy inventory storage table.
+    assert_writer_available_during_inventory(&f.state);
+    let writer = fs::File::open(&f.settings.index).unwrap();
+    writer.try_lock().unwrap();
+    assert!(
+        notion_knowledge_retrieval::sync_state::SqliteSyncStateStore::open_read_only(&f.state)
+            .unwrap()
+            .cache_rebuild_pending()
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -3525,4 +3586,131 @@ async fn inventory_recording_rejects_a_local_predecessor_changed_after_planning(
         .state()
         .release_lease(&lease, now)
         .unwrap();
+}
+
+async fn await_cached_page(path: &std::path::Path, page: &str) {
+    use notion_knowledge_core::sync_state::SyncStateStore;
+    use notion_knowledge_retrieval::sync_state::SqliteSyncStateStore;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if SqliteSyncStateStore::open_read_only(path)
+                .ok()
+                .and_then(|state| state.page_state(page).ok().flatten())
+                .is_some()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initial_sync_embeds_and_commits_before_discovery_finishes() {
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    fs::remove_dir_all(&f.settings.index).unwrap();
+    http.discovery_pause.armed.store(true, Ordering::SeqCst);
+    let settings = f.settings.clone();
+    let state = f.state.clone();
+    let source = http.client();
+    let provider = f.provider.clone();
+    let recovery = tokio::spawn(async move {
+        IndexRuntime::recover(&settings, &state, authority(), source, provider).await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        http.discovery_pause.started.notified(),
+    )
+    .await
+    .unwrap();
+    await_cached_page(&f.state, ROOT).await;
+    assert!(f.provider.count.load(Ordering::SeqCst) > 0);
+    assert!(
+        !recovery.is_finished(),
+        "serving readiness still requires the completed inventory"
+    );
+    http.discovery_pause.proceed.notify_one();
+    let runtime = recovery.await.unwrap().unwrap();
+    assert_eq!(runtime.coordinator.owned_page_ids().unwrap().len(), 3);
+    assert!(!runtime.chunks().page_chunks(ROOT).await.unwrap().is_empty());
+    assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
+}
+
+#[tokio::test]
+async fn streaming_retries_commit_the_page_skipped_during_early_population() {
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Info);
+    http.state.lock().unwrap().unsupported_page_once = true;
+    fs::remove_dir_all(&f.settings.index).unwrap();
+    let runtime = IndexRuntime::recover(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    )
+    .await
+    .unwrap();
+    let progress = runtime
+        .coordinator
+        .reconciliation_progress("cache-reset")
+        .unwrap();
+    assert_eq!(progress.changed, 1);
+    assert_eq!(progress.unchanged, 2);
+    assert!(progress.failed.is_empty());
+    assert!(!runtime.chunks().page_chunks(PAGE).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn streaming_retry_progress_reports_actual_commits_without_double_counting_unchanged_pages() {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "streaming_retries_commit_the_page_skipped_during_early_population",
+                "--nocapture",
+            ])
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!stderr.contains("fixture-credential"));
+    let events: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let ready = events
+        .iter()
+        .find(|event| {
+            event["operation"] == "cache_sync"
+                && event["phase"] == "preparing_search"
+                && event["status"] == "completed"
+        })
+        .unwrap();
+    let counts = &ready["sync_progress"];
+    assert_eq!(counts["discovered_pages"], 3);
+    assert_eq!(counts["total_pages"], 3);
+    assert_eq!(counts["committed_pages"], 3);
+    assert_eq!(counts["skipped_pages"], 1);
+    assert!(counts["embedded_chunks"].as_u64().unwrap() > 0);
+    for event in events
+        .iter()
+        .filter(|event| event["operation"] == "notion_api" || event["operation"] == "index_commit")
+    {
+        assert!(event["sync_progress"].is_object(), "{event}");
+    }
 }

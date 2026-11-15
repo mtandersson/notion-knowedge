@@ -8,11 +8,18 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod sync_progress;
+pub use sync_progress::{
+    SyncContext, SyncCount, current_sync_progress, sync_context, sync_count, sync_total_pages,
+    with_sync_context, with_sync_progress,
+};
+
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static LOG_LEVEL: AtomicU8 = AtomicU8::new(Level::Info as u8);
 
 tokio::task_local! {
     static REQUEST_ID: CorrelationId;
+    static SYNC_TASK: (SyncPhase, usize);
 }
 
 /// The only accepted event fields are fixed enums, numeric durations/statuses
@@ -93,6 +100,93 @@ pub fn set_level(level: Level) {
     LOG_LEVEL.store(level as u8, Ordering::Relaxed);
 }
 
+#[derive(Clone, Copy)]
+pub enum SyncPhase {
+    Discovery,
+    Planning,
+    Indexing,
+    PreparingSearch,
+}
+
+impl SyncPhase {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Discovery => "discovery",
+            Self::Planning => "planning",
+            Self::Indexing => "indexing",
+            Self::PreparingSearch => "preparing_search",
+        }
+    }
+}
+
+/// An async fetch branch may move between runtime threads. Keep its numeric
+/// worker label and correlation ID stable across its HTTP requests.
+pub async fn sync_task<T>(phase: SyncPhase, task: usize, future: impl Future<Output = T>) -> T {
+    SYNC_TASK
+        .scope((phase, task), scope(CorrelationId::new(), future))
+        .await
+}
+
+fn sync_worker() -> Option<String> {
+    SYNC_TASK
+        .try_with(|(phase, task)| format!("{}-{task}", phase.label()))
+        .ok()
+        .or_else(sync_progress::thread_worker)
+}
+
+/// Periodic operator progress contains counts only, never source identifiers.
+pub struct SyncProgressLog {
+    phase: SyncPhase,
+    started: Instant,
+    last: Option<Instant>,
+}
+
+impl SyncProgressLog {
+    pub fn new(phase: SyncPhase) -> Self {
+        Self {
+            phase,
+            started: Instant::now(),
+            last: None,
+        }
+    }
+
+    pub fn report(
+        &mut self,
+        processed: usize,
+        total: Option<usize>,
+        pages: usize,
+        skipped: usize,
+        finished: bool,
+    ) {
+        sync_progress::sync_phase(self.phase);
+        let now = Instant::now();
+        if !finished
+            && self
+                .last
+                .is_some_and(|last| now.duration_since(last) < Duration::from_secs(10))
+        {
+            return;
+        }
+        self.last = Some(now);
+        if LOG_LEVEL.load(Ordering::Relaxed) < Level::Info as u8 {
+            return;
+        }
+        let phase = self.phase.label();
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "{}",
+            serde_json::json!({
+                "operation": "cache_sync", "phase": phase,
+                "sync_progress": current_sync_progress(),
+                "status": if finished { "completed" } else { "running" },
+                "processed": processed, "total": total, "pages": pages,
+                "skipped": skipped, "elapsed_seconds": self.started.elapsed().as_secs(),
+            "runtime_thread": format!("{:?}", std::thread::current().id()),
+            })
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum Operation {
     HttpRequest,
@@ -158,7 +252,7 @@ pub fn event_json(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    serde_json::json!({
+    let mut event = serde_json::json!({
         "timestamp_unix_ms": timestamp_ms,
         "level": level.label(),
         "correlation_id": id.as_str(),
@@ -166,8 +260,13 @@ pub fn event_json(
         "duration_ms": elapsed.as_millis(),
         "outcome": outcome.label(),
         "http_status": status,
-    })
-    .to_string()
+        "worker": sync_worker(),
+        "runtime_thread": format!("{:?}", std::thread::current().id()),
+    });
+    if let Some(progress) = current_sync_progress() {
+        event["sync_progress"] = progress;
+    }
+    event.to_string()
 }
 
 pub fn emit(
@@ -252,7 +351,9 @@ mod tests {
         assert_eq!(parsed["outcome"], "failed");
         assert_eq!(parsed["http_status"], 503);
         assert_eq!(parsed["duration_ms"], 13);
-        assert_eq!(parsed.as_object().unwrap().len(), 7);
+        assert_eq!(parsed.as_object().unwrap().len(), 9);
+        assert!(parsed["worker"].is_null());
+        assert!(parsed["runtime_thread"].as_str().is_some());
         assert!(!line.contains("authorization"));
         assert!(!line.contains("token"));
         assert!(!line.contains("url"));
@@ -271,6 +372,15 @@ mod tests {
 
     #[tokio::test]
     async fn task_scope_propagates_but_does_not_leak_across_requests() {
+        sync_task(SyncPhase::Discovery, 3, async {
+            assert_eq!(sync_worker().as_deref(), Some("discovery-3"));
+            let id = current_id();
+            tokio::task::yield_now().await;
+            assert_eq!(sync_worker().as_deref(), Some("discovery-3"));
+            assert_eq!(current_id(), id);
+        })
+        .await;
+        assert!(sync_worker().is_none());
         let requested = CorrelationId::new();
         let actual = scope(requested.clone(), async {
             let same = current_id();
@@ -281,5 +391,40 @@ mod tests {
         .await;
         assert_eq!(actual, requested);
         assert_ne!(current_id(), requested);
+    }
+    #[tokio::test]
+    async fn sync_counts_follow_async_and_owned_threads_without_leaking_to_other_work() {
+        assert!(current_sync_progress().is_none());
+        with_sync_progress(async {
+            sync_count(SyncCount::DiscoveredPage, 2);
+            sync_count(SyncCount::ContentRead, 1);
+            sync_count(SyncCount::EmbeddedChunk, 3);
+            let captured = sync_context();
+            let event = std::thread::spawn(move || {
+                with_sync_context(captured, || {
+                    sync_count(SyncCount::CommittedPage, 1);
+                    event_json(
+                        &CorrelationId::new(),
+                        Operation::IndexCommit,
+                        Outcome::Success,
+                        Duration::ZERO,
+                        None,
+                        Level::Info,
+                    )
+                })
+            })
+            .join()
+            .unwrap();
+            let event: serde_json::Value = serde_json::from_str(&event).unwrap();
+            assert_eq!(event["sync_progress"]["discovered_pages"], 2);
+            assert_eq!(event["sync_progress"]["content_reads"], 1);
+            assert_eq!(event["sync_progress"]["embedded_chunks"], 3);
+            assert_eq!(event["sync_progress"]["committed_pages"], 1);
+            assert!(event["sync_progress"]["total_pages"].is_null());
+            sync_total_pages(2);
+            assert_eq!(current_sync_progress().unwrap()["total_pages"], 2);
+        })
+        .await;
+        assert!(current_sync_progress().is_none());
     }
 }

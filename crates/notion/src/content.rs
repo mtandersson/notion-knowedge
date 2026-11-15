@@ -68,6 +68,10 @@ impl NotionClient {
             return Err(error(BackendErrorKind::UnsupportedContent));
         }
         // Do not trim/indent/rewrite: tabs encode children, spaces and fences encode code.
+        notion_knowledge_core::logging::sync_count(
+            notion_knowledge_core::logging::SyncCount::ContentRead,
+            1,
+        );
         Ok(PageContent {
             page,
             markdown: content.markdown,

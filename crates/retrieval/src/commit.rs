@@ -1138,46 +1138,49 @@ impl IndexCommitCoordinator {
     {
         let coordinator = self.clone();
         let correlation = logging::current_id();
+        let sync_context = logging::sync_context();
         let (sender, receiver) = oneshot::channel();
         let spawned = std::thread::Builder::new()
             .name("nk-index-commit".into())
             .spawn(move || {
-                let mut log = EventGuard::with_id(Operation::IndexCommit, correlation);
-                let result = (|| {
-                    let _guard = coordinator.acquire_owned(&lease, &clock)?;
-                    coordinator.revalidate(&lease, clock())?;
-                    if !coordinator.begin(&operation, &lease, clock())? {
-                        return Ok(CommitOutcome::AlreadyApplied);
-                    }
-                    let runtime = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .map_err(io)?;
-                    let context = CommitContext {
-                        coordinator: coordinator.clone(),
-                        lease: lease.clone(),
-                        clock: clock.clone(),
-                    };
-                    match runtime.block_on(effect(context)) {
-                        Ok(authority) => {
-                            let result = coordinator
-                                .finish(&operation, &lease, clock())
-                                .map(|()| CommitOutcome::Applied);
-                            drop(authority);
-                            result
+                logging::with_sync_context(sync_context, || {
+                    let mut log = EventGuard::with_id(Operation::IndexCommit, correlation);
+                    let result = (|| {
+                        let _guard = coordinator.acquire_owned(&lease, &clock)?;
+                        coordinator.revalidate(&lease, clock())?;
+                        if !coordinator.begin(&operation, &lease, clock())? {
+                            return Ok(CommitOutcome::AlreadyApplied);
                         }
-                        Err(failure) => {
-                            coordinator.fail(&operation, failure.clone())?;
-                            Err(CommitError::Operation(failure))
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .map_err(io)?;
+                        let context = CommitContext {
+                            coordinator: coordinator.clone(),
+                            lease: lease.clone(),
+                            clock: clock.clone(),
+                        };
+                        match runtime.block_on(effect(context)) {
+                            Ok(authority) => {
+                                let result = coordinator
+                                    .finish(&operation, &lease, clock())
+                                    .map(|()| CommitOutcome::Applied);
+                                drop(authority);
+                                result
+                            }
+                            Err(failure) => {
+                                coordinator.fail(&operation, failure.clone())?;
+                                Err(CommitError::Operation(failure))
+                            }
                         }
-                    }
-                })();
-                log.finish(if result.is_ok() {
-                    Outcome::Success
-                } else {
-                    Outcome::Failed
-                });
-                let _ = sender.send(result);
+                    })();
+                    log.finish(if result.is_ok() {
+                        Outcome::Success
+                    } else {
+                        Outcome::Failed
+                    });
+                    let _ = sender.send(result);
+                })
             });
         let tracked = spawned
             .map_err(io)

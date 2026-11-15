@@ -104,6 +104,16 @@ impl AuthoritativeReconciliationRunner {
         self.planner.plan().await.map_err(RunnerError::Planning)
     }
 
+    pub async fn dry_run_discovered(
+        &self,
+        report: notion_knowledge_core::discovery::DiscoveryReport,
+    ) -> Result<ReconciliationPlan, RunnerError> {
+        self.planner
+            .plan_discovered(report)
+            .await
+            .map_err(RunnerError::Planning)
+    }
+
     /// Admit an already prepared read-only inventory under a fresh writer
     /// lease. A changed local predecessor conflicts instead of recording a
     /// plan against stale cache state. Source effects still revalidate on apply.

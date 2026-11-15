@@ -2571,6 +2571,41 @@ fn record_plan(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_page_plans_recheck_metadata_and_scope_before_indexing() {
+    for moved in [false, true] {
+        let index = Fixture::new();
+        index.create().await;
+        let source = HttpNotion::start().await;
+        let provider = CountingProvider::new(index.embed.clone());
+        let service = runner(&index, &source);
+        let plan = service.dry_run().await.unwrap();
+        assert_eq!(plan.planned_refresh(), 3);
+        assert_eq!(source.body_reads.load(Ordering::SeqCst), 0);
+        record_plan(&index, "initial-source-race", &plan);
+        source.change(|m| {
+            if moved {
+                m.parent = FOREIGN.into();
+            } else {
+                // Keep the edit timestamp unchanged: exact metadata matters.
+                m.title = "Changed after inventory".into();
+            }
+        });
+        let result = service
+            .apply(
+                "initial-source-race",
+                index.lease.clone(),
+                clock(),
+                &provider,
+            )
+            .await
+            .unwrap();
+        assert!(result.failed.contains_key(PAGE), "{result:?}");
+        assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+        assert_eq!(result.changed, 2);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconciliation_and_refresh_keep_source_policy_across_physical_generations() {
     for (generation, epoch) in [("lexical-v2", 3), ("rollback-v1", 5)] {
         let index = Fixture::with_physical_generation(authority(), generation, epoch);
