@@ -61,3 +61,38 @@ Before closing #455, capture the following from the activated, exact candidate:
 
 Actual ChatGPT installation remains separate in #109/#559. Historical quality
 measurements are retained; optional ranking work does not gate this launch.
+
+## Activation and observed startup failure
+
+The owner approved the reviewed persistent activation on 2026-11-15. The bounded
+one-way service and private bearer-aware observer were activated; the effective
+limits read back as CPU 100%, memory 4 GiB, swap zero, tasks 128 and file descriptors
+1,024. Persistent unit and boot dependencies were read back. Existing unrelated
+services and credentials were preserved, and operational SQLite was backed up
+before derived-cache recovery. No source writes or uploads occurred.
+
+Startup repeatedly failed after approximately 50 seconds with successful Notion
+reads but no embedded chunks or page commits. There was no cgroup OOM event. The
+owned service was stopped after four automatic restarts to avoid repeating the
+same unsuccessful recovery; no stable full-root sync or search is claimed.
+
+A counts-only probe through production scoped page preparation found one
+4,717-byte / 2,248-token chunk, exceeding the unchanged 1,024-token provider limit.
+The HTML span finder incorrectly extended an opener to the last sibling's close.
+The source itself contains independent complete elements; its largest genuinely
+balanced container is 792 characters. This is tracked as the concrete prerequisite
+[#646](https://github.com/mtandersson/notion-knowedge/issues/646), with focused draft
+[#647](https://github.com/mtandersson/notion-knowedge/pull/647).
+
+An isolated diagnostic using the current provider and that coalesced input timed
+out at 330 seconds under the same 4-GiB / one-CPU envelope; peak memory was
+4,126,752,768 bytes and CPU time 325.962 seconds. This diagnostic is a debug build,
+not deployed release acceptance. Its failure does not justify increasing model
+admission or the resource cap.
+
+The locally corrected, independently reviewed chunking design prepares the exact
+canonical source as six chunks with token counts 142, 449, 506, 493, 475 and 188.
+This fits the existing context bound without truncation or source changes. These
+are local preparation results, not proof of deployed embeddings, full-root sync,
+resource sizing or usable search. A tested release of the correction must pass
+review/CI before resuming the owned service and completing the remaining checks.
