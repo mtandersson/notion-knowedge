@@ -37,6 +37,85 @@ pub(crate) fn has_fatal_sync_failure(
         })
 }
 
+/// Concurrent read-only page preparations ahead of the embedding consumer.
+const PREFETCH_WORKERS: usize = 2;
+/// Completed preparations queued for the consumer beyond those in flight.
+const PREFETCH_QUEUE: usize = 1;
+/// Shared retained-byte budget (KiB) for in-flight, queued and committing pages.
+const PREFETCH_BUDGET_KIB: usize = 64 * 1024;
+/// Worst-case reservation (KiB) per preparation: the 8 MiB streamed Markdown
+/// cap retained as source, normalized text, new and previous chunk copies.
+const PREFETCH_RESERVE_KIB: usize = 32 * 1024;
+
+/// One retained-byte budget for read-ahead. A preparation reserves the
+/// worst case before its first request, then keeps only its measured share
+/// while queued and committing; dropping the permit returns the bytes.
+struct PrefetchBudget {
+    kib: Arc<tokio::sync::Semaphore>,
+    reserve_kib: usize,
+}
+impl PrefetchBudget {
+    fn new(total_kib: usize, reserve_kib: usize) -> Self {
+        assert!(reserve_kib > 0 && reserve_kib <= total_kib);
+        Self {
+            kib: Arc::new(tokio::sync::Semaphore::new(total_kib)),
+            reserve_kib,
+        }
+    }
+    async fn reserve(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.kib
+            .clone()
+            .acquire_many_owned(u32::try_from(self.reserve_kib).ok()?)
+            .await
+            .ok()
+    }
+    /// Shrink a reservation to a measured size, or `None` if it exceeds it.
+    fn retain(
+        &self,
+        mut reservation: tokio::sync::OwnedSemaphorePermit,
+        bytes: usize,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let kib = bytes.div_ceil(1024).max(1);
+        if kib > self.reserve_kib {
+            return None;
+        }
+        drop(reservation.split(self.reserve_kib - kib));
+        Some(reservation)
+    }
+}
+
+enum Prefetched {
+    Skipped,
+    Fatal(&'static str),
+    Ready {
+        prefetched: Box<notion_knowledge_retrieval::refresh::PrefetchedPage>,
+        bytes: tokio::sync::OwnedSemaphorePermit,
+    },
+    Oversize {
+        page: notion_knowledge_core::backend::PageId,
+        root: notion_knowledge_core::backend::PageId,
+        operation: String,
+    },
+    Failed {
+        page: notion_knowledge_core::backend::PageId,
+        operation: String,
+        error: notion_knowledge_retrieval::refresh::RefreshError,
+    },
+    TimedOut {
+        page: notion_knowledge_core::backend::PageId,
+        operation: String,
+    },
+}
+enum PageWork {
+    Commit(
+        Box<notion_knowledge_retrieval::refresh::PrefetchedPage>,
+        tokio::sync::OwnedSemaphorePermit,
+    ),
+    Inline(notion_knowledge_core::backend::PageId),
+    Failed(notion_knowledge_retrieval::refresh::RefreshError),
+    TimedOut,
+}
+
 struct SyncEmbedding<'a>(&'a dyn EmbeddingProvider);
 impl EmbeddingProvider for SyncEmbedding<'_> {
     fn wait_idle(&self) -> notion_knowledge_core::embedding::EmbeddingIdleFuture<'_> {
@@ -369,20 +448,53 @@ impl IndexRuntime {
         ),
         &'static str,
     > {
+        use futures::StreamExt;
         use notion_knowledge_core::{
             logging::{SyncPhase, SyncProgressLog, sync_task},
             root_scope::RootScopeGate,
         };
         use notion_knowledge_retrieval::refresh::RefreshError;
-        let (send, mut receive) = tokio::sync::mpsc::channel(8);
+        let (send, receive) = tokio::sync::mpsc::channel(8);
         let crawl = self.source.crawl_with_pages(
             &self.source_scope.roots,
             &self.source_scope.exclusions,
             send,
         );
-        let consume = async {
+        // Bounded read-ahead: source preparation for later pages overlaps the
+        // one embedding/commit consumer. Each preparation reserves worst-case
+        // bytes before any request and keeps its measured share until the
+        // consumer finishes it, so in-flight and queued pages share one budget.
+        let budget = PrefetchBudget::new(PREFETCH_BUDGET_KIB, PREFETCH_RESERVE_KIB);
+        let (ready, mut prepared) = tokio::sync::mpsc::channel::<Prefetched>(PREFETCH_QUEUE);
+        let produce = async {
+            let ready = ready;
             let gate = RootScopeGate::new(self.source.clone(), self.source_scope.clone())
                 .map_err(|_| "cache scope unavailable")?;
+            let pages = futures::stream::unfold(receive, |mut receive| async move {
+                receive.recv().await.map(|page| (page, receive))
+            });
+            let mut fetched = std::pin::pin!(
+                pages
+                    .enumerate()
+                    .map(|(index, page)| {
+                        Box::pin(self.prefetch_initial_page(
+                            settings,
+                            &gate,
+                            &budget,
+                            index + 1,
+                            page,
+                        ))
+                    })
+                    .buffered(PREFETCH_WORKERS)
+            );
+            while let Some(item) = fetched.next().await {
+                if ready.send(item).await.is_err() {
+                    break;
+                }
+            }
+            Ok::<_, &'static str>(())
+        };
+        let consume = async {
             let mut progress = SyncProgressLog::new(SyncPhase::Indexing);
             let mut processed = 0;
             let mut persisted = 0;
@@ -391,8 +503,8 @@ impl IndexRuntime {
             let state = self.coordinator.state();
             let ttl = settings.timeout_seconds as i64 + 30;
             loop {
-                let page = tokio::select! {
-                    page = receive.recv() => match page { Some(page) => page, None => break },
+                let item = tokio::select! {
+                    item = prepared.recv() => match item { Some(item) => item, None => break },
                     _ = tokio::time::sleep(std::time::Duration::from_secs((ttl as u64 / 3).max(1))) => {
                         *lease = state.renew_lease(lease, now_ms()/1000, ttl).map_err(|_| "cache sync lease unavailable")?;
                         continue;
@@ -402,26 +514,36 @@ impl IndexRuntime {
                     .renew_lease(lease, now_ms() / 1000, ttl)
                     .map_err(|_| "cache sync lease unavailable")?;
                 processed += 1;
-                let permit = match gate.authorize(&page).await {
-                    Ok(permit) => permit,
-                    Err(_) => {
+                let (page, operation, work) = match item {
+                    Prefetched::Fatal(error) => return Err(error),
+                    Prefetched::Skipped => {
                         skipped += 1;
                         notion_knowledge_core::logging::sync_count(
                             notion_knowledge_core::logging::SyncCount::SkippedPage,
                             1,
                         );
+                        progress.report(processed, None, persisted, skipped, false);
                         continue;
                     }
+                    Prefetched::Ready { prefetched, bytes } => (
+                        prefetched.page().clone(),
+                        prefetched.operation().to_owned(),
+                        PageWork::Commit(prefetched, bytes),
+                    ),
+                    Prefetched::Oversize {
+                        page,
+                        root,
+                        operation,
+                    } => (page, operation, PageWork::Inline(root)),
+                    Prefetched::Failed {
+                        page,
+                        operation,
+                        error,
+                    } => (page, operation, PageWork::Failed(error)),
+                    Prefetched::TimedOut { page, operation } => {
+                        (page, operation, PageWork::TimedOut)
+                    }
                 };
-                let root = self
-                    .source_scope
-                    .roots
-                    .iter()
-                    .find(|root| permit.belongs_to_any(std::slice::from_ref(&root.0)))
-                    .ok_or("cache source authority unavailable")?;
-                *lease = state
-                    .renew_lease(lease, now_ms() / 1000, ttl)
-                    .map_err(|_| "cache sync lease unavailable")?;
                 struct Attempt(Arc<std::sync::atomic::AtomicBool>);
                 impl Drop for Attempt {
                     fn drop(&mut self) {
@@ -438,26 +560,48 @@ impl IndexRuntime {
                         now_ms() / 1000
                     }
                 });
-                let operation = format!(
-                    "initial-{}",
-                    notion_knowledge_core::logging::CorrelationId::new().as_str()
-                );
-                let result = tokio::time::timeout(
-                    std::time::Duration::from_secs(settings.timeout_seconds),
-                    sync_task(
-                        SyncPhase::Indexing,
-                        processed,
-                        Box::pin(self.handler.refresh_page(
-                            &page,
-                            root,
-                            &operation,
-                            &SyncEmbedding(self.provider.as_ref()),
-                            lease.clone(),
-                            clock,
-                        )),
-                    ),
-                )
-                .await;
+                let deadline = std::time::Duration::from_secs(settings.timeout_seconds);
+                let embedding = SyncEmbedding(self.provider.as_ref());
+                let result: Result<Result<_, RefreshError>, ()> = match work {
+                    PageWork::Commit(prefetched, bytes) => {
+                        let result = tokio::time::timeout(
+                            deadline,
+                            sync_task(
+                                SyncPhase::Indexing,
+                                processed,
+                                Box::pin(self.handler.refresh_prefetched(
+                                    *prefetched,
+                                    &embedding,
+                                    lease.clone(),
+                                    clock,
+                                )),
+                            ),
+                        )
+                        .await
+                        .map_err(|_| ());
+                        drop(bytes);
+                        result
+                    }
+                    PageWork::Inline(root) => tokio::time::timeout(
+                        deadline,
+                        sync_task(
+                            SyncPhase::Indexing,
+                            processed,
+                            Box::pin(self.handler.refresh_page(
+                                &page,
+                                &root,
+                                &operation,
+                                &embedding,
+                                lease.clone(),
+                                clock,
+                            )),
+                        ),
+                    )
+                    .await
+                    .map_err(|_| ()),
+                    PageWork::Failed(error) => Ok(Err(error)),
+                    PageWork::TimedOut => Err(()),
+                };
                 expired.store(true, std::sync::atomic::Ordering::SeqCst);
                 if result.is_ok() {
                     self.coordinator
@@ -498,7 +642,7 @@ impl IndexRuntime {
                     Ok(Err(RefreshError::Unavailable)) => {
                         return Err("cache streaming dependency unavailable");
                     }
-                    Err(_) => {
+                    Err(()) => {
                         if self
                             .settle_page_timeout(settings, lease, &operation)
                             .await?
@@ -524,11 +668,79 @@ impl IndexRuntime {
             progress.report(processed, Some(processed), persisted, skipped, true);
             Ok::<_, &'static str>(timed_out)
         };
-        let (report, timed_out) = tokio::try_join!(
+        let (report, (), timed_out) = tokio::try_join!(
             async { Box::pin(crawl).await.map_err(|_| "cache inventory failed") },
+            Box::pin(produce),
             Box::pin(consume)
         )?;
         Ok((report, timed_out))
+    }
+
+    /// Read-only source preparation for one discovered page. Authorization and
+    /// content reads share the client's Notion rate limiter; nothing here
+    /// embeds, takes the index version, or needs the writer lease.
+    async fn prefetch_initial_page(
+        &self,
+        settings: &WorkerSettings,
+        gate: &notion_knowledge_core::root_scope::RootScopeGate,
+        budget: &PrefetchBudget,
+        index: usize,
+        page: notion_knowledge_core::backend::PageId,
+    ) -> Prefetched {
+        use notion_knowledge_core::logging::{SyncCount, SyncPhase, sync_count, sync_task};
+        let Ok(permit) = gate.authorize(&page).await else {
+            return Prefetched::Skipped;
+        };
+        let Some(root) = self
+            .source_scope
+            .roots
+            .iter()
+            .find(|root| permit.belongs_to_any(std::slice::from_ref(&root.0)))
+            .cloned()
+        else {
+            return Prefetched::Fatal("cache source authority unavailable");
+        };
+        let operation = format!(
+            "initial-{}",
+            notion_knowledge_core::logging::CorrelationId::new().as_str()
+        );
+        let Some(reservation) = budget.reserve().await else {
+            return Prefetched::Fatal("cache prefetch budget unavailable");
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(settings.timeout_seconds),
+            sync_task(
+                SyncPhase::Indexing,
+                index,
+                Box::pin(self.handler.prefetch_page(&page, &root, &operation)),
+            ),
+        )
+        .await;
+        match result {
+            Err(_) => Prefetched::TimedOut { page, operation },
+            Ok(Err(error)) => Prefetched::Failed {
+                page,
+                operation,
+                error,
+            },
+            Ok(Ok(prefetched)) => {
+                let Some(bytes) = budget.retain(reservation, prefetched.retained_bytes()) else {
+                    // Never queue more than was reserved. The consumer prepares
+                    // this rare page inline, as the serial path always did.
+                    drop(prefetched);
+                    return Prefetched::Oversize {
+                        page,
+                        root,
+                        operation,
+                    };
+                };
+                sync_count(SyncCount::PrefetchedPage, 1);
+                Prefetched::Ready {
+                    prefetched: Box::new(prefetched),
+                    bytes,
+                }
+            }
+        }
     }
 
     async fn resync_cache(&self, settings: &WorkerSettings) -> Result<(), &'static str> {
@@ -1282,5 +1494,39 @@ mod timeout_tests {
                 assert_eq!(result, Ok(false));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn prefetch_budget_applies_byte_backpressure_until_a_page_is_released() {
+        use std::time::Duration;
+        let budget = PrefetchBudget::new(8, 3);
+        let first = budget.reserve().await.unwrap();
+        let second = budget.reserve().await.unwrap();
+        // Two worst-case reservations exhaust the budget; a third preparation
+        // must not start any request until retained bytes are returned.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), budget.reserve())
+                .await
+                .is_err()
+        );
+        // A measured page keeps only its share while queued or committing.
+        let queued = budget.retain(first, 1000).unwrap();
+        let third = tokio::time::timeout(Duration::from_secs(1), budget.reserve())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), budget.reserve())
+                .await
+                .is_err()
+        );
+        drop(queued);
+        drop(third);
+        let _released = tokio::time::timeout(Duration::from_secs(1), budget.reserve())
+            .await
+            .unwrap()
+            .unwrap();
+        // A page larger than its reservation is never retained in the queue.
+        assert!(budget.retain(second, 3 * 1024 + 1).is_none());
     }
 }

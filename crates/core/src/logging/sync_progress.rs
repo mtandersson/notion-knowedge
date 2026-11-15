@@ -10,6 +10,7 @@ use std::{
 struct Counts {
     discovered_pages: usize,
     content_reads: usize,
+    prefetched_pages: usize,
     embedded_chunks: usize,
     committed_pages: usize,
     skipped_pages: usize,
@@ -68,6 +69,8 @@ fn update(work: impl FnOnce(&mut Counts)) {
 pub enum SyncCount {
     DiscoveredPage,
     ContentRead,
+    /// A page whose source content was prepared ahead of embedding.
+    PrefetchedPage,
     EmbeddedChunk,
     CommittedPage,
     SkippedPage,
@@ -77,6 +80,7 @@ pub fn sync_count(counter: SyncCount, amount: usize) {
         let field = match counter {
             SyncCount::DiscoveredPage => &mut c.discovered_pages,
             SyncCount::ContentRead => &mut c.content_reads,
+            SyncCount::PrefetchedPage => &mut c.prefetched_pages,
             SyncCount::EmbeddedChunk => &mut c.embedded_chunks,
             SyncCount::CommittedPage => &mut c.committed_pages,
             SyncCount::SkippedPage => &mut c.skipped_pages,
@@ -96,7 +100,8 @@ pub fn current_sync_progress() -> Option<serde_json::Value> {
     Some(serde_json::json!({
         "phase": context.worker.map(|w| w.0).or(c.phase).map(|p|p.label()),
         "discovered_pages": c.discovered_pages, "total_pages": c.total_pages,
-        "content_reads": c.content_reads, "embedded_chunks": c.embedded_chunks,
+        "content_reads": c.content_reads, "prefetched_pages": c.prefetched_pages,
+        "embedded_chunks": c.embedded_chunks,
         "committed_pages": c.committed_pages, "skipped_pages": c.skipped_pages,
     }))
 }

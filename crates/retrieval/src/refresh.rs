@@ -98,6 +98,33 @@ pub(crate) struct ExpectedReconciliation {
     pub replan: bool,
 }
 
+/// Source-prepared page content awaiting the embedding/commit consumer.
+/// It carries no index version, lease or receipt decision; those are taken
+/// fresh by [`AuthoritativePageRefresh::refresh_prefetched`].
+pub struct PrefetchedPage {
+    page: PageId,
+    root: PageId,
+    operation: String,
+    previous: Vec<notion_knowledge_core::indexed::IndexedChunk>,
+    proposal: notion_knowledge_notion::relation_proposal::RelationProposal,
+}
+impl PrefetchedPage {
+    pub fn page(&self) -> &PageId {
+        &self.page
+    }
+    pub fn operation(&self) -> &str {
+        &self.operation
+    }
+    /// Conservative estimate of the heap bytes this prepared page retains.
+    pub fn retained_bytes(&self) -> usize {
+        self.previous
+            .iter()
+            .map(notion_knowledge_notion::prepare::chunk_retained_bytes)
+            .sum::<usize>()
+            .saturating_add(self.proposal.retained_bytes())
+    }
+}
+
 #[derive(Clone)]
 pub struct AuthoritativePageRefresh {
     notion: Arc<NotionClient>,
@@ -514,6 +541,36 @@ impl AuthoritativePageRefresh {
         lifecycle: bool,
         expected: Option<ExpectedReconciliation>,
     ) -> Result<RefreshResult, RefreshError> {
+        let PrefetchedPage {
+            previous,
+            proposal: relation_proposal,
+            ..
+        } = Box::pin(self.prefetch_page(page, root, operation_id)).await?;
+        Box::pin(self.embed_and_commit(
+            page,
+            operation_id,
+            previous,
+            relation_proposal,
+            provider,
+            lease,
+            clock,
+            lifecycle,
+            expected,
+        ))
+        .await
+    }
+
+    /// Read-only source preparation for one page: local receipt authority,
+    /// current Notion authorization, content and chunk drafts. No embedding,
+    /// index version, lease or durable effect is captured here, so a caller may
+    /// run several of these concurrently ahead of the single embedding/commit
+    /// consumer. Commit still revalidates the source inside its owned guard.
+    pub async fn prefetch_page(
+        &self,
+        page: &PageId,
+        root: &PageId,
+        operation_id: &str,
+    ) -> Result<PrefetchedPage, RefreshError> {
         if !self.scope.roots.contains(root) || operation_id.is_empty() {
             return Err(RefreshError::InvalidConfiguration);
         }
@@ -525,7 +582,7 @@ impl AuthoritativePageRefresh {
         // The notion adapter validates its previous-page provenance/IDs/hash
         // after live Notion ancestry authorization.
         let previous = self.guard.page_chunks(&page.0).await?;
-        let relation_proposal = self
+        let proposal = self
             .relations
             .prepare(page, root, &previous, self.chunk_config)
             .await
@@ -538,7 +595,62 @@ impl AuthoritativePageRefresh {
                 }
                 _ => RefreshError::Source,
             })?;
+        Ok(PrefetchedPage {
+            page: page.clone(),
+            root: root.clone(),
+            operation: operation_id.to_owned(),
+            previous,
+            proposal,
+        })
+    }
 
+    /// Embed and durably commit a page prepared by [`Self::prefetch_page`].
+    /// The guarded mutation plan (pinned index version, receipt and projection
+    /// state) is built here from current local state, never from prefetch time.
+    /// When this page's own indexed chunks changed while it waited, its
+    /// chunk-identity preparation is stale and the source is prepared again.
+    pub async fn refresh_prefetched(
+        &self,
+        prefetched: PrefetchedPage,
+        provider: &dyn EmbeddingProvider,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Result<RefreshResult, RefreshError> {
+        let PrefetchedPage {
+            page,
+            root,
+            operation,
+            previous,
+            proposal,
+        } = prefetched;
+        let (previous, proposal) = if self.guard.page_chunks(&page.0).await? == previous {
+            self.coordinator
+                .validate_page_receipt_authority(&operation, &page.0)?;
+            (previous, proposal)
+        } else {
+            drop((previous, proposal));
+            let fresh = Box::pin(self.prefetch_page(&page, &root, &operation)).await?;
+            (fresh.previous, fresh.proposal)
+        };
+        Box::pin(self.embed_and_commit(
+            &page, &operation, previous, proposal, provider, lease, clock, false, None,
+        ))
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn embed_and_commit(
+        &self,
+        page: &PageId,
+        operation_id: &str,
+        previous: Vec<notion_knowledge_core::indexed::IndexedChunk>,
+        relation_proposal: notion_knowledge_notion::relation_proposal::RelationProposal,
+        provider: &dyn EmbeddingProvider,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+        lifecycle: bool,
+        expected: Option<ExpectedReconciliation>,
+    ) -> Result<RefreshResult, RefreshError> {
         let proposal = relation_proposal.snapshot().clone();
         let projection = RelationProjection::new(
             self.coordinator.binding(),

@@ -98,6 +98,7 @@ struct RequestPause {
 struct HttpNotion {
     state: Arc<Mutex<Model>>,
     body_reads: Arc<AtomicUsize>,
+    markdown_pages: Arc<Mutex<std::collections::BTreeSet<String>>>,
     server: tokio::task::JoinHandle<()>,
     port: u16,
     pause: Arc<RequestPause>,
@@ -114,6 +115,8 @@ impl HttpNotion {
         let values = state.clone();
         let counts = attempts.clone();
         let bodies = body_reads.clone();
+        let markdown_pages = Arc::new(Mutex::new(std::collections::BTreeSet::new()));
+        let markdown_reads = markdown_pages.clone();
         let fail = fail_once.clone();
         let pause = Arc::new(RequestPause::default());
         let boundary = pause.clone();
@@ -158,6 +161,7 @@ impl HttpNotion {
                 }
                 if route.ends_with("/markdown") {
                     bodies.fetch_add(1, Ordering::SeqCst);
+                    markdown_reads.lock().unwrap().insert(route.to_owned());
                 }
                 let snapshot = {
                     let mut state = values.lock().unwrap();
@@ -300,6 +304,7 @@ impl HttpNotion {
         Self {
             state,
             body_reads,
+            markdown_pages,
             server,
             port,
             pause,
@@ -358,6 +363,12 @@ struct Provider {
     busy: AtomicBool,
     idle_entered: tokio::sync::Notify,
     idle_release: tokio::sync::Semaphore,
+    /// Releasable embedding pause: the next call waits for `hold_release`.
+    hold: AtomicBool,
+    held: tokio::sync::Notify,
+    hold_release: tokio::sync::Semaphore,
+    active: AtomicUsize,
+    max_active: AtomicUsize,
 }
 impl Provider {
     fn new() -> Self {
@@ -375,6 +386,11 @@ impl Provider {
             busy: AtomicBool::new(false),
             idle_entered: tokio::sync::Notify::new(),
             idle_release: tokio::sync::Semaphore::new(0),
+            hold: AtomicBool::new(false),
+            held: tokio::sync::Notify::new(),
+            hold_release: tokio::sync::Semaphore::new(0),
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
         }
     }
 }
@@ -400,6 +416,19 @@ impl EmbeddingProvider for Provider {
         let fail_once = self.fail_next.swap(false, Ordering::SeqCst);
         let input_limit = self.input_limit_bytes.load(Ordering::SeqCst);
         Box::pin(async move {
+            struct Active<'a>(&'a AtomicUsize);
+            impl Drop for Active<'_> {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+            let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(now, Ordering::SeqCst);
+            let _active = Active(&self.active);
+            if self.hold.swap(false, Ordering::SeqCst) {
+                self.held.notify_one();
+                self.hold_release.acquire().await.unwrap().forget();
+            }
             if self.busy.load(Ordering::SeqCst) {
                 return Err(EmbeddingError::ResourceExhausted);
             }
@@ -4085,5 +4114,136 @@ async fn page_deadline_logs_expose_only_fixed_reason_and_aggregate_counts() {
         );
         assert_eq!(event["status"], "page_skipped");
         assert!(event["sync_progress"].is_object());
+    }
+}
+
+/// Wait until markdown for at least `count` distinct pages has been read.
+async fn await_markdown_pages(http: &HttpNotion, count: usize) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while http.markdown_pages.lock().unwrap().len() < count {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initial_sync_fetches_next_page_while_one_embedding_is_paused() {
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    fs::remove_dir_all(&f.settings.index).unwrap();
+    http.markdown_pages.lock().unwrap().clear();
+    f.provider.hold.store(true, Ordering::SeqCst);
+    let settings = f.settings.clone();
+    let state = f.state.clone();
+    let source = http.client();
+    let provider = f.provider.clone();
+    let recovery = tokio::spawn(async move {
+        IndexRuntime::recover(&settings, &state, authority(), source, provider).await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        f.provider.held.notified(),
+    )
+    .await
+    .unwrap();
+    // Page A's embedding is held. Page B's content download still completes.
+    await_markdown_pages(&http, 2).await;
+    assert_eq!(f.provider.active.load(Ordering::SeqCst), 1);
+    assert!(!recovery.is_finished());
+    f.provider.hold_release.add_permits(1);
+    let runtime = recovery.await.unwrap().unwrap();
+    assert_eq!(runtime.coordinator.owned_page_ids().unwrap().len(), 3);
+    for page in [ROOT, PAGE, OTHER] {
+        assert!(!runtime.chunks().page_chunks(page).await.unwrap().is_empty());
+    }
+    assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
+    assert_eq!(
+        f.provider.max_active.load(Ordering::SeqCst),
+        1,
+        "one embedding worker"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initial_sync_read_ahead_is_bounded_while_embedding_is_paused() {
+    let http = HttpNotion::start().await;
+    http.change(|m| {
+        for n in 0..12 {
+            m.extra.insert(
+                format!("66666666-6666-6666-6666-{n:012}"),
+                ExtraPage {
+                    title: format!("Extra {n}"),
+                    visible: true,
+                    archived: false,
+                },
+            );
+        }
+    });
+    let f = Fixture::new(&http).await;
+    fs::remove_dir_all(&f.settings.index).unwrap();
+    http.markdown_pages.lock().unwrap().clear();
+    f.provider.hold.store(true, Ordering::SeqCst);
+    let settings = f.settings.clone();
+    let state = f.state.clone();
+    let source = http.client();
+    let provider = f.provider.clone();
+    let recovery = tokio::spawn(async move {
+        IndexRuntime::recover(&settings, &state, authority(), source, provider).await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        f.provider.held.notified(),
+    )
+    .await
+    .unwrap();
+    await_markdown_pages(&http, 2).await;
+    // Give unbounded read-ahead ample time to fetch all 15 pages.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let fetched = http.markdown_pages.lock().unwrap().len();
+    assert!(
+        fetched <= 5,
+        "held page, one queued, one awaiting the queue and two workers; got {fetched}"
+    );
+    f.provider.hold_release.add_permits(1);
+    let runtime = recovery.await.unwrap().unwrap();
+    assert_eq!(runtime.coordinator.owned_page_ids().unwrap().len(), 15);
+    assert_eq!(f.provider.max_active.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_edit_after_prefetch_never_commits_the_stale_snapshot() {
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    fs::remove_dir_all(&f.settings.index).unwrap();
+    http.markdown_pages.lock().unwrap().clear();
+    f.provider.hold.store(true, Ordering::SeqCst);
+    let settings = f.settings.clone();
+    let state = f.state.clone();
+    let source = http.client();
+    let provider = f.provider.clone();
+    let recovery = tokio::spawn(async move {
+        IndexRuntime::recover(&settings, &state, authority(), source, provider).await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        f.provider.held.notified(),
+    )
+    .await
+    .unwrap();
+    // Every page is prepared ahead while the first embedding is held.
+    await_markdown_pages(&http, 3).await;
+    http.change(|m| m.markdown = "# Intro\n\nJuniper gnocchi.\n".into());
+    f.provider.hold_release.add_permits(1);
+    let result = recovery.await.unwrap();
+    let runtime = f.open(&http, OpenMode::ReadOnly).await;
+    let chunks = runtime.chunks().page_chunks(PAGE).await.unwrap();
+    assert!(
+        chunks.iter().all(|c| !c.text.contains("Saffron")),
+        "a prefetched snapshot edited upstream must never be committed"
+    );
+    if result.is_ok() {
+        assert!(chunks.iter().any(|c| c.text.contains("Juniper")));
     }
 }
