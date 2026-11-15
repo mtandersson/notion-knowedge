@@ -27,8 +27,9 @@ reset the disposable index and began a second attempt. A reviewed runtime-only
 `Restart=no` guard was then applied without stopping or replacing that running
 process. The second invocation also hit the page deadline and stopped naturally;
 the guard prevented another restart. Its retained derived cache has 13 applied
-receipts/checkpoints and 143 embedded chunks; logs report 33 discovered pages
-and three deterministic embedding-budget skips. No stable HTTP readiness or
+receipts/checkpoints. Structured progress counts 143 generated embeddings, 33
+discovered pages and three deterministic embedding-budget skips. Generated
+embeddings can include an uncommitted page; 143 is not an indexed-row count. No stable HTTP readiness or
 search/fresh-read acceptance was reached.
 
 Effective limits stayed at one CPU, 4 GiB memory, no swap, 128 tasks and 1,024
