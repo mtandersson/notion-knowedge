@@ -205,6 +205,9 @@ fn html_pairing_preserves_nested_containers_and_ignores_quoted_or_commented_clos
         "<page>before<!-- </page> -->after</page>\n",
         "<page><![CDATA[ </page> ]]></page>\n",
         "<script>const sample = '<page>';</script>\n",
+        "<script>if (left < right) run();</script>\n",
+        "<textarea>literal x < y and an unmatched quote '</textarea>\n",
+        "<div>left < right and 1 < 2</div>\n",
         "<page title=\"fake </page>\nclose\">body</page>\n",
         "<PAGE>case-insensitive</page>\n",
     ] {

@@ -19,18 +19,37 @@ struct Markup {
 impl HtmlSpans {
     pub(super) fn observe(&mut self, fragment: &str, offset: usize, standalone: bool) {
         for (index, ch) in fragment.char_indices() {
+            let raw_text = self.open.last().is_some_and(|(tag, _, _)| {
+                matches!(tag.as_str(), "script" | "style" | "textarea" | "title")
+            });
+            // Raw-text contents are not HTML attributes/comments. A bare '<'
+            // or quote in that text must not swallow the real closing tag.
+            if ch == '<' && (self.pending.is_none() || raw_text) {
+                self.pending = Some(Markup {
+                    start: offset + index,
+                    text: "<".into(),
+                    quote: None,
+                    standalone,
+                });
+                continue;
+            }
             if self.pending.is_none() {
-                if ch == '<' {
-                    self.pending = Some(Markup {
-                        start: offset + index,
-                        text: "<".into(),
-                        quote: None,
-                        standalone,
-                    });
-                }
                 continue;
             }
             let markup = self.pending.as_mut().expect("pending markup");
+            if (markup.text == "<" && !ch.is_ascii_alphabetic() && !matches!(ch, '/' | '!' | '?'))
+                || (markup.text == "</" && !ch.is_ascii_alphabetic())
+            {
+                // Comparisons and literal less-than signs in an HTML block
+                // are not incomplete tags. Keep scanning for real markup.
+                self.pending = (ch == '<').then(|| Markup {
+                    start: offset + index,
+                    text: "<".into(),
+                    quote: None,
+                    standalone,
+                });
+                continue;
+            }
             markup.text.push(ch);
             let finished = if markup.text.starts_with("<!--") {
                 markup.text.ends_with("-->")
