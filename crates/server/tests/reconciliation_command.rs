@@ -354,6 +354,10 @@ struct Provider {
     pause: AtomicBool,
     entered: tokio::sync::Notify,
     boundary_pause: Mutex<Option<Arc<RequestPause>>>,
+    retain_when_cancelled: AtomicBool,
+    busy: AtomicBool,
+    idle_entered: tokio::sync::Notify,
+    idle_release: tokio::sync::Semaphore,
 }
 impl Provider {
     fn new() -> Self {
@@ -367,10 +371,24 @@ impl Provider {
             pause: AtomicBool::new(false),
             entered: tokio::sync::Notify::new(),
             boundary_pause: Mutex::new(None),
+            retain_when_cancelled: AtomicBool::new(false),
+            busy: AtomicBool::new(false),
+            idle_entered: tokio::sync::Notify::new(),
+            idle_release: tokio::sync::Semaphore::new(0),
         }
     }
 }
 impl EmbeddingProvider for Provider {
+    fn wait_idle(&self) -> notion_knowledge_core::embedding::EmbeddingIdleFuture<'_> {
+        Box::pin(async move {
+            if self.busy.load(Ordering::SeqCst) {
+                self.idle_entered.notify_one();
+                self.idle_release.acquire().await.unwrap().forget();
+                self.busy.store(false, Ordering::SeqCst);
+            }
+            Ok(())
+        })
+    }
     fn metadata(&self) -> &EmbeddingMetadata {
         &self.metadata
     }
@@ -382,12 +400,18 @@ impl EmbeddingProvider for Provider {
         let fail_once = self.fail_next.swap(false, Ordering::SeqCst);
         let input_limit = self.input_limit_bytes.load(Ordering::SeqCst);
         Box::pin(async move {
+            if self.busy.load(Ordering::SeqCst) {
+                return Err(EmbeddingError::ResourceExhausted);
+            }
             if texts.len() > 32
                 || (input_limit > 0 && texts.iter().any(|text| text.len() > input_limit))
             {
                 return Err(EmbeddingError::InputLimit);
             }
             if self.pause.swap(false, Ordering::SeqCst) {
+                if self.retain_when_cancelled.load(Ordering::SeqCst) {
+                    self.busy.store(true, Ordering::SeqCst);
+                }
                 self.entered.notify_one();
                 std::future::pending::<()>().await;
             }
@@ -420,6 +444,7 @@ impl Fixture {
         notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Off);
         let dir = tempfile::tempdir().unwrap();
         let settings = WorkerSettings {
+            projection_mode: Default::default(),
             lexical: None,
             alias_sources: notion_knowledge_core::aliases::AliasSources::new(true, vec![]).unwrap(),
             index: dir.path().join("index"),
@@ -3274,6 +3299,7 @@ async fn streaming_initial_sync_separates_discovery_and_page_budgets() {
     use std::time::Duration;
     let http = HttpNotion::start().await;
     let mut f = Fixture::new(&http).await;
+    notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Info);
     f.settings.timeout_seconds = 1;
     f.settings.inventory_timeout_seconds = 7200;
     http.discovery_pause.armed.store(true, Ordering::SeqCst);
@@ -3288,11 +3314,25 @@ async fn streaming_initial_sync_separates_discovery_and_page_budgets() {
         // Discovery may wait longer than a page budget after an earlier page
         // has already committed. A subsequent embedding keeps its own bound.
         tokio::time::sleep(Duration::from_millis(1100)).await;
+        f.provider
+            .retain_when_cancelled
+            .store(true, Ordering::SeqCst);
         f.provider.pause.store(true, Ordering::SeqCst);
         http.discovery_pause.proceed.notify_one();
         tokio::time::timeout(Duration::from_secs(10), f.provider.entered.notified())
             .await
             .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), f.provider.idle_entered.notified())
+            .await
+            .unwrap();
+        let calls = f.provider.count.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            f.provider.count.load(Ordering::SeqCst),
+            calls,
+            "no sibling admission while cancelled work is busy"
+        );
+        f.provider.idle_release.add_permits(1);
     };
     let recovery = IndexRuntime::reset_and_resync(
         &f.settings,
@@ -3306,18 +3346,45 @@ async fn streaming_initial_sync_separates_discovery_and_page_budgets() {
     })
     .await
     .unwrap();
-    assert!(
-        result.is_err(),
-        "pending page embedding must expire under its page budget"
+    let runtime = result.unwrap();
+    let progress = runtime
+        .coordinator
+        .reconciliation_progress("cache-reset")
+        .unwrap();
+    assert_eq!(progress.failed.len(), 1, "{progress:?}");
+    let (timed_out_page, failure) = progress.failed.iter().next().unwrap();
+    assert_eq!(
+        *failure,
+        notion_knowledge_retrieval::durable_plan::DurableFailure::PageTimeout
     );
-    assert_writer_available_during_inventory(&f.state);
-    let writer = fs::File::open(&f.settings.index).unwrap();
-    writer.try_lock().unwrap();
+    assert!(progress.pending.is_empty());
+    assert_eq!(progress.successful.len(), 2);
     assert!(
-        notion_knowledge_retrieval::sync_state::SqliteSyncStateStore::open_read_only(&f.state)
+        runtime
+            .chunks()
+            .page_chunks(timed_out_page)
+            .await
             .unwrap()
-            .cache_rebuild_pending()
+            .is_empty()
+    );
+    assert!(
+        !runtime
+            .chunks()
+            .page_chunks(if timed_out_page == PAGE { OTHER } else { PAGE })
+            .await
             .unwrap()
+            .is_empty()
+    );
+    assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
+    drop(runtime);
+    assert_writer_available_during_inventory(&f.state);
+    // A later normal cycle can retry the timed-out readable page without source edits.
+    counts(
+        &f.command(&http, &["--reconcile", "apply", "after-page-timeout"])
+            .await,
+        1,
+        0,
+        2,
     );
 }
 
@@ -3904,4 +3971,119 @@ async fn an_existing_coalesced_layout_requires_explicit_scoped_cache_rebuild() {
     .unwrap();
     assert!(rebuilt.chunks().page_chunks(PAGE).await.unwrap().len() > 1);
     assert!(!rebuilt.coordinator.state().cache_rebuild_pending().unwrap());
+}
+
+#[tokio::test]
+async fn target_projection_mode_changes_reconcile_without_reembedding_canonical_content() {
+    use notion_knowledge_core::graph::{GraphEdgeStore, GraphTarget};
+    use notion_knowledge_notion::relation_proposal::ProjectionMode;
+    let http = HttpNotion::start().await;
+    let mut f = Fixture::new(&http).await;
+    {
+        let mut source = http.state.lock().unwrap();
+        source.relation_name = Some("Related".into());
+        source.markdown = format!("[related](https://www.notion.so/{OTHER})\n");
+    }
+    let mut first_vectors = 0;
+    for (n, mode) in [
+        ProjectionMode::UnresolvedTargets,
+        ProjectionMode::ResolveTargets,
+        ProjectionMode::UnresolvedTargets,
+        ProjectionMode::ResolveTargets,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        f.settings.projection_mode = mode;
+        f.populate(&http, &format!("projection-mode-{n}")).await;
+        let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+        let progress = runtime
+            .coordinator
+            .reconciliation_progress(&format!("projection-mode-{n}"))
+            .unwrap();
+        assert!(progress.failed.is_empty());
+        assert!(progress.pending.is_empty());
+        let edges = runtime.coordinator.state().edges_from(PAGE).unwrap();
+        assert_eq!(edges.len(), 2);
+        let committed =
+            notion_knowledge_retrieval::graph::CommittedGraph::new(runtime.coordinator.clone());
+        let gate =
+            notion_knowledge_core::root_scope::RootScopeGate::new(http.client(), authority())
+                .unwrap();
+        let related = notion_knowledge_mcp::related::navigate(
+            &notion_knowledge_mcp::related::RelatedRequest {
+                page_id: PAGE.into(),
+                depth: 1,
+                limit: 10,
+            },
+            &committed,
+            &gate,
+            &[ROOT.into()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            related.relations.is_empty(),
+            mode == ProjectionMode::UnresolvedTargets
+        );
+
+        assert!(edges.iter().all(|edge| match (mode, edge.target()) {
+            (ProjectionMode::ResolveTargets, GraphTarget::Page { page_id }) => page_id == OTHER,
+            (ProjectionMode::UnresolvedTargets, GraphTarget::Unresolved { reference }) =>
+                reference == OTHER,
+            _ => false,
+        }));
+        assert_eq!(
+            runtime.chunks().page_chunks(PAGE).await.unwrap()[0].text,
+            http.state.lock().unwrap().markdown
+        );
+        if n == 0 {
+            first_vectors = f.provider.count.load(Ordering::SeqCst);
+        } else {
+            assert_eq!(f.provider.count.load(Ordering::SeqCst), first_vectors);
+        }
+    }
+}
+
+#[tokio::test]
+async fn page_deadline_logs_expose_only_fixed_reason_and_aggregate_counts() {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "streaming_initial_sync_separates_discovery_and_page_budgets",
+                "--exact",
+                "--nocapture",
+            ])
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(output.status.success());
+    let events: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let skips: Vec<_> = events
+        .iter()
+        .filter(|event| event["reason"] == "page_timeout")
+        .collect();
+    assert!(!skips.is_empty());
+    for event in skips {
+        let keys: std::collections::BTreeSet<_> = event
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            ["operation", "phase", "reason", "status", "sync_progress"]
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(event["status"], "page_skipped");
+        assert!(event["sync_progress"].is_object());
+    }
 }

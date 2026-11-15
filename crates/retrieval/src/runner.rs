@@ -38,7 +38,8 @@ impl AuthoritativeReconciliationRunner {
         coordinator: Arc<IndexCommitCoordinator>,
         scope: ReconciliationScope,
     ) -> Result<Self, RunnerError> {
-        if refresh.alias_configuration_identity() != planner.alias_configuration_identity()
+        if refresh.projection_mode() != planner.projection_mode()
+            || refresh.alias_configuration_identity() != planner.alias_configuration_identity()
             || !refresh.is_bound_to(&coordinator)
             || !planner.is_bound_to(&coordinator)
             || coordinator.binding().scope() != scope.identity()

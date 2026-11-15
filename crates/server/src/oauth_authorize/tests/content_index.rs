@@ -229,6 +229,7 @@ async fn configured_oauth_lexical_reads_require_native_exact_id_readiness() {
     config.notion_scope = Some(scope);
     config.webhook_state_file = Some(seeded.state.clone());
     config.retrieval = Some(crate::webhook_worker::WorkerSettings {
+        projection_mode: Default::default(),
         lexical: Some(lexical),
         alias_sources: notion_knowledge_core::aliases::AliasSources::new(true, vec![]).unwrap(),
         index: seeded.index.clone(),

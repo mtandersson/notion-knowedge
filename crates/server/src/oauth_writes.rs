@@ -237,6 +237,7 @@ mod installed {
         let worker = GrantRefreshWorker::new(
             runtime.clone(),
             GrantRefreshSettings {
+                projection_mode: settings.projection_mode,
                 scope,
                 chunk_config: ChunkConfig::default(),
                 alias_sources: Some(settings.alias_sources.clone()),
@@ -393,6 +394,7 @@ mod tests {
         assert!(!ledger.exists());
         config.webhook_state_file = Some(dir.path().join("state"));
         config.retrieval = Some(crate::webhook_worker::WorkerSettings {
+            projection_mode: Default::default(),
             lexical: None,
             index: alias,
             assets: dir.path().join("assets"),

@@ -173,6 +173,7 @@ impl RequestAuthority for GrantReadAuthority {
 pub struct GrantRefreshSettings {
     pub scope: LifecycleScope,
     pub chunk_config: ChunkConfig,
+    pub projection_mode: notion_knowledge_notion::relation_proposal::ProjectionMode,
     pub alias_sources: Option<AliasSources>,
     pub timeout: Duration,
 }
@@ -317,6 +318,7 @@ impl GrantRefreshWorker {
         ) else {
             return false;
         };
+        handler = handler.with_projection_mode(self.settings.projection_mode);
         if let Some(aliases) = &self.settings.alias_sources {
             handler = handler.with_alias_sources(aliases.clone());
         }

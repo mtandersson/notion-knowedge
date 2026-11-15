@@ -298,7 +298,21 @@ pub struct IndexCommitCoordinator {
     state_identity: Identity,
     state_token: String,
     binding: CommitBinding,
-    owned_threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    owned_threads: Mutex<OwnedWork>,
+}
+/// Completed handles are released promptly. Keep at most one of each fixed
+/// failure class until explicit drain, rather than retaining per-operation data.
+#[derive(Default)]
+struct OwnedWork {
+    handles: Vec<std::thread::JoinHandle<Option<CommitError>>>,
+    failures: Vec<CommitError>,
+}
+impl OwnedWork {
+    fn retain_failure(&mut self, failure: CommitError) {
+        if !self.failures.contains(&failure) {
+            self.failures.push(failure);
+        }
+    }
 }
 const ANCHOR: &str = ".nk-operational-binding";
 impl IndexCommitCoordinator {
@@ -376,7 +390,7 @@ impl IndexCommitCoordinator {
             state_identity,
             state_token,
             binding,
-            owned_threads: Mutex::new(Vec::new()),
+            owned_threads: Mutex::new(OwnedWork::default()),
         });
         let db = coordinator
             .state
@@ -441,7 +455,7 @@ impl IndexCommitCoordinator {
             state_identity,
             state_token,
             binding,
-            owned_threads: Mutex::new(Vec::new()),
+            owned_threads: Mutex::new(OwnedWork::default()),
         });
         let mut db = coordinator
             .state
@@ -489,29 +503,50 @@ impl IndexCommitCoordinator {
     /// Wait for an already submitted owned effect before a graceful operator
     /// exit. Cancellation invalidates its clock, but never releases a live guard.
     pub async fn drain_owned(self: &Arc<Self>) -> Result<(), CommitError> {
+        self.drain_owned_outcomes().await.map(|_| ())
+    }
+    /// Retain typed owned failures even when a cancelled observer never consumed
+    /// its oneshot result. A successful send alone does not prove consumption.
+    pub async fn drain_owned_outcomes(self: &Arc<Self>) -> Result<Vec<CommitError>, CommitError> {
         let coordinator = self.clone();
         tokio::task::spawn_blocking(move || {
-            let handles: Vec<_> = coordinator
-                .owned_threads
-                .lock()
-                .map_err(|_| CommitError::Unavailable)?
-                .drain(..)
-                .collect();
-            for handle in handles {
-                handle.join().map_err(|_| CommitError::Unavailable)?;
+            let mut owned = {
+                let mut current = coordinator
+                    .owned_threads
+                    .lock()
+                    .map_err(|_| CommitError::Unavailable)?;
+                std::mem::take(&mut *current)
+            };
+            for handle in std::mem::take(&mut owned.handles) {
+                if let Some(error) = handle.join().map_err(|_| CommitError::Unavailable)? {
+                    owned.retain_failure(error);
+                }
             }
-            Ok(())
+            Ok(owned.failures)
         })
         .await
         .map_err(|_| CommitError::Unavailable)?
     }
-    fn track_owned(&self, handle: std::thread::JoinHandle<()>) -> Result<(), CommitError> {
-        let mut handles = self
+    fn track_owned(
+        &self,
+        handle: std::thread::JoinHandle<Option<CommitError>>,
+    ) -> Result<(), CommitError> {
+        let mut owned = self
             .owned_threads
             .lock()
             .map_err(|_| CommitError::Unavailable)?;
-        handles.retain(|h| !h.is_finished());
-        handles.push(handle);
+        for previous in std::mem::take(&mut owned.handles) {
+            if previous.is_finished() {
+                match previous.join() {
+                    Ok(Some(error)) => owned.retain_failure(error),
+                    Ok(None) => {}
+                    Err(_) => owned.retain_failure(CommitError::Unavailable),
+                }
+            } else {
+                owned.handles.push(previous);
+            }
+        }
+        owned.handles.push(handle);
         Ok(())
     }
     pub fn state(&self) -> &Arc<SqliteSyncStateStore> {
@@ -815,7 +850,7 @@ impl IndexCommitCoordinator {
             state_identity: self.state_identity,
             state_token: self.state_token.clone(),
             binding: next,
-            owned_threads: Mutex::new(Vec::new()),
+            owned_threads: Mutex::new(OwnedWork::default()),
         }))
     }
     /// Durable evidence of page ownership even after external effects removed
@@ -1179,7 +1214,9 @@ impl IndexCommitCoordinator {
                     } else {
                         Outcome::Failed
                     });
+                    let failure = result.as_ref().err().cloned();
                     let _ = sender.send(result);
+                    failure
                 })
             });
         let tracked = spawned
@@ -1225,7 +1262,9 @@ impl IndexCommitCoordinator {
                         .block_on(effect(context))
                         .map_err(CommitError::Operation)
                 })();
+                let failure = result.as_ref().err().cloned();
                 let _ = sender.send(result);
+                failure
             });
         let tracked = spawned
             .map_err(io)
@@ -1270,5 +1309,53 @@ fn failure_value(failure: i64) -> Result<FailureClass, CommitError> {
         2 => Ok(FailureClass::Conflict),
         3 => Ok(FailureClass::Unavailable),
         _ => Err(CommitError::Unavailable),
+    }
+}
+
+#[cfg(test)]
+mod owned_outcome_tests {
+    use super::*;
+    use notion_knowledge_core::reconciliation::ReconciliationJournal;
+
+    #[tokio::test]
+    async fn registering_more_work_cannot_erase_a_queued_unconsumed_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let index = root.path().join("index");
+        std::fs::create_dir(&index).unwrap();
+        let scope = ReconciliationScope::new(vec!["root".into()], vec![], "policy", "1").unwrap();
+        let binding = CommitBinding::new("chunks", "workspace", &scope, "1", 1).unwrap();
+        let coordinator =
+            IndexCommitCoordinator::initialize(&index, root.path().join("state.sqlite"), binding)
+                .unwrap();
+        let lease = coordinator.state().acquire_lease(10, 100).unwrap();
+        let first = coordinator.maintain(lease.clone(), Arc::new(|| 10), |_| async {
+            Err(FailureClass::Index)
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if coordinator
+                    .owned_threads
+                    .lock()
+                    .unwrap()
+                    .handles
+                    .iter()
+                    .all(|h| h.is_finished())
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // The first observer still holds its queued result. Registration must
+        // prune finished resources without losing its unconsumed failure class.
+        let second = coordinator.maintain(lease, Arc::new(|| 10), |_| async { Ok(()) });
+        drop(first);
+        second.await.unwrap();
+        assert_eq!(
+            coordinator.drain_owned_outcomes().await.unwrap(),
+            vec![CommitError::Operation(FailureClass::Index)]
+        );
     }
 }

@@ -5862,3 +5862,63 @@ async fn committed_graph_bounds_source_projection_through_low_degree_target_and_
         assert!(writer.try_lock().is_ok());
     }
 }
+
+#[tokio::test]
+async fn owned_drain_retains_failures_even_when_cancelled_observers_never_consume_them() {
+    use notion_knowledge_core::reconciliation::FailureClass;
+    use notion_knowledge_retrieval::commit::CommitError;
+    for failure in [
+        FailureClass::Index,
+        FailureClass::Unavailable,
+        FailureClass::Conflict,
+    ] {
+        for queued_before_cancel in [false, true] {
+            let index = Fixture::new();
+            index.create().await;
+            let (started, entered) = tokio::sync::oneshot::channel();
+            let (release, resume) = tokio::sync::oneshot::channel();
+            let expected_failure = failure.clone();
+            let failure = failure.clone();
+            let work =
+                index
+                    .coordinator
+                    .maintain(index.lease.clone(), clock(), move |_| async move {
+                        started.send(()).unwrap();
+                        resume.await.unwrap();
+                        Err(failure)
+                    });
+            entered.await.unwrap();
+            let mut observer = Some(work);
+            if !queued_before_cancel {
+                drop(observer.take());
+            }
+            release.send(()).unwrap();
+            // Joining while the observer still exists forces the successful-send
+            // race: the error is queued but the outer future never consumes it.
+            let errors = index.coordinator.drain_owned_outcomes().await.unwrap();
+            drop(observer);
+            assert_eq!(errors, vec![CommitError::Operation(expected_failure)]);
+            assert!(!index.coordinator.has_unfinished_commits().unwrap());
+            let guard = fs::File::open(&index.index).unwrap();
+            guard.try_lock().unwrap();
+        }
+    }
+    let index = Fixture::new();
+    index.create().await;
+    let observer =
+        index
+            .coordinator
+            .maintain(index.lease.clone(), Arc::new(|| i64::MAX), |_| async {
+                Ok(())
+            });
+    drop(observer);
+    assert_eq!(
+        index.coordinator.drain_owned_outcomes().await.unwrap(),
+        vec![CommitError::LeaseLost]
+    );
+    index
+        .coordinator
+        .state()
+        .renew_lease(&index.lease, 10, 100)
+        .unwrap();
+}
