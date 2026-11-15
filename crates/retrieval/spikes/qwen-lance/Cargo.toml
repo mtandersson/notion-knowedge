@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 notion-knowledge-mcp = { path = "../../../mcp" }
 notion-knowledge-server = { path = "../../../server" }
-rmcp = { version = "3.5.0", default-features = false, features = ["server", "transport-io"] }
+rmcp = { version = "3.9.0", default-features = false, features = ["server", "transport-io"] }
 notion-knowledge-notion = { path = "../../../notion" }
 notion-knowledge-core = { path = "../../../core" }
 anyhow = "1"

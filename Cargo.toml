@@ -14,7 +14,7 @@ edition = "2024"
 repository = "https://github.com/mtandersson/notion-knowedge"
 
 [workspace.dependencies]
-rmcp = { version = "3.5.0", default-features = false, features = ["server"] }
+rmcp = { version = "3.9.0", default-features = false, features = ["server"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 # Temporary security patch; see vendor/README.md.
