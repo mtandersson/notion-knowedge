@@ -5877,6 +5877,8 @@ async fn owned_drain_retains_failures_even_when_cancelled_observers_never_consum
             index.create().await;
             let (started, entered) = tokio::sync::oneshot::channel();
             let (release, resume) = tokio::sync::oneshot::channel();
+            let expected_failure = failure.clone();
+            let failure = failure.clone();
             let work =
                 index
                     .coordinator
@@ -5895,7 +5897,7 @@ async fn owned_drain_retains_failures_even_when_cancelled_observers_never_consum
             // race: the error is queued but the outer future never consumes it.
             let errors = index.coordinator.drain_owned_outcomes().await.unwrap();
             drop(observer);
-            assert_eq!(errors, vec![CommitError::Operation(failure)]);
+            assert_eq!(errors, vec![CommitError::Operation(expected_failure)]);
             assert!(!index.coordinator.has_unfinished_commits().unwrap());
             let guard = fs::File::open(&index.index).unwrap();
             guard.try_lock().unwrap();

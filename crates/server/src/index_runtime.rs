@@ -658,6 +658,9 @@ impl IndexRuntime {
                 }
             })
             .await;
+            if matches!(&attempt, Ok(Ok(_))) && self.coordinator.drain_owned().await.is_err() {
+                break Err("cache sync drain failed");
+            }
             let progress = match attempt {
                 Ok(Ok(progress)) => progress,
                 Err(_) if operation.is_some() => {
@@ -1120,9 +1123,7 @@ mod timeout_tests {
         reconciliation::{FailureClass, Lease},
         sync_state::PageSyncState,
     };
-    use notion_knowledge_retrieval::commit::{
-        CommitError, PageAction, PageOperation, ReceiptStatus,
-    };
+    use notion_knowledge_retrieval::commit::{PageAction, PageOperation, ReceiptStatus};
     struct Model(EmbeddingMetadata);
     impl EmbeddingProvider for Model {
         fn metadata(&self) -> &EmbeddingMetadata {
