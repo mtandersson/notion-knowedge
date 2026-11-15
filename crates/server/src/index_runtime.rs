@@ -91,7 +91,9 @@ enum Prefetched {
         prefetched: Box<notion_knowledge_retrieval::refresh::PrefetchedPage>,
         bytes: tokio::sync::OwnedSemaphorePermit,
     },
-    Oversize {
+    /// Prepared again inline by the consumer from current state: the page was
+    /// too large to queue, or its source changed while it was being prefetched.
+    Inline {
         page: notion_knowledge_core::backend::PageId,
         root: notion_knowledge_core::backend::PageId,
         operation: String,
@@ -530,7 +532,7 @@ impl IndexRuntime {
                         prefetched.operation().to_owned(),
                         PageWork::Commit(prefetched, bytes),
                     ),
-                    Prefetched::Oversize {
+                    Prefetched::Inline {
                         page,
                         root,
                         operation,
@@ -718,6 +720,15 @@ impl IndexRuntime {
         .await;
         match result {
             Err(_) => Prefetched::TimedOut { page, operation },
+            // Source changed during preparation: nothing was captured, so the
+            // consumer prepares it again from current state.
+            Ok(Err(notion_knowledge_retrieval::refresh::RefreshError::Conflict)) => {
+                Prefetched::Inline {
+                    page,
+                    root,
+                    operation,
+                }
+            }
             Ok(Err(error)) => Prefetched::Failed {
                 page,
                 operation,
@@ -728,7 +739,7 @@ impl IndexRuntime {
                     // Never queue more than was reserved. The consumer prepares
                     // this rare page inline, as the serial path always did.
                     drop(prefetched);
-                    return Prefetched::Oversize {
+                    return Prefetched::Inline {
                         page,
                         root,
                         operation,

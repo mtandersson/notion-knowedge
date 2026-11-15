@@ -4,7 +4,7 @@
 //! The webhook is only a hint for which ID to inspect. The actual Notion
 //! credential/scope and local index binding come from trusted operator config.
 //! No receipts are acknowledged until the guarded local commit completes.
-use std::sync::Arc;
+use std::sync::{Arc, atomic::Ordering};
 
 use notion_knowledge_core::{
     aliases::AliasSources,
@@ -556,6 +556,7 @@ impl AuthoritativePageRefresh {
             clock,
             lifecycle,
             expected,
+            None,
         ))
         .await
     }
@@ -632,10 +633,46 @@ impl AuthoritativePageRefresh {
             let fresh = Box::pin(self.prefetch_page(&page, &root, &operation)).await?;
             (fresh.previous, fresh.proposal)
         };
-        Box::pin(self.embed_and_commit(
-            &page, &operation, previous, proposal, provider, lease, clock, false, None,
+        let changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let first = Box::pin(self.embed_and_commit(
+            &page,
+            &operation,
+            previous,
+            proposal,
+            provider,
+            lease.clone(),
+            clock.clone(),
+            false,
+            None,
+            Some(changed.clone()),
         ))
-        .await
+        .await;
+        if !matches!(first, Err(RefreshError::Conflict)) || !changed.load(Ordering::SeqCst) {
+            return first;
+        }
+        // The source changed after prefetch and nothing was committed. Prepare
+        // this page once more from current source and local state; every guard
+        // still applies. A page that keeps changing is a page-local transient
+        // source failure, so its siblings continue.
+        changed.store(false, Ordering::SeqCst);
+        let fresh = Box::pin(self.prefetch_page(&page, &root, &operation)).await?;
+        let retry = Box::pin(self.embed_and_commit(
+            &page,
+            &operation,
+            fresh.previous,
+            fresh.proposal,
+            provider,
+            lease,
+            clock,
+            false,
+            None,
+            Some(changed.clone()),
+        ))
+        .await;
+        if matches!(retry, Err(RefreshError::Conflict)) && changed.load(Ordering::SeqCst) {
+            return Err(RefreshError::Source);
+        }
+        retry
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -650,7 +687,16 @@ impl AuthoritativePageRefresh {
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
         lifecycle: bool,
         expected: Option<ExpectedReconciliation>,
+        // Set when guarded source revalidation reports the page changed.
+        source_changed: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<RefreshResult, RefreshError> {
+        let mark_changed = move |kind: BackendErrorKind| {
+            if kind == BackendErrorKind::Conflict
+                && let Some(flag) = &source_changed
+            {
+                flag.store(true, Ordering::SeqCst);
+            }
+        };
         let proposal = relation_proposal.snapshot().clone();
         let projection = RelationProjection::new(
             self.coordinator.binding(),
@@ -727,6 +773,7 @@ impl AuthoritativePageRefresh {
             new.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
             if old == new {
                 let handler = self.clone();
+                let mark_changed = mark_changed.clone();
                 let expected_projection = projection.clone();
                 let expected_aliases = aliases.clone();
                 let proposal = relation_proposal;
@@ -740,6 +787,7 @@ impl AuthoritativePageRefresh {
                             .revalidate(&proposal)
                             .await
                             .map_err(|error| {
+                                mark_changed(error.kind);
                                 if error.kind == BackendErrorKind::Unauthenticated {
                                     FailureClass::Unavailable
                                 } else {
@@ -805,12 +853,16 @@ impl AuthoritativePageRefresh {
                 .is_some_and(|r| r.status == ReceiptStatus::Applied)
         {
             let handler = self.clone();
+            let mark_changed = mark_changed.clone();
             self.check_owned_snapshot(lease, clock, move |context| async move {
                 let _authority = handler
                     .relations
                     .revalidate(&relation_proposal)
                     .await
-                    .map_err(|_| FailureClass::Conflict)?;
+                    .map_err(|error| {
+                        mark_changed(error.kind);
+                        FailureClass::Conflict
+                    })?;
                 context.revalidate().map_err(|_| FailureClass::Conflict)?;
                 if !handler
                     .aliases_complete(&aliases)
@@ -924,7 +976,10 @@ impl AuthoritativePageRefresh {
                             .relations
                             .revalidate(&relation_proposal)
                             .await
-                            .map_err(|error| source_revalidation_failure(error.kind))
+                            .map_err(|error| {
+                                mark_changed(error.kind);
+                                source_revalidation_failure(error.kind)
+                            })
                     },
                     owned_clock.clone(),
                     expires_at,
