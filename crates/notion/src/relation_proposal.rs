@@ -96,6 +96,10 @@ impl RelationProposal {
     pub fn links(&self) -> &[GraphEdge] {
         &self.links
     }
+    /// Conservative heap-retention estimate of the prepared content and edges.
+    pub fn retained_bytes(&self) -> usize {
+        self.snapshot.retained_bytes() + (self.edges.len() + self.links.len()) * 512
+    }
     /// Per-candidate physical authorization outcomes; failures remain unresolved.
     pub fn targets(&self) -> &TargetOutcomes {
         &self.targets

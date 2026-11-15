@@ -24,6 +24,40 @@ pub struct ScopedPageSnapshot {
     pub(crate) source: PageContent,
 }
 
+/// Fixed allowance for per-value metadata/allocation overhead in estimates.
+const RETAINED_OVERHEAD: usize = 1024;
+
+fn metadata_retained_bytes(metadata: &notion_knowledge_core::indexed::IndexedMetadata) -> usize {
+    serde_json::to_vec(metadata).map_or(RETAINED_OVERHEAD * 16, |v| v.len())
+}
+
+/// Conservative heap-retention estimate for one indexed chunk.
+pub fn chunk_retained_bytes(chunk: &IndexedChunk) -> usize {
+    RETAINED_OVERHEAD
+        + chunk.chunk_id.len()
+        + chunk.text.len()
+        + chunk.content_hash.len()
+        + chunk.links.len() * 256
+        + metadata_retained_bytes(&chunk.metadata)
+}
+
+impl ScopedPageSnapshot {
+    /// Conservative heap-retention estimate used to bound prefetched pages.
+    pub fn retained_bytes(&self) -> usize {
+        RETAINED_OVERHEAD
+            + self.document.text.len()
+            + self.document.links.len() * 256
+            + metadata_retained_bytes(&self.document.metadata)
+            + self.source.markdown.len()
+            + self.chunks.iter().map(chunk_retained_bytes).sum::<usize>()
+            + self
+                .relation_names
+                .iter()
+                .map(|(k, v)| k.len() + v.len() + 64)
+                .sum::<usize>()
+    }
+}
+
 fn failure(kind: BackendErrorKind) -> BackendError {
     BackendError {
         operation: "notion.prepare_scoped_page",

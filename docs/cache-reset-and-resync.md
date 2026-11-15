@@ -33,12 +33,19 @@ flag pending. The next start retries recovery; arbitrary storage errors do not
 trigger destructive reset.
 
 Initial/reset sync overlaps discovery with useful indexing. A bounded channel
-holds at most eight discovered page IDs; a single consumer freshly authorizes,
-fetches, embeds and durably commits each page while independent discovery
-branches continue. Source bodies are processed one page at a time rather than
-buffering the corpus. The existing writer lease is renewed while waiting for
-more pages; timed-out work is fenced and drained before releasing it. No Notion
-write or upload is issued.
+holds at most eight discovered page IDs. Two read-only workers freshly authorize
+and prepare page content (shared Notion rate limiter) while one consumer embeds
+and durably commits pages in discovery order, so the next page downloads while
+the model works. At most one prepared page waits beyond those in flight. Each
+preparation reserves 32 MiB of a 64 MiB retained-byte budget before its first
+request, keeps only its measured size while queued and committing, and is
+re-prepared inline by the consumer if it exceeds its reservation. Prefetching
+captures no index version, lease or receipt decision: the consumer builds the
+guarded mutation plan from current index state, re-prepares a page whose own
+indexed chunks changed meanwhile, and revalidates the source inside the owned
+commit. Preparation and commit each keep the page deadline. The existing writer
+lease is renewed while waiting for more pages; timed-out work is fenced and
+drained before releasing it. No Notion write or upload is issued.
 
 Discovery overlaps up to eight independent page/block/database branches; cursors
 within a paginated endpoint remain ordered. After traversal and early refreshes
@@ -53,9 +60,9 @@ still wait for a valid completed inventory and the available indexed subset.
 Operator stderr/journald includes `operation=cache_sync` summaries at phase start,
 roughly every ten seconds as work completes, and phase completion. Every normal
 operation event within a startup sync also includes `sync_progress`: phase,
-`discovered_pages`, `content_reads`, `embedded_chunks`, `committed_pages`,
+`discovered_pages`, `content_reads`, `prefetched_pages`, `embedded_chunks`, `committed_pages`,
 `skipped_pages`, and `total_pages`. These are actual metadata discoveries, successful
-content reads, completed embedding outputs and acknowledged page commits; reads
+content reads, pages prepared ahead of embedding, completed embedding outputs and acknowledged page commits; reads
 and commits may repeat for a page during final revalidation. They are not estimates
 of unique indexed sources. The total stays null until traversal completes; no
 workspace-wide page count is guessed. Counts contain no titles, IDs, URLs or text.
