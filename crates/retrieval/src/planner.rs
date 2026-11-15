@@ -187,10 +187,23 @@ impl AuthoritativeReconciliationPlanner {
             scope,
         })
     }
+    /// Apply the same trusted target projection policy in every refresh/planning role.
+    pub fn with_projection_mode(
+        mut self,
+        mode: notion_knowledge_notion::relation_proposal::ProjectionMode,
+    ) -> Self {
+        self.relations = self.relations.with_projection_mode(mode);
+        self
+    }
+
     /// Trusted composition only: immutable source policy shared by runtime callers.
     pub fn with_alias_sources(mut self, sources: AliasSources) -> Self {
         self.alias_sources = Some(sources);
         self
+    }
+
+    pub(crate) fn projection_mode(&self) -> notion_knowledge_notion::relation_proposal::ProjectionMode {
+        self.relations.projection_mode()
     }
 
     pub(crate) fn alias_configuration_identity(&self) -> Option<String> {

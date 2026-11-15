@@ -39,6 +39,9 @@ pub(crate) fn has_fatal_sync_failure(
 
 struct SyncEmbedding<'a>(&'a dyn EmbeddingProvider);
 impl EmbeddingProvider for SyncEmbedding<'_> {
+    fn wait_idle(&self) -> notion_knowledge_core::embedding::EmbeddingIdleFuture<'_> {
+        self.0.wait_idle()
+    }
     fn metadata(&self) -> &notion_knowledge_core::embedding::EmbeddingMetadata {
         self.0.metadata()
     }
@@ -796,7 +799,8 @@ impl IndexRuntime {
             },
         )
         .map_err(|_| "authoritative handler incompatible")?
-        .with_alias_sources(settings.alias_sources.clone());
+        .with_alias_sources(settings.alias_sources.clone())
+        .with_projection_mode(settings.projection_mode);
         let planner = AuthoritativeReconciliationPlanner::new(
             source.clone(),
             guard.clone(),
@@ -804,7 +808,8 @@ impl IndexRuntime {
             scope.clone(),
         )
         .map_err(|_| "authoritative planner incompatible")?
-        .with_alias_sources(settings.alias_sources.clone());
+        .with_alias_sources(settings.alias_sources.clone())
+        .with_projection_mode(settings.projection_mode);
         let runner = AuthoritativeReconciliationRunner::new(
             planner,
             handler.clone(),

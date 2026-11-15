@@ -4,6 +4,7 @@ use std::{ffi::OsString, path::PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct WorkerSettings {
+    pub projection_mode: notion_knowledge_notion::relation_proposal::ProjectionMode,
     pub lexical: Option<crate::lexical_expansion::Settings>,
     pub alias_sources: notion_knowledge_core::aliases::AliasSources,
     pub index: PathBuf,
@@ -96,6 +97,7 @@ impl WorkerSettings {
                 .ok_or_else(|| error(name, "outside documented integer range"))
         };
         Ok(Self {
+            projection_mode: Default::default(),
             lexical,
             alias_sources,
             index,

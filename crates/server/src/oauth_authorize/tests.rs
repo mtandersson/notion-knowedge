@@ -386,6 +386,7 @@ impl Harness {
                 settings.graph_boost.enabled = true;
                 settings.webhook_state_file = Some(seeded.state);
                 settings.retrieval = Some(crate::webhook_worker::WorkerSettings {
+                    projection_mode: Default::default(),
                     lexical: None,
                     alias_sources: notion_knowledge_core::aliases::AliasSources::new(true, vec![])
                         .unwrap(),

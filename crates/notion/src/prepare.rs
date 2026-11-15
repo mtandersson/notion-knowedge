@@ -713,6 +713,32 @@ mod tests {
         server.await.unwrap();
     }
     #[tokio::test]
+    async fn unresolved_projection_keeps_references_and_fresh_source_checks_without_target_requests()
+     {
+        use crate::relation_proposal::{ProjectionMode, RelationProposalAdapter};
+        use notion_knowledge_core::graph::GraphTarget;
+        for targets in [vec![], vec![OTHER, OTHER]] {
+            let mut routes = relations(full("Body", "Current"), "Related", &targets, false);
+            routes.extend(validation("Related", &targets, vec![]));
+            let (client, server) = fixture(routes).await;
+            let adapter = RelationProposalAdapter::new(client, scope())
+                .unwrap()
+                .with_projection_mode(ProjectionMode::UnresolvedTargets);
+            let prepared = proposal(&adapter).await.unwrap();
+            assert!(prepared.targets().is_empty()); // No fabricated denied observations.
+            assert!(prepared.edges().iter().all(|e| matches!(e.target(), GraphTarget::Unresolved { reference } if reference == OTHER)));
+            let other_mode = adapter
+                .clone()
+                .with_projection_mode(ProjectionMode::ResolveTargets);
+            assert!(other_mode.revalidate(&prepared).await.is_err()); // Even empty proposals are mode-bound.
+            drop(adapter.revalidate(&prepared).await.unwrap());
+            let requests = server.await.unwrap();
+            assert!(requests.iter().all(|p| !p.contains(OTHER)));
+            assert!(requests.iter().filter(|p| p.ends_with("/markdown")).count() >= 4);
+        }
+    }
+
+    #[tokio::test]
     async fn relation_labels_never_authorize_outside_excluded_broken_or_inaccessible_targets() {
         use crate::relation_proposal::RelationProposalAdapter;
         use notion_knowledge_core::graph::GraphTarget;

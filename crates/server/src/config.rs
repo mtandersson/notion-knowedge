@@ -839,6 +839,11 @@ impl Config {
         .flatten()
         {
             settings.lexical = lexical.clone();
+            settings.projection_mode = if graph_enabled {
+                notion_knowledge_notion::relation_proposal::ProjectionMode::ResolveTargets
+            } else {
+                notion_knowledge_notion::relation_proposal::ProjectionMode::UnresolvedTargets
+            };
         }
         let max_upload_files = optional(&mut lookup, "NK_MAX_UPLOAD_FILES", "4")?
             .parse::<usize>()

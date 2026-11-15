@@ -71,6 +71,7 @@ fn worker(
     GrantRefreshWorker::new(
         h.login.callback.as_ref().unwrap().credentials.clone(),
         GrantRefreshSettings {
+            projection_mode: Default::default(),
             scope: scope(),
             chunk_config: ChunkConfig::default(),
             alias_sources: None,

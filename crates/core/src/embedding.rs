@@ -115,7 +115,15 @@ pub type EmbeddingFuture<'a> =
 /// Metadata is immutable for a provider instance. Results preserve input order,
 /// return exactly one finite vector of the advertised dimension per input, and
 /// fail the whole batch on error. Retry scheduling belongs to the caller.
+pub type EmbeddingIdleFuture<'a> = Pin<Box<dyn Future<Output = Result<(), EmbeddingError>> + Send + 'a>>;
+
 pub trait EmbeddingProvider: Send + Sync {
+    /// Wait for work retained after a cancelled embedding observer. Providers
+    /// with cancellation-safe futures need no additional drain. Blocking adapters
+    /// must retain admission until their work ends and override this method.
+    fn wait_idle(&self) -> EmbeddingIdleFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
     fn metadata(&self) -> &EmbeddingMetadata;
     fn embed_batch<'a>(&'a self, inputs: &'a [String]) -> EmbeddingFuture<'a>;
 }

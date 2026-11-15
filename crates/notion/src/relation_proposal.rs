@@ -58,11 +58,20 @@ fn conflict() -> BackendError {
     }
 }
 
+/// Operator-owned optional target enrichment. Source authorization is always fresh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProjectionMode {
+    #[default]
+    ResolveTargets,
+    UnresolvedTargets,
+}
+
 /// Trusted composition-owned adapter. Clones share one current policy owner.
 /// Construct from operator configuration, never request/relation metadata.
 #[derive(Clone)]
 pub struct RelationProposalAdapter {
     client: NotionClient,
+    mode: ProjectionMode,
     policy: Arc<RwLock<LifecycleScope>>,
 }
 
@@ -75,6 +84,7 @@ pub struct RelationProposal {
     targets: TargetOutcomes,
     evidence: TargetEvidence,
     owner: Arc<RwLock<LifecycleScope>>,
+    mode: ProjectionMode,
 }
 impl RelationProposal {
     pub fn snapshot(&self) -> &ScopedPageSnapshot {
@@ -104,8 +114,17 @@ impl RelationProposalAdapter {
         RootScopeGate::new(Arc::new(client.clone()), policy.clone())?;
         Ok(Self {
             client,
+            mode: ProjectionMode::default(),
             policy: Arc::new(RwLock::new(policy)),
         })
+    }
+    /// Trusted immutable composition setting; never infer from source references.
+    pub fn with_projection_mode(mut self, mode: ProjectionMode) -> Self {
+        self.mode = mode;
+        self
+    }
+    pub fn projection_mode(&self) -> ProjectionMode {
+        self.mode
     }
     /// Serialize current operator policy replacement with in-flight commit authority.
     /// Generation must increase, even if the operator later restores old settings.
@@ -158,7 +177,10 @@ impl RelationProposalAdapter {
         let mut outcomes = BTreeMap::new();
         let mut evidence = BTreeMap::new();
         let mut allowed = BTreeSet::from([metadata.page_id.clone()]);
-        for target in targets {
+        for target in targets
+            .into_iter()
+            .filter(|_| self.mode == ProjectionMode::ResolveTargets)
+        {
             let recording = Arc::new(RecordingLifecycle {
                 client: self.client.clone(),
                 observation: Mutex::new(None),
@@ -274,6 +296,7 @@ impl RelationProposalAdapter {
             targets,
             evidence,
             owner: self.policy.clone(),
+            mode: self.mode,
         })
     }
     /// Retain the same current policy owner for an authoritative removal.
@@ -302,7 +325,7 @@ impl RelationProposalAdapter {
         &self,
         proposal: &RelationProposal,
     ) -> Result<RelationAuthority, BackendError> {
-        if !Arc::ptr_eq(&self.policy, &proposal.owner) {
+        if self.mode != proposal.mode || !Arc::ptr_eq(&self.policy, &proposal.owner) {
             return Err(conflict());
         }
         let scope = self.policy.clone().read_owned().await;
