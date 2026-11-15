@@ -4236,14 +4236,16 @@ async fn source_edit_after_prefetch_never_commits_the_stale_snapshot() {
     await_markdown_pages(&http, 3).await;
     http.change(|m| m.markdown = "# Intro\n\nJuniper gnocchi.\n".into());
     f.provider.hold_release.add_permits(1);
-    let result = recovery.await.unwrap();
-    let runtime = f.open(&http, OpenMode::ReadOnly).await;
+    // The stale page is prepared again from current source; siblings continue.
+    let runtime = recovery.await.unwrap().unwrap();
     let chunks = runtime.chunks().page_chunks(PAGE).await.unwrap();
     assert!(
         chunks.iter().all(|c| !c.text.contains("Saffron")),
         "a prefetched snapshot edited upstream must never be committed"
     );
-    if result.is_ok() {
-        assert!(chunks.iter().any(|c| c.text.contains("Juniper")));
+    assert!(chunks.iter().any(|c| c.text.contains("Juniper")));
+    for page in [ROOT, PAGE, OTHER] {
+        assert!(!runtime.chunks().page_chunks(page).await.unwrap().is_empty());
     }
+    assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
 }
