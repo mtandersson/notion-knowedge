@@ -86,6 +86,13 @@ inputs return sanitized typed errors. All input token and padded-batch budgets
 are checked before any inference; a failed call returns no partial vectors.
 Results are validated for exact cardinality, dimension and finite components.
 
+Deterministic token/text/count admission returns `InputLimit`, distinct from
+invalid/blank input and from concurrent/runtime `ResourceExhausted` failures.
+The guarded page caller uses sequential single-text requests and performs no
+storage mutation until every required vector is prepared. A local input limit
+can then be reported as a typed page failure without masking a storage or model
+failure. The CPU context default remains 1,024 tokens.
+
 Each instance admits at most one active call; concurrent calls receive
 `ResourceExhausted` immediately. CPU work runs on Tokio's blocking pool. Dropping
 the future stops waiting, but an already-started forward pass continues holding

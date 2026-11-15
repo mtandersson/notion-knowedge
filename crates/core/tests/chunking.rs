@@ -85,6 +85,10 @@ fn code_lists_tables_and_enhanced_containers_remain_atomic() {
     for block in [
         format!("```rust\n{}\n```\n", "let x = 1;\n".repeat(30)),
         format!("- first\n{}", "  - nested item\n".repeat(30)),
+        format!(
+            "- first\n{}",
+            "  <page>nested HTML source</page>\n".repeat(30)
+        ),
         format!("|a|b|\n|-|-|\n{}", "|1|2|\n".repeat(30)),
         format!(
             "<details>\n\n# inner\n\n{}\n</details>\n",
@@ -165,27 +169,31 @@ fn prose_splits_cannot_manufacture_lists_headings_or_drop_hard_breaks() {
 
 #[test]
 fn independent_complete_html_elements_split_without_changing_source_or_citations() {
-    let text = (0..30)
-        .map(|n| format!("<page url=\"https://example.org/{n}\">Svensk åäö text {n}</page>\n"))
-        .collect::<String>();
-    let doc = document(&text);
-    let chunks = chunk_document(
-        &doc,
-        ChunkConfig {
-            target_chars: 200,
-            overlap_chars: 0,
-        },
-    )
-    .unwrap();
-    assert!(chunks.len() > 5);
-    assert_eq!(
-        chunks.iter().map(|c| c.text.as_str()).collect::<String>(),
-        text
-    );
-    for chunk in chunks {
-        assert!(chunk.text.chars().count() <= 200);
-        assert_eq!(chunk.text, text[chunk.source_bytes]);
-        assert_eq!(chunk.metadata, doc.metadata);
+    for tag in ["page", "database", "div", "details"] {
+        let text = (0..30)
+            .map(|n| {
+                format!("<{tag} url=\"https://example.org/{n}\">Svensk åäö text {n}</{tag}>\n")
+            })
+            .collect::<String>();
+        let doc = document(&text);
+        let chunks = chunk_document(
+            &doc,
+            ChunkConfig {
+                target_chars: 200,
+                overlap_chars: 0,
+            },
+        )
+        .unwrap();
+        assert!(chunks.len() > 5);
+        assert_eq!(
+            chunks.iter().map(|c| c.text.as_str()).collect::<String>(),
+            text
+        );
+        for chunk in chunks {
+            assert!(chunk.text.chars().count() <= 200);
+            assert_eq!(chunk.text, text[chunk.source_bytes]);
+            assert_eq!(chunk.metadata, doc.metadata);
+        }
     }
 }
 
@@ -195,6 +203,8 @@ fn html_pairing_preserves_nested_containers_and_ignores_quoted_or_commented_clos
         "<page>outer<page>nested</page>still outer</page>\n",
         "<page title=\"fake </page> close\">åäö</page>\n",
         "<page>before<!-- </page> -->after</page>\n",
+        "<page><![CDATA[ </page> ]]></page>\n",
+        "<script>const sample = '<page>';</script>\n",
         "<page title=\"fake </page>\nclose\">body</page>\n",
         "<PAGE>case-insensitive</page>\n",
     ] {

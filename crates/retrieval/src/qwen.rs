@@ -177,11 +177,12 @@ fn persist_metadata(identity: &EmbeddingMetadata, path: &Path) -> Result<(), Emb
 fn validate_inputs(inputs: &[String]) -> Result<(), EmbeddingError> {
     // Bound cloning/tokenization before admission. Caller can split large jobs.
     if inputs.len() > 32
-        || inputs
-            .iter()
-            .any(|s| s.trim().is_empty() || s.len() > 32768)
+        || inputs.iter().any(|s| s.len() > 32768)
         || inputs.iter().map(String::len).sum::<usize>() > 262144
     {
+        return Err(EmbeddingError::InputLimit);
+    }
+    if inputs.iter().any(|s| s.trim().is_empty()) {
         return Err(EmbeddingError::InvalidInput);
     }
     Ok(())
@@ -212,14 +213,17 @@ impl EmbeddingProvider for QwenProvider {
                     .iter()
                     .map(|s| runtime.token_count(s))
                     .collect::<Result<_, _>>()?;
-                if lengths.iter().any(|&n| n == 0 || n > config.max_tokens) {
+                if lengths.contains(&0) {
                     return Err(EmbeddingError::InvalidInput);
+                }
+                if lengths.iter().any(|&n| n > config.max_tokens) {
+                    return Err(EmbeddingError::InputLimit);
                 }
                 if lengths
                     .chunks(config.batch_size)
                     .any(|tokens| tokens.iter().max().copied().unwrap_or(0) * tokens.len() > 4096)
                 {
-                    return Err(EmbeddingError::ResourceExhausted);
+                    return Err(EmbeddingError::InputLimit);
                 }
                 let mut output = Vec::with_capacity(inputs.len());
                 for batch in inputs.chunks(config.batch_size) {
@@ -264,9 +268,13 @@ mod tests {
     }
     #[test]
     fn input_budget_rejects_empty_and_excessive_text_without_echoing() {
-        for text in ["".to_string(), " \n".to_string(), "å".repeat(32769)] {
+        for text in ["".to_string(), " \n".to_string()] {
             assert_eq!(validate_inputs(&[text]), Err(EmbeddingError::InvalidInput));
         }
+        assert_eq!(
+            validate_inputs(&["å".repeat(32769)]),
+            Err(EmbeddingError::InputLimit)
+        );
         assert!(
             validate_inputs(&[
                 "Svensk text".into(),
@@ -277,7 +285,7 @@ mod tests {
         );
         assert_eq!(
             validate_inputs(&vec!["x".into(); 33]),
-            Err(EmbeddingError::InvalidInput)
+            Err(EmbeddingError::InputLimit)
         );
     }
     #[tokio::test]
@@ -385,7 +393,7 @@ mod tests {
         );
         assert_eq!(
             provider.embed_batch(&["1025".into()]).await,
-            Err(EmbeddingError::InvalidInput)
+            Err(EmbeddingError::InputLimit)
         );
         assert_eq!(calls.lock().unwrap().len(), texts.len());
 
@@ -394,7 +402,7 @@ mod tests {
         let (provider, calls) = fake(smaller, false);
         assert_eq!(
             provider.embed_batch(&["530".into()]).await,
-            Err(EmbeddingError::InvalidInput)
+            Err(EmbeddingError::InputLimit)
         );
         assert!(calls.lock().unwrap().is_empty());
     }
@@ -426,11 +434,11 @@ mod tests {
         let (p, calls) = fake(c, false);
         assert_eq!(
             p.embed_batch(&["1".into(), "4097".into()]).await,
-            Err(EmbeddingError::InvalidInput)
+            Err(EmbeddingError::InputLimit)
         );
         assert_eq!(
             p.embed_batch(&["1".into(), "3000".into()]).await,
-            Err(EmbeddingError::ResourceExhausted)
+            Err(EmbeddingError::InputLimit)
         );
         assert!(calls.lock().unwrap().is_empty());
     }

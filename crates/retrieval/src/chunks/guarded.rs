@@ -711,11 +711,14 @@ impl GuardedChunkTable {
                 }
             }
         }
-        let vectors = if embed_inputs.is_empty() {
-            Vec::new()
-        } else {
-            embedding::embed_batch(provider, &embed_inputs).await?
-        };
+        // The page is the atomic storage snapshot, not a provider call budget.
+        // Keep each request bounded independently of page chunk count; finish
+        // all embedding before preparing any mutation. Production Qwen already
+        // uses one-text inference batches, retaining the same accepted vectors.
+        let mut vectors = Vec::with_capacity(embed_inputs.len());
+        for input in &embed_inputs {
+            vectors.extend(embedding::embed_batch(provider, std::slice::from_ref(input)).await?);
+        }
         let mut generated = embed_positions
             .into_iter()
             .zip(vectors)

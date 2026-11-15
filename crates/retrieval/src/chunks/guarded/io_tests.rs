@@ -24,6 +24,54 @@ use std::{
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn cancelling_after_partial_embedding_does_not_mutate_the_page_or_checkpoint() {
+    struct PausingProvider {
+        metadata: EmbeddingMetadata,
+        calls: AtomicUsize,
+        entered: tokio::sync::Notify,
+    }
+    impl EmbeddingProvider for PausingProvider {
+        fn metadata(&self) -> &EmbeddingMetadata {
+            &self.metadata
+        }
+        fn embed_batch<'a>(&'a self, inputs: &'a [String]) -> EmbeddingFuture<'a> {
+            Box::pin(async move {
+                assert_eq!(inputs.len(), 1);
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Ok(vec![vec![1.0, 0.0, 0.0]]);
+                }
+                self.entered.notify_one();
+                std::future::pending().await
+            })
+        }
+    }
+    let rt = runtime();
+    let f = Fixture::new();
+    rt.block_on(async {
+        f.create().await;
+        let table = f.guarded();
+        let version = table.inventory_version().await.unwrap();
+        let provider = PausingProvider { metadata: f.embedding.clone(), calls: AtomicUsize::new(0), entered: tokio::sync::Notify::new() };
+        let chunks = [chunk("first", "first source", "Title"), chunk("second", "second source", "Title")];
+        {
+            let preparation = table.prepare_page(&provider, operation("cancelled-embedding", "source", false), &chunks);
+            tokio::pin!(preparation);
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::select! {
+                    result = &mut preparation => panic!("second embedding must remain pending; succeeded={}", result.is_ok()),
+                    _ = provider.entered.notified() => {},
+                }
+            }).await.unwrap();
+        }
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(table.inventory_version().await.unwrap(), version);
+        assert!(table.page_chunks("page").await.unwrap().is_empty());
+        assert!(f.coordinator.state().page_state("page").unwrap().is_none());
+        assert!(f.coordinator.receipt("cancelled-embedding").unwrap().is_none());
+    });
+}
+
 struct Fixture {
     root: PathBuf,
     index: PathBuf,

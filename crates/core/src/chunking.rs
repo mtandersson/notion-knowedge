@@ -51,6 +51,7 @@ pub fn chunk_document(
     let mut headings = Vec::new();
     let mut depth = 0;
     let mut paragraph = None;
+    let mut top_level_html = false;
     let mut html_spans = html::HtmlSpans::default();
     let mut heading: Option<(usize, usize, String)> = None;
     for (event, bytes) in Parser::new_ext(
@@ -62,6 +63,7 @@ pub fn chunk_document(
         match event {
             Event::Start(tag) => {
                 if depth == 0 {
+                    top_level_html = matches!(tag, Tag::HtmlBlock);
                     if matches!(tag, Tag::Paragraph) {
                         paragraph = Some(bytes.clone());
                     }
@@ -74,6 +76,9 @@ pub fn chunk_document(
             }
             Event::End(end) => {
                 depth -= 1;
+                if depth == 0 {
+                    top_level_html = false;
+                }
                 if depth == 0
                     && matches!(end, TagEnd::Paragraph)
                     && let Some(range) = paragraph.take()
@@ -136,7 +141,7 @@ pub fn chunk_document(
                 html_spans.observe(
                     &text[bytes.clone()],
                     bytes.start,
-                    depth == 0 || (depth == 1 && paragraph.is_some()),
+                    depth == 0 || (depth == 1 && (paragraph.is_some() || top_level_html)),
                 );
                 if depth == 0 {
                     boundaries.push(bytes.start);

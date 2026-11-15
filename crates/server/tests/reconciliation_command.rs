@@ -350,6 +350,7 @@ struct Provider {
     count: AtomicUsize,
     fail: AtomicBool,
     fail_next: AtomicBool,
+    input_limit_bytes: AtomicUsize,
     pause: AtomicBool,
     entered: tokio::sync::Notify,
     boundary_pause: Mutex<Option<Arc<RequestPause>>>,
@@ -362,6 +363,7 @@ impl Provider {
             count: AtomicUsize::new(0),
             fail: AtomicBool::new(false),
             fail_next: AtomicBool::new(false),
+            input_limit_bytes: AtomicUsize::new(0),
             pause: AtomicBool::new(false),
             entered: tokio::sync::Notify::new(),
             boundary_pause: Mutex::new(None),
@@ -378,7 +380,13 @@ impl EmbeddingProvider for Provider {
             pause.armed.store(true, Ordering::SeqCst);
         }
         let fail_once = self.fail_next.swap(false, Ordering::SeqCst);
+        let input_limit = self.input_limit_bytes.load(Ordering::SeqCst);
         Box::pin(async move {
+            if texts.len() > 32
+                || (input_limit > 0 && texts.iter().any(|text| text.len() > input_limit))
+            {
+                return Err(EmbeddingError::InputLimit);
+            }
             if self.pause.swap(false, Ordering::SeqCst) {
                 self.entered.notify_one();
                 std::future::pending::<()>().await;
@@ -3713,4 +3721,187 @@ async fn streaming_retry_progress_reports_actual_commits_without_double_counting
     {
         assert!(event["sync_progress"].is_object(), "{event}");
     }
+}
+
+#[tokio::test]
+async fn readable_html_siblings_and_many_chunk_pages_use_bounded_embedding_requests() {
+    for markdown in [
+        (0..60).map(|n| format!("<page url=\"https://example.invalid/{n}\">Independent readable source {n}</page>\n")).collect::<String>(),
+        (0..40).map(|n| format!("# Section {n}\n\nIndependent readable section {n}.\n\n")).collect(),
+    ] {
+        let http = HttpNotion::start().await;
+        let f = Fixture::new(&http).await;
+        http.state.lock().unwrap().markdown = markdown;
+        f.provider.input_limit_bytes.store(2048, Ordering::SeqCst);
+        fs::remove_dir_all(&f.settings.index).unwrap();
+        let runtime = IndexRuntime::recover(&f.settings, &f.state, authority(), http.client(), f.provider.clone()).await.unwrap();
+        let chunks = runtime.chunks().page_chunks(PAGE).await.unwrap();
+        assert!(chunks.len() >= 4);
+        assert!(chunks.iter().all(|chunk| chunk.metadata.page_id == PAGE && chunk.metadata.source.root_page_id == ROOT));
+        let progress = runtime.coordinator.reconciliation_progress("cache-reset").unwrap();
+        assert!(progress.failed.is_empty());
+        assert_eq!(progress.successful.len(), 3);
+        assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
+    }
+}
+
+#[tokio::test]
+async fn embedding_input_limits_remain_visible_while_siblings_commit_and_normal_sync_can_retry() {
+    use notion_knowledge_retrieval::durable_plan::DurableFailure;
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Info);
+    http.state.lock().unwrap().markdown = format!(
+        "<details>\n{}\n</details>\n",
+        "private atomic source ".repeat(100)
+    );
+    f.provider.input_limit_bytes.store(1024, Ordering::SeqCst);
+    fs::remove_dir_all(&f.settings.index).unwrap();
+    let runtime = IndexRuntime::recover(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    )
+    .await
+    .unwrap();
+    let progress = runtime
+        .coordinator
+        .reconciliation_progress("cache-reset")
+        .unwrap();
+    assert_eq!(
+        progress.failed.get(PAGE),
+        Some(&DurableFailure::EmbeddingInputLimit)
+    );
+    assert_eq!(progress.successful.len(), 2);
+    assert!(progress.pending.is_empty());
+    assert!(runtime.chunks().page_chunks(PAGE).await.unwrap().is_empty());
+    assert!(
+        !runtime
+            .chunks()
+            .page_chunks(OTHER)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
+    drop(runtime);
+    // Removing the local admission restriction requires no Notion source edit.
+    f.provider.input_limit_bytes.store(0, Ordering::SeqCst);
+    counts(
+        &f.command(&http, &["--reconcile", "apply", "after-input-limit"])
+            .await,
+        1,
+        0,
+        2,
+    );
+}
+
+#[tokio::test]
+async fn embedding_input_limit_logs_contain_only_the_typed_reason_and_counts() {
+    let output = tokio::time::timeout(std::time::Duration::from_secs(30),
+        tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "embedding_input_limits_remain_visible_while_siblings_commit_and_normal_sync_can_retry", "--nocapture"])
+            .stdin(std::process::Stdio::null()).kill_on_drop(true).output()).await.unwrap().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    for private in ["fixture-credential", "private atomic source", PAGE, ROOT] {
+        assert!(!stderr.contains(private), "source or credential leaked");
+    }
+    let events: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let event = events
+        .iter()
+        .find(|e| e["status"] == "page_skipped" && e["reason"] == "embedding_input_limit")
+        .unwrap();
+    assert_eq!(event["operation"], "cache_sync");
+    assert!(event["sync_progress"].is_object());
+    assert_eq!(event.as_object().unwrap().len(), 5);
+}
+
+#[tokio::test]
+async fn an_existing_coalesced_layout_requires_explicit_scoped_cache_rebuild() {
+    use notion_knowledge_core::chunking::ChunkConfig;
+    use notion_knowledge_retrieval::{
+        durable_plan::DurableFailure, refresh::AuthoritativePageRefresh,
+    };
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    http.state.lock().unwrap().markdown = (0..30)
+        .map(|n| {
+            format!(
+                "<page url=\"https://example.invalid/{n}\">Independent readable source {n}</page>\n"
+            )
+        })
+        .collect();
+    let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+    // Represent an already indexed wider chunk layout without changing the
+    // source revision, content, model space or any authorization policy.
+    let previous_layout = AuthoritativePageRefresh::new(
+        http.client(),
+        runtime.chunks().clone(),
+        runtime.coordinator.clone(),
+        authority(),
+        &runtime.scope,
+        ChunkConfig {
+            target_chars: 100_000,
+            overlap_chars: 0,
+        },
+    )
+    .unwrap()
+    .with_alias_sources(f.settings.alias_sources.clone());
+    let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
+    let lease = runtime.coordinator.state().acquire_lease(now, 330).unwrap();
+    previous_layout
+        .refresh_page(
+            &PageId(PAGE.into()),
+            &PageId(ROOT.into()),
+            "previous-layout",
+            f.provider.as_ref(),
+            lease.clone(),
+            Arc::new(|| notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000),
+        )
+        .await
+        .unwrap();
+    runtime
+        .coordinator
+        .state()
+        .release_lease(&lease, now)
+        .unwrap();
+    assert_eq!(runtime.chunks().page_chunks(PAGE).await.unwrap().len(), 1);
+    drop(previous_layout);
+    drop(runtime);
+    let result = f
+        .command(&http, &["--reconcile", "apply", "layout-upgrade"])
+        .await;
+    assert_eq!(result.exit, 3);
+    let runtime = f.open(&http, OpenMode::ReadOnly).await;
+    assert_eq!(
+        runtime
+            .coordinator
+            .reconciliation_progress("layout-upgrade")
+            .unwrap()
+            .failed
+            .get(PAGE),
+        Some(&DurableFailure::Conflict)
+    );
+    drop(runtime);
+    let rebuilt = IndexRuntime::reset_and_resync(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(rebuilt.chunks().page_chunks(PAGE).await.unwrap().len() > 1);
+    assert!(!rebuilt.coordinator.state().cache_rebuild_pending().unwrap());
 }
