@@ -381,17 +381,31 @@ impl IndexRuntime {
                         );
                     }
                     Ok(Err(
-                        RefreshError::Source
+                        error @ (RefreshError::Source
                         | RefreshError::PermanentSource
-                        | RefreshError::OutOfScope,
+                        | RefreshError::EmbeddingInputLimit
+                        | RefreshError::OutOfScope),
                     )) => {
                         skipped += 1;
                         notion_knowledge_core::logging::sync_count(
                             notion_knowledge_core::logging::SyncCount::SkippedPage,
                             1,
                         );
+                        if error == RefreshError::EmbeddingInputLimit {
+                            progress.embedding_input_limit();
+                        }
                     }
-                    _ => return Err("cache streaming refresh failed"),
+                    Ok(Err(RefreshError::Unauthenticated)) => {
+                        return Err("cache streaming source authentication failed");
+                    }
+                    Ok(Err(RefreshError::Index)) => return Err("cache streaming index failed"),
+                    Ok(Err(RefreshError::Conflict | RefreshError::InvalidConfiguration)) => {
+                        return Err("cache streaming authority failed");
+                    }
+                    Ok(Err(RefreshError::Unavailable)) => {
+                        return Err("cache streaming dependency unavailable");
+                    }
+                    Err(_) => return Err("cache streaming page timeout"),
                 }
                 progress.report(processed, None, persisted, skipped, false);
             }
@@ -454,9 +468,13 @@ impl IndexRuntime {
                 .await
                 {
                     Ok(Ok(plan)) => plan,
-                    _ => {
+                    Ok(Err(error)) => {
                         let _ = self.coordinator.drain_owned().await;
-                        break Err("cache inventory failed; retry startup");
+                        break Err(error);
+                    }
+                    Err(_) => {
+                        let _ = self.coordinator.drain_owned().await;
+                        break Err("cache inventory timeout; retry startup");
                     }
                 };
                 lease = match state.acquire_lease(now_ms() / 1000, timeout_seconds as i64 + 30) {

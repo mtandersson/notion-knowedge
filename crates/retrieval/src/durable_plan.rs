@@ -32,6 +32,7 @@ pub enum DurableFailure {
     MissingSource,
     Unauthenticated,
     UnsupportedSource,
+    EmbeddingInputLimit,
     Conflict,
     IncompleteTraversal,
     TraversalSource,

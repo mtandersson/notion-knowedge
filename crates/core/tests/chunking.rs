@@ -85,6 +85,10 @@ fn code_lists_tables_and_enhanced_containers_remain_atomic() {
     for block in [
         format!("```rust\n{}\n```\n", "let x = 1;\n".repeat(30)),
         format!("- first\n{}", "  - nested item\n".repeat(30)),
+        format!(
+            "- first\n{}",
+            "  <page>nested HTML source</page>\n".repeat(30)
+        ),
         format!("|a|b|\n|-|-|\n{}", "|1|2|\n".repeat(30)),
         format!(
             "<details>\n\n# inner\n\n{}\n</details>\n",
@@ -161,4 +165,113 @@ fn prose_splits_cannot_manufacture_lists_headings_or_drop_hard_breaks() {
         assert_eq!(chunks.len(), 1, "{text:?}: {chunks:?}");
         assert_eq!(chunks[0].text, text);
     }
+}
+
+#[test]
+fn independent_complete_html_elements_split_without_changing_source_or_citations() {
+    for tag in ["page", "database", "div", "details"] {
+        let text = (0..30)
+            .map(|n| {
+                format!("<{tag} url=\"https://example.org/{n}\">Svensk åäö text {n}</{tag}>\n")
+            })
+            .collect::<String>();
+        let doc = document(&text);
+        let chunks = chunk_document(
+            &doc,
+            ChunkConfig {
+                target_chars: 200,
+                overlap_chars: 0,
+            },
+        )
+        .unwrap();
+        assert!(chunks.len() > 5);
+        assert_eq!(
+            chunks.iter().map(|c| c.text.as_str()).collect::<String>(),
+            text
+        );
+        for chunk in chunks {
+            assert!(chunk.text.chars().count() <= 200);
+            assert_eq!(chunk.text, text[chunk.source_bytes]);
+            assert_eq!(chunk.metadata, doc.metadata);
+        }
+    }
+}
+
+#[test]
+fn html_pairing_preserves_nested_containers_and_ignores_quoted_or_commented_closes() {
+    for block in [
+        "<page>outer<page>nested</page>still outer</page>\n",
+        "<page title=\"fake </page> close\">åäö</page>\n",
+        "<page>before<!-- </page> -->after</page>\n",
+        "<page><![CDATA[ </page> ]]></page>\n",
+        "<script>const sample = '<page>';</script>\n",
+        "<script>if (left < right) run();</script>\n",
+        "<textarea>literal x < y and an unmatched quote '</textarea>\n",
+        "<div>left < right and 1 < 2</div>\n",
+        "<page title=\"fake </page>\nclose\">body</page>\n",
+        "<PAGE>case-insensitive</page>\n",
+    ] {
+        let text = format!("{block}\n<page>independent sibling</page>\n\n# After\n\nend\n");
+        let doc = document(&text);
+        let chunks = chunk_document(
+            &doc,
+            ChunkConfig {
+                target_chars: 12,
+                overlap_chars: 0,
+            },
+        )
+        .unwrap();
+        assert!(
+            chunks.iter().any(|c| c.text.contains(block)),
+            "{block:?}: {chunks:?}"
+        );
+        assert!(
+            !chunks
+                .iter()
+                .any(|c| c.text.contains(block) && c.text.contains("independent sibling")),
+            "{chunks:?}"
+        );
+        assert_eq!(
+            chunks.iter().map(|c| c.text.as_str()).collect::<String>(),
+            text
+        );
+        assert_eq!(chunks.last().unwrap().metadata.heading_path, vec!["After"]);
+    }
+}
+
+#[test]
+fn literal_code_tags_do_not_own_later_source_and_unclosed_html_keeps_its_tail() {
+    let text = "```html\n<page>unclosed code example\n```\n\n<page>real element</page>\n\n# After\n\nend\n";
+    let chunks = chunk_document(
+        &document(text),
+        ChunkConfig {
+            target_chars: 12,
+            overlap_chars: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(chunks.last().unwrap().metadata.heading_path, vec!["After"]);
+    assert!(
+        !chunks
+            .iter()
+            .any(|c| c.text.contains("code example") && c.text.contains("real element"))
+    );
+    let text = "before\n\n<page>unclosed container\n\n# Not a separate section\n\ntail\n";
+    let chunks = chunk_document(
+        &document(text),
+        ChunkConfig {
+            target_chars: 12,
+            overlap_chars: 0,
+        },
+    )
+    .unwrap();
+    assert!(
+        chunks
+            .iter()
+            .any(|c| c.text.contains("<page>") && c.text.ends_with("tail\n"))
+    );
+    assert_eq!(
+        chunks.iter().map(|c| c.text.as_str()).collect::<String>(),
+        text
+    );
 }

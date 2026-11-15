@@ -1775,6 +1775,7 @@ struct PausedProvider {
     metadata: EmbeddingMetadata,
     started: tokio::sync::Notify,
     proceed: tokio::sync::Notify,
+    released: AtomicBool,
 }
 impl EmbeddingProvider for PausedProvider {
     fn metadata(&self) -> &EmbeddingMetadata {
@@ -1783,7 +1784,9 @@ impl EmbeddingProvider for PausedProvider {
     fn embed_batch<'a>(&'a self, texts: &'a [String]) -> EmbeddingFuture<'a> {
         Box::pin(async move {
             self.started.notify_one();
-            self.proceed.notified().await;
+            if !self.released.load(Ordering::SeqCst) {
+                self.proceed.notified().await;
+            }
             Ok(texts
                 .iter()
                 .map(|text| vec![text.len() as f32, 1.0, 0.0])
@@ -1812,6 +1815,7 @@ async fn concurrent_canonical_refresh_cannot_resurrect_authoritatively_removed_p
         metadata: index.embed.clone(),
         started: tokio::sync::Notify::new(),
         proceed: tokio::sync::Notify::new(),
+        released: AtomicBool::new(false),
     });
     let refresh_handler = handler.clone();
     let refresh_provider = paused.clone();
@@ -3343,6 +3347,7 @@ async fn reconciliation_inflight_webhook_and_authoritative_move_cannot_overwrite
         metadata: index.embed.clone(),
         started: tokio::sync::Notify::new(),
         proceed: tokio::sync::Notify::new(),
+        released: AtomicBool::new(false),
     });
     let plan = service.dry_run().await.unwrap();
     record_plan(&index, "inflight", &plan);
@@ -3457,6 +3462,7 @@ async fn reconciliation_cancelled_explicit_retry_reopens_its_persisted_fresh_pro
         metadata: index.embed.clone(),
         started: tokio::sync::Notify::new(),
         proceed: tokio::sync::Notify::new(),
+        released: AtomicBool::new(false),
     });
     let owned = service.clone();
     let embedding = paused.clone();
@@ -3575,6 +3581,7 @@ async fn reconciliation_owned_lock_wait_expires_without_releasing_another_live_o
         metadata: index.embed.clone(),
         started: tokio::sync::Notify::new(),
         proceed: tokio::sync::Notify::new(),
+        released: AtomicBool::new(false),
     });
     let now = Arc::new(std::sync::atomic::AtomicI64::new(10));
     let observed = now.clone();
@@ -3595,9 +3602,13 @@ async fn reconciliation_owned_lock_wait_expires_without_releasing_another_live_o
     )
     .await
     .unwrap();
-    provider.proceed.notify_one();
     // Expiry is authoritative regardless of whether submit has reached lock wait.
     now.store(110, Ordering::SeqCst);
+    // A complete page can require several bounded provider calls. Release
+    // this embedding boundary and let later calls finish so the test reaches
+    // the expired commit fence rather than pausing on the next chunk.
+    provider.released.store(true, Ordering::SeqCst);
+    provider.proceed.notify_one();
     let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
         .await
         .unwrap()

@@ -48,6 +48,8 @@ pub enum RefreshError {
     Index,
     Conflict,
     Unavailable,
+    /// A readable atomic input exceeds the local model's configured budget.
+    EmbeddingInputLimit,
 }
 impl std::fmt::Display for RefreshError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -57,8 +59,13 @@ impl std::fmt::Display for RefreshError {
 impl std::error::Error for RefreshError {}
 
 impl From<ChunkTableError> for RefreshError {
-    fn from(_: ChunkTableError) -> Self {
-        Self::Index
+    fn from(error: ChunkTableError) -> Self {
+        match error {
+            ChunkTableError::Embedding(
+                notion_knowledge_core::embedding::EmbeddingError::InputLimit,
+            ) => Self::EmbeddingInputLimit,
+            _ => Self::Index,
+        }
     }
 }
 impl From<CommitError> for RefreshError {
@@ -1218,6 +1225,34 @@ async fn owned_revalidation<Authority>(
         tokio::select! {
             result = &mut source => return result,
             _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {},
+        }
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+    use notion_knowledge_core::embedding::EmbeddingError;
+
+    #[test]
+    fn only_deterministic_embedding_input_limits_are_page_failures() {
+        assert_eq!(
+            RefreshError::from(ChunkTableError::Embedding(EmbeddingError::InputLimit)),
+            RefreshError::EmbeddingInputLimit
+        );
+        for error in [
+            EmbeddingError::InvalidInput,
+            EmbeddingError::InvalidOutput,
+            EmbeddingError::Unavailable,
+            EmbeddingError::ResourceExhausted,
+            EmbeddingError::UnsupportedModel,
+            EmbeddingError::InvalidMetadata,
+            EmbeddingError::IncompatibleIndex,
+        ] {
+            assert_eq!(
+                RefreshError::from(ChunkTableError::Embedding(error)),
+                RefreshError::Index
+            );
         }
     }
 }

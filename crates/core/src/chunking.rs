@@ -5,6 +5,8 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 use crate::indexed::{IndexedDocument, IndexedMetadata};
 
+mod html;
+
 /// Sizes count Unicode scalar values, not bytes or model-specific tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkConfig {
@@ -49,7 +51,8 @@ pub fn chunk_document(
     let mut headings = Vec::new();
     let mut depth = 0;
     let mut paragraph = None;
-    let mut html_spans = Vec::new();
+    let mut top_level_html = false;
+    let mut html_spans = html::HtmlSpans::default();
     let mut heading: Option<(usize, usize, String)> = None;
     for (event, bytes) in Parser::new_ext(
         text,
@@ -60,6 +63,7 @@ pub fn chunk_document(
         match event {
             Event::Start(tag) => {
                 if depth == 0 {
+                    top_level_html = matches!(tag, Tag::HtmlBlock);
                     if matches!(tag, Tag::Paragraph) {
                         paragraph = Some(bytes.clone());
                     }
@@ -72,6 +76,9 @@ pub fn chunk_document(
             }
             Event::End(end) => {
                 depth -= 1;
+                if depth == 0 {
+                    top_level_html = false;
+                }
                 if depth == 0
                     && matches!(end, TagEnd::Paragraph)
                     && let Some(range) = paragraph.take()
@@ -130,30 +137,12 @@ pub fn chunk_document(
                     title.push(' ');
                 }
             }
-            Event::Html(value) | Event::InlineHtml(value) => {
-                let token = value.trim_start();
-                if let Some(rest) = token.strip_prefix('<') {
-                    let name: String = rest
-                        .chars()
-                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
-                        .collect();
-                    if !name.is_empty()
-                        && !token.trim_end().ends_with("/>")
-                        && ![
-                            "br", "hr", "img", "input", "meta", "link", "wbr", "area", "base",
-                            "embed", "source", "track", "col", "param",
-                        ]
-                        .contains(&name.to_ascii_lowercase().as_str())
-                    {
-                        let close = format!("</{name}>");
-                        if let Some(end) = text[bytes.start..].rfind(&close) {
-                            html_spans.push(bytes.start..bytes.start + end + close.len());
-                        } else {
-                            // An incomplete container is safer as one oversized tail.
-                            html_spans.push(bytes.start..text.len());
-                        }
-                    }
-                }
+            Event::Html(_) | Event::InlineHtml(_) => {
+                html_spans.observe(
+                    &text[bytes.clone()],
+                    bytes.start,
+                    depth == 0 || (depth == 1 && (paragraph.is_some() || top_level_html)),
+                );
                 if depth == 0 {
                     boundaries.push(bytes.start);
                 }
@@ -163,6 +152,21 @@ pub fn chunk_document(
                     boundaries.push(bytes.start);
                 }
             }
+        }
+    }
+    let (html_spans, html_boundaries) = html_spans.finish(text.len());
+    // CommonMark can represent standalone custom elements as inline HTML in
+    // one paragraph. Complete elements on their own lines remain independent
+    // blocks; genuine nested containers and Markdown lists stay atomic.
+    for span in html_boundaries {
+        let before = text[..span.start]
+            .rsplit_once('\n')
+            .map_or(&text[..span.start], |(_, tail)| tail);
+        let after = text[span.end..]
+            .split_once('\n')
+            .map_or(&text[span.end..], |(head, _)| head);
+        if before.trim().is_empty() && after.trim().is_empty() {
+            boundaries.push(span.start - before.len());
         }
     }
     boundaries.retain(|p| {

@@ -66,6 +66,30 @@ as awaited async requests. Thread identity can change across awaits. Summary
 phase completion is distinct from final search readiness, and progress does not
 claim skipped or inaccessible content was indexed.
 
+HTML containers are paired at their matching close, so independent complete
+elements retain separate boundaries while genuinely nested containers stay
+atomic. The chunk target remains soft and source text is never truncated.
+For an existing healthy cache that contains the older coalesced HTML layout,
+unchanged verification can report a conflict rather than silently changing its
+checkpoint. Use the existing trusted scoped cache reset/resync procedure below
+to rebuild that derived layout, preserving operational/external-effect records.
+The embedding model/vector identity does not change for this boundary correction.
+
+Each guarded page prepares its embeddings with sequential single-text provider
+requests, then commits the complete page atomically. A page with many valid
+chunks therefore does not exceed the provider's per-request text-count bound.
+An actually oversized atomic input records `EmbeddingInputLimit` in reconciliation
+status and emits the fixed `embedding_input_limit` skip reason; independent pages
+can still become searchable. Input is never partially indexed or claimed complete.
+Normal later sync can retry after a permitted input/configuration correction.
+Model availability, malformed outputs, concurrency/resource exhaustion and index,
+ownership or authentication failures retain their failure handling.
+
+`EmbeddingInputLimit` is new derived reconciliation metadata. Older executables
+may reject that cache status on downgrade; use the same scoped disposable-cache
+rebuild rather than editing status or relabeling vectors. Preserve the private
+operational backup and external mutation/credential records throughout.
+
 For a corrupt cache file that cannot be classified as an identity/schema
 mismatch, stop the service and run the explicit trusted operator command with
 the normal scope, Notion credential and offline embedding settings:

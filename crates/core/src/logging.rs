@@ -142,6 +142,22 @@ pub struct SyncProgressLog {
 }
 
 impl SyncProgressLog {
+    /// A fixed local admission reason, never model errors or source text.
+    pub fn embedding_input_limit(&self) {
+        if LOG_LEVEL.load(Ordering::Relaxed) < Level::Info as u8 {
+            return;
+        }
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "{}",
+            serde_json::json!({
+                "operation": "cache_sync", "phase": self.phase.label(),
+                "status": "page_skipped", "reason": "embedding_input_limit",
+                "sync_progress": current_sync_progress(),
+            }),
+        );
+    }
+
     pub fn new(phase: SyncPhase) -> Self {
         Self {
             phase,

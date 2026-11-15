@@ -90,6 +90,8 @@ pub enum EmbeddingError {
     Unavailable,
     ResourceExhausted,
     InvalidInput,
+    /// Deterministic text/token admission limit; inference has not accepted it.
+    InputLimit,
     UnsupportedModel,
     InvalidMetadata,
     InvalidOutput,
