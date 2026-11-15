@@ -43,7 +43,8 @@ re-prepared inline by the consumer if it exceeds its reservation. Prefetching
 captures no index version, lease or receipt decision: the consumer builds the
 guarded mutation plan from current index state, re-prepares a page whose own
 indexed chunks changed meanwhile, and revalidates the source inside the owned
-commit. Preparation and commit each keep the page deadline. The existing writer
+commit. Preparation and embedding/commit each have their own page deadline, so one
+page may take up to twice `timeout_seconds`; both timeouts use the existing settlement. The existing writer
 lease is renewed while waiting for more pages; timed-out work is fenced and
 drained before releasing it. No Notion write or upload is issued.
 

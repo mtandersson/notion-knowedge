@@ -4211,3 +4211,39 @@ async fn initial_sync_read_ahead_is_bounded_while_embedding_is_paused() {
     assert_eq!(runtime.coordinator.owned_page_ids().unwrap().len(), 15);
     assert_eq!(f.provider.max_active.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_edit_after_prefetch_never_commits_the_stale_snapshot() {
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    fs::remove_dir_all(&f.settings.index).unwrap();
+    http.markdown_pages.lock().unwrap().clear();
+    f.provider.hold.store(true, Ordering::SeqCst);
+    let settings = f.settings.clone();
+    let state = f.state.clone();
+    let source = http.client();
+    let provider = f.provider.clone();
+    let recovery = tokio::spawn(async move {
+        IndexRuntime::recover(&settings, &state, authority(), source, provider).await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        f.provider.held.notified(),
+    )
+    .await
+    .unwrap();
+    // Every page is prepared ahead while the first embedding is held.
+    await_markdown_pages(&http, 3).await;
+    http.change(|m| m.markdown = "# Intro\n\nJuniper gnocchi.\n".into());
+    f.provider.hold_release.add_permits(1);
+    let result = recovery.await.unwrap();
+    let runtime = f.open(&http, OpenMode::ReadOnly).await;
+    let chunks = runtime.chunks().page_chunks(PAGE).await.unwrap();
+    assert!(
+        chunks.iter().all(|c| !c.text.contains("Saffron")),
+        "a prefetched snapshot edited upstream must never be committed"
+    );
+    if result.is_ok() {
+        assert!(chunks.iter().any(|c| c.text.contains("Juniper")));
+    }
+}

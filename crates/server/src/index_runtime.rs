@@ -88,7 +88,7 @@ enum Prefetched {
     Skipped,
     Fatal(&'static str),
     Ready {
-        prefetched: notion_knowledge_retrieval::refresh::PrefetchedPage,
+        prefetched: Box<notion_knowledge_retrieval::refresh::PrefetchedPage>,
         bytes: tokio::sync::OwnedSemaphorePermit,
     },
     Oversize {
@@ -108,7 +108,7 @@ enum Prefetched {
 }
 enum PageWork {
     Commit(
-        notion_knowledge_retrieval::refresh::PrefetchedPage,
+        Box<notion_knowledge_retrieval::refresh::PrefetchedPage>,
         tokio::sync::OwnedSemaphorePermit,
     ),
     Inline(notion_knowledge_core::backend::PageId),
@@ -477,7 +477,13 @@ impl IndexRuntime {
                 pages
                     .enumerate()
                     .map(|(index, page)| {
-                        self.prefetch_initial_page(settings, &gate, &budget, index + 1, page)
+                        Box::pin(self.prefetch_initial_page(
+                            settings,
+                            &gate,
+                            &budget,
+                            index + 1,
+                            page,
+                        ))
                     })
                     .buffered(PREFETCH_WORKERS)
             );
@@ -564,7 +570,7 @@ impl IndexRuntime {
                                 SyncPhase::Indexing,
                                 processed,
                                 Box::pin(self.handler.refresh_prefetched(
-                                    prefetched,
+                                    *prefetched,
                                     &embedding,
                                     lease.clone(),
                                     clock,
@@ -729,7 +735,10 @@ impl IndexRuntime {
                     };
                 };
                 sync_count(SyncCount::PrefetchedPage, 1);
-                Prefetched::Ready { prefetched, bytes }
+                Prefetched::Ready {
+                    prefetched: Box::new(prefetched),
+                    bytes,
+                }
             }
         }
     }
@@ -1513,7 +1522,7 @@ mod timeout_tests {
         );
         drop(queued);
         drop(third);
-        tokio::time::timeout(Duration::from_secs(1), budget.reserve())
+        let _released = tokio::time::timeout(Duration::from_secs(1), budget.reserve())
             .await
             .unwrap()
             .unwrap();

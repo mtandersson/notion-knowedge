@@ -545,8 +545,8 @@ impl AuthoritativePageRefresh {
             previous,
             proposal: relation_proposal,
             ..
-        } = self.prefetch_page(page, root, operation_id).await?;
-        self.embed_and_commit(
+        } = Box::pin(self.prefetch_page(page, root, operation_id)).await?;
+        Box::pin(self.embed_and_commit(
             page,
             operation_id,
             previous,
@@ -556,7 +556,7 @@ impl AuthoritativePageRefresh {
             clock,
             lifecycle,
             expected,
-        )
+        ))
         .await
     }
 
@@ -629,12 +629,12 @@ impl AuthoritativePageRefresh {
             (previous, proposal)
         } else {
             drop((previous, proposal));
-            let fresh = self.prefetch_page(&page, &root, &operation).await?;
+            let fresh = Box::pin(self.prefetch_page(&page, &root, &operation)).await?;
             (fresh.previous, fresh.proposal)
         };
-        self.embed_and_commit(
+        Box::pin(self.embed_and_commit(
             &page, &operation, previous, proposal, provider, lease, clock, false, None,
-        )
+        ))
         .await
     }
 
