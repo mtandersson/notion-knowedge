@@ -513,57 +513,57 @@ fn schema_eleven_upgrade_is_atomic_and_read_only_current_schema_inspection_creat
         (
             1,
             "initial_sync_state",
-            include_str!("../migrations/0001_initial.sql"),
+            include_str!("../../migrations/0001_initial.sql"),
         ),
         (
             2,
             "reconciliation_journal",
-            include_str!("../migrations/0002_reconciliation.sql"),
+            include_str!("../../migrations/0002_reconciliation.sql"),
         ),
         (
             3,
             "webhook_inbox",
-            include_str!("../migrations/0003_webhook_inbox.sql"),
+            include_str!("../../migrations/0003_webhook_inbox.sql"),
         ),
         (
             4,
             "webhook_recovery",
-            include_str!("../migrations/0004_webhook_recovery.sql"),
+            include_str!("../../migrations/0004_webhook_recovery.sql"),
         ),
         (
             5,
             "webhook_debounce",
-            include_str!("../migrations/0005_webhook_debounce.sql"),
+            include_str!("../../migrations/0005_webhook_debounce.sql"),
         ),
         (
             6,
             "index_commit_coordinator",
-            include_str!("../migrations/0006_index_commit.sql"),
+            include_str!("../../migrations/0006_index_commit.sql"),
         ),
         (
             7,
             "knowledge_graph_edges",
-            include_str!("../migrations/0007_graph_edges.sql"),
+            include_str!("../../migrations/0007_graph_edges.sql"),
         ),
         (
             8,
             "knowledge_graph_aliases",
-            include_str!("../migrations/0008_graph_aliases.sql"),
+            include_str!("../../migrations/0008_graph_aliases.sql"),
         ),
         (
             9,
             "page_metadata_identity",
-            include_str!("../migrations/0009_page_metadata_identity.sql"),
+            include_str!("../../migrations/0009_page_metadata_identity.sql"),
         ),
         (
             10,
             "authoritative_reconciliation_plan",
-            include_str!("../migrations/0010_reconciliation_plan.sql"),
+            include_str!("../../migrations/0010_reconciliation_plan.sql"),
         ),
         (
             11,
             "reconciliation_retry",
-            include_str!("../migrations/0011_reconciliation_retry.sql"),
+            include_str!("../../migrations/0011_reconciliation_retry.sql"),
         ),
     ];
     raw.execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at_unix INTEGER NOT NULL)").unwrap();

@@ -68,7 +68,7 @@ Use the pinned standard development shell; no Notion token, model, or network
 source is required by these tests:
 
 ```sh
-nix develop --command cargo test -p notion-knowledge-retrieval --test reconciliation --locked
+nix develop --command cargo test -p notion-knowledge-retrieval --test it reconciliation:: --locked
 nix develop --command cargo test --workspace --locked
 nix develop --command cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
@@ -157,7 +157,7 @@ operational metadata, or application acknowledgment. Recording a durable plan is
 an explicit real-run operation.
 
 Verification: `cargo test -p notion-knowledge-retrieval --features local-lancedb
---test durable_plan --locked` exercises real SQLite transactions, independent
+--test it durable_plan:: --locked` exercises real SQLite transactions, independent
 connections, reopen, schema migration, classified summaries, exact duplicate
 replay, explicit retry, stale lease/fence and scope/generation rejection,
 transaction rollback and real coordinator apply-before-ack receipt recovery.
@@ -294,6 +294,6 @@ atomic actual-plan completion, bounded backoff/exhaustion, held failures,
 immutable receipts, explicit authority replacement and read-only manual commands:
 
 ```sh
-nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --test schedule --test sync_state --test reconciliation --test durable_plan --test authoritative_refresh --test index_commits --locked
-nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test reconciliation_command --locked
+nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --test it --locked
+nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test it reconciliation_command:: --locked
 ```

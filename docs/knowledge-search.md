@@ -47,7 +47,7 @@ same handler, with hybrid fusion and typed metadata filters implemented below.
 Production-boundary discovery and call tests run with:
 
 ```sh
-cargo test -p notion-knowledge-server --test stdio --test http --locked
+cargo test -p notion-knowledge-server --test it --locked
 ```
 
 ## Compact excerpts and source freshness

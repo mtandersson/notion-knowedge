@@ -33,7 +33,7 @@ fixtures. Real neural inference is the separate opt-in smoke below.
 | Invalid rebuild configuration and storage errors cannot trigger destructive compatibility recovery | `rebuild_policy_validates_target_schema_before_dropping_existing_table`, `explicit_rebuild_handles_schema_version_mismatch_but_not_storage_errors` |
 
 The chunk tests live in `crates/retrieval/src/chunks.rs`; SQLite integration
-tests live in `crates/retrieval/tests/sync_state.rs`. Core embedding tests
+tests live in `crates/retrieval/tests/it/sync_state.rs`. Core embedding tests
 validate cardinality, dimensions, finite vectors and vector-space identity
 before adapters may persist a batch. See the component documents linked below
 for error and maintenance semantics.

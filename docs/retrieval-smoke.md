@@ -9,7 +9,7 @@ they need neither Notion credentials nor model downloads.
 ```sh
 nix develop --command cargo test -p notion-knowledge-core -p notion-knowledge-mcp --locked
 nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --locked
-nix develop --command cargo test -p notion-knowledge-server --test stdio --test http --locked
+nix develop --command cargo test -p notion-knowledge-server --test it --locked
 ```
 
 The checks exercise the integration boundaries separately:

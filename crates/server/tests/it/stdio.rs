@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 use std::io;
 use std::process::Stdio;
 use std::time::Duration;

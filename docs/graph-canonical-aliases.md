@@ -42,7 +42,7 @@ separate issue #63, rather than silently exposing untrusted aliases here.
 
 ## Validation
 
-`cargo test -p notion-knowledge-retrieval --test aliases` covers Swedish and
+`cargo test -p notion-knowledge-retrieval --test it aliases::` covers Swedish and
 English names, exact/property source selection, multi-page ambiguity, scope
 isolation, stale removal/tombstones, malformed inputs and SQLite reopen.
 Core extraction and alias storage are provider-independent and rebuildable.

@@ -143,7 +143,7 @@ async fn sigterm_drains_or_rolls_back_native_work_and_preserves_acknowledged_web
         let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "shutdown_process::native_process_fixture",
+                "webhook_worker::shutdown_process::native_process_fixture",
                 "--ignored",
                 "--nocapture",
             ])

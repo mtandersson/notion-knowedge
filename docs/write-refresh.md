@@ -52,6 +52,6 @@ Credential-free verification:
 ```sh
 cargo test -p notion-knowledge-core --test append --test section_update --locked
 cargo test -p notion-knowledge-notion --lib scoped_create --locked
-cargo test -p notion-knowledge-retrieval --test mutation_refresh --locked
-nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test webhook_worker mutation_refresh --locked
+cargo test -p notion-knowledge-retrieval --test it mutation_refresh:: --locked
+nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test it mutation_refresh --locked
 ```

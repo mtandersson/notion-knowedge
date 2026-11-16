@@ -45,7 +45,7 @@ fn page(id: &str, action: WorkAction) -> InventoryPage {
 fn version_one_data_survives_upgrade_and_reopen() {
     let db = Db::new();
     let raw = Connection::open(&db.0).unwrap();
-    raw.execute_batch(include_str!("../migrations/0001_initial.sql"))
+    raw.execute_batch(include_str!("../../migrations/0001_initial.sql"))
         .unwrap();
     raw.execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at_unix INTEGER NOT NULL); INSERT INTO schema_migrations VALUES(1,'initial_sync_state',0); INSERT INTO page_sync_state VALUES('page','hash','edited',0,0); INSERT INTO crawl_checkpoints VALUES('root','cursor',0); INSERT INTO webhook_events VALUES('event',0); INSERT INTO index_versions VALUES('chunks','v1',0);").unwrap();
     drop(raw);

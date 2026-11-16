@@ -57,7 +57,7 @@ is not a successful OAuth login. Fully configured routes are covered by the
 ## Verification
 
 ```sh
-nix develop --command cargo test -p notion-knowledge-server --test oauth_discovery --locked
+nix develop --command cargo test -p notion-knowledge-server --test it oauth_discovery:: --locked
 nix develop --command cargo test -p notion-knowledge-server --locked
 nix develop --command cargo fmt --all -- --check
 ```

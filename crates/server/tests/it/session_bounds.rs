@@ -391,7 +391,7 @@ async fn authenticated_burst_is_bounded_while_webhook_and_management_remain_avai
     }).await.unwrap();
 }
 
-#[path = "../../mcp/tests/scope_fixture.rs"]
+#[path = "../../../mcp/tests/scope_fixture.rs"]
 mod scope_fixture;
 
 struct LoadGate {

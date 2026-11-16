@@ -98,7 +98,7 @@ below. Ordinary CI exercises real fixture Notion reads, SQLite/Lance population,
 these command services and actual vector queries without model downloads:
 
 ```sh
-nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test reconciliation_command index_commands --locked
+nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test it index_commands --locked
 ```
 
 Trusted installed readers also bind guarded indexed source expansion and the
@@ -126,7 +126,7 @@ SQLite/Lance vector and FTS data, reopen through the installed runtime, and call
 search over stdio and authenticated HTTP:
 
 ```sh
-nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --locked --test webhook_worker
+nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --locked --test it webhook_worker::
 ```
 
 Optional bounded graph reranking is installed over this same hybrid adapter through

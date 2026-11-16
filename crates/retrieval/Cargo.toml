@@ -3,6 +3,9 @@ name = "notion-knowledge-retrieval"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+# One integration binary per crate: each test binary links the full dependency
+# graph, so separate tests/*.rs files dominated native link time.
+autotests = false
 
 [features]
 default = []
@@ -70,3 +73,7 @@ required-features = ["eval-e5"]
 [[example]]
 name = "production-eval"
 required-features = ["local-qwen", "local-lancedb"]
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

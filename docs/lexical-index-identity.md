@@ -55,5 +55,5 @@ Verification:
 nix develop .#spike --command cargo test -p notion-knowledge-retrieval \
   --features local-lancedb --lib lexical_identity --locked --offline
 nix develop .#spike --command cargo test -p notion-knowledge-server \
-  --features webhook-worker --test reconciliation_command lexical_cache_ --locked --offline
+  --features webhook-worker --test it lexical_cache_ --locked --offline
 ```

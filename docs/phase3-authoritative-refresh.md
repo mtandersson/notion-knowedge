@@ -86,7 +86,7 @@ unserialized write or source-side mutation exists in this workflow.
 
 ## Reproducible end-to-end test
 
-The integration harness in `crates/retrieval/tests/authoritative_refresh.rs`
+The integration harness in `crates/retrieval/tests/it/authoritative_refresh.rs`
 uses a strict local HTTP Notion response server, persistent SQLite, real
 LanceDB, provider-compatible 3D counting embeddings, and actual lexical and
 vector searches. No Notion credentials or model assets are required.

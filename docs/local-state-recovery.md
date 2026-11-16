@@ -76,7 +76,7 @@ startup/sync seams: create a cache, delete it, restart and verify reconstructed
 scoped results; repeat with unusable derived metadata and a transient sync
 failure. Check unavailable search during rebuilding and subsequent incremental
 updates. Verify preserved credentials/ledgers and zero upstream writes/uploads
-from recovery. The bounded cache-resync tests in `server/tests/reconciliation_command.rs`
+from recovery. The bounded cache-resync tests in `server/tests/it/reconciliation_command.rs`
 exercise the shared production startup seam. Current-head CI must pass before #577 closes; these fixtures do not establish
 deployed or real Notion acceptance.
 

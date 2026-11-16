@@ -5,7 +5,7 @@ children, to production boundaries and deterministic assertions. Parent closure
 belongs to the parent owner after the final head's checks and merge. Packaging
 #145, sync-status #59 and epic #7 retain their separate scopes.
 
-The scheduled fixtures in `crates/server/tests/reconciliation_command.rs` start
+The scheduled fixtures in `crates/server/tests/it/reconciliation_command.rs` start
 `http::serve_composed`, exercise `/livez` over real HTTP, and run the actual
 supervised worker. They use authenticated fake HTTP Notion through the trusted
 `NotionClient` seam, the real SQLite journal, guarded on-disk LanceDB and a counting
@@ -65,8 +65,8 @@ real authenticated Notion client before writable composition.
 ## Reproduction
 
 ```sh
-nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test reconciliation_command --test reconciliation_dispatch --test webhook_worker --locked
-nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --test authoritative_refresh --test durable_plan --locked
+nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test it --locked
+nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --test it --locked
 nix develop .#spike --command cargo test --workspace --features notion-knowledge-server/webhook-worker --locked
 ```
 

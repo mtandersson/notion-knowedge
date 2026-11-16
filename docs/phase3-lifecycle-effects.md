@@ -65,7 +65,7 @@ index through the guard as described by refresh composition; both indexed and
 brute-force vector queries observe row removal.
 
 Credential-free integration tests in
-`crates/retrieval/tests/authoritative_refresh.rs` use actual Notion HTTP,
+`crates/retrieval/tests/it/authoritative_refresh.rs` use actual Notion HTTP,
 SQLite journal/sync state, LanceDB lexical/vector search and a counting embedding
 provider. They cover current hints, delete/outside/exclusion/restore, unowned
 removal, two-root metadata moves, duplicate/out-of-order hints, inaccessible

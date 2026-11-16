@@ -61,7 +61,7 @@ Run with the repository toolchain:
 
 ```sh
 nix develop .#spike --command cargo test --locked -p notion-knowledge-server --lib ingestion_tests
-nix develop .#spike --command cargo test --locked -p notion-knowledge-server --test stdio --test http --test startup
+nix develop .#spike --command cargo test --locked -p notion-knowledge-server --test it
 ```
 
 | Original criterion | Installed evidence |

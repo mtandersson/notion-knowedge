@@ -1,7 +1,7 @@
 # Cache reset and authoritative resync
 
 Implementation: #577. See the production behavior below and the bounded
-credential-free acceptance tests in `server/tests/reconciliation_command.rs`.
+credential-free acceptance tests in `server/tests/it/reconciliation_command.rs`.
 
 Notion is authoritative. One server process owns local retrieval and sync.
 Derived data can be discarded and rebuilt. Recovery must not depend on a prior
