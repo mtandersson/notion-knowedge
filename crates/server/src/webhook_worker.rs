@@ -257,13 +257,14 @@ pub mod runtime {
                 .map_err(|_| "Notion client unavailable")?,
         );
         crate::index_runtime::configured_plan(settings)?;
-        let provider = Arc::new(
-            notion_knowledge_retrieval::qwen::QwenProvider::load(
-                notion_knowledge_retrieval::qwen::QwenConfig::cpu(&settings.assets),
-            )
-            .await
-            .map_err(|_| "Qwen assets unavailable or incompatible")?,
-        );
+        let provider = notion_knowledge_retrieval::embedder::load_configured_embedder(
+            &notion_knowledge_retrieval::embedder::EmbedderConfig::LocalQwen {
+                assets: settings.assets.clone(),
+            },
+            None,
+        )
+        .await
+        .map_err(|_| "Qwen assets unavailable or incompatible")?;
         let state_file = config
             .webhook_state_file
             .clone()

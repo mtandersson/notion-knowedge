@@ -19,7 +19,11 @@ for asset in config.json tokenizer.json model.safetensors; do
 done
 ```
 
-The provider verifies SHA-256 hashes of the exact owned bytes before loading:
+The provider verifies SHA-256 hashes of the exact bytes it loads. It checks
+`config.json` and `tokenizer.json` before parsing them. It hashes
+`model.safetensors` while streaming it tensor by tensor into F32 storage, so the
+file is never buffered beside the converted weights, and it discards every
+tensor if the digest, length or layout does not match.
 
 The exact checksums are the `ASSETS` constants in the
 [provider source](../crates/retrieval/src/qwen.rs).

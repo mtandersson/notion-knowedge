@@ -17,6 +17,9 @@ pub mod lexical_runtime;
 #[cfg(feature = "local-qwen")]
 pub mod qwen;
 
+/// One configured embedding provider factory with vector identity admission.
+pub mod embedder;
+
 /// SQLite-backed durable operational state used by crawlers and index orchestration.
 pub mod sync_state;
 

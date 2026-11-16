@@ -1302,7 +1302,7 @@ async fn walk_removal_stalled_past_its_deadline_releases_the_index_guard() {
     )
     .await
     .expect("a stalled removal must give up at its deadline");
-    assert_eq!(result.unwrap_err(), "cache sync removal timeout");
+    assert_eq!(result.unwrap_err().reason, "cache sync removal timeout");
     // The pause was never released: the deadline poll freed the guard.
     let guard = std::fs::File::open(&f.settings.index).unwrap();
     guard.try_lock().unwrap();
@@ -1344,6 +1344,27 @@ async fn incremental_with_no_changes_only_calls_search() {
         (totals.indexed, totals.removed, totals.inventory),
         (0, 0, 0)
     );
+}
+
+#[tokio::test]
+async fn cut_short_search_listing_reports_the_inventory_incomplete_until_a_full_walk() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    sync(&f, &http, SyncMode::Full).await;
+    assert_eq!(local_status(&f).await["inventory"]["walk_complete"], true);
+    // The listing reports more results but its cursor cannot be followed.
+    http.change(|m| m.repeat_search_cursor = true);
+    sync(&f, &http, SyncMode::Incremental).await;
+    let state = f.open(&http, OpenMode::ExistingWrite).await;
+    let last = state.coordinator.state().last_sync().unwrap().unwrap();
+    assert!(last.incremental && !last.complete);
+    assert_eq!(local_status(&f).await["inventory"]["walk_complete"], false);
+    // A complete search cannot vouch for what the cut-short one missed.
+    http.change(|m| m.repeat_search_cursor = false);
+    sync(&f, &http, SyncMode::Incremental).await;
+    assert_eq!(local_status(&f).await["inventory"]["walk_complete"], false);
+    sync(&f, &http, SyncMode::Full).await;
+    assert_eq!(local_status(&f).await["inventory"]["walk_complete"], true);
 }
 
 #[tokio::test]
@@ -1649,6 +1670,47 @@ async fn actual_scheduled_http_timeout_exhaustion_is_inspectable_and_explicit_ab
             )
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn actual_scheduled_http_rejected_credential_holds_the_cycle_without_consuming_attempts() {
+    use notion_knowledge_retrieval::schedule::{ScheduleEventKind, ScheduleStatus};
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    http.change(|m| m.unauthenticated = true);
+    // One attempt: any consumed attempt would exhaust the schedule.
+    let (worker, stop, server) =
+        scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
+    let events = || {
+        worker
+            .coordinator
+            .schedule_events("periodic", 0, 100)
+            .unwrap()
+    };
+    let held = await_schedule(&worker, |s| {
+        s.active_run.is_some()
+            && events()
+                .iter()
+                .filter(|e| e.kind == ScheduleEventKind::Cancelled)
+                .count()
+                >= 2
+    })
+    .await;
+    // Held past more than one backoff ceiling: still no attempt consumed.
+    assert_eq!((held.status, held.attempts), (ScheduleStatus::Ready, 0));
+    assert!(
+        !events()
+            .iter()
+            .any(|e| e.kind == ScheduleEventKind::RunFailure)
+    );
+    assert!(worker.state.inventory_counts().unwrap().indexed == 0);
+    // Once the credential is accepted again, the same cycle completes.
+    http.change(|m| m.unauthenticated = false);
+    let done = await_schedule(&worker, |s| s.active_run.is_none()).await;
+    assert_eq!((done.cycle, done.attempts), (1, 0));
+    assert_eq!(worker.state.inventory_counts().unwrap().indexed, 3);
+    stop.cancel();
+    server.await.unwrap().unwrap();
 }
 
 #[tokio::test]

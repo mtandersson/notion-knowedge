@@ -43,6 +43,8 @@ pub struct Model {
     pub unsupported_page_reads: usize,
     pub unauthenticated_content: bool,
     pub unauthenticated_page_metadata: bool,
+    /// Every request answers 401, as with a revoked credential.
+    pub unauthenticated: bool,
     pub title: String,
     pub revision: String,
     pub parent: String,
@@ -76,6 +78,9 @@ pub struct Model {
     pub search_unavailable: bool,
     /// Search lists [`PAGE`] as trashed while the page itself is not (lag).
     pub stale_search_trash: bool,
+    /// Search reports more results but keeps returning the same cursor, so
+    /// no listing can be followed to its end.
+    pub repeat_search_cursor: bool,
     pub foreign_revision: String,
 }
 impl Default for Model {
@@ -88,6 +93,7 @@ impl Default for Model {
             unsupported_page_reads: 0,
             unauthenticated_content: false,
             unauthenticated_page_metadata: false,
+            unauthenticated: false,
             title: "First".into(),
             revision: "2026-10-10T12:00:00Z".into(),
             parent: ROOT.into(),
@@ -114,6 +120,7 @@ impl Default for Model {
             repeat_query_cursor: false,
             search_unavailable: false,
             stale_search_trash: false,
+            repeat_search_cursor: false,
             foreign_revision: "2026-10-10T11:00:00Z".into(),
         }
     }
@@ -255,6 +262,9 @@ fn root_revision(snapshot: &Model) -> String {
 
 /// Every readable page, as one search listing would return it.
 fn search(snapshot: &Model, bodies: usize) -> Value {
+    if snapshot.repeat_search_cursor {
+        return json!({"object":"list","results":[],"has_more":true,"next_cursor":"same-cursor"});
+    }
     let ids = [ROOT, PAGE, OTHER, FOREIGN]
         .into_iter()
         .map(str::to_owned)
@@ -275,6 +285,9 @@ fn search(snapshot: &Model, bodies: usize) -> Value {
 
 fn respond(route: &str, snapshot: Model, bodies: usize) -> Value {
     let not_found = json!({"object":"error", "code":"object_not_found"});
+    if snapshot.unauthenticated {
+        return json!({"object":"error", "code":"unauthorized"});
+    }
     if route == "/v1/search" {
         return if snapshot.search_unavailable {
             not_found
