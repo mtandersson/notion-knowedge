@@ -533,6 +533,7 @@ pub mod runtime {
             if attempt.is_cancelled() {
                 // The observer has dropped; an already live mutation still owns
                 // its guard. Drain before releasing/renewing or exiting normally.
+                runtime.runner.discard_read_ahead();
                 let _ = runtime.coordinator.drain_owned().await;
                 break status(
                     &runtime,

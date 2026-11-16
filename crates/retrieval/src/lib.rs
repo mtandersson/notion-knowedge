@@ -58,6 +58,9 @@ pub mod durable_plan;
 #[cfg(all(unix, feature = "local-lancedb"))]
 pub mod runner;
 
+/// Retained-byte budget shared by bounded source read-ahead.
+pub mod prefetch;
+
 /// Fenced, scoped periodic schedule authority (does not start a runtime).
 #[cfg(unix)]
 pub mod schedule;

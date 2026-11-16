@@ -38,51 +38,16 @@ pub(crate) fn has_fatal_sync_failure(
 }
 
 /// Concurrent read-only page preparations ahead of the embedding consumer.
-const PREFETCH_WORKERS: usize = 2;
+pub(crate) const PREFETCH_WORKERS: usize = 2;
 /// Completed preparations queued for the consumer beyond those in flight.
 const PREFETCH_QUEUE: usize = 1;
 /// Shared retained-byte budget (KiB) for in-flight, queued and committing pages.
-const PREFETCH_BUDGET_KIB: usize = 64 * 1024;
+pub(crate) const PREFETCH_BUDGET_KIB: usize = 64 * 1024;
 /// Worst-case reservation (KiB) per preparation: the 8 MiB streamed Markdown
 /// cap retained as source, normalized text, new and previous chunk copies.
-const PREFETCH_RESERVE_KIB: usize = 32 * 1024;
+pub(crate) const PREFETCH_RESERVE_KIB: usize = 32 * 1024;
 
-/// One retained-byte budget for read-ahead. A preparation reserves the
-/// worst case before its first request, then keeps only its measured share
-/// while queued and committing; dropping the permit returns the bytes.
-struct PrefetchBudget {
-    kib: Arc<tokio::sync::Semaphore>,
-    reserve_kib: usize,
-}
-impl PrefetchBudget {
-    fn new(total_kib: usize, reserve_kib: usize) -> Self {
-        assert!(reserve_kib > 0 && reserve_kib <= total_kib);
-        Self {
-            kib: Arc::new(tokio::sync::Semaphore::new(total_kib)),
-            reserve_kib,
-        }
-    }
-    async fn reserve(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
-        self.kib
-            .clone()
-            .acquire_many_owned(u32::try_from(self.reserve_kib).ok()?)
-            .await
-            .ok()
-    }
-    /// Shrink a reservation to a measured size, or `None` if it exceeds it.
-    fn retain(
-        &self,
-        mut reservation: tokio::sync::OwnedSemaphorePermit,
-        bytes: usize,
-    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
-        let kib = bytes.div_ceil(1024).max(1);
-        if kib > self.reserve_kib {
-            return None;
-        }
-        drop(reservation.split(self.reserve_kib - kib));
-        Some(reservation)
-    }
-}
+use notion_knowledge_retrieval::prefetch::PrefetchBudget;
 
 enum Prefetched {
     Skipped,
@@ -1229,7 +1194,14 @@ impl IndexRuntime {
             coordinator.clone(),
             journal.clone(),
         )
-        .map_err(|_| "authoritative runner incompatible")?;
+        .map_err(|_| "authoritative runner incompatible")?
+        // Scheduled, manual and cache-reset reconciliation share the bounded
+        // read-ahead used by initial streaming: same workers and byte budget.
+        .with_read_ahead(
+            PREFETCH_WORKERS,
+            PrefetchBudget::new(PREFETCH_BUDGET_KIB, PREFETCH_RESERVE_KIB),
+            std::time::Duration::from_secs(settings.timeout_seconds),
+        );
         Ok(Self {
             coordinator,
             scope: journal,

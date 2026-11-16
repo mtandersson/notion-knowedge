@@ -3,14 +3,16 @@ use crate::{
     commit::{CommitError, IndexCommitCoordinator, ReceiptStatus},
     durable_plan::{DurableFailure, DurablePlan, DurableProgress, ProposedDifference},
     planner::{AuthoritativeReconciliationPlanner, PlanError, ReconciliationPlan},
-    refresh::{AuthoritativePageRefresh, ExpectedReconciliation, RefreshError},
+    prefetch::PrefetchBudget,
+    refresh::{AuthoritativePageRefresh, ExpectedReconciliation, PrefetchedPage, RefreshError},
 };
 use notion_knowledge_core::{
     backend::PageId,
     embedding::EmbeddingProvider,
     reconciliation::{JournalError, Lease, ReconciliationJournal, ReconciliationScope, RunPhase},
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[derive(Debug)]
 pub enum RunnerError {
@@ -30,8 +32,163 @@ pub struct AuthoritativeReconciliationRunner {
     refresh: AuthoritativePageRefresh,
     coordinator: Arc<IndexCommitCoordinator>,
     scope: ReconciliationScope,
+    read_ahead: Option<Arc<ReadAhead>>,
+}
+
+/// Bounded read-only source preparation of the next planned pages while the
+/// single consumer embeds and commits the current one. Slots survive between
+/// `apply_next` calls, because callers apply one page per deadline-bounded
+/// attempt. A slot carries no lease, index version, receipt or plan decision;
+/// the consumer revalidates the durable plan and takes only a matching source
+/// preparation. Dropping a slot aborts its task and returns its bytes.
+struct ReadAhead {
+    workers: usize,
+    budget: PrefetchBudget,
+    timeout: Duration,
+    slots: Mutex<Vec<Slot>>,
+}
+type Prepared = Option<(PrefetchedPage, tokio::sync::OwnedSemaphorePermit)>;
+struct Slot {
+    run: String,
+    page: String,
+    operation: String,
+    task: tokio::task::JoinHandle<Prepared>,
+}
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+impl Slot {
+    async fn take(mut self) -> Prepared {
+        (&mut self.task).await.ok().flatten()
+    }
+}
+impl ReadAhead {
+    /// Hand over the slot for `pending[0]`, discard slots no longer among the
+    /// next `workers` planned pages, and start preparations for the rest.
+    fn advance(
+        &self,
+        refresh: &AuthoritativePageRefresh,
+        coordinator: &IndexCommitCoordinator,
+        run: &str,
+        pending: &[String],
+    ) -> Option<Slot> {
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let current = pending.first().and_then(|first| {
+            let index = slots
+                .iter()
+                .position(|slot| slot.run == run && slot.page == *first)?;
+            Some(slots.swap_remove(index))
+        });
+        let ahead = pending.get(1..).unwrap_or_default();
+        let ahead = &ahead[..ahead.len().min(self.workers)];
+        let mut wanted = Vec::new();
+        for id in ahead {
+            // Only content reads are prepared ahead: recovery of an applied
+            // receipt and orphan deletion read no page content.
+            let Ok((proposal, _)) = coordinator.reconciliation_page_proposal(run, id) else {
+                continue;
+            };
+            if proposal.difference == ProposedDifference::Orphan
+                || coordinator
+                    .receipt(&proposal.operation_id)
+                    .map_or(true, |r| {
+                        r.is_some_and(|r| r.status == ReceiptStatus::Applied)
+                    })
+            {
+                continue;
+            }
+            wanted.push((id.clone(), proposal.operation_id));
+        }
+        slots.retain(|slot| {
+            slot.run == run
+                && wanted
+                    .iter()
+                    .any(|(page, operation)| *page == slot.page && *operation == slot.operation)
+        });
+        for (page, operation) in wanted {
+            if slots
+                .iter()
+                .any(|slot| slot.page == page && slot.operation == operation)
+            {
+                continue;
+            }
+            let refresh = refresh.clone();
+            let budget = self.budget.clone();
+            let timeout = self.timeout;
+            let id = PageId(page.clone());
+            let op = operation.clone();
+            let context = notion_knowledge_core::logging::sync_context();
+            let task = tokio::spawn(notion_knowledge_core::logging::in_sync_context(
+                context,
+                async move {
+                    // Reserve worst-case bytes before any source request.
+                    let reservation = budget.reserve().await?;
+                    let prepared =
+                        tokio::time::timeout(timeout, refresh.prefetch_reconciliation(&id, &op))
+                            .await
+                            .ok()??;
+                    let bytes = budget.retain(reservation, prepared.retained_bytes())?;
+                    notion_knowledge_core::logging::sync_count(
+                        notion_knowledge_core::logging::SyncCount::PrefetchedPage,
+                        1,
+                    );
+                    Some((prepared, bytes))
+                },
+            ));
+            slots.push(Slot {
+                run: run.into(),
+                page,
+                operation,
+                task,
+            });
+        }
+        current
+    }
+    fn clear(&self) {
+        self.slots.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
 }
 impl AuthoritativeReconciliationRunner {
+    /// Prepare up to `workers` next planned pages' source content while one
+    /// page embeds and commits, within one retained-byte `budget`. Each
+    /// preparation is bounded by `timeout`; a slow or failed one is simply
+    /// prepared again by the consumer.
+    pub fn with_read_ahead(
+        mut self,
+        workers: usize,
+        budget: PrefetchBudget,
+        timeout: Duration,
+    ) -> Self {
+        self.read_ahead = (workers > 0).then(|| {
+            Arc::new(ReadAhead {
+                workers,
+                budget,
+                timeout,
+                slots: Mutex::new(Vec::new()),
+            })
+        });
+        self
+    }
+    /// Abort all read-ahead preparations, for example after a cancelled
+    /// attempt. Pending work is unaffected; it is prepared again on demand.
+    pub fn discard_read_ahead(&self) {
+        if let Some(read_ahead) = &self.read_ahead {
+            read_ahead.clear();
+        }
+    }
+    /// Take the current page's read-ahead (awaiting it if still in flight)
+    /// after starting preparations for the pages that follow it.
+    async fn read_ahead(&self, run: &str, pending: &[String]) -> Prepared {
+        let read_ahead = self.read_ahead.as_ref()?;
+        let current = read_ahead.advance(&self.refresh, &self.coordinator, run, pending);
+        if pending.is_empty() {
+            read_ahead.clear();
+        }
+        current?.take().await
+    }
+
     pub fn new(
         planner: AuthoritativeReconciliationPlanner,
         refresh: AuthoritativePageRefresh,
@@ -51,6 +208,7 @@ impl AuthoritativeReconciliationRunner {
             refresh,
             coordinator,
             scope,
+            read_ahead: None,
         })
     }
     /// Start explicit derived-relation rebuild under the existing writer lease.
@@ -169,11 +327,13 @@ impl AuthoritativeReconciliationRunner {
         }
         self.coordinator.reconciliation_plan(run)?;
         let progress = self.coordinator.reconciliation_progress(run)?;
-        for id in &progress.pending {
+        let pending: Vec<String> = progress.pending.iter().cloned().collect();
+        for (index, id) in pending.iter().enumerate() {
             if clock() >= lease.expires_at {
                 return Err(JournalError::LeaseLost.into());
             }
             let (page, replan) = self.coordinator.reconciliation_page_proposal(run, id)?;
+            let prefetched = self.read_ahead(run, &pending[index..]).await;
             self.apply_one(
                 ExpectedReconciliation {
                     run: run.into(),
@@ -183,6 +343,7 @@ impl AuthoritativeReconciliationRunner {
                 lease.clone(),
                 clock.clone(),
                 provider,
+                prefetched,
             )
             .await?;
         }
@@ -214,6 +375,8 @@ impl AuthoritativeReconciliationRunner {
             let progress = self.coordinator.reconciliation_progress(run)?;
             if let Some(id) = progress.pending.first() {
                 let (page, replan) = self.coordinator.reconciliation_page_proposal(run, id)?;
+                let pending: Vec<String> = progress.pending.iter().cloned().collect();
+                let prefetched = self.read_ahead(run, &pending).await;
                 self.apply_one(
                     ExpectedReconciliation {
                         run: run.into(),
@@ -223,8 +386,11 @@ impl AuthoritativeReconciliationRunner {
                     lease.clone(),
                     clock.clone(),
                     provider,
+                    prefetched,
                 )
                 .await?;
+            } else {
+                self.discard_read_ahead();
             }
         }
         let progress = self.coordinator.reconciliation_progress(run)?;
@@ -335,6 +501,7 @@ impl AuthoritativeReconciliationRunner {
             lease.clone(),
             clock.clone(),
             provider,
+            None,
         )
         .await?;
         let result = self.coordinator.reconciliation_progress(run)?;
@@ -363,7 +530,10 @@ impl AuthoritativeReconciliationRunner {
         lease: Lease,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
         provider: &dyn EmbeddingProvider,
+        prefetched: Prepared,
     ) -> Result<(), RunnerError> {
+        // The retained bytes stay reserved until this page is finished.
+        let (prefetched, _bytes) = prefetched.unzip();
         let page = expected.page.page_id.clone();
         let run = expected.run.clone();
         let applied = self
@@ -383,7 +553,7 @@ impl AuthoritativeReconciliationRunner {
                 .await
         } else if expected.page.difference == ProposedDifference::Unchanged {
             self.refresh
-                .apply_unchanged(expected, provider, lease.clone(), clock.clone())
+                .apply_unchanged(expected, provider, lease.clone(), clock.clone(), prefetched)
                 .await
         } else {
             let operation = expected.page.operation_id.clone();
@@ -395,6 +565,7 @@ impl AuthoritativeReconciliationRunner {
                     lease.clone(),
                     clock.clone(),
                     Some(expected),
+                    prefetched,
                 )
                 .await
                 .map(|_| ())

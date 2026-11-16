@@ -150,6 +150,7 @@ pub mod runtime {
                         },
                     };
                     if attempt.is_cancelled() {
+                        self.index.runner.discard_read_ahead();
                         coordinator.drain_owned().await.map_err(|_| "scheduled drain failed")?;
                         // Never renew a running effect. After drain, an expired lease
                         // leaves its durable checkpoint for the next service owner.
