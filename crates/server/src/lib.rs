@@ -1,5 +1,6 @@
 //! Configuration owned by the server composition root.
 
+pub mod allocator;
 pub mod config;
 pub mod diagnostics;
 pub mod file_recovery_command;

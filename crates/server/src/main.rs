@@ -20,6 +20,7 @@ fn components() -> [&'static str; 4] {
 }
 
 fn main() -> ExitCode {
+    notion_knowledge_server::allocator::bound_allocator_arenas();
     match notion_knowledge_server::shutdown::run(run()) {
         Ok(code) => code,
         Err(error) => {

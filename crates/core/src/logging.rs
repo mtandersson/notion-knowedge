@@ -204,6 +204,7 @@ impl SyncProgressLog {
             return;
         }
         let phase = self.phase.label();
+        let memory = ResidentMemory::current();
         let _ = writeln!(
             std::io::stderr().lock(),
             "{}",
@@ -214,8 +215,39 @@ impl SyncProgressLog {
                 "processed": processed, "total": total, "pages": pages,
                 "skipped": skipped, "elapsed_seconds": self.started.elapsed().as_secs(),
             "runtime_thread": format!("{:?}", std::thread::current().id()),
+                // Resident-memory trend across long syncs (#656); null off Linux.
+                "rss_kib": memory.map(|m| m.rss_kib), "rss_peak_kib": memory.map(|m| m.peak_kib),
             })
         );
+    }
+}
+
+/// Process resident memory from the kernel's own accounting, in KiB.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResidentMemory {
+    pub rss_kib: u64,
+    pub peak_kib: u64,
+}
+impl ResidentMemory {
+    /// `None` where `/proc/self/status` is unavailable or unparsable.
+    pub fn current() -> Option<Self> {
+        Self::parse(&std::fs::read_to_string("/proc/self/status").ok()?)
+    }
+    fn parse(status: &str) -> Option<Self> {
+        let field = |name: &str| {
+            status.lines().find_map(|line| {
+                line.strip_prefix(name)?
+                    .trim()
+                    .strip_suffix("kB")?
+                    .trim()
+                    .parse()
+                    .ok()
+            })
+        };
+        Some(Self {
+            rss_kib: field("VmRSS:")?,
+            peak_kib: field("VmHWM:")?,
+        })
     }
 }
 
@@ -365,6 +397,21 @@ impl Drop for EventGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resident_memory_reads_current_and_peak_kernel_accounting() {
+        let status = "Name:\tnk\nVmHWM:\t 4183040 kB\nVmRSS:\t 2540000 kB\nThreads:\t9\n";
+        assert_eq!(
+            ResidentMemory::parse(status),
+            Some(ResidentMemory {
+                rss_kib: 2_540_000,
+                peak_kib: 4_183_040
+            })
+        );
+        assert_eq!(ResidentMemory::parse("Name:\tnk\nVmRSS:\t12 kB\n"), None);
+        #[cfg(target_os = "linux")]
+        assert!(ResidentMemory::current().is_some_and(|m| m.rss_kib > 0));
+    }
 
     #[test]
     fn structured_events_have_only_safe_allowlisted_fields() {

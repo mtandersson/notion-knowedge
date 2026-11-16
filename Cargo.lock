@@ -4856,6 +4856,7 @@ dependencies = [
  "futures",
  "hmac",
  "http-body",
+ "libc",
  "notion-knowledge-core",
  "notion-knowledge-mcp",
  "notion-knowledge-notion",
