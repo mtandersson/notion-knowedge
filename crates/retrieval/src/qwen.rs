@@ -131,6 +131,12 @@ fn checked_safetensors(
     use std::io::Read;
     let bad = |_| EmbeddingError::UnsupportedModel;
     let file = std::fs::File::open(path).map_err(|_| EmbeddingError::Unavailable)?;
+    // Bound every allocation by the bytes the open file can supply, so a
+    // tampered header fails closed instead of exhausting memory.
+    let file_len = file
+        .metadata()
+        .map_err(|_| EmbeddingError::Unavailable)?
+        .len();
     let mut reader = std::io::BufReader::with_capacity(1 << 20, file);
     let mut hasher = Sha256::new();
     let mut read = |len: usize| -> Result<Vec<u8>, EmbeddingError> {
@@ -146,7 +152,7 @@ fn checked_safetensors(
             .try_into()
             .map_err(|_| EmbeddingError::UnsupportedModel)?,
     );
-    if header_len > 100 << 20 {
+    if header_len > 100 << 20 || header_len > file_len.saturating_sub(8) {
         return Err(EmbeddingError::UnsupportedModel);
     }
     let header: std::collections::HashMap<String, serde_json::Value> =
@@ -157,6 +163,7 @@ fn checked_safetensors(
         .map(|(name, v)| Ok((name, serde_json::from_value::<TensorEntry>(v).map_err(bad)?)))
         .collect::<Result<Vec<_>, EmbeddingError>>()?;
     entries.sort_by_key(|(_, e)| e.data_offsets);
+    let data_len = (file_len - 8 - header_len) as usize;
     let mut position = 0;
     let mut tensors = std::collections::HashMap::with_capacity(entries.len());
     for (name, entry) in entries {
@@ -173,6 +180,7 @@ fn checked_safetensors(
             .try_fold(1usize, |n, &d| n.checked_mul(d));
         if start != position
             || end < start
+            || end > data_len
             || elements.and_then(|n| n.checked_mul(dtype.size_in_bytes())) != Some(end - start)
         {
             return Err(EmbeddingError::UnsupportedModel);
@@ -181,14 +189,14 @@ fn checked_safetensors(
         let tensor =
             candle_core::Tensor::from_raw_buffer(&bytes, dtype, &entry.shape, &Device::Cpu)
                 .and_then(|t| t.to_dtype(DType::F32))
-                .map_err(|_| EmbeddingError::Unavailable)?;
+                .map_err(|_| EmbeddingError::UnsupportedModel)?;
         tensors.insert(name, tensor);
         position = end;
     }
     let mut trailing = [0u8; 1];
     if reader
         .read(&mut trailing)
-        .map_err(|_| EmbeddingError::Unavailable)?
+        .map_err(|_| EmbeddingError::UnsupportedModel)?
         != 0
         || format!("{:x}", hasher.finalize()) != expected
     {
@@ -475,6 +483,18 @@ mod tests {
                 Some(EmbeddingError::UnsupportedModel)
             );
         }
+        // A header claiming more data than the file holds is rejected before
+        // allocating, even though the digest would also fail later.
+        let header =
+            br#"{"a":{"dtype":"F32","shape":[1099511627776],"data_offsets":[0,4398046511104]}}"#;
+        let mut oversized = (header.len() as u64).to_le_bytes().to_vec();
+        oversized.extend_from_slice(header);
+        oversized.extend_from_slice(&[0; 16]);
+        std::fs::write(&p, &oversized).unwrap();
+        assert_eq!(
+            checked_safetensors(&p, &digest(&oversized)).err(),
+            Some(EmbeddingError::UnsupportedModel)
+        );
         std::fs::write(&p, &bytes).unwrap();
         assert_eq!(
             checked_safetensors(&p, ASSETS[2].1).err(),
