@@ -230,13 +230,19 @@ impl NotionClient {
                             value
                         }
                         Ok(_) => return Err(error(BackendErrorKind::Internal)),
-                        Err(e) if inaccessible(e.kind) => return Ok(false),
+                        // Ancestry cannot be proven: not a rejection the walk
+                        // may silently rely on for deletes.
+                        Err(e) if inaccessible(e.kind) => {
+                            visit.incomplete = true;
+                            return Ok(false);
+                        }
                         Err(e) => return Err(e),
                     };
                 }
                 _ => return Ok(false),
             }
         }
+        visit.incomplete = true;
         Ok(false)
     }
 
@@ -296,7 +302,11 @@ impl NotionClient {
         visit.calls += 1;
         let body = match self.markdown_body(&page_ref).await {
             Ok(body) => body,
+            // Readable metadata but no body is not a revoked permission: keep
+            // the page out of this walk's index but do not let it authorize
+            // deletes.
             Err(e) if !is_root && inaccessible(e.kind) => {
+                visit.incomplete = true;
                 visit.skip_page(entry, SkipReason::Inaccessible);
                 return Ok(visit);
             }
@@ -560,8 +570,12 @@ impl NotionClient {
         let mut processed = 0;
         progress.report(0, None, 0, 0, false);
         let mut pending = FuturesUnordered::new();
+        // Pages waiting for sink capacity. In-flight reads keep being polled
+        // while the sink is full, and no new read starts until the outbox
+        // drains, so retained content stays bounded by FETCH_CONCURRENCY.
+        let mut outbox: VecDeque<WalkedPage> = VecDeque::new();
         loop {
-            while pending.len() < FETCH_CONCURRENCY {
+            while pending.len() < FETCH_CONCURRENCY && outbox.len() < FETCH_CONCURRENCY {
                 let Some(node) = queue.pop_front() else { break };
                 if rejected.contains(&node.claim()) {
                     continue;
@@ -592,9 +606,31 @@ impl NotionClient {
                     }
                 }));
             }
-            let Some(visit) = pending.next().await else {
-                break;
+            let visit = match (sink, outbox.is_empty(), pending.is_empty()) {
+                (_, true, true) => break,
+                (Some(sink), false, true) => {
+                    let permit = sink
+                        .reserve()
+                        .await
+                        .map_err(|_| error(BackendErrorKind::Unavailable))?;
+                    permit.send(outbox.pop_front().expect("outbox is not empty"));
+                    continue;
+                }
+                (Some(sink), false, false) => {
+                    let reserve = std::pin::pin!(sink.reserve());
+                    match futures_util::future::select(reserve, pending.next()).await {
+                        futures_util::future::Either::Left((permit, _)) => {
+                            let permit =
+                                permit.map_err(|_| error(BackendErrorKind::Unavailable))?;
+                            permit.send(outbox.pop_front().expect("outbox is not empty"));
+                            continue;
+                        }
+                        futures_util::future::Either::Right((visit, _)) => visit,
+                    }
+                }
+                _ => pending.next().await,
             };
+            let Some(visit) = visit else { continue };
             let visit = visit?;
             walk.calls += visit.calls;
             walk.complete &= !visit.incomplete;
@@ -614,10 +650,8 @@ impl NotionClient {
                     sync_count(SyncCount::DiscoveredPage, 1);
                 }
                 walk.entries.push(page.entry.clone());
-                if let Some(sink) = sink {
-                    sink.send(page)
-                        .await
-                        .map_err(|_| error(BackendErrorKind::Unavailable))?;
+                if sink.is_some() {
+                    outbox.push_back(page);
                 }
             }
             processed += 1;
@@ -1088,6 +1122,29 @@ mod tests {
                 id: X.into(),
                 reason: SkipReason::Inaccessible
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_child_failures_fail_the_walk_instead_of_skipping() {
+        let mut routes = Routes::new();
+        routes.insert(
+            format!("GET /v1/pages/{ROOT}"),
+            (200, metadata(ROOT, parent("workspace", ""))),
+        );
+        routes.insert(
+            format!("GET /v1/pages/{ROOT}/markdown"),
+            (200, markdown(ROOT, "Visible\n", &[X])),
+        );
+        routes.insert(format!("GET /v1/pages/{X}/markdown"), (500, json!({})));
+        let (client, _) = serve(routes).await;
+        let error = client
+            .walk_tree(&scope(ExclusionRules::default()), None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            notion_knowledge_core::backend::BackendErrorKind::Unavailable
         );
     }
 
