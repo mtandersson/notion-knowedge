@@ -1,5 +1,41 @@
 # CI selection and verification
 
+## Required gate and optional jobs
+
+The required **CI gate** waits only for checks that fit a 10-minute budget on
+a warm cache: CI input selection, Agent layout, Format, Clippy (default
+features, `--all-targets`, which also type-checks every target), Unit tests
+(workspace), Dependency vulnerabilities and Secret scanning. These jobs run in
+parallel.
+
+Optional jobs still run and report on every PR that selects them, but the gate
+does not wait for them: Clippy (native features), Unit tests (local-qwen), the
+native test compile and its two native test suites, and the Release build. PRs
+skip linking the `production-eval` example; main pushes still link it, and
+Clippy (native features) checks it on every selected PR. Container smoke has
+its own workflow, `.github/workflows/container.yml`. It runs on every main
+push, nightly at 03:00 UTC, on manual dispatch, and on PRs that change
+container inputs (`Dockerfile`, `.dockerignore`, `compose.yaml`, container
+and smoke scripts, Nix inputs, `Cargo.lock` and the toolchain). Its main run
+keeps publishing the GHCR BuildKit cache.
+
+**Merge rule:** before merging a PR whose selection includes native or
+container inputs, every optional job that ran for it, including Container
+smoke, must be green. The gate alone is not enough for such PRs.
+
+All Cargo jobs set `CARGO_INCREMENTAL=0` and line-table debug info for the
+dev and test profiles at workflow level, so these settings are part of every
+Cargo snapshot key. Each job keeps its own snapshot (`clippy-features` is
+separate from `clippy`), and only main saves snapshots.
+
+Integration tests build as one `it` binary per crate for
+`notion-knowledge-retrieval` and `notion-knowledge-server`
+(`tests/it/main.rs`, one module per former test file), so native jobs link
+two LanceDB test binaries instead of 39. Run one former file with, for
+example, `cargo test -p notion-knowledge-server --test it http::`. The
+server's `allocator_bounds` test stays its own binary because its allocator
+bound is process-wide.
+
 Container smoke chooses one available Buildx index per final/builder root,
 preferring the current PR/branch and falling back to trusted main,
 loads the final runtime and pinned builder, and exports a bounded mutable
@@ -30,28 +66,27 @@ redacts findings. Ordinary checks need no application credentials or secrets.
 | --- | --- |
 | `README.md`, `CONTRIBUTING.md`, `LICENSE`, Markdown under `docs/` or `eval/` | None |
 | `AGENTS.md`, `CLAUDE.md`, `.agents/`, `.claude/`, `.codex/`, `scripts/check-agent-layout.sh` | Agent layout |
-| Non-Markdown `eval/` data | Unit tests (consuming evaluation integration tests) |
-| Rust `.rs` inputs and manifests under `crates/`, root `Cargo.toml`, `Cargo.lock` | Format, Clippy, Type check, Unit tests, Release build, Container smoke |
-| `Dockerfile`, `.dockerignore`, `scripts/smoke-container.py` | Container smoke |
-| Workflows, CI scripts/tests, security configuration/scripts, `flake.nix`, `flake.lock`, Rust toolchain files, all other inputs | All nine checks |
+| Non-Markdown `eval/` data | Unit tests (workspace and local-qwen), native tests |
+| Rust `.rs` inputs and manifests under `crates/`, root `Cargo.toml`, `Cargo.lock` | Format, both Clippy jobs, all unit and native tests, Release build |
+| `Dockerfile`, `.dockerignore`, `compose.yaml`, container smoke scripts | None in CI; Container smoke runs from `container.yml` |
+| Workflows, CI scripts/tests, security configuration/scripts, `flake.nix`, `flake.lock`, Rust toolchain files, all other inputs | All checks |
 
-Rust integration tests select the whole workspace and container conservatively:
-Docker's context allowlist currently admits every `.rs` file, including tests.
 Build scripts are Rust inputs. Manifests and the lockfile affect all workspace
-checks and the image. Toolchain/workflow changes and unknown paths require full
-coverage. Main and manual dispatch always select all nine jobs.
+checks. Toolchain/workflow changes and unknown paths require full coverage.
+Main and manual dispatch always select every job. Rust source changes do not
+trigger Container smoke on PRs; it runs after merge on main and nightly.
 
 ## Stable check and failure contract
 
-The nine logical checks remain; Unit tests displays one check per matrix suite. Narrow PR jobs now
-report intentional skips. Configure **CI gate** as the required check instead of
-requiring each optional job individually. Keep **CI input selection** visible
-for diagnosis; CI gate requires it to succeed and validates every selection
-output and every job result. Selected checks must succeed. Unselected checks may
-skip or succeed, but failures, cancellations, missing results, or malformed
+Narrow PR jobs report intentional skips. Configure **CI gate** as the required
+check. Keep **CI input selection** visible for diagnosis; CI gate requires it to
+succeed, validates every selection output, and checks the result of every
+required job. Selected required checks must succeed. Unselected ones may skip
+or succeed, but failures, cancellations, missing results, or malformed
 selection outputs fail the gate. Both security checks must always be selected.
-The gate uses `always()` and depends on all jobs, so a failed upstream job cannot
-silently skip the final decision. Cancelling the entire workflow cannot produce
+The gate uses `always()` and depends on all required jobs, so a failed upstream
+job cannot silently skip the final decision. Optional job results are not part
+of the gate; the merge rule above covers them. Cancelling the entire workflow cannot produce
 a successful gate; any required CI gate still needs a successful run.
 
 On 2026-10-03, rechecking rulesets returned HTTP 403: “Upgrade to GitHub Pro or

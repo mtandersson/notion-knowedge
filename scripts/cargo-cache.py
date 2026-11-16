@@ -12,7 +12,7 @@ import time
 
 VERSION = 1
 STATE = Path('target/.nk-cache-source-times.json')
-PROFILES = {'clippy': 'debug', 'check': 'debug', 'test-workspace': 'debug',
+PROFILES = {'clippy': 'debug', 'clippy-features': 'debug', 'test-workspace': 'debug',
             'test-local-qwen': 'debug', 'test-native-build': 'debug', 'build': 'release'}
 FLAG_NAMES = {'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'RUSTDOCFLAGS',
               'CARGO_ENCODED_RUSTDOCFLAGS', 'CARGO_BUILD_TARGET', 'CARGO_BUILD_RUSTFLAGS',

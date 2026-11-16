@@ -1,0 +1,180 @@
+name: Container smoke
+
+# Container smoke takes about 30 minutes, so it is not part of the required CI
+# gate. It runs after every main push, nightly, on demand, and on PRs that
+# change container inputs. See docs/ci.md for the merge rule.
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - compose.yaml
+      - docker-compose*.yml
+      - scripts/*container*
+      - scripts/smoke-*.py
+      - scripts/compose-dev.sh
+      - nix/**
+      - flake.nix
+      - flake.lock
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/container.yml
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  container:
+    if: github.event_name == 'pull_request' || github.ref != 'refs/heads/main'
+    name: Container smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: read
+    steps: &container_smoke_steps
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # Verified BuildKit v0.33.1 and its GHA index protocol.
+          driver-opts: image=moby/buildkit:buildx-stable-1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+
+      - name: Log in to GHCR with job-scoped package permissions
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Test cached image identity rejection
+        run: python3 scripts/test-container-smoke.py
+
+      - name: Test runtime artifact export contracts
+        run: python3 scripts/test-package-container-server.py
+
+      - name: Verify actual Docker context excludes runtime and private data
+        run: python3 scripts/test-container-context.py
+
+      - name: Read canonical image identity
+        id: identity
+        run: |
+          python3 - <<'PY'
+          import os, tomllib
+          with open('Cargo.toml', 'rb') as manifest:
+              version = tomllib.load(manifest)['workspace']['package']['version']
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              print(f'version={version}', file=output)
+          PY
+
+      - name: Build and load final runtime image
+        id: runtime-image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: notion-knowledge:smoke
+          build-args: |
+            VERSION=${{ steps.identity.outputs.version }}
+            REVISION=${{ github.sha }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-main-amd64
+
+      - name: Load pinned builder for permission probe
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          target: probe-builder
+          load: true
+          tags: notion-knowledge:smoke-builder
+          build-args: VERSION=${{ steps.identity.outputs.version }}
+
+      - name: Verify final runtime image
+        run: python3 scripts/smoke-container.py --prebuilt --builder-image notion-knowledge:smoke-builder
+
+      - name: Verify production indexing and offline retrieval in final image
+        run: python3 scripts/smoke-retrieval-container.py --prebuilt --assets "$RUNNER_TEMP/nk-qwen-assets" --download-assets
+
+      - name: Smoke test local Docker Compose stack
+        run: |
+          docker tag notion-knowledge:smoke notion-knowledge:local
+          python3 scripts/smoke-compose.py --prebuilt
+
+      - name: Package tested feature-enabled server
+        run: python3 scripts/package-container-server.py --image "${{ steps.runtime-image.outputs.imageid }}" --revision "$GITHUB_SHA"
+
+      - name: Upload tested feature-enabled server
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: notion-knowledge-server-webhook-worker-Linux-X64
+          path: dist/container-server/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+      # Keep an independent, pinned compiler cache manifest in GHCR: previous
+      # hosted evidence showed that lazy final-image exports can lose builder
+      # results. PR jobs have packages:read and cannot publish cache tags.
+      - name: Export verified builder root
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          target: builder
+          build-args: VERSION=${{ steps.identity.outputs.version }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-main-amd64-builder
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-main-amd64-builder,mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true
+
+      # Only trusted main exports after production, retrieval and Compose smoke.
+      # PR jobs lack packages:write and cannot overwrite these shared tags.
+      - name: Export verified final image graph
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: |
+            VERSION=${{ steps.identity.outputs.version }}
+            REVISION=${{ github.sha }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-main-amd64
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-main-amd64,mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true
+
+      # Only optional registry cache publication is best effort. Mandatory
+      # build/load, retrieval, permission and Compose checks must still pass.
+      - name: Report optional cache publication
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        run: |
+          {
+            echo '### Optional GHCR BuildKit cache publication'
+            echo 'The verified builder and final-image GHCR registry cache exports were attempted.'
+            echo 'BuildKit may ignore registry upload failures (`ignore-error=true`); check both export logs for pushed manifests or warnings.'
+            echo 'A successful Container smoke run validates the image and smoke tests, **not** GHCR cache publication.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  container-main:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    name: Container smoke (main cache publisher)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps: *container_smoke_steps
+

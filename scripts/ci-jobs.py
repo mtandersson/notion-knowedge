@@ -7,9 +7,14 @@ from pathlib import PurePosixPath
 import subprocess
 import sys
 
-JOBS = ('agent-layout', 'fmt', 'clippy', 'check', 'test', 'native-build', 'native-test', 'build', 'container',
-        'dependencies', 'secrets')
-RUST = {'fmt', 'clippy', 'check', 'test', 'native-build', 'native-test', 'build'}
+# The CI gate requires these. Each runs in parallel within the 10-minute budget.
+REQUIRED = ('agent-layout', 'fmt', 'clippy', 'test', 'dependencies', 'secrets')
+# Selected and reported, but outside the gate: native-feature compiles and the
+# release build take too long for it. Container smoke has its own workflow.
+OPTIONAL = ('clippy-features', 'test-local-qwen', 'native-build', 'native-test', 'build')
+JOBS = REQUIRED + OPTIONAL
+RUST = {'fmt', 'clippy', 'clippy-features', 'test', 'test-local-qwen', 'native-build',
+        'native-test', 'build'}
 SECURITY = {'dependencies', 'secrets'}
 
 
@@ -24,20 +29,16 @@ def path_jobs(path):
     ):
         return set()
     if path.startswith('eval/'):
-        return {'test', 'native-build', 'native-test'}
-    if path.startswith('crates/') and '/tests/' in path and path.endswith('.rs'):
-        # Docker's context allowlist includes every .rs file, even tests.
-        return RUST | {'container'}
-    if path in {'compose.yaml', 'scripts/compose-dev.sh',
-                'scripts/smoke-compose.py'}:
-        return {'container'}
-    if path in {'Dockerfile', '.dockerignore', 'scripts/smoke-container.py'}:
-        return {'container'}
+        return {'test', 'test-local-qwen', 'native-build', 'native-test'}
+    if path in {'compose.yaml', 'scripts/compose-dev.sh', 'scripts/smoke-compose.py',
+                'Dockerfile', '.dockerignore', 'scripts/smoke-container.py'}:
+        # Container inputs: .github/workflows/container.yml runs the smoke.
+        return set()
     if path.startswith('crates/') and (path.endswith('.rs') or
                                       PurePosixPath(path).name == 'Cargo.toml'):
-        return RUST | {'container'}
+        return set(RUST)
     if path in {'Cargo.toml', 'Cargo.lock'}:
-        return RUST | {'container'}
+        return set(RUST)
     return set(JOBS)
 
 
@@ -80,19 +81,12 @@ def validate(needs):
     if needs.get('changes', {}).get('result') != 'success':
         errors.append('Change selection did not succeed')
     outputs = needs.get('changes', {}).get('outputs', {})
-    for job in JOBS:
+    for job in OPTIONAL:
+        if outputs.get(job) not in {'true', 'false'}:
+            errors.append(f'{job}: invalid selection')
+    for job in REQUIRED:
         selected = outputs.get(job)
         result = needs.get(job, {}).get('result')
-        if job == 'container' and selected in {'true', 'false'}:
-            # Exactly one of the read-only PR job and trusted main publisher
-            # must succeed for a selected container check. Their mutually
-            # exclusive permissions are a security boundary, not optional CI.
-            other = needs.get('container-main', {}).get('result')
-            outcomes = sorted((str(result), str(other)))
-            allowed = ['skipped', 'success'] if selected == 'true' else ['skipped', 'skipped']
-            if outcomes != allowed:
-                errors.append(f'container: expected {allowed}, got {outcomes}')
-            continue
         if selected not in {'true', 'false'}:
             errors.append(f'{job}: invalid selection')
         elif job in SECURITY and selected != 'true':
