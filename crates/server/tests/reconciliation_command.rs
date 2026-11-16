@@ -4055,12 +4055,9 @@ async fn scheduled_cycle_fetches_next_planned_page_while_one_embedding_is_paused
     let (worker, stop, server) =
         scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
     await_held_embedding(&f).await;
-    // Planning (its walk and inspections) finished before this embedding;
-    // count only what preparation reads while the embedding is held.
-    let planned = http.markdown_pages.lock().unwrap().len();
     await_markdown_pages(&http, 2).await;
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    let fetched = http.markdown_pages.lock().unwrap().len() - planned;
+    let fetched = http.markdown_pages.lock().unwrap().len();
     assert!(
         fetched <= 3,
         "held page and two read-ahead workers; got {fetched}"

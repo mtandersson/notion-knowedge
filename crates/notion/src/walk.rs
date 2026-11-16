@@ -571,11 +571,12 @@ impl NotionClient {
         progress.report(0, None, 0, 0, false);
         let mut pending = FuturesUnordered::new();
         // Pages waiting for sink capacity. In-flight reads keep being polled
-        // while the sink is full, and no new read starts until the outbox
-        // drains, so retained content stays bounded by FETCH_CONCURRENCY.
+        // while the sink is full, and a read starts only while in-flight
+        // reads plus waiting pages stay under FETCH_CONCURRENCY, so at most
+        // that many walked pages are held here at once.
         let mut outbox: VecDeque<WalkedPage> = VecDeque::new();
         loop {
-            while pending.len() < FETCH_CONCURRENCY && outbox.len() < FETCH_CONCURRENCY {
+            while pending.len() + outbox.len() < FETCH_CONCURRENCY {
                 let Some(node) = queue.pop_front() else { break };
                 if rejected.contains(&node.claim()) {
                     continue;
@@ -1146,6 +1147,44 @@ mod tests {
             error.kind,
             notion_knowledge_core::backend::BackendErrorKind::Unavailable
         );
+    }
+
+    #[tokio::test]
+    async fn unreadable_body_after_readable_metadata_is_not_authoritative() {
+        let mut routes = Routes::new();
+        add_page(&mut routes, ROOT, parent("workspace", ""), &page_tag(P));
+        routes.insert(
+            format!("GET /v1/pages/{P}"),
+            (200, metadata(P, parent("page_id", ROOT))),
+        );
+        let (client, _) = serve(routes).await;
+        let walk = client
+            .walk_tree(&scope(ExclusionRules::default()), None)
+            .await
+            .unwrap();
+        assert!(!walk.authoritative());
+        assert_eq!(
+            walk.skipped,
+            [SkippedContent {
+                id: P.into(),
+                reason: SkipReason::Inaccessible
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn unprovable_block_ancestry_is_not_authoritative() {
+        let mut routes = Routes::new();
+        add_page(&mut routes, ROOT, parent("workspace", ""), &page_tag(P));
+        // P sits in a block the integration cannot read.
+        add_page(&mut routes, P, parent("block_id", X), "Nested\n");
+        let (client, _) = serve(routes).await;
+        let walk = client
+            .walk_tree(&scope(ExclusionRules::default()), None)
+            .await
+            .unwrap();
+        assert!(!walk.authoritative());
+        assert_eq!(ids(&walk), [ROOT]);
     }
 
     #[tokio::test]

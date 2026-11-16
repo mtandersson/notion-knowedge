@@ -147,7 +147,7 @@ pub struct FakeNotion {
     pub foreign_body_reads: Arc<AtomicUsize>,
     /// Distinct Markdown routes read by indexing preparation (not by a walk).
     pub markdown_pages: Arc<Mutex<BTreeSet<String>>>,
-    markdown_reads: Arc<Mutex<BTreeMap<String, usize>>>,
+    markdown_reads: Arc<Mutex<BTreeMap<String, (usize, usize)>>>,
     /// The next response is a 503.
     pub fail_once: Arc<AtomicBool>,
     /// Pauses the next `pages/{PAGE}` metadata read.
@@ -443,18 +443,22 @@ impl FakeNotion {
                 if route == format!("/v1/pages/{OTHER}/markdown") {
                     target_bodies.fetch_add(1, Ordering::SeqCst);
                 }
-                // The walk reads a page's metadata once (rows: never) before
-                // its Markdown; preparation first checks lifecycle, re-reading
-                // the page's metadata at least twice. That tells them apart.
+                // Since the last reset, the walk reads each page's Markdown
+                // first, after at most one metadata read. Preparation reads it
+                // again after lifecycle has re-read the page's metadata at
+                // least twice. Counts: (metadata reads since Markdown, Markdown reads).
                 if let Some(page) = route.strip_prefix("/v1/pages/") {
                     let mut counts = read_counts.lock().unwrap();
                     if let Some(page) = page.strip_suffix("/markdown") {
                         bodies.fetch_add(1, Ordering::SeqCst);
-                        if counts.insert(page.to_owned(), 0).unwrap_or(0) >= 2 {
+                        let (metadata, reads) = counts.entry(page.to_owned()).or_insert((0, 0));
+                        if *reads > 0 && *metadata >= 2 {
                             markdown_reads.lock().unwrap().insert(route.clone());
                         }
+                        *metadata = 0;
+                        *reads += 1;
                     } else if !page.contains('/') {
-                        *counts.entry(page.to_owned()).or_insert(0) += 1;
+                        counts.entry(page.to_owned()).or_insert((0, 0)).0 += 1;
                     }
                 }
                 let snapshot = {
