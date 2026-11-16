@@ -258,11 +258,10 @@ fn mask_html(markdown: &str) -> (String, Vec<Range<usize>>) {
     (masked, ignored_ranges)
 }
 
-/// Extract graph-ready links and relation-property edges, retaining diagnostics.
-/// Does not fetch targets, authorize traversal, persist a graph or hash content.
-pub fn extract_relationships(content: &PageContent) -> Relationships {
-    let tags = enhanced(&content.markdown);
-    let (masked, ignored_ranges) = mask_html(&content.markdown);
+/// Markdown links plus the enhanced tags outside code spans and escapes.
+fn scan(markdown: &str) -> (Vec<Reference>, Vec<EnhancedTag>) {
+    let tags = enhanced(markdown);
+    let (masked, ignored_ranges) = mask_html(markdown);
     let mut references = Vec::new();
     let mut code_ranges = ignored_ranges;
     let mut code_start = None;
@@ -288,21 +287,41 @@ pub fn extract_relationships(content: &PageContent) -> Relationships {
             _ => {}
         }
     }
+    let live = tags
+        .into_iter()
+        .filter(|tag| {
+            let escaped = markdown[..tag.bytes.start]
+                .bytes()
+                .rev()
+                .take_while(|b| *b == b'\\')
+                .count()
+                % 2
+                == 1;
+            !escaped
+                && !code_ranges
+                    .iter()
+                    .any(|r| r.start <= tag.bytes.start && tag.bytes.start < r.end)
+        })
+        .collect();
+    (references, live)
+}
+
+/// Physical child tags (`<page>` and `<database>`) in document order, as
+/// `(tag name, raw url)`. Mentions, links and literal code are excluded.
+pub(crate) fn child_tags(markdown: &str) -> Vec<(String, String)> {
+    scan(markdown)
+        .1
+        .into_iter()
+        .filter(|tag| matches!(tag.name.as_str(), "page" | "database"))
+        .map(|tag| (tag.name, tag.url))
+        .collect()
+}
+
+/// Extract graph-ready links and relation-property edges, retaining diagnostics.
+/// Does not fetch targets, authorize traversal, persist a graph or hash content.
+pub fn extract_relationships(content: &PageContent) -> Relationships {
+    let (mut references, tags) = scan(&content.markdown);
     for tag in tags {
-        let escaped = content.markdown[..tag.bytes.start]
-            .bytes()
-            .rev()
-            .take_while(|b| *b == b'\\')
-            .count()
-            % 2
-            == 1;
-        if escaped
-            || code_ranges
-                .iter()
-                .any(|r| r.start <= tag.bytes.start && tag.bytes.start < r.end)
-        {
-            continue;
-        }
         references.push(reference(
             ReferenceSource::Markdown {
                 bytes: tag.bytes,

@@ -23,6 +23,9 @@ pub mod pages;
 
 pub mod crawl;
 
+/// Scope discovery: one walk from the root through Markdown child tags.
+pub mod walk;
+
 pub mod content;
 
 mod media_identity;
