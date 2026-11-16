@@ -67,7 +67,7 @@ async fn joined_committed_bilingual_aliases_navigation_and_off_on_ranking_surviv
         &runtime.db,
         off_config.notion_scope.clone().unwrap(),
         runtime.source.client(),
-        runtime.worker.provider.clone(),
+        runtime.worker.index.provider.clone(),
         OpenMode::ReadOnly,
     )
     .await

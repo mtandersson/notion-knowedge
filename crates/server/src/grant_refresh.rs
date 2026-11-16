@@ -24,9 +24,9 @@ use notion_knowledge_retrieval::{
     commit::IndexCommitCoordinator,
     mutation_refresh::{GrantMutationRefreshQueue, MutationRefreshClaim},
     planner::production_scope,
-    refresh::AuthoritativePageRefresh,
     sync_state::SqliteSyncStateStore,
 };
+use crate::index_runtime::{IndexRuntime, PageDeadline, RuntimeParts};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -308,20 +308,21 @@ impl GrantRefreshWorker {
         };
         // Construct BOTH the primary source and relation adapter from this exact
         // temporary OAuth client. There is no integration fallback/prototype.
-        let Ok(mut handler) = AuthoritativePageRefresh::new(
-            Arc::new(client),
-            self.guard.clone(),
-            self.coordinator.clone(),
-            self.settings.scope.clone(),
-            &policy,
-            self.settings.chunk_config,
-        ) else {
+        let Ok(index) = IndexRuntime::from_parts(RuntimeParts {
+            source: Arc::new(client),
+            table: self.guard.clone(),
+            coordinator: self.coordinator.clone(),
+            scope: self.settings.scope.clone(),
+            journal: policy,
+            provider: self.provider.clone(),
+            chunk_config: self.settings.chunk_config,
+            alias_sources: self.settings.alias_sources.clone(),
+            projection_mode: self.settings.projection_mode,
+            page_timeout_seconds: self.settings.timeout.as_secs(),
+            lexical: None,
+        }) else {
             return false;
         };
-        handler = handler.with_projection_mode(self.settings.projection_mode);
-        if let Some(aliases) = &self.settings.alias_sources {
-            handler = handler.with_alias_sources(aliases.clone());
-        }
         let state = self.coordinator.state().clone();
         let owned = claim.clone();
         let fence = authority.clone();
@@ -337,20 +338,20 @@ impl GrantRefreshWorker {
                 now
             }
         });
-        let operation = format!(
-            "oauth-refresh-{}-{}",
-            claim.key.workspace_id, claim.key.mutation_digest
-        );
-        let result = handler
-            .apply_lifecycle(
-                &PageId(claim.key.page_id.clone()),
-                &operation,
-                self.provider.as_ref(),
-                lease,
-                clock,
-            )
-            .await;
-        result.is_ok() && authority.validate(false).is_ok()
+        let mut lease = lease;
+        let deadline = PageDeadline {
+            timeout_seconds: self.settings.timeout.as_secs(),
+        };
+        // A page the inventory cannot place counts in `drift.unplaced`; the
+        // next walk indexes it.
+        let result = Box::pin(index.sync_page(
+            &deadline,
+            &mut lease,
+            PageId(claim.key.page_id.clone()),
+            clock,
+        ))
+        .await;
+        result.is_ok_and(|totals| totals.failed == 0) && authority.validate(false).is_ok()
     }
 }
 fn now() -> i64 {

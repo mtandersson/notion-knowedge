@@ -15,6 +15,7 @@ use notion_knowledge_retrieval::{
     commit::{CommitBinding, IndexCommitCoordinator},
     refresh::AuthoritativePageRefresh,
 };
+use notion_knowledge_server::index_runtime::{IndexRuntime, RuntimeParts};
 use serde_json::{Value, json};
 use sha2::Digest;
 use std::sync::{
@@ -397,38 +398,32 @@ impl TestRuntime {
             .unwrap();
         state.release_lease(&lease, now_ms() / 1000).unwrap();
         let source = HttpNotion::start().await;
-        let handler = AuthoritativePageRefresh::new(
+        if joined {
+            source.change(|m| m.joined = true);
+        }
+        let embeddings = Arc::new(AtomicUsize::new(0));
+        let runtime_index = index_runtime(
             source.client(),
             guard,
             coordinator.clone(),
-            scope,
-            &journal,
-            ChunkConfig {
-                target_chars: 1000,
-                overlap_chars: 0,
-            },
-        )
-        .unwrap();
-        let handler = if joined {
-            source.change(|m| m.joined = true);
-            handler.with_alias_sources(
+            scope.clone(),
+            journal,
+            Arc::new(Provider {
+                metadata,
+                count: embeddings.clone(),
+            }),
+            joined.then(|| {
                 notion_knowledge_core::aliases::AliasSources::new(true, vec!["alias".into()])
-                    .unwrap(),
-            )
-        } else {
-            handler
-        };
-        let embeddings = Arc::new(AtomicUsize::new(0));
+                    .unwrap()
+            }),
+        );
+        seed_walk(&source, &state, &scope).await;
         let worker = Arc::new(Worker {
             webhook_enabled: true,
             scheduled: None,
             state,
             coordinator,
-            handler,
-            provider: Arc::new(Provider {
-                metadata,
-                count: embeddings.clone(),
-            }),
+            index: runtime_index,
             scope: InboxScope {
                 workspace_id: WORKSPACE.into(),
                 subscription_id: SUB.into(),
@@ -451,7 +446,7 @@ impl TestRuntime {
         LanceChunkTable::open(
             &self.index,
             "chunks",
-            self.worker.provider.metadata().clone(),
+            self.worker.index.provider.metadata().clone(),
         )
         .await
         .unwrap()
@@ -460,6 +455,59 @@ impl TestRuntime {
         .unwrap()
         .len()
     }
+}
+
+/// The runtime the worker syncs each claimed page through.
+fn index_runtime(
+    source: Arc<NotionClient>,
+    table: GuardedChunkTable,
+    coordinator: Arc<IndexCommitCoordinator>,
+    scope: LifecycleScope,
+    journal: ReconciliationScope,
+    provider: Arc<dyn EmbeddingProvider>,
+    alias_sources: Option<notion_knowledge_core::aliases::AliasSources>,
+) -> Arc<IndexRuntime> {
+    Arc::new(
+        IndexRuntime::from_parts(RuntimeParts {
+            source,
+            table,
+            coordinator,
+            scope,
+            journal,
+            provider,
+            chunk_config: ChunkConfig {
+                target_chars: 1000,
+                overlap_chars: 0,
+            },
+            alias_sources,
+            projection_mode: Default::default(),
+            page_timeout_seconds: 10,
+            lexical: None,
+        })
+        .unwrap(),
+    )
+}
+
+/// Record a walk of the fixture tree as the inventory, without indexing, so
+/// claimed pages are placed by its parent map as in production. Request
+/// counters start after it.
+async fn seed_walk(
+    source: &HttpNotion,
+    state: &notion_knowledge_retrieval::sync_state::SqliteSyncStateStore,
+    scope: &LifecycleScope,
+) {
+    let walk = source.client().walk_tree(scope, None).await.unwrap();
+    state
+        .record_walk(&walk.run_id, &walk.entries, walk.authoritative())
+        .unwrap();
+    source.attempts.store(0, Ordering::SeqCst);
+    source.body_reads.store(0, Ordering::SeqCst);
+}
+
+fn set_provider(worker: &mut Arc<Worker>, provider: Arc<dyn EmbeddingProvider>) {
+    Arc::get_mut(&mut Arc::get_mut(worker).unwrap().index)
+        .unwrap()
+        .provider = provider;
 }
 
 struct UnavailableEmbedding(EmbeddingMetadata);
@@ -532,9 +580,9 @@ async fn mutation_refresh_preserves_verified_write_on_index_failure_and_retries_
     assert!(!result.replayed);
     assert_eq!(result.receipt.last_edited_time, "2026-10-10T12:00:01Z");
     assert_eq!(runtime.source.writes.load(Ordering::SeqCst), 1);
-    let provider = runtime.worker.provider.clone();
-    Arc::get_mut(&mut runtime.worker).unwrap().provider =
-        Arc::new(UnavailableEmbedding(provider.metadata().clone()));
+    let provider = runtime.worker.index.provider.clone();
+    set_provider(&mut runtime.worker,
+        Arc::new(UnavailableEmbedding(provider.metadata().clone())));
     tick(&runtime.worker, false).await;
     assert_eq!(
         state.status(&result.refresh).unwrap(),
@@ -563,7 +611,7 @@ async fn mutation_refresh_preserves_verified_write_on_index_failure_and_retries_
     assert_eq!(replay.index, IndexStatus::Failed);
     assert_eq!(replay.receipt, result.receipt);
     assert_eq!(runtime.source.writes.load(Ordering::SeqCst), 1);
-    Arc::get_mut(&mut runtime.worker).unwrap().provider = provider;
+    set_provider(&mut runtime.worker, provider);
     state.retry_mutation_refresh(&result.refresh).unwrap();
     tick(&runtime.worker, false).await;
     assert_eq!(
@@ -894,7 +942,7 @@ async fn debounce_and_lifecycle_follow_authority_and_recover_effects_before_inbo
     let guard = GuardedChunkTable::bind(
         &runtime.index,
         "chunks",
-        runtime.worker.provider.metadata().clone(),
+        runtime.worker.index.provider.metadata().clone(),
         reopened.clone(),
     )
     .unwrap();
@@ -910,19 +958,15 @@ async fn debounce_and_lifecycle_follow_authority_and_recover_effects_before_inbo
         scheduled: None,
         state: reopened.state().clone(),
         coordinator: reopened.clone(),
-        handler: AuthoritativePageRefresh::new(
+        index: index_runtime(
             runtime.source.client(),
             guard,
             reopened,
             scope,
-            &journal,
-            ChunkConfig {
-                target_chars: 1000,
-                overlap_chars: 0,
-            },
-        )
-        .unwrap(),
-        provider: runtime.worker.provider.clone(),
+            journal,
+            runtime.worker.index.provider.clone(),
+            None,
+        ),
         scope: runtime.worker.scope.clone(),
         integration: INTEGRATION.into(),
         poll: Duration::from_millis(20),
@@ -1109,13 +1153,13 @@ async fn mutation_refresh_expired_ownership_during_embedding_cannot_commit_under
         page_id: PAGE.into(),
     };
     runtime.worker.state.admit(&key).unwrap();
-    let provider = runtime.worker.provider.clone();
+    let provider = runtime.worker.index.provider.clone();
     let paused = Arc::new(PausedProvider {
         metadata: provider.metadata().clone(),
         entered: tokio::sync::Notify::new(),
         proceed: tokio::sync::Notify::new(),
     });
-    Arc::get_mut(&mut runtime.worker).unwrap().provider = paused.clone();
+    set_provider(&mut runtime.worker, paused.clone());
     let worker = runtime.worker.clone();
     let task = tokio::spawn(async move { worker.tick(CancellationToken::new(), false).await });
     tokio::time::timeout(Duration::from_secs(5), paused.entered.notified())
@@ -1131,7 +1175,7 @@ async fn mutation_refresh_expired_ownership_during_embedding_cannot_commit_under
     task.await.unwrap().unwrap();
     assert_eq!(runtime.searchable("Saffron").await, 0);
     assert!(runtime.worker.state.page_state(PAGE).unwrap().is_none());
-    Arc::get_mut(&mut runtime.worker).unwrap().provider = provider;
+    set_provider(&mut runtime.worker, provider);
     tick(&runtime.worker, false).await;
     assert_eq!(
         runtime.worker.state.status(&key).unwrap(),
@@ -1169,11 +1213,11 @@ impl EmbeddingProvider for PausedProvider {
 async fn shared_index_fence_and_expired_inbox_ownership_reject_stale_commit() {
     let mut runtime = TestRuntime::new().await;
     let paused = Arc::new(PausedProvider {
-        metadata: runtime.worker.provider.metadata().clone(),
+        metadata: runtime.worker.index.provider.metadata().clone(),
         entered: tokio::sync::Notify::new(),
         proceed: tokio::sync::Notify::new(),
     });
-    Arc::get_mut(&mut runtime.worker).unwrap().provider = paused.clone();
+    set_provider(&mut runtime.worker, paused.clone());
     let e = event(PAGE, "page.created");
     runtime.worker.state.receive(&e).unwrap();
     let competing = runtime
@@ -1218,11 +1262,11 @@ async fn writer_lease_takeover_rejects_stale_effects_without_fatal_cleanup_or_re
 {
     let mut runtime = TestRuntime::new().await;
     let paused = Arc::new(PausedProvider {
-        metadata: runtime.worker.provider.metadata().clone(),
+        metadata: runtime.worker.index.provider.metadata().clone(),
         entered: tokio::sync::Notify::new(),
         proceed: tokio::sync::Notify::new(),
     });
-    Arc::get_mut(&mut runtime.worker).unwrap().provider = paused.clone();
+    set_provider(&mut runtime.worker, paused.clone());
     let stale = event(PAGE, "page.created");
     runtime.worker.state.receive(&stale).unwrap();
     let worker = runtime.worker.clone();
@@ -1474,7 +1518,7 @@ async fn installed_retrieval(
         config,
         transport,
         runtime.source.client(),
-        runtime.worker.provider.clone(),
+        runtime.worker.index.provider.clone(),
     )
     .await
 }
@@ -1587,7 +1631,7 @@ async fn configured_lexical_expansion_preserves_scoped_content_and_rebuilds_afte
         &runtime.db,
         config.notion_scope.clone().unwrap(),
         runtime.source.client(),
-        runtime.worker.provider.clone(),
+        runtime.worker.index.provider.clone(),
         CancellationToken::new(),
     )
     .await;
@@ -1665,7 +1709,7 @@ async fn commit_search_fixture(runtime: &TestRuntime) {
     let guard = GuardedChunkTable::bind(
         &runtime.index,
         "chunks",
-        runtime.worker.provider.metadata().clone(),
+        runtime.worker.index.provider.metadata().clone(),
         runtime.worker.coordinator.clone(),
     )
     .unwrap();
@@ -1720,7 +1764,7 @@ async fn reopened_committed_index_serves_all_modes_over_stdio_and_revalidates_ph
     let version = GuardedChunkTable::bind(
         &runtime.index,
         "chunks",
-        runtime.worker.provider.metadata().clone(),
+        runtime.worker.index.provider.metadata().clone(),
         runtime.worker.coordinator.clone(),
     )
     .unwrap()
@@ -1740,7 +1784,7 @@ async fn reopened_committed_index_serves_all_modes_over_stdio_and_revalidates_ph
         GuardedChunkTable::bind(
             &runtime.index,
             "chunks",
-            runtime.worker.provider.metadata().clone(),
+            runtime.worker.index.provider.metadata().clone(),
             runtime.worker.coordinator.clone()
         )
         .unwrap()
@@ -2503,11 +2547,11 @@ fn pause_owned_commits(runtime: &TestRuntime) {
 async fn shutdown_cancels_owned_commit_source_read_releases_fence_and_restart_processes_healthy_page()
  {
     let mut runtime = TestRuntime::new().await;
-    let metadata = runtime.worker.provider.metadata().clone();
-    Arc::get_mut(&mut runtime.worker).unwrap().provider = Arc::new(PauseSourceProvider {
+    let metadata = runtime.worker.index.provider.metadata().clone();
+    set_provider(&mut runtime.worker, Arc::new(PauseSourceProvider {
         metadata,
         pause: runtime.source.pause_next.clone(),
-    });
+    }));
     pause_owned_commits(&runtime);
     let interrupted = event(PAGE, "page.created");
     runtime.worker.state.receive(&interrupted).unwrap();
@@ -2564,19 +2608,33 @@ async fn shutdown_cancels_owned_commit_source_read_releases_fence_and_restart_pr
     // for the cancelled page's original inbox lease to expire.
     let healthy = event(OTHER, "page.created");
     runtime.worker.state.receive(&healthy).unwrap();
-    let metadata = runtime.worker.provider.metadata().clone();
+    let metadata = runtime.worker.index.provider.metadata().clone();
     let original = runtime.worker.clone();
     let provider: Arc<dyn EmbeddingProvider> = Arc::new(Provider {
         metadata,
         count: Arc::new(AtomicUsize::new(0)),
     });
+    let scope = LifecycleScope {
+        workspace_id: WORKSPACE.into(),
+        generation: 1,
+        roots: vec![PageId(ROOT.into())],
+        exclusions: ExclusionRules::default(),
+    };
+    let journal = notion_knowledge_retrieval::planner::production_scope(&scope).unwrap();
     let restarted = Worker {
         webhook_enabled: true,
         scheduled: None,
         state: original.state.clone(),
         coordinator: original.coordinator.clone(),
-        handler: original.handler.clone(),
-        provider,
+        index: index_runtime(
+            runtime.source.client(),
+            original.index.chunks().clone(),
+            original.coordinator.clone(),
+            scope,
+            journal,
+            provider,
+            None,
+        ),
         scope: original.scope.clone(),
         integration: original.integration.clone(),
         poll: original.poll,
@@ -2604,12 +2662,15 @@ async fn deadline_cancellation_retains_due_retry_and_allows_healthy_page_progres
             .await
             .unwrap(),
     );
-    let metadata = runtime.worker.provider.metadata().clone();
+    let metadata = runtime.worker.index.provider.metadata().clone();
+    set_provider(
+        &mut runtime.worker,
+        Arc::new(PauseSourceProvider {
+            metadata,
+            pause: runtime.source.pause_next.clone(),
+        }),
+    );
     let worker = Arc::get_mut(&mut runtime.worker).unwrap();
-    worker.provider = Arc::new(PauseSourceProvider {
-        metadata,
-        pause: runtime.source.pause_next.clone(),
-    });
     worker.timeout = Duration::from_secs(6);
     pause_owned_commits(&runtime);
     let bad = event(PAGE, "page.created");
@@ -2691,12 +2752,15 @@ async fn deadline_cancellation_retains_due_retry_and_allows_healthy_page_progres
     );
     assert_eq!(runtime.searchable("Saffron").await, 0);
     runtime.source.proceed.notify_one();
-    let metadata = runtime.worker.provider.metadata().clone();
+    let metadata = runtime.worker.index.provider.metadata().clone();
+    set_provider(
+        &mut runtime.worker,
+        Arc::new(Provider {
+            metadata,
+            count: runtime.embeddings.clone(),
+        }),
+    );
     let worker = Arc::get_mut(&mut runtime.worker).unwrap();
-    worker.provider = Arc::new(Provider {
-        metadata,
-        count: runtime.embeddings.clone(),
-    });
     worker.timeout = Duration::from_secs(10);
     let healthy = event(OTHER, "page.created");
     runtime.worker.state.receive(&healthy).unwrap();
@@ -2749,11 +2813,11 @@ async fn installed_graph_denies_reads_after_interrupted_owned_producer_commit() 
     )
     .await
     .unwrap();
-    let metadata = runtime.worker.provider.metadata().clone();
-    Arc::get_mut(&mut runtime.worker).unwrap().provider = Arc::new(PauseSourceProvider {
+    let metadata = runtime.worker.index.provider.metadata().clone();
+    set_provider(&mut runtime.worker, Arc::new(PauseSourceProvider {
         metadata,
         pause: runtime.source.pause_next.clone(),
-    });
+    }));
     pause_owned_commits(&runtime);
     runtime.source.change(|m| {
         m.markdown = "Changed Saffron.".into();

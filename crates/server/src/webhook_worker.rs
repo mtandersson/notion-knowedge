@@ -118,7 +118,6 @@ impl WorkerSettings {
 pub mod runtime {
     use notion_knowledge_core::{
         backend::PageId,
-        embedding::EmbeddingProvider,
         reconciliation::ReconciliationJournal,
         webhook::{
             EventClaim, EventFailure, EventState, InboxScope, PageWorkClaim, ProcessingOutcome,
@@ -128,10 +127,9 @@ pub mod runtime {
     use notion_knowledge_retrieval::{
         commit::IndexCommitCoordinator,
         mutation_refresh::MutationRefreshClaim,
-        refresh::{AuthoritativePageRefresh, RefreshError},
         sync_state::SqliteSyncStateStore,
     };
-    use sha2::{Digest, Sha256};
+    use crate::index_runtime::{SyncError, SyncFailure};
     use std::{
         sync::Arc,
         time::{Duration, SystemTime, UNIX_EPOCH},
@@ -173,24 +171,6 @@ pub mod runtime {
                 Self::Mutation(_) => vec![],
             }
         }
-        fn operation(&self) -> String {
-            if let Self::Mutation(c) = self {
-                return format!(
-                    "mutation-refresh-{}-{}",
-                    c.key.workspace_id, c.key.mutation_digest
-                );
-            }
-            let mut ids: Vec<_> = self.claims().into_iter().map(|c| c.key.event_id).collect();
-            ids.sort();
-            let hint = self.hint().expect("webhook work has a hint");
-            format!(
-                "webhook-{:x}",
-                Sha256::digest(format!(
-                    "{}:{}:{ids:?}",
-                    hint.workspace_id, hint.subscription_id
-                ))
-            )
-        }
     }
     /// One bounded processor per server; independent processes share SQLite and
     /// the directory commit lock. Fixture tests inject the real Notion transport
@@ -202,8 +182,8 @@ pub mod runtime {
         pub scope: InboxScope,
         pub integration: String,
         pub coordinator: Arc<IndexCommitCoordinator>,
-        pub handler: AuthoritativePageRefresh,
-        pub provider: Arc<dyn EmbeddingProvider>,
+        /// Syncs each claimed page; shared with the scheduled worker.
+        pub index: Arc<crate::index_runtime::IndexRuntime>,
         pub poll: Duration,
         pub timeout: Duration,
         pub log_enabled: bool,
@@ -269,21 +249,21 @@ pub mod runtime {
             .webhook_state_file
             .clone()
             .ok_or("webhook state required")?;
-        let runtime = crate::index_runtime::IndexRuntime::recover(
-            settings,
-            &state_file,
-            scope,
-            source,
-            provider,
-        )
-        .await?;
+        let runtime = Arc::new(
+            crate::index_runtime::IndexRuntime::recover(
+                settings,
+                &state_file,
+                scope,
+                source,
+                provider,
+            )
+            .await?,
+        );
         let coordinator = runtime.coordinator.clone();
         let state = coordinator.state().clone();
-        let handler = runtime.handler.clone();
-        let provider = runtime.provider.clone();
         let scheduled = config.reconciliation_schedule.clone().map(|policy| {
             Arc::new(crate::scheduled_reconciliation::runtime::Worker {
-                index: runtime,
+                index: runtime.clone(),
                 settings: policy,
                 poll: Duration::from_millis(settings.poll_ms),
                 timeout: Duration::from_secs(settings.timeout_seconds),
@@ -300,8 +280,7 @@ pub mod runtime {
             },
             integration: integration_id.clone(),
             coordinator,
-            handler,
-            provider,
+            index: runtime,
             poll: Duration::from_millis(settings.poll_ms),
             timeout: Duration::from_secs(settings.timeout_seconds),
             log_enabled: matches!(
@@ -363,7 +342,7 @@ pub mod runtime {
             let duration = self.timeout.as_secs() as i64 + 30;
             // Acquire the shared fence BEFORE claiming/effects. Busy writers do
             // not consume inbox retry budgets merely by delaying dispatch.
-            let lease = match blocking(move || state.acquire_lease(now_ms() / 1000, duration))
+            let mut lease = match blocking(move || state.acquire_lease(now_ms() / 1000, duration))
                 .await?
             {
                 Ok(lease) => lease,
@@ -430,7 +409,7 @@ pub mod runtime {
             })
             .await?;
             let result = match claim {
-                Ok(Some(work)) => self.process(work, lease.clone(), stop).await.map(|_| true),
+                Ok(Some(work)) => self.process(work, &mut lease, stop).await.map(|_| true),
                 Ok(None) => Ok(false),
                 Err(_) => Err("inbox claim unavailable"),
             };
@@ -444,7 +423,7 @@ pub mod runtime {
         async fn process(
             &self,
             work: Work,
-            lease: notion_knowledge_core::reconciliation::Lease,
+            lease: &mut notion_knowledge_core::reconciliation::Lease,
             stop: CancellationToken,
         ) -> Result<(), &'static str> {
             let hint = work.hint();
@@ -488,26 +467,28 @@ pub mod runtime {
                 ProcessingOutcome::Permanent(EventFailure::Source)
             } else {
                 let page = PageId(work.page_id().to_owned());
-                let operation = work.operation();
                 tokio::select! {
                     biased;
                     _=stop.cancelled()=>{ processing.cancel(); return Ok(()); },
                     _=tokio::time::sleep(self.timeout)=>{ processing.cancel(); ProcessingOutcome::Retryable(EventFailure::Unavailable) },
                     result=async {
-                        self.handler.apply_lifecycle(&page, &operation, self.provider.as_ref(), lease.clone(), clock.clone()).await?;
-                        crate::index_runtime::prepare_search_if_missing(&self.coordinator, &self.handler, lease, clock)
-                            .await.map_err(|_| RefreshError::Index)
+                        let deadline = crate::index_runtime::PageDeadline { timeout_seconds: self.timeout.as_secs() };
+                        let totals = Box::pin(self.index.sync_page(&deadline, lease, page, clock.clone())).await?;
+                        crate::index_runtime::prepare_search_if_missing(&self.coordinator, &self.index.handler, lease.clone(), clock)
+                            .await.map_err(|_| SyncError::new(SyncFailure::Index, "webhook search preparation failed"))?;
+                        Ok::<_, SyncError>(totals)
                     } => match result {
-                        Ok(_)=>ProcessingOutcome::Succeeded,
-                        Err(RefreshError::EmbeddingInputLimit)=>{
-                            notion_knowledge_core::logging::SyncProgressLog::new(notion_knowledge_core::logging::SyncPhase::Indexing).embedding_input_limit();
-                            ProcessingOutcome::Permanent(EventFailure::Source)
+                        // A page the inventory cannot place is counted in
+                        // `drift.unplaced` and settled by the next walk.
+                        Ok(totals) if totals.failed == 0 => ProcessingOutcome::Succeeded,
+                        Ok(totals) if totals.failed == totals.permanent => ProcessingOutcome::Permanent(EventFailure::Source),
+                        Ok(_) => ProcessingOutcome::Retryable(EventFailure::Source),
+                        Err(error) => match error.failure {
+                            SyncFailure::Unauthenticated => ProcessingOutcome::Permanent(EventFailure::Source),
+                            SyncFailure::Index => ProcessingOutcome::Retryable(EventFailure::Index),
+                            SyncFailure::Authority => ProcessingOutcome::Retryable(EventFailure::Conflict),
+                            SyncFailure::Unavailable => ProcessingOutcome::Retryable(EventFailure::Unavailable),
                         },
-                        Err(RefreshError::InvalidConfiguration | RefreshError::OutOfScope | RefreshError::PermanentSource | RefreshError::Unauthenticated)=>ProcessingOutcome::Permanent(EventFailure::Source),
-                        Err(RefreshError::Source)=>ProcessingOutcome::Retryable(EventFailure::Source),
-                        Err(RefreshError::Index)=>ProcessingOutcome::Retryable(EventFailure::Index),
-                        Err(RefreshError::Conflict)=>ProcessingOutcome::Retryable(EventFailure::Conflict),
-                        Err(RefreshError::Unavailable)=>ProcessingOutcome::Retryable(EventFailure::Unavailable),
                     }
                 }
             };

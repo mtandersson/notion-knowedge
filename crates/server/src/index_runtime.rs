@@ -62,6 +62,9 @@ enum PageWork {
     TimedOut,
 }
 
+/// A commit clock: seconds now, or `i64::MAX` once its authority expired.
+pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
+
 /// The per-page deadline every sync page and removal runs under.
 #[derive(Debug, Clone, Copy)]
 pub struct PageDeadline {
@@ -159,6 +162,9 @@ pub struct SyncTotals {
     /// Settled by the walk itself (excluded, archived, unreadable).
     pub skipped: u64,
     pub failed: u64,
+    /// Of `failed`, pages a retry cannot fix (unsupported source content,
+    /// an embedding input over the limit).
+    pub permanent: u64,
     pub removed: u64,
     /// Unreached pages under a page that became inaccessible in this walk,
     /// kept until the next walk confirms it.
@@ -206,7 +212,7 @@ pub struct IndexRuntime {
     pub handler: AuthoritativePageRefresh,
     pub runner: AuthoritativeReconciliationRunner,
     pub provider: Arc<dyn EmbeddingProvider>,
-    alias_sources: notion_knowledge_core::aliases::AliasSources,
+    alias_sources: Option<notion_knowledge_core::aliases::AliasSources>,
     table: GuardedChunkTable,
     lexical: Option<LexicalCachePlan>,
     source: Arc<NotionClient>,
@@ -511,6 +517,45 @@ impl IndexRuntime {
         lease: &mut notion_knowledge_core::reconciliation::Lease,
         mode: SyncMode,
     ) -> Result<SyncTotals, SyncError> {
+        let clock: Clock = Arc::new(|| now_ms() / 1000);
+        self.sync(settings, lease, mode, clock).await
+    }
+
+    /// Sync one page ([`SyncMode::Page`]) for a claimed callback: a webhook
+    /// event or a post-write refresh. `claim` is the claim's clock: every
+    /// commit and removal of this sync is fenced by it, so an expired,
+    /// taken-over or cancelled claim cannot authorize a write.
+    pub async fn sync_page(
+        &self,
+        settings: &PageDeadline,
+        lease: &mut notion_knowledge_core::reconciliation::Lease,
+        page: notion_knowledge_core::backend::PageId,
+        claim: Clock,
+    ) -> Result<SyncTotals, SyncError> {
+        self.sync(settings, lease, SyncMode::Page(page), claim)
+            .await
+    }
+
+    /// Erases the large sync future once, so callers' layout and auto-trait
+    /// queries stay bounded (see [`Self::resync_cache`]).
+    fn sync<'a>(
+        &'a self,
+        settings: &'a PageDeadline,
+        lease: &'a mut notion_knowledge_core::reconciliation::Lease,
+        mode: SyncMode,
+        base: Clock,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<SyncTotals, SyncError>> + Send + 'a>>
+    {
+        Box::pin(self.sync_inner(settings, lease, mode, base))
+    }
+
+    async fn sync_inner(
+        &self,
+        settings: &PageDeadline,
+        lease: &mut notion_knowledge_core::reconciliation::Lease,
+        mode: SyncMode,
+        base: Clock,
+    ) -> Result<SyncTotals, SyncError> {
         use futures::StreamExt;
         use notion_knowledge_core::{
             discovery::SkipReason,
@@ -638,11 +683,12 @@ impl IndexRuntime {
                 let expired = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let _attempt = Attempt(expired.clone());
                 let flag = expired.clone();
-                let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || {
+                let claim = base.clone();
+                let clock: Clock = Arc::new(move || {
                     if flag.load(std::sync::atomic::Ordering::SeqCst) {
                         i64::MAX
                     } else {
-                        now_ms() / 1000
+                        claim()
                     }
                 });
                 let deadline = std::time::Duration::from_secs(settings.timeout_seconds);
@@ -714,6 +760,9 @@ impl IndexRuntime {
                             totals.skipped += 1;
                         } else {
                             totals.failed += 1;
+                            if error != RefreshError::Source {
+                                totals.permanent += 1;
+                            }
                         }
                         sync_count(SyncCount::SkippedPage, 1);
                         if error == RefreshError::EmbeddingInputLimit {
@@ -795,7 +844,7 @@ impl IndexRuntime {
                 totals.complete = walk.authoritative();
                 if walk.authoritative() {
                     totals.removed =
-                        Box::pin(self.remove_unreached(settings, lease, &walk, &held)).await?;
+                        Box::pin(self.remove_unreached(settings, lease, &walk, &held, &base)).await?;
                 }
                 walk.run_id
             }
@@ -820,7 +869,7 @@ impl IndexRuntime {
                 totals.skipped += hits.skipped.len() as u64;
                 totals.drift.unplaced = hits.unplaced;
                 totals.removed =
-                    Box::pin(self.remove_pages(settings, lease, &run, &hits.removals)).await?;
+                    Box::pin(self.remove_pages(settings, lease, &run, &hits.removals, &base)).await?;
                 run
             }
         };
@@ -1051,6 +1100,7 @@ impl IndexRuntime {
         lease: &mut notion_knowledge_core::reconciliation::Lease,
         walk: &notion_knowledge_notion::walk::TreeWalk,
         held: &std::collections::BTreeSet<String>,
+        base: &Clock,
     ) -> Result<u64, &'static str> {
         let readable = walk.readable();
         let unreached: Vec<_> = self
@@ -1060,7 +1110,7 @@ impl IndexRuntime {
             .into_iter()
             .filter(|page| !readable.contains(page) && !held.contains(page))
             .collect();
-        self.remove_pages(settings, lease, &walk.run_id, &unreached)
+        self.remove_pages(settings, lease, &walk.run_id, &unreached, base)
             .await
     }
 
@@ -1071,6 +1121,7 @@ impl IndexRuntime {
         lease: &mut notion_knowledge_core::reconciliation::Lease,
         run_id: &str,
         pages: &[String],
+        base: &Clock,
     ) -> Result<u64, &'static str> {
         use notion_knowledge_core::sync_state::SyncStateStore;
         let mut removed = 0;
@@ -1094,11 +1145,12 @@ impl IndexRuntime {
             // Also expire it if this future is dropped (stop or sync budget).
             let _attempt = Attempt(expired.clone());
             let flag = expired.clone();
-            let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || {
+            let claim = base.clone();
+            let clock: Clock = Arc::new(move || {
                 if flag.load(std::sync::atomic::Ordering::SeqCst) {
                     i64::MAX
                 } else {
-                    now_ms() / 1000
+                    claim()
                 }
             });
             let result = tokio::time::timeout(
@@ -1322,8 +1374,10 @@ impl IndexRuntime {
         &self,
         alias: &str,
     ) -> Result<Vec<String>, notion_knowledge_retrieval::commit::CommitError> {
-        self.coordinator
-            .lookup_canonical_alias(&self.alias_sources, alias)
+        match &self.alias_sources {
+            Some(sources) => self.coordinator.lookup_canonical_alias(sources, alias),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// Trusted dependency seam: production supplies an authenticated Notion
@@ -1454,29 +1508,67 @@ impl IndexRuntime {
             )
             .map_err(|_| "index binding incompatible")?
         };
-        let handler = AuthoritativePageRefresh::new(
-            source.clone(),
-            guard.clone(),
-            coordinator.clone(),
-            scope.clone(),
-            &journal,
-            ChunkConfig {
+        Self::from_parts(RuntimeParts {
+            source,
+            table: guard,
+            coordinator,
+            scope,
+            journal,
+            provider,
+            chunk_config: ChunkConfig {
                 target_chars: 1000,
                 overlap_chars: 100,
             },
+            alias_sources: Some(settings.alias_sources.clone()),
+            projection_mode: settings.projection_mode,
+            page_timeout_seconds: settings.timeout_seconds,
+            lexical,
+        })
+    }
+
+    /// Compose a runtime over an opened index and one source client. Startup
+    /// recovery uses it after binding the cache; callers holding their own
+    /// client (an OAuth grant, a fixture) use it to sync through that client.
+    pub fn from_parts(parts: RuntimeParts) -> Result<Self, &'static str> {
+        let RuntimeParts {
+            source,
+            table,
+            coordinator,
+            scope,
+            journal,
+            provider,
+            chunk_config,
+            alias_sources,
+            projection_mode,
+            page_timeout_seconds,
+            lexical,
+        } = parts;
+        let handler = AuthoritativePageRefresh::new(
+            source.clone(),
+            table.clone(),
+            coordinator.clone(),
+            scope.clone(),
+            &journal,
+            chunk_config,
         )
         .map_err(|_| "authoritative handler incompatible")?
-        .with_alias_sources(settings.alias_sources.clone())
-        .with_projection_mode(settings.projection_mode);
+        .with_projection_mode(projection_mode);
+        let handler = match &alias_sources {
+            Some(sources) => handler.with_alias_sources(sources.clone()),
+            None => handler,
+        };
         let planner = AuthoritativeReconciliationPlanner::new(
             source.clone(),
-            guard.clone(),
+            table.clone(),
             coordinator.clone(),
             scope.clone(),
         )
         .map_err(|_| "authoritative planner incompatible")?
-        .with_alias_sources(settings.alias_sources.clone())
-        .with_projection_mode(settings.projection_mode);
+        .with_projection_mode(projection_mode);
+        let planner = match &alias_sources {
+            Some(sources) => planner.with_alias_sources(sources.clone()),
+            None => planner,
+        };
         let runner = AuthoritativeReconciliationRunner::new(
             planner,
             handler.clone(),
@@ -1490,7 +1582,7 @@ impl IndexRuntime {
         let runner = runner.with_read_ahead(
             PREFETCH_WORKERS,
             prefetch_budget.clone(),
-            std::time::Duration::from_secs(settings.timeout_seconds),
+            std::time::Duration::from_secs(page_timeout_seconds),
         );
         Ok(Self {
             coordinator,
@@ -1498,8 +1590,8 @@ impl IndexRuntime {
             handler,
             runner,
             provider,
-            alias_sources: settings.alias_sources.clone(),
-            table: guard,
+            alias_sources,
+            table,
             lexical,
             source,
             source_scope: scope,
@@ -1507,6 +1599,24 @@ impl IndexRuntime {
         })
     }
 }
+
+/// What [`IndexRuntime::from_parts`] binds together.
+pub struct RuntimeParts {
+    pub source: Arc<NotionClient>,
+    pub table: GuardedChunkTable,
+    pub coordinator: Arc<IndexCommitCoordinator>,
+    pub scope: LifecycleScope,
+    pub journal: ReconciliationScope,
+    pub provider: Arc<dyn EmbeddingProvider>,
+    pub chunk_config: ChunkConfig,
+    /// `None` projects no aliases.
+    pub alias_sources: Option<notion_knowledge_core::aliases::AliasSources>,
+    pub projection_mode: notion_knowledge_notion::relation_proposal::ProjectionMode,
+    /// Bounds reconciliation read-ahead preparation of one page.
+    pub page_timeout_seconds: u64,
+    pub lexical: Option<LexicalCachePlan>,
+}
+
 /// Finish derived search maintenance after authoritative sync, including the
 /// first populated page after an empty cache. A healthy snapshot is a no-op.
 pub(crate) async fn prepare_search_if_missing(
