@@ -27,6 +27,7 @@ tempfile = "3"
 sha2 = "0.10"
 ring = "0.17"
 rustix = { version = "1", features = ["process"] }
+libc = "0.2"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 
