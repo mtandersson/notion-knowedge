@@ -439,7 +439,8 @@ impl AuthoritativeReconciliationPlanner {
                 .fetch_page(id)
                 .await
                 .map_err(|error| source_error(error.kind))?;
-            let parent = InventoryParent::from_evidence(&evidence).ok_or(PlanError::Ownership)?;
+            let parent =
+                InventoryParent::from_evidence(&evidence).ok_or(PlanError::UnsupportedSource)?;
             let identity = metadata_identity(&page, &parent);
             // A missing page always needs refresh. Relation completeness and
             // repeated snapshot checks cannot change that decision. Apply still

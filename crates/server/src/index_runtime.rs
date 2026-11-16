@@ -94,6 +94,8 @@ pub(crate) struct SyncTotals {
     pub skipped: u64,
     pub failed: u64,
     pub removed: u64,
+    /// The walk was authoritative (no unproven subtree).
+    pub complete: bool,
 }
 
 struct SyncEmbedding<'a>(&'a dyn EmbeddingProvider);
@@ -599,7 +601,11 @@ impl IndexRuntime {
                                 Failed(FailureClass::Source)
                             },
                         ));
-                        totals.failed += 1;
+                        if error == RefreshError::OutOfScope {
+                            totals.skipped += 1;
+                        } else {
+                            totals.failed += 1;
+                        }
                         sync_count(SyncCount::SkippedPage, 1);
                         if error == RefreshError::EmbeddingInputLimit {
                             progress.embedding_input_limit();
@@ -655,28 +661,34 @@ impl IndexRuntime {
             Box::pin(produce),
             Box::pin(consume)
         )?;
-        let diff = self.record_inventory(&walk, outcomes)?;
+        self.record_inventory(&walk, outcomes)?;
         totals.inventory = walk.entries.len() as u64;
-        totals.skipped = walk.skipped.len() as u64;
+        totals.skipped += walk.skipped.len() as u64;
+        totals.complete = walk.authoritative();
         if walk.authoritative() {
-            totals.removed = Box::pin(self.remove_unreached(settings, lease, &walk, &diff)).await?;
+            totals.removed = Box::pin(self.remove_unreached(settings, lease, &walk)).await?;
         }
         Ok(totals)
     }
 
-    /// Remove indexed pages a complete walk no longer reached or found trashed.
+    /// After a complete walk, remove every indexed page the walk did not
+    /// reach as indexable: moved out, trashed, revoked, excluded or deleted.
     async fn remove_unreached(
         &self,
         settings: &WorkerSettings,
         lease: &mut notion_knowledge_core::reconciliation::Lease,
         walk: &notion_knowledge_notion::walk::TreeWalk,
-        diff: &notion_knowledge_core::inventory::InventoryDiff,
     ) -> Result<u64, &'static str> {
+        use notion_knowledge_core::sync_state::SyncStateStore;
         let readable = walk.readable();
         let mut removed = 0;
         let state = self.coordinator.state();
         let ttl = settings.timeout_seconds as i64 + 30;
-        for page in diff.removed.iter().chain(&diff.trashed) {
+        let indexed = self
+            .coordinator
+            .owned_page_ids()
+            .map_err(|_| "cache sync state unavailable")?;
+        for page in &indexed {
             if readable.contains(page)
                 || !state
                     .page_state(page)
@@ -852,7 +864,7 @@ impl IndexRuntime {
             .map_err(|_| "rebuilt search index unavailable")?
             .map_err(|_| "rebuilt search index unavailable")?;
             preparing.report(1, Some(1), changed, totals.failed as usize, true);
-            if totals.failed > 0 {
+            if totals.failed > 0 || !totals.complete {
                 eprintln!(
                     "{}",
                     serde_json::json!({
@@ -860,6 +872,7 @@ impl IndexRuntime {
                         "status": "ready_with_skips",
                         "sync_progress": notion_knowledge_core::logging::current_sync_progress(),
                         "skipped_pages": totals.failed,
+                        "walk_complete": totals.complete,
                     })
                 );
             }

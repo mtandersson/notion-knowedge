@@ -52,6 +52,10 @@ pub struct WalkedPage {
     pub entry: InventoryEntry,
     pub content: Option<PageContent>,
     pub skip: Option<SkipReason>,
+    /// Child pages tagged in this page whose search listing names this page
+    /// as their physical parent: the walk's own child test, so relation and
+    /// link targets among them need no further authorization.
+    pub children: BTreeSet<String>,
 }
 
 /// The result of one walk. `entries` holds every reached page once (sorted by
@@ -162,6 +166,7 @@ impl Visit {
             entry,
             content: None,
             skip: Some(reason),
+            children: BTreeSet::new(),
         });
     }
 }
@@ -330,6 +335,25 @@ impl NotionClient {
         let mut children = child_references(&body.markdown);
         self.follow_unknown_blocks(&body, &mut children, &mut visit)
             .await?;
+        // descendants_of keeps the page and prunes everything below it.
+        let pruned = rules.descendants_of.contains(&id);
+        let listed_children = children
+            .iter()
+            .filter_map(|child| match child {
+                ChildRef::Page(child) => Some(child),
+                ChildRef::Database(_) => None,
+            })
+            .filter(|child| {
+                !pruned
+                    && rules.exclusion(child, SourceType::Page).is_none()
+                    && search.get(*child).is_some_and(|value| {
+                        value["parent"]["type"] == "page_id"
+                            && self::id(&value["parent"]["page_id"]).ok().as_ref() == Some(&id)
+                            && inactive(value) == Some(false)
+                    })
+            })
+            .cloned()
+            .collect();
         visit.pages.push(WalkedPage {
             entry,
             content: complete.then_some(PageContent {
@@ -337,9 +361,9 @@ impl NotionClient {
                 markdown: body.markdown,
             }),
             skip: None,
+            children: listed_children,
         });
-        // descendants_of keeps the page and prunes everything below it.
-        if rules.descendants_of.contains(&id) {
+        if pruned {
             return Ok(visit);
         }
         for child in children {

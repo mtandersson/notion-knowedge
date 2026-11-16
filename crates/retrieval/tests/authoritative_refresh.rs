@@ -49,9 +49,6 @@ impl CountingProvider {
     fn embeddings(&self) -> usize {
         self.count.load(Ordering::SeqCst)
     }
-    fn race_on_next_embedding(&self, source: Arc<Mutex<Model>>) {
-        *self.race.lock().unwrap() = Some(source);
-    }
 }
 impl EmbeddingProvider for CountingProvider {
     fn metadata(&self) -> &EmbeddingMetadata {

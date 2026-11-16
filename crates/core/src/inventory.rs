@@ -41,8 +41,13 @@ impl InventoryParent {
         let (mut source, mut database) = (None, None);
         for node in &evidence.ancestry[1..] {
             match node.kind {
-                LifecycleKind::DataSource => source = Some(node.id.clone()),
-                LifecycleKind::Database => database = Some(node.id.clone()),
+                // The nearest container wins, as in the walk.
+                LifecycleKind::DataSource => {
+                    source.get_or_insert_with(|| node.id.clone());
+                }
+                LifecycleKind::Database => {
+                    database.get_or_insert_with(|| node.id.clone());
+                }
                 LifecycleKind::Block => {}
                 LifecycleKind::Page => {
                     return Some(match (source, database) {

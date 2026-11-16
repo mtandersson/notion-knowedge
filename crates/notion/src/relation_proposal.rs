@@ -122,6 +122,7 @@ impl RelationProposalAdapter {
         names: &BTreeMap<String, String>,
         content: Option<&PageContent>,
         scope: &LifecycleScope,
+        children: &BTreeSet<String>,
     ) -> Result<CandidateProjection, BackendError> {
         let mut targets = BTreeSet::new();
         for value in metadata.properties.values() {
@@ -160,7 +161,11 @@ impl RelationProposalAdapter {
             // The page itself is in scope by the walk; only other targets
             // need their own authorization.
             for target in targets.into_iter().filter(|t| *t != metadata.page_id) {
-                let outcome = gate.authorize(&PageId(target.clone())).await.map(|_| ());
+                let outcome = if children.contains(&target) {
+                    Ok(())
+                } else {
+                    gate.authorize(&PageId(target.clone())).await.map(|_| ())
+                };
                 if outcome.is_ok() {
                     allowed.insert(target.clone());
                 }
@@ -215,7 +220,13 @@ impl RelationProposalAdapter {
             properties: page.properties.clone(),
         };
         let (edges, _) = self
-            .targets(&metadata, &page.relation_names, None, &scope)
+            .targets(
+                &metadata,
+                &page.relation_names,
+                None,
+                &scope,
+                &BTreeSet::new(),
+            )
             .await?;
         if *self.policy.read().await != scope {
             return Err(conflict());
@@ -234,7 +245,7 @@ impl RelationProposalAdapter {
         let snapshot = self
             .client
             .prepare_walked_page(walked, &scope, previous, chunks)?;
-        self.propose(snapshot, scope).await
+        self.propose(snapshot, scope, &walked.children).await
     }
 
     /// Propose a page from content the caller already read, for example to
@@ -249,7 +260,7 @@ impl RelationProposalAdapter {
     ) -> Result<RelationProposal, BackendError> {
         let scope = self.policy.read().await.clone();
         let snapshot = prepare_content(content, parent, root, &scope, previous, chunks)?;
-        self.propose(snapshot, scope).await
+        self.propose(snapshot, scope, &BTreeSet::new()).await
     }
 
     /// Read one page once (metadata and Markdown) and propose it. For a
@@ -274,6 +285,7 @@ impl RelationProposalAdapter {
         &self,
         snapshot: ScopedPageSnapshot,
         scope: LifecycleScope,
+        children: &BTreeSet<String>,
     ) -> Result<RelationProposal, BackendError> {
         let (edges, targets) = self
             .targets(
@@ -281,6 +293,7 @@ impl RelationProposalAdapter {
                 &snapshot.relation_names,
                 Some(snapshot.source()),
                 &scope,
+                children,
             )
             .await?;
         if *self.policy.read().await != scope {

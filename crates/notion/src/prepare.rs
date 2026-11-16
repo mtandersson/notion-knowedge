@@ -252,6 +252,7 @@ mod tests {
                 markdown: body.into(),
             }),
             skip: None,
+            children: Default::default(),
         }
     }
     fn walked(body: &str, title: &str) -> WalkedPage {

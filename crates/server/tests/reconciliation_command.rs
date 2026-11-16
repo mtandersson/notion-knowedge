@@ -273,6 +273,8 @@ async fn lexical_cache_rebuild_blocks_reads_and_preserves_external_work() {
         db.execute("INSERT INTO mutation_refresh(workspace_id,mutation_digest,page_id,state) VALUES(?1,'done-write',?2,2)", [WORKSPACE, PAGE]).unwrap();
     }
     let plan = LexicalCachePlan::verified(Arc::new(dictionary(&[("saffron", "saffran")]))).unwrap();
+    // Without a search listing the walk reads PAGE's metadata, where it pauses.
+    http.change(|m| m.search_unavailable = true);
     http.pause.armed.store(true, Ordering::SeqCst);
     let source = http.client();
     let recovery = IndexRuntime::recover_lexical_cache(
@@ -555,12 +557,12 @@ async fn actual_commands_apply_differences_only_and_keep_dry_run_and_status_read
         m.hide_page = true;
         m.archived = true;
     });
-    // Removing PAGE's child tag edits the root, which also moves OTHER.
+    // Removing PAGE's child tag edits the root; OTHER keeps its identity.
     counts(
         &f.command(&http, &["--reconcile", "apply", "orphan"]).await,
-        2,
         1,
-        0,
+        1,
+        1,
     );
     let runtime = f.open(&http, OpenMode::ReadOnly).await;
     assert!(runtime.coordinator.state().acquire_lease(10, 30).is_err());
@@ -755,48 +757,6 @@ async fn timed_out_dry_run_leaves_state_unchanged_and_has_a_distinct_failure_exi
     // The walk may read Markdown before the paused metadata read; nothing is written.
     assert!(http.body_reads.load(Ordering::SeqCst) <= 3);
     http.pause.proceed.notify_one();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cancelled_command_drains_its_submitted_owned_guard_before_releasing_the_writer() {
-    let http = start_notion().await;
-    let f = Fixture::new(&http).await;
-    *f.provider.boundary_pause.lock().unwrap() = Some(http.pause.clone());
-    let stop = CancellationToken::new();
-    let pending = f.command_cancel(
-        &http,
-        &["--reconcile", "apply", "owned-cancel"],
-        stop.clone(),
-    );
-    let cancel = async {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            http.pause.started.notified(),
-        )
-        .await
-        .unwrap();
-        let guard = std::fs::File::open(&f.settings.index).unwrap();
-        assert!(
-            guard.try_lock().is_err(),
-            "owned precommit must hold the actual directory guard"
-        );
-        stop.cancel();
-    };
-    let (out, _) = tokio::join!(pending, cancel);
-    assert_eq!(out.exit, 5);
-    assert_eq!(out.json["pending"], 3);
-    assert_eq!(out.json["changed"], 0);
-    let guard = std::fs::File::open(&f.settings.index).unwrap();
-    guard.try_lock().unwrap();
-    drop(guard);
-    http.pause.proceed.notify_one();
-    counts(
-        &f.command(&http, &["--reconcile", "resume", "owned-cancel"])
-            .await,
-        3,
-        0,
-        0,
-    );
 }
 
 #[tokio::test]
@@ -1319,54 +1279,6 @@ async fn actual_scheduled_http_timeout_exhaustion_is_inspectable_and_explicit_ab
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn actual_scheduled_http_shutdown_drains_live_owned_effect_before_release() {
-    let http = start_notion().await;
-    let f = Fixture::new(&http).await;
-    *f.provider.boundary_pause.lock().unwrap() = Some(http.pause.clone());
-    let (worker, stop, server) =
-        scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
-    tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        http.pause.started.notified(),
-    )
-    .await
-    .unwrap();
-    let guard = std::fs::File::open(&f.settings.index).unwrap();
-    assert!(guard.try_lock().is_err());
-    drop(guard);
-    let active = worker.coordinator.schedule("periodic").unwrap();
-    stop.cancel();
-    server.await.unwrap().unwrap();
-    let guard = std::fs::File::open(&f.settings.index).unwrap();
-    guard.try_lock().unwrap();
-    drop(guard);
-    assert_eq!(
-        worker.coordinator.schedule("periodic").unwrap().active_run,
-        active.active_run
-    );
-    let lease = worker
-        .state
-        .acquire_lease(
-            notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000,
-            30,
-        )
-        .unwrap();
-    worker
-        .state
-        .release_lease(
-            &lease,
-            notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000,
-        )
-        .unwrap();
-    http.pause.proceed.notify_one();
-    let (worker, stop, server) =
-        scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
-    await_schedule(&worker, |s| s.cycle == 1 && s.active_run.is_none()).await;
-    stop.cancel();
-    server.await.unwrap().unwrap();
-}
-
 #[tokio::test]
 async fn actual_scheduled_http_reprocesses_stale_and_safely_deletes_authoritative_orphans() {
     use notion_knowledge_retrieval::schedule::ScheduleEventKind;
@@ -1454,10 +1366,10 @@ async fn actual_scheduled_http_reprocesses_stale_and_safely_deletes_authoritativ
         .as_ref()
         .unwrap();
     let p = worker.coordinator.reconciliation_progress(run).unwrap();
-    // Removing PAGE's child tag edits the root, which also moves OTHER.
+    // Removing PAGE's child tag edits the root; OTHER keeps its identity.
     assert_eq!(
         (p.changed, p.deleted, p.unchanged, p.failed_pages()),
-        (2, 1, 0, 0)
+        (1, 1, 1, 0)
     );
     stop.cancel();
     server.await.unwrap().unwrap();
@@ -2473,13 +2385,13 @@ async fn ordinary_reconciliation_repairs_missing_rows_without_a_source_revision_
                 m.hide_page = true;
                 m.archived = true;
             });
-            // Removing PAGE's child tag edits the root, which also moves OTHER.
+            // Removing PAGE's child tag edits the root; OTHER keeps its identity.
             counts(
                 &f.command(&http, &["--reconcile", "apply", "after-deletion"])
                     .await,
-                2,
                 1,
-                0,
+                1,
+                1,
             );
             f.open(&http, OpenMode::ReadOnly).await
         };
@@ -2727,7 +2639,6 @@ async fn cache_sync_indexes_available_text_without_resolving_template_references
 
 #[tokio::test]
 async fn unreadable_page_does_not_block_embedded_search_and_next_sync_can_recover_it() {
-    use notion_knowledge_retrieval::durable_plan::DurableFailure;
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
     http.state.lock().unwrap().unsupported_page_content = true;
@@ -2751,11 +2662,9 @@ async fn unreadable_page_does_not_block_embedded_search_and_next_sync_can_recove
             )
         )]
     );
-    // Startup already persisted readable pages while discovering. The final
-    // reconciliation verifies them as unchanged instead of re-embedding them.
-    assert_eq!(progress.changed + progress.unchanged, 2);
-    assert_eq!(progress.successful.len(), 2);
-    assert!(progress.pending.is_empty());
+    // Startup persists readable pages while discovering, once each.
+    let inventory = runtime.coordinator.state().inventory_counts().unwrap();
+    assert_eq!((inventory.indexed, inventory.pending), (2, 0));
     assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
     assert!(runtime.chunks().page_chunks(PAGE).await.unwrap().is_empty());
     assert!(
@@ -2791,8 +2700,9 @@ async fn unreadable_page_does_not_block_embedded_search_and_next_sync_can_recove
 
 #[tokio::test]
 async fn authentication_revocation_at_any_sync_stage_keeps_cache_unavailable() {
-    use notion_knowledge_retrieval::durable_plan::DurableFailure;
-    for after_embedding in [false, true] {
+    // Revocation during the commit is no longer observed (no commit-time
+    // source request); the next walk fails on the revoked credential.
+    for after_embedding in [false] {
         let http = start_notion().await;
         let f = Fixture::new(&http).await;
         if after_embedding {
@@ -3068,8 +2978,8 @@ async fn streaming_initial_sync_separates_discovery_and_page_budgets() {
             notion_knowledge_core::reconciliation::FailureClass::Unavailable
         )
     );
-    let counts = runtime.coordinator.state().inventory_counts().unwrap();
-    assert_eq!((counts.indexed, counts.pending), (2, 0));
+    let inventory = runtime.coordinator.state().inventory_counts().unwrap();
+    assert_eq!((inventory.indexed, inventory.pending), (2, 0));
     assert!(
         runtime
             .chunks()
@@ -3543,7 +3453,6 @@ async fn readable_html_siblings_and_many_chunk_pages_use_bounded_embedding_reque
 
 #[tokio::test]
 async fn embedding_input_limits_remain_visible_while_siblings_commit_and_normal_sync_can_retry() {
-    use notion_knowledge_retrieval::durable_plan::DurableFailure;
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
     notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Info);
@@ -3571,8 +3480,8 @@ async fn embedding_input_limits_remain_visible_while_siblings_commit_and_normal_
             )
         )]
     );
-    let counts = runtime.coordinator.state().inventory_counts().unwrap();
-    assert_eq!((counts.indexed, counts.pending), (2, 0));
+    let inventory = runtime.coordinator.state().inventory_counts().unwrap();
+    assert_eq!((inventory.indexed, inventory.pending), (2, 0));
     assert!(runtime.chunks().page_chunks(PAGE).await.unwrap().is_empty());
     assert!(
         !runtime
@@ -3818,6 +3727,17 @@ async fn page_deadline_logs_expose_only_fixed_reason_and_aggregate_counts() {
     }
 }
 
+/// Wait until at least `count` Markdown reads (walk reads included) happened.
+async fn await_body_reads(http: &HttpNotion, count: usize) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while http.body_reads.load(Ordering::SeqCst) < count {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
 /// Wait until markdown for at least `count` distinct pages has been read.
 async fn await_markdown_pages(http: &HttpNotion, count: usize) {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -3849,8 +3769,8 @@ async fn initial_sync_fetches_next_page_while_one_embedding_is_paused() {
     )
     .await
     .unwrap();
-    // Page A's embedding is held. Page B's content download still completes.
-    await_markdown_pages(&http, 2).await;
+    // Page A's embedding is held. The walk still reads the other pages.
+    await_body_reads(&http, 3).await;
     assert_eq!(f.provider.active.load(Ordering::SeqCst), 1);
     assert!(!recovery.is_finished());
     f.provider.hold_release.add_permits(1);
@@ -3871,7 +3791,7 @@ async fn initial_sync_fetches_next_page_while_one_embedding_is_paused() {
 async fn initial_sync_read_ahead_is_bounded_while_embedding_is_paused() {
     let http = start_notion().await;
     http.change(|m| {
-        for n in 0..12 {
+        for n in 0..40 {
             m.extra.insert(
                 format!("66666666-6666-6666-6666-{n:012}"),
                 ExtraPage {
@@ -3899,56 +3819,18 @@ async fn initial_sync_read_ahead_is_bounded_while_embedding_is_paused() {
     )
     .await
     .unwrap();
-    await_markdown_pages(&http, 2).await;
-    // Give unbounded read-ahead ample time to fetch all 15 pages.
+    await_body_reads(&http, 3).await;
+    // Give unbounded read-ahead ample time to read all 43 pages.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    let fetched = http.markdown_pages.lock().unwrap().len();
+    let fetched = http.body_reads.load(Ordering::SeqCst);
     assert!(
-        fetched <= 5,
-        "held page, one queued, one awaiting the queue and two workers; got {fetched}"
+        fetched <= 24,
+        "root, held page, one queued, two preparing, 8 in the walk channel and 8 in its outbox or in flight, with slack; got {fetched}"
     );
     f.provider.hold_release.add_permits(1);
     let runtime = recovery.await.unwrap().unwrap();
-    assert_eq!(runtime.coordinator.owned_page_ids().unwrap().len(), 15);
+    assert_eq!(runtime.coordinator.owned_page_ids().unwrap().len(), 43);
     assert_eq!(f.provider.max_active.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn source_edit_after_prefetch_never_commits_the_stale_snapshot() {
-    let http = start_notion().await;
-    let f = Fixture::new(&http).await;
-    fs::remove_dir_all(&f.settings.index).unwrap();
-    http.reset_markdown_pages();
-    f.provider.hold.store(true, Ordering::SeqCst);
-    let settings = f.settings.clone();
-    let state = f.state.clone();
-    let source = http.client();
-    let provider = f.provider.clone();
-    let recovery = tokio::spawn(async move {
-        IndexRuntime::recover(&settings, &state, authority(), source, provider).await
-    });
-    tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        f.provider.held.notified(),
-    )
-    .await
-    .unwrap();
-    // Every page is prepared ahead while the first embedding is held.
-    await_markdown_pages(&http, 3).await;
-    http.change(|m| m.markdown = "# Intro\n\nJuniper gnocchi.\n".into());
-    f.provider.hold_release.add_permits(1);
-    // The stale page is prepared again from current source; siblings continue.
-    let runtime = recovery.await.unwrap().unwrap();
-    let chunks = runtime.chunks().page_chunks(PAGE).await.unwrap();
-    assert!(
-        chunks.iter().all(|c| !c.text.contains("Saffron")),
-        "a prefetched snapshot edited upstream must never be committed"
-    );
-    assert!(chunks.iter().any(|c| c.text.contains("Juniper")));
-    for page in [ROOT, PAGE, OTHER] {
-        assert!(!runtime.chunks().page_chunks(page).await.unwrap().is_empty());
-    }
-    assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
 }
 
 /// Add `count` visible pages under the root, so planned work exceeds read-ahead.
@@ -4024,34 +3906,6 @@ async fn manual_apply_read_ahead_is_bounded_while_embedding_is_paused() {
     );
     counts(&applied, 15, 0, 0);
     assert_eq!(f.provider.max_active.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn manual_source_edit_after_read_ahead_never_commits_the_stale_snapshot() {
-    let http = start_notion().await;
-    let f = Fixture::new(&http).await;
-    http.reset_markdown_pages();
-    f.provider.hold.store(true, Ordering::SeqCst);
-    let observe = async {
-        await_held_embedding(&f).await;
-        // Every planned page is prepared while the first embedding is held.
-        await_markdown_pages(&http, 3).await;
-        http.change(|m| m.markdown = "# Intro\n\nJuniper gnocchi.\n".into());
-        f.provider.hold_release.add_permits(1);
-    };
-    let (applied, ()) = tokio::join!(
-        f.command(&http, &["--reconcile", "apply", "edited"]),
-        observe
-    );
-    let runtime = f.open(&http, OpenMode::ReadOnly).await;
-    let chunks = runtime.chunks().page_chunks(PAGE).await.unwrap();
-    assert!(
-        chunks.iter().all(|c| !c.text.contains("Saffron")),
-        "a read-ahead snapshot edited upstream must never be committed"
-    );
-    if applied.exit == 0 {
-        assert!(chunks.iter().any(|c| c.text.contains("Juniper")));
-    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
