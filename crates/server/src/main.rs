@@ -225,13 +225,19 @@ async fn run() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        return match client.crawl_with_exclusions(&roots, &rules).await {
-            Ok(report) => {
-                // Output intentionally includes discovered titles/links; no
-                // content is printed before the complete read-only run succeeds.
+        let scope = notion_knowledge_core::lifecycle::LifecycleScope {
+            workspace_id: String::new(),
+            generation: 0,
+            roots,
+            exclusions: rules,
+        };
+        return match client.walk_tree(&scope, None).await {
+            Ok(walk) => {
+                // Ids, parents and timestamps only; nothing is printed before
+                // the complete read-only walk succeeds.
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&report).expect("serializable discovery")
+                    serde_json::to_string_pretty(&walk).expect("serializable walk")
                 );
                 ExitCode::SUCCESS
             }

@@ -14,7 +14,9 @@ use notion_knowledge_core::{
     reconciliation::ReconciliationScope,
     sync_state::{PageSyncState, SyncStateStore},
 };
-use notion_knowledge_notion::{NotionClient, relation_proposal::RelationProposalAdapter};
+use notion_knowledge_notion::{
+    NotionClient, relation_proposal::RelationProposalAdapter, walk::TreeWalk,
+};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -275,24 +277,25 @@ impl AuthoritativeReconciliationPlanner {
         }
         Ok(result)
     }
-    /// The dry-run and apply sibling share this typed plan. No operational
-    /// metadata, content extraction, embedding, or acknowledgments are written.
+    /// The dry-run and apply sibling share this typed plan. It walks the
+    /// tree first; no operational metadata, content extraction, embedding,
+    /// or acknowledgments are written.
     pub async fn plan(&self) -> Result<ReconciliationPlan, PlanError> {
-        self.plan_report(None).await
+        let walk = self.notion.walk_tree(&self.scope, None).await;
+        self.plan_from(walk.as_ref().map_err(|error| error.kind))
+            .await
     }
 
-    /// Use a completed startup traversal after early independently authorized
-    /// page refreshes. Capture the local predecessor AFTER those writes finish.
-    pub async fn plan_discovered(
-        &self,
-        report: notion_knowledge_core::discovery::DiscoveryReport,
-    ) -> Result<ReconciliationPlan, PlanError> {
-        self.plan_report(Some(report)).await
+    /// Plan against a walk the caller already completed, for example the
+    /// startup walk that streamed early page refreshes. Capture the local
+    /// predecessor AFTER those writes finish.
+    pub async fn plan_walk(&self, walk: &TreeWalk) -> Result<ReconciliationPlan, PlanError> {
+        self.plan_from(Ok(walk)).await
     }
 
-    async fn plan_report(
+    async fn plan_from(
         &self,
-        report: Option<notion_knowledge_core::discovery::DiscoveryReport>,
+        walk: Result<&TreeWalk, BackendErrorKind>,
     ) -> Result<ReconciliationPlan, PlanError> {
         let index_version = self
             .guard
@@ -312,35 +315,24 @@ impl AuthoritativeReconciliationPlanner {
             traversal_complete: false,
         };
         let mut discovered = BTreeSet::new();
-        let discovery = match report {
-            Some(report) => Ok(report),
-            None => {
-                self.notion
-                    .crawl_with_exclusions(&self.scope.roots, &self.scope.exclusions)
-                    .await
-            }
-        };
-        match discovery {
-            Ok(report) => {
-                // Copied synced content is not a physical child subtree. Its
-                // completeness belongs to the host page's content attempt;
-                // discovery must never follow it to widen root authority.
-                plan.traversal_complete = !report
-                    .skipped
-                    .iter()
-                    .any(|s| s.reason == SkipReason::Inaccessible);
-                for skipped in &report.skipped {
+        match walk {
+            Ok(walk) => {
+                // Only a complete walk may plan deletions. An unreadable child
+                // also blocks them: its unreached subtree may still exist.
+                plan.traversal_complete = walk.complete;
+                for skipped in &walk.skipped {
                     if skipped.reason == SkipReason::Inaccessible {
+                        plan.traversal_complete = false;
                         plan.errors
                             .insert(skipped.id.clone(), PlanError::Permission);
                     }
                 }
-                discovered.extend(report.pages.into_iter().map(|p| p.id));
+                discovered = walk.readable();
                 if !plan.traversal_complete {
                     plan.run_errors.push(PlanError::IncompleteTraversal);
                 }
             }
-            Err(error) => plan.run_errors.push(PlanError::Traversal(error.kind)),
+            Err(kind) => plan.run_errors.push(PlanError::Traversal(kind)),
         }
         let ids: BTreeSet<_> = discovered
             .iter()

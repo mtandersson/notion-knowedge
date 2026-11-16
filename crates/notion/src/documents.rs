@@ -1,52 +1,67 @@
 //! Read-only scoped canonical snapshots; no index or embedding side effects.
 use crate::{
-    NotionClient, link_graph::page_link_edges, links::extract_relationships,
-    media_identity::canonical_content, pages::page_id,
+    NotionClient,
+    link_graph::page_link_edges,
+    links::extract_relationships,
+    media_identity::canonical_content,
+    pages::page_id,
+    walk::{TreeWalk, WalkedPage},
 };
 use notion_knowledge_core::{
     backend::{BackendError, BackendErrorKind, Page, PageContent, PageId},
     chunking::{ChunkConfig, chunk_document},
-    discovery::{DiscoveryReport, ExclusionRules},
+    discovery::ExclusionRules,
     fingerprint::{content_hash, identify_chunks},
     graph::GraphEdgeStore,
     indexed::{IndexedChunk, IndexedDocument, IndexedMetadata, SchemaVersion, SourceMetadata},
+    inventory::InventoryParent,
+    lifecycle::LifecycleScope,
     relations::relation_edges,
     sync_state::{SyncStateError, validate_identifier},
 };
 
 #[derive(Debug, serde::Serialize)]
 pub struct DocumentSnapshot {
-    pub discovery: DiscoveryReport,
+    /// The full authorized walk, even when only one page's content was kept.
+    pub walk: TreeWalk,
     pub documents: Vec<IndexedDocument>,
     pub chunks: Vec<IndexedChunk>,
 }
 
-/// Persist relation-property edges only from a *completed* authorized crawl.
+/// Persist relation-property edges only from a *completed* authorized walk.
 /// The caller must first ensure this snapshot is current for its trusted root,
 /// commit lease and exclusion policy. This method cannot grant graph traversal.
 impl DocumentSnapshot {
+    /// Snapshots are single-root: exactly one walked entry has a root parent.
+    fn root(&self) -> Result<&str, SyncStateError> {
+        let mut roots = self
+            .walk
+            .entries
+            .iter()
+            .filter(|e| e.parent == InventoryParent::Root);
+        match (roots.next(), roots.next()) {
+            (Some(root), None) => {
+                validate_identifier(&root.page_id)?;
+                Ok(&root.page_id)
+            }
+            _ => Err(SyncStateError::InvalidInput),
+        }
+    }
     /// Persist graph links from the lossless page bodies in this authorized
     /// snapshot. Independent relation-property edges are never touched.
-    /// The caller supplies the fresh authorized crawl and commit fence.
+    /// The caller supplies the fresh authorized walk and commit fence.
     pub fn persist_link_edges(&self, store: &dyn GraphEdgeStore) -> Result<(), SyncStateError> {
         use std::collections::BTreeSet;
 
-        if self.discovery.roots.len() != 1 {
-            return Err(SyncStateError::InvalidInput);
-        }
-        let root = &self.discovery.roots[0];
-        validate_identifier(root)?;
-        let allowed: BTreeSet<_> = self.discovery.pages.iter().map(|p| p.id.clone()).collect();
-        if allowed.len() != self.discovery.pages.len() {
-            return Err(SyncStateError::InvalidInput);
-        }
+        let root = self.root()?;
+        let allowed = self.walk.readable();
 
         let mut prepared = Vec::with_capacity(self.documents.len());
         let mut seen = BTreeSet::new();
         let mut workspace = None;
         for doc in &self.documents {
             if !seen.insert(doc.metadata.page_id.clone())
-                || doc.metadata.source.root_page_id != *root
+                || doc.metadata.source.root_page_id != root
                 || !allowed.contains(&doc.metadata.page_id)
             {
                 return Err(SyncStateError::InvalidInput);
@@ -88,23 +103,16 @@ impl DocumentSnapshot {
     pub fn persist_relation_edges(&self, store: &dyn GraphEdgeStore) -> Result<(), SyncStateError> {
         use std::collections::BTreeSet;
 
-        // A selected-page snapshot has the *full* authorized discovery set,
-        // even when only the selected page's content was read.
-        if self.discovery.roots.len() != 1 {
-            return Err(SyncStateError::InvalidInput);
-        }
-        let root = &self.discovery.roots[0];
-        validate_identifier(root)?;
-        let allowed: BTreeSet<_> = self.discovery.pages.iter().map(|p| p.id.clone()).collect();
-        if allowed.len() != self.discovery.pages.len() {
-            return Err(SyncStateError::InvalidInput);
-        }
+        // A selected-page snapshot has the *full* authorized walk, even when
+        // only the selected page's content was kept.
+        let root = self.root()?;
+        let allowed = self.walk.readable();
         let mut prepared = Vec::with_capacity(self.documents.len());
         let mut seen = BTreeSet::new();
         let mut workspace = None;
         for doc in &self.documents {
             if !seen.insert(doc.metadata.page_id.clone())
-                || doc.metadata.source.root_page_id != *root
+                || doc.metadata.source.root_page_id != root
                 || !allowed.contains(&doc.metadata.page_id)
             {
                 return Err(SyncStateError::InvalidInput);
@@ -141,9 +149,42 @@ fn error(kind: BackendErrorKind) -> BackendError {
 }
 
 impl NotionClient {
-    /// Assemble one fresh root snapshot. Only successfully discovered page IDs
-    /// reach exact reads. Any failure discards the entire in-memory snapshot.
-    /// Workspace identity is trusted caller provenance, not an authorization claim.
+    /// Walk one root and keep each readable page's walked content. Any walk
+    /// failure discards the entire in-memory snapshot.
+    async fn walk_documents(
+        &self,
+        root: &PageId,
+        workspace_id: &str,
+        rules: &ExclusionRules,
+    ) -> Result<(TreeWalk, Vec<WalkedPage>), BackendError> {
+        let scope = LifecycleScope {
+            workspace_id: workspace_id.into(),
+            generation: 0,
+            roots: vec![root.clone()],
+            exclusions: rules.clone(),
+        };
+        let (send, mut receive) = tokio::sync::mpsc::channel(8);
+        let walk = async move {
+            let send = send;
+            self.walk_tree(&scope, Some(&send)).await
+        };
+        let collect = async {
+            let mut pages = Vec::new();
+            while let Some(page) = receive.recv().await {
+                if page.skip.is_none() {
+                    pages.push(page);
+                }
+            }
+            pages
+        };
+        let (walk, mut pages) = futures_util::future::join(walk, collect).await;
+        pages.sort_by(|a, b| a.entry.page_id.cmp(&b.entry.page_id));
+        Ok((walk?, pages))
+    }
+
+    /// Assemble one fresh root snapshot from a single walk. Only walked,
+    /// readable pages are assembled. Workspace identity is trusted caller
+    /// provenance, not an authorization claim.
     pub async fn discover_documents(
         &self,
         root: &str,
@@ -158,15 +199,12 @@ impl NotionClient {
         {
             return Err(error(BackendErrorKind::InvalidInput));
         }
-        let discovery = self
-            .crawl_with_exclusions(std::slice::from_ref(&root), rules)
-            .await?;
-        self.assemble_documents(root.0, workspace_id, discovery, config)
-            .await
+        let (walk, pages) = self.walk_documents(&root, workspace_id, rules).await?;
+        assemble_documents(root.0, workspace_id, walk, pages, config)
     }
 
-    /// Fresh discovery authorizes exactly one selected page. Other discovered
-    /// pages and referenced targets never reach content extraction.
+    /// A fresh walk authorizes exactly one selected page. Other walked pages
+    /// and referenced targets never reach chunking.
     pub async fn discover_selected_document(
         &self,
         root: &str,
@@ -183,74 +221,69 @@ impl NotionClient {
         {
             return Err(error(BackendErrorKind::InvalidInput));
         }
-        let discovery = self
-            .crawl_with_exclusions(std::slice::from_ref(&root), rules)
-            .await?;
-        if !discovery.pages.iter().any(|page| page.id == selected.0) {
+        let (walk, mut pages) = self.walk_documents(&root, workspace_id, rules).await?;
+        pages.retain(|page| page.entry.page_id == selected.0);
+        if pages.is_empty() {
             return Err(error(BackendErrorKind::PermissionDenied));
         }
-        let mut selected_report = discovery.clone();
-        selected_report.pages.retain(|page| page.id == selected.0);
-        let mut snapshot = self
-            .assemble_documents(root.0, workspace_id, selected_report, config)
-            .await?;
-        snapshot.discovery = discovery;
-        Ok(snapshot)
+        assemble_documents(root.0, workspace_id, walk, pages, config)
     }
+}
 
-    async fn assemble_documents(
-        &self,
-        root: String,
-        workspace_id: &str,
-        discovery: DiscoveryReport,
-        config: ChunkConfig,
-    ) -> Result<DocumentSnapshot, BackendError> {
-        let mut documents = Vec::new();
-        let mut chunks = Vec::new();
-        for discovered in &discovery.pages {
-            let content = canonical_content(self.read_content(&discovered.id).await?);
-            if content.page.archived {
-                return Err(error(BackendErrorKind::Conflict));
-            }
-            let document = IndexedDocument {
-                schema_version: SchemaVersion::V1,
-                metadata: IndexedMetadata {
-                    page_id: content.page.id.0.clone(),
-                    block_id: None,
-                    url: content.page.url.clone(),
-                    title: content.page.title.clone(),
-                    heading_path: Vec::new(),
-                    last_edited_time: content.page.last_edited_time.clone(),
-                    source: SourceMetadata {
-                        workspace_id: workspace_id.into(),
-                        root_page_id: root.clone(),
-                        database_id: None,
-                        data_source_id: None,
-                    },
-                    properties: content.page.properties.clone(),
+fn assemble_documents(
+    root: String,
+    workspace_id: &str,
+    walk: TreeWalk,
+    pages: Vec<WalkedPage>,
+    config: ChunkConfig,
+) -> Result<DocumentSnapshot, BackendError> {
+    let mut documents = Vec::new();
+    let mut chunks = Vec::new();
+    for walked in pages {
+        // Truncated or partially rendered pages are never partial successes.
+        let content = canonical_content(
+            walked
+                .content
+                .ok_or_else(|| error(BackendErrorKind::UnsupportedContent))?,
+        );
+        let document = IndexedDocument {
+            schema_version: SchemaVersion::V1,
+            metadata: IndexedMetadata {
+                page_id: content.page.id.0.clone(),
+                block_id: None,
+                url: content.page.url.clone(),
+                title: content.page.title.clone(),
+                heading_path: Vec::new(),
+                last_edited_time: content.page.last_edited_time.clone(),
+                source: SourceMetadata {
+                    workspace_id: workspace_id.into(),
+                    root_page_id: root.clone(),
+                    database_id: None,
+                    data_source_id: None,
                 },
-                text: content.markdown.clone(),
-                content_hash: content_hash(&content.markdown),
-                links: extract_relationships(&content).links,
-            };
-            let drafts = chunk_document(&document, config)
-                .map_err(|_| error(BackendErrorKind::InvalidInput))?;
-            let mut identified =
-                identify_chunks(drafts, &[]).map_err(|_| error(BackendErrorKind::Internal))?;
-            for chunk in &mut identified {
-                chunk.links = extract_relationships(&PageContent {
-                    page: content.page.clone(),
-                    markdown: chunk.text.clone(),
-                })
-                .links;
-            }
-            chunks.extend(identified);
-            documents.push(document);
+                properties: content.page.properties.clone(),
+            },
+            text: content.markdown.clone(),
+            content_hash: content_hash(&content.markdown),
+            links: extract_relationships(&content).links,
+        };
+        let drafts =
+            chunk_document(&document, config).map_err(|_| error(BackendErrorKind::InvalidInput))?;
+        let mut identified =
+            identify_chunks(drafts, &[]).map_err(|_| error(BackendErrorKind::Internal))?;
+        for chunk in &mut identified {
+            chunk.links = extract_relationships(&PageContent {
+                page: content.page.clone(),
+                markdown: chunk.text.clone(),
+            })
+            .links;
         }
-        Ok(DocumentSnapshot {
-            discovery,
-            documents,
-            chunks,
-        })
+        chunks.extend(identified);
+        documents.push(document);
     }
+    Ok(DocumentSnapshot {
+        walk,
+        documents,
+        chunks,
+    })
 }

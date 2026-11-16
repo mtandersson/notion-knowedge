@@ -6,6 +6,7 @@ members = [
   "crates/retrieval",
   "crates/mcp",
   "crates/server",
+  "crates/notion-fake",
 ]
 
 [workspace.package]

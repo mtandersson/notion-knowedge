@@ -1,9 +1,9 @@
 # Scoped canonical document smoke
 
 `NotionClient::discover_documents` assembles the phase-1 read path for one explicit
-root and trusted workspace provenance. It completes `crawl_with_exclusions`
-before fetching content, then consumes only the report's allowed IDs. Each exact
-read normalizes properties and preserves enhanced Markdown, IDs, authoritative
+root and trusted workspace provenance. It completes one `walk_tree` from the
+root and assembles only the readable pages that walk reached, from the content
+the walk already read. Each page read normalizes properties and preserves enhanced Markdown, IDs, authoritative
 URL and edit timestamp. Local relationship extraction does not follow references.
 The heading-aware chunker and versioned fingerprints produce schema-1
 `IndexedDocument` and `IndexedChunk` records with citation metadata. Chunk links
@@ -20,8 +20,7 @@ stable fresh IDs, while cross-edit reconciliation remains available through
 `identify_chunks` in the owning downstream consumer.
 
 Notion does not provide an atomic snapshot: content can move or change between
-crawl and exact read. This smoke inherits the crawler's concurrency limitations;
-repeat discovery to reconcile the current scope. Workspace ID is supplied trusted
+pages read during one walk. Repeat the walk to reconcile the current scope. Workspace ID is supplied trusted
 provenance, not independently verified by this method. Database/data-source and
 source-block IDs are absent rather than guessed from incomplete discovery data.
 Multiple roots can be run separately; resolving overlapping-root provenance is
@@ -80,9 +79,9 @@ embedding, sync and semantic MCP retrieval remain their own implementation epics
 
 ## Explicit selected-page consumer
 
-`discover_selected_document` completes the same fresh exclusion-aware crawl,
-rejects a selected page absent from its allowed report, and extracts/chunks only
-that page. It retains the full discovery report for audit while the canonical
+`discover_selected_document` completes the same fresh exclusion-aware walk,
+rejects a selected page the walk did not reach as readable, and extracts/chunks only
+that page. It retains the full walk for audit while the canonical
 records contain exactly the selected page. Other discovered pages and links do
 not enter extraction. This is used by the experimental one-page vector spike;
 it does not write an index inside the authoritative adapter.

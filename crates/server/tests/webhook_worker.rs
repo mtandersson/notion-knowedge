@@ -158,15 +158,17 @@ impl HttpNotion {
                     mutations.fetch_add(1, Ordering::SeqCst);
                 }
                 let snapshot = values.lock().unwrap().clone();
-                let mut response = if route == format!("/v1/blocks/{ROOT}/children?page_size=100") {
-                    json!({"object":"list","results":[
-                        {"object":"block","id":PAGE,"type":"child_page","archived":false,"has_children":false,"parent":{"type":"page_id","page_id":ROOT},"child_page":{"title":snapshot.title}},
-                        {"object":"block","id":OTHER,"type":"child_page","archived":false,"has_children":false,"parent":{"type":"page_id","page_id":ROOT},"child_page":{"title":"Separate"}}
-                    ],"has_more":false,"next_cursor":null})
-                } else if route.starts_with("/v1/blocks/") && route.contains("/children") {
-                    json!({"object":"list","results":[],"has_more":false,"next_cursor":null})
-                } else if route == format!("/v1/pages/{ROOT}/markdown") {
-                    json!({"object":"page_markdown","id":ROOT,"markdown":"","truncated":false,"unknown_block_ids":[]})
+                let mut response = if route == format!("/v1/pages/{ROOT}/markdown") {
+                    // The walk reaches both children through their <page> tags.
+                    let markdown = [PAGE, OTHER]
+                        .map(|id| {
+                            format!(
+                                "<page url=\"https://www.notion.so/{}\">Child</page>\n",
+                                id.replace('-', "")
+                            )
+                        })
+                        .concat();
+                    json!({"object":"page_markdown","id":ROOT,"markdown":markdown,"truncated":false,"unknown_block_ids":[]})
                 } else if route == format!("/v1/pages/{PAGE}/markdown") {
                     bodies.fetch_add(1, Ordering::SeqCst);
                     json!({

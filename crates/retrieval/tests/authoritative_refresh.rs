@@ -15,7 +15,6 @@ use notion_knowledge_retrieval::{
     commit::{CommitBinding, CommitOutcome, IndexCommitCoordinator},
     refresh::{AuthoritativePageRefresh, RefreshError},
 };
-use serde_json::{Value, json};
 use std::{
     fs,
     path::PathBuf,
@@ -24,331 +23,11 @@ use std::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const PAGE: &str = "11111111-1111-1111-1111-111111111111";
-const OTHER: &str = "55555555-5555-5555-5555-555555555555";
-const ROOT: &str = "22222222-2222-2222-2222-222222222222";
-const FOREIGN: &str = "33333333-3333-3333-3333-333333333333";
-const WORKSPACE: &str = "44444444-4444-4444-4444-444444444444";
+use notion_fake::{
+    ExtraPage, FOREIGN, FakeNotion as HttpNotion, Model, OTHER, PAGE, ROOT, RequestPause, WORKSPACE,
+};
 static NEXT: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Clone)]
-struct ExtraPage {
-    title: String,
-    visible: bool,
-    archived: bool,
-}
-#[derive(Clone)]
-struct Model {
-    markdown: String,
-    rotate_media: bool,
-    title: String,
-    revision: String,
-    parent: String,
-    archived: bool,
-    root_revision: String,
-    hide_page: bool,
-    copied_reference: bool,
-    inaccessible_other: bool,
-    inaccessible_foreign: bool,
-    foreign_parent: String,
-    inaccessible_root: bool,
-    inaccessible_page: bool,
-    race_metadata: bool,
-    race_metadata_once: bool,
-    race_move: bool,
-    level: u64,
-    relation_name: Option<String>,
-    relation_targets: Vec<String>,
-    extra: std::collections::BTreeMap<String, ExtraPage>,
-}
-impl Default for Model {
-    fn default() -> Self {
-        Self {
-            markdown: "# Intro\n\nSaffron ravioli.\n\n## Other\n\nAn evergreen section.\n".into(),
-            rotate_media: false,
-            title: "First".into(),
-            revision: "2026-10-10T12:00:00Z".into(),
-            parent: ROOT.into(),
-            archived: false,
-            root_revision: "2026-10-10T11:00:00Z".into(),
-            hide_page: false,
-            copied_reference: false,
-            inaccessible_other: false,
-            inaccessible_foreign: false,
-            foreign_parent: "workspace".into(),
-            inaccessible_root: false,
-            inaccessible_page: false,
-            race_metadata: false,
-            race_metadata_once: false,
-            race_move: false,
-            level: 3,
-            relation_name: None,
-            relation_targets: vec![],
-            extra: Default::default(),
-        }
-    }
-}
-#[derive(Default)]
-struct RequestPause {
-    owned_directory: Mutex<Option<PathBuf>>,
-    armed: AtomicBool,
-    started: tokio::sync::Notify,
-    proceed: tokio::sync::Notify,
-}
-impl RequestPause {
-    fn ready(&self) -> bool {
-        if !self.armed.load(Ordering::SeqCst) {
-            return false;
-        }
-        if let Some(directory) = self.owned_directory.lock().unwrap().as_ref() {
-            let guard = fs::File::open(directory).unwrap();
-            match guard.try_lock() {
-                Ok(()) => return false,
-                Err(fs::TryLockError::WouldBlock) => {}
-                Err(error) => panic!("fixture cannot observe directory guard: {error:?}"),
-            }
-        }
-        self.armed.swap(false, Ordering::SeqCst)
-    }
-}
-struct HttpNotion {
-    state: Arc<Mutex<Model>>,
-    attempts: Arc<AtomicUsize>,
-    body_reads: Arc<AtomicUsize>,
-    target_body_reads: Arc<AtomicUsize>,
-    foreign_body_reads: Arc<AtomicUsize>,
-    fail_once: Arc<AtomicBool>,
-    server: tokio::task::JoinHandle<()>,
-    port: u16,
-    pause: Arc<RequestPause>,
-}
-impl HttpNotion {
-    async fn start() -> Self {
-        let state = Arc::new(Mutex::new(Model::default()));
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let body_reads = Arc::new(AtomicUsize::new(0));
-        let target_body_reads = Arc::new(AtomicUsize::new(0));
-        let foreign_body_reads = Arc::new(AtomicUsize::new(0));
-        let foreign_bodies = foreign_body_reads.clone();
-        let fail_once = Arc::new(AtomicBool::new(false));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let values = state.clone();
-        let counts = attempts.clone();
-        let bodies = body_reads.clone();
-        let target_bodies = target_body_reads.clone();
-        let fail = fail_once.clone();
-        let pause = Arc::new(RequestPause::default());
-        let boundary = pause.clone();
-        let server = tokio::spawn(async move {
-            loop {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut bytes = Vec::new();
-                loop {
-                    let mut part = [0u8; 2048];
-                    let size = stream.read(&mut part).await.unwrap();
-                    if size == 0 {
-                        break;
-                    }
-                    bytes.extend_from_slice(&part[..size]);
-                    if bytes.windows(4).any(|v| v == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                if bytes.is_empty() {
-                    continue;
-                }
-                let req = String::from_utf8(bytes).unwrap();
-                assert!(req.contains("authorization: Bearer fixture-credential"));
-                assert!(req.contains("notion-version: 2026-03-11"));
-                assert!(req.starts_with("GET /v1/"));
-                counts.fetch_add(1, Ordering::SeqCst);
-                let route = req
-                    .lines()
-                    .next()
-                    .unwrap()
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap();
-                if route == format!("/v1/pages/{PAGE}") && boundary.ready() {
-                    boundary.started.notify_one();
-                    boundary.proceed.notified().await;
-                }
-                if route == format!("/v1/pages/{FOREIGN}/markdown") {
-                    foreign_bodies.fetch_add(1, Ordering::SeqCst);
-                }
-                if route == format!("/v1/pages/{OTHER}/markdown") {
-                    target_bodies.fetch_add(1, Ordering::SeqCst);
-                }
-                if route.ends_with("/markdown") {
-                    bodies.fetch_add(1, Ordering::SeqCst);
-                }
-                let snapshot = values.lock().unwrap().clone();
-                if snapshot.race_metadata && route == format!("/v1/pages/{PAGE}") {
-                    values.lock().unwrap().title.push('!');
-                }
-                if snapshot.race_metadata_once && route == format!("/v1/pages/{PAGE}") {
-                    let mut model = values.lock().unwrap();
-                    model.race_metadata_once = false;
-                    model.title.push('!');
-                }
-                if snapshot.race_move && route == format!("/v1/pages/{PAGE}") {
-                    values.lock().unwrap().parent = if snapshot.parent == ROOT {
-                        FOREIGN.into()
-                    } else {
-                        ROOT.into()
-                    };
-                }
-                let response = if (snapshot.inaccessible_root
-                    && route == format!("/v1/pages/{ROOT}"))
-                    || (snapshot.inaccessible_other && route == format!("/v1/pages/{OTHER}"))
-                    || (snapshot.inaccessible_foreign && route == format!("/v1/pages/{FOREIGN}"))
-                    || (snapshot.inaccessible_page && route == format!("/v1/pages/{PAGE}"))
-                {
-                    json!({"object":"error", "code":"object_not_found"})
-                } else if route == format!("/v1/blocks/{ROOT}/children?page_size=100") {
-                    let mut children = vec![
-                        json!({"object":"block","id":OTHER,"type":"child_page","archived":false,"has_children":false,"parent":{"type":"page_id","page_id":ROOT},"child_page":{"title":"Separate"}}),
-                    ];
-                    if snapshot.copied_reference {
-                        children.push(json!({"object":"block","id":"66666666-6666-6666-6666-666666666666","type":"synced_block","archived":false,"has_children":true,"parent":{"type":"page_id","page_id":ROOT},"synced_block":{"synced_from":{"block_id":FOREIGN}}}));
-                    }
-                    for (id, page) in &snapshot.extra {
-                        if page.visible {
-                            children.push(json!({"object":"block","id":id,"type":"child_page","archived":false,"has_children":false,"parent":{"type":"page_id","page_id":ROOT},"child_page":{"title":page.title}}));
-                        }
-                    }
-                    if !snapshot.hide_page {
-                        children.push(json!({"object":"block","id":PAGE,"type":"child_page","archived":false,"has_children":false,"parent":{"type":"page_id","page_id":ROOT},"child_page":{"title":"First"}}));
-                    }
-                    json!({"object":"list","results":children,"has_more":false,"next_cursor":null})
-                } else if route.starts_with("/v1/blocks/") && route.contains("/children") {
-                    json!({"object":"list","results":[],"has_more":false,"next_cursor":null})
-                } else if route == format!("/v1/pages/{PAGE}/markdown") {
-                    json!({
-                        "object": "page_markdown",
-                        "id": PAGE,
-                        "markdown": if snapshot.rotate_media {
-                            snapshot.markdown.replace("AUTH_GENERATION", &bodies.load(Ordering::SeqCst).to_string())
-                        } else { snapshot.markdown },
-                        "truncated": false,
-                        "unknown_block_ids": []
-                    })
-                } else if route == format!("/v1/pages/{PAGE}") {
-                    let mut page = page_metadata(
-                        PAGE,
-                        &snapshot.parent,
-                        &snapshot.title,
-                        &snapshot.revision,
-                        snapshot.archived,
-                    );
-                    page["properties"]["level"]["number"] = json!(snapshot.level);
-                    if let Some(name) = &snapshot.relation_name {
-                        page["properties"][name] = json!({"id":"related-stable", "type":"relation", "relation": snapshot.relation_targets.iter().map(|id|json!({"id":id})).collect::<Vec<_>>(),"has_more":false});
-                    }
-                    page
-                } else if route == format!("/v1/pages/{OTHER}/markdown") {
-                    json!({"object":"page_markdown", "id":OTHER,
-                        "markdown":"# Separate\n\nUntouched cinnamon.\n", "truncated":false,
-                        "unknown_block_ids":[]})
-                } else if route == format!("/v1/pages/{OTHER}") {
-                    page_metadata(OTHER, ROOT, "Separate", "2026-10-10T11:00:00Z", false)
-                } else if let Some((id, page)) = snapshot
-                    .extra
-                    .iter()
-                    .find(|(id, _)| route == format!("/v1/pages/{id}"))
-                {
-                    page_metadata(id, ROOT, &page.title, "2026-10-10T12:00:00Z", page.archived)
-                } else if let Some((id, page)) = snapshot
-                    .extra
-                    .iter()
-                    .find(|(id, _)| route == format!("/v1/pages/{id}/markdown"))
-                {
-                    json!({"object":"page_markdown", "id":id,
-                        "markdown":format!("# {}\n\nExtra source contents.\n",page.title), "truncated":false,
-                        "unknown_block_ids":[]})
-                } else if route == format!("/v1/pages/{ROOT}/markdown") {
-                    json!({"object":"page_markdown", "id":ROOT,
-                        "markdown":"# Root\n\nRoot overview.\n", "truncated":false,
-                        "unknown_block_ids":[]})
-                } else if route == format!("/v1/pages/{ROOT}") {
-                    page_metadata(ROOT, "workspace", "Root", &snapshot.root_revision, false)
-                } else if route == format!("/v1/pages/{FOREIGN}") {
-                    page_metadata(
-                        FOREIGN,
-                        &snapshot.foreign_parent,
-                        "Foreign",
-                        "2026-10-10T11:00:00Z",
-                        false,
-                    )
-                } else {
-                    json!({"object":"error", "code":"object_not_found"})
-                };
-                let bad = fail.swap(false, Ordering::SeqCst);
-                let status = if bad {
-                    503
-                } else if response.get("code").is_some() {
-                    404
-                } else {
-                    200
-                };
-                let body = if bad { json!({}) } else { response }.to_string();
-                let _ = stream.write_all(format!("HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
-            }
-        });
-        Self {
-            state,
-            attempts,
-            body_reads,
-            target_body_reads,
-            foreign_body_reads,
-            fail_once,
-            server,
-            port,
-            pause,
-        }
-    }
-    fn client(&self) -> Arc<NotionClient> {
-        Arc::new(
-            NotionClient::integration("fixture-credential")
-                .unwrap()
-                .with_loopback_fixture(self.port),
-        )
-    }
-    fn change(&self, change: impl FnOnce(&mut Model)) {
-        change(&mut self.state.lock().unwrap());
-    }
-}
-impl Drop for HttpNotion {
-    fn drop(&mut self) {
-        self.server.abort();
-    }
-}
-fn page_metadata(id: &str, parent: &str, title: &str, revision: &str, archived: bool) -> Value {
-    json!({
-        "object": "page",
-        "id": id,
-        "url": format!("https://www.notion.so/{id}"),
-        "last_edited_time": revision,
-        "in_trash": archived,
-        "parent": if parent == "workspace" {
-            json!({"type":"workspace","workspace":true})
-        } else {
-            json!({"type":"page_id","page_id":parent})
-        },
-        "properties": {
-            "Title": {
-                "id":"title", "type":"title",
-                "title":[{"plain_text":title}]
-            },
-            "level": {
-                "id":"level", "type":"number", "number":3
-            }
-        }
-    })
-}
 
 struct CountingProvider {
     metadata: EmbeddingMetadata,
@@ -2105,7 +1784,7 @@ async fn planner_dry_run_missing_metadata_stale_unchanged_restored_and_empty_pag
     assert_eq!(initial.scanned, 3);
     assert_eq!(initial.planned_refresh(), 3);
     assert_eq!(initial.changed(), 0);
-    assert_eq!(source.body_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(source.body_reads.load(Ordering::SeqCst), 3); // The walk reads each of the 3 walked pages once.
     handler
         .apply_lifecycle(
             &PageId(PAGE.into()),
@@ -2130,7 +1809,7 @@ async fn planner_dry_run_missing_metadata_stale_unchanged_restored_and_empty_pag
             .difference,
         Difference::Unchanged
     );
-    assert_eq!(source.body_reads.load(Ordering::SeqCst), reads);
+    assert_eq!(source.body_reads.load(Ordering::SeqCst), reads + 3); // One walk re-reads the 3 pages.
     assert_eq!(provider.embeddings(), embeddings);
     assert_eq!(index.guarded().page_chunks(PAGE).await.unwrap(), before);
     assert_eq!(
@@ -2272,7 +1951,7 @@ async fn intentional_synced_references_preserve_physical_inventory_completeness(
     assert!(plan.run_errors.is_empty());
     assert_eq!(plan.scanned, 3);
     assert_eq!(plan.planned_refresh(), 3);
-    assert_eq!(source.body_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(source.body_reads.load(Ordering::SeqCst), 3); // The walk reads each of the 3 walked pages once.
     assert_eq!(source.foreign_body_reads.load(Ordering::SeqCst), 0);
 }
 
@@ -2328,7 +2007,8 @@ async fn planner_absence_access_failures_and_races_never_authorize_deletion() {
             .find(|p| p.page_id == PAGE)
             .unwrap()
             .difference,
-        Difference::Unchanged
+        // The root lost or regained a child tag: its new revision also moves ROOT and OTHER.
+        Difference::Stale
     );
     source.change(|m| {
         m.archived = true;
@@ -2522,7 +2202,7 @@ async fn real_read_only_planner_plan_roundtrips_without_apply_acknowledgments() 
     );
     // Dry-run did not persist operational plan metadata or suppress the real run.
     assert!(index.coordinator.reconciliation_plan("run").is_err());
-    assert_eq!(source.body_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(source.body_reads.load(Ordering::SeqCst), 3); // The walk reads each of the 3 walked pages once.
     index
         .coordinator
         .state()
@@ -2550,7 +2230,7 @@ async fn real_read_only_planner_plan_roundtrips_without_apply_acknowledgments() 
     assert_eq!(counts.pending.len(), 3);
     assert!(reopened.state().page_state(PAGE).unwrap().is_none());
     assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
-    assert_eq!(source.body_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(source.body_reads.load(Ordering::SeqCst), 3); // The walk reads the 3 pages once.
 }
 
 fn runner(
@@ -2591,7 +2271,7 @@ async fn missing_page_plans_recheck_metadata_and_scope_before_indexing() {
         let service = runner(&index, &source);
         let plan = service.dry_run().await.unwrap();
         assert_eq!(plan.planned_refresh(), 3);
-        assert_eq!(source.body_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(source.body_reads.load(Ordering::SeqCst), 3); // The walk reads each of the 3 walked pages once.
         record_plan(&index, "initial-source-race", &plan);
         source.change(|m| {
             if moved {
@@ -2663,7 +2343,7 @@ async fn reconciliation_dry_run_real_apply_and_unchanged_resume_have_exact_recei
     assert_eq!(dry.scanned, 3);
     assert_eq!(dry.planned_refresh(), 3);
     assert_eq!(provider.embeddings(), 0);
-    assert_eq!(source.body_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(source.body_reads.load(Ordering::SeqCst), 3); // The walk reads each of the 3 walked pages once.
     assert!(index.coordinator.owned_page_ids().unwrap().is_empty());
     assert!(index.coordinator.reconciliation_plan("dry").is_err());
     let first = service
@@ -2774,7 +2454,7 @@ async fn reconciliation_stale_archive_move_restore_and_incomplete_traversal_appl
         .unwrap();
     assert_eq!(
         (archived.deleted, archived.changed, archived.failed_pages()),
-        (1, 0, 0)
+        (1, 1, 0) // The root changed too: it lost a child tag.
     );
     assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
     assert!(
@@ -2795,7 +2475,8 @@ async fn reconciliation_stale_archive_move_restore_and_incomplete_traversal_appl
         .apply("restored", index.lease.clone(), clock(), &provider)
         .await
         .unwrap();
-    assert_eq!((restored.changed, restored.deleted), (1, 0));
+    // The root lost or regained a child tag: its new revision also moves ROOT and OTHER.
+    assert_eq!((restored.changed, restored.deleted), (3, 0));
     assert!(
         !index
             .coordinator
@@ -2861,8 +2542,23 @@ async fn reconciliation_planned_delete_restoration_and_webhook_write_conflict_re
         .unwrap();
     assert_eq!(
         (retried.changed, retried.deleted, retried.failed_pages()),
-        (1, 0, 0)
+        // The root regained a child tag: its new revision also moved ROOT and
+        // OTHER under the recorded plan. Retry them so the run can finish.
+        (1, 0, 2)
     );
+    for page in [ROOT, OTHER] {
+        let retried = service
+            .retry_page(
+                "restoration-race",
+                page,
+                index.lease.clone(),
+                clock(),
+                &provider,
+            )
+            .await
+            .unwrap();
+        assert!(!retried.failed.contains_key(page));
+    }
     source.change(|m| {
         m.title = "Proposal".into();
     });
@@ -3409,7 +3105,8 @@ async fn reconciliation_inflight_webhook_and_authoritative_move_cannot_overwrite
         .retry_page("inflight", PAGE, index.lease.clone(), clock(), &webhook)
         .await
         .unwrap();
-    assert_eq!((retry.deleted, retry.failed_pages()), (1, 0));
+    // The root lost or regained a child tag: its new revision also moves ROOT and OTHER.
+    assert_eq!((retry.deleted, retry.failed_pages()), (1, 2));
     assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
 }
 
@@ -3748,17 +3445,19 @@ async fn reconciliation_mixed_inventory_counts_missing_stale_restored_orphan_and
         m.title = "Stale exact metadata".into();
     });
     let dry = service.dry_run().await.unwrap();
+    // Until slice 2 drops lifecycle evidence, the root's new revision also
+    // makes its direct children stale: their ancestry revision changed.
     assert_eq!(
         (dry.scanned, dry.planned_refresh(), dry.planned_delete()),
-        (6, 3, 1)
+        (6, 5, 1)
     );
     for (id, difference) in [
         (PAGE, Difference::Stale),
         (MISSING, Difference::Missing),
         (RESTORED, Difference::Restored),
         (ORPHAN, Difference::Orphan),
-        (ROOT, Difference::Unchanged),
-        (OTHER, Difference::Unchanged),
+        (ROOT, Difference::Stale),
+        (OTHER, Difference::Stale),
     ] {
         assert_eq!(
             dry.pages
@@ -3784,7 +3483,7 @@ async fn reconciliation_mixed_inventory_counts_missing_stale_restored_orphan_and
             progress.failed_pages(),
             progress.run_failures.len()
         ),
-        (6, 3, 1, 3, 1, 2, 0, 0)
+        (6, 5, 1, 5, 1, 0, 0, 0)
     );
     assert_eq!(progress.successful.len(), 6);
     assert!(progress.pending.is_empty());
@@ -4917,7 +4616,7 @@ async fn reconciliation_converges_target_only_changes_and_rebuilds_derived_relat
             .iter()
             .all(|p| p.difference == Difference::Unchanged)
     );
-    assert_eq!(source.body_reads.load(Ordering::SeqCst), bodies);
+    assert_eq!(source.body_reads.load(Ordering::SeqCst), bodies + 3); // One walk re-reads the 3 pages.
     let repeat = service
         .apply("relations-repeat", index.lease.clone(), clock(), &provider)
         .await
@@ -4951,7 +4650,7 @@ async fn reconciliation_converges_target_only_changes_and_rebuilds_derived_relat
                 .difference,
             Difference::Stale
         );
-        assert_eq!(source.body_reads.load(Ordering::SeqCst), bodies);
+        assert_eq!(source.body_reads.load(Ordering::SeqCst), bodies + 3); // One walk re-reads the 3 pages.
         let result = service
             .apply(run, index.lease.clone(), clock(), &provider)
             .await
@@ -5192,7 +4891,8 @@ async fn reconciliation_converges_target_only_changes_and_rebuilds_derived_relat
         )
         .await
         .unwrap();
-    assert_eq!((restored.changed, restored.failed_pages()), (1, 0));
+    // The root lost or regained a child tag: its new revision also moves ROOT and OTHER.
+    assert_eq!((restored.changed, restored.failed_pages()), (3, 0));
     assert_eq!(index.coordinator.state().edges_from(PAGE).unwrap().len(), 2);
     source.change(|m| {
         m.hide_page = true;
@@ -5771,7 +5471,8 @@ async fn reconciliation_commits_body_links_and_never_acknowledges_missing_link_r
         [PAGE],
     )
     .unwrap();
-    sql.execute_batch("CREATE TRIGGER fail_link BEFORE INSERT ON graph_edges WHEN substr(NEW.relation_type,1,5)='link:' BEGIN SELECT RAISE(ABORT,'link persistence'); END;").unwrap();
+    // Only PAGE's links fail; the root's child tags are links of their own.
+    sql.execute_batch(&format!("CREATE TRIGGER fail_link BEFORE INSERT ON graph_edges WHEN substr(NEW.relation_type,1,5)='link:' AND NEW.source_page_id='{PAGE}' BEGIN SELECT RAISE(ABORT,'link persistence'); END;")).unwrap();
     let failed = service
         .apply("body-link-repair", index.lease.clone(), clock(), &provider)
         .await
@@ -6051,4 +5752,48 @@ async fn receipt_authority_conflict_during_preparation_is_never_retried_as_a_sou
     assert_eq!(inline.unwrap_err(), RefreshError::Conflict);
     assert_eq!(provider.embeddings(), embedded);
     assert!(index.guarded().page_chunks(OTHER).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn incomplete_walk_with_repeated_cursor_plans_no_deletes() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let provider = CountingProvider::new(index.embed.clone());
+    index
+        .handler(source.client())
+        .apply_lifecycle(
+            &PageId(PAGE.into()),
+            "seed",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let state = index.coordinator.state();
+    let first = source.client().walk_tree(&index.scope, None).await.unwrap();
+    assert!(first.complete);
+    state
+        .record_walk(&first.run_id, &first.entries, first.complete)
+        .unwrap();
+    // PAGE leaves the tree while a data-source query repeats its cursor.
+    source.change(|m| {
+        m.hide_page = true;
+        m.archived = true;
+        m.rows = vec!["99999999-9999-9999-9999-999999999999".into()];
+        m.repeat_query_cursor = true;
+    });
+    let walk = source.client().walk_tree(&index.scope, None).await.unwrap();
+    assert!(!walk.complete);
+    let plan = planner(&index, &source).plan_walk(&walk).await.unwrap();
+    assert!(!plan.traversal_complete);
+    assert_eq!(plan.planned_delete(), 0);
+    state
+        .record_walk(&walk.run_id, &walk.entries, walk.complete)
+        .unwrap();
+    assert!(
+        state.inventory_entry(PAGE).unwrap().is_some(),
+        "unreached entries stay"
+    );
 }

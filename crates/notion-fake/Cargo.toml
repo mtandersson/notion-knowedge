@@ -1,0 +1,12 @@
+[package]
+name = "notion-fake"
+description = "Dev-only scripted Notion HTTP fake shared by integration tests."
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+notion-knowledge-notion = { path = "../notion", features = ["test-fixtures"] }
+serde_json = "1"
+tokio = { workspace = true, features = ["net", "io-util", "sync"] }

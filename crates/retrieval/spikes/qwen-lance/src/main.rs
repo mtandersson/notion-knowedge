@@ -241,8 +241,8 @@ async fn main() -> Result<()> {
         );
         println!(
             "selected_documents=1 allowed_discovered={} skipped={} selected_chunks={}",
-            snapshot.discovery.pages.len(),
-            snapshot.discovery.skipped.len(),
+            snapshot.walk.readable().len(),
+            snapshot.walk.skipped.len(),
             snapshot.chunks.len()
         );
         Some(snapshot.chunks)

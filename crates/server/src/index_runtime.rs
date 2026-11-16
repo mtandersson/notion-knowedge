@@ -1,6 +1,7 @@
 //! Shared production authority for webhook, manual and periodic reconciliation callers.
 #![cfg(all(unix, feature = "webhook-worker"))]
 use crate::webhook_worker::{WorkerSettings, runtime::now_ms};
+use notion_knowledge_core::inventory::InventoryOutcome;
 use notion_knowledge_core::{
     chunking::ChunkConfig,
     embedding::EmbeddingProvider,
@@ -50,7 +51,7 @@ pub(crate) const PREFETCH_RESERVE_KIB: usize = 32 * 1024;
 use notion_knowledge_retrieval::prefetch::PrefetchBudget;
 
 enum Prefetched {
-    Skipped,
+    Skipped(notion_knowledge_core::backend::PageId),
     Fatal(&'static str),
     Ready {
         prefetched: Box<notion_knowledge_retrieval::refresh::PrefetchedPage>,
@@ -404,33 +405,41 @@ impl IndexRuntime {
         Ok(applied)
     }
 
-    /// Stream only initial/reset-cache population. Final discovery still owns
-    /// inventory/deletion decisions; ordinary reconciliation is unchanged.
+    /// Stream only initial/reset-cache population. The walk is the inventory:
+    /// it is persisted with each page's outcome, and only a complete walk
+    /// replaces it. The final plan still owns deletion decisions.
     async fn stream_initial_pages(
         &self,
         settings: &WorkerSettings,
         lease: &mut notion_knowledge_core::reconciliation::Lease,
     ) -> Result<
         (
-            notion_knowledge_core::discovery::DiscoveryReport,
+            notion_knowledge_notion::walk::TreeWalk,
             std::collections::BTreeSet<String>,
         ),
         &'static str,
     > {
         use futures::StreamExt;
         use notion_knowledge_core::{
+            discovery::SkipReason,
+            inventory::InventoryOutcome::{Failed, Skipped},
+            reconciliation::FailureClass,
+        };
+        use notion_knowledge_core::{
             logging::{SyncPhase, SyncProgressLog, sync_task},
             root_scope::RootScopeGate,
         };
         use notion_knowledge_retrieval::refresh::RefreshError;
+        let indexed = || InventoryOutcome::Indexed {
+            revision: String::new(),
+        };
         // Parked reconciliation read-ahead must not hold the shared budget.
         self.runner.discard_read_ahead();
         let (send, receive) = tokio::sync::mpsc::channel(8);
-        let crawl = self.source.crawl_with_pages(
-            &self.source_scope.roots,
-            &self.source_scope.exclusions,
-            send,
-        );
+        let walk = async move {
+            let send = send;
+            self.source.walk_tree(&self.source_scope, Some(&send)).await
+        };
         // Bounded read-ahead: source preparation for later pages overlaps the
         // one embedding/commit consumer. Each preparation reserves worst-case
         // bytes before any request and keeps its measured share until the
@@ -441,9 +450,17 @@ impl IndexRuntime {
             let ready = ready;
             let gate = RootScopeGate::new(self.source.clone(), self.source_scope.clone())
                 .map_err(|_| "cache scope unavailable")?;
+            // Skipped pages are already settled by the walk itself.
             let pages = futures::stream::unfold(receive, |mut receive| async move {
                 receive.recv().await.map(|page| (page, receive))
-            });
+            })
+            .filter_map(
+                |page: notion_knowledge_notion::walk::WalkedPage| async move {
+                    page.skip
+                        .is_none()
+                        .then(|| notion_knowledge_core::backend::PageId(page.entry.page_id))
+                },
+            );
             let mut fetched = std::pin::pin!(
                 pages
                     .enumerate()
@@ -471,6 +488,7 @@ impl IndexRuntime {
             let mut persisted = 0;
             let mut skipped = 0;
             let mut timed_out = std::collections::BTreeSet::new();
+            let mut outcomes = Vec::new();
             let state = self.coordinator.state();
             let ttl = settings.timeout_seconds as i64 + 30;
             loop {
@@ -487,7 +505,8 @@ impl IndexRuntime {
                 processed += 1;
                 let (page, operation, work) = match item {
                     Prefetched::Fatal(error) => return Err(error),
-                    Prefetched::Skipped => {
+                    Prefetched::Skipped(page) => {
+                        outcomes.push((page.0, Skipped(SkipReason::OutsideScope)));
                         skipped += 1;
                         notion_knowledge_core::logging::sync_count(
                             notion_knowledge_core::logging::SyncCount::SkippedPage,
@@ -582,6 +601,7 @@ impl IndexRuntime {
                 }
                 match result {
                     Ok(Ok(_)) => {
+                        outcomes.push((page.0.clone(), indexed()));
                         persisted += 1;
                         notion_knowledge_core::logging::sync_count(
                             notion_knowledge_core::logging::SyncCount::CommittedPage,
@@ -594,6 +614,14 @@ impl IndexRuntime {
                         | RefreshError::EmbeddingInputLimit
                         | RefreshError::OutOfScope),
                     )) => {
+                        outcomes.push((
+                            page.0.clone(),
+                            if error == RefreshError::OutOfScope {
+                                Skipped(SkipReason::OutsideScope)
+                            } else {
+                                Failed(FailureClass::Source)
+                            },
+                        ));
                         skipped += 1;
                         notion_knowledge_core::logging::sync_count(
                             notion_knowledge_core::logging::SyncCount::SkippedPage,
@@ -618,6 +646,7 @@ impl IndexRuntime {
                             .settle_page_timeout(settings, lease, &operation)
                             .await?
                         {
+                            outcomes.push((page.0.clone(), indexed()));
                             persisted += 1;
                             notion_knowledge_core::logging::sync_count(
                                 notion_knowledge_core::logging::SyncCount::CommittedPage,
@@ -625,6 +654,7 @@ impl IndexRuntime {
                             );
                         } else {
                             timed_out.insert(page.0.clone());
+                            outcomes.push((page.0.clone(), Failed(FailureClass::Unavailable)));
                             skipped += 1;
                             notion_knowledge_core::logging::sync_count(
                                 notion_knowledge_core::logging::SyncCount::SkippedPage,
@@ -637,14 +667,58 @@ impl IndexRuntime {
                 progress.report(processed, None, persisted, skipped, false);
             }
             progress.report(processed, Some(processed), persisted, skipped, true);
-            Ok::<_, &'static str>(timed_out)
+            Ok::<_, &'static str>((timed_out, outcomes))
         };
-        let (report, (), timed_out) = tokio::try_join!(
-            async { Box::pin(crawl).await.map_err(|_| "cache inventory failed") },
+        let (walk, (), (timed_out, outcomes)) = tokio::try_join!(
+            async { Box::pin(walk).await.map_err(|_| "cache inventory failed") },
             Box::pin(produce),
             Box::pin(consume)
         )?;
-        Ok((report, timed_out))
+        self.record_inventory(&walk, outcomes)?;
+        Ok((walk, timed_out))
+    }
+
+    /// Persist the walk and settle every reached page: indexed, or skipped
+    /// with a typed reason. Pages still pending are left without an outcome.
+    fn record_inventory(
+        &self,
+        walk: &notion_knowledge_notion::walk::TreeWalk,
+        outcomes: Vec<(String, InventoryOutcome)>,
+    ) -> Result<(), &'static str> {
+        let state = self.coordinator.state();
+        let unavailable = |_| "cache inventory state unavailable";
+        state
+            .record_walk(&walk.run_id, &walk.entries, walk.complete)
+            .map_err(unavailable)?;
+        let now = now_ms() / 1000;
+        for skipped in &walk.skipped {
+            state
+                .record_inventory_outcome(
+                    &skipped.id,
+                    &InventoryOutcome::Skipped(skipped.reason),
+                    now,
+                )
+                .map_err(unavailable)?;
+        }
+        let revisions: std::collections::BTreeMap<_, _> = walk
+            .entries
+            .iter()
+            .map(|e| (e.page_id.as_str(), e.last_edited_time.as_str()))
+            .collect();
+        for (page, mut outcome) in outcomes {
+            if let InventoryOutcome::Indexed { revision } = &mut outcome {
+                // The walk observed the revision this run indexed.
+                *revision = revisions
+                    .get(page.as_str())
+                    .copied()
+                    .unwrap_or_default()
+                    .to_owned();
+            }
+            state
+                .record_inventory_outcome(&page, &outcome, now)
+                .map_err(unavailable)?;
+        }
+        Ok(())
     }
 
     /// Read-only source preparation for one discovered page. Authorization and
@@ -660,7 +734,7 @@ impl IndexRuntime {
     ) -> Prefetched {
         use notion_knowledge_core::logging::{SyncCount, SyncPhase, sync_count, sync_task};
         let Ok(permit) = gate.authorize(&page).await else {
-            return Prefetched::Skipped;
+            return Prefetched::Skipped(page);
         };
         let Some(root) = self
             .source_scope
@@ -767,7 +841,7 @@ impl IndexRuntime {
                         state
                             .release_lease(&lease, now_ms() / 1000)
                             .map_err(|_| "cache sync lease unavailable")?;
-                        Box::pin(self.runner.dry_run_discovered(report))
+                        Box::pin(self.runner.dry_run_walk(&report))
                             .await
                             .map_err(|_| "cache inventory planning failed")
                     },

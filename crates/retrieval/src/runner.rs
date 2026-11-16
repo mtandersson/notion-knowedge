@@ -263,12 +263,13 @@ impl AuthoritativeReconciliationRunner {
         self.planner.plan().await.map_err(RunnerError::Planning)
     }
 
-    pub async fn dry_run_discovered(
+    /// Plan against an already completed walk instead of walking again.
+    pub async fn dry_run_walk(
         &self,
-        report: notion_knowledge_core::discovery::DiscoveryReport,
+        walk: &notion_knowledge_notion::walk::TreeWalk,
     ) -> Result<ReconciliationPlan, RunnerError> {
         self.planner
-            .plan_discovered(report)
+            .plan_walk(walk)
             .await
             .map_err(RunnerError::Planning)
     }

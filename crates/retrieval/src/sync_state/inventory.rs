@@ -182,6 +182,29 @@ impl SqliteSyncStateStore {
         Ok(diff)
     }
 
+    /// Persist one walk. A complete walk replaces the inventory; an incomplete
+    /// one only upserts what it reached and never deletes unreached entries.
+    pub fn record_walk(
+        &self,
+        run_id: &str,
+        entries: &[InventoryEntry],
+        complete: bool,
+    ) -> Result<InventoryDiff, SyncStateError> {
+        if complete {
+            return self.replace_inventory(run_id, entries);
+        }
+        let mut db = self.lock_connection()?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        let mut diff = InventoryDiff::default();
+        for entry in entries {
+            upsert(&tx, run_id, entry, &mut diff)?;
+        }
+        tx.commit().map_err(map_sqlite_error)?;
+        Ok(diff)
+    }
+
     /// Unknown pages are ignored: only reached pages carry an outcome.
     pub fn record_inventory_outcome(
         &self,

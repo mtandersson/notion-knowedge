@@ -1,14 +1,7 @@
-//! Read-only discovery. Reports are disposable snapshots, never indexing writes.
-use crate::backend::{BackendErrorKind, BackendFuture, PageId};
+//! Discovery vocabulary: typed skips and exclusion rules applied by the walk.
+use crate::backend::BackendErrorKind;
 use serde::Serialize;
 use std::collections::BTreeSet;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DiscoveredPage {
-    pub id: String,
-    pub url: String,
-    pub title: String,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SkippedContent {
@@ -26,28 +19,6 @@ pub enum SkipReason {
     ExcludedPage,
     ExcludedDescendants,
     ExcludedSourceType,
-}
-
-/// Returned only after successful traversal. A failed/interrupted traversal has
-/// no checkpoint or side effects: restart with the same roots and deduplicate
-/// downstream writes by page ID. Not an atomic Notion snapshot.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DiscoveryReport {
-    pub roots: Vec<String>,
-    pub pages: Vec<DiscoveredPage>,
-    pub skipped: Vec<SkippedContent>,
-}
-
-pub trait ScopedDiscovery: Send + Sync {
-    /// Configured roots are explicit authority; links/relations do not expand it.
-    fn discover<'a>(&'a self, roots: &'a [PageId]) -> BackendFuture<'a, DiscoveryReport>;
-    /// Index consumers must supply the current exclusion policy before any
-    /// content extraction or embedding; a failed traversal authorizes nothing.
-    fn discover_with_exclusions<'a>(
-        &'a self,
-        roots: &'a [PageId],
-        rules: &'a ExclusionRules,
-    ) -> BackendFuture<'a, DiscoveryReport>;
 }
 
 pub fn inaccessible(kind: BackendErrorKind) -> bool {

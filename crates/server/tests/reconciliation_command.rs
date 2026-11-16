@@ -8,7 +8,6 @@ use notion_knowledge_core::{
     lifecycle::LifecycleScope,
     reconciliation::ReconciliationJournal,
 };
-use notion_knowledge_notion::NotionClient;
 use notion_knowledge_server::{
     index_runtime::{IndexRuntime, OpenMode},
     reconciliation_command::{Command, Output, runtime::execute},
@@ -23,332 +22,20 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
-const PAGE: &str = "11111111-1111-1111-1111-111111111111";
-const OTHER: &str = "55555555-5555-5555-5555-555555555555";
-const ROOT: &str = "22222222-2222-2222-2222-222222222222";
-const FOREIGN: &str = "33333333-3333-3333-3333-333333333333";
-const WORKSPACE: &str = "44444444-4444-4444-4444-444444444444";
-
-#[derive(Clone)]
-struct ExtraPage {
-    title: String,
-    visible: bool,
-    archived: bool,
-}
-#[derive(Clone)]
-struct Model {
-    empty_content: bool,
-    unsupported_page_content: bool,
-    unsupported_page_once: bool,
-    unauthenticated_content: bool,
-    unauthenticated_page_metadata: bool,
-    markdown: String,
-    title: String,
-    revision: String,
-    parent: String,
-    archived: bool,
-    root_revision: String,
-    hide_page: bool,
-    inaccessible_other: bool,
-    inaccessible_root: bool,
-    inaccessible_page: bool,
-    race_metadata: bool,
-    race_move: bool,
-    level: u64,
-    relation_name: Option<String>,
-    alias_names: Vec<String>,
-    extra: std::collections::BTreeMap<String, ExtraPage>,
-}
-impl Default for Model {
-    fn default() -> Self {
-        Self {
-            empty_content: false,
-            unsupported_page_content: false,
-            unsupported_page_once: false,
-            unauthenticated_content: false,
-            unauthenticated_page_metadata: false,
-            markdown: "# Intro\n\nSaffron ravioli.\n\n## Other\n\nAn evergreen section.\n".into(),
-            title: "First".into(),
-            revision: "2026-10-10T12:00:00Z".into(),
-            parent: ROOT.into(),
-            archived: false,
-            root_revision: "2026-10-10T11:00:00Z".into(),
-            hide_page: false,
-            inaccessible_other: false,
-            inaccessible_root: false,
-            inaccessible_page: false,
-            race_metadata: false,
-            race_move: false,
-            level: 3,
-            relation_name: None,
-            alias_names: vec![],
-            extra: Default::default(),
-        }
-    }
-}
-#[derive(Default)]
-struct RequestPause {
-    armed: AtomicBool,
-    started: tokio::sync::Notify,
-    proceed: tokio::sync::Notify,
-}
-struct HttpNotion {
-    state: Arc<Mutex<Model>>,
-    body_reads: Arc<AtomicUsize>,
-    markdown_pages: Arc<Mutex<std::collections::BTreeSet<String>>>,
-    server: tokio::task::JoinHandle<()>,
-    port: u16,
-    pause: Arc<RequestPause>,
-    discovery_pause: Arc<RequestPause>,
-}
-impl HttpNotion {
-    async fn start() -> Self {
-        let state = Arc::new(Mutex::new(Model::default()));
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let body_reads = Arc::new(AtomicUsize::new(0));
-        let fail_once = Arc::new(AtomicBool::new(false));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let values = state.clone();
-        let counts = attempts.clone();
-        let bodies = body_reads.clone();
-        let markdown_pages = Arc::new(Mutex::new(std::collections::BTreeSet::new()));
-        let markdown_reads = markdown_pages.clone();
-        let fail = fail_once.clone();
-        let pause = Arc::new(RequestPause::default());
-        let boundary = pause.clone();
-        let discovery_pause = Arc::new(RequestPause::default());
-        let discovery = discovery_pause.clone();
-        let server = tokio::spawn(async move {
-            let mut pending_responses = tokio::task::JoinSet::new();
-            loop {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut bytes = Vec::new();
-                loop {
-                    let mut part = [0u8; 2048];
-                    let size = stream.read(&mut part).await.unwrap();
-                    if size == 0 {
-                        break;
-                    }
-                    bytes.extend_from_slice(&part[..size]);
-                    if bytes.windows(4).any(|v| v == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                if bytes.is_empty() {
-                    continue;
-                }
-                let req = String::from_utf8(bytes).unwrap();
-                assert!(req.contains("authorization: Bearer fixture-credential"));
-                assert!(req.contains("notion-version: 2026-03-11"));
-                assert!(req.starts_with("GET /v1/"));
-                counts.fetch_add(1, Ordering::SeqCst);
-                let route = req
-                    .lines()
-                    .next()
-                    .unwrap()
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap();
-                if route == format!("/v1/pages/{PAGE}")
-                    && boundary.armed.swap(false, Ordering::SeqCst)
-                {
-                    boundary.started.notify_one();
-                    boundary.proceed.notified().await;
-                }
-                if route.ends_with("/markdown") {
-                    bodies.fetch_add(1, Ordering::SeqCst);
-                    markdown_reads.lock().unwrap().insert(route.to_owned());
-                }
-                let snapshot = {
-                    let mut state = values.lock().unwrap();
-                    let mut snapshot = state.clone();
-                    if route == format!("/v1/pages/{PAGE}/markdown") && state.unsupported_page_once
-                    {
-                        state.unsupported_page_once = false;
-                        snapshot.unsupported_page_content = true;
-                    }
-                    snapshot
-                };
-                if snapshot.race_metadata && route == format!("/v1/pages/{PAGE}") {
-                    values.lock().unwrap().title.push('!');
-                }
-                if snapshot.race_move && route == format!("/v1/pages/{PAGE}") {
-                    values.lock().unwrap().parent = if snapshot.parent == ROOT {
-                        FOREIGN.into()
-                    } else {
-                        ROOT.into()
-                    };
-                }
-                let mut response = if (snapshot.unauthenticated_content
-                    && route == format!("/v1/pages/{PAGE}/markdown"))
-                    || (snapshot.unauthenticated_page_metadata
-                        && route == format!("/v1/pages/{PAGE}"))
-                {
-                    json!({"object":"error", "code":"unauthorized"})
-                } else if (snapshot.inaccessible_root && route == format!("/v1/pages/{ROOT}"))
-                    || (snapshot.inaccessible_other && route == format!("/v1/pages/{OTHER}"))
-                    || (snapshot.inaccessible_page && route == format!("/v1/pages/{PAGE}"))
-                {
-                    json!({"object":"error", "code":"object_not_found"})
-                } else if route == format!("/v1/blocks/{ROOT}/children?page_size=100") {
-                    let mut children = vec![
-                        json!({"object":"block","id":OTHER,"type":"child_page","archived":false,"has_children":false,"parent":{"type":"page_id","page_id":ROOT},"child_page":{"title":"Separate"}}),
-                    ];
-                    for (id, page) in &snapshot.extra {
-                        if page.visible {
-                            children.push(json!({"object":"block","id":id,"type":"child_page","archived":false,"has_children":false,"parent":{"type":"page_id","page_id":ROOT},"child_page":{"title":page.title}}));
-                        }
-                    }
-                    if !snapshot.hide_page {
-                        children.push(json!({"object":"block","id":PAGE,"type":"child_page","archived":false,"has_children":false,"parent":{"type":"page_id","page_id":ROOT},"child_page":{"title":"First"}}));
-                    }
-                    json!({"object":"list","results":children,"has_more":false,"next_cursor":null})
-                } else if route.starts_with("/v1/blocks/") && route.contains("/children") {
-                    json!({"object":"list","results":[],"has_more":false,"next_cursor":null})
-                } else if route == format!("/v1/pages/{PAGE}/markdown") {
-                    json!({
-                        "object": "page_markdown",
-                        "id": PAGE,
-                        "markdown": snapshot.markdown,
-                        "truncated": snapshot.unsupported_page_content,
-                        "unknown_block_ids": []
-                    })
-                } else if route == format!("/v1/pages/{PAGE}") {
-                    let mut page = page_metadata(
-                        PAGE,
-                        &snapshot.parent,
-                        &snapshot.title,
-                        &snapshot.revision,
-                        snapshot.archived,
-                    );
-                    page["properties"]["level"]["number"] = json!(snapshot.level);
-                    page["properties"]["Alternate names"] = json!({"id":"names","type":"multi_select","multi_select":snapshot.alias_names.iter().map(|name|json!({"id":"choice","name":name})).collect::<Vec<_>>()});
-                    page["properties"]["Unselected"] = json!({"id":"not-selected","type":"rich_text","rich_text":[{"type":"text","plain_text":"Never an alias","text":{"content":"Never an alias"}}]});
-                    if let Some(name) = snapshot.relation_name {
-                        page["properties"][name] = json!({"id":"shared-relation","type":"relation","relation":[{"id":OTHER}],"has_more":false});
-                    }
-                    page
-                } else if route == format!("/v1/pages/{OTHER}/markdown") {
-                    json!({"object":"page_markdown", "id":OTHER,
-                        "markdown":"# Separate\n\nUntouched cinnamon.\n", "truncated":false,
-                        "unknown_block_ids":[]})
-                } else if route == format!("/v1/pages/{OTHER}") {
-                    page_metadata(OTHER, ROOT, "Separate", "2026-10-10T11:00:00Z", false)
-                } else if let Some((id, page)) = snapshot
-                    .extra
-                    .iter()
-                    .find(|(id, _)| route == format!("/v1/pages/{id}"))
-                {
-                    page_metadata(id, ROOT, &page.title, "2026-10-10T12:00:00Z", page.archived)
-                } else if let Some((id, page)) = snapshot
-                    .extra
-                    .iter()
-                    .find(|(id, _)| route == format!("/v1/pages/{id}/markdown"))
-                {
-                    json!({"object":"page_markdown", "id":id,
-                        "markdown":format!("# {}\n\nExtra source contents.\n",page.title), "truncated":false,
-                        "unknown_block_ids":[]})
-                } else if route == format!("/v1/pages/{ROOT}/markdown") {
-                    json!({"object":"page_markdown", "id":ROOT,
-                        "markdown":"# Root\n\nRoot overview.\n", "truncated":false,
-                        "unknown_block_ids":[]})
-                } else if route == format!("/v1/pages/{ROOT}") {
-                    page_metadata(ROOT, "workspace", "Root", &snapshot.root_revision, false)
-                } else if route == format!("/v1/pages/{FOREIGN}") {
-                    page_metadata(
-                        FOREIGN,
-                        "workspace",
-                        "Foreign",
-                        "2026-10-10T11:00:00Z",
-                        false,
-                    )
-                } else {
-                    json!({"object":"error", "code":"object_not_found"})
-                };
-                if snapshot.empty_content && response["object"] == "page_markdown" {
-                    response["markdown"] = json!("");
-                }
-                let bad = fail.swap(false, Ordering::SeqCst);
-                let status = if bad {
-                    503
-                } else if response["code"] == "unauthorized" {
-                    401
-                } else if response.get("code").is_some() {
-                    404
-                } else {
-                    200
-                };
-                let body = if bad { json!({}) } else { response }.to_string();
-                let payload = format!(
-                    "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                if route.starts_with(&format!("/v1/blocks/{ROOT}/children"))
-                    && discovery.armed.swap(false, Ordering::SeqCst)
-                {
-                    let barrier = discovery.clone();
-                    pending_responses.spawn(async move {
-                        barrier.started.notify_one();
-                        barrier.proceed.notified().await;
-                        let _ = stream.write_all(payload.as_bytes()).await;
-                    });
-                } else {
-                    let _ = stream.write_all(payload.as_bytes()).await;
-                }
-            }
-        });
-        Self {
-            state,
-            body_reads,
-            markdown_pages,
-            server,
-            port,
-            pause,
-            discovery_pause,
-        }
-    }
-    fn client(&self) -> Arc<NotionClient> {
-        Arc::new(
-            NotionClient::integration("fixture-credential")
-                .unwrap()
-                .with_loopback_fixture(self.port),
-        )
-    }
-    fn change(&self, change: impl FnOnce(&mut Model)) {
-        change(&mut self.state.lock().unwrap());
-    }
-}
-impl Drop for HttpNotion {
-    fn drop(&mut self) {
-        self.server.abort();
-    }
-}
-fn page_metadata(id: &str, parent: &str, title: &str, revision: &str, archived: bool) -> Value {
-    json!({
-        "object": "page",
-        "id": id,
-        "url": format!("https://www.notion.so/{id}"),
-        "last_edited_time": revision,
-        "in_trash": archived,
-        "parent": if parent == "workspace" {
-            json!({"type":"workspace","workspace":true})
-        } else {
-            json!({"type":"page_id","page_id":parent})
-        },
-        "properties": {
-            "Title": {
-                "id":"title", "type":"title",
-                "title":[{"plain_text":title}]
-            },
-            "level": {
-                "id":"level", "type":"number", "number":3
-            }
-        }
-    })
+use notion_fake::{
+    ExtraPage, FOREIGN, FakeNotion as HttpNotion, OTHER, PAGE, ROOT, RequestPause, WORKSPACE,
+};
+/// This suite's page carries alias properties and a relation to OTHER.
+async fn start_notion() -> HttpNotion {
+    let notion = HttpNotion::start().await;
+    notion.change(|m| {
+        m.alias_properties = true;
+        m.relation_property_id = "shared-relation".into();
+        m.relation_targets = vec![OTHER.into()];
+    });
+    notion
 }
 struct Provider {
     metadata: EmbeddingMetadata,
@@ -570,7 +257,7 @@ async fn lexical_cache_rebuild_blocks_reads_and_preserves_external_work() {
         chunks::{GuardedChunkTable, lexical_binding::LexicalCachePlan},
         lexical_dictionary::test_fixtures::dictionary,
     };
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     let existing = f.open(&http, OpenMode::ReadOnly).await;
     let binding = existing.coordinator.binding().clone();
@@ -732,7 +419,7 @@ async fn lexical_cache_failed_resync_remains_unavailable_and_retries_current_sco
     use notion_knowledge_retrieval::{
         chunks::lexical_binding::LexicalCachePlan, lexical_dictionary::test_fixtures::dictionary,
     };
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     let plan = LexicalCachePlan::verified(Arc::new(dictionary(&[("saffron", "saffran")]))).unwrap();
     f.provider.fail.store(true, Ordering::SeqCst);
@@ -814,7 +501,7 @@ fn counts(out: &Output, changed: u64, deleted: u64, unchanged: u64) {
 
 #[tokio::test]
 async fn actual_commands_apply_differences_only_and_keep_dry_run_and_status_read_only() {
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     let db = rusqlite::Connection::open(&f.state).unwrap();
     assert_eq!(
@@ -887,7 +574,7 @@ async fn actual_commands_apply_differences_only_and_keep_dry_run_and_status_read
 
 #[tokio::test]
 async fn unknown_runs_missing_paths_and_incompatible_authority_fail_before_mutation() {
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     for args in [
         ["--reconcile", "status", "missing"],
@@ -960,7 +647,7 @@ async fn unknown_runs_missing_paths_and_incompatible_authority_fail_before_mutat
 
 #[tokio::test]
 async fn failed_pages_require_explicit_retry_and_webhook_writer_busy_does_not_consume_work() {
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     let runtime = f.open(&http, OpenMode::ExistingWrite).await;
     let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
@@ -1008,7 +695,7 @@ async fn failed_pages_require_explicit_retry_and_webhook_writer_busy_does_not_co
 
 #[tokio::test]
 async fn cancellation_reopens_pending_work_and_permission_failure_never_deletes() {
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     f.provider.pause.store(true, Ordering::SeqCst);
     let stop = CancellationToken::new();
@@ -1055,7 +742,7 @@ async fn cancellation_reopens_pending_work_and_permission_failure_never_deletes(
 
 #[tokio::test]
 async fn timed_out_dry_run_leaves_state_unchanged_and_has_a_distinct_failure_exit() {
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let mut f = Fixture::new(&http).await;
     f.settings.inventory_timeout_seconds = 1;
     http.pause.armed.store(true, Ordering::SeqCst);
@@ -1070,7 +757,7 @@ async fn timed_out_dry_run_leaves_state_unchanged_and_has_a_distinct_failure_exi
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelled_command_drains_its_submitted_owned_guard_before_releasing_the_writer() {
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     *f.provider.boundary_pause.lock().unwrap() = Some(http.pause.clone());
     let stop = CancellationToken::new();
@@ -1112,7 +799,7 @@ async fn cancelled_command_drains_its_submitted_owned_guard_before_releasing_the
 
 #[tokio::test]
 async fn read_only_commands_reject_external_wal_before_creating_sqlite_auxiliaries() {
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     let db = rusqlite::Connection::open(&f.state).unwrap();
     let journal: String = db
@@ -1163,7 +850,7 @@ async fn read_only_commands_reject_external_wal_before_creating_sqlite_auxiliari
 
 #[tokio::test]
 async fn read_only_commands_reject_previous_schema_without_migration_or_auxiliary_creation() {
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     let db = rusqlite::Connection::open(&f.state).unwrap();
     db.execute_batch(include_str!(
@@ -1331,7 +1018,7 @@ async fn actual_scheduled_http_preserves_deadline_restart_and_unchanged_next_cyc
         ScheduleEventKind, SchedulePolicy, ScheduleReconfiguration,
     };
     use notion_knowledge_server::webhook_worker::runtime::now_ms;
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     let (worker, stop, server) =
         scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
@@ -1409,7 +1096,7 @@ async fn actual_scheduled_http_preserves_deadline_restart_and_unchanged_next_cyc
 #[tokio::test]
 async fn actual_scheduled_http_cancellation_resumes_same_pending_plan_without_implicit_retry() {
     use notion_knowledge_retrieval::schedule::{ScheduleEventKind, ScheduleStatus};
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     f.provider.pause.store(true, Ordering::SeqCst);
     let (worker, stop, server) =
@@ -1466,7 +1153,7 @@ async fn actual_scheduled_http_cancellation_resumes_same_pending_plan_without_im
 #[tokio::test]
 async fn actual_scheduled_http_holds_failed_pages_until_explicit_manual_recovery() {
     use notion_knowledge_retrieval::schedule::ScheduleStatus;
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     f.provider.fail_next.store(true, Ordering::SeqCst);
     let (worker, stop, server) =
@@ -1564,7 +1251,7 @@ async fn actual_scheduled_http_holds_failed_pages_until_explicit_manual_recovery
 async fn actual_scheduled_http_timeout_exhaustion_is_inspectable_and_explicit_abandon_preserves_history()
  {
     use notion_knowledge_retrieval::schedule::{ScheduleEventKind, ScheduleStatus};
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     http.pause.armed.store(true, Ordering::SeqCst);
     let (worker, stop, server) =
@@ -1632,7 +1319,7 @@ async fn actual_scheduled_http_timeout_exhaustion_is_inspectable_and_explicit_ab
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn actual_scheduled_http_shutdown_drains_live_owned_effect_before_release() {
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     *f.provider.boundary_pause.lock().unwrap() = Some(http.pause.clone());
     let (worker, stop, server) =
@@ -1681,7 +1368,7 @@ async fn actual_scheduled_http_shutdown_drains_live_owned_effect_before_release(
 #[tokio::test]
 async fn actual_scheduled_http_reprocesses_stale_and_safely_deletes_authoritative_orphans() {
     use notion_knowledge_retrieval::schedule::ScheduleEventKind;
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     let (worker, stop, server) =
         scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
@@ -1776,7 +1463,7 @@ async fn actual_scheduled_http_reprocesses_stale_and_safely_deletes_authoritativ
 #[tokio::test]
 async fn actual_scheduled_http_transient_source_attempts_back_off_then_exhaust_without_spinning() {
     use notion_knowledge_retrieval::schedule::{ScheduleEventKind, ScheduleStatus};
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     // Stall the source during inventory so its deadline determines the retry path.
     http.pause.armed.store(true, Ordering::SeqCst);
@@ -1829,7 +1516,7 @@ async fn actual_scheduled_http_transient_source_attempts_back_off_then_exhaust_w
 #[tokio::test]
 async fn actual_scheduled_http_manual_periodic_and_webhook_contention_preserves_retry_budgets() {
     use notion_knowledge_core::webhook::{EventState, WebhookEvent, WebhookInbox};
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     http.change(|m| {
         m.relation_name = Some("Scheduled relations".into());
         m.title = "Äpple".into();
@@ -1959,7 +1646,7 @@ async fn actual_scheduled_http_manual_periodic_and_webhook_contention_preserves_
 
 #[tokio::test]
 async fn fatal_scheduled_storage_failure_terminates_actual_http_and_both_serving_workers() {
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     let (worker, stop, server) =
         scheduled_server_workers(&f, &http, std::time::Duration::from_secs(60), 1, true).await;
@@ -1989,7 +1676,7 @@ async fn explicit_relation_rebuild_uses_shared_runtime_and_preserves_operational
         graph::{GraphEdge, GraphEdgeStore, GraphTarget},
         sync_state::SyncStateStore,
     };
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     http.change(|m| {
         m.markdown = format!("[root](https://www.notion.so/{ROOT})");
         m.relation_name = Some("Ingredients".into());
@@ -2090,7 +1777,7 @@ async fn explicit_relation_rebuild_uses_shared_runtime_and_preserves_operational
 #[tokio::test]
 async fn installed_aliases_preserve_ambiguity_explicit_sources_rebuild_and_restart() {
     use notion_knowledge_core::aliases::{AliasSources, PageAlias, PageAliasStore};
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     http.change(|m| {
         m.title = "Öresund".into();
         m.alias_names = vec!["Oresund".into(), "Öresund".into(), "Oresund".into()];
@@ -2266,7 +1953,7 @@ async fn installed_aliases_preserve_ambiguity_explicit_sources_rebuild_and_resta
 async fn installed_alias_persistence_failure_replays_durable_repair_without_mutating_history() {
     use notion_knowledge_core::aliases::AliasSources;
     use notion_knowledge_retrieval::commit::ReceiptStatus;
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     http.change(|m| m.alias_names = vec!["Äpple".into(), "Apple".into()]);
     let mut f = Fixture::new(&http).await;
     f.settings.alias_sources = AliasSources::new(false, vec!["names".into()]).unwrap();
@@ -2408,7 +2095,7 @@ async fn index_commands_provision_reuse_and_rebuild_search_without_changing_auth
     use notion_knowledge_server::index_command::{
         Command as IndexCommand, runtime::execute as index,
     };
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     counts(
         &f.command(&http, &["--reconcile", "apply", "seed-index"])
@@ -2481,7 +2168,7 @@ async fn index_commands_refuse_missing_foreign_cancelled_and_busy_state() {
     use notion_knowledge_server::index_command::{
         Command as IndexCommand, runtime::execute as index,
     };
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     let before = f.snapshot();
     let foreign =
@@ -2566,7 +2253,7 @@ async fn index_rebuild_refuses_foreign_vector_distance_without_replacing_it() {
     use notion_knowledge_server::index_command::{
         Command as IndexCommand, runtime::execute as index,
     };
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     f.populate(&http, "seed-distance").await;
     let runtime = f.open(&http, OpenMode::ExistingWrite).await;
@@ -2647,7 +2334,7 @@ async fn ordinary_reconciliation_repairs_missing_rows_without_a_source_revision_
     };
 
     for remove_all in [false, true] {
-        let http = HttpNotion::start().await;
+        let http = start_notion().await;
         let f = Fixture::new(&http).await;
         counts(
             &f.command(&http, &["--reconcile", "apply", "seed"]).await,
@@ -2827,7 +2514,7 @@ async fn lost_or_incompatible_cache_resyncs_without_replaying_external_effects()
     use notion_knowledge_core::search::{LexicalQuery, LexicalSearch};
     use notion_knowledge_retrieval::chunks::GuardedChunkTable;
     for damage in ["deleted", "incompatible", "corrupt", "missing-index"] {
-        let http = HttpNotion::start().await;
+        let http = start_notion().await;
         let f = Fixture::new(&http).await;
         if damage == "missing-index" {
             f.populate(&http, "seed-cache").await;
@@ -2996,7 +2683,7 @@ async fn lost_or_incompatible_cache_resyncs_without_replaying_external_effects()
 
 #[tokio::test]
 async fn cache_sync_indexes_available_text_without_resolving_template_references() {
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     http.state.lock().unwrap().markdown = format!(
         "Available recipe text.\n<synced_block_reference url=\"https://notion.so/{PAGE}\">\n</synced_block_reference>"
@@ -3037,7 +2724,7 @@ async fn cache_sync_indexes_available_text_without_resolving_template_references
 #[tokio::test]
 async fn unreadable_page_does_not_block_embedded_search_and_next_sync_can_recover_it() {
     use notion_knowledge_retrieval::durable_plan::DurableFailure;
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     http.state.lock().unwrap().unsupported_page_content = true;
     fs::remove_dir_all(&f.settings.index).unwrap();
@@ -3101,7 +2788,7 @@ async fn unreadable_page_does_not_block_embedded_search_and_next_sync_can_recove
 async fn authentication_revocation_at_any_sync_stage_keeps_cache_unavailable() {
     use notion_knowledge_retrieval::durable_plan::DurableFailure;
     for after_embedding in [false, true] {
-        let http = HttpNotion::start().await;
+        let http = start_notion().await;
         let f = Fixture::new(&http).await;
         if after_embedding {
             *f.provider.boundary_pause.lock().unwrap() = Some(http.pause.clone());
@@ -3160,7 +2847,7 @@ async fn authentication_revocation_at_any_sync_stage_keeps_cache_unavailable() {
 
 #[tokio::test]
 async fn failed_cache_resync_stays_pending_and_next_start_retries_from_notion() {
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     fs::remove_dir_all(&f.settings.index).unwrap();
     f.provider.fail.store(true, Ordering::SeqCst);
@@ -3218,7 +2905,7 @@ async fn failed_cache_resync_stays_pending_and_next_start_retries_from_notion() 
 async fn empty_authorized_content_completes_resync_and_search_returns_no_hits() {
     use notion_knowledge_core::search::{LexicalQuery, LexicalSearch};
     use notion_knowledge_retrieval::chunks::GuardedChunkTable;
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     http.state.lock().unwrap().empty_content = true;
     let f = Fixture::new(&http).await;
     fs::remove_dir_all(&f.settings.index).unwrap();
@@ -3297,7 +2984,7 @@ async fn empty_authorized_content_completes_resync_and_search_returns_no_hits() 
 #[tokio::test]
 async fn manual_inventory_uses_its_budget_and_expires_without_source_mutations() {
     use std::time::Duration;
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let mut f = Fixture::new(&http).await;
     f.settings.timeout_seconds = 1;
     f.settings.inventory_timeout_seconds = 60;
@@ -3326,7 +3013,7 @@ async fn manual_inventory_uses_its_budget_and_expires_without_source_mutations()
 #[tokio::test]
 async fn streaming_initial_sync_separates_discovery_and_page_budgets() {
     use std::time::Duration;
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let mut f = Fixture::new(&http).await;
     notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Info);
     f.settings.timeout_seconds = 1;
@@ -3425,7 +3112,7 @@ async fn periodic_sync_retries_unreadable_pages_on_the_next_normal_cycle() {
     use notion_knowledge_server::scheduled_reconciliation::{Settings, runtime::Worker};
     use notion_knowledge_server::webhook_worker::runtime::now_ms;
     use std::time::Duration;
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     http.state.lock().unwrap().unsupported_page_content = true;
     let worker = Worker {
@@ -3516,7 +3203,7 @@ async fn periodic_sync_retries_unreadable_pages_on_the_next_normal_cycle() {
 async fn scheduled_inventory_uses_its_budget_before_bounded_page_work() {
     use notion_knowledge_server::scheduled_reconciliation::{Settings, runtime::Worker};
     use std::time::Duration;
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     // This budget contract owns one scheduled attempt. Combined HTTP-worker
     // contention and periodic mutation refresh have separate integration cases.
@@ -3568,7 +3255,7 @@ async fn scheduled_inventory_uses_its_budget_before_bounded_page_work() {
 #[tokio::test]
 async fn explicit_retry_replans_with_inventory_budget_then_keeps_the_page_deadline() {
     use std::time::Duration;
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let mut f = Fixture::new(&http).await;
     f.provider.fail.store(true, Ordering::SeqCst);
     let seeded = f
@@ -3622,7 +3309,7 @@ async fn new_and_resumed_manual_inventory_allow_short_writer_admission_while_rea
         ("apply", "fresh-read-plan"),
         ("resume", "resumed-read-plan"),
     ] {
-        let http = HttpNotion::start().await;
+        let http = start_notion().await;
         let mut f = Fixture::new(&http).await;
         f.settings.inventory_timeout_seconds = 7200;
         if operation == "resume" {
@@ -3659,7 +3346,7 @@ async fn new_and_resumed_manual_inventory_allow_short_writer_admission_while_rea
 #[tokio::test]
 async fn inventory_recording_rejects_a_local_predecessor_changed_after_planning() {
     use notion_knowledge_retrieval::{planner::PlanError, runner::RunnerError};
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     let runtime = f.open(&http, OpenMode::ExistingWrite).await;
     let plan = runtime.runner.dry_run().await.unwrap();
@@ -3713,7 +3400,7 @@ async fn await_cached_page(path: &std::path::Path, page: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn initial_sync_embeds_and_commits_before_discovery_finishes() {
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     fs::remove_dir_all(&f.settings.index).unwrap();
     http.discovery_pause.armed.store(true, Ordering::SeqCst);
@@ -3745,7 +3432,7 @@ async fn initial_sync_embeds_and_commits_before_discovery_finishes() {
 
 #[tokio::test]
 async fn streaming_retries_commit_the_page_skipped_during_early_population() {
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Info);
     http.state.lock().unwrap().unsupported_page_once = true;
@@ -3825,7 +3512,7 @@ async fn readable_html_siblings_and_many_chunk_pages_use_bounded_embedding_reque
         (0..60).map(|n| format!("<page url=\"https://example.invalid/{n}\">Independent readable source {n}</page>\n")).collect::<String>(),
         (0..40).map(|n| format!("# Section {n}\n\nIndependent readable section {n}.\n\n")).collect(),
     ] {
-        let http = HttpNotion::start().await;
+        let http = start_notion().await;
         let f = Fixture::new(&http).await;
         http.state.lock().unwrap().markdown = markdown;
         f.provider.input_limit_bytes.store(2048, Ordering::SeqCst);
@@ -3844,7 +3531,7 @@ async fn readable_html_siblings_and_many_chunk_pages_use_bounded_embedding_reque
 #[tokio::test]
 async fn embedding_input_limits_remain_visible_while_siblings_commit_and_normal_sync_can_retry() {
     use notion_knowledge_retrieval::durable_plan::DurableFailure;
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Info);
     http.state.lock().unwrap().markdown = format!(
@@ -3928,7 +3615,7 @@ async fn an_existing_coalesced_layout_requires_explicit_scoped_cache_rebuild() {
     use notion_knowledge_retrieval::{
         durable_plan::DurableFailure, refresh::AuthoritativePageRefresh,
     };
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     http.state.lock().unwrap().markdown = (0..30)
         .map(|n| {
@@ -4006,7 +3693,7 @@ async fn an_existing_coalesced_layout_requires_explicit_scoped_cache_rebuild() {
 async fn target_projection_mode_changes_reconcile_without_reembedding_canonical_content() {
     use notion_knowledge_core::graph::{GraphEdgeStore, GraphTarget};
     use notion_knowledge_notion::relation_proposal::ProjectionMode;
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let mut f = Fixture::new(&http).await;
     {
         let mut source = http.state.lock().unwrap();
@@ -4130,7 +3817,7 @@ async fn await_markdown_pages(http: &HttpNotion, count: usize) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn initial_sync_fetches_next_page_while_one_embedding_is_paused() {
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     fs::remove_dir_all(&f.settings.index).unwrap();
     http.markdown_pages.lock().unwrap().clear();
@@ -4168,7 +3855,7 @@ async fn initial_sync_fetches_next_page_while_one_embedding_is_paused() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn initial_sync_read_ahead_is_bounded_while_embedding_is_paused() {
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     http.change(|m| {
         for n in 0..12 {
             m.extra.insert(
@@ -4214,7 +3901,7 @@ async fn initial_sync_read_ahead_is_bounded_while_embedding_is_paused() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_edit_after_prefetch_never_commits_the_stale_snapshot() {
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     fs::remove_dir_all(&f.settings.index).unwrap();
     http.markdown_pages.lock().unwrap().clear();
@@ -4278,7 +3965,7 @@ async fn await_held_embedding(f: &Fixture) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_apply_fetches_next_planned_page_while_one_embedding_is_paused() {
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     http.markdown_pages.lock().unwrap().clear();
     f.provider.hold.store(true, Ordering::SeqCst);
@@ -4300,7 +3987,7 @@ async fn manual_apply_fetches_next_planned_page_while_one_embedding_is_paused() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_apply_read_ahead_is_bounded_while_embedding_is_paused() {
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     add_extra_pages(&http, 12);
     let f = Fixture::new(&http).await;
     http.markdown_pages.lock().unwrap().clear();
@@ -4327,7 +4014,7 @@ async fn manual_apply_read_ahead_is_bounded_while_embedding_is_paused() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_source_edit_after_read_ahead_never_commits_the_stale_snapshot() {
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     let f = Fixture::new(&http).await;
     http.markdown_pages.lock().unwrap().clear();
     f.provider.hold.store(true, Ordering::SeqCst);
@@ -4355,7 +4042,7 @@ async fn manual_source_edit_after_read_ahead_never_commits_the_stale_snapshot() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scheduled_cycle_fetches_next_planned_page_while_one_embedding_is_paused() {
-    let http = HttpNotion::start().await;
+    let http = start_notion().await;
     add_extra_pages(&http, 12);
     let f = Fixture::new(&http).await;
     http.markdown_pages.lock().unwrap().clear();
@@ -4387,4 +4074,39 @@ async fn scheduled_cycle_fetches_next_planned_page_while_one_embedding_is_paused
     assert_eq!(f.provider.max_active.load(Ordering::SeqCst), 1);
     stop.cancel();
     server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn initial_sync_records_inventory_totals_equal_outcomes() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    http.change(|m| {
+        m.inaccessible_other = true;
+        for (id, title) in [
+            ("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "Extra one"),
+            ("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "Extra two"),
+        ] {
+            m.extra.insert(
+                id.into(),
+                ExtraPage {
+                    title: title.into(),
+                    visible: true,
+                    archived: false,
+                },
+            );
+        }
+    });
+    let runtime = IndexRuntime::reset_and_resync(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    )
+    .await
+    .unwrap();
+    let counts = runtime.coordinator.state().inventory_counts().unwrap();
+    assert_eq!(counts.total, 5);
+    assert_eq!((counts.indexed, counts.skipped, counts.failed), (4, 1, 0));
+    assert_eq!(counts.pending, 0);
 }
