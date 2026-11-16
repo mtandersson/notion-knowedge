@@ -125,7 +125,7 @@ impl NotionClient {
             .map_err(|error| match error {
                 ScopeError::Denied => failure(BackendErrorKind::PermissionDenied),
                 ScopeError::Unverifiable => failure(BackendErrorKind::Unavailable),
-                ScopeError::Changed => source_changed(),
+                ScopeError::Changed => failure(BackendErrorKind::Conflict),
                 ScopeError::InvalidConfiguration => failure(BackendErrorKind::InvalidInput),
             })?;
         if !permit.belongs_to_any(std::slice::from_ref(&root.0)) {
