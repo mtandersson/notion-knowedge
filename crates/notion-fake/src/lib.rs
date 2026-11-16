@@ -39,7 +39,8 @@ pub struct Model {
     pub rotate_media: bool,
     pub empty_content: bool,
     pub unsupported_page_content: bool,
-    pub unsupported_page_once: bool,
+    /// The next this-many reads of [`PAGE`]'s Markdown are truncated.
+    pub unsupported_page_reads: usize,
     pub unauthenticated_content: bool,
     pub unauthenticated_page_metadata: bool,
     pub title: String,
@@ -79,7 +80,7 @@ impl Default for Model {
             rotate_media: false,
             empty_content: false,
             unsupported_page_content: false,
-            unsupported_page_once: false,
+            unsupported_page_reads: 0,
             unauthenticated_content: false,
             unauthenticated_page_metadata: false,
             title: "First".into(),
@@ -144,13 +145,16 @@ pub struct FakeNotion {
     pub body_reads: Arc<AtomicUsize>,
     pub target_body_reads: Arc<AtomicUsize>,
     pub foreign_body_reads: Arc<AtomicUsize>,
-    /// Distinct Markdown routes read.
+    /// Distinct Markdown routes read again after the walk's first read, that
+    /// is, pages whose content was prepared for indexing.
     pub markdown_pages: Arc<Mutex<BTreeSet<String>>>,
+    markdown_reads: Arc<Mutex<BTreeMap<String, usize>>>,
     /// The next response is a 503.
     pub fail_once: Arc<AtomicBool>,
     /// Pauses the next `pages/{PAGE}` metadata read.
     pub pause: Arc<RequestPause>,
-    /// Pauses the next response to the root's Markdown, which starts a walk.
+    /// Pauses the next response to [`OTHER`]'s Markdown. The first such read is
+    /// the walk's, so the walk stays open while other reached pages proceed.
     pub discovery_pause: Arc<RequestPause>,
     requests: Arc<Mutex<Vec<String>>>,
     server: tokio::task::JoinHandle<()>,
@@ -356,6 +360,8 @@ impl FakeNotion {
         let target_body_reads = Arc::new(AtomicUsize::new(0));
         let foreign_body_reads = Arc::new(AtomicUsize::new(0));
         let markdown_pages = Arc::new(Mutex::new(BTreeSet::new()));
+        let markdown_counts = Arc::new(Mutex::new(BTreeMap::new()));
+        let read_counts = markdown_counts.clone();
         let fail_once = Arc::new(AtomicBool::new(false));
         let pause = Arc::new(RequestPause::default());
         let discovery_pause = Arc::new(RequestPause::default());
@@ -440,14 +446,20 @@ impl FakeNotion {
                 }
                 if route.ends_with("/markdown") {
                     bodies.fetch_add(1, Ordering::SeqCst);
-                    markdown_reads.lock().unwrap().insert(route.clone());
+                    let mut counts = read_counts.lock().unwrap();
+                    let reads = counts.entry(route.clone()).or_insert(0);
+                    *reads += 1;
+                    if *reads > 1 {
+                        markdown_reads.lock().unwrap().insert(route.clone());
+                    }
                 }
                 let snapshot = {
                     let mut state = values.lock().unwrap();
                     let mut snapshot = state.clone();
-                    if route == format!("/v1/pages/{PAGE}/markdown") && state.unsupported_page_once
+                    if route == format!("/v1/pages/{PAGE}/markdown")
+                        && state.unsupported_page_reads > 0
                     {
-                        state.unsupported_page_once = false;
+                        state.unsupported_page_reads -= 1;
                         snapshot.unsupported_page_content = true;
                     }
                     if route == format!("/v1/pages/{PAGE}") {
@@ -488,7 +500,7 @@ impl FakeNotion {
                     "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
-                if route == format!("/v1/pages/{ROOT}/markdown")
+                if route == format!("/v1/pages/{OTHER}/markdown")
                     && discovery.armed.swap(false, Ordering::SeqCst)
                 {
                     let barrier = discovery.clone();
@@ -509,6 +521,7 @@ impl FakeNotion {
             target_body_reads,
             foreign_body_reads,
             markdown_pages,
+            markdown_reads: markdown_counts,
             fail_once,
             pause,
             discovery_pause,
@@ -526,6 +539,11 @@ impl FakeNotion {
     }
     pub fn change(&self, change: impl FnOnce(&mut Model)) {
         change(&mut self.state.lock().unwrap());
+    }
+    /// Forget prepared pages and read counts, so the next walk counts afresh.
+    pub fn reset_markdown_pages(&self) {
+        self.markdown_reads.lock().unwrap().clear();
+        self.markdown_pages.lock().unwrap().clear();
     }
     /// Request routes in arrival order.
     pub fn requests(&self) -> Vec<String> {

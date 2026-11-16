@@ -516,7 +516,7 @@ async fn actual_commands_apply_differences_only_and_keep_dry_run_and_status_read
     assert_eq!(dry.exit, 0);
     assert_eq!(dry.json["planned_refresh"], 3);
     assert_eq!(dry.json["changed"], 0);
-    assert_eq!(http.body_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(http.body_reads.load(Ordering::SeqCst), 3); // The walk reads each of the 3 pages once.
     assert_eq!(f.provider.count.load(Ordering::SeqCst), 0);
     assert_eq!(before, f.snapshot());
     let applied = f.command(&http, &["--reconcile", "apply", "first"]).await;
@@ -555,11 +555,12 @@ async fn actual_commands_apply_differences_only_and_keep_dry_run_and_status_read
         m.hide_page = true;
         m.archived = true;
     });
+    // Removing PAGE's child tag edits the root, which also moves OTHER.
     counts(
         &f.command(&http, &["--reconcile", "apply", "orphan"]).await,
-        0,
-        1,
         2,
+        1,
+        0,
     );
     let runtime = f.open(&http, OpenMode::ReadOnly).await;
     assert!(runtime.coordinator.state().acquire_lease(10, 30).is_err());
@@ -751,7 +752,8 @@ async fn timed_out_dry_run_leaves_state_unchanged_and_has_a_distinct_failure_exi
     assert_eq!(result.exit, 3);
     assert_eq!(result.json["status"], "timeout");
     assert_eq!(before, f.snapshot());
-    assert_eq!(http.body_reads.load(Ordering::SeqCst), 0);
+    // The walk may read Markdown before the paused metadata read; nothing is written.
+    assert!(http.body_reads.load(Ordering::SeqCst) <= 3);
     http.pause.proceed.notify_one();
 }
 
@@ -1452,9 +1454,10 @@ async fn actual_scheduled_http_reprocesses_stale_and_safely_deletes_authoritativ
         .as_ref()
         .unwrap();
     let p = worker.coordinator.reconciliation_progress(run).unwrap();
+    // Removing PAGE's child tag edits the root, which also moves OTHER.
     assert_eq!(
         (p.changed, p.deleted, p.unchanged, p.failed_pages()),
-        (0, 1, 2, 0)
+        (2, 1, 0, 0)
     );
     stop.cancel();
     server.await.unwrap().unwrap();
@@ -2470,12 +2473,13 @@ async fn ordinary_reconciliation_repairs_missing_rows_without_a_source_revision_
                 m.hide_page = true;
                 m.archived = true;
             });
+            // Removing PAGE's child tag edits the root, which also moves OTHER.
             counts(
                 &f.command(&http, &["--reconcile", "apply", "after-deletion"])
                     .await,
-                0,
-                1,
                 2,
+                1,
+                0,
             );
             f.open(&http, OpenMode::ReadOnly).await
         };
@@ -3435,7 +3439,8 @@ async fn streaming_retries_commit_the_page_skipped_during_early_population() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
     notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Info);
-    http.state.lock().unwrap().unsupported_page_once = true;
+    // Truncated for the walk's read and for early population's preparation.
+    http.state.lock().unwrap().unsupported_page_reads = 2;
     fs::remove_dir_all(&f.settings.index).unwrap();
     let runtime = IndexRuntime::recover(
         &f.settings,
@@ -3820,7 +3825,7 @@ async fn initial_sync_fetches_next_page_while_one_embedding_is_paused() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
     fs::remove_dir_all(&f.settings.index).unwrap();
-    http.markdown_pages.lock().unwrap().clear();
+    http.reset_markdown_pages();
     f.provider.hold.store(true, Ordering::SeqCst);
     let settings = f.settings.clone();
     let state = f.state.clone();
@@ -3870,7 +3875,7 @@ async fn initial_sync_read_ahead_is_bounded_while_embedding_is_paused() {
     });
     let f = Fixture::new(&http).await;
     fs::remove_dir_all(&f.settings.index).unwrap();
-    http.markdown_pages.lock().unwrap().clear();
+    http.reset_markdown_pages();
     f.provider.hold.store(true, Ordering::SeqCst);
     let settings = f.settings.clone();
     let state = f.state.clone();
@@ -3904,7 +3909,7 @@ async fn source_edit_after_prefetch_never_commits_the_stale_snapshot() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
     fs::remove_dir_all(&f.settings.index).unwrap();
-    http.markdown_pages.lock().unwrap().clear();
+    http.reset_markdown_pages();
     f.provider.hold.store(true, Ordering::SeqCst);
     let settings = f.settings.clone();
     let state = f.state.clone();
@@ -3967,7 +3972,7 @@ async fn await_held_embedding(f: &Fixture) {
 async fn manual_apply_fetches_next_planned_page_while_one_embedding_is_paused() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
-    http.markdown_pages.lock().unwrap().clear();
+    http.reset_markdown_pages();
     f.provider.hold.store(true, Ordering::SeqCst);
     let observe = async {
         await_held_embedding(&f).await;
@@ -3990,7 +3995,7 @@ async fn manual_apply_read_ahead_is_bounded_while_embedding_is_paused() {
     let http = start_notion().await;
     add_extra_pages(&http, 12);
     let f = Fixture::new(&http).await;
-    http.markdown_pages.lock().unwrap().clear();
+    http.reset_markdown_pages();
     f.provider.hold.store(true, Ordering::SeqCst);
     let observe = async {
         await_held_embedding(&f).await;
@@ -4016,7 +4021,7 @@ async fn manual_apply_read_ahead_is_bounded_while_embedding_is_paused() {
 async fn manual_source_edit_after_read_ahead_never_commits_the_stale_snapshot() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
-    http.markdown_pages.lock().unwrap().clear();
+    http.reset_markdown_pages();
     f.provider.hold.store(true, Ordering::SeqCst);
     let observe = async {
         await_held_embedding(&f).await;
@@ -4045,7 +4050,7 @@ async fn scheduled_cycle_fetches_next_planned_page_while_one_embedding_is_paused
     let http = start_notion().await;
     add_extra_pages(&http, 12);
     let f = Fixture::new(&http).await;
-    http.markdown_pages.lock().unwrap().clear();
+    http.reset_markdown_pages();
     f.provider.hold.store(true, Ordering::SeqCst);
     let (worker, stop, server) =
         scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
