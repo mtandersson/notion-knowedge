@@ -201,7 +201,7 @@ impl RelationProposalAdapter {
                 .take()
                 .unwrap_or(Err(BackendErrorKind::InvalidInput));
             if target == metadata.page_id && observed.as_ref().ok() != Some(source) {
-                return Err(conflict());
+                return Err(crate::prepare::source_changed());
             }
             evidence.insert(target.clone(), observed);
             if outcome.is_ok() {

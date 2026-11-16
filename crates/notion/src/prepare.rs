@@ -58,6 +58,20 @@ impl ScopedPageSnapshot {
     }
 }
 
+/// Operation tag of a [`BackendErrorKind::Conflict`] that means only that the
+/// page's source changed while it was being read. Callers may prepare such a
+/// page again; every other conflict (scope, policy, bounds, lock) may not.
+pub const SOURCE_CHANGED: &str = "notion.prepare_scoped_page.source_changed";
+
+pub(crate) fn source_changed() -> BackendError {
+    BackendError {
+        operation: SOURCE_CHANGED,
+        kind: BackendErrorKind::Conflict,
+        retry_after: None,
+        committed_page_id: None,
+    }
+}
+
 fn failure(kind: BackendErrorKind) -> BackendError {
     BackendError {
         operation: "notion.prepare_scoped_page",
@@ -111,7 +125,7 @@ impl NotionClient {
             .map_err(|error| match error {
                 ScopeError::Denied => failure(BackendErrorKind::PermissionDenied),
                 ScopeError::Unverifiable => failure(BackendErrorKind::Unavailable),
-                ScopeError::Changed => failure(BackendErrorKind::Conflict),
+                ScopeError::Changed => source_changed(),
                 ScopeError::InvalidConfiguration => failure(BackendErrorKind::InvalidInput),
             })?;
         if !permit.belongs_to_any(std::slice::from_ref(&root.0)) {
@@ -162,7 +176,7 @@ impl NotionClient {
         // not just timestamps, then physically revalidate original ancestry.
         let after = canonical_content(self.read_content(&selected.0).await?);
         if before != after {
-            return Err(failure(BackendErrorKind::Conflict));
+            return Err(source_changed());
         }
         gate.revalidate(&permit, scope)
             .await

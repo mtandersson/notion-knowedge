@@ -576,8 +576,10 @@ impl AuthoritativePageRefresh {
     }
 
     /// [`Self::prefetch_page`], additionally marking `source_changed` when the
-    /// conflict came from the source changing during preparation. Receipt
-    /// authority, lease, storage and ownership conflicts are never marked.
+    /// conflict means only that the source changed during preparation
+    /// ([`notion_knowledge_notion::prepare::SOURCE_CHANGED`]). Receipt
+    /// authority, scope policy, bounds, lock, lease, storage and ownership
+    /// conflicts are never marked and stay fatal.
     async fn prepare_source(
         &self,
         page: &PageId,
@@ -603,7 +605,9 @@ impl AuthoritativePageRefresh {
             .map_err(|e| match e.kind {
                 BackendErrorKind::PermissionDenied => RefreshError::OutOfScope,
                 BackendErrorKind::Conflict => {
-                    if let Some(flag) = source_changed {
+                    if e.operation == notion_knowledge_notion::prepare::SOURCE_CHANGED
+                        && let Some(flag) = source_changed
+                    {
                         flag.store(true, Ordering::SeqCst);
                     }
                     RefreshError::Conflict
@@ -664,6 +668,8 @@ impl AuthoritativePageRefresh {
     /// re-prepares once from current state, and a page that changes again is a
     /// page-local transient [`RefreshError::Source`] failure. Any other conflict
     /// (receipt authority, lease, ownership, storage) is returned unchanged.
+    /// The bound is per call: a page the producer already saw change during
+    /// prefetch is handed here and may be prepared at most twice more.
     pub async fn refresh_inline(
         &self,
         page: &PageId,
