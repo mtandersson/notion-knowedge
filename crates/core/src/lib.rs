@@ -31,6 +31,9 @@ pub mod backend;
 /// Read-only discovery under explicit configured roots.
 pub mod discovery;
 
+/// Disposable inventory of pages reached by one walk from the root.
+pub mod inventory;
+
 /// Semantic Markdown chunk drafts, before hashing and ID assignment.
 pub mod chunking;
 

@@ -42,6 +42,7 @@ impl SqliteSyncStateStore {
             DELETE FROM index_commit_generations;
             DELETE FROM page_sync_state;
             DELETE FROM crawl_checkpoints;
+            DELETE FROM page_inventory;
             DELETE FROM index_versions;
             INSERT INTO index_versions(index_name,version) VALUES('cache-rebuild','pending');
         ",
