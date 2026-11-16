@@ -448,6 +448,53 @@ impl IndexCommitCoordinator {
             Ok(s)
         })
     }
+    /// Hold the active cycle until `deadline` WITHOUT consuming run-failure
+    /// budget, for failures retrying cannot fix (a rejected credential). The
+    /// status and attempts are unchanged; the event is recorded like a
+    /// checkpoint, so history shows the cycle paused rather than failed.
+    pub fn postpone_schedule(
+        &self,
+        lease: &Lease,
+        now: i64,
+        id: &str,
+        deadline: i64,
+    ) -> Result<Schedule, JournalError> {
+        validate(id)?;
+        time(deadline)?;
+        self.schedule_write(lease, now, |db| {
+            let s = load(db, self, id)?;
+            let run = s
+                .active_run
+                .as_deref()
+                .ok_or(JournalError::InvalidTransition)?;
+            if matches!(s.status, ScheduleStatus::HeldPages | ScheduleStatus::Exhausted) {
+                return Err(JournalError::InvalidTransition);
+            }
+            let owned: bool = db
+                .query_row(
+                    "SELECT fence=?1 AND abandoned=0 AND phase<>2 FROM reconciliation_runs WHERE run_id=?2",
+                    params![lease.fence, run],
+                    |r| r.get(0),
+                )
+                .map_err(sql)?;
+            if !owned {
+                return Err(JournalError::InvalidTransition);
+            }
+            db.execute(
+                "UPDATE reconciliation_schedules SET next_deadline=?1 WHERE schedule_id=?2",
+                params![deadline, id],
+            )
+            .map_err(sql)?;
+            db.execute(
+                "UPDATE reconciliation_runs SET next_deadline=?1 WHERE run_id=?2",
+                params![deadline, run],
+            )
+            .map_err(sql)?;
+            let s = load(db, self, id)?;
+            event(db, &s, now, 7, None, None)?;
+            Ok(s)
+        })
+    }
     /// Explicit operator recovery AFTER failed-page retry. Never resets failed work.
     /// A completed/abandoned run requires `abandon_schedule` + a fresh cycle.
     pub fn retry_schedule(

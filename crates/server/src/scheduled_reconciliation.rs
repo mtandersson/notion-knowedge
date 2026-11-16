@@ -56,7 +56,7 @@ impl Settings {
 pub mod runtime {
     use super::Settings;
     use crate::{
-        index_runtime::{IndexRuntime, PageDeadline, SyncMode, SyncTotals},
+        index_runtime::{IndexRuntime, PageDeadline, SyncError, SyncFailure, SyncMode, SyncTotals},
         webhook_worker::runtime::now_ms,
     };
     use notion_knowledge_core::reconciliation::{
@@ -128,20 +128,20 @@ pub mod runtime {
             stop: &CancellationToken,
             lease: &mut Lease,
             mode: SyncMode,
-        ) -> Result<Option<Result<SyncTotals, &'static str>>, &'static str> {
+        ) -> Result<Option<Result<SyncTotals, SyncError>>, &'static str> {
             let page = PageDeadline {
                 timeout_seconds: self.timeout.as_secs(),
             };
             let index = &self.index;
             let outcome = tokio::select! { biased;
                 _ = stop.cancelled() => None,
-                _ = tokio::time::sleep(self.inventory_timeout) => Some(Err("scheduled sync timeout")),
+                _ = tokio::time::sleep(self.inventory_timeout) => Some(Err(SyncError::from("scheduled sync timeout"))),
                 result = async {
                     let totals = Box::pin(index.sync_from_walk(&page, lease, mode)).await?;
                     let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| now_ms() / 1000);
                     crate::index_runtime::prepare_search_if_missing(&index.coordinator, &index.handler, lease.clone(), clock)
                         .await
-                        .map_err(|_| "scheduled search preparation failed")?;
+                        .map_err(|_| SyncError::from("scheduled search preparation failed"))?;
                     Ok(totals)
                 } => Some(result),
             };
@@ -206,13 +206,27 @@ pub mod runtime {
                             .complete_schedule(&lease, now, ID, success)
                             .map(drop)
                     }
+                    // A rejected credential cannot heal by retrying: hold the
+                    // cycle without consuming an attempt until the backoff
+                    // ceiling, then try again.
+                    Some(Err(SyncError {
+                        failure: SyncFailure::Unauthenticated,
+                        ..
+                    })) => coordinator
+                        .postpone_schedule(
+                            &lease,
+                            now,
+                            ID,
+                            now.saturating_add(self.settings.maximum_backoff),
+                        )
+                        .map(drop),
                     Some(Err(error)) => {
-                        let class = if error.contains("index") {
-                            FailureClass::Index
-                        } else if error.contains("authority") {
-                            FailureClass::Conflict
-                        } else {
-                            FailureClass::Unavailable
+                        let class = match error.failure {
+                            SyncFailure::Index => FailureClass::Index,
+                            SyncFailure::Authority => FailureClass::Conflict,
+                            SyncFailure::Unavailable | SyncFailure::Unauthenticated => {
+                                FailureClass::Unavailable
+                            }
                         };
                         let event = format!(
                             "attempt-{}",

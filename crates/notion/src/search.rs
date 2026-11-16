@@ -109,6 +109,15 @@ impl NotionClient {
     }
 }
 
+/// Pages a changed-since search listed, and whether it reached `since`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchChanges {
+    pub hits: Vec<SearchHit>,
+    /// False when the listing was cut short: changes older than the last
+    /// listed page may be missing until the next full walk.
+    pub complete: bool,
+}
+
 /// Where a search hit says it lives, for placement against the inventory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HitParent {
@@ -155,9 +164,12 @@ fn page_id_of(value: &Value) -> Option<String> {
 impl NotionClient {
     /// Pages edited at or after `since`, newest first. Timestamps are
     /// minute-granular, so pages edited in the `since` minute are listed again
-    /// and the caller compares them against the inventory.
-    pub async fn search_changed_since(&self, since: &str) -> Result<Vec<SearchHit>, BackendError> {
+    /// and the caller compares them against the inventory. A listing that
+    /// stops before reaching `since` (entry or page cap, missing or repeated
+    /// cursor) is returned with `complete: false`.
+    pub async fn search_changed_since(&self, since: &str) -> Result<SearchChanges, BackendError> {
         let mut hits = Vec::new();
+        let mut complete = true;
         let mut cursor: Option<String> = None;
         let mut cursors = BTreeSet::new();
         for _ in 0..MAX_SEARCH_PAGES {
@@ -192,21 +204,29 @@ impl NotionClient {
                     older = true;
                 } else if hits.len() < MAX_SEARCH_ENTRIES {
                     hits.push(hit);
+                } else {
+                    complete = false;
                 }
+            }
+            if older || value["has_more"] != true {
+                return Ok(SearchChanges { hits, complete });
             }
             match value["next_cursor"].as_str() {
-                Some(next)
-                    if !older
-                        && value["has_more"] == true
-                        && !next.is_empty()
-                        && cursors.insert(next.to_owned()) =>
-                {
+                Some(next) if !next.is_empty() && cursors.insert(next.to_owned()) => {
                     cursor = Some(next.to_owned());
                 }
-                _ => return Ok(hits),
+                _ => {
+                    return Ok(SearchChanges {
+                        hits,
+                        complete: false,
+                    });
+                }
             }
         }
-        Ok(hits)
+        Ok(SearchChanges {
+            hits,
+            complete: false,
+        })
     }
 
     /// One page retrieve as a hit: the single-page (callback) path.

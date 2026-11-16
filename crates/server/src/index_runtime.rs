@@ -89,10 +89,68 @@ struct HitSync {
     /// In the inventory and confirmed trashed, archived or excluded.
     removals: Vec<String>,
     unplaced: u64,
+    /// The search listing was cut short (see [`SearchChanges::complete`]).
+    ///
+    /// [`SearchChanges::complete`]: notion_knowledge_notion::search::SearchChanges::complete
+    truncated: bool,
 }
 enum Discovered {
     Walk(notion_knowledge_notion::walk::TreeWalk),
     Hits(HitSync),
+}
+
+/// What stopped a sync, so a scheduler decides by type whether to hold,
+/// retry or fail the cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncFailure {
+    /// The source rejected the credential (401). Retrying cannot help until
+    /// an operator fixes it.
+    Unauthenticated,
+    /// The local index failed.
+    Index,
+    /// Local authority (lease, fence, receipt or configuration) conflicted.
+    Authority,
+    /// A dependency or the source was unavailable; a retry may succeed.
+    Unavailable,
+}
+
+/// A failed [`IndexRuntime::sync_from_walk`]: its class and a stable reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncError {
+    pub failure: SyncFailure,
+    pub reason: &'static str,
+}
+impl SyncError {
+    pub const fn new(failure: SyncFailure, reason: &'static str) -> Self {
+        Self { failure, reason }
+    }
+    /// A source read failure: authentication is told apart from the rest.
+    fn source(error: &notion_knowledge_core::backend::BackendError) -> Self {
+        if error.kind == notion_knowledge_core::backend::BackendErrorKind::Unauthenticated {
+            Self::new(
+                SyncFailure::Unauthenticated,
+                "cache inventory source authentication failed",
+            )
+        } else {
+            Self::new(SyncFailure::Unavailable, "cache inventory failed")
+        }
+    }
+}
+/// Untyped local failures are unavailability: retried within the budget.
+impl From<&'static str> for SyncError {
+    fn from(reason: &'static str) -> Self {
+        Self::new(SyncFailure::Unavailable, reason)
+    }
+}
+impl PartialEq<&str> for SyncError {
+    fn eq(&self, other: &&str) -> bool {
+        self.reason == *other
+    }
+}
+impl std::fmt::Display for SyncError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.reason)
+    }
 }
 
 /// Page counts of one [`IndexRuntime::sync_from_walk`] run.
@@ -457,7 +515,7 @@ impl IndexRuntime {
         settings: &PageDeadline,
         lease: &mut notion_knowledge_core::reconciliation::Lease,
         mode: SyncMode,
-    ) -> Result<SyncTotals, &'static str> {
+    ) -> Result<SyncTotals, SyncError> {
         use futures::StreamExt;
         use notion_knowledge_core::{
             discovery::SkipReason,
@@ -488,24 +546,29 @@ impl IndexRuntime {
                     .walk_tree_with_search(&self.source_scope, Some(&send))
                     .await
                     .map(Discovered::Walk)
-                    .map_err(|_| "cache inventory failed");
+                    .map_err(|e| SyncError::source(&e));
             }
-            let hits = match mode {
+            let (hits, complete) = match mode {
                 SyncMode::Page(page) => match self.source.page_hit(&page).await {
-                    Ok(hit) => hit.into_iter().collect(),
-                    Err(e) if notion_knowledge_core::discovery::inaccessible(e.kind) => vec![],
-                    Err(_) => return Err("cache inventory failed"),
+                    Ok(hit) => (hit.into_iter().collect(), true),
+                    Err(e) if notion_knowledge_core::discovery::inaccessible(e.kind) => {
+                        (vec![], true)
+                    }
+                    Err(e) => return Err(SyncError::source(&e)),
                 },
-                _ => self
-                    .source
-                    .search_changed_since(since.as_deref().unwrap_or_default())
-                    .await
-                    .map_err(|_| "cache inventory failed")?,
+                _ => {
+                    let changes = self
+                        .source
+                        .search_changed_since(since.as_deref().unwrap_or_default())
+                        .await
+                        .map_err(|e| SyncError::source(&e))?;
+                    (changes.hits, changes.complete)
+                }
             };
             let single = hits.len() == 1 && since.is_none();
-            Box::pin(self.discover_hits(hits, single, &send))
-                .await
-                .map(Discovered::Hits)
+            let mut hits = Box::pin(self.discover_hits(hits, single, &send)).await?;
+            hits.truncated = !complete;
+            Ok(Discovered::Hits(hits))
         };
         // Bounded read-ahead: preparation of later pages overlaps the one
         // embedding/commit consumer. Each preparation reserves worst-case bytes
@@ -535,7 +598,7 @@ impl IndexRuntime {
                     break;
                 }
             }
-            Ok::<_, &'static str>(())
+            Ok::<_, SyncError>(())
         };
         let consume = async {
             let mut progress = SyncProgressLog::new(SyncPhase::Indexing);
@@ -557,7 +620,7 @@ impl IndexRuntime {
                     .map_err(|_| "cache sync lease unavailable")?;
                 processed += 1;
                 let (page, operation, work) = match item {
-                    Prefetched::Fatal(error) => return Err(error),
+                    Prefetched::Fatal(error) => return Err(error.into()),
                     Prefetched::Ready { prefetched, bytes } => (
                         prefetched.page().clone(),
                         prefetched.operation().to_owned(),
@@ -663,16 +726,27 @@ impl IndexRuntime {
                         }
                     }
                     Ok(Err(RefreshError::Unauthenticated)) => {
-                        return Err("cache streaming source authentication failed");
+                        return Err(SyncError::new(
+                            SyncFailure::Unauthenticated,
+                            "cache streaming source authentication failed",
+                        ));
                     }
-                    Ok(Err(RefreshError::Index)) => return Err("cache streaming index failed"),
+                    Ok(Err(RefreshError::Index)) => {
+                        return Err(SyncError::new(
+                            SyncFailure::Index,
+                            "cache streaming index failed",
+                        ));
+                    }
                     // Only local authority (lease, fence, receipt) can conflict:
                     // the source is not checked again before commit.
                     Ok(Err(RefreshError::Conflict | RefreshError::InvalidConfiguration)) => {
-                        return Err("cache streaming authority failed");
+                        return Err(SyncError::new(
+                            SyncFailure::Authority,
+                            "cache streaming authority failed",
+                        ));
                     }
                     Ok(Err(RefreshError::Unavailable)) => {
-                        return Err("cache streaming dependency unavailable");
+                        return Err("cache streaming dependency unavailable".into());
                     }
                     Err(()) => {
                         if self
@@ -705,10 +779,11 @@ impl IndexRuntime {
                 totals.failed as usize,
                 true,
             );
-            Ok::<_, &'static str>((totals, outcomes))
+            Ok::<_, SyncError>((totals, outcomes))
         };
         let (discovered, (), (mut totals, outcomes)) =
             tokio::try_join!(Box::pin(walk), Box::pin(produce), Box::pin(consume))?;
+        let mut truncated = false;
         let run_id = match discovered {
             Discovered::Walk(walk) => {
                 // Read the previous inventory before this walk replaces it.
@@ -730,6 +805,7 @@ impl IndexRuntime {
                 walk.run_id
             }
             Discovered::Hits(hits) => {
+                truncated = hits.truncated;
                 let run = notion_knowledge_core::logging::CorrelationId::new()
                     .as_str()
                     .to_owned();
@@ -756,11 +832,13 @@ impl IndexRuntime {
         let mut walk = (totals.complete, totals.held);
         if !full {
             totals.drift.removed = totals.removed;
-            // Completeness describes the last walk; a search does not change it.
+            // Completeness describes the last walk; a complete search does not
+            // change it. A cut-short listing may have missed older changes, so
+            // the inventory is incomplete until the next full walk.
             walk = state
                 .last_sync()
                 .map_err(|_| "cache inventory state unavailable")?
-                .map_or((false, 0), |last| (last.complete, last.held));
+                .map_or((false, 0), |last| (last.complete && !truncated, last.held));
         }
         state
             .record_sync(&notion_knowledge_core::inventory::SyncRecord {
@@ -786,7 +864,7 @@ impl IndexRuntime {
         hits: Vec<notion_knowledge_notion::search::SearchHit>,
         single: bool,
         send: &tokio::sync::mpsc::Sender<notion_knowledge_notion::walk::WalkedPage>,
-    ) -> Result<HitSync, &'static str> {
+    ) -> Result<HitSync, SyncError> {
         use notion_knowledge_core::discovery::{SkipReason, SkippedContent, inaccessible};
         let state = self.coordinator.state();
         let unavailable = |_| "cache inventory state unavailable";
@@ -807,7 +885,7 @@ impl IndexRuntime {
                     {
                         Ok(confirmed) => confirmed.is_some_and(|c| c.in_trash),
                         Err(e) if inaccessible(e.kind) => false,
-                        Err(_) => return Err("cache inventory failed"),
+                        Err(e) => return Err(SyncError::source(&e)),
                     };
                 if confirmed {
                     entry.in_trash = true;
@@ -853,7 +931,7 @@ impl IndexRuntime {
                     out.unplaced += 1;
                     continue;
                 }
-                Err(_) => return Err("cache inventory failed"),
+                Err(e) => return Err(SyncError::source(&e)),
             };
             out.entries.push(page.entry.clone());
             if let Some(reason) = page.skip {
@@ -1169,7 +1247,8 @@ impl IndexRuntime {
                 )),
             )
             .await
-            .map_err(|_| "cache inventory timeout; retry startup")??;
+            .map_err(|_| "cache inventory timeout; retry startup")?
+            .map_err(|e| e.reason)?;
             lease = state
                 .renew_lease(&lease, now_ms() / 1000, timeout_seconds as i64 + 30)
                 .map_err(|_| "cache sync lease unavailable")?;
