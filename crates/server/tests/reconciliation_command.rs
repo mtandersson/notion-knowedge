@@ -4031,3 +4031,107 @@ async fn full_sync_makes_two_calls_per_plain_page_and_one_per_row() {
         counts.total
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_command_drains_its_submitted_owned_guard_before_releasing_the_writer() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    *f.provider.boundary_pause.lock().unwrap() = Some(http.pause.clone());
+    pause_owned_commits(&f.settings.index, http.pause.clone());
+    let stop = CancellationToken::new();
+    let pending = f.command_cancel(
+        &http,
+        &["--reconcile", "apply", "owned-cancel"],
+        stop.clone(),
+    );
+    let cancel = async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            http.pause.started.notified(),
+        )
+        .await
+        .unwrap();
+        let guard = std::fs::File::open(&f.settings.index).unwrap();
+        assert!(
+            guard.try_lock().is_err(),
+            "owned precommit must hold the actual directory guard"
+        );
+        stop.cancel();
+    };
+    let (out, _) = tokio::join!(pending, cancel);
+    assert_eq!(out.exit, 5);
+    assert_eq!(out.json["pending"], 3);
+    assert_eq!(out.json["changed"], 0);
+    let guard = std::fs::File::open(&f.settings.index).unwrap();
+    guard.try_lock().unwrap();
+    drop(guard);
+    http.pause.proceed.notify_one();
+    counts(
+        &f.command(&http, &["--reconcile", "resume", "owned-cancel"])
+            .await,
+        3,
+        0,
+        0,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actual_scheduled_http_shutdown_drains_live_owned_effect_before_release() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    *f.provider.boundary_pause.lock().unwrap() = Some(http.pause.clone());
+    pause_owned_commits(&f.settings.index, http.pause.clone());
+    let (worker, stop, server) =
+        scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        http.pause.started.notified(),
+    )
+    .await
+    .unwrap();
+    let guard = std::fs::File::open(&f.settings.index).unwrap();
+    assert!(guard.try_lock().is_err());
+    drop(guard);
+    let active = worker.coordinator.schedule("periodic").unwrap();
+    stop.cancel();
+    server.await.unwrap().unwrap();
+    let guard = std::fs::File::open(&f.settings.index).unwrap();
+    guard.try_lock().unwrap();
+    drop(guard);
+    assert_eq!(
+        worker.coordinator.schedule("periodic").unwrap().active_run,
+        active.active_run
+    );
+    let lease = worker
+        .state
+        .acquire_lease(
+            notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000,
+            30,
+        )
+        .unwrap();
+    worker
+        .state
+        .release_lease(
+            &lease,
+            notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000,
+        )
+        .unwrap();
+    http.pause.proceed.notify_one();
+    let (worker, stop, server) =
+        scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
+    await_schedule(&worker, |s| s.cycle == 1 && s.active_run.is_none()).await;
+    stop.cancel();
+    server.await.unwrap().unwrap();
+}
+
+/// Hold the owned commit (guard and fence held, before effects) whenever
+/// `pause` is armed: the boundary the removed in-guard source read used to give.
+fn pause_owned_commits(index: &std::path::Path, pause: Arc<RequestPause>) {
+    notion_knowledge_retrieval::test_hooks::set_commit_pause(
+        index,
+        Arc::new(move || {
+            let pause = pause.clone();
+            Box::pin(async move { pause.hold().await })
+        }),
+    );
+}

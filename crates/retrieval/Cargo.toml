@@ -46,6 +46,7 @@ serde = { version = "1", features = ["derive"] }
 rusqlite = { version = "0.41.0", default-features = false, features = ["bundled"] }
 
 [dev-dependencies]
+notion-knowledge-retrieval = { path = ".", features = ["test-fixtures"] }
 notion-fake = { path = "../notion-fake" }
 notion-knowledge-mcp = { path = "../mcp" }
 notion-knowledge-notion = { path = "../notion", features = ["test-fixtures"] }

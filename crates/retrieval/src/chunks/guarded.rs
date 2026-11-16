@@ -133,6 +133,11 @@ async fn open_current(
 }
 
 impl GuardedChunkTable {
+    /// The bound index directory (test pause hooks are keyed by it).
+    pub(crate) fn index_directory(&self) -> &std::path::Path {
+        &self.index_directory
+    }
+
     /// Verify trusted operator configuration, including the directory inode
     /// identity already pinned by the SQLite/index commit coordinator.
     pub fn bind(

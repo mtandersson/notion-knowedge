@@ -2,16 +2,50 @@
 //! integration can see, used only to skip per-page metadata reads. Search never
 //! decides scope: a listed page the walk does not reach is ignored, and the
 //! walk falls back to reading a page when its listing is missing or disagrees.
-use crate::{NotionClient, pages::page_id};
-use notion_knowledge_core::backend::{BackendError, BackendErrorKind};
+use crate::{
+    NotionClient,
+    pages::{metadata, page_id},
+};
+use notion_knowledge_core::backend::{BackendError, BackendErrorKind, Page, PageId};
 use reqwest::Method;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_SEARCH_PAGES: usize = 10_000;
+/// Listed pages kept per walk. The walk itself reaches at most 100,000
+/// nodes; past this many listings the remaining pages are read directly, so
+/// a workspace much larger than the configured roots costs memory only up
+/// to this bound.
+pub const MAX_SEARCH_ENTRIES: usize = 20_000;
 
-/// Page id to the page object search returned for it.
-pub type SearchMetadata = BTreeMap<String, Value>;
+/// One complete listing: parsed metadata and its direct page parent, if any.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListedPage {
+    pub page: Page,
+    /// `None` unless the physical parent is a page (block, data source and
+    /// workspace parents always fall back to a direct read).
+    pub parent_page_id: Option<String>,
+}
+
+/// Page id to its complete search listing. Partial listings (missing fields,
+/// truncated properties) are left out, so those pages are read directly.
+pub type SearchMetadata = BTreeMap<String, ListedPage>;
+
+fn listed(value: &Value) -> Option<(String, ListedPage)> {
+    let id = page_id(value["id"].as_str()?).ok()?;
+    let page = metadata(value, &id).ok()?;
+    let parent_page_id = (value["parent"]["type"] == "page_id")
+        .then(|| page_id(value["parent"]["page_id"].as_str()?).ok())
+        .flatten()
+        .map(|PageId(id)| id);
+    Some((
+        id.0,
+        ListedPage {
+            page,
+            parent_page_id,
+        },
+    ))
+}
 
 impl NotionClient {
     /// Every page search lists, oldest edit first, 100 per request. A
@@ -50,10 +84,15 @@ impl NotionClient {
                     retry_after: None,
                     committed_page_id: None,
                 })?;
-            for page in results.iter().filter(|page| page["object"] == "page") {
-                if let Some(id) = page["id"].as_str().and_then(|id| page_id(id).ok()) {
-                    pages.insert(id.0, page.clone());
+            for (id, page) in results
+                .iter()
+                .filter(|page| page["object"] == "page")
+                .filter_map(listed)
+            {
+                if pages.len() >= MAX_SEARCH_ENTRIES {
+                    return Ok(pages);
                 }
+                pages.insert(id, page);
             }
             match value["next_cursor"].as_str() {
                 Some(next)

@@ -283,16 +283,16 @@ impl NotionClient {
         // metadata read; anything else (missing, partial, moved, nested under
         // a block, or the root) is read directly.
         let listed = match &parent {
-            InventoryParent::Page(expected) => search.get(&id).filter(|value| {
-                value["parent"]["type"] == "page_id"
-                    && self::id(&value["parent"]["page_id"]).ok().as_ref() == Some(expected)
-                    && metadata(value, &page_ref).is_ok()
-            }),
+            InventoryParent::Page(expected) => search
+                .get(&id)
+                .filter(|listed| listed.parent_page_id.as_ref() == Some(expected))
+                .map(|listed| listed.page.clone()),
             _ => None,
         };
-        let value = match row.or_else(|| listed.cloned()) {
-            Some(value) => value,
-            None => {
+        let value = match (listed.is_some(), row) {
+            (true, _) => Value::Null,
+            (false, Some(value)) => value,
+            (false, None) => {
                 visit.calls += 1;
                 match self.fetch_page_value(&page_ref).await {
                     Ok(value) => value,
@@ -305,8 +305,12 @@ impl NotionClient {
                 }
             }
         };
-        let page = metadata(&value, &page_ref)?;
+        let page = match listed {
+            Some(page) => page,
+            None => metadata(&value, &page_ref)?,
+        };
         if let InventoryParent::Page(expected) = &parent
+            && !value.is_null()
             && !self.parent_is(&value, expected, &mut visit).await?
         {
             // Not physically under this page, for example a linked view.
@@ -346,10 +350,8 @@ impl NotionClient {
             .filter(|child| {
                 !pruned
                     && rules.exclusion(child, SourceType::Page).is_none()
-                    && search.get(*child).is_some_and(|value| {
-                        value["parent"]["type"] == "page_id"
-                            && self::id(&value["parent"]["page_id"]).ok().as_ref() == Some(&id)
-                            && inactive(value) == Some(false)
+                    && search.get(*child).is_some_and(|listed| {
+                        listed.parent_page_id.as_ref() == Some(&id) && !listed.page.archived
                     })
             })
             .cloned()
@@ -1390,5 +1392,53 @@ mod tests {
             .unwrap();
         assert_eq!(ids(&walk), [ROOT, P, A, Q]);
         assert_eq!(fetched(&requests).len(), 4);
+    }
+
+    #[tokio::test]
+    async fn walk_vouches_only_for_listed_unexcluded_children_of_the_page() {
+        let mut routes = flat_tree();
+        // A is listed under ROOT, P is listed under another page, Q is missing.
+        let listed = vec![
+            metadata(A, parent("page_id", ROOT)),
+            metadata(P, parent("page_id", O)),
+        ];
+        routes.insert("POST /v1/search".into(), listing(listed));
+        let (client, _) = serve(routes.clone()).await;
+        let (sink, mut pages) = tokio::sync::mpsc::channel(16);
+        client
+            .walk_tree_with_search(&scope(ExclusionRules::default()), Some(&sink))
+            .await
+            .unwrap();
+        drop(sink);
+        let mut root = None;
+        while let Some(page) = pages.recv().await {
+            if page.entry.page_id == ROOT {
+                root = Some(page);
+            }
+        }
+        assert_eq!(root.unwrap().children, BTreeSet::from([A.to_owned()]));
+
+        // An excluded child, and every child of a pruned page, is never vouched for.
+        for exclusions in [
+            ExclusionRules {
+                page_ids: BTreeSet::from([A.to_owned()]),
+                ..Default::default()
+            },
+            ExclusionRules {
+                descendants_of: BTreeSet::from([ROOT.to_owned()]),
+                ..Default::default()
+            },
+        ] {
+            let (client, _) = serve(routes.clone()).await;
+            let (sink, mut pages) = tokio::sync::mpsc::channel(16);
+            client
+                .walk_tree_with_search(&scope(exclusions), Some(&sink))
+                .await
+                .unwrap();
+            drop(sink);
+            while let Some(page) = pages.recv().await {
+                assert!(page.children.is_empty(), "{:?}", page.entry.page_id);
+            }
+        }
     }
 }

@@ -124,7 +124,15 @@ pub struct RequestPause {
     pub proceed: tokio::sync::Notify,
 }
 impl RequestPause {
-    fn ready(&self) -> bool {
+    /// Pause here once when armed: notify `started`, then wait for `proceed`.
+    pub async fn hold(&self) {
+        if self.ready() {
+            self.started.notify_one();
+            self.proceed.notified().await;
+        }
+    }
+    /// Consume the arming if the pause should fire now.
+    pub fn ready(&self) -> bool {
         if !self.armed.load(Ordering::SeqCst) {
             return false;
         }

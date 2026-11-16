@@ -490,6 +490,7 @@ impl AuthoritativePageRefresh {
             .guard
             .commit_page_with_authority(prepared, lease, clock, move || async move {
                 owned_revalidation(
+                    handler.guard.index_directory().to_path_buf(),
                     async {
                         if let Some(expected) = &expected {
                             handler.check_expected(expected, &evidence).await?;
@@ -1040,6 +1041,7 @@ impl AuthoritativePageRefresh {
             .guard
             .commit_page_with_authority(prepared, lease, clock, move || async move {
                 owned_revalidation(
+                    handler.guard.index_directory().to_path_buf(),
                     async {
                         if let Some((expected, evidence)) = &expected {
                             handler.check_expected(expected, evidence).await?;
@@ -1087,9 +1089,10 @@ impl AuthoritativePageRefresh {
     {
         let owned_clock = clock.clone();
         let expires_at = lease.expires_at;
+        let index = self.guard.index_directory().to_path_buf();
         self.coordinator
             .maintain(lease, clock, move |context| async move {
-                owned_revalidation(check(context), owned_clock, expires_at).await
+                owned_revalidation(index, check(context), owned_clock, expires_at).await
             })
     }
 
@@ -1298,6 +1301,7 @@ impl AuthoritativePageRefresh {
         self.coordinator
             .submit_with_authority(operation, lease, clock, move |context| async move {
                 owned_revalidation(
+                    handler.guard.index_directory().to_path_buf(),
                     async {
                         handler.check_expected(&expected, &evidence).await?;
                         context.revalidate().map_err(|_| FailureClass::Conflict)?;
@@ -1395,6 +1399,7 @@ impl AuthoritativePageRefresh {
         self.coordinator
             .maintain(lease, clock, move |context| async move {
                 owned_revalidation(
+                    handler.guard.index_directory().to_path_buf(),
                     async {
                         let _authority = if let Some(proposal) = &proposal {
                             let authority = handler
@@ -1480,10 +1485,18 @@ impl AuthoritativePageRefresh {
 /// the caller loses ownership. Dropping its observer alone cannot release that
 /// runtime's index directory guard. All messages remain sanitized enum classes.
 async fn owned_revalidation<Authority>(
+    index: std::path::PathBuf,
     source: impl std::future::Future<Output = Result<Authority, FailureClass>>,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     expires_at: i64,
 ) -> Result<Authority, FailureClass> {
+    #[cfg(any(test, feature = "test-fixtures"))]
+    let source = async move {
+        crate::test_hooks::commit_pause(&index).await;
+        source.await
+    };
+    #[cfg(not(any(test, feature = "test-fixtures")))]
+    drop(index);
     tokio::pin!(source);
     loop {
         if clock() >= expires_at {

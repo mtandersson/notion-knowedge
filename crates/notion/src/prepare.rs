@@ -690,4 +690,32 @@ mod tests {
         drop(authority);
         update.await.unwrap();
     }
+
+    #[tokio::test]
+    async fn walk_children_skip_authorization_but_other_targets_do_not() {
+        use crate::relation_proposal::RelationProposalAdapter;
+        use notion_knowledge_core::graph::GraphTarget;
+        // A target the walk vouched for as its child: resolved with no request.
+        let client = offline();
+        let adapter = RelationProposalAdapter::new(client.clone(), scope()).unwrap();
+        let mut page = with_relations("Related", &[OTHER], false);
+        page.children.insert(OTHER.into());
+        let result = proposal(&adapter, &page).await.unwrap();
+        assert_eq!(
+            result.edges()[0].target(),
+            &GraphTarget::Page {
+                page_id: OTHER.into()
+            }
+        );
+        assert_eq!(client.request_metrics().attempts, 0);
+
+        // The same target, not vouched for, still goes through the gate.
+        let (client, server) = fixture(target_chain(ROOT)).await;
+        let adapter = RelationProposalAdapter::new(client, scope()).unwrap();
+        let result = proposal(&adapter, &with_relations("Related", &[OTHER], false))
+            .await
+            .unwrap();
+        assert!(result.targets()[OTHER].is_ok());
+        assert_eq!(server.await.unwrap().len(), 4);
+    }
 }

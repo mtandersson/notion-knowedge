@@ -5245,3 +5245,303 @@ async fn incomplete_walk_with_repeated_cursor_plans_no_deletes() {
         "unreached entries stay"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconciliation_cancelled_observer_retains_owned_commit_then_recovers_real_receipt() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let provider = Arc::new(CountingProvider::new(index.embed.clone()));
+    *provider.boundary_pause.lock().unwrap() = Some(source.pause.clone());
+    pause_owned_commits(&index.index, source.pause.clone());
+    let service = runner(&index, &source);
+    let plan = service.dry_run().await.unwrap();
+    record_plan(&index, "cancelled", &plan);
+    let operation = index
+        .coordinator
+        .reconciliation_plan("cancelled")
+        .unwrap()
+        .pages[PAGE]
+        .operation_id
+        .clone();
+    let owned = service.clone();
+    let embedding = provider.clone();
+    let lease = index.lease.clone();
+    let task = tokio::spawn(async move {
+        owned
+            .apply("cancelled", lease, clock(), embedding.as_ref())
+            .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        source.pause.started.notified(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        index
+            .coordinator
+            .receipt(&operation)
+            .unwrap()
+            .unwrap()
+            .status,
+        notion_knowledge_retrieval::commit::ReceiptStatus::Pending
+    );
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    source.pause.proceed.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if index
+                .coordinator
+                .receipt(&operation)
+                .unwrap()
+                .is_some_and(|r| {
+                    r.status == notion_knowledge_retrieval::commit::ReceiptStatus::Applied
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        index
+            .coordinator
+            .reconciliation_progress("cancelled")
+            .unwrap()
+            .pending
+            .contains(PAGE)
+    );
+    assert!(!index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+    assert!(
+        index
+            .coordinator
+            .current_relation_projection_complete(PAGE)
+            .unwrap()
+    );
+    let progress = service
+        .apply("cancelled", index.lease.clone(), clock(), provider.as_ref())
+        .await
+        .unwrap();
+    assert_eq!((progress.changed, progress.failed_pages()), (3, 0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconciliation_owned_source_poll_expires_lease_and_new_fence_resumes_without_effects() {
+    use notion_knowledge_core::reconciliation::JournalError;
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let provider = Arc::new(CountingProvider::new(index.embed.clone()));
+    *provider.boundary_pause.lock().unwrap() = Some(source.pause.clone());
+    pause_owned_commits(&index.index, source.pause.clone());
+    let service = runner(&index, &source);
+    let plan = service.dry_run().await.unwrap();
+    record_plan(&index, "expiry", &plan);
+    let operation = index
+        .coordinator
+        .reconciliation_plan("expiry")
+        .unwrap()
+        .pages[PAGE]
+        .operation_id
+        .clone();
+    let now = Arc::new(std::sync::atomic::AtomicI64::new(10));
+    let observed = now.clone();
+    let timed_clock: Arc<dyn Fn() -> i64 + Send + Sync> =
+        Arc::new(move || observed.load(Ordering::SeqCst));
+    let owned = service.clone();
+    let embedding = provider.clone();
+    let lease = index.lease.clone();
+    let timer = timed_clock.clone();
+    let task = tokio::spawn(async move {
+        owned
+            .apply("expiry", lease, timer, embedding.as_ref())
+            .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        source.pause.started.notified(),
+    )
+    .await
+    .unwrap();
+    now.store(110, Ordering::SeqCst);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        result,
+        Err(notion_knowledge_retrieval::runner::RunnerError::Journal(
+            JournalError::LeaseLost
+        ))
+    ));
+    assert_eq!(
+        index
+            .coordinator
+            .receipt(&operation)
+            .unwrap()
+            .unwrap()
+            .status,
+        notion_knowledge_retrieval::commit::ReceiptStatus::Failed
+    );
+    assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+    source.pause.proceed.notify_one();
+    let lease = index.coordinator.state().acquire_lease(110, 100).unwrap();
+    let resumed = service
+        .apply("expiry", lease, timed_clock, provider.as_ref())
+        .await
+        .unwrap();
+    assert_eq!((resumed.changed, resumed.failed_pages()), (3, 0));
+    assert!(
+        service
+            .apply("expiry", index.lease.clone(), clock(), provider.as_ref())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unchanged_owned_source_poll_releases_guard_after_cancelled_observer_and_lease_loss() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let provider = Arc::new(CountingProvider::new(index.embed.clone()));
+    let handler = index.handler(source.client());
+    handler
+        .refresh_page(
+            &PageId(PAGE.into()),
+            &PageId(ROOT.into()),
+            "noop-seed",
+            provider.as_ref(),
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let checkpoint = index.coordinator.state().page_state(PAGE).unwrap();
+    *source.pause.owned_directory.lock().unwrap() = Some(index.index.clone());
+    pause_owned_commits(&index.index, source.pause.clone());
+    source.pause.armed.store(true, Ordering::SeqCst);
+    let now = Arc::new(std::sync::atomic::AtomicI64::new(10));
+    let owned_now = now.clone();
+    let clock: Arc<dyn Fn() -> i64 + Send + Sync> =
+        Arc::new(move || owned_now.load(Ordering::SeqCst));
+    let lease = index.lease.clone();
+    let owned_provider = provider.clone();
+    let task = tokio::spawn(async move {
+        handler
+            .refresh_page(
+                &PageId(PAGE.into()),
+                &PageId(ROOT.into()),
+                "unchanged-cancelled",
+                owned_provider.as_ref(),
+                lease,
+                clock,
+            )
+            .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        source.pause.started.notified(),
+    )
+    .await
+    .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    now.store(110, Ordering::SeqCst);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        index.coordinator.drain_owned(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let probe = fs::File::open(&index.index).unwrap();
+    probe.try_lock().unwrap();
+    assert_eq!(
+        index.coordinator.state().page_state(PAGE).unwrap(),
+        checkpoint
+    );
+    assert!(
+        index
+            .coordinator
+            .current_relation_projection_complete(PAGE)
+            .unwrap()
+    );
+    assert!(
+        index
+            .coordinator
+            .receipt("unchanged-cancelled")
+            .unwrap()
+            .is_none()
+    );
+    source.pause.proceed.notify_one();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconciliation_binding_change_during_owned_precommit_rejects_effect_and_preserves_resume()
+{
+    for change in [
+        "UPDATE index_commit_binding SET epoch=2",
+        "UPDATE index_commit_binding SET scope='new-policy'",
+    ] {
+        let index = Fixture::new();
+        index.create().await;
+        let source = HttpNotion::start().await;
+        let service = runner(&index, &source);
+        let provider = Arc::new(CountingProvider::new(index.embed.clone()));
+        let plan = service.dry_run().await.unwrap();
+        record_plan(&index, "owned-binding", &plan);
+        *provider.boundary_pause.lock().unwrap() = Some(source.pause.clone());
+        pause_owned_commits(&index.index, source.pause.clone());
+        let owned = service.clone();
+        let embedding = provider.clone();
+        let lease = index.lease.clone();
+        let task = tokio::spawn(async move {
+            owned
+                .apply("owned-binding", lease, clock(), embedding.as_ref())
+                .await
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            source.pause.started.notified(),
+        )
+        .await
+        .unwrap();
+        let sql = rusqlite::Connection::open(&index.db).unwrap();
+        sql.execute_batch(change).unwrap();
+        source.pause.proceed.notify_one();
+        assert!(task.await.unwrap().is_err());
+        assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+        sql.execute(
+            "UPDATE index_commit_binding SET epoch=1,scope=?1",
+            [index.journal_scope.identity()],
+        )
+        .unwrap();
+        let progress = service
+            .apply(
+                "owned-binding",
+                index.lease.clone(),
+                clock(),
+                provider.as_ref(),
+            )
+            .await
+            .unwrap();
+        assert_eq!((progress.changed, progress.failed_pages()), (3, 0));
+    }
+}
+
+/// Hold the owned commit (guard and fence held, before effects) whenever
+/// `pause` is armed: the boundary the removed in-guard source read used to give.
+fn pause_owned_commits(index: &std::path::Path, pause: Arc<RequestPause>) {
+    notion_knowledge_retrieval::test_hooks::set_commit_pause(
+        index,
+        Arc::new(move || {
+            let pause = pause.clone();
+            Box::pin(async move { pause.hold().await })
+        }),
+    );
+}
