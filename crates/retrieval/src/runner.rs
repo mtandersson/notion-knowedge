@@ -315,6 +315,20 @@ impl AuthoritativeReconciliationRunner {
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
         provider: &dyn EmbeddingProvider,
     ) -> Result<DurableProgress, RunnerError> {
+        // A failed attempt leaves no read-ahead running for a later caller.
+        let result = self.apply_inner(run, lease, clock, provider).await;
+        if result.is_err() {
+            self.discard_read_ahead();
+        }
+        result
+    }
+    async fn apply_inner(
+        &self,
+        run: &str,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+        provider: &dyn EmbeddingProvider,
+    ) -> Result<DurableProgress, RunnerError> {
         let state = self.coordinator.state();
         let current = state.start_or_resume(&lease, clock(), run, &self.scope)?;
         if current.phase == RunPhase::Inventory {
@@ -357,6 +371,20 @@ impl AuthoritativeReconciliationRunner {
     /// One inventory or page attempt. Operators may renew the global fence only
     /// after this returns; a submitted owned operation keeps its original bound.
     pub async fn apply_next(
+        &self,
+        run: &str,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+        provider: &dyn EmbeddingProvider,
+    ) -> Result<DurableProgress, RunnerError> {
+        // A failed attempt leaves no read-ahead running for a later caller.
+        let result = self.apply_next_inner(run, lease, clock, provider).await;
+        if result.is_err() {
+            self.discard_read_ahead();
+        }
+        result
+    }
+    async fn apply_next_inner(
         &self,
         run: &str,
         lease: Lease,

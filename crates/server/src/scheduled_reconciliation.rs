@@ -194,6 +194,8 @@ pub mod runtime {
                     }
                 }
             }.await;
+            // No read-ahead outlives this cycle's writer lease.
+            self.index.runner.discard_read_ahead();
             match state.release_lease(&lease, now_ms() / 1000) {
                 Ok(()) | Err(JournalError::LeaseLost) => {}
                 Err(_) => return Err("scheduled lease release failed"),

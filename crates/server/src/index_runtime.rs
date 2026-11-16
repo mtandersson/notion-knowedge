@@ -117,6 +117,8 @@ pub struct IndexRuntime {
     lexical: Option<LexicalCachePlan>,
     source: Arc<NotionClient>,
     source_scope: LifecycleScope,
+    /// One retained-byte budget for initial streaming and reconciliation read-ahead.
+    prefetch_budget: PrefetchBudget,
 }
 impl IndexRuntime {
     /// Production startup for a disposable cache. Compatibility errors reset
@@ -431,7 +433,7 @@ impl IndexRuntime {
         // one embedding/commit consumer. Each preparation reserves worst-case
         // bytes before any request and keeps its measured share until the
         // consumer finishes it, so in-flight and queued pages share one budget.
-        let budget = PrefetchBudget::new(PREFETCH_BUDGET_KIB, PREFETCH_RESERVE_KIB);
+        let budget = &self.prefetch_budget;
         let (ready, mut prepared) = tokio::sync::mpsc::channel::<Prefetched>(PREFETCH_QUEUE);
         let produce = async {
             let ready = ready;
@@ -447,7 +449,7 @@ impl IndexRuntime {
                         Box::pin(self.prefetch_initial_page(
                             settings,
                             &gate,
-                            &budget,
+                            budget,
                             index + 1,
                             page,
                         ))
@@ -852,6 +854,7 @@ impl IndexRuntime {
             let progress = match attempt {
                 Ok(Ok(progress)) => progress,
                 Err(_) if operation.is_some() => {
+                    self.runner.discard_read_ahead();
                     expired.store(true, Ordering::SeqCst);
                     let page = pending_page.as_ref().expect("operation has page");
                     match self
@@ -1194,12 +1197,13 @@ impl IndexRuntime {
             coordinator.clone(),
             journal.clone(),
         )
-        .map_err(|_| "authoritative runner incompatible")?
+        .map_err(|_| "authoritative runner incompatible")?;
         // Scheduled, manual and cache-reset reconciliation share the bounded
-        // read-ahead used by initial streaming: same workers and byte budget.
-        .with_read_ahead(
+        // read-ahead of initial streaming: same workers and the same budget.
+        let prefetch_budget = PrefetchBudget::new(PREFETCH_BUDGET_KIB, PREFETCH_RESERVE_KIB);
+        let runner = runner.with_read_ahead(
             PREFETCH_WORKERS,
-            PrefetchBudget::new(PREFETCH_BUDGET_KIB, PREFETCH_RESERVE_KIB),
+            prefetch_budget.clone(),
             std::time::Duration::from_secs(settings.timeout_seconds),
         );
         Ok(Self {
@@ -1213,6 +1217,7 @@ impl IndexRuntime {
             lexical,
             source,
             source_scope: scope,
+            prefetch_budget,
         })
     }
 }
