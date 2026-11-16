@@ -18,7 +18,10 @@ on:
       - nix/**
       - flake.nix
       - flake.lock
+      - Cargo.toml
       - Cargo.lock
+      - crates/*/Cargo.toml
+      - .cargo/**
       - rust-toolchain.toml
       - .github/workflows/container.yml
   push:
@@ -33,7 +36,9 @@ permissions:
 
 concurrency:
   group: container-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Superseded PR runs cancel; main and nightly runs finish so the cache
+  # publisher is never cut off mid-export.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   container:

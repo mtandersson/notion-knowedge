@@ -199,7 +199,7 @@ class ContainerWorkflow(unittest.TestCase):
         pull = triggers.split('  pull_request:\n', 1)[1].split('\n  push:\n', 1)[0]
         paths = set(re.findall(r'^      - (\S+)$', pull, re.M))
         for path in ('Dockerfile', '.dockerignore', 'compose.yaml', 'scripts/*container*',
-                     'scripts/smoke-*.py', 'nix/**', 'flake.lock', 'Cargo.lock',
+                     'scripts/smoke-*.py', 'nix/**', 'flake.lock', 'Cargo.lock', 'crates/*/Cargo.toml',
                      '.github/workflows/container.yml'):
             self.assertIn(path, paths)
         self.assertIn('  push:\n    branches:\n      - main\n', triggers)

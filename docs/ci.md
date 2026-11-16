@@ -16,8 +16,10 @@ Clippy (native features) checks it on every selected PR. Container smoke has
 its own workflow, `.github/workflows/container.yml`. It runs on every main
 push, nightly at 03:00 UTC, on manual dispatch, and on PRs that change
 container inputs (`Dockerfile`, `.dockerignore`, `compose.yaml`, container
-and smoke scripts, Nix inputs, `Cargo.lock` and the toolchain). Its main run
-keeps publishing the GHCR BuildKit cache.
+and smoke scripts, Nix inputs, Cargo manifests, `Cargo.lock` and the
+toolchain). Its main run keeps publishing the GHCR BuildKit cache. Rust source
+changes alone do not start it on a PR, so a container break from source
+surfaces first on the main push run.
 
 **Merge rule:** before merging a PR whose selection includes native or
 container inputs, every optional job that ran for it, including Container
