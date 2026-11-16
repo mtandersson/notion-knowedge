@@ -6,6 +6,10 @@ mod bearer_fallback;
 mod common;
 mod http;
 mod index_dispatch;
+// Shared by `shutdown` and `webhook_worker`, so declared once here.
+#[cfg(unix)]
+#[path = "support/listener_shutdown.rs"]
+mod listener_shutdown;
 mod oauth_discovery;
 mod oauth_forget;
 mod reconciliation_command;

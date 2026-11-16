@@ -636,7 +636,12 @@ async fn expiry_during_effect_never_acknowledges_but_keeps_guard_until_completio
 
 fn child(f: &Fixture, index: &Path, state: &Path, name: &str, lease: &Lease, mode: &str) -> Child {
     Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "index_commits::commit_child", "--ignored", "--nocapture"])
+        .args([
+            "--exact",
+            "index_commits::commit_child",
+            "--ignored",
+            "--nocapture",
+        ])
         .env("NK_COMMIT_TEST_ROOT", &f.root)
         .env("NK_COMMIT_TEST_INDEX", index)
         .env("NK_COMMIT_TEST_STATE", state)

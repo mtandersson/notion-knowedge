@@ -1,6 +1,5 @@
 #![cfg(unix)]
-#[path = "support/listener_shutdown.rs"]
-mod listener_shutdown;
+use crate::listener_shutdown;
 use std::{process::Stdio, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
