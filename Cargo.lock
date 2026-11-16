@@ -4764,6 +4764,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0676bb32a98c1a483ce53e500a81ad9c3d5b3f7c920c28c24e9cb0980d0b5bc8"
 
 [[package]]
+name = "notion-fake"
+version = "0.1.0"
+dependencies = [
+ "notion-knowledge-notion",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "notion-knowledge-core"
 version = "0.1.0"
 dependencies = [
@@ -4829,6 +4838,7 @@ dependencies = [
  "lance",
  "lancedb",
  "libc",
+ "notion-fake",
  "notion-knowledge-core",
  "notion-knowledge-mcp",
  "notion-knowledge-notion",
@@ -4857,6 +4867,7 @@ dependencies = [
  "hmac",
  "http-body",
  "libc",
+ "notion-fake",
  "notion-knowledge-core",
  "notion-knowledge-mcp",
  "notion-knowledge-notion",

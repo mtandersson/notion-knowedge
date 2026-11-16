@@ -2,12 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use notion_knowledge_core::{
     backend::{Page, PageContent, PageId},
-    discovery::{DiscoveredPage, DiscoveryReport},
     graph::{GraphEdge, GraphEdgeStore, GraphTarget},
     indexed::{IndexedDocument, IndexedMetadata, SchemaVersion, SourceMetadata},
+    inventory::{InventoryEntry, InventoryParent},
     sync_state::SyncStateError,
 };
-use notion_knowledge_notion::{documents::DocumentSnapshot, link_graph::page_link_edges};
+use notion_knowledge_notion::{
+    documents::DocumentSnapshot, link_graph::page_link_edges, walk::TreeWalk,
+};
 use notion_knowledge_retrieval::sync_state::SqliteSyncStateStore;
 
 const SOURCE: &str = "11111111-1111-4111-8111-111111111111";
@@ -38,17 +40,25 @@ fn discovery() -> BTreeSet<String> {
 fn snapshot(markdown: &str) -> DocumentSnapshot {
     let origin = content(markdown);
     DocumentSnapshot {
-        discovery: DiscoveryReport {
-            roots: vec![ROOT.to_owned()],
-            pages: [SOURCE, INSIDE]
-                .into_iter()
-                .map(|id| DiscoveredPage {
-                    id: id.into(),
-                    url: format!("https://notion.so/{id}"),
-                    title: "Page".into(),
-                })
-                .collect(),
+        walk: TreeWalk {
+            run_id: "run".into(),
+            entries: [
+                (ROOT, InventoryParent::Root),
+                (SOURCE, InventoryParent::Page(ROOT.into())),
+                (INSIDE, InventoryParent::Page(ROOT.into())),
+            ]
+            .into_iter()
+            .map(|(id, parent)| InventoryEntry {
+                page_id: id.into(),
+                parent,
+                root_id: ROOT.into(),
+                last_edited_time: "2026-10-10T17:00:00Z".into(),
+                in_trash: false,
+            })
+            .collect(),
             skipped: vec![],
+            complete: true,
+            calls: 0,
         },
         documents: vec![IndexedDocument {
             schema_version: SchemaVersion::V1,

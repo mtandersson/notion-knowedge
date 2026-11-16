@@ -255,3 +255,184 @@ fn metadata_identity_migration_preserves_checkpoints_without_fabricating_identit
         .unwrap();
     assert_eq!(identities, 0);
 }
+
+mod inventory {
+    use super::TestDb;
+    use notion_knowledge_core::{
+        discovery::SkipReason,
+        inventory::{InventoryEntry, InventoryOutcome, InventoryParent},
+        reconciliation::FailureClass,
+    };
+    use notion_knowledge_retrieval::sync_state::SqliteSyncStateStore;
+
+    fn entry(id: &str, parent: InventoryParent, edited: &str, in_trash: bool) -> InventoryEntry {
+        InventoryEntry {
+            page_id: id.into(),
+            parent,
+            root_id: "A".into(),
+            last_edited_time: edited.into(),
+            in_trash,
+        }
+    }
+    fn page(id: &str) -> InventoryParent {
+        InventoryParent::Page(id.into())
+    }
+
+    #[test]
+    fn inventory_replace_classifies_added_changed_moved_removed_trashed() {
+        let store = SqliteSyncStateStore::open_in_memory().unwrap();
+        let seeded = store
+            .replace_inventory(
+                "run-1",
+                &[
+                    entry("A", InventoryParent::Root, "t1", false),
+                    entry("B", page("A"), "t1", false),
+                    entry("D", page("A"), "t1", false),
+                    entry("E", page("A"), "t1", false),
+                ],
+            )
+            .unwrap();
+        assert_eq!(seeded.added, ["A", "B", "D", "E"]);
+        let diff = store
+            .replace_inventory(
+                "run-2",
+                &[
+                    entry("A", InventoryParent::Root, "t2", false),
+                    entry("B", InventoryParent::Root, "t1", false),
+                    entry("C", page("A"), "t1", false),
+                    entry("D", page("A"), "t1", true),
+                ],
+            )
+            .unwrap();
+        assert_eq!(diff.added, ["C"]);
+        assert_eq!(diff.changed, ["A"]);
+        assert_eq!(diff.moved, ["B"]);
+        assert_eq!(diff.trashed, ["D"]);
+        assert_eq!(diff.removed, ["E"]);
+        assert_eq!(diff.unchanged, 0);
+        assert_eq!(store.inventory_entry("E").unwrap(), None);
+        assert_eq!(
+            store.inventory_entry("B").unwrap(),
+            Some(entry("B", InventoryParent::Root, "t1", false))
+        );
+    }
+
+    #[test]
+    fn inventory_counts_add_up_to_total() {
+        let store = SqliteSyncStateStore::open_in_memory().unwrap();
+        let rows = ["A", "B", "C", "D"].map(|id| entry(id, InventoryParent::Root, "t1", false));
+        store.replace_inventory("run", &rows).unwrap();
+        store
+            .record_inventory_outcome(
+                "A",
+                &InventoryOutcome::Indexed {
+                    revision: "t1".into(),
+                },
+                1,
+            )
+            .unwrap();
+        store
+            .record_inventory_outcome("B", &InventoryOutcome::Skipped(SkipReason::Inaccessible), 1)
+            .unwrap();
+        store
+            .record_inventory_outcome("C", &InventoryOutcome::Failed(FailureClass::Source), 1)
+            .unwrap();
+        let counts = store.inventory_counts().unwrap();
+        assert_eq!(counts.total, 4);
+        assert_eq!((counts.indexed, counts.skipped, counts.failed), (1, 1, 1));
+        assert_eq!(counts.pending, 1);
+        assert_eq!(
+            counts.indexed + counts.skipped + counts.failed + counts.pending,
+            counts.total
+        );
+        assert_eq!(
+            store.out_of_sync_pages(10).unwrap(),
+            [
+                (
+                    "B".to_owned(),
+                    InventoryOutcome::Skipped(SkipReason::Inaccessible)
+                ),
+                (
+                    "C".to_owned(),
+                    InventoryOutcome::Failed(FailureClass::Source)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn inventory_parent_chain_ends_at_root_or_is_none() {
+        let store = SqliteSyncStateStore::open_in_memory().unwrap();
+        store
+            .replace_inventory(
+                "run",
+                &[
+                    entry("A", InventoryParent::Root, "t", false),
+                    entry("B", page("A"), "t", false),
+                    entry("C", page("B"), "t", false),
+                    entry("U", page("missing"), "t", false),
+                    entry("X", page("Y"), "t", false),
+                    entry("Y", page("X"), "t", false),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            store.inventory_parent_chain("C").unwrap(),
+            Some(vec!["B".to_owned(), "A".to_owned()])
+        );
+        assert_eq!(store.inventory_parent_chain("A").unwrap(), Some(vec![]));
+        assert_eq!(store.inventory_parent_chain("U").unwrap(), None);
+        assert_eq!(store.inventory_parent_chain("X").unwrap(), None);
+        assert_eq!(store.inventory_parent_chain("unknown").unwrap(), None);
+    }
+
+    #[test]
+    fn upsert_keeps_unreached_entries_and_reports_its_own_difference() {
+        let store = SqliteSyncStateStore::open_in_memory().unwrap();
+        store
+            .replace_inventory("run-1", &[entry("A", InventoryParent::Root, "t1", false)])
+            .unwrap();
+        let diff = store
+            .upsert_inventory_entry(
+                "run-2",
+                &entry(
+                    "B",
+                    InventoryParent::DataSource {
+                        data_source_id: "S".into(),
+                        database_id: "D".into(),
+                        owner_page_id: "A".into(),
+                    },
+                    "t1",
+                    false,
+                ),
+            )
+            .unwrap();
+        assert_eq!(diff.added, ["B"]);
+        assert!(store.inventory_entry("A").unwrap().is_some());
+        assert_eq!(
+            store.inventory_parent_chain("B").unwrap(),
+            Some(vec!["A".to_owned()])
+        );
+        assert_eq!(store.inventory_counts().unwrap().total, 2);
+    }
+
+    #[test]
+    fn dropping_inventory_table_forces_full_walk() {
+        let db = TestDb::new("inventory-drop");
+        let store = SqliteSyncStateStore::open(db.path()).unwrap();
+        store
+            .replace_inventory("run", &[entry("A", InventoryParent::Root, "t", false)])
+            .unwrap();
+        drop(store);
+        rusqlite::Connection::open(db.path())
+            .unwrap()
+            .execute_batch("DROP TABLE page_inventory")
+            .unwrap();
+        let reopened = SqliteSyncStateStore::open(db.path()).unwrap();
+        assert_eq!(reopened.inventory_counts().unwrap().total, 0);
+        assert_eq!(
+            reopened.schema_version().unwrap(),
+            notion_knowledge_retrieval::sync_state::LATEST_SCHEMA_VERSION
+        );
+    }
+}

@@ -32,6 +32,7 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [dev-dependencies]
+notion-fake = { path = "../notion-fake" }
 notion-knowledge-retrieval = { path = "../retrieval", features = ["test-fixtures"] }
 notion-knowledge-notion = { path = "../notion", features = ["test-fixtures"] }
 rusqlite = { version = "0.41.0", default-features = false, features = ["bundled"] }

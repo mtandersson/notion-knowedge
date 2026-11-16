@@ -55,15 +55,10 @@ class Notion(http.server.BaseHTTPRequestHandler):
             body = {"object": "page_markdown", "id": PAGE, "markdown": TEXT,
                     "truncated": False, "unknown_block_ids": []}
         elif path == f"/v1/pages/{ROOT}/markdown":
-            body = {"object": "page_markdown", "id": ROOT, "markdown": "# Container root\n",
+            # The walk finds the child page through its <page> tag.
+            child = f'<page url="https://www.notion.so/{PAGE.replace("-", "")}">Saffron recipe</page>\n'
+            body = {"object": "page_markdown", "id": ROOT, "markdown": "# Container root\n" + child,
                     "truncated": False, "unknown_block_ids": []}
-        elif path == f"/v1/blocks/{ROOT}/children":
-            body = {"object": "list", "results": [{"object": "block", "id": PAGE,
-                "type": "child_page", "archived": False, "has_children": False,
-                "parent": {"type": "page_id", "page_id": ROOT},
-                "child_page": {"title": "Saffron recipe"}}], "has_more": False, "next_cursor": None}
-        elif path == f"/v1/blocks/{PAGE}/children":
-            body = {"object": "list", "results": [], "has_more": False, "next_cursor": None}
         else:
             self.send_error(404)
             return

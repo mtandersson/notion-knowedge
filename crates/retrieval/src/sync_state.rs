@@ -14,8 +14,9 @@ use notion_knowledge_core::sync_state::{
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 mod cache_reset;
+mod inventory;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 19;
+pub const LATEST_SCHEMA_VERSION: i64 = 20;
 
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     // Entries below stay append-only and ordered.
@@ -113,6 +114,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         19,
         "file_refresh_intents",
         include_str!("../migrations/0019_file_refresh_intents.sql"),
+    ),
+    (
+        20,
+        "page_inventory",
+        include_str!("../migrations/0020_page_inventory.sql"),
     ),
 ];
 
@@ -519,6 +525,10 @@ fn apply_migrations(transaction: &rusqlite::Transaction<'_>) -> Result<(), SyncS
             )
             .map_err(map_sqlite_error)?;
     }
+    // The inventory is disposable: recreate it if an operator dropped it.
+    transaction
+        .execute_batch(MIGRATIONS[19].2)
+        .map_err(map_sqlite_error)?;
 
     Ok(())
 }

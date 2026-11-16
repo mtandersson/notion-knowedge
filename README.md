@@ -536,8 +536,8 @@ every Notion request and exposes payload-free retry counters.
 The [page write primitives](docs/notion-writes.md) document Markdown creation
 and append semantics.
 
-The [scoped root crawler](docs/notion-discovery.md) documents read-only discovery,
-physical ancestry boundaries and the `--crawl-dry-run` command.
+The [tree walk](docs/notion-discovery.md) documents read-only discovery from the
+root, the page inventory and the `--crawl-dry-run` command.
 
 The [authoritative lifecycle evidence](docs/notion-lifecycle.md) resolves current
 physical ancestry and supplies source/scope revalidation before downstream

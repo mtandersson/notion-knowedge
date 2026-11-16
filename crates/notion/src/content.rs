@@ -3,7 +3,7 @@ use crate::{
     NotionClient,
     pages::{PAGE_VERSION, page_id},
 };
-use notion_knowledge_core::backend::{BackendError, BackendErrorKind, PageContent};
+use notion_knowledge_core::backend::{BackendError, BackendErrorKind, PageContent, PageId};
 use reqwest::header::AUTHORIZATION;
 use serde::Deserialize;
 
@@ -15,21 +15,19 @@ fn error(kind: BackendErrorKind) -> BackendError {
         committed_page_id: None,
     }
 }
+/// One `pages/{id}/markdown` response. `id` may name a block when the walk
+/// follows `unknown_block_ids`; callers decide what incompleteness means.
 #[derive(Deserialize)]
-struct Markdown {
+pub(crate) struct MarkdownBody {
     object: String,
     id: String,
-    markdown: String,
-    truncated: bool,
-    unknown_block_ids: Vec<String>,
+    pub(crate) markdown: String,
+    pub(crate) truncated: bool,
+    pub(crate) unknown_block_ids: Vec<String>,
 }
 impl NotionClient {
-    /// Read metadata and the enhanced Markdown exposed by Notion without following links.
-    /// Unsupported blocks remain visible as Notion's `<unknown .../>` markers.
-    /// Incomplete content fails; no partial success or cache is returned.
-    pub async fn read_content(&self, input: &str) -> Result<PageContent, BackendError> {
-        let id = page_id(input)?;
-        let page = self.fetch_page(&id.0).await?;
+    /// The shared parser for enhanced-Markdown reads. Does not follow links.
+    pub(crate) async fn markdown_body(&self, id: &PageId) -> Result<MarkdownBody, BackendError> {
         let request = self
             .http
             .get(format!("{}/pages/{}/markdown", self.api_root, id.0))
@@ -59,11 +57,21 @@ impl NotionClient {
             }
             body.extend_from_slice(&chunk);
         }
-        let content: Markdown =
+        let content: MarkdownBody =
             serde_json::from_slice(&body).map_err(|_| error(BackendErrorKind::Internal))?;
-        if content.object != "page_markdown" || page_id(&content.id).ok().as_ref() != Some(&id) {
+        if content.object != "page_markdown" || page_id(&content.id).ok().as_ref() != Some(id) {
             return Err(error(BackendErrorKind::Internal));
         }
+        Ok(content)
+    }
+
+    /// Read metadata and the enhanced Markdown exposed by Notion without following links.
+    /// Unsupported blocks remain visible as Notion's `<unknown .../>` markers.
+    /// Incomplete content fails; no partial success or cache is returned.
+    pub async fn read_content(&self, input: &str) -> Result<PageContent, BackendError> {
+        let id = page_id(input)?;
+        let page = self.fetch_page(&id.0).await?;
+        let content = self.markdown_body(&id).await?;
         if content.truncated || !content.unknown_block_ids.is_empty() {
             return Err(error(BackendErrorKind::UnsupportedContent));
         }
@@ -82,7 +90,7 @@ impl NotionClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notion_knowledge_core::backend::{NotionRead, PageId};
+    use notion_knowledge_core::backend::NotionRead;
     use serde_json::{Value, json};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     const ID: &str = "12345678-1234-1234-1234-123456789abc";

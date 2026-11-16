@@ -206,7 +206,7 @@ fn property(value: &Value) -> Result<PropertyValue, BackendError> {
         _ => return Err(error(BackendErrorKind::UnsupportedContent)),
     })
 }
-fn metadata(value: &Value, expected: &PageId) -> Result<Page, BackendError> {
+pub(crate) fn metadata(value: &Value, expected: &PageId) -> Result<Page, BackendError> {
     let id = uuid(&string(&value["id"])?).ok_or_else(|| error(BackendErrorKind::Internal))?;
     let url = string(&value["url"])?;
     let edited = string(&value["last_edited_time"])?;
@@ -260,6 +260,11 @@ impl NotionClient {
     /// Fresh exact metadata. Does not read page content, cache or follow links.
     pub async fn fetch_page(&self, input: &str) -> Result<Page, BackendError> {
         let id = page_id(input)?;
+        metadata(&self.fetch_page_value(&id).await?, &id)
+    }
+
+    /// The raw page object, for callers that also need its physical parent.
+    pub(crate) async fn fetch_page_value(&self, id: &PageId) -> Result<Value, BackendError> {
         let request = self
             .http
             .get(format!("{}/pages/{}", self.api_root, id.0))
@@ -289,8 +294,7 @@ impl NotionClient {
             }
             body.extend_from_slice(&chunk);
         }
-        let value = serde_json::from_slice(&body).map_err(|_| error(BackendErrorKind::Internal))?;
-        metadata(&value, &id)
+        serde_json::from_slice(&body).map_err(|_| error(BackendErrorKind::Internal))
     }
 }
 
