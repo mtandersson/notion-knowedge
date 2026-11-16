@@ -589,7 +589,7 @@ impl IndexRuntime {
                         sync_task(
                             SyncPhase::Indexing,
                             processed,
-                            Box::pin(self.handler.refresh_page(
+                            Box::pin(self.handler.refresh_inline(
                                 &page,
                                 &root,
                                 &operation,

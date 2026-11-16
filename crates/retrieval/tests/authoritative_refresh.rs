@@ -56,6 +56,7 @@ struct Model {
     inaccessible_root: bool,
     inaccessible_page: bool,
     race_metadata: bool,
+    race_metadata_once: bool,
     race_move: bool,
     level: u64,
     relation_name: Option<String>,
@@ -80,6 +81,7 @@ impl Default for Model {
             inaccessible_root: false,
             inaccessible_page: false,
             race_metadata: false,
+            race_metadata_once: false,
             race_move: false,
             level: 3,
             relation_name: None,
@@ -186,6 +188,11 @@ impl HttpNotion {
                 let snapshot = values.lock().unwrap().clone();
                 if snapshot.race_metadata && route == format!("/v1/pages/{PAGE}") {
                     values.lock().unwrap().title.push('!');
+                }
+                if snapshot.race_metadata_once && route == format!("/v1/pages/{PAGE}") {
+                    let mut model = values.lock().unwrap();
+                    model.race_metadata_once = false;
+                    model.title.push('!');
                 }
                 if snapshot.race_move && route == format!("/v1/pages/{PAGE}") {
                     values.lock().unwrap().parent = if snapshot.parent == ROOT {
@@ -5921,4 +5928,92 @@ async fn owned_drain_retains_failures_even_when_cancelled_observers_never_consum
         .state()
         .renew_lease(&index.lease, 10, 100)
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inline_page_whose_source_changes_once_is_prepared_again_and_committed() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let handler = index.handler(source.client());
+    let provider = CountingProvider::new(index.embed.clone());
+    let page = PageId(PAGE.into());
+    let root = PageId(ROOT.into());
+
+    source.change(|m| m.race_metadata_once = true);
+    let during_preparation = handler
+        .refresh_inline(&page, &root, "inline-prepare", &provider, index.lease.clone(), clock())
+        .await
+        .unwrap();
+    assert_eq!(during_preparation.outcome, CommitOutcome::Applied);
+
+    source.change(|m| m.markdown = "# Intro\n\nJuniper gnocchi.\n".into());
+    provider.race_on_next_embedding(source.state.clone());
+    let during_commit = handler
+        .refresh_inline(&page, &root, "inline-commit", &provider, index.lease.clone(), clock())
+        .await
+        .unwrap();
+    assert_eq!(during_commit.outcome, CommitOutcome::Applied);
+    let chunks = index.guarded().page_chunks(PAGE).await.unwrap();
+    assert!(chunks.iter().any(|c| c.text.contains("Juniper")));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inline_page_whose_source_keeps_changing_is_a_page_local_source_failure() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let handler = index.handler(source.client());
+    let provider = CountingProvider::new(index.embed.clone());
+    let page = PageId(PAGE.into());
+    let root = PageId(ROOT.into());
+
+    source.change(|m| m.race_metadata = true);
+    let failure = handler
+        .refresh_inline(&page, &root, "inline-churn", &provider, index.lease.clone(), clock())
+        .await;
+    assert_eq!(failure.unwrap_err(), RefreshError::Source);
+    assert_eq!(provider.embeddings(), 0);
+    assert_eq!(index.table().await.count_rows().await.unwrap(), 0);
+
+    // The same durable work item completes once the source settles.
+    source.change(|m| m.race_metadata = false);
+    let settled = handler
+        .refresh_inline(&page, &root, "inline-churn", &provider, index.lease.clone(), clock())
+        .await
+        .unwrap();
+    assert_eq!(settled.outcome, CommitOutcome::Applied);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn receipt_authority_conflict_during_preparation_is_never_retried_as_a_source_change() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let handler = index.handler(source.client());
+    let provider = CountingProvider::new(index.embed.clone());
+    let root = PageId(ROOT.into());
+    handler
+        .refresh_page(
+            &PageId(PAGE.into()),
+            &root,
+            "shared-receipt",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let embedded = provider.embeddings();
+
+    // The receipt belongs to another page, so this work item has no authority.
+    let other = PageId(OTHER.into());
+    let prefetch = handler.prefetch_page(&other, &root, "shared-receipt").await;
+    assert_eq!(prefetch.err(), Some(RefreshError::Conflict));
+    let inline = handler
+        .refresh_inline(&other, &root, "shared-receipt", &provider, index.lease.clone(), clock())
+        .await;
+    assert_eq!(inline.unwrap_err(), RefreshError::Conflict);
+    assert_eq!(provider.embeddings(), embedded);
+    assert!(index.guarded().page_chunks(OTHER).await.unwrap().is_empty());
 }
