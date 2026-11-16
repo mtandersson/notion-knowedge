@@ -259,6 +259,53 @@ impl SqliteSyncStateStore {
         }
     }
 
+    /// Of `candidates` (indexed pages a complete walk did not reach), those to
+    /// keep for one more walk: a page of `inaccessible` (404/403 in this
+    /// walk) whose previous outcome was not already that skip, and every
+    /// candidate whose previous parent chain passes through such a page.
+    /// Call before the walk replaces the inventory. A second walk with the
+    /// same result finds the skip already recorded and holds nothing.
+    pub fn held_removals(
+        &self,
+        inaccessible: &[String],
+        candidates: &[String],
+    ) -> Result<BTreeSet<String>, SyncStateError> {
+        let mut new = BTreeSet::new();
+        {
+            let db = self.lock_connection()?;
+            for id in inaccessible {
+                let confirmed = db
+                    .query_row(
+                        "SELECT outcome = 'skipped' AND outcome_detail = ?2
+                         FROM page_inventory WHERE page_id = ?1",
+                        params![id, SkipReason::Inaccessible.as_str()],
+                        |row| row.get::<_, Option<bool>>(0),
+                    )
+                    .optional()
+                    .map_err(map_sqlite_error)?
+                    .flatten()
+                    .unwrap_or(false);
+                if !confirmed {
+                    new.insert(id.as_str());
+                }
+            }
+        }
+        if new.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let mut held = BTreeSet::new();
+        for page in candidates {
+            if new.contains(page.as_str())
+                || self
+                    .inventory_parent_chain(page)?
+                    .is_some_and(|chain| chain.iter().any(|a| new.contains(a.as_str())))
+            {
+                held.insert(page.clone());
+            }
+        }
+        Ok(held)
+    }
+
     pub fn inventory_counts(&self) -> Result<InventoryCounts, SyncStateError> {
         self.lock_connection()?
             .query_row(

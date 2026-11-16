@@ -360,6 +360,53 @@ mod inventory {
         );
     }
 
+    /// A spurious 404 on a previously indexed page must not delete its whole
+    /// subtree at once: removals under a page that became inaccessible in
+    /// this walk are held until a second walk confirms the same result.
+    #[test]
+    fn removals_under_a_newly_inaccessible_page_wait_for_a_second_walk() {
+        let store = SqliteSyncStateStore::open_in_memory().unwrap();
+        let indexed = InventoryOutcome::Indexed {
+            revision: "t".into(),
+        };
+        let inaccessible = InventoryOutcome::Skipped(SkipReason::Inaccessible);
+        store
+            .replace_inventory(
+                "run-1",
+                &[
+                    entry("A", InventoryParent::Root, "t", false),
+                    entry("B", page("A"), "t", false),
+                    entry("C", page("B"), "t", false),
+                    entry("D", page("A"), "t", false),
+                ],
+            )
+            .unwrap();
+        for id in ["A", "B", "C", "D"] {
+            store.record_inventory_outcome(id, &indexed, 1).unwrap();
+        }
+        let unreached = ["B", "C", "D"].map(String::from);
+        // Walk 2: B answers 404, so C is not reached; D moved out of scope.
+        let held = store.held_removals(&["B".to_owned()], &unreached).unwrap();
+        assert_eq!(held, ["B".to_owned(), "C".to_owned()].into());
+        store
+            .replace_inventory(
+                "run-2",
+                &[
+                    entry("A", InventoryParent::Root, "t", false),
+                    entry("B", page("A"), "", false),
+                ],
+            )
+            .unwrap();
+        store
+            .record_inventory_outcome("B", &inaccessible, 2)
+            .unwrap();
+        // Walk 3 confirms B is still inaccessible: nothing is held any more.
+        let held = store
+            .held_removals(&["B".to_owned()], &["B".to_owned(), "C".to_owned()])
+            .unwrap();
+        assert!(held.is_empty(), "{held:?}");
+    }
+
     #[test]
     fn inventory_parent_chain_ends_at_root_or_is_none() {
         let store = SqliteSyncStateStore::open_in_memory().unwrap();
