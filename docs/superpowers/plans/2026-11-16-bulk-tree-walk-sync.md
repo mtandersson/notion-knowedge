@@ -188,6 +188,8 @@
 
 **Depends on:** Slice 1. **Issue scope:** sync preparation uses the walked content and inventory parent. The before/after double read, `RootScopeGate` in sync, `revalidate_lifecycle` in sync, and the precommit source check for sync commits are all removed. The two parallel stream paths (initial and reconciliation) become one `sync_from_walk`. #651 is re-scoped to this slice.
 
+**Owner decision (2026-11-16): search metadata on full runs.** At the start of every walk, one paged `POST /v1/search` (object=page, ascending `last_edited_time`, 100 per call, about 30 calls for 3,000 pages) builds a `SearchMetadata` map: id → `last_edited_time`, parent, in_trash, properties. A walked page whose entry exists, is complete (not a partial object, no truncated property) and whose parent equals the walk parent needs no `fetch_page`. The Markdown read is its only call. Pages missing from the map, partial, truncated or with a mismatched parent fall back to `fetch_page`. **Search never decides scope**: a page in the map that the walk never reaches is ignored. Target: about 1.1 calls per page. Slice 8 measures the hit rate.
+
 **Deletes:**
 - The `RootScopeGate::authorize`/`revalidate` calls in `prepare_scoped_page` (`prepare.rs:105-215`), the `after` re-read, `source_changed()`/`SOURCE_CHANGED`, and the `ScopedPageSnapshot.evidence` field.
 - `prepare.rs` tests that only test the bracket: `metadata_or_markdown_race_is_conflict_not_snapshot`, `changed_physical_ancestry_during_final_check_is_conflict`, `relation_commit_rejects_source_physical_move_after_preparation`, `owned_relation_revalidation_rejects_source_and_target_changes_without_timestamp_help`, `relation_preparation_rejects_policy_replacement_during_authoritative_reads`, and the `chain()` fixtures with their 4-request lifecycle prefix.
@@ -219,6 +221,11 @@
   ```
 - `IndexedMetadata.source.database_id` and `data_source_id` come from `InventoryParent::DataSource`.
 - Only properties marked truncated (relations or people over 25 items) trigger `fetch_page` property pagination.
+- Adds `pub async fn search_metadata(&self) -> Result<SearchMetadata, BackendError>` in `crates/notion/src/search.rs`, where `SearchMetadata` is `BTreeMap<PageId, PageMetadata>`. The walk passes the map in, and `WalkedPage.metadata` comes from it when the entry is complete and its parent matches; otherwise from `fetch_page`.
+- Extra tests:
+  - `walk_uses_search_metadata_and_skips_fetch_page`: with 3 walked pages, all present in search, the requests are 1 search plus 3 markdown and no `GET /v1/pages/{id}`.
+  - `walk_falls_back_to_fetch_page_for_missing_partial_or_moved_entries`: one entry each, missing / partial / with a different parent, and each causes exactly one fetch_page.
+  - `search_only_pages_outside_walk_are_never_indexed`.
 
 - [ ] **Step 1: Write the failing tests**:
   - `prepare_walked_page_makes_no_requests`: the fixture has an empty route list, and the test asserts `requests == []` and that `snapshot.document.metadata.last_edited_time` equals the walked entry's value.
