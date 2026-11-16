@@ -200,8 +200,16 @@ impl RelationProposalAdapter {
                 .map_err(|_| conflict())?
                 .take()
                 .unwrap_or(Err(BackendErrorKind::InvalidInput));
-            if target == metadata.page_id && observed.as_ref().ok() != Some(source) {
-                return Err(conflict());
+            if target == metadata.page_id {
+                match &observed {
+                    // Only a successful, different observation is a source
+                    // change; a failed lookup (auth, outage) is never retried.
+                    Ok(current) if current != source => {
+                        return Err(crate::prepare::source_changed());
+                    }
+                    Ok(_) => {}
+                    Err(_) => return Err(conflict()),
+                }
             }
             evidence.insert(target.clone(), observed);
             if outcome.is_ok() {

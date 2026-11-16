@@ -572,6 +572,21 @@ impl AuthoritativePageRefresh {
         root: &PageId,
         operation_id: &str,
     ) -> Result<PrefetchedPage, RefreshError> {
+        Box::pin(self.prepare_source(page, root, operation_id, None)).await
+    }
+
+    /// [`Self::prefetch_page`], additionally marking `source_changed` when the
+    /// conflict means only that the source changed during preparation
+    /// ([`notion_knowledge_notion::prepare::SOURCE_CHANGED`]). Receipt
+    /// authority, scope policy, bounds, lock, lease, storage and ownership
+    /// conflicts are never marked and stay fatal.
+    async fn prepare_source(
+        &self,
+        page: &PageId,
+        root: &PageId,
+        operation_id: &str,
+        source_changed: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<PrefetchedPage, RefreshError> {
         if !self.scope.roots.contains(root) || operation_id.is_empty() {
             return Err(RefreshError::InvalidConfiguration);
         }
@@ -589,7 +604,14 @@ impl AuthoritativePageRefresh {
             .await
             .map_err(|e| match e.kind {
                 BackendErrorKind::PermissionDenied => RefreshError::OutOfScope,
-                BackendErrorKind::Conflict => RefreshError::Conflict,
+                BackendErrorKind::Conflict => {
+                    if e.operation == notion_knowledge_notion::prepare::SOURCE_CHANGED
+                        && let Some(flag) = source_changed
+                    {
+                        flag.store(true, Ordering::SeqCst);
+                    }
+                    RefreshError::Conflict
+                }
                 BackendErrorKind::Unauthenticated => RefreshError::Unauthenticated,
                 BackendErrorKind::InvalidInput | BackendErrorKind::UnsupportedContent => {
                     RefreshError::PermanentSource
@@ -633,10 +655,94 @@ impl AuthoritativePageRefresh {
             let fresh = Box::pin(self.prefetch_page(&page, &root, &operation)).await?;
             (fresh.previous, fresh.proposal)
         };
+        Box::pin(self.commit_with_one_retry(
+            &page, &root, &operation, previous, proposal, provider, lease, clock, true,
+        ))
+        .await
+    }
+
+    /// Prepare and commit a page the streaming consumer could not take from
+    /// the prefetch queue (too large to retain, or its source changed while it
+    /// was prefetched). It gets the same single bounded re-preparation as a
+    /// queued prefetched page: a source change during preparation or commit
+    /// re-prepares once from current state, and a page that changes again is a
+    /// page-local transient [`RefreshError::Source`] failure. Any other conflict
+    /// (receipt authority, lease, ownership, storage) is returned unchanged.
+    /// The bound is per call: a page the producer already saw change during
+    /// prefetch is handed here and may be prepared at most twice more.
+    pub async fn refresh_inline(
+        &self,
+        page: &PageId,
+        root: &PageId,
+        operation_id: &str,
+        provider: &dyn EmbeddingProvider,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Result<RefreshResult, RefreshError> {
+        let changed = std::sync::atomic::AtomicBool::new(false);
+        let (prepared, retry) =
+            match Box::pin(self.prepare_source(page, root, operation_id, Some(&changed))).await {
+                Err(RefreshError::Conflict) if changed.load(Ordering::SeqCst) => {
+                    // The single retry is spent on re-preparation.
+                    (
+                        Box::pin(self.prepare_once_more(page, root, operation_id)).await?,
+                        false,
+                    )
+                }
+                prepared => (prepared?, true),
+            };
+        Box::pin(self.commit_with_one_retry(
+            page,
+            root,
+            operation_id,
+            prepared.previous,
+            prepared.proposal,
+            provider,
+            lease,
+            clock,
+            retry,
+        ))
+        .await
+    }
+
+    /// The single re-preparation after a source change. A source that changes
+    /// again is a page-local transient failure; other errors are unchanged.
+    async fn prepare_once_more(
+        &self,
+        page: &PageId,
+        root: &PageId,
+        operation_id: &str,
+    ) -> Result<PrefetchedPage, RefreshError> {
+        let changed = std::sync::atomic::AtomicBool::new(false);
+        match Box::pin(self.prepare_source(page, root, operation_id, Some(&changed))).await {
+            Err(RefreshError::Conflict) if changed.load(Ordering::SeqCst) => {
+                Err(RefreshError::Source)
+            }
+            prepared => prepared,
+        }
+    }
+
+    /// Embed and commit a prepared page. When guarded source revalidation
+    /// reports the page changed and nothing was committed, it is prepared once
+    /// more (if `retry`) and committed through the same guards; a page that
+    /// keeps changing is a page-local transient source failure.
+    #[allow(clippy::too_many_arguments)]
+    async fn commit_with_one_retry(
+        &self,
+        page: &PageId,
+        root: &PageId,
+        operation: &str,
+        previous: Vec<notion_knowledge_core::indexed::IndexedChunk>,
+        proposal: notion_knowledge_notion::relation_proposal::RelationProposal,
+        provider: &dyn EmbeddingProvider,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+        retry: bool,
+    ) -> Result<RefreshResult, RefreshError> {
         let changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let first = Box::pin(self.embed_and_commit(
-            &page,
-            &operation,
+            page,
+            operation,
             previous,
             proposal,
             provider,
@@ -650,15 +756,18 @@ impl AuthoritativePageRefresh {
         if !matches!(first, Err(RefreshError::Conflict)) || !changed.load(Ordering::SeqCst) {
             return first;
         }
-        // The source changed after prefetch and nothing was committed. Prepare
-        // this page once more from current source and local state; every guard
-        // still applies. A page that keeps changing is a page-local transient
-        // source failure, so its siblings continue.
+        if !retry {
+            return Err(RefreshError::Source);
+        }
+        // The source changed after preparation and nothing was committed.
+        // Prepare this page once more from current source and local state;
+        // every guard still applies. A page that keeps changing is a
+        // page-local transient source failure, so its siblings continue.
         changed.store(false, Ordering::SeqCst);
-        let fresh = Box::pin(self.prefetch_page(&page, &root, &operation)).await?;
+        let fresh = Box::pin(self.prepare_once_more(page, root, operation)).await?;
         let retry = Box::pin(self.embed_and_commit(
-            &page,
-            &operation,
+            page,
+            operation,
             fresh.previous,
             fresh.proposal,
             provider,
