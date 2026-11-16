@@ -10,7 +10,7 @@ use notion_knowledge_core::{
     fingerprint::{content_hash, identify_chunks},
     indexed::{IndexedChunk, IndexedDocument, IndexedMetadata, SchemaVersion, SourceMetadata},
     lifecycle::{LifecycleEvidence, LifecycleScope},
-    root_scope::{RootScopeGate, ScopeError},
+    root_scope::{AuthorizedPage, RootScopeGate, ScopeError},
 };
 
 /// A prepared *proposal*, never an authorization token for later index commits.
@@ -110,6 +110,23 @@ impl NotionClient {
         previous: &[IndexedChunk],
         config: ChunkConfig,
     ) -> Result<ScopedPageSnapshot, BackendError> {
+        self.prepare_scoped_page_with(selected, root, scope, previous, config, None)
+            .await
+    }
+
+    /// [`Self::prepare_scoped_page`] for a caller that has just authorized the
+    /// page itself under the same scope, as the streaming producer does to pick
+    /// its root. The permit stands in for the opening ancestry read only; the
+    /// content reads are still followed by a fresh chain revalidation.
+    pub async fn prepare_scoped_page_with(
+        &self,
+        selected: &PageId,
+        root: &PageId,
+        scope: &LifecycleScope,
+        previous: &[IndexedChunk],
+        config: ChunkConfig,
+        permit: Option<AuthorizedPage>,
+    ) -> Result<ScopedPageSnapshot, BackendError> {
         if !scope.roots.contains(root)
             || config.target_chars == 0
             || config.overlap_chars >= config.target_chars
@@ -119,15 +136,26 @@ impl NotionClient {
         }
         let gate = RootScopeGate::new(Arc::new(self.clone()), scope.clone())
             .map_err(|_| failure(BackendErrorKind::InvalidInput))?;
-        let permit = gate
-            .authorize(selected)
-            .await
-            .map_err(|error| match error {
-                ScopeError::Denied => failure(BackendErrorKind::PermissionDenied),
-                ScopeError::Unverifiable => failure(BackendErrorKind::Unavailable),
-                ScopeError::Changed => failure(BackendErrorKind::Conflict),
-                ScopeError::InvalidConfiguration => failure(BackendErrorKind::InvalidInput),
-            })?;
+        let permit = match permit {
+            Some(permit) => {
+                let evidence = permit.lifecycle_evidence();
+                if evidence.scope != *scope
+                    || evidence.ancestry.first().is_none_or(|n| n.id != selected.0)
+                {
+                    return Err(failure(BackendErrorKind::Conflict));
+                }
+                permit
+            }
+            None => gate
+                .authorize(selected)
+                .await
+                .map_err(|error| match error {
+                    ScopeError::Denied => failure(BackendErrorKind::PermissionDenied),
+                    ScopeError::Unverifiable => failure(BackendErrorKind::Unavailable),
+                    ScopeError::Changed => failure(BackendErrorKind::Conflict),
+                    ScopeError::InvalidConfiguration => failure(BackendErrorKind::InvalidInput),
+                })?,
+        };
         if !permit.belongs_to_any(std::slice::from_ref(&root.0)) {
             return Err(failure(BackendErrorKind::PermissionDenied));
         }

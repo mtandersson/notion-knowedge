@@ -659,6 +659,11 @@ impl IndexRuntime {
         page: notion_knowledge_core::backend::PageId,
     ) -> Prefetched {
         use notion_knowledge_core::logging::{SyncCount, SyncPhase, sync_count, sync_task};
+        // Reserve first so the authorization below is fresh when preparation
+        // reuses it in place of its own opening ancestry read.
+        let Some(reservation) = budget.reserve().await else {
+            return Prefetched::Fatal("cache prefetch budget unavailable");
+        };
         let Ok(permit) = gate.authorize(&page).await else {
             return Prefetched::Skipped;
         };
@@ -675,15 +680,15 @@ impl IndexRuntime {
             "initial-{}",
             notion_knowledge_core::logging::CorrelationId::new().as_str()
         );
-        let Some(reservation) = budget.reserve().await else {
-            return Prefetched::Fatal("cache prefetch budget unavailable");
-        };
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(settings.timeout_seconds),
             sync_task(
                 SyncPhase::Indexing,
                 index,
-                Box::pin(self.handler.prefetch_page(&page, &root, &operation)),
+                Box::pin(
+                    self.handler
+                        .prefetch_authorized_page(permit, &root, &operation),
+                ),
             ),
         )
         .await;

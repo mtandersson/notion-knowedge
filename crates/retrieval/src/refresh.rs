@@ -595,7 +595,29 @@ impl AuthoritativePageRefresh {
         root: &PageId,
         operation_id: &str,
     ) -> Result<PrefetchedPage, RefreshError> {
-        Box::pin(self.prepare_source(page, root, operation_id, None)).await
+        Box::pin(self.prepare_source(page, root, operation_id, None, None)).await
+    }
+
+    /// [`Self::prefetch_page`] for a page the caller authorized just before,
+    /// under the same scope. The permit replaces only the opening ancestry
+    /// read; preparation still revalidates the chain after its content reads
+    /// and commit revalidates everything again inside its owned guard.
+    pub async fn prefetch_authorized_page(
+        &self,
+        permit: notion_knowledge_core::root_scope::AuthorizedPage,
+        root: &PageId,
+        operation_id: &str,
+    ) -> Result<PrefetchedPage, RefreshError> {
+        let page = PageId(
+            permit
+                .lifecycle_evidence()
+                .ancestry
+                .first()
+                .ok_or(RefreshError::Conflict)?
+                .id
+                .clone(),
+        );
+        Box::pin(self.prepare_source(&page, root, operation_id, None, Some(permit))).await
     }
 
     /// Read-ahead source preparation for a planned reconciliation page. The
@@ -666,6 +688,7 @@ impl AuthoritativePageRefresh {
         root: &PageId,
         operation_id: &str,
         source_changed: Option<&std::sync::atomic::AtomicBool>,
+        permit: Option<notion_knowledge_core::root_scope::AuthorizedPage>,
     ) -> Result<PrefetchedPage, RefreshError> {
         if !self.scope.roots.contains(root) || operation_id.is_empty() {
             return Err(RefreshError::InvalidConfiguration);
@@ -680,7 +703,7 @@ impl AuthoritativePageRefresh {
         let previous = self.guard.page_chunks(&page.0).await?;
         let proposal = self
             .relations
-            .prepare(page, root, &previous, self.chunk_config)
+            .prepare_with(page, root, &previous, self.chunk_config, permit)
             .await
             .map_err(|e| match e.kind {
                 BackendErrorKind::PermissionDenied => RefreshError::OutOfScope,
@@ -761,7 +784,7 @@ impl AuthoritativePageRefresh {
     ) -> Result<RefreshResult, RefreshError> {
         let changed = std::sync::atomic::AtomicBool::new(false);
         let (prepared, retry) =
-            match Box::pin(self.prepare_source(page, root, operation_id, Some(&changed))).await {
+            match Box::pin(self.prepare_source(page, root, operation_id, Some(&changed), None)).await {
                 Err(RefreshError::Conflict) if changed.load(Ordering::SeqCst) => {
                     // The single retry is spent on re-preparation.
                     (
@@ -794,7 +817,7 @@ impl AuthoritativePageRefresh {
         operation_id: &str,
     ) -> Result<PrefetchedPage, RefreshError> {
         let changed = std::sync::atomic::AtomicBool::new(false);
-        match Box::pin(self.prepare_source(page, root, operation_id, Some(&changed))).await {
+        match Box::pin(self.prepare_source(page, root, operation_id, Some(&changed), None)).await {
             Err(RefreshError::Conflict) if changed.load(Ordering::SeqCst) => {
                 Err(RefreshError::Source)
             }

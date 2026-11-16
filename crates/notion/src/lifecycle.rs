@@ -172,6 +172,57 @@ fn parse(value: &Value, kind: LifecycleKind, id: &str) -> Result<LifecycleNode, 
         parent: physical_parent,
     })
 }
+/// Derive the authorization status of a bracketed chain under `scope`.
+fn evaluate(scope: LifecycleScope, ancestry: Vec<LifecycleNode>) -> LifecycleEvidence {
+    let status = if ancestry[0].inactive {
+        LifecycleStatus::Inactive
+    } else {
+        let exclusion = ancestry.iter().enumerate().find_map(|(index, node)| {
+            let source = match node.kind {
+                LifecycleKind::Page => Some(SourceType::Page),
+                LifecycleKind::Database => Some(SourceType::Database),
+                LifecycleKind::DataSource => Some(SourceType::DataSource),
+                LifecycleKind::Block => None,
+            };
+            source
+                .and_then(|s| scope.exclusions.exclusion(&node.id, s))
+                .or_else(|| {
+                    (index > 0
+                        && node.kind == LifecycleKind::Page
+                        && scope.exclusions.descendants_of.contains(&node.id))
+                    .then_some(SkipReason::ExcludedDescendants)
+                })
+                .map(|reason| LifecycleStatus::Excluded {
+                    id: node.id.clone(),
+                    reason,
+                })
+        });
+        if let Some(excluded) = exclusion {
+            excluded
+        } else {
+            let roots: Vec<_> = scope
+                .roots
+                .iter()
+                .filter(|root| {
+                    ancestry
+                        .iter()
+                        .any(|n| n.kind == LifecycleKind::Page && n.id == root.0)
+                })
+                .map(|r| r.0.clone())
+                .collect();
+            if roots.is_empty() {
+                LifecycleStatus::OutsideScope
+            } else {
+                LifecycleStatus::Allowed { roots }
+            }
+        }
+    };
+    LifecycleEvidence {
+        scope,
+        status,
+        ancestry,
+    }
+}
 impl NotionClient {
     async fn lifecycle_node(
         &self,
@@ -253,54 +304,53 @@ impl NotionClient {
                 return Err(error(BackendErrorKind::Conflict));
             }
         }
-        let status = if ancestry[0].inactive {
-            LifecycleStatus::Inactive
-        } else {
-            let exclusion = ancestry.iter().enumerate().find_map(|(index, node)| {
-                let source = match node.kind {
-                    LifecycleKind::Page => Some(SourceType::Page),
-                    LifecycleKind::Database => Some(SourceType::Database),
-                    LifecycleKind::DataSource => Some(SourceType::DataSource),
-                    LifecycleKind::Block => None,
-                };
-                source
-                    .and_then(|s| scope.exclusions.exclusion(&node.id, s))
-                    .or_else(|| {
-                        (index > 0
-                            && node.kind == LifecycleKind::Page
-                            && scope.exclusions.descendants_of.contains(&node.id))
-                        .then_some(SkipReason::ExcludedDescendants)
-                    })
-                    .map(|reason| LifecycleStatus::Excluded {
-                        id: node.id.clone(),
-                        reason,
-                    })
+        Ok(evaluate(scope, ancestry))
+    }
+
+    /// Re-read every node of an already bracketed chain exactly once, from the
+    /// outermost ancestor down to the selected page, and require each to match.
+    /// This is the same final observation the reverse pass of a full fresh
+    /// resolution makes (the page itself is read last); the extra forward pass
+    /// of a fresh resolution could only notice a change that was reverted
+    /// before these reads, which leaves the chain exactly as authorized.
+    async fn revalidate_chain(
+        &self,
+        evidence: &LifecycleEvidence,
+        current_scope: &LifecycleScope,
+    ) -> Result<(), BackendError> {
+        if normalize(current_scope)? != evidence.scope {
+            return Err(error(BackendErrorKind::Conflict));
+        }
+        let ancestry = &evidence.ancestry;
+        let page = ancestry
+            .first()
+            .filter(|n| n.kind == LifecycleKind::Page)
+            .ok_or_else(|| error(BackendErrorKind::InvalidInput))?;
+        page_id(&page.id)?;
+        // Only a chain a fresh resolution could have produced is accepted:
+        // linked parents, a workspace top, the node bound, no repeats and no
+        // inactive ancestor. Its status must be the one this scope derives.
+        let mut seen = BTreeSet::new();
+        let linked = ancestry.len() <= MAX_LIFECYCLE_NODES
+            && ancestry.iter().all(|n| seen.insert((n.kind, n.id.clone())))
+            && ancestry.windows(2).all(|pair| {
+                matches!(&pair[0].parent, PhysicalParent::Object { kind, id }
+                    if *kind == pair[1].kind && *id == pair[1].id)
+                    && !pair[0].inactive
+                    && !pair[1].inactive
+            })
+            && ancestry.last().is_some_and(|n| {
+                n.parent == PhysicalParent::Workspace || (ancestry.len() == 1 && n.inactive)
             });
-            if let Some(excluded) = exclusion {
-                excluded
-            } else {
-                let roots: Vec<_> = scope
-                    .roots
-                    .iter()
-                    .filter(|root| {
-                        ancestry
-                            .iter()
-                            .any(|n| n.kind == LifecycleKind::Page && n.id == root.0)
-                    })
-                    .map(|r| r.0.clone())
-                    .collect();
-                if roots.is_empty() {
-                    LifecycleStatus::OutsideScope
-                } else {
-                    LifecycleStatus::Allowed { roots }
-                }
+        if !linked || evaluate(evidence.scope.clone(), ancestry.clone()) != *evidence {
+            return Err(error(BackendErrorKind::Conflict));
+        }
+        for node in ancestry.iter().rev() {
+            if self.lifecycle_node(node.kind, &node.id).await? != *node {
+                return Err(error(BackendErrorKind::Conflict));
             }
-        };
-        Ok(LifecycleEvidence {
-            scope,
-            status,
-            ancestry,
-        })
+        }
+        Ok(())
     }
 }
 impl PageLifecycle for NotionClient {
@@ -316,23 +366,7 @@ impl PageLifecycle for NotionClient {
         evidence: &'a LifecycleEvidence,
         current_scope: &'a LifecycleScope,
     ) -> BackendFuture<'a, ()> {
-        Box::pin(async move {
-            if normalize(current_scope)? != evidence.scope {
-                return Err(error(BackendErrorKind::Conflict));
-            }
-            let page = evidence
-                .ancestry
-                .first()
-                .filter(|n| n.kind == LifecycleKind::Page)
-                .ok_or_else(|| error(BackendErrorKind::InvalidInput))?;
-            let fresh = self
-                .resolve_lifecycle(&PageId(page.id.clone()), current_scope)
-                .await?;
-            if fresh != *evidence {
-                return Err(error(BackendErrorKind::Conflict));
-            }
-            Ok(())
-        })
+        Box::pin(self.revalidate_chain(evidence, current_scope))
     }
 }
 

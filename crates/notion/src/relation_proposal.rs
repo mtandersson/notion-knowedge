@@ -7,7 +7,7 @@ use notion_knowledge_core::{
     indexed::{IndexedChunk, IndexedMetadata, PropertyValue, SourceMetadata},
     lifecycle::{LifecycleEvidence, LifecycleScope, PageLifecycle},
     relations::relation_edges_with_names,
-    root_scope::{RootScopeGate, ScopeError},
+    root_scope::{AuthorizedPage, RootScopeGate, ScopeError},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -56,6 +56,40 @@ fn conflict() -> BackendError {
         retry_after: None,
         committed_page_id: None,
     }
+}
+
+/// Relation and body-link targets whose physical chains a proposal resolves.
+fn candidates(
+    metadata: &IndexedMetadata,
+    content: Option<&PageContent>,
+) -> Result<BTreeSet<String>, BackendError> {
+    let mut targets = BTreeSet::new();
+    for value in metadata.properties.values() {
+        if let PropertyValue::PageIds(ids) = value {
+            targets.extend(ids.iter().cloned());
+        }
+    }
+    if let Some(content) = content {
+        for edge in crate::link_graph::page_link_edges(
+            content,
+            &BTreeSet::from([metadata.page_id.clone()]),
+        )
+        .map_err(|_| conflict())?
+        {
+            match edge.target() {
+                notion_knowledge_core::graph::GraphTarget::Page { page_id } => {
+                    targets.insert(page_id.clone());
+                }
+                notion_knowledge_core::graph::GraphTarget::Unresolved { reference }
+                    if !reference.starts_with("invalid-page-link:") =>
+                {
+                    targets.insert(reference.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(targets)
 }
 
 /// Operator-owned optional target enrichment. Source authorization is always fresh.
@@ -149,32 +183,7 @@ impl RelationProposalAdapter {
         source: &LifecycleEvidence,
         scope: &LifecycleScope,
     ) -> Result<CandidateProjection, BackendError> {
-        let mut targets = BTreeSet::new();
-        for value in metadata.properties.values() {
-            if let PropertyValue::PageIds(ids) = value {
-                targets.extend(ids.iter().cloned());
-            }
-        }
-        if let Some(content) = content {
-            for edge in crate::link_graph::page_link_edges(
-                content,
-                &BTreeSet::from([metadata.page_id.clone()]),
-            )
-            .map_err(|_| conflict())?
-            {
-                match edge.target() {
-                    notion_knowledge_core::graph::GraphTarget::Page { page_id } => {
-                        targets.insert(page_id.clone());
-                    }
-                    notion_knowledge_core::graph::GraphTarget::Unresolved { reference }
-                        if !reference.starts_with("invalid-page-link:") =>
-                    {
-                        targets.insert(reference.clone());
-                    }
-                    _ => {}
-                }
-            }
-        }
+        let targets = candidates(metadata, content)?;
         // Validate bounds before making candidate requests.
         relation_edges_with_names(metadata, names, &BTreeSet::from([metadata.page_id.clone()]))
             .map_err(|_| conflict())?;
@@ -281,10 +290,23 @@ impl RelationProposalAdapter {
         previous: &[IndexedChunk],
         chunks: ChunkConfig,
     ) -> Result<RelationProposal, BackendError> {
+        self.prepare_with(page, root, previous, chunks, None).await
+    }
+    /// [`Self::prepare`] reusing the caller's just-made source authorization
+    /// in place of the opening ancestry read; see
+    /// [`NotionClient::prepare_scoped_page_with`].
+    pub async fn prepare_with(
+        &self,
+        page: &PageId,
+        root: &PageId,
+        previous: &[IndexedChunk],
+        chunks: ChunkConfig,
+        permit: Option<AuthorizedPage>,
+    ) -> Result<RelationProposal, BackendError> {
         let scope = self.policy.read().await.clone();
         let snapshot = self
             .client
-            .prepare_scoped_page(page, root, &scope, previous, chunks)
+            .prepare_scoped_page_with(page, root, &scope, previous, chunks, permit)
             .await?;
         let (edges, targets, evidence) = self
             .targets(
@@ -344,14 +366,25 @@ impl RelationProposalAdapter {
         if *scope != proposal.snapshot.evidence.scope {
             return Err(conflict());
         }
-        self.client
-            .revalidate_lifecycle(&proposal.snapshot.evidence, &scope)
-            .await?;
         let page = &proposal.snapshot.source.page.id.0;
-        if crate::media_identity::canonical_content(self.client.read_content(page).await?)
-            != proposal.snapshot.source
-        {
-            return Err(conflict());
+        // Target lookups are bracketed by the source on both sides. Without
+        // any, the closing source and chain checks below are already the
+        // freshest observation; an opening pair would repeat them unchanged.
+        let lookups = self.mode == ProjectionMode::ResolveTargets
+            && !candidates(
+                &proposal.snapshot.document.metadata,
+                Some(&proposal.snapshot.source),
+            )?
+            .is_empty();
+        if lookups {
+            self.client
+                .revalidate_lifecycle(&proposal.snapshot.evidence, &scope)
+                .await?;
+            if crate::media_identity::canonical_content(self.client.read_content(page).await?)
+                != proposal.snapshot.source
+            {
+                return Err(conflict());
+            }
         }
         let (edges, targets, evidence) = self
             .targets(

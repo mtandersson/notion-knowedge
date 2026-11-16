@@ -119,6 +119,7 @@ struct HttpNotion {
     body_reads: Arc<AtomicUsize>,
     target_body_reads: Arc<AtomicUsize>,
     foreign_body_reads: Arc<AtomicUsize>,
+    routes: Arc<Mutex<Vec<String>>>,
     fail_once: Arc<AtomicBool>,
     server: tokio::task::JoinHandle<()>,
     port: u16,
@@ -132,6 +133,8 @@ impl HttpNotion {
         let target_body_reads = Arc::new(AtomicUsize::new(0));
         let foreign_body_reads = Arc::new(AtomicUsize::new(0));
         let foreign_bodies = foreign_body_reads.clone();
+        let routes = Arc::new(Mutex::new(Vec::new()));
+        let route_log = routes.clone();
         let fail_once = Arc::new(AtomicBool::new(false));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -172,6 +175,7 @@ impl HttpNotion {
                     .split_whitespace()
                     .nth(1)
                     .unwrap();
+                route_log.lock().unwrap().push(route.to_owned());
                 if route == format!("/v1/pages/{PAGE}") && boundary.ready() {
                     boundary.started.notify_one();
                     boundary.proceed.notified().await;
@@ -304,6 +308,7 @@ impl HttpNotion {
             body_reads,
             target_body_reads,
             foreign_body_reads,
+            routes,
             fail_once,
             server,
             port,
@@ -6051,4 +6056,32 @@ async fn receipt_authority_conflict_during_preparation_is_never_retried_as_a_sou
     assert_eq!(inline.unwrap_err(), RefreshError::Conflict);
     assert_eq!(provider.embeddings(), embedded);
     assert!(index.guarded().page_chunks(OTHER).await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zz_probe_call_counts() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let provider = CountingProvider::new(index.embed.clone());
+    let service = runner(&index, &source);
+    let dump = |label: &str| {
+        let mut log = source.routes.lock().unwrap();
+        let mut h = std::collections::BTreeMap::<String, usize>::new();
+        for r in log.iter() { *h.entry(r.clone()).or_default() += 1; }
+        eprintln!("== {label}: total {}", log.len());
+        for (k, v) in h { eprintln!("  {v:4} {k}"); }
+        log.clear();
+    };
+    let client = source.client();
+    client.crawl_with_exclusions(&index.scope.roots, &index.scope.exclusions).await.unwrap();
+    dump("crawl");
+    client.resolve_lifecycle(&PageId(PAGE.into()), &index.scope).await.unwrap();
+    dump("lifecycle PAGE");
+    service.dry_run().await.unwrap();
+    dump("dry_run (plan)");
+    service.apply("first", index.lease.clone(), clock(), &provider).await.unwrap();
+    dump("apply first");
+    service.apply("second", index.lease.clone(), clock(), &provider).await.unwrap();
+    dump("apply second (unchanged)");
 }
