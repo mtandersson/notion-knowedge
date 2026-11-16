@@ -74,6 +74,9 @@ pub struct Model {
     pub repeat_query_cursor: bool,
     /// `POST /v1/search` fails, so the walk reads every page's metadata.
     pub search_unavailable: bool,
+    /// Search lists [`PAGE`] as trashed while the page itself is not (lag).
+    pub stale_search_trash: bool,
+    pub foreign_revision: String,
 }
 impl Default for Model {
     fn default() -> Self {
@@ -110,6 +113,8 @@ impl Default for Model {
             rows: vec![],
             repeat_query_cursor: false,
             search_unavailable: false,
+            stale_search_trash: false,
+            foreign_revision: "2026-10-10T11:00:00Z".into(),
         }
     }
 }
@@ -258,6 +263,12 @@ fn search(snapshot: &Model, bodies: usize) -> Value {
     let results: Vec<_> = ids
         .map(|id| respond(&format!("/v1/pages/{id}"), snapshot.clone(), bodies))
         .filter(|page| page["object"] == "page")
+        .map(|mut page| {
+            if snapshot.stale_search_trash && page["id"] == PAGE {
+                page["in_trash"] = json!(true);
+            }
+            page
+        })
         .collect();
     json!({"object":"list","results":results,"has_more":false,"next_cursor":null})
 }
@@ -375,7 +386,7 @@ fn respond(route: &str, snapshot: Model, bodies: usize) -> Value {
             FOREIGN,
             &snapshot.foreign_parent,
             "Foreign",
-            "2026-10-10T11:00:00Z",
+            &snapshot.foreign_revision,
             false,
         )
     } else {

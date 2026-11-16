@@ -768,14 +768,23 @@ impl AuthoritativePageRefresh {
         let prepared = self.guard.prepare_page(provider, operation, &[]).await?;
         let diff = prepared.metrics();
         let handler = self.clone();
+        let (owned_clock, expires_at) = (clock.clone(), lease.expires_at);
         let outcome = self
             .guard
             .commit_page_with_authority(prepared, lease, clock, move || async move {
-                handler
-                    .relations
-                    .removal_authority(&handler.scope)
-                    .await
-                    .map_err(|_| FailureClass::Conflict)
+                owned_revalidation(
+                    handler.guard.index_directory().to_path_buf(),
+                    async {
+                        handler
+                            .relations
+                            .removal_authority(&handler.scope)
+                            .await
+                            .map_err(|_| FailureClass::Conflict)
+                    },
+                    owned_clock,
+                    expires_at,
+                )
+                .await
             })
             .await
             .map_err(RefreshError::from)?;

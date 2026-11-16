@@ -8,6 +8,37 @@ pub struct SyncStatus {
     pub webhooks: Option<WebhookCounts>,
     pub operational_schema_version: Option<i64>,
     pub index: Option<IndexStatus>,
+    pub inventory: Option<InventoryStatus>,
+}
+/// Page inventory counts, the last sync's drift and the out-of-sync pages.
+/// Ids and typed reasons only: never titles or content.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InventoryStatus {
+    pub total: u64,
+    pub indexed: u64,
+    pub skipped: u64,
+    pub failed: u64,
+    pub pending: u64,
+    /// `None` before the first sync. Only a complete walk removes pages.
+    pub walk_complete: Option<bool>,
+    pub held: u64,
+    pub drift: Drift,
+    pub out_of_sync: Vec<OutOfSyncPage>,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Drift {
+    pub added: u64,
+    pub changed: u64,
+    pub moved: u64,
+    pub removed: u64,
+    pub trashed: u64,
+    pub unplaced: u64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutOfSyncPage {
+    pub page_id: String,
+    /// `skipped:<reason>` or `failed:<class>`.
+    pub outcome: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WebhookCounts {

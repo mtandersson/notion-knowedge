@@ -364,6 +364,40 @@ impl IndexCommitCoordinator {
             let s=load(db,self,id)?;event(db,&s,now,if held{2}else{1},Some(number(&class)),Some(failure_id))?;Ok(s)
         })
     }
+    /// Finish a cycle whose walk settled every page itself (there is no plan).
+    /// A complete walk records a successful reconciliation; the next cycle is
+    /// due one interval later either way, and page failures are retried then.
+    pub fn complete_schedule(
+        &self,
+        lease: &Lease,
+        now: i64,
+        id: &str,
+        success: bool,
+    ) -> Result<Schedule, JournalError> {
+        validate(id)?;
+        self.schedule_write(lease, now, |db| {
+            let s = load(db, self, id)?;
+            let run = s
+                .active_run
+                .as_deref()
+                .ok_or(JournalError::InvalidTransition)?;
+            let changed = db
+                .execute(
+                    "UPDATE reconciliation_runs SET phase=2,failure=NULL WHERE run_id=?1 AND fence=?2 AND phase<>2 AND abandoned=0",
+                    params![run, lease.fence],
+                )
+                .map_err(sql)?;
+            if changed != 1 {
+                return Err(JournalError::InvalidTransition);
+            }
+            if success {
+                let b = self.binding();
+                db.execute("INSERT INTO reconciliation_success(run_id,table_name,workspace,scope,generation,epoch,completed_at_seconds) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![run,b.table(),b.workspace(),b.scope(),b.generation(),b.epoch() as i64,now]).map_err(sql)?;
+            }
+            completed(db, now, run)?;
+            load(db, self, id)
+        })
+    }
     /// Explicitly hold detected failed pages WITHOUT consuming run-failure budget.
     pub fn hold_schedule(
         &self,
