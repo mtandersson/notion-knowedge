@@ -81,10 +81,14 @@ pub mod runtime {
                     return Ok(());
                 }
                 // A restart inside the interval catches up through search.
-                if !self.tick(stop.clone()).await? && std::mem::take(&mut first) {
-                    self.catch_up(stop.clone()).await?;
+                // A busy writer (for example a webhook tick) retries it next poll.
+                if !self.tick(stop.clone()).await? {
+                    if first {
+                        first = !self.catch_up(stop.clone()).await?;
+                    }
+                } else {
+                    first = false;
                 }
-                first = false;
                 tokio::select! { _ = stop.cancelled() => return Ok(()), _ = tokio::time::sleep(self.poll) => {} }
             }
         }
@@ -230,10 +234,10 @@ pub mod runtime {
         }
 
         /// One incremental sync outside the schedule. Failures are left to
-        /// the next full walk.
-        async fn catch_up(&self, stop: CancellationToken) -> Result<(), &'static str> {
+        /// the next full walk. `false` when the writer was busy.
+        async fn catch_up(&self, stop: CancellationToken) -> Result<bool, &'static str> {
             let Some(mut lease) = self.lease()? else {
-                return Ok(());
+                return Ok(false);
             };
             let admitted = self
                 .index
@@ -242,7 +246,8 @@ pub mod runtime {
             if admitted.is_ok() {
                 self.sync(&stop, &mut lease, SyncMode::Incremental).await?;
             }
-            self.release(&lease)
+            self.release(&lease)?;
+            Ok(true)
         }
     }
 }
