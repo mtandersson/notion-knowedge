@@ -423,6 +423,8 @@ impl IndexRuntime {
             root_scope::RootScopeGate,
         };
         use notion_knowledge_retrieval::refresh::RefreshError;
+        // Parked reconciliation read-ahead must not hold the shared budget.
+        self.runner.discard_read_ahead();
         let (send, receive) = tokio::sync::mpsc::channel(8);
         let crawl = self.source.crawl_with_pages(
             &self.source_scope.roots,
@@ -895,6 +897,7 @@ impl IndexRuntime {
                 }
                 _ => {
                     expired.store(true, Ordering::SeqCst);
+                    self.runner.discard_read_ahead();
                     let _ = self.coordinator.drain_owned().await;
                     break Err("cache resync failed; retry startup");
                 }
