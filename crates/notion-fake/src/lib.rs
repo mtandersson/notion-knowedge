@@ -145,8 +145,7 @@ pub struct FakeNotion {
     pub body_reads: Arc<AtomicUsize>,
     pub target_body_reads: Arc<AtomicUsize>,
     pub foreign_body_reads: Arc<AtomicUsize>,
-    /// Distinct Markdown routes read again after the walk's first read, that
-    /// is, pages whose content was prepared for indexing.
+    /// Distinct Markdown routes read by indexing preparation (not by a walk).
     pub markdown_pages: Arc<Mutex<BTreeSet<String>>>,
     markdown_reads: Arc<Mutex<BTreeMap<String, usize>>>,
     /// The next response is a 503.
@@ -444,13 +443,18 @@ impl FakeNotion {
                 if route == format!("/v1/pages/{OTHER}/markdown") {
                     target_bodies.fetch_add(1, Ordering::SeqCst);
                 }
-                if route.ends_with("/markdown") {
-                    bodies.fetch_add(1, Ordering::SeqCst);
+                // The walk reads a page's metadata once (rows: never) before
+                // its Markdown; preparation first checks lifecycle, re-reading
+                // the page's metadata at least twice. That tells them apart.
+                if let Some(page) = route.strip_prefix("/v1/pages/") {
                     let mut counts = read_counts.lock().unwrap();
-                    let reads = counts.entry(route.clone()).or_insert(0);
-                    *reads += 1;
-                    if *reads > 1 {
-                        markdown_reads.lock().unwrap().insert(route.clone());
+                    if let Some(page) = page.strip_suffix("/markdown") {
+                        bodies.fetch_add(1, Ordering::SeqCst);
+                        if counts.insert(page.to_owned(), 0).unwrap_or(0) >= 2 {
+                            markdown_reads.lock().unwrap().insert(route.clone());
+                        }
+                    } else if !page.contains('/') {
+                        *counts.entry(page.to_owned()).or_insert(0) += 1;
                     }
                 }
                 let snapshot = {

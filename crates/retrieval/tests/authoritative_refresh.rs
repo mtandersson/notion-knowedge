@@ -2010,13 +2010,25 @@ async fn planner_absence_access_failures_and_races_never_authorize_deletion() {
         // The root lost or regained a child tag: its new revision also moves ROOT and OTHER.
         Difference::Stale
     );
+    // A transiently incomplete walk (a repeated query cursor) never deletes.
     source.change(|m| {
         m.archived = true;
-        m.inaccessible_other = true;
+        m.rows = vec!["99999999-9999-9999-9999-999999999999".into()];
+        m.repeat_query_cursor = true;
     });
     let inaccessible = planner(&index, &source).plan().await.unwrap();
     assert!(!inaccessible.traversal_complete);
     assert_eq!(inaccessible.planned_delete(), 0);
+    // A permanently unreadable sibling is a typed skip: it does not keep the
+    // archived page alive (owner decision for slice 1).
+    source.change(|m| {
+        m.rows.clear();
+        m.repeat_query_cursor = false;
+        m.inaccessible_other = true;
+    });
+    let unreadable = planner(&index, &source).plan().await.unwrap();
+    assert!(unreadable.traversal_complete);
+    assert_eq!(unreadable.planned_delete(), 1);
     source.change(|m| {
         m.inaccessible_other = false;
         m.inaccessible_root = true;
@@ -2433,11 +2445,11 @@ async fn reconciliation_stale_archive_move_restore_and_incomplete_traversal_appl
         .await
         .unwrap();
     assert_eq!((stale.changed, stale.unchanged), (1, 2));
-    let embeddings = provider.embeddings();
     source.change(|m| {
         m.archived = true;
         m.hide_page = true;
-        m.inaccessible_other = true;
+        m.rows = vec!["99999999-9999-9999-9999-999999999999".into()];
+        m.repeat_query_cursor = true;
     });
     let incomplete = service
         .apply("incomplete", index.lease.clone(), clock(), &provider)
@@ -2447,14 +2459,17 @@ async fn reconciliation_stale_archive_move_restore_and_incomplete_traversal_appl
     assert!(incomplete.failed_pages() > 0);
     assert!(!incomplete.run_failures.is_empty());
     assert!(!index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
-    source.change(|m| m.inaccessible_other = false);
+    // The new database row was indexed by that run; nothing embeds after it.
+    let embeddings = provider.embeddings();
+    // The row stays; only the cursor recovers, so the walk is complete.
+    source.change(|m| m.repeat_query_cursor = false);
     let archived = service
         .apply("archive", index.lease.clone(), clock(), &provider)
         .await
         .unwrap();
     assert_eq!(
         (archived.deleted, archived.changed, archived.failed_pages()),
-        (1, 1, 0) // The root changed too: it lost a child tag.
+        (1, 0, 0) // The root was already refreshed by the incomplete run.
     );
     assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
     assert!(
@@ -2475,8 +2490,8 @@ async fn reconciliation_stale_archive_move_restore_and_incomplete_traversal_appl
         .apply("restored", index.lease.clone(), clock(), &provider)
         .await
         .unwrap();
-    // The root lost or regained a child tag: its new revision also moves ROOT and OTHER.
-    assert_eq!((restored.changed, restored.deleted), (3, 0));
+    // The root regained a child tag: its new revision also moves ROOT, OTHER and the row.
+    assert_eq!((restored.changed, restored.deleted), (4, 0));
     assert!(
         !index
             .coordinator

@@ -63,6 +63,13 @@ pub struct TreeWalk {
     pub calls: u64,
 }
 impl TreeWalk {
+    /// The one definition of a walk that may replace the inventory and plan
+    /// deletions. Unreadable (404/403) children are typed skips and do not
+    /// lower it; transient failures already fail the walk, and a repeated
+    /// cursor or truncated body clears `complete`.
+    pub fn authoritative(&self) -> bool {
+        self.complete
+    }
     /// Reached pages that were not skipped: the pages that may be indexed.
     pub fn readable(&self) -> BTreeSet<String> {
         let skipped: BTreeSet<_> = self.skipped.iter().map(|s| s.id.as_str()).collect();
@@ -109,6 +116,18 @@ enum Node {
     },
 }
 impl Node {
+    /// The id and the page that claims it as a child.
+    fn claim(&self) -> (String, String) {
+        match self {
+            Self::Page {
+                id,
+                parent: InventoryParent::Page(parent),
+                ..
+            } => (id.clone(), parent.clone()),
+            Self::Page { id, .. } => (id.clone(), String::new()),
+            Self::Database { id, owner, .. } => (id.clone(), owner.clone()),
+        }
+    }
     fn id(&self) -> &str {
         match self {
             Self::Page { id, .. } | Self::Database { id, .. } => id,
@@ -122,6 +141,11 @@ struct Visit {
     children: Vec<Node>,
     calls: u64,
     incomplete: bool,
+    /// Tagged under a page that is not its physical parent. The id stays
+    /// unvisited so a later tag from its real parent is still walked.
+    rejected: Option<(String, String)>,
+    /// The visited node's id.
+    id: String,
 }
 impl Visit {
     fn skip(&mut self, id: &str, reason: SkipReason) {
@@ -224,7 +248,10 @@ impl NotionClient {
         row: Option<Value>,
         rules: &ExclusionRules,
     ) -> Result<Visit, BackendError> {
-        let mut visit = Visit::default();
+        let mut visit = Visit {
+            id: id.clone(),
+            ..Default::default()
+        };
         let is_root = parent == InventoryParent::Root;
         let entry = |edited: &str, in_trash: bool| InventoryEntry {
             page_id: id.clone(),
@@ -257,8 +284,8 @@ impl NotionClient {
         if let InventoryParent::Page(expected) = &parent
             && !self.parent_is(&value, expected, &mut visit).await?
         {
-            // Not physically under this page: not part of the tree at all.
-            visit.skip(&id, SkipReason::OutsideScope);
+            // Not physically under this page, for example a linked view.
+            visit.rejected = Some((id.clone(), expected.clone()));
             return Ok(visit);
         }
         let entry = entry(&page.last_edited_time, page.archived);
@@ -281,7 +308,7 @@ impl NotionClient {
             .await?;
         visit.pages.push(WalkedPage {
             entry,
-            content: complete.then(|| PageContent {
+            content: complete.then_some(PageContent {
                 page,
                 markdown: body.markdown,
             }),
@@ -310,8 +337,8 @@ impl NotionClient {
     }
 
     /// Blocks Notion did not render inline are read through the same endpoint
-    /// so their child tags are still reached. Unreadable blocks make the walk
-    /// incomplete rather than silently dropping their children.
+    /// so their child tags are still reached. A 404/403 block is recorded as
+    /// an `inaccessible` skip; any other failure fails the whole walk.
     async fn follow_unknown_blocks(
         &self,
         body: &MarkdownBody,
@@ -340,7 +367,9 @@ impl NotionClient {
                     children.extend(child_references(&part.markdown));
                     pending.extend(part.unknown_block_ids);
                 }
-                Err(e) if inaccessible(e.kind) => visit.incomplete = true,
+                // Permanently unreadable (for example a synced block from a
+                // page the integration cannot see): a typed skip, not doubt.
+                Err(e) if inaccessible(e.kind) => visit.skip(&block.0, SkipReason::Inaccessible),
                 Err(e) => return Err(e),
             }
         }
@@ -354,7 +383,10 @@ impl NotionClient {
         root: String,
         rules: &ExclusionRules,
     ) -> Result<Visit, BackendError> {
-        let mut visit = Visit::default();
+        let mut visit = Visit {
+            id: id.clone(),
+            ..Default::default()
+        };
         if let Some(reason) = rules.exclusion(&id, SourceType::Database) {
             visit.skip(&id, reason);
             return Ok(visit);
@@ -376,7 +408,7 @@ impl NotionClient {
         }
         // A linked view of a database elsewhere is not a physical child.
         if !self.parent_is(&value, &owner, &mut visit).await? {
-            visit.skip(&id, SkipReason::OutsideScope);
+            visit.rejected = Some((id, owner));
             return Ok(visit);
         }
         if inactive(&value).ok_or_else(|| error(BackendErrorKind::Internal))? {
@@ -510,6 +542,11 @@ impl NotionClient {
         }
         let rules = &rules;
         let mut visited = BTreeSet::new();
+        // (id, claimed parent) pairs already rejected, so a repeated wrong
+        // tag is not re-read while the real parent's tag still is.
+        let mut rejected = BTreeSet::new();
+        let mut deferred: std::collections::BTreeMap<String, Vec<Node>> = Default::default();
+        let mut accepted = BTreeSet::new();
         let mut walk = TreeWalk {
             run_id: notion_knowledge_core::logging::CorrelationId::new()
                 .as_str()
@@ -526,7 +563,15 @@ impl NotionClient {
         loop {
             while pending.len() < FETCH_CONCURRENCY {
                 let Some(node) = queue.pop_front() else { break };
+                if rejected.contains(&node.claim()) {
+                    continue;
+                }
                 if !visited.insert(node.id().to_owned()) {
+                    // The first claim may still be rejected (a linked view
+                    // read in flight); keep this one until that is known.
+                    if !accepted.contains(node.id()) {
+                        deferred.entry(node.id().to_owned()).or_default().push(node);
+                    }
                     continue;
                 }
                 if visited.len() > MAX_NODES {
@@ -553,6 +598,15 @@ impl NotionClient {
             let visit = visit?;
             walk.calls += visit.calls;
             walk.complete &= !visit.incomplete;
+            if let Some(claim) = visit.rejected {
+                visited.remove(&claim.0);
+                queue.extend(deferred.remove(&claim.0).unwrap_or_default());
+                rejected.insert(claim);
+            } else {
+                // Settled: later claims for this id are plain repeats.
+                deferred.remove(&visit.id);
+                accepted.insert(visit.id.clone());
+            }
             walk.skipped.extend(visit.skipped);
             queue.extend(visit.children);
             for page in visit.pages {
@@ -966,18 +1020,74 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ids(&walk), [ROOT]);
-        assert_eq!(
-            walk.skipped,
-            [SkippedContent {
-                id: O.into(),
-                reason: SkipReason::OutsideScope
-            }]
+        assert!(
+            walk.skipped.is_empty(),
+            "an outside page is not inventoried"
         );
         assert!(
             !requests
                 .lock()
                 .unwrap()
                 .contains(&format!("GET /v1/pages/{O}/markdown"))
+        );
+    }
+
+    #[tokio::test]
+    async fn linked_view_reached_first_does_not_hide_the_real_subtree() {
+        // Root tags A then P. A holds a linked view of D; D really lives in P.
+        let mut routes = nested_tree();
+        add_page(
+            &mut routes,
+            ROOT,
+            parent("workspace", ""),
+            &format!("{}{}", page_tag(A), page_tag(P)),
+        );
+        add_page(
+            &mut routes,
+            A,
+            parent("page_id", ROOT),
+            &format!("<database url=\"{}\">View</database>\n", url(D)),
+        );
+        let (client, _) = serve(routes).await;
+        let walk = client
+            .walk_tree(&scope(ExclusionRules::default()), None)
+            .await
+            .unwrap();
+        assert!(walk.authoritative());
+        assert_eq!(ids(&walk), [ROOT, P, A, ROW1, ROW2]);
+        assert_eq!(
+            walk.entries[3].parent,
+            InventoryParent::DataSource {
+                data_source_id: S.into(),
+                database_id: D.into(),
+                owner_page_id: P.into(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn unreadable_unknown_block_is_a_typed_skip_not_doubt() {
+        let mut routes = Routes::new();
+        routes.insert(
+            format!("GET /v1/pages/{ROOT}"),
+            (200, metadata(ROOT, parent("workspace", ""))),
+        );
+        routes.insert(
+            format!("GET /v1/pages/{ROOT}/markdown"),
+            (200, markdown(ROOT, "Visible\n", &[X])),
+        );
+        let (client, _) = serve(routes).await;
+        let walk = client
+            .walk_tree(&scope(ExclusionRules::default()), None)
+            .await
+            .unwrap();
+        assert!(walk.authoritative());
+        assert_eq!(
+            walk.skipped,
+            [SkippedContent {
+                id: X.into(),
+                reason: SkipReason::Inaccessible
+            }]
         );
     }
 

@@ -51,7 +51,8 @@ pub(crate) const PREFETCH_RESERVE_KIB: usize = 32 * 1024;
 use notion_knowledge_retrieval::prefetch::PrefetchBudget;
 
 enum Prefetched {
-    Skipped(notion_knowledge_core::backend::PageId),
+    /// The scope gate refused the page; the outcome says why.
+    Skipped(notion_knowledge_core::backend::PageId, InventoryOutcome),
     Fatal(&'static str),
     Ready {
         prefetched: Box<notion_knowledge_retrieval::refresh::PrefetchedPage>,
@@ -458,7 +459,7 @@ impl IndexRuntime {
                 |page: notion_knowledge_notion::walk::WalkedPage| async move {
                     page.skip
                         .is_none()
-                        .then(|| notion_knowledge_core::backend::PageId(page.entry.page_id))
+                        .then_some(notion_knowledge_core::backend::PageId(page.entry.page_id))
                 },
             );
             let mut fetched = std::pin::pin!(
@@ -505,8 +506,8 @@ impl IndexRuntime {
                 processed += 1;
                 let (page, operation, work) = match item {
                     Prefetched::Fatal(error) => return Err(error),
-                    Prefetched::Skipped(page) => {
-                        outcomes.push((page.0, Skipped(SkipReason::OutsideScope)));
+                    Prefetched::Skipped(page, outcome) => {
+                        outcomes.push((page.0, outcome));
                         skipped += 1;
                         notion_knowledge_core::logging::sync_count(
                             notion_knowledge_core::logging::SyncCount::SkippedPage,
@@ -688,7 +689,7 @@ impl IndexRuntime {
         let state = self.coordinator.state();
         let unavailable = |_| "cache inventory state unavailable";
         state
-            .record_walk(&walk.run_id, &walk.entries, walk.complete)
+            .record_walk(&walk.run_id, &walk.entries, walk.authoritative())
             .map_err(unavailable)?;
         let now = now_ms() / 1000;
         for skipped in &walk.skipped {
@@ -707,7 +708,9 @@ impl IndexRuntime {
             .collect();
         for (page, mut outcome) in outcomes {
             if let InventoryOutcome::Indexed { revision } = &mut outcome {
-                // The walk observed the revision this run indexed.
+                // The walk's revision, not the later prefetch read's. If the
+                // page changed in between, the recorded revision is older than
+                // the indexed one, which only causes an extra refresh later.
                 *revision = revisions
                     .get(page.as_str())
                     .copied()
@@ -733,8 +736,25 @@ impl IndexRuntime {
         page: notion_knowledge_core::backend::PageId,
     ) -> Prefetched {
         use notion_knowledge_core::logging::{SyncCount, SyncPhase, sync_count, sync_task};
-        let Ok(permit) = gate.authorize(&page).await else {
-            return Prefetched::Skipped(page);
+        let permit = match gate.authorize(&page).await {
+            Ok(permit) => permit,
+            Err(notion_knowledge_core::root_scope::ScopeError::Denied) => {
+                return Prefetched::Skipped(
+                    page,
+                    InventoryOutcome::Skipped(
+                        notion_knowledge_core::discovery::SkipReason::OutsideScope,
+                    ),
+                );
+            }
+            // Lifecycle could not be verified now: a failure, not a scope fact.
+            Err(_) => {
+                return Prefetched::Skipped(
+                    page,
+                    InventoryOutcome::Failed(
+                        notion_knowledge_core::reconciliation::FailureClass::Unavailable,
+                    ),
+                );
+            }
         };
         let Some(root) = self
             .source_scope

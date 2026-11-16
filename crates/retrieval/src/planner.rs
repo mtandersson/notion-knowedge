@@ -8,7 +8,6 @@ use notion_knowledge_core::logging::{SyncPhase, SyncProgressLog, sync_task};
 use notion_knowledge_core::{
     aliases::AliasSources,
     backend::{BackendErrorKind, Page, PageId},
-    discovery::SkipReason,
     indexed::IndexedChunk,
     lifecycle::{LifecycleEvidence, LifecycleScope, LifecycleStatus, PageLifecycle},
     reconciliation::ReconciliationScope,
@@ -317,16 +316,10 @@ impl AuthoritativeReconciliationPlanner {
         let mut discovered = BTreeSet::new();
         match walk {
             Ok(walk) => {
-                // Only a complete walk may plan deletions. An unreadable child
-                // also blocks them: its unreached subtree may still exist.
-                plan.traversal_complete = walk.complete;
-                for skipped in &walk.skipped {
-                    if skipped.reason == SkipReason::Inaccessible {
-                        plan.traversal_complete = false;
-                        plan.errors
-                            .insert(skipped.id.clone(), PlanError::Permission);
-                    }
-                }
+                // Only an authoritative walk may plan deletions. Unreadable
+                // children are typed skips: a page that lost permission must
+                // be gone after the next walk, so they do not block deletes.
+                plan.traversal_complete = walk.authoritative();
                 discovered = walk.readable();
                 if !plan.traversal_complete {
                     plan.run_errors.push(PlanError::IncompleteTraversal);
