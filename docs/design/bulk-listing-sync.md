@@ -157,7 +157,9 @@ discovered by walking it:
   revision is skipped only when it was read at least two minutes after that
   minute, so a second edit within the minute is still read. A hit whose parent
   chain the inventory cannot resolve is counted as `unplaced` and left to the
-  next walk. A restart inside the interval runs one incremental sync; the
+  next walk; so is a failed incremental page (the high water moves past it),
+  and a page whose ancestor moved out of the root is still placed through
+  the stale parent map until the next walk. A restart inside the interval runs one incremental sync; the
   periodic cycle always walks.
 
 ### 4. Inventory resource and drift detection

@@ -1383,6 +1383,43 @@ async fn incremental_indexes_new_page_under_an_inventoried_parent() {
 }
 
 #[tokio::test]
+async fn incremental_places_a_new_child_under_a_new_parent_in_one_search() {
+    const NEW: &str = "cccccccc-0000-0000-0000-00000000000c";
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    sync(&f, &http, SyncMode::Full).await;
+    // FOREIGN becomes a new child of a new root page; search lists it after
+    // (newer than) NEW, so placement must see NEW from this same run.
+    http.change(|m| {
+        m.extra.insert(
+            NEW.into(),
+            ExtraPage {
+                title: "New".into(),
+                visible: true,
+                archived: false,
+            },
+        );
+        m.foreign_parent = NEW.into();
+        m.foreign_revision = "2026-10-11T12:00:00Z".into();
+    });
+    let (totals, indexed) = sync(&f, &http, SyncMode::Incremental).await;
+    assert!(indexed.contains(NEW), "{totals:?}");
+    // The fake serves no Markdown for FOREIGN, so it is placed and skipped.
+    assert_eq!((totals.drift.added, totals.drift.unplaced), (2, 0));
+    let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+    let entry = runtime
+        .coordinator
+        .state()
+        .inventory_entry(FOREIGN)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        entry.parent,
+        notion_knowledge_core::inventory::InventoryParent::Page(NEW.into())
+    );
+}
+
+#[tokio::test]
 async fn search_hit_with_unknown_parent_is_counted_not_indexed() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;

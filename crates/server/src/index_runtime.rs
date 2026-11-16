@@ -116,6 +116,14 @@ pub struct SyncTotals {
     pub drift: notion_knowledge_core::inventory::DriftCounts,
 }
 
+/// Expires a page attempt's clock when dropped.
+struct Attempt(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for Attempt {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 struct SyncEmbedding<'a>(&'a dyn EmbeddingProvider);
 impl EmbeddingProvider for SyncEmbedding<'_> {
     fn wait_idle(&self) -> notion_knowledge_core::embedding::EmbeddingIdleFuture<'_> {
@@ -569,12 +577,6 @@ impl IndexRuntime {
                         (page, operation, PageWork::TimedOut)
                     }
                 };
-                struct Attempt(Arc<std::sync::atomic::AtomicBool>);
-                impl Drop for Attempt {
-                    fn drop(&mut self) {
-                        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-                    }
-                }
                 let expired = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let _attempt = Attempt(expired.clone());
                 let flag = expired.clone();
@@ -789,7 +791,8 @@ impl IndexRuntime {
         let state = self.coordinator.state();
         let unavailable = |_| "cache inventory state unavailable";
         let mut out = HitSync::default();
-        for hit in hits {
+        // Oldest first, so a new parent is placed before its new children.
+        for hit in hits.into_iter().rev() {
             let previous = state.inventory_entry(&hit.page_id).map_err(unavailable)?;
             if hit.in_trash {
                 let Some(mut entry) = previous else { continue };
@@ -829,7 +832,7 @@ impl IndexRuntime {
             {
                 continue;
             }
-            let Some((parent, root)) = self.place(&hit, previous)? else {
+            let Some((parent, root)) = self.place(&hit, previous, &out.entries)? else {
                 out.unplaced += 1;
                 continue;
             };
@@ -876,6 +879,7 @@ impl IndexRuntime {
         &self,
         hit: &notion_knowledge_notion::search::SearchHit,
         previous: Option<notion_knowledge_core::inventory::InventoryEntry>,
+        placed: &[notion_knowledge_core::inventory::InventoryEntry],
     ) -> Result<Option<(notion_knowledge_core::inventory::InventoryParent, String)>, &'static str>
     {
         use notion_knowledge_core::inventory::{InventoryOutcome, InventoryParent};
@@ -886,6 +890,10 @@ impl IndexRuntime {
             return Ok(Some((InventoryParent::Root, hit.page_id.clone())));
         }
         Ok(match &hit.parent {
+            HitParent::Page(parent) if placed.iter().any(|e| &e.page_id == parent) => {
+                let entry = placed.iter().find(|e| &e.page_id == parent).unwrap();
+                Some((InventoryParent::Page(parent.clone()), entry.root_id.clone()))
+            }
             HitParent::Page(parent) => {
                 let Some(entry) = state.inventory_entry(parent).map_err(unavailable)? else {
                     return Ok(None);
@@ -987,6 +995,8 @@ impl IndexRuntime {
             // Past the deadline the clock expires, so the owned commit's
             // deadline poll gives up its index guard instead of holding it.
             let expired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            // Also expire it if this future is dropped (stop or sync budget).
+            let _attempt = Attempt(expired.clone());
             let flag = expired.clone();
             let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || {
                 if flag.load(std::sync::atomic::Ordering::SeqCst) {
