@@ -5942,7 +5942,14 @@ async fn inline_page_whose_source_changes_once_is_prepared_again_and_committed()
 
     source.change(|m| m.race_metadata_once = true);
     let during_preparation = handler
-        .refresh_inline(&page, &root, "inline-prepare", &provider, index.lease.clone(), clock())
+        .refresh_inline(
+            &page,
+            &root,
+            "inline-prepare",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
         .await
         .unwrap();
     assert_eq!(during_preparation.outcome, CommitOutcome::Applied);
@@ -5950,7 +5957,14 @@ async fn inline_page_whose_source_changes_once_is_prepared_again_and_committed()
     source.change(|m| m.markdown = "# Intro\n\nJuniper gnocchi.\n".into());
     provider.race_on_next_embedding(source.state.clone());
     let during_commit = handler
-        .refresh_inline(&page, &root, "inline-commit", &provider, index.lease.clone(), clock())
+        .refresh_inline(
+            &page,
+            &root,
+            "inline-commit",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
         .await
         .unwrap();
     assert_eq!(during_commit.outcome, CommitOutcome::Applied);
@@ -5970,7 +5984,14 @@ async fn inline_page_whose_source_keeps_changing_is_a_page_local_source_failure(
 
     source.change(|m| m.race_metadata = true);
     let failure = handler
-        .refresh_inline(&page, &root, "inline-churn", &provider, index.lease.clone(), clock())
+        .refresh_inline(
+            &page,
+            &root,
+            "inline-churn",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
         .await;
     assert_eq!(failure.unwrap_err(), RefreshError::Source);
     assert_eq!(provider.embeddings(), 0);
@@ -5979,7 +6000,14 @@ async fn inline_page_whose_source_keeps_changing_is_a_page_local_source_failure(
     // The same durable work item completes once the source settles.
     source.change(|m| m.race_metadata = false);
     let settled = handler
-        .refresh_inline(&page, &root, "inline-churn", &provider, index.lease.clone(), clock())
+        .refresh_inline(
+            &page,
+            &root,
+            "inline-churn",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
         .await
         .unwrap();
     assert_eq!(settled.outcome, CommitOutcome::Applied);
@@ -6011,7 +6039,14 @@ async fn receipt_authority_conflict_during_preparation_is_never_retried_as_a_sou
     let prefetch = handler.prefetch_page(&other, &root, "shared-receipt").await;
     assert_eq!(prefetch.err(), Some(RefreshError::Conflict));
     let inline = handler
-        .refresh_inline(&other, &root, "shared-receipt", &provider, index.lease.clone(), clock())
+        .refresh_inline(
+            &other,
+            &root,
+            "shared-receipt",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
         .await;
     assert_eq!(inline.unwrap_err(), RefreshError::Conflict);
     assert_eq!(provider.embeddings(), embedded);
