@@ -38,6 +38,17 @@ pub fn sync_context() -> Option<SyncContext> {
     }
     Some(context)
 }
+/// Run a spawned task inside a captured [`sync_context`], so its source reads
+/// keep reporting to the sync that started it.
+pub async fn in_sync_context<T>(
+    context: Option<SyncContext>,
+    future: impl Future<Output = T>,
+) -> T {
+    match context {
+        Some(context) => CURRENT.scope(context, future).await,
+        None => future.await,
+    }
+}
 /// Propagate counts to an already owned commit thread, restoring on unwind.
 pub fn with_sync_context<T>(context: Option<SyncContext>, work: impl FnOnce() -> T) -> T {
     struct Reset(Option<SyncContext>);

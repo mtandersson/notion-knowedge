@@ -4249,3 +4249,142 @@ async fn source_edit_after_prefetch_never_commits_the_stale_snapshot() {
     }
     assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
 }
+
+/// Add `count` visible pages under the root, so planned work exceeds read-ahead.
+fn add_extra_pages(http: &HttpNotion, count: usize) {
+    http.change(|m| {
+        for n in 0..count {
+            m.extra.insert(
+                format!("66666666-6666-6666-6666-{n:012}"),
+                ExtraPage {
+                    title: format!("Extra {n}"),
+                    visible: true,
+                    archived: false,
+                },
+            );
+        }
+    });
+}
+
+/// Hold the next embedding and return once it is held.
+async fn await_held_embedding(f: &Fixture) {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        f.provider.held.notified(),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_apply_fetches_next_planned_page_while_one_embedding_is_paused() {
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    http.markdown_pages.lock().unwrap().clear();
+    f.provider.hold.store(true, Ordering::SeqCst);
+    let observe = async {
+        await_held_embedding(&f).await;
+        // Page A's embedding is held; a later planned page's content is
+        // still downloaded by read-ahead during that pause.
+        await_markdown_pages(&http, 2).await;
+        assert_eq!(f.provider.active.load(Ordering::SeqCst), 1);
+        f.provider.hold_release.add_permits(1);
+    };
+    let (applied, ()) = tokio::join!(
+        f.command(&http, &["--reconcile", "apply", "manual"]),
+        observe
+    );
+    counts(&applied, 3, 0, 0);
+    assert_eq!(f.provider.max_active.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_apply_read_ahead_is_bounded_while_embedding_is_paused() {
+    let http = HttpNotion::start().await;
+    add_extra_pages(&http, 12);
+    let f = Fixture::new(&http).await;
+    http.markdown_pages.lock().unwrap().clear();
+    f.provider.hold.store(true, Ordering::SeqCst);
+    let observe = async {
+        await_held_embedding(&f).await;
+        await_markdown_pages(&http, 2).await;
+        // Give unbounded read-ahead ample time to fetch all 15 pages.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let fetched = http.markdown_pages.lock().unwrap().len();
+        assert!(
+            fetched <= 3,
+            "held page and two read-ahead workers; got {fetched}"
+        );
+        f.provider.hold_release.add_permits(1);
+    };
+    let (applied, ()) = tokio::join!(
+        f.command(&http, &["--reconcile", "apply", "bounded"]),
+        observe
+    );
+    counts(&applied, 15, 0, 0);
+    assert_eq!(f.provider.max_active.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_source_edit_after_read_ahead_never_commits_the_stale_snapshot() {
+    let http = HttpNotion::start().await;
+    let f = Fixture::new(&http).await;
+    http.markdown_pages.lock().unwrap().clear();
+    f.provider.hold.store(true, Ordering::SeqCst);
+    let observe = async {
+        await_held_embedding(&f).await;
+        // Every planned page is prepared while the first embedding is held.
+        await_markdown_pages(&http, 3).await;
+        http.change(|m| m.markdown = "# Intro\n\nJuniper gnocchi.\n".into());
+        f.provider.hold_release.add_permits(1);
+    };
+    let (applied, ()) = tokio::join!(
+        f.command(&http, &["--reconcile", "apply", "edited"]),
+        observe
+    );
+    let runtime = f.open(&http, OpenMode::ReadOnly).await;
+    let chunks = runtime.chunks().page_chunks(PAGE).await.unwrap();
+    assert!(
+        chunks.iter().all(|c| !c.text.contains("Saffron")),
+        "a read-ahead snapshot edited upstream must never be committed"
+    );
+    if applied.exit == 0 {
+        assert!(chunks.iter().any(|c| c.text.contains("Juniper")));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scheduled_cycle_fetches_next_planned_page_while_one_embedding_is_paused() {
+    let http = HttpNotion::start().await;
+    add_extra_pages(&http, 12);
+    let f = Fixture::new(&http).await;
+    http.markdown_pages.lock().unwrap().clear();
+    f.provider.hold.store(true, Ordering::SeqCst);
+    let (worker, stop, server) =
+        scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
+    await_held_embedding(&f).await;
+    await_markdown_pages(&http, 2).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let fetched = http.markdown_pages.lock().unwrap().len();
+    assert!(
+        fetched <= 3,
+        "held page and two read-ahead workers; got {fetched}"
+    );
+    assert_eq!(f.provider.active.load(Ordering::SeqCst), 1);
+    f.provider.hold_release.add_permits(1);
+    await_schedule(&worker, |s| s.cycle == 1 && s.active_run.is_none()).await;
+    let run = worker
+        .coordinator
+        .schedule_events("periodic", 0, 100)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == notion_knowledge_retrieval::schedule::ScheduleEventKind::Completed)
+        .unwrap()
+        .run_id
+        .unwrap();
+    let progress = worker.coordinator.reconciliation_progress(&run).unwrap();
+    assert_eq!((progress.changed, progress.failed_pages()), (15, 0));
+    assert_eq!(f.provider.max_active.load(Ordering::SeqCst), 1);
+    stop.cancel();
+    server.await.unwrap().unwrap();
+}

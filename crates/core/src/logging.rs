@@ -10,8 +10,8 @@ use std::{
 
 mod sync_progress;
 pub use sync_progress::{
-    SyncContext, SyncCount, current_sync_progress, sync_context, sync_count, sync_total_pages,
-    with_sync_context, with_sync_progress,
+    SyncContext, SyncCount, current_sync_progress, in_sync_context, sync_context, sync_count,
+    sync_total_pages, with_sync_context, with_sync_progress,
 };
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);

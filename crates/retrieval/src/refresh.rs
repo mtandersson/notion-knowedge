@@ -239,7 +239,7 @@ impl AuthoritativePageRefresh {
         lease: Lease,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Result<RefreshResult, RefreshError> {
-        self.apply_lifecycle_expected(page, operation_id, provider, lease, clock, None)
+        self.apply_lifecycle_expected(page, operation_id, provider, lease, clock, None, None)
             .await
     }
 
@@ -252,6 +252,8 @@ impl AuthoritativePageRefresh {
         lease: Lease,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
         expected: Option<ExpectedReconciliation>,
+        // Read-ahead source preparation; used only if it still matches.
+        prefetched: Option<PrefetchedPage>,
     ) -> Result<RefreshResult, RefreshError> {
         let evidence =
             self.notion
@@ -277,10 +279,31 @@ impl AuthoritativePageRefresh {
         }
         if let LifecycleStatus::Allowed { roots } = &evidence.status {
             let root = roots.first().ok_or(RefreshError::Source)?;
+            let root = PageId(root.clone());
+            // The durable plan was revalidated above from current state; a
+            // read-ahead preparation replaces only the source read that follows.
+            if let Some((previous, proposal)) = self
+                .matching_prefetch(prefetched, page, &root, operation_id, true)
+                .await?
+            {
+                return Box::pin(self.embed_and_commit(
+                    page,
+                    operation_id,
+                    previous,
+                    proposal,
+                    provider,
+                    lease,
+                    clock,
+                    true,
+                    expected,
+                    None,
+                ))
+                .await;
+            }
             return self
                 .refresh_page_inner(
                     page,
-                    &PageId(root.clone()),
+                    &root,
                     operation_id,
                     provider,
                     lease,
@@ -573,6 +596,63 @@ impl AuthoritativePageRefresh {
         operation_id: &str,
     ) -> Result<PrefetchedPage, RefreshError> {
         Box::pin(self.prepare_source(page, root, operation_id, None)).await
+    }
+
+    /// Read-ahead source preparation for a planned reconciliation page. The
+    /// root is the single configured root, or else the page's indexed
+    /// provenance; the consumer discards it unless its own lifecycle read
+    /// selects the same root. No durable plan state is checked or captured
+    /// here: that stays with the consumer. Any failure yields `None`, and the
+    /// consumer then prepares the page itself exactly as without read-ahead.
+    pub(crate) async fn prefetch_reconciliation(
+        &self,
+        page: &PageId,
+        operation_id: &str,
+    ) -> Option<PrefetchedPage> {
+        let root = if let [root] = self.scope.roots.as_slice() {
+            root.clone()
+        } else {
+            let previous = self.guard.page_chunks(&page.0).await.ok()?;
+            PageId(previous.first()?.metadata.source.root_page_id.clone())
+        };
+        Box::pin(self.prefetch_page(page, &root, operation_id))
+            .await
+            .ok()
+    }
+
+    /// Take a read-ahead preparation only if it was made for this page,
+    /// operation and root and this page's indexed chunks did not change since,
+    /// so its chunk identities are still current. `authority` re-checks the
+    /// receipt authority the inline preparation would have checked.
+    async fn matching_prefetch(
+        &self,
+        prefetched: Option<PrefetchedPage>,
+        page: &PageId,
+        root: &PageId,
+        operation_id: &str,
+        authority: bool,
+    ) -> Result<
+        Option<(
+            Vec<notion_knowledge_core::indexed::IndexedChunk>,
+            notion_knowledge_notion::relation_proposal::RelationProposal,
+        )>,
+        RefreshError,
+    > {
+        let Some(prefetched) = prefetched else {
+            return Ok(None);
+        };
+        if prefetched.page != *page
+            || prefetched.root != *root
+            || prefetched.operation != operation_id
+            || self.guard.page_chunks(&page.0).await? != prefetched.previous
+        {
+            return Ok(None);
+        }
+        if authority {
+            self.coordinator
+                .validate_page_receipt_authority(operation_id, &page.0)?;
+        }
+        Ok(Some((prefetched.previous, prefetched.proposal)))
     }
 
     /// [`Self::prefetch_page`], additionally marking `source_changed` when the
@@ -1203,6 +1283,7 @@ impl AuthoritativePageRefresh {
         provider: &dyn EmbeddingProvider,
         lease: Lease,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+        prefetched: Option<PrefetchedPage>,
     ) -> Result<(), RefreshError> {
         let evidence = self
             .notion
@@ -1227,23 +1308,34 @@ impl AuthoritativePageRefresh {
             }
             _ => return Err(RefreshError::Conflict),
         };
-        let previous = self.guard.page_chunks(&expected.page.page_id).await?;
-        let proposal = self
-            .relations
-            .prepare(
-                &PageId(expected.page.page_id.clone()),
+        let page_id = PageId(expected.page.page_id.clone());
+        let (previous, proposal) = match self
+            .matching_prefetch(
+                prefetched,
+                &page_id,
                 &root,
-                &previous,
-                self.chunk_config,
+                &expected.page.operation_id,
+                false,
             )
-            .await
-            .map_err(|error| {
-                if error.kind == BackendErrorKind::Unauthenticated {
-                    RefreshError::Unauthenticated
-                } else {
-                    RefreshError::Source
-                }
-            })?;
+            .await?
+        {
+            Some(prepared) => prepared,
+            None => {
+                let previous = self.guard.page_chunks(&expected.page.page_id).await?;
+                let proposal = self
+                    .relations
+                    .prepare(&page_id, &root, &previous, self.chunk_config)
+                    .await
+                    .map_err(|error| {
+                        if error.kind == BackendErrorKind::Unauthenticated {
+                            RefreshError::Unauthenticated
+                        } else {
+                            RefreshError::Source
+                        }
+                    })?;
+                (previous, proposal)
+            }
+        };
         let mut prepared_chunks = proposal.snapshot().chunks.clone();
         let mut previous_chunks = previous;
         prepared_chunks.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
@@ -1277,6 +1369,7 @@ impl AuthoritativePageRefresh {
                 lease,
                 clock,
                 Some(repair),
+                None,
             ))
             .await
             .map(|_| ());
