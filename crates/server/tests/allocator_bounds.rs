@@ -1,7 +1,8 @@
 #![cfg(all(target_os = "linux", target_env = "gnu"))]
 //! #656: memory freed on many runtime threads must be reused, not retained
 //! per thread. Its own test binary, because the allocator bound is
-//! process-wide and must precede thread creation.
+//! process-wide and must precede thread creation. Keep this the only test in
+//! this binary: another test's allocations would share its arenas.
 use notion_knowledge_server::allocator::{DEFAULT_ARENA_MAX, bound_allocator_arenas};
 use std::sync::{Arc, Barrier};
 
@@ -29,6 +30,12 @@ fn transient_work() -> Box<[u8]> {
 
 #[test]
 fn sequential_page_work_on_many_threads_keeps_retained_heap_near_one_page() {
+    if std::env::var_os("MALLOC_ARENA_MAX").is_some()
+        && std::env::var_os("NK_ALLOCATOR_GUARD_FORCE").is_none()
+    {
+        eprintln!("skipped: MALLOC_ARENA_MAX is set by the environment");
+        return;
+    }
     if std::env::var_os("MALLOC_ARENA_MAX").is_none() {
         assert_eq!(bound_allocator_arenas(), Some(DEFAULT_ARENA_MAX));
     }

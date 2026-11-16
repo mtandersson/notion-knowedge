@@ -8,6 +8,12 @@ local index/operational-state compatibility. `TBD` is a **draft**, not a publish
 
 ### Added
 - Release checklist and machine-checkable changelog/version guard.
+- Periodic cache-sync progress logs include `rss_kib` and `rss_peak_kib`.
+
+### Fixed
+- Long syncs no longer grow resident memory with pages processed: the server
+  caps glibc malloc arenas at 2 at startup (#656). Set `MALLOC_ARENA_MAX` to
+  override.
 
 ### MCP tool-schema changes
 - Added read-only `knowledge_sync_status` with scoped webhook counts, persisted index/model/schema identity and durable successful reconciliation time.
