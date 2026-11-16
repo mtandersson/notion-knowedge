@@ -79,12 +79,14 @@ pub mod runtime {
         };
         // Validate exact external assets in the shipping runtime, even though
         // ANN training consumes already committed vectors and makes no API call.
-        use notion_knowledge_core::embedding::EmbeddingProvider;
         if crate::index_runtime::configured_plan(&settings).is_err() {
             return output("configuration", 2);
         }
-        let provider = match notion_knowledge_retrieval::qwen::QwenProvider::load(
-            notion_knowledge_retrieval::qwen::QwenConfig::cpu(&settings.assets),
+        let provider = match notion_knowledge_retrieval::embedder::load_configured_embedder(
+            &notion_knowledge_retrieval::embedder::EmbedderConfig::LocalQwen {
+                assets: settings.assets.clone(),
+            },
+            None,
         )
         .await
         {
@@ -103,7 +105,7 @@ pub mod runtime {
             return tokio::select! { biased;
                 _ = stop.cancelled() => output("cancelled", 5),
                 result = crate::index_runtime::IndexRuntime::reset_and_resync(
-                    &settings, &state, scope, source, Arc::new(provider),
+                    &settings, &state, scope, source, provider,
                 ) => match result {
                     Ok(runtime) => match runtime.coordinator.state().inventory_counts() {
                         Ok(counts) if counts.failed > 0 => output("ready_with_skips", 0),

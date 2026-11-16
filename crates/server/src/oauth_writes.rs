@@ -187,13 +187,14 @@ mod installed {
             .retrieval
             .as_ref()
             .ok_or("OAuth writes require retrieval")?;
-        let provider = Arc::new(
-            notion_knowledge_retrieval::qwen::QwenProvider::load(
-                notion_knowledge_retrieval::qwen::QwenConfig::cpu(&settings.assets),
-            )
-            .await
-            .map_err(|_| "retrieval model unavailable or incompatible")?,
-        );
+        let provider = notion_knowledge_retrieval::embedder::load_configured_embedder(
+            &notion_knowledge_retrieval::embedder::EmbedderConfig::LocalQwen {
+                assets: settings.assets.clone(),
+            },
+            None,
+        )
+        .await
+        .map_err(|_| "retrieval model unavailable or incompatible")?;
         compose(handler, config, runtime, provider).await
     }
     /// Production and fixtures share the same stores, authority and mutation factory.

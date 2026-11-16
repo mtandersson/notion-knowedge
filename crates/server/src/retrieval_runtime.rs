@@ -140,13 +140,14 @@ pub async fn configured(
         NotionClient::integration(token.expose_secret())
             .map_err(|_| "authoritative retrieval source unavailable")?,
     );
-    let provider = Arc::new(
-        notion_knowledge_retrieval::qwen::QwenProvider::load(
-            notion_knowledge_retrieval::qwen::QwenConfig::cpu(&settings.assets),
-        )
-        .await
-        .map_err(|_| "retrieval model unavailable or incompatible")?,
-    );
+    let provider = notion_knowledge_retrieval::embedder::load_configured_embedder(
+        &notion_knowledge_retrieval::embedder::EmbedderConfig::LocalQwen {
+            assets: settings.assets.clone(),
+        },
+        None,
+    )
+    .await
+    .map_err(|_| "retrieval model unavailable or incompatible")?;
     compose(handler, config, transport, source, provider).await
 }
 
@@ -294,13 +295,14 @@ pub(crate) async fn configured_oauth(
         .as_ref()
         .ok_or("retrieval settings unavailable")?;
     crate::index_runtime::configured_plan(settings)?;
-    let provider = Arc::new(
-        notion_knowledge_retrieval::qwen::QwenProvider::load(
-            notion_knowledge_retrieval::qwen::QwenConfig::cpu(&settings.assets),
-        )
-        .await
-        .map_err(|_| "retrieval model unavailable or incompatible")?,
-    );
+    let provider = notion_knowledge_retrieval::embedder::load_configured_embedder(
+        &notion_knowledge_retrieval::embedder::EmbedderConfig::LocalQwen {
+            assets: settings.assets.clone(),
+        },
+        None,
+    )
+    .await
+    .map_err(|_| "retrieval model unavailable or incompatible")?;
     compose_oauth_queries(handler, config, provider).await
 }
 

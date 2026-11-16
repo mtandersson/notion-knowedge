@@ -209,12 +209,15 @@ pub mod runtime {
         if crate::index_runtime::configured_plan(&settings).is_err() {
             return Output::error("configuration", 2);
         }
-        let provider = match notion_knowledge_retrieval::qwen::QwenProvider::load(
-            notion_knowledge_retrieval::qwen::QwenConfig::cpu(&settings.assets),
+        let provider = match notion_knowledge_retrieval::embedder::load_configured_embedder(
+            &notion_knowledge_retrieval::embedder::EmbedderConfig::LocalQwen {
+                assets: settings.assets.clone(),
+            },
+            None,
         )
         .await
         {
-            Ok(p) => Arc::new(p),
+            Ok(p) => p,
             Err(_) => return Output::error("model_configuration", 2),
         };
         execute(command, &settings, &state, scope, source, provider, stop).await
