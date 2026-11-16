@@ -2742,13 +2742,14 @@ async fn unreadable_page_does_not_block_embedded_search_and_next_sync_can_recove
     )
     .await
     .unwrap();
-    let progress = runtime
-        .coordinator
-        .reconciliation_progress("cache-reset")
-        .unwrap();
     assert_eq!(
-        progress.failed.get(PAGE),
-        Some(&DurableFailure::UnsupportedSource)
+        out_of_sync(&runtime),
+        [(
+            PAGE.to_owned(),
+            notion_knowledge_core::inventory::InventoryOutcome::Failed(
+                notion_knowledge_core::reconciliation::FailureClass::Source
+            )
+        )]
     );
     // Startup already persisted readable pages while discovering. The final
     // reconciliation verifies them as unchanged instead of re-embedding them.
@@ -2827,25 +2828,16 @@ async fn authentication_revocation_at_any_sync_stage_keeps_cache_unavailable() {
         // In both orders, no unauthorized page is acknowledged and the cache
         // remains unavailable; an early failure needs no extra recovery ledger.
         assert!(runtime.chunks().page_chunks(PAGE).await.unwrap().is_empty());
-        match runtime.coordinator.reconciliation_progress("cache-reset") {
-            Ok(progress) => assert!(
-                progress
-                    .failed
-                    .values()
-                    .chain(progress.planning_failures.values())
-                    .chain(progress.run_failures.values())
-                    .any(|failure| matches!(
-                        failure,
-                        DurableFailure::Unauthenticated
-                            | DurableFailure::TraversalUnauthenticated
-                            | DurableFailure::Index
-                    ))
-            ),
-            Err(error) => assert_eq!(
-                error,
-                notion_knowledge_core::reconciliation::JournalError::InvalidTransition
-            ),
-        }
+        // A failed sync records no indexed outcome for the unauthorized page.
+        assert!(
+            runtime
+                .coordinator
+                .state()
+                .inventory_counts()
+                .unwrap()
+                .indexed
+                < 3
+        );
     }
 }
 
@@ -3067,18 +3059,17 @@ async fn streaming_initial_sync_separates_discovery_and_page_budgets() {
     .await
     .unwrap();
     let runtime = result.unwrap();
-    let progress = runtime
-        .coordinator
-        .reconciliation_progress("cache-reset")
-        .unwrap();
-    assert_eq!(progress.failed.len(), 1, "{progress:?}");
-    let (timed_out_page, failure) = progress.failed.iter().next().unwrap();
+    let failed = out_of_sync(&runtime);
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    let (timed_out_page, failure) = &failed[0];
     assert_eq!(
         *failure,
-        notion_knowledge_retrieval::durable_plan::DurableFailure::PageTimeout
+        notion_knowledge_core::inventory::InventoryOutcome::Failed(
+            notion_knowledge_core::reconciliation::FailureClass::Unavailable
+        )
     );
-    assert!(progress.pending.is_empty());
-    assert_eq!(progress.successful.len(), 2);
+    let counts = runtime.coordinator.state().inventory_counts().unwrap();
+    assert_eq!((counts.indexed, counts.pending), (2, 0));
     assert!(
         runtime
             .chunks()
@@ -3435,12 +3426,12 @@ async fn initial_sync_embeds_and_commits_before_discovery_finishes() {
 }
 
 #[tokio::test]
-async fn streaming_retries_commit_the_page_skipped_during_early_population() {
+async fn truncated_walk_read_fails_only_that_page_without_a_second_read() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
     notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Info);
-    // Truncated for the walk's read and for early population's preparation.
-    http.state.lock().unwrap().unsupported_page_reads = 2;
+    // Truncated for the walk's single read; the next walk retries it.
+    http.state.lock().unwrap().unsupported_page_reads = 1;
     fs::remove_dir_all(&f.settings.index).unwrap();
     let runtime = IndexRuntime::recover(
         &f.settings,
@@ -3451,24 +3442,42 @@ async fn streaming_retries_commit_the_page_skipped_during_early_population() {
     )
     .await
     .unwrap();
-    let progress = runtime
-        .coordinator
-        .reconciliation_progress("cache-reset")
-        .unwrap();
-    assert_eq!(progress.changed, 1);
-    assert_eq!(progress.unchanged, 2);
-    assert!(progress.failed.is_empty());
-    assert!(!runtime.chunks().page_chunks(PAGE).await.unwrap().is_empty());
+    assert_eq!(
+        out_of_sync(&runtime),
+        [(
+            PAGE.to_owned(),
+            notion_knowledge_core::inventory::InventoryOutcome::Failed(
+                notion_knowledge_core::reconciliation::FailureClass::Source
+            )
+        )]
+    );
+    assert_eq!(
+        runtime
+            .coordinator
+            .state()
+            .inventory_counts()
+            .unwrap()
+            .indexed,
+        2
+    );
+    assert!(runtime.chunks().page_chunks(PAGE).await.unwrap().is_empty());
+    assert_eq!(
+        http.requests()
+            .iter()
+            .filter(|r| *r == &format!("/v1/pages/{PAGE}/markdown"))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
-async fn streaming_retry_progress_reports_actual_commits_without_double_counting_unchanged_pages() {
+async fn streaming_progress_reports_actual_commits_and_failed_pages() {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         tokio::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "streaming_retries_commit_the_page_skipped_during_early_population",
+                "truncated_walk_read_fails_only_that_page_without_a_second_read",
                 "--nocapture",
             ])
             .stdin(std::process::Stdio::null())
@@ -3500,7 +3509,7 @@ async fn streaming_retry_progress_reports_actual_commits_without_double_counting
     let counts = &ready["sync_progress"];
     assert_eq!(counts["discovered_pages"], 3);
     assert_eq!(counts["total_pages"], 3);
-    assert_eq!(counts["committed_pages"], 3);
+    assert_eq!(counts["committed_pages"], 2);
     assert_eq!(counts["skipped_pages"], 1);
     assert!(counts["embedded_chunks"].as_u64().unwrap() > 0);
     for event in events
@@ -3526,9 +3535,8 @@ async fn readable_html_siblings_and_many_chunk_pages_use_bounded_embedding_reque
         let chunks = runtime.chunks().page_chunks(PAGE).await.unwrap();
         assert!(chunks.len() >= 4);
         assert!(chunks.iter().all(|chunk| chunk.metadata.page_id == PAGE && chunk.metadata.source.root_page_id == ROOT));
-        let progress = runtime.coordinator.reconciliation_progress("cache-reset").unwrap();
-        assert!(progress.failed.is_empty());
-        assert_eq!(progress.successful.len(), 3);
+        assert!(out_of_sync(&runtime).is_empty());
+        assert_eq!(runtime.coordinator.state().inventory_counts().unwrap().indexed, 3);
         assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
     }
 }
@@ -3554,16 +3562,17 @@ async fn embedding_input_limits_remain_visible_while_siblings_commit_and_normal_
     )
     .await
     .unwrap();
-    let progress = runtime
-        .coordinator
-        .reconciliation_progress("cache-reset")
-        .unwrap();
     assert_eq!(
-        progress.failed.get(PAGE),
-        Some(&DurableFailure::EmbeddingInputLimit)
+        out_of_sync(&runtime),
+        [(
+            PAGE.to_owned(),
+            notion_knowledge_core::inventory::InventoryOutcome::Failed(
+                notion_knowledge_core::reconciliation::FailureClass::Source
+            )
+        )]
     );
-    assert_eq!(progress.successful.len(), 2);
-    assert!(progress.pending.is_empty());
+    let counts = runtime.coordinator.state().inventory_counts().unwrap();
+    assert_eq!((counts.indexed, counts.pending), (2, 0));
     assert!(runtime.chunks().page_chunks(PAGE).await.unwrap().is_empty());
     assert!(
         !runtime
@@ -4114,4 +4123,57 @@ async fn initial_sync_records_inventory_totals_equal_outcomes() {
     assert_eq!(counts.total, 5);
     assert_eq!((counts.indexed, counts.skipped, counts.failed), (4, 1, 0));
     assert_eq!(counts.pending, 0);
+}
+
+/// Skipped and failed pages recorded by the last sync's inventory.
+fn out_of_sync(
+    runtime: &IndexRuntime,
+) -> Vec<(String, notion_knowledge_core::inventory::InventoryOutcome)> {
+    runtime.coordinator.state().out_of_sync_pages(100).unwrap()
+}
+
+#[tokio::test]
+async fn full_sync_makes_two_calls_per_plain_page_and_one_per_row() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    // 10 plain pages under the root (PAGE, OTHER and 8 extras) and a
+    // database with 20 rows.
+    add_extra_pages(&http, 8);
+    http.change(|m| {
+        m.rows = (0..20)
+            .map(|n| format!("99999999-9999-9999-9999-{n:012}"))
+            .collect();
+    });
+    let before = http.requests().len();
+    let runtime = IndexRuntime::reset_and_resync(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    )
+    .await
+    .unwrap();
+    let requests = http.requests()[before..].to_vec();
+    // One search listing, the root's two reads, one Markdown read for each
+    // listed plain page and row, and one database read and query.
+    assert!(
+        requests.len() <= 2 * 11 + 20 + 2,
+        "{} {requests:?}",
+        requests.len()
+    );
+    assert!(
+        requests
+            .iter()
+            .filter(|r| r.starts_with("/v1/pages/") && !r.ends_with("/markdown"))
+            .all(|r| r == &format!("/v1/pages/{ROOT}")),
+        "{requests:?}"
+    );
+    let counts = runtime.coordinator.state().inventory_counts().unwrap();
+    assert_eq!(counts.total, 31);
+    assert_eq!(counts.indexed, 31);
+    assert_eq!(
+        counts.indexed + counts.skipped + counts.failed + counts.pending,
+        counts.total
+    );
 }

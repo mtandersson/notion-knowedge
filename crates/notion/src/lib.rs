@@ -24,6 +24,9 @@ pub mod pages;
 /// Scope discovery: one walk from the root through Markdown child tags.
 pub mod walk;
 
+/// Search metadata that lets the walk skip per-page metadata reads.
+pub mod search;
+
 pub mod content;
 
 mod media_identity;

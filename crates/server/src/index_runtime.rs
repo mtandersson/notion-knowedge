@@ -51,18 +51,15 @@ pub(crate) const PREFETCH_RESERVE_KIB: usize = 32 * 1024;
 use notion_knowledge_retrieval::prefetch::PrefetchBudget;
 
 enum Prefetched {
-    /// The scope gate refused the page; the outcome says why.
-    Skipped(notion_knowledge_core::backend::PageId, InventoryOutcome),
     Fatal(&'static str),
     Ready {
         prefetched: Box<notion_knowledge_retrieval::refresh::PrefetchedPage>,
         bytes: tokio::sync::OwnedSemaphorePermit,
     },
-    /// Prepared again inline by the consumer from current state: the page was
-    /// too large to queue, or its source changed while it was being prefetched.
-    Inline {
-        page: notion_knowledge_core::backend::PageId,
-        root: notion_knowledge_core::backend::PageId,
+    /// Too large to queue within the budget: the consumer prepares it again
+    /// from the same walked read when it reaches it.
+    Deferred {
+        walked: Box<notion_knowledge_notion::walk::WalkedPage>,
         operation: String,
     },
     Failed {
@@ -78,11 +75,25 @@ enum Prefetched {
 enum PageWork {
     Commit(
         Box<notion_knowledge_retrieval::refresh::PrefetchedPage>,
-        tokio::sync::OwnedSemaphorePermit,
+        Option<tokio::sync::OwnedSemaphorePermit>,
     ),
-    Inline(notion_knowledge_core::backend::PageId),
+    Deferred(Box<notion_knowledge_notion::walk::WalkedPage>),
     Failed(notion_knowledge_retrieval::refresh::RefreshError),
     TimedOut,
+}
+
+/// Page counts of one [`IndexRuntime::sync_from_walk`] run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SyncTotals {
+    /// Every page the walk reached, including skipped ones.
+    pub inventory: u64,
+    pub indexed: u64,
+    /// Committed already: content, metadata and projections matched.
+    pub unchanged: u64,
+    /// Settled by the walk itself (excluded, archived, unreadable).
+    pub skipped: u64,
+    pub failed: u64,
+    pub removed: u64,
 }
 
 struct SyncEmbedding<'a>(&'a dyn EmbeddingProvider);
@@ -406,31 +417,25 @@ impl IndexRuntime {
         Ok(applied)
     }
 
-    /// Stream only initial/reset-cache population. The walk is the inventory:
-    /// it is persisted with each page's outcome, and only a complete walk
-    /// replaces it. The final plan still owns deletion decisions.
-    async fn stream_initial_pages(
+    /// The one sync path: walk the tree once, prepare each reached page from
+    /// that walk's read, and commit it. The walk is the inventory: it is
+    /// persisted with each page's outcome, and only a complete walk replaces
+    /// it and removes indexed pages it no longer reached. Nothing is read
+    /// again to recheck a page before its commit (staleness is bounded by
+    /// the next walk).
+    async fn sync_from_walk(
         &self,
         settings: &WorkerSettings,
         lease: &mut notion_knowledge_core::reconciliation::Lease,
-    ) -> Result<
-        (
-            notion_knowledge_notion::walk::TreeWalk,
-            std::collections::BTreeSet<String>,
-        ),
-        &'static str,
-    > {
+    ) -> Result<SyncTotals, &'static str> {
         use futures::StreamExt;
         use notion_knowledge_core::{
             discovery::SkipReason,
             inventory::InventoryOutcome::{Failed, Skipped},
+            logging::{SyncCount, SyncPhase, SyncProgressLog, sync_count, sync_task},
             reconciliation::FailureClass,
         };
-        use notion_knowledge_core::{
-            logging::{SyncPhase, SyncProgressLog, sync_task},
-            root_scope::RootScopeGate,
-        };
-        use notion_knowledge_retrieval::refresh::RefreshError;
+        use notion_knowledge_retrieval::{commit::CommitOutcome, refresh::RefreshError};
         let indexed = || InventoryOutcome::Indexed {
             revision: String::new(),
         };
@@ -439,40 +444,30 @@ impl IndexRuntime {
         let (send, receive) = tokio::sync::mpsc::channel(8);
         let walk = async move {
             let send = send;
-            self.source.walk_tree(&self.source_scope, Some(&send)).await
+            self.source
+                .walk_tree_with_search(&self.source_scope, Some(&send))
+                .await
         };
-        // Bounded read-ahead: source preparation for later pages overlaps the
-        // one embedding/commit consumer. Each preparation reserves worst-case
-        // bytes before any request and keeps its measured share until the
-        // consumer finishes it, so in-flight and queued pages share one budget.
+        // Bounded read-ahead: preparation of later pages overlaps the one
+        // embedding/commit consumer. Each preparation reserves worst-case bytes
+        // and keeps its measured share until the consumer finishes it, so
+        // in-flight and queued pages share one budget.
         let budget = &self.prefetch_budget;
         let (ready, mut prepared) = tokio::sync::mpsc::channel::<Prefetched>(PREFETCH_QUEUE);
         let produce = async {
             let ready = ready;
-            let gate = RootScopeGate::new(self.source.clone(), self.source_scope.clone())
-                .map_err(|_| "cache scope unavailable")?;
             // Skipped pages are already settled by the walk itself.
             let pages = futures::stream::unfold(receive, |mut receive| async move {
                 receive.recv().await.map(|page| (page, receive))
             })
-            .filter_map(
-                |page: notion_knowledge_notion::walk::WalkedPage| async move {
-                    page.skip
-                        .is_none()
-                        .then_some(notion_knowledge_core::backend::PageId(page.entry.page_id))
-                },
-            );
+            .filter(|page: &notion_knowledge_notion::walk::WalkedPage| {
+                std::future::ready(page.skip.is_none())
+            });
             let mut fetched = std::pin::pin!(
                 pages
                     .enumerate()
                     .map(|(index, page)| {
-                        Box::pin(self.prefetch_initial_page(
-                            settings,
-                            &gate,
-                            budget,
-                            index + 1,
-                            page,
-                        ))
+                        Box::pin(self.prepare_walked_page(settings, budget, index + 1, page))
                     })
                     .buffered(PREFETCH_WORKERS)
             );
@@ -485,10 +480,8 @@ impl IndexRuntime {
         };
         let consume = async {
             let mut progress = SyncProgressLog::new(SyncPhase::Indexing);
+            let mut totals = SyncTotals::default();
             let mut processed = 0;
-            let mut persisted = 0;
-            let mut skipped = 0;
-            let mut timed_out = std::collections::BTreeSet::new();
             let mut outcomes = Vec::new();
             let state = self.coordinator.state();
             let ttl = settings.timeout_seconds as i64 + 30;
@@ -506,26 +499,16 @@ impl IndexRuntime {
                 processed += 1;
                 let (page, operation, work) = match item {
                     Prefetched::Fatal(error) => return Err(error),
-                    Prefetched::Skipped(page, outcome) => {
-                        outcomes.push((page.0, outcome));
-                        skipped += 1;
-                        notion_knowledge_core::logging::sync_count(
-                            notion_knowledge_core::logging::SyncCount::SkippedPage,
-                            1,
-                        );
-                        progress.report(processed, None, persisted, skipped, false);
-                        continue;
-                    }
                     Prefetched::Ready { prefetched, bytes } => (
                         prefetched.page().clone(),
                         prefetched.operation().to_owned(),
-                        PageWork::Commit(prefetched, bytes),
+                        PageWork::Commit(prefetched, Some(bytes)),
                     ),
-                    Prefetched::Inline {
-                        page,
-                        root,
+                    Prefetched::Deferred { walked, operation } => (
+                        notion_knowledge_core::backend::PageId(walked.entry.page_id.clone()),
                         operation,
-                    } => (page, operation, PageWork::Inline(root)),
+                        PageWork::Deferred(walked),
+                    ),
                     Prefetched::Failed {
                         page,
                         operation,
@@ -553,45 +536,37 @@ impl IndexRuntime {
                 });
                 let deadline = std::time::Duration::from_secs(settings.timeout_seconds);
                 let embedding = SyncEmbedding(self.provider.as_ref());
-                let result: Result<Result<_, RefreshError>, ()> = match work {
-                    PageWork::Commit(prefetched, bytes) => {
-                        let result = tokio::time::timeout(
-                            deadline,
-                            sync_task(
-                                SyncPhase::Indexing,
-                                processed,
-                                Box::pin(self.handler.refresh_prefetched(
-                                    *prefetched,
-                                    &embedding,
-                                    lease.clone(),
-                                    clock,
-                                )),
-                            ),
-                        )
-                        .await
-                        .map_err(|_| ());
-                        drop(bytes);
-                        result
-                    }
-                    PageWork::Inline(root) => tokio::time::timeout(
-                        deadline,
-                        sync_task(
-                            SyncPhase::Indexing,
-                            processed,
-                            Box::pin(self.handler.refresh_inline(
-                                &page,
-                                &root,
-                                &operation,
+                let result = match work {
+                    PageWork::Failed(error) => Ok(Err(error)),
+                    PageWork::TimedOut => Err(()),
+                    work => {
+                        let work = async {
+                            let (prefetched, bytes) = match work {
+                                PageWork::Commit(prefetched, bytes) => (*prefetched, bytes),
+                                // Too large to queue: prepared here from the same read.
+                                PageWork::Deferred(walked) => (
+                                    self.handler.prepare_walked(&walked, &operation).await?,
+                                    None,
+                                ),
+                                PageWork::Failed(_) | PageWork::TimedOut => unreachable!(),
+                            };
+                            let result = Box::pin(self.handler.refresh_prefetched(
+                                prefetched,
                                 &embedding,
                                 lease.clone(),
                                 clock,
-                            )),
-                        ),
-                    )
-                    .await
-                    .map_err(|_| ()),
-                    PageWork::Failed(error) => Ok(Err(error)),
-                    PageWork::TimedOut => Err(()),
+                            ))
+                            .await;
+                            drop(bytes);
+                            result
+                        };
+                        tokio::time::timeout(
+                            deadline,
+                            sync_task(SyncPhase::Indexing, processed, work),
+                        )
+                        .await
+                        .map_err(|_| ())
+                    }
                 };
                 expired.store(true, std::sync::atomic::Ordering::SeqCst);
                 if result.is_ok() {
@@ -601,13 +576,14 @@ impl IndexRuntime {
                         .map_err(|_| "cache sync drain failed")?;
                 }
                 match result {
-                    Ok(Ok(_)) => {
+                    Ok(Ok(result)) => {
                         outcomes.push((page.0.clone(), indexed()));
-                        persisted += 1;
-                        notion_knowledge_core::logging::sync_count(
-                            notion_knowledge_core::logging::SyncCount::CommittedPage,
-                            1,
-                        );
+                        if result.outcome == CommitOutcome::AlreadyApplied {
+                            totals.unchanged += 1;
+                        } else {
+                            totals.indexed += 1;
+                            sync_count(SyncCount::CommittedPage, 1);
+                        }
                     }
                     Ok(Err(
                         error @ (RefreshError::Source
@@ -623,11 +599,8 @@ impl IndexRuntime {
                                 Failed(FailureClass::Source)
                             },
                         ));
-                        skipped += 1;
-                        notion_knowledge_core::logging::sync_count(
-                            notion_knowledge_core::logging::SyncCount::SkippedPage,
-                            1,
-                        );
+                        totals.failed += 1;
+                        sync_count(SyncCount::SkippedPage, 1);
                         if error == RefreshError::EmbeddingInputLimit {
                             progress.embedding_input_limit();
                         }
@@ -636,6 +609,8 @@ impl IndexRuntime {
                         return Err("cache streaming source authentication failed");
                     }
                     Ok(Err(RefreshError::Index)) => return Err("cache streaming index failed"),
+                    // Only local authority (lease, fence, receipt) can conflict:
+                    // the source is not checked again before commit.
                     Ok(Err(RefreshError::Conflict | RefreshError::InvalidConfiguration)) => {
                         return Err("cache streaming authority failed");
                     }
@@ -648,35 +623,93 @@ impl IndexRuntime {
                             .await?
                         {
                             outcomes.push((page.0.clone(), indexed()));
-                            persisted += 1;
-                            notion_knowledge_core::logging::sync_count(
-                                notion_knowledge_core::logging::SyncCount::CommittedPage,
-                                1,
-                            );
+                            totals.indexed += 1;
+                            sync_count(SyncCount::CommittedPage, 1);
                         } else {
-                            timed_out.insert(page.0.clone());
                             outcomes.push((page.0.clone(), Failed(FailureClass::Unavailable)));
-                            skipped += 1;
-                            notion_knowledge_core::logging::sync_count(
-                                notion_knowledge_core::logging::SyncCount::SkippedPage,
-                                1,
-                            );
+                            totals.failed += 1;
+                            sync_count(SyncCount::SkippedPage, 1);
                             progress.page_timeout();
                         }
                     }
                 }
-                progress.report(processed, None, persisted, skipped, false);
+                progress.report(
+                    processed,
+                    None,
+                    (totals.indexed + totals.unchanged) as usize,
+                    totals.failed as usize,
+                    false,
+                );
             }
-            progress.report(processed, Some(processed), persisted, skipped, true);
-            Ok::<_, &'static str>((timed_out, outcomes))
+            progress.report(
+                processed,
+                Some(processed),
+                (totals.indexed + totals.unchanged) as usize,
+                totals.failed as usize,
+                true,
+            );
+            Ok::<_, &'static str>((totals, outcomes))
         };
-        let (walk, (), (timed_out, outcomes)) = tokio::try_join!(
+        let (walk, (), (mut totals, outcomes)) = tokio::try_join!(
             async { Box::pin(walk).await.map_err(|_| "cache inventory failed") },
             Box::pin(produce),
             Box::pin(consume)
         )?;
-        self.record_inventory(&walk, outcomes)?;
-        Ok((walk, timed_out))
+        let diff = self.record_inventory(&walk, outcomes)?;
+        totals.inventory = walk.entries.len() as u64;
+        totals.skipped = walk.skipped.len() as u64;
+        if walk.authoritative() {
+            totals.removed = Box::pin(self.remove_unreached(settings, lease, &walk, &diff)).await?;
+        }
+        Ok(totals)
+    }
+
+    /// Remove indexed pages a complete walk no longer reached or found trashed.
+    async fn remove_unreached(
+        &self,
+        settings: &WorkerSettings,
+        lease: &mut notion_knowledge_core::reconciliation::Lease,
+        walk: &notion_knowledge_notion::walk::TreeWalk,
+        diff: &notion_knowledge_core::inventory::InventoryDiff,
+    ) -> Result<u64, &'static str> {
+        let readable = walk.readable();
+        let mut removed = 0;
+        let state = self.coordinator.state();
+        let ttl = settings.timeout_seconds as i64 + 30;
+        for page in diff.removed.iter().chain(&diff.trashed) {
+            if readable.contains(page)
+                || !state
+                    .page_state(page)
+                    .map_err(|_| "cache sync state unavailable")?
+                    .is_some_and(|state| !state.is_tombstone())
+            {
+                continue;
+            }
+            *lease = state
+                .renew_lease(lease, now_ms() / 1000, ttl)
+                .map_err(|_| "cache sync lease unavailable")?;
+            let operation = format!("walk-removal-{}-{page}", walk.run_id);
+            let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| now_ms() / 1000);
+            tokio::time::timeout(
+                std::time::Duration::from_secs(settings.timeout_seconds),
+                Box::pin(self.handler.remove_unreached(
+                    &notion_knowledge_core::backend::PageId(page.clone()),
+                    &operation,
+                    &SyncEmbedding(self.provider.as_ref()),
+                    lease.clone(),
+                    clock,
+                )),
+            )
+            .await
+            .map_err(|_| "cache sync removal timeout")?
+            .map_err(|_| "cache sync removal failed")?;
+            self.coordinator
+                .drain_owned()
+                .await
+                .map_err(|_| "cache sync drain failed")?;
+            removed += 1;
+        }
+        Ok(removed)
     }
 
     /// Persist the walk and settle every reached page: indexed, or skipped
@@ -685,10 +718,10 @@ impl IndexRuntime {
         &self,
         walk: &notion_knowledge_notion::walk::TreeWalk,
         outcomes: Vec<(String, InventoryOutcome)>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<notion_knowledge_core::inventory::InventoryDiff, &'static str> {
         let state = self.coordinator.state();
         let unavailable = |_| "cache inventory state unavailable";
-        state
+        let diff = state
             .record_walk(&walk.run_id, &walk.entries, walk.authoritative())
             .map_err(unavailable)?;
         let now = now_ms() / 1000;
@@ -708,9 +741,7 @@ impl IndexRuntime {
             .collect();
         for (page, mut outcome) in outcomes {
             if let InventoryOutcome::Indexed { revision } = &mut outcome {
-                // The walk's revision, not the later prefetch read's. If the
-                // page changed in between, the recorded revision is older than
-                // the indexed one, which only causes an extra refresh later.
+                // The walk's revision: the page was prepared from that read.
                 *revision = revisions
                     .get(page.as_str())
                     .copied()
@@ -721,50 +752,20 @@ impl IndexRuntime {
                 .record_inventory_outcome(&page, &outcome, now)
                 .map_err(unavailable)?;
         }
-        Ok(())
+        Ok(diff)
     }
 
-    /// Read-only source preparation for one discovered page. Authorization and
-    /// content reads share the client's Notion rate limiter; nothing here
-    /// embeds, takes the index version, or needs the writer lease.
-    async fn prefetch_initial_page(
+    /// Local preparation for one walked page. No request is made for the
+    /// page itself; relation targets share the client's rate limiter.
+    async fn prepare_walked_page(
         &self,
         settings: &WorkerSettings,
-        gate: &notion_knowledge_core::root_scope::RootScopeGate,
         budget: &PrefetchBudget,
         index: usize,
-        page: notion_knowledge_core::backend::PageId,
+        walked: notion_knowledge_notion::walk::WalkedPage,
     ) -> Prefetched {
         use notion_knowledge_core::logging::{SyncCount, SyncPhase, sync_count, sync_task};
-        let permit = match gate.authorize(&page).await {
-            Ok(permit) => permit,
-            Err(notion_knowledge_core::root_scope::ScopeError::Denied) => {
-                return Prefetched::Skipped(
-                    page,
-                    InventoryOutcome::Skipped(
-                        notion_knowledge_core::discovery::SkipReason::OutsideScope,
-                    ),
-                );
-            }
-            // Lifecycle could not be verified now: a failure, not a scope fact.
-            Err(_) => {
-                return Prefetched::Skipped(
-                    page,
-                    InventoryOutcome::Failed(
-                        notion_knowledge_core::reconciliation::FailureClass::Unavailable,
-                    ),
-                );
-            }
-        };
-        let Some(root) = self
-            .source_scope
-            .roots
-            .iter()
-            .find(|root| permit.belongs_to_any(std::slice::from_ref(&root.0)))
-            .cloned()
-        else {
-            return Prefetched::Fatal("cache source authority unavailable");
-        };
+        let page = notion_knowledge_core::backend::PageId(walked.entry.page_id.clone());
         let operation = format!(
             "initial-{}",
             notion_knowledge_core::logging::CorrelationId::new().as_str()
@@ -777,21 +778,12 @@ impl IndexRuntime {
             sync_task(
                 SyncPhase::Indexing,
                 index,
-                Box::pin(self.handler.prefetch_page(&page, &root, &operation)),
+                Box::pin(self.handler.prepare_walked(&walked, &operation)),
             ),
         )
         .await;
         match result {
             Err(_) => Prefetched::TimedOut { page, operation },
-            // Source changed during preparation: nothing was captured, so the
-            // consumer prepares it again from current state.
-            Ok(Err(notion_knowledge_retrieval::refresh::RefreshError::Conflict)) => {
-                Prefetched::Inline {
-                    page,
-                    root,
-                    operation,
-                }
-            }
             Ok(Err(error)) => Prefetched::Failed {
                 page,
                 operation,
@@ -800,11 +792,10 @@ impl IndexRuntime {
             Ok(Ok(prefetched)) => {
                 let Some(bytes) = budget.retain(reservation, prefetched.retained_bytes()) else {
                     // Never queue more than was reserved. The consumer prepares
-                    // this rare page inline, as the serial path always did.
+                    // this rare page again from the same read when it is next.
                     drop(prefetched);
-                    return Prefetched::Inline {
-                        page,
-                        root,
+                    return Prefetched::Deferred {
+                        walked: Box::new(walked),
                         operation,
                     };
                 };
@@ -828,291 +819,58 @@ impl IndexRuntime {
 
     async fn resync_cache_inner(&self, settings: &WorkerSettings) -> Result<(), &'static str> {
         use notion_knowledge_core::logging::{SyncPhase, SyncProgressLog};
-        let timeout_seconds = settings.timeout_seconds;
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::Duration;
-        struct Attempt(Arc<AtomicBool>);
-        impl Drop for Attempt {
-            fn drop(&mut self) {
-                self.0.store(true, Ordering::SeqCst);
-            }
-        }
+        let timeout_seconds = settings.timeout_seconds;
         let state = self.coordinator.state();
         let mut lease = state
             .acquire_lease(now_ms() / 1000, timeout_seconds as i64 + 30)
             .map_err(|_| "cache sync writer busy")?;
-        let mut progress_log = None;
-        let mut reported_commits = 0;
-        let mut reported_failures = 0;
-        let mut streaming_timeouts = std::collections::BTreeSet::new();
-        let mut timed_out_recovery = std::collections::BTreeSet::new();
-        let result = 'resync: loop {
-            let inventory = match self.inventory_pending("cache-reset") {
-                Ok(inventory) => inventory,
-                Err(_) => break Err("cache sync state unavailable"),
-            };
-            let prepared = if inventory {
-                let plan = match tokio::time::timeout(
-                    Duration::from_secs(settings.inventory_timeout_seconds),
-                    async {
-                        let (report, timeouts) =
-                            Box::pin(self.stream_initial_pages(settings, &mut lease)).await?;
-                        streaming_timeouts = timeouts;
-                        state
-                            .release_lease(&lease, now_ms() / 1000)
-                            .map_err(|_| "cache sync lease unavailable")?;
-                        Box::pin(self.runner.dry_run_walk(&report))
-                            .await
-                            .map_err(|_| "cache inventory planning failed")
-                    },
-                )
-                .await
-                {
-                    Ok(Ok(plan)) => plan,
-                    Ok(Err(error)) => {
-                        let _ = self.coordinator.drain_owned().await;
-                        break Err(error);
-                    }
-                    Err(_) => {
-                        let _ = self.coordinator.drain_owned().await;
-                        break Err("cache inventory timeout; retry startup");
-                    }
-                };
-                lease = match state.acquire_lease(now_ms() / 1000, timeout_seconds as i64 + 30) {
-                    Ok(lease) => lease,
-                    Err(_) => break Err("cache sync writer busy"),
-                };
-                if state
-                    .start_or_resume(&lease, now_ms() / 1000, "cache-reset", &self.scope)
-                    .is_err()
-                {
-                    break Err("cache sync state unavailable");
-                }
-                Some(plan)
-            } else {
-                None
-            };
-            lease = match state.renew_lease(&lease, now_ms() / 1000, timeout_seconds as i64 + 30) {
-                Ok(lease) => lease,
-                Err(_) => break Err("cache sync lease unavailable"),
-            };
-
-            let expired = Arc::new(AtomicBool::new(false));
-            let _attempt = Attempt(expired.clone());
-            let flag = expired.clone();
-            let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || {
-                if flag.load(Ordering::SeqCst) {
-                    i64::MAX
-                } else {
-                    now_ms() / 1000
-                }
-            });
-            let pending_page = if prepared.is_none() {
-                match self.coordinator.reconciliation_progress("cache-reset") {
-                    Ok(progress) => progress.pending.first().cloned(),
-                    Err(_) => break Err("cache sync progress unavailable"),
-                }
-            } else {
-                None
-            };
-            let operation = pending_page
-                .as_ref()
-                .map(|page| {
-                    self.coordinator
-                        .reconciliation_page_proposal("cache-reset", page)
-                        .map(|(proposal, _)| proposal.operation_id)
-                })
-                .transpose();
-            let operation = match operation {
-                Ok(operation) => operation,
-                Err(_) => break Err("cache sync proposal unavailable"),
-            };
-            let attempt = tokio::time::timeout(Duration::from_secs(timeout_seconds), async {
-                if let Some(plan) = prepared {
-                    self.runner
-                        .record_inventory_plan("cache-reset", &plan, lease.clone(), clock)
+        let result = async {
+            let totals = tokio::time::timeout(
+                Duration::from_secs(settings.inventory_timeout_seconds),
+                Box::pin(self.sync_from_walk(settings, &mut lease)),
+            )
+            .await
+            .map_err(|_| "cache inventory timeout; retry startup")??;
+            lease = state
+                .renew_lease(&lease, now_ms() / 1000, timeout_seconds as i64 + 30)
+                .map_err(|_| "cache sync lease unavailable")?;
+            let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| now_ms() / 1000);
+            let changed = (totals.indexed + totals.removed) as usize;
+            let mut preparing = SyncProgressLog::new(SyncPhase::PreparingSearch);
+            preparing.report(0, None, changed, totals.failed as usize, false);
+            tokio::time::timeout(Duration::from_secs(timeout_seconds), async {
+                self.prepare_search(lease.clone(), clock).await?;
+                if self.lexical.is_some() {
+                    Box::pin(self.table.probe_lexical_cache())
                         .await
-                } else {
-                    self.runner
-                        .apply_next(
-                            "cache-reset",
-                            lease.clone(),
-                            clock,
-                            &SyncEmbedding(self.provider.as_ref()),
-                        )
-                        .await
+                        .map_err(|_| "lexical search probe failed")?;
                 }
+                Ok::<(), &'static str>(())
             })
-            .await;
-            if matches!(&attempt, Ok(Ok(_))) && self.coordinator.drain_owned().await.is_err() {
-                break Err("cache sync drain failed");
-            }
-            let progress = match attempt {
-                Ok(Ok(progress)) => progress,
-                Err(_) if operation.is_some() => {
-                    self.runner.discard_read_ahead();
-                    expired.store(true, Ordering::SeqCst);
-                    let page = pending_page.as_ref().expect("operation has page");
-                    match self
-                        .settle_page_timeout(settings, &mut lease, operation.as_ref().unwrap())
-                        .await
-                    {
-                        Ok(true) => {
-                            // Existing recovery/ack path must verify an applied receipt;
-                            // allow one bounded recovery, never an endless timeout loop.
-                            if !timed_out_recovery.insert(page.clone()) {
-                                break Err("cache sync applied receipt recovery timeout");
-                            }
-                            continue;
-                        }
-                        Ok(false) => {
-                            let current =
-                                match self.coordinator.reconciliation_progress("cache-reset") {
-                                    Ok(progress) => progress,
-                                    Err(_) => break Err("cache sync progress unavailable"),
-                                };
-                            if current.failed.contains_key(page) {
-                                // Keep the genuine failure recorded before observer cancellation.
-                                current
-                            } else {
-                                if self.coordinator.fail_reconciliation_page(&lease, now_ms()/1000, "cache-reset", page,
-                                    notion_knowledge_retrieval::durable_plan::DurableFailure::PageTimeout).is_err() {
-                                    break Err("cache sync timeout status unavailable");
-                                }
-                                SyncProgressLog::new(SyncPhase::Indexing).page_timeout();
-                                match self.coordinator.reconciliation_progress("cache-reset") {
-                                    Ok(progress) => progress,
-                                    Err(_) => break Err("cache sync progress unavailable"),
-                                }
-                            }
-                        }
-                        Err(error) => break Err(error),
-                    }
-                }
-                _ => {
-                    expired.store(true, Ordering::SeqCst);
-                    self.runner.discard_read_ahead();
-                    let _ = self.coordinator.drain_owned().await;
-                    break Err("cache resync failed; retry startup");
-                }
-            };
-            let progress = if !streaming_timeouts.is_empty() {
-                for page in std::mem::take(&mut streaming_timeouts) {
-                    if progress.pending.contains(&page) && self.coordinator.fail_reconciliation_page(
-                        &lease, now_ms()/1000, "cache-reset", &page,
-                        notion_knowledge_retrieval::durable_plan::DurableFailure::PageTimeout,
-                    ).is_err() {
-                        break 'resync Err("cache sync timeout status unavailable");
-                    }
-                }
-                match self.coordinator.reconciliation_progress("cache-reset") {
-                    Ok(progress) => progress,
-                    Err(_) => break Err("cache sync progress unavailable"),
-                }
-            } else {
-                progress
-            };
-            // Report actual application outcomes after the streaming handoff.
-            // Unchanged verification must not count the early page commit again.
-            let commits = progress.changed.saturating_add(progress.deleted) as usize;
-            notion_knowledge_core::logging::sync_count(
-                notion_knowledge_core::logging::SyncCount::CommittedPage,
-                commits.saturating_sub(reported_commits),
-            );
-            let failures = progress.failed_pages();
-            notion_knowledge_core::logging::sync_count(
-                notion_knowledge_core::logging::SyncCount::SkippedPage,
-                failures.saturating_sub(reported_failures),
-            );
-            reported_commits = commits;
-            reported_failures = failures;
-            // An unreadable source page does not invalidate other cached pages.
-            // Keep its existing failure record for status/retry, while storage,
-            // ownership and credential failures still prevent serving this cache.
-            if has_fatal_sync_failure(&progress) {
-                break Err("cache resync incomplete; retry startup");
-            }
-            let total = progress.successful.len() + progress.failed.len() + progress.pending.len();
-            progress_log
-                .get_or_insert_with(|| SyncProgressLog::new(SyncPhase::Indexing))
-                .report(
-                    total - progress.pending.len(),
-                    Some(total),
-                    progress.changed as usize,
-                    progress.failed_pages(),
-                    progress.pending.is_empty(),
+            .await
+            .map_err(|_| "rebuilt search index unavailable")?
+            .map_err(|_| "rebuilt search index unavailable")?;
+            preparing.report(1, Some(1), changed, totals.failed as usize, true);
+            if totals.failed > 0 {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "operation": "cache_sync",
+                        "status": "ready_with_skips",
+                        "sync_progress": notion_knowledge_core::logging::current_sync_progress(),
+                        "skipped_pages": totals.failed,
+                    })
                 );
-            if progress.pending.is_empty() {
-                match state.renew_lease(&lease, now_ms() / 1000, timeout_seconds as i64 + 30) {
-                    Ok(next) => lease = next,
-                    Err(_) => break Err("cache sync lease unavailable"),
-                }
-                let flag = expired.clone();
-                let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || {
-                    if flag.load(Ordering::SeqCst) {
-                        i64::MAX
-                    } else {
-                        now_ms() / 1000
-                    }
-                });
-                let mut preparing = SyncProgressLog::new(SyncPhase::PreparingSearch);
-                preparing.report(
-                    0,
-                    None,
-                    progress.changed as usize,
-                    progress.failed_pages(),
-                    false,
-                );
-                let ready = tokio::time::timeout(Duration::from_secs(timeout_seconds), async {
-                    self.prepare_search(lease.clone(), clock).await?;
-                    if self.lexical.is_some() {
-                        Box::pin(self.table.probe_lexical_cache())
-                            .await
-                            .map_err(|_| "lexical search probe failed")?;
-                    }
-                    Ok::<(), &'static str>(())
-                })
-                .await;
-                if !matches!(ready, Ok(Ok(()))) {
-                    expired.store(true, Ordering::SeqCst);
-                    let _ = self.coordinator.drain_owned().await;
-                    break Err("rebuilt search index unavailable");
-                }
-                preparing.report(
-                    1,
-                    Some(1),
-                    progress.changed as usize,
-                    progress.failed_pages(),
-                    true,
-                );
-                if self
-                    .runner
-                    .complete("cache-reset", &lease, now_ms() / 1000)
-                    .is_err()
-                {
-                    break Err("cache sync completion unavailable");
-                }
-                if progress.failed_pages() > 0 || !progress.run_failures.is_empty() {
-                    eprintln!(
-                        "{}",
-                        serde_json::json!({
-                            "operation": "cache_sync",
-                            "status": "ready_with_skips",
-                            "sync_progress": notion_knowledge_core::logging::current_sync_progress(),
-                            "skipped_pages": progress.failed_pages(),
-                            "discovery_errors": progress.run_failures.len(),
-                        })
-                    );
-                }
-                break state
-                    .finish_cache_rebuild(&lease, now_ms() / 1000)
-                    .map_err(|_| "cache sync state unavailable");
             }
-            match state.renew_lease(&lease, now_ms() / 1000, timeout_seconds as i64 + 30) {
-                Ok(next) => lease = next,
-                Err(_) => break Err("cache sync lease unavailable"),
-            }
-        };
+            state
+                .finish_cache_rebuild(&lease, now_ms() / 1000)
+                .map_err(|_| "cache sync state unavailable")
+        }
+        .await;
+        if result.is_err() {
+            let _ = self.coordinator.drain_owned().await;
+        }
         let _ = state.release_lease(&lease, now_ms() / 1000);
         result
     }
