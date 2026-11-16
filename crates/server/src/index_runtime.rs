@@ -94,6 +94,9 @@ pub(crate) struct SyncTotals {
     pub skipped: u64,
     pub failed: u64,
     pub removed: u64,
+    /// Unreached pages under a page that became inaccessible in this walk,
+    /// kept until the next walk confirms it.
+    pub held: u64,
     /// The walk was authoritative (no unproven subtree).
     pub complete: bool,
 }
@@ -661,23 +664,60 @@ impl IndexRuntime {
             Box::pin(produce),
             Box::pin(consume)
         )?;
+        // Read the previous inventory before this walk replaces it.
+        let held = if walk.authoritative() {
+            self.held_removals(&walk)?
+        } else {
+            Default::default()
+        };
         self.record_inventory(&walk, outcomes)?;
+        totals.held = held.len() as u64;
         totals.inventory = walk.entries.len() as u64;
         totals.skipped += walk.skipped.len() as u64;
         totals.complete = walk.authoritative();
         if walk.authoritative() {
-            totals.removed = Box::pin(self.remove_unreached(settings, lease, &walk)).await?;
+            totals.removed = Box::pin(self.remove_unreached(settings, lease, &walk, &held)).await?;
         }
         Ok(totals)
     }
 
+    /// Indexed pages a complete walk did not reach that sit under a page
+    /// newly answering 404/403. A spurious 404 then costs one walk of
+    /// staleness instead of the subtree; the next walk confirms and removes.
+    fn held_removals(
+        &self,
+        walk: &notion_knowledge_notion::walk::TreeWalk,
+    ) -> Result<std::collections::BTreeSet<String>, &'static str> {
+        use notion_knowledge_core::discovery::SkipReason;
+        let readable = walk.readable();
+        let candidates: Vec<_> = self
+            .coordinator
+            .owned_page_ids()
+            .map_err(|_| "cache sync state unavailable")?
+            .into_iter()
+            .filter(|page| !readable.contains(page))
+            .collect();
+        let inaccessible: Vec<_> = walk
+            .skipped
+            .iter()
+            .filter(|s| s.reason == SkipReason::Inaccessible)
+            .map(|s| s.id.clone())
+            .collect();
+        self.coordinator
+            .state()
+            .held_removals(&inaccessible, &candidates)
+            .map_err(|_| "cache inventory state unavailable")
+    }
+
     /// After a complete walk, remove every indexed page the walk did not
     /// reach as indexable: moved out, trashed, revoked, excluded or deleted.
+    /// `held` pages wait for the next walk (see [`Self::held_removals`]).
     async fn remove_unreached(
         &self,
         settings: &WorkerSettings,
         lease: &mut notion_knowledge_core::reconciliation::Lease,
         walk: &notion_knowledge_notion::walk::TreeWalk,
+        held: &std::collections::BTreeSet<String>,
     ) -> Result<u64, &'static str> {
         use notion_knowledge_core::sync_state::SyncStateStore;
         let readable = walk.readable();
@@ -690,6 +730,7 @@ impl IndexRuntime {
             .map_err(|_| "cache sync state unavailable")?;
         for page in &indexed {
             if readable.contains(page)
+                || held.contains(page)
                 || !state
                     .page_state(page)
                     .map_err(|_| "cache sync state unavailable")?
@@ -864,7 +905,7 @@ impl IndexRuntime {
             .map_err(|_| "rebuilt search index unavailable")?
             .map_err(|_| "rebuilt search index unavailable")?;
             preparing.report(1, Some(1), changed, totals.failed as usize, true);
-            if totals.failed > 0 || !totals.complete {
+            if totals.failed > 0 || totals.held > 0 || !totals.complete {
                 eprintln!(
                     "{}",
                     serde_json::json!({
@@ -873,6 +914,7 @@ impl IndexRuntime {
                         "sync_progress": notion_knowledge_core::logging::current_sync_progress(),
                         "skipped_pages": totals.failed,
                         "walk_complete": totals.complete,
+                        "held_removals": totals.held,
                     })
                 );
             }

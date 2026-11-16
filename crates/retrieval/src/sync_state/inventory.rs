@@ -259,6 +259,63 @@ impl SqliteSyncStateStore {
         }
     }
 
+    /// Of `candidates` (indexed pages a complete walk did not reach), those to
+    /// keep for one more walk: a page of `inaccessible` (404/403 in this
+    /// walk) whose previous outcome was not already that skip, and every
+    /// candidate whose previous parent chain passes through such a page.
+    /// Call before the walk replaces the inventory. A second walk with the
+    /// same result finds the skip already recorded and holds nothing.
+    pub fn held_removals(
+        &self,
+        inaccessible: &[String],
+        candidates: &[String],
+    ) -> Result<BTreeSet<String>, SyncStateError> {
+        let mut new = BTreeSet::new();
+        {
+            let db = self.lock_connection()?;
+            for id in inaccessible {
+                let confirmed = db
+                    .query_row(
+                        "SELECT outcome = 'skipped' AND outcome_detail = ?2
+                         FROM page_inventory WHERE page_id = ?1",
+                        params![id, SkipReason::Inaccessible.as_str()],
+                        |row| row.get::<_, Option<bool>>(0),
+                    )
+                    .optional()
+                    .map_err(map_sqlite_error)?
+                    .flatten()
+                    .unwrap_or(false);
+                if !confirmed {
+                    new.insert(id.as_str());
+                }
+            }
+        }
+        if new.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let mut held = BTreeSet::new();
+        // A database or data source has no row of its own: its rows match by
+        // their parent, and after one walk they have left the inventory.
+        let under_new = |id: &str| -> Result<bool, SyncStateError> {
+            Ok(new.contains(id)
+                || matches!(
+                    self.inventory_entry(id)?.map(|e| e.parent),
+                    Some(InventoryParent::DataSource { data_source_id, database_id, .. })
+                        if new.contains(data_source_id.as_str()) || new.contains(database_id.as_str())
+                ))
+        };
+        for page in candidates {
+            let mut hold = under_new(page)?;
+            for ancestor in self.inventory_parent_chain(page)?.unwrap_or_default() {
+                hold = hold || under_new(&ancestor)?;
+            }
+            if hold {
+                held.insert(page.clone());
+            }
+        }
+        Ok(held)
+    }
+
     pub fn inventory_counts(&self) -> Result<InventoryCounts, SyncStateError> {
         self.lock_connection()?
             .query_row(
