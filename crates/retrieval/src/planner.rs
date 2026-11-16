@@ -179,7 +179,8 @@ impl AuthoritativeReconciliationPlanner {
             return Err(PlanError::Ownership);
         }
         let relations = RelationProposalAdapter::new((*notion).clone(), scope.clone())
-            .map_err(|_| PlanError::Ownership)?;
+            .map_err(|_| PlanError::Ownership)?
+            .with_inventory(coordinator.state().clone());
         Ok(Self {
             relations,
             alias_sources: None,

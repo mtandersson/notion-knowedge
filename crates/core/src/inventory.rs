@@ -17,6 +17,16 @@ pub enum InventoryParent {
     },
 }
 
+/// Read-only placement of a page in the last walk's inventory, used to decide
+/// whether a relation or link target is inside the configured scope without a
+/// Notion request.
+pub trait InventoryPlacement: Send + Sync {
+    /// The page's ancestor pages, nearest first and ending at its root (empty
+    /// for a root). `None` when the page is not a readable, live inventory
+    /// entry, its chain does not reach a root, or the inventory is unreadable.
+    fn placed_chain(&self, page_id: &str) -> Option<Vec<String>>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct InventoryEntry {
     pub page_id: String,

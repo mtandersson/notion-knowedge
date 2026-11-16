@@ -454,6 +454,29 @@ mod inventory {
     }
 
     #[test]
+    fn placed_chain_holds_only_live_readable_pages_under_a_root() {
+        use notion_knowledge_core::inventory::InventoryPlacement;
+        let store = SqliteSyncStateStore::open_in_memory().unwrap();
+        store
+            .replace_inventory(
+                "run",
+                &[
+                    entry("A", InventoryParent::Root, "t", false),
+                    entry("B", page("A"), "t", false),
+                    entry("T", page("A"), "t", true),
+                    entry("N", page("A"), "", false),
+                    entry("U", page("missing"), "t", false),
+                ],
+            )
+            .unwrap();
+        assert_eq!(store.placed_chain("B"), Some(vec!["A".to_owned()]));
+        assert_eq!(store.placed_chain("A"), Some(vec![]));
+        for absent in ["T", "N", "U", "unknown"] {
+            assert_eq!(store.placed_chain(absent), None, "{absent}");
+        }
+    }
+
+    #[test]
     fn inventory_parent_chain_ends_at_root_or_is_none() {
         let store = SqliteSyncStateStore::open_in_memory().unwrap();
         store

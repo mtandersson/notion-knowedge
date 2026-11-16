@@ -514,3 +514,21 @@ impl SqliteSyncStateStore {
             .collect()
     }
 }
+
+impl notion_knowledge_core::inventory::InventoryPlacement for SqliteSyncStateStore {
+    fn placed_chain(&self, page_id: &str) -> Option<Vec<String>> {
+        let entry = self.inventory_entry(page_id).ok()??;
+        // A trashed or unreadable child, or a page the walk skipped, is not
+        // a placed target.
+        if entry.in_trash
+            || entry.last_edited_time.is_empty()
+            || matches!(
+                self.inventory_outcome(page_id).ok()?,
+                Some(InventoryOutcome::Skipped(_))
+            )
+        {
+            return None;
+        }
+        self.inventory_parent_chain(page_id).ok()?
+    }
+}
