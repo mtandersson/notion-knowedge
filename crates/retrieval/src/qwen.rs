@@ -111,6 +111,101 @@ fn checked_asset(path: &Path, expected: &str) -> Result<Vec<u8>, EmbeddingError>
     }
     Ok(bytes)
 }
+
+#[derive(serde::Deserialize)]
+struct TensorEntry {
+    dtype: String,
+    shape: Vec<usize>,
+    data_offsets: [usize; 2],
+}
+
+/// Streams a safetensors file once, hashing every byte as it is read and
+/// building each F32 tensor from exactly those bytes. Only one source tensor
+/// is buffered at a time, so the file is never held in memory beside the
+/// converted weights. Any digest mismatch, truncation, trailing data or
+/// malformed layout drops every built tensor and fails closed.
+fn checked_safetensors(
+    path: &Path,
+    expected: &str,
+) -> Result<std::collections::HashMap<String, candle_core::Tensor>, EmbeddingError> {
+    use std::io::Read;
+    let bad = |_| EmbeddingError::UnsupportedModel;
+    let file = std::fs::File::open(path).map_err(|_| EmbeddingError::Unavailable)?;
+    let mut reader = std::io::BufReader::with_capacity(1 << 20, file);
+    let mut hasher = Sha256::new();
+    let mut read = |len: usize| -> Result<Vec<u8>, EmbeddingError> {
+        let mut buf = vec![0; len];
+        reader
+            .read_exact(&mut buf)
+            .map_err(|_| EmbeddingError::UnsupportedModel)?;
+        hasher.update(&buf);
+        Ok(buf)
+    };
+    let header_len = u64::from_le_bytes(
+        read(8)?
+            .try_into()
+            .map_err(|_| EmbeddingError::UnsupportedModel)?,
+    );
+    if header_len > 100 << 20 {
+        return Err(EmbeddingError::UnsupportedModel);
+    }
+    let header: std::collections::HashMap<String, serde_json::Value> =
+        serde_json::from_slice(&read(header_len as usize)?).map_err(bad)?;
+    let mut entries = header
+        .into_iter()
+        .filter(|(name, _)| name != "__metadata__")
+        .map(|(name, v)| Ok((name, serde_json::from_value::<TensorEntry>(v).map_err(bad)?)))
+        .collect::<Result<Vec<_>, EmbeddingError>>()?;
+    entries.sort_by_key(|(_, e)| e.data_offsets);
+    let mut position = 0;
+    let mut tensors = std::collections::HashMap::with_capacity(entries.len());
+    for (name, entry) in entries {
+        let [start, end] = entry.data_offsets;
+        let dtype = match entry.dtype.as_str() {
+            "BF16" => DType::BF16,
+            "F16" => DType::F16,
+            "F32" => DType::F32,
+            _ => return Err(EmbeddingError::UnsupportedModel),
+        };
+        let elements = entry
+            .shape
+            .iter()
+            .try_fold(1usize, |n, &d| n.checked_mul(d));
+        if start != position
+            || end < start
+            || elements.and_then(|n| n.checked_mul(dtype.size_in_bytes())) != Some(end - start)
+        {
+            return Err(EmbeddingError::UnsupportedModel);
+        }
+        let bytes = read(end - start)?;
+        let tensor =
+            candle_core::Tensor::from_raw_buffer(&bytes, dtype, &entry.shape, &Device::Cpu)
+                .and_then(|t| t.to_dtype(DType::F32))
+                .map_err(|_| EmbeddingError::Unavailable)?;
+        tensors.insert(name, tensor);
+        position = end;
+    }
+    let mut trailing = [0u8; 1];
+    if reader
+        .read(&mut trailing)
+        .map_err(|_| EmbeddingError::Unavailable)?
+        != 0
+        || format!("{:x}", hasher.finalize()) != expected
+    {
+        return Err(EmbeddingError::UnsupportedModel);
+    }
+    Ok(tensors)
+}
+
+/// Return heap freed during model load to the OS so peak load memory does not
+/// linger in the resident set. Works alongside the arena cap (#659).
+fn release_freed_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only releases free allocator memory; it takes no pointers.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
 impl QwenProvider {
     /// Reads only caller-provided files; never downloads, reads credentials or
     /// initializes an ONNX runtime. Requires a Tokio runtime for blocking work.
@@ -118,18 +213,19 @@ impl QwenProvider {
         config.validate()?;
         let assets = config.assets.clone();
         let runtime = tokio::task::spawn_blocking(move || {
-            // Verify precisely the owned bytes subsequently parsed/loaded.
+            // Verify precisely the bytes subsequently parsed/loaded; weights are
+            // hashed while streaming into tensors and discarded on mismatch.
             let cfg_bytes = checked_asset(&assets.join(ASSETS[0].0), ASSETS[0].1)?;
             let tokenizer_bytes = checked_asset(&assets.join(ASSETS[1].0), ASSETS[1].1)?;
-            let weights = checked_asset(&assets.join(ASSETS[2].0), ASSETS[2].1)?;
+            let weights = checked_safetensors(&assets.join(ASSETS[2].0), ASSETS[2].1)?;
             let cfg: Qwen3Config =
                 serde_json::from_slice(&cfg_bytes).map_err(|_| EmbeddingError::UnsupportedModel)?;
             if cfg.hidden_size != DIMENSION {
                 return Err(EmbeddingError::UnsupportedModel);
             }
-            let vb = VarBuilder::from_buffered_safetensors(weights, DType::F32, &Device::Cpu)
-                .map_err(|_| EmbeddingError::Unavailable)?;
+            let vb = VarBuilder::from_tensors(weights, DType::F32, &Device::Cpu);
             let model = Qwen3Model::new(cfg, vb).map_err(|_| EmbeddingError::Unavailable)?;
+            release_freed_heap();
             let mut tokenizer = tokenizers::Tokenizer::from_bytes(&tokenizer_bytes)
                 .map_err(|_| EmbeddingError::UnsupportedModel)?;
             tokenizer
@@ -314,6 +410,75 @@ mod tests {
         assert_eq!(
             checked_asset(&p, ASSETS[0].1),
             Err(EmbeddingError::UnsupportedModel)
+        );
+        std::fs::remove_file(p).unwrap();
+    }
+    fn safetensors_fixture(name: &str) -> (PathBuf, Vec<u8>) {
+        let a = candle_core::Tensor::new(&[[1.5f32, -2.25], [3.0, 0.1]], &Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let b = candle_core::Tensor::new(&[7.0f32, f32::MIN_POSITIVE, -0.0], &Device::Cpu).unwrap();
+        let p = std::env::temp_dir().join(format!("nk665-{name}-{}", std::process::id()));
+        candle_core::safetensors::save(
+            &std::collections::HashMap::from([("a".to_string(), a), ("b".to_string(), b)]),
+            &p,
+        )
+        .unwrap();
+        let bytes = std::fs::read(&p).unwrap();
+        (p, bytes)
+    }
+    fn digest(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+    #[test]
+    fn streamed_weights_match_buffered_f32_load_bit_for_bit() {
+        let (p, bytes) = safetensors_fixture("same");
+        let streamed = checked_safetensors(&p, &digest(&bytes)).unwrap();
+        let buffered =
+            VarBuilder::from_buffered_safetensors(bytes, DType::F32, &Device::Cpu).unwrap();
+        assert_eq!(streamed.len(), 2);
+        for (name, shape) in [("a", vec![2, 2]), ("b", vec![3])] {
+            let expected = buffered.get(shape.as_slice(), name).unwrap();
+            let actual = &streamed[name];
+            assert_eq!(actual.dtype(), DType::F32);
+            let bits = |t: &candle_core::Tensor| {
+                t.flatten_all()
+                    .unwrap()
+                    .to_vec1::<f32>()
+                    .unwrap()
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(bits(actual), bits(&expected));
+        }
+        std::fs::remove_file(p).unwrap();
+    }
+    #[test]
+    fn tampered_truncated_or_extended_weights_fail_closed() {
+        let (p, bytes) = safetensors_fixture("tamper");
+        let expected = digest(&bytes);
+        let mut tampered = bytes.clone();
+        *tampered.last_mut().unwrap() ^= 1;
+        let mut extended = bytes.clone();
+        extended.push(0);
+        for variant in [
+            tampered,
+            bytes[..bytes.len() - 1].to_vec(),
+            bytes[..4].to_vec(),
+            extended,
+        ] {
+            std::fs::write(&p, &variant).unwrap();
+            assert_eq!(
+                checked_safetensors(&p, &expected).err(),
+                Some(EmbeddingError::UnsupportedModel)
+            );
+        }
+        std::fs::write(&p, &bytes).unwrap();
+        assert_eq!(
+            checked_safetensors(&p, ASSETS[2].1).err(),
+            Some(EmbeddingError::UnsupportedModel)
         );
         std::fs::remove_file(p).unwrap();
     }
