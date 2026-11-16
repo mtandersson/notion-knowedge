@@ -39,23 +39,25 @@ and durably commits pages in discovery order, so the next page downloads while
 the model works. At most one prepared page waits beyond those in flight. Each
 preparation reserves 32 MiB of a 64 MiB retained-byte budget before its first
 request, keeps only its measured size while queued and committing, and is
-re-prepared inline by the consumer if it exceeds its reservation. Prefetching
-captures no index version, lease or receipt decision: the consumer builds the
-guarded mutation plan from current index state, re-prepares a page whose own
-indexed chunks changed meanwhile, and revalidates the source inside the owned
-commit. Preparation and embedding/commit each have their own page deadline, so one
+prepared again from the same walked read by the consumer if it exceeds its
+reservation. Each page is prepared from the walk's single read (one paged
+search listing supplies metadata, so a listed page costs only its Markdown
+read); nothing is read again before or inside the commit. Prefetching captures
+no index version, lease or receipt decision: the consumer builds the guarded
+mutation plan from current index state and re-chunks a page whose own indexed
+chunks changed meanwhile. A source edit or move after the read is picked up by
+the next walk. Preparation and embedding/commit each have their own page deadline, so one
 page may take up to twice `timeout_seconds`; both timeouts use the existing settlement. The existing writer
 lease is renewed while waiting for more pages; timed-out work is fenced and
 drained before releasing it. No Notion write or upload is issued.
 
 Discovery overlaps up to eight independent page/block/database branches; cursors
 within a paginated endpoint remain ordered. After traversal and early refreshes
-finish, the existing planner captures the current local snapshot and performs
-its bounded checks. Only that completed inventory drives final reconciliation
-and removal decisions. Apply still revalidates fresh metadata and physical scope.
-Already committed pages are verified as unchanged without re-embedding them.
-Source failures remain in the existing reconciliation status; no extra recovery
-ledger or persisted traversal cursor is introduced. Search preparation and serving
+finish, the walk is recorded as the page inventory with each page's outcome.
+Only a complete walk replaces the inventory and removes indexed pages it did not
+reach as indexable. There is no second planning pass. Page failures are kept as
+inventory outcomes (`failed`); no extra recovery ledger or persisted traversal
+cursor is introduced. Search preparation and serving
 still wait for a valid completed inventory and the available indexed subset.
 
 Operator stderr/journald includes `operation=cache_sync` summaries at phase start,
@@ -64,7 +66,7 @@ operation event within a startup sync also includes `sync_progress`: phase,
 `discovered_pages`, `content_reads`, `prefetched_pages`, `embedded_chunks`, `committed_pages`,
 `skipped_pages`, and `total_pages`. These are actual metadata discoveries, successful
 content reads, pages prepared ahead of embedding, completed embedding outputs and acknowledged page commits; reads
-and commits may repeat for a page during final revalidation. They are not estimates
+happen once per page per sync. They are not estimates
 of unique indexed sources. The total stays null until traversal completes; no
 workspace-wide page count is guessed. Counts contain no titles, IDs, URLs or text.
 

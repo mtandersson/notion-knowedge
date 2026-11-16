@@ -61,6 +61,10 @@ pub mod runner;
 /// Retained-byte budget shared by bounded source read-ahead.
 pub mod prefetch;
 
+/// Test-only pause points inside owned commits. Never compiled into shipping builds.
+#[cfg(all(unix, feature = "local-lancedb", any(test, feature = "test-fixtures")))]
+pub mod test_hooks;
+
 /// Fenced, scoped periodic schedule authority (does not start a runtime).
 #[cfg(unix)]
 pub mod schedule;

@@ -1,25 +1,26 @@
-//! Canonical, scope-verified single-page refresh preparation.
-//! No index or embedding side effects. The final guarded commit must still
-//! revalidate source revision, physical ancestry and owner generation.
-use std::sync::Arc;
-
+//! Canonical single-page preparation from content already read. No network,
+//! index or embedding side effects. Scope comes from the walk that reached the
+//! page (or the caller's lifecycle read); it is not re-checked here or at commit.
 use crate::{NotionClient, links::extract_relationships, media_identity::canonical_content};
 use notion_knowledge_core::{
     backend::{BackendError, BackendErrorKind, PageContent, PageId},
     chunking::{ChunkConfig, chunk_document},
     fingerprint::{content_hash, identify_chunks},
     indexed::{IndexedChunk, IndexedDocument, IndexedMetadata, SchemaVersion, SourceMetadata},
-    lifecycle::{LifecycleEvidence, LifecycleScope},
-    root_scope::{RootScopeGate, ScopeError},
+    inventory::InventoryParent,
+    lifecycle::LifecycleScope,
 };
+
+use crate::walk::WalkedPage;
 
 /// A prepared *proposal*, never an authorization token for later index commits.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScopedPageSnapshot {
     pub document: IndexedDocument,
     pub chunks: Vec<IndexedChunk>,
-    pub evidence: LifecycleEvidence,
-    /// Authoritative names from the same fully bracketed read as membership.
+    /// Where the walk (or the caller's lifecycle read) placed the page.
+    pub parent: InventoryParent,
+    /// Relation property names from the same metadata read as the content.
     pub relation_names: std::collections::BTreeMap<String, String>,
     pub(crate) source: PageContent,
 }
@@ -56,25 +57,15 @@ impl ScopedPageSnapshot {
                 .map(|(k, v)| k.len() + v.len() + 64)
                 .sum::<usize>()
     }
-}
-
-/// Operation tag of a [`BackendErrorKind::Conflict`] that means only that the
-/// page's source changed while it was being read. Callers may prepare such a
-/// page again; every other conflict (scope, policy, bounds, lock) may not.
-pub const SOURCE_CHANGED: &str = "notion.prepare_scoped_page.source_changed";
-
-pub(crate) fn source_changed() -> BackendError {
-    BackendError {
-        operation: SOURCE_CHANGED,
-        kind: BackendErrorKind::Conflict,
-        retry_after: None,
-        committed_page_id: None,
+    /// The content this snapshot was prepared from.
+    pub fn source(&self) -> &PageContent {
+        &self.source
     }
 }
 
 fn failure(kind: BackendErrorKind) -> BackendError {
     BackendError {
-        operation: "notion.prepare_scoped_page",
+        operation: "notion.prepare_page",
         kind,
         retry_after: None,
         committed_page_id: None,
@@ -94,107 +85,113 @@ fn valid_previous(selected: &PageId, scope: &LifecycleScope, previous: &[Indexed
         })
 }
 
+/// Chunk one page's content. Pure: the caller supplies content it already
+/// read once, and the parent and root the walk placed it under.
+pub(crate) fn prepare_content(
+    content: PageContent,
+    parent: InventoryParent,
+    root: &PageId,
+    scope: &LifecycleScope,
+    previous: &[IndexedChunk],
+    config: ChunkConfig,
+) -> Result<ScopedPageSnapshot, BackendError> {
+    let selected = content.page.id.clone();
+    if !scope.roots.contains(root)
+        || config.target_chars == 0
+        || config.overlap_chars >= config.target_chars
+        || !valid_previous(&selected, scope, previous)
+    {
+        return Err(failure(BackendErrorKind::InvalidInput));
+    }
+    let source = canonical_content(content);
+    if source.page.archived {
+        return Err(failure(BackendErrorKind::Conflict));
+    }
+    let (database_id, data_source_id) = match &parent {
+        InventoryParent::DataSource {
+            data_source_id,
+            database_id,
+            ..
+        } => (Some(database_id.clone()), Some(data_source_id.clone())),
+        _ => (None, None),
+    };
+    let metadata = IndexedMetadata {
+        page_id: selected.0.clone(),
+        block_id: None,
+        url: source.page.url.clone(),
+        title: source.page.title.clone(),
+        heading_path: Vec::new(),
+        last_edited_time: source.page.last_edited_time.clone(),
+        source: SourceMetadata {
+            workspace_id: scope.workspace_id.clone(),
+            root_page_id: root.0.clone(),
+            database_id,
+            data_source_id,
+        },
+        properties: source.page.properties.clone(),
+    };
+    let document = IndexedDocument {
+        schema_version: SchemaVersion::V1,
+        metadata,
+        text: source.markdown.clone(),
+        content_hash: content_hash(&source.markdown),
+        links: extract_relationships(&source).links,
+    };
+    let drafts =
+        chunk_document(&document, config).map_err(|_| failure(BackendErrorKind::InvalidInput))?;
+    let mut chunks =
+        identify_chunks(drafts, previous).map_err(|_| failure(BackendErrorKind::Conflict))?;
+    for chunk in &mut chunks {
+        chunk.links = extract_relationships(&PageContent {
+            page: source.page.clone(),
+            markdown: chunk.text.clone(),
+        })
+        .links;
+    }
+    Ok(ScopedPageSnapshot {
+        document,
+        chunks,
+        parent,
+        relation_names: source.page.relation_names.clone(),
+        source,
+    })
+}
+
 impl NotionClient {
-    /// Read exactly one chosen page. The root MUST be part of the trusted
-    /// operator scope; neither caller-provided page IDs nor index provenance
-    /// are sufficient authority to perform even the first content read.
-    ///
-    /// Complete source reads are bracketed with live physical ancestry and
-    /// full metadata/content equality checks. Notion offers no atomic snapshot
-    /// or CAS, so commit users MUST check again under #254's actual index guard.
-    pub async fn prepare_scoped_page(
+    /// Prepare a page from the walk's single read. Makes no requests: the
+    /// walk already read its metadata and Markdown and decided its scope.
+    pub fn prepare_walked_page(
         &self,
-        selected: &PageId,
-        root: &PageId,
+        walked: &WalkedPage,
         scope: &LifecycleScope,
         previous: &[IndexedChunk],
         config: ChunkConfig,
     ) -> Result<ScopedPageSnapshot, BackendError> {
-        if !scope.roots.contains(root)
-            || config.target_chars == 0
-            || config.overlap_chars >= config.target_chars
-            || !valid_previous(selected, scope, previous)
-        {
+        let content = walked
+            .content
+            .clone()
+            .filter(|_| walked.skip.is_none())
+            .ok_or_else(|| failure(BackendErrorKind::UnsupportedContent))?;
+        if content.page.id.0 != walked.entry.page_id {
             return Err(failure(BackendErrorKind::InvalidInput));
         }
-        let gate = RootScopeGate::new(Arc::new(self.clone()), scope.clone())
-            .map_err(|_| failure(BackendErrorKind::InvalidInput))?;
-        let permit = gate
-            .authorize(selected)
-            .await
-            .map_err(|error| match error {
-                ScopeError::Denied => failure(BackendErrorKind::PermissionDenied),
-                ScopeError::Unverifiable => failure(BackendErrorKind::Unavailable),
-                ScopeError::Changed => failure(BackendErrorKind::Conflict),
-                ScopeError::InvalidConfiguration => failure(BackendErrorKind::InvalidInput),
-            })?;
-        if !permit.belongs_to_any(std::slice::from_ref(&root.0)) {
-            return Err(failure(BackendErrorKind::PermissionDenied));
-        }
-
-        let before = canonical_content(self.read_content(&selected.0).await?);
-        if before.page.id != *selected || before.page.archived {
-            return Err(failure(BackendErrorKind::Conflict));
-        }
-        let (database_id, data_source_id) = permit.physical_containers();
-        let metadata = IndexedMetadata {
-            page_id: selected.0.clone(),
-            block_id: None,
-            url: before.page.url.clone(),
-            title: before.page.title.clone(),
-            heading_path: Vec::new(),
-            last_edited_time: before.page.last_edited_time.clone(),
-            source: SourceMetadata {
-                workspace_id: scope.workspace_id.clone(),
-                root_page_id: root.0.clone(),
-                database_id: database_id.map(str::to_owned),
-                data_source_id: data_source_id.map(str::to_owned),
-            },
-            properties: before.page.properties.clone(),
-        };
-        let document = IndexedDocument {
-            schema_version: SchemaVersion::V1,
-            metadata,
-            text: before.markdown.clone(),
-            content_hash: content_hash(&before.markdown),
-            links: extract_relationships(&before).links,
-        };
-        let drafts = chunk_document(&document, config)
-            .map_err(|_| failure(BackendErrorKind::InvalidInput))?;
-        let mut chunks =
-            identify_chunks(drafts, previous).map_err(|_| failure(BackendErrorKind::Conflict))?;
-        for chunk in &mut chunks {
-            chunk.links = extract_relationships(&PageContent {
-                page: before.page.clone(),
-                markdown: chunk.text.clone(),
-            })
-            .links;
-        }
-
-        // Source may change between metadata and Markdown reads, or during
-        // the local chunk preparation. Compare *all* authoritative fields,
-        // not just timestamps, then physically revalidate original ancestry.
-        let after = canonical_content(self.read_content(&selected.0).await?);
-        if before != after {
-            return Err(source_changed());
-        }
-        gate.revalidate(&permit, scope)
-            .await
-            .map_err(|_| failure(BackendErrorKind::Conflict))?;
-        Ok(ScopedPageSnapshot {
-            document,
-            chunks,
-            evidence: permit.lifecycle_evidence().clone(),
-            relation_names: before.page.relation_names.clone(),
-            source: before,
-        })
+        prepare_content(
+            content,
+            walked.entry.parent.clone(),
+            &PageId(walked.entry.root_id.clone()),
+            scope,
+            previous,
+            config,
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notion_knowledge_core::{discovery::ExclusionRules, indexed::PropertyValue};
+    use notion_knowledge_core::{
+        discovery::ExclusionRules, indexed::PropertyValue, inventory::InventoryEntry,
+    };
     use serde_json::{Value, json};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -239,56 +236,216 @@ mod tests {
             }
         })
     }
-    fn markdown(body: &str) -> Value {
-        json!({
-            "object":"page_markdown",
-            "id":PAGE,
-            "markdown":body,
-            "truncated":false,
-            "unknown_block_ids":[]
-        })
-    }
-    type Route = (String, Value);
-    fn chain(parent: &str) -> Vec<Route> {
-        vec![
-            (
-                format!("pages/{PAGE}"),
-                metadata(PAGE, parent, "Current", REVISION),
-            ),
-            (
-                format!("pages/{parent}"),
-                metadata(parent, "workspace", "Root", REVISION),
-            ),
-            (
-                format!("pages/{parent}"),
-                metadata(parent, "workspace", "Root", REVISION),
-            ),
-            (
-                format!("pages/{PAGE}"),
-                metadata(PAGE, parent, "Current", REVISION),
-            ),
-        ]
-    }
-    fn full(body: &str, title: &str) -> Vec<Route> {
-        let mut routes = chain(ROOT);
-        for _ in 0..2 {
-            routes.push((
-                format!("pages/{PAGE}"),
-                metadata(PAGE, ROOT, title, REVISION),
-            ));
-            routes.push((format!("pages/{PAGE}/markdown"), markdown(body)));
+
+    /// The page as the walk delivers it: one metadata and one Markdown read.
+    fn walked_with(value: &Value, body: &str, parent: InventoryParent) -> WalkedPage {
+        WalkedPage {
+            entry: InventoryEntry {
+                page_id: PAGE.into(),
+                parent,
+                root_id: ROOT.into(),
+                last_edited_time: value["last_edited_time"].as_str().unwrap().into(),
+                in_trash: false,
+            },
+            content: Some(PageContent {
+                page: crate::pages::metadata(value, &PageId(PAGE.into())).unwrap(),
+                markdown: body.into(),
+            }),
+            skip: None,
+            children: Default::default(),
         }
-        routes.extend(chain(ROOT));
-        routes
+    }
+    fn walked(body: &str, title: &str) -> WalkedPage {
+        walked_with(
+            &metadata(PAGE, ROOT, title, REVISION),
+            body,
+            InventoryParent::Page(ROOT.into()),
+        )
+    }
+    /// A client whose every request would fail: preparation must not make one.
+    fn offline() -> NotionClient {
+        let mut client = NotionClient::integration("fixture-credential")
+            .unwrap()
+            .with_fast_fixture_transport();
+        client.api_root = "http://127.0.0.1:9/v1".into();
+        client
+    }
+    fn prepare(walked: &WalkedPage, previous: &[IndexedChunk]) -> ScopedPageSnapshot {
+        offline()
+            .prepare_walked_page(walked, &scope(), previous, ChunkConfig::default())
+            .unwrap()
     }
 
+    #[test]
+    fn prepare_walked_page_makes_no_requests() {
+        let client = offline();
+        let page = walked("# Intro\n\nBody.\n", "Current");
+        let snapshot = client
+            .prepare_walked_page(&page, &scope(), &[], ChunkConfig::default())
+            .unwrap();
+        assert_eq!(client.request_metrics().attempts, 0);
+        assert_eq!(
+            snapshot.document.metadata.last_edited_time,
+            page.entry.last_edited_time
+        );
+        assert_eq!(snapshot.parent, page.entry.parent);
+    }
+
+    #[test]
+    fn selects_only_target_and_preserves_canonical_metadata_links_and_stable_ids() {
+        let text = format!(
+            "# Intro\n\nUnchanged [linked](https://www.notion.so/{OTHER}).\n\n## Detail\n\nA sentence."
+        );
+        let first = prepare(&walked(&text, "Current"), &[]);
+        assert_eq!(first.document.text, text);
+        assert_eq!(first.document.metadata.source.workspace_id, WORKSPACE);
+        assert_eq!(first.document.metadata.source.root_page_id, ROOT);
+        assert_eq!(first.document.metadata.source.database_id, None);
+        assert_eq!(
+            first.document.metadata.properties.get("priority"),
+            Some(&PropertyValue::Number(4.0))
+        );
+        assert!(!first.chunks.is_empty());
+        assert!(first.document.links.iter().any(|link| {
+            matches!(link, notion_knowledge_core::indexed::LinkTarget::Page { page_id } if page_id == OTHER)
+        }));
+
+        // Property-only metadata change must update citations but preserve
+        // chunk IDs and content fingerprints, without fetching linked pages.
+        let second = prepare(&walked(&text, "Renamed"), &first.chunks);
+        assert_eq!(second.document.metadata.title, "Renamed");
+        assert_eq!(
+            second
+                .chunks
+                .iter()
+                .map(|c| (&c.chunk_id, &c.content_hash))
+                .collect::<Vec<_>>(),
+            first
+                .chunks
+                .iter()
+                .map(|c| (&c.chunk_id, &c.content_hash))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            second
+                .chunks
+                .iter()
+                .all(|chunk| chunk.metadata.title == "Renamed")
+        );
+    }
+
+    #[test]
+    fn hosted_media_rotation_keeps_snapshot_identity() {
+        let first = prepare(
+            &walked(&crate::media_identity::tests::body("1"), "Current"),
+            &[],
+        );
+        let second = prepare(
+            &walked(&crate::media_identity::tests::body("2"), "Current"),
+            &first.chunks,
+        );
+        assert_eq!(first.document, second.document);
+        assert_eq!(first.chunks, second.chunks);
+    }
+
+    #[test]
+    fn changed_section_keeps_unmodified_chunk_identity() {
+        let a = "# Title\n\nStable paragraph.\n\n## Different\n\nOld content.\n";
+        let b = "# Title\n\nStable paragraph.\n\n## Different\n\nNew content.\n";
+        let old = prepare(&walked(a, "Current"), &[]);
+        let new = prepare(&walked(b, "Current"), &old.chunks);
+        assert!(
+            old.chunks
+                .iter()
+                .any(|old_chunk| new.chunks.iter().any(|new_chunk| {
+                    old_chunk.chunk_id == new_chunk.chunk_id && old_chunk.text == new_chunk.text
+                }))
+        );
+        assert_ne!(old.document.content_hash, new.document.content_hash);
+    }
+
+    #[test]
+    fn row_page_metadata_carries_database_and_data_source_ids() {
+        let mut value = metadata(PAGE, ROOT, "Row", REVISION);
+        value["parent"] = json!({"type":"data_source_id","data_source_id":OTHER});
+        let parent = InventoryParent::DataSource {
+            data_source_id: OTHER.into(),
+            database_id: WORKSPACE.into(),
+            owner_page_id: ROOT.into(),
+        };
+        let snapshot = prepare(&walked_with(&value, "Row body", parent.clone()), &[]);
+        assert_eq!(
+            snapshot.document.metadata.source.database_id.as_deref(),
+            Some(WORKSPACE)
+        );
+        assert_eq!(
+            snapshot.document.metadata.source.data_source_id.as_deref(),
+            Some(OTHER)
+        );
+        assert!(
+            snapshot
+                .chunks
+                .iter()
+                .all(|c| c.metadata.source == snapshot.document.metadata.source)
+        );
+        assert_eq!(snapshot.parent, parent);
+    }
+
+    #[test]
+    fn skipped_incomplete_or_foreign_walked_pages_are_not_prepared() {
+        let client = offline();
+        let mut skipped = walked("Body", "Current");
+        skipped.skip = Some(notion_knowledge_core::discovery::SkipReason::Archived);
+        let mut incomplete = walked("Body", "Current");
+        incomplete.content = None;
+        let mut foreign = walked("Body", "Current");
+        foreign.entry.root_id = OTHER.into();
+        for (page, kind) in [
+            (skipped, BackendErrorKind::UnsupportedContent),
+            (incomplete, BackendErrorKind::UnsupportedContent),
+            (foreign, BackendErrorKind::InvalidInput),
+        ] {
+            let error = client
+                .prepare_walked_page(&page, &scope(), &[], ChunkConfig::default())
+                .unwrap_err();
+            assert_eq!(error.kind, kind);
+        }
+    }
+
+    #[test]
+    fn previous_foreign_or_corrupt_page_state_rejected_without_network() {
+        let page = walked("Simple text", "Current");
+        let baseline = prepare(&page, &[]);
+        let client = offline();
+        let mut wrong = baseline.chunks;
+        assert!(!wrong.is_empty());
+        wrong[0].metadata.page_id = OTHER.into();
+        let prepare = |previous: &[IndexedChunk]| {
+            client
+                .prepare_walked_page(&page, &scope(), previous, ChunkConfig::default())
+                .unwrap_err()
+                .kind
+        };
+        assert_eq!(prepare(&wrong), BackendErrorKind::InvalidInput);
+        wrong[0].metadata.page_id = PAGE.into();
+        for field in ["workspace", "root"] {
+            let mut foreign = wrong.clone();
+            if field == "workspace" {
+                foreign[0].metadata.source.workspace_id = OTHER.into();
+            } else {
+                foreign[0].metadata.source.root_page_id = OTHER.into();
+            }
+            assert_eq!(prepare(&foreign), BackendErrorKind::InvalidInput);
+        }
+        wrong[0].content_hash = "forged".into();
+        assert_eq!(prepare(&wrong), BackendErrorKind::Conflict);
+        assert_eq!(client.request_metrics().attempts, 0);
+    }
+
+    type Route = (String, u16, Value);
+
+    /// Serves `routes` in order and returns the paths requested.
     async fn fixture(routes: Vec<Route>) -> (NotionClient, tokio::task::JoinHandle<Vec<String>>) {
-        fixture_status(routes.into_iter().map(|(p, v)| (p, 200, v)).collect()).await
-    }
-
-    async fn fixture_status(
-        routes: Vec<(String, u16, Value)>,
-    ) -> (NotionClient, tokio::task::JoinHandle<Vec<String>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut client = NotionClient::integration("fixture-credential")
             .unwrap()
@@ -314,8 +471,6 @@ mod tests {
                     headers.starts_with(&format!("GET /v1/{path} HTTP/1.1\r\n")),
                     "{headers}"
                 );
-                assert!(headers.contains("authorization: Bearer fixture-credential"));
-                assert!(headers.contains("notion-version: 2026-03-11"));
                 requests.push(path);
                 let body = value.to_string();
                 stream.write_all(format!(
@@ -327,360 +482,38 @@ mod tests {
         });
         (client, task)
     }
-
-    async fn prepare(
-        routes: Vec<Route>,
-        previous: &[IndexedChunk],
-    ) -> Result<(ScopedPageSnapshot, Vec<String>), BackendError> {
-        let (client, server) = fixture(routes).await;
-        let result = client
-            .prepare_scoped_page(
-                &PageId(PAGE.into()),
-                &PageId(ROOT.into()),
-                &scope(),
-                previous,
-                ChunkConfig::default(),
-            )
-            .await?;
-        Ok((result, server.await.unwrap()))
-    }
-
-    #[tokio::test]
-    async fn selects_only_target_and_preserves_canonical_metadata_links_and_stable_ids() {
-        let text = format!(
-            "# Intro\n\nUnchanged [linked](https://www.notion.so/{OTHER}).\n\n## Detail\n\nA sentence."
-        );
-        let (first, requests) = prepare(full(&text, "Current"), &[]).await.unwrap();
-        assert_eq!(requests.len(), 12);
-        assert!(requests.iter().all(|path| path == &format!("pages/{PAGE}")
-            || path == &format!("pages/{ROOT}")
-            || path == &format!("pages/{PAGE}/markdown")));
-        assert_eq!(first.document.text, text);
-        assert_eq!(first.document.metadata.source.workspace_id, WORKSPACE);
-        assert_eq!(first.document.metadata.source.root_page_id, ROOT);
-        assert_eq!(
-            first.document.metadata.properties.get("priority"),
-            Some(&PropertyValue::Number(4.0))
-        );
-        assert!(!first.chunks.is_empty());
-        assert!(first.document.links.iter().any(|link| {
-            matches!(link, notion_knowledge_core::indexed::LinkTarget::Page { page_id } if page_id == OTHER)
-        }));
-
-        // Property-only metadata change must update citations but preserve
-        // chunk IDs and content fingerprints, without fetching linked pages.
-        let (second, _) = prepare(full(&text, "Renamed"), &first.chunks)
-            .await
-            .unwrap();
-        assert_eq!(second.document.metadata.title, "Renamed");
-        assert_eq!(second.chunks.len(), first.chunks.len());
-        assert_eq!(
-            second
-                .chunks
-                .iter()
-                .map(|c| &c.chunk_id)
-                .collect::<Vec<_>>(),
-            first.chunks.iter().map(|c| &c.chunk_id).collect::<Vec<_>>()
-        );
-        assert_eq!(
-            second
-                .chunks
-                .iter()
-                .map(|c| &c.content_hash)
-                .collect::<Vec<_>>(),
-            first
-                .chunks
-                .iter()
-                .map(|c| &c.content_hash)
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            second
-                .chunks
-                .iter()
-                .all(|chunk| chunk.metadata.title == "Renamed")
-        );
-    }
-
-    // Every authoritative read rotates credentials while the page revision and
-    // asset remain unchanged. Preparation and the final commit check must agree.
-    fn rotate_media(routes: &mut [Route]) {
-        let mut generation = 0;
-        for (path, value) in routes {
-            if path.ends_with("/markdown") {
-                generation += 1;
-                value["markdown"] =
-                    crate::media_identity::tests::body(&generation.to_string()).into();
-            }
+    fn with_relations(name: &str, targets: &[&str], second: bool) -> WalkedPage {
+        let mut value = metadata(PAGE, ROOT, "Current", REVISION);
+        value["properties"][name] = json!({"id":"rel%3A1","type":"relation","relation":targets.iter().map(|id| json!({"id":id})).collect::<Vec<_>>(),"has_more":false});
+        if second {
+            value["properties"]["Other relation"] =
+                json!({"id":"rel2","type":"relation","relation":[{"id":OTHER}],"has_more":false});
         }
+        walked_with(&value, "Body", InventoryParent::Page(ROOT.into()))
     }
-
-    #[tokio::test]
-    async fn hosted_media_rotation_keeps_snapshot_identity_and_commit_authority() {
-        use crate::relation_proposal::RelationProposalAdapter;
-        let mut initial = full("unused", "Current");
-        rotate_media(&mut initial);
-        let (first, _) = prepare(initial, &[]).await.unwrap();
-        let mut second_routes = full("unused", "Current");
-        rotate_media(&mut second_routes);
-        let (second, _) = prepare(second_routes, &first.chunks).await.unwrap();
-        assert_eq!(first.document, second.document);
-        assert_eq!(first.chunks, second.chunks);
-
-        let mut routes = full("unused", "Current");
-        routes.extend(chain(ROOT));
-        routes.extend(full("unused", "Current")[4..8].iter().cloned());
-        routes.extend(chain(ROOT));
-        rotate_media(&mut routes);
-        let (client, server) = fixture(routes).await;
-        let adapter = RelationProposalAdapter::new(client, scope()).unwrap();
-        let prepared = proposal(&adapter).await.unwrap();
-        let _authority = adapter.revalidate(&prepared).await.unwrap();
-        assert_eq!(prepared.snapshot().document, first.document);
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn media_asset_and_user_link_changes_still_reject_commit() {
-        use crate::relation_proposal::RelationProposalAdapter;
-        for user_link in [false, true] {
-            let original = crate::media_identity::tests::body("original");
-            let original = if user_link {
-                original.replace("![Image caption]", "[User link]")
-            } else {
-                original
-            };
-            let mut routes = full(&original, "Current");
-            routes.extend(chain(ROOT));
-            let changed = if user_link {
-                original.replace("original", "changed")
-            } else {
-                original.replace("example.png", "different.png")
-            };
-            routes.push((
-                format!("pages/{PAGE}"),
-                metadata(PAGE, ROOT, "Current", REVISION),
-            ));
-            routes.push((format!("pages/{PAGE}/markdown"), markdown(&changed)));
-            let (client, server) = fixture(routes).await;
-            let adapter = RelationProposalAdapter::new(client, scope()).unwrap();
-            let prepared = proposal(&adapter).await.unwrap();
-            assert_eq!(
-                adapter.revalidate(&prepared).await.err().unwrap().kind,
-                BackendErrorKind::Conflict
-            );
-            server.await.unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn changed_section_keeps_unmodified_chunk_identity() {
-        let a = "# Title\n\nStable paragraph.\n\n## Different\n\nOld content.\n";
-        let b = "# Title\n\nStable paragraph.\n\n## Different\n\nNew content.\n";
-        let (old, _) = prepare(full(a, "Current"), &[]).await.unwrap();
-        let (new, _) = prepare(full(b, "Current"), &old.chunks).await.unwrap();
-        assert!(
-            old.chunks
-                .iter()
-                .any(|old_chunk| new.chunks.iter().any(|new_chunk| {
-                    old_chunk.chunk_id == new_chunk.chunk_id && old_chunk.text == new_chunk.text
-                }))
-        );
-        assert_ne!(old.document.content_hash, new.document.content_hash);
-    }
-
-    #[tokio::test]
-    async fn out_of_scope_and_exclusions_deny_before_any_content_read() {
-        let (client, server) = fixture(chain(OTHER)).await;
-        let failure = client
-            .prepare_scoped_page(
-                &PageId(PAGE.into()),
-                &PageId(ROOT.into()),
-                &scope(),
-                &[],
-                ChunkConfig::default(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(failure.kind, BackendErrorKind::PermissionDenied);
-        assert_eq!(server.await.unwrap().len(), 4);
-
-        let mut forbidden = scope();
-        forbidden.exclusions.page_ids.insert(PAGE.into());
-        let (client, server) = fixture(chain(ROOT)).await;
-        let failure = client
-            .prepare_scoped_page(
-                &PageId(PAGE.into()),
-                &PageId(ROOT.into()),
-                &forbidden,
-                &[],
-                ChunkConfig::default(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(failure.kind, BackendErrorKind::PermissionDenied);
-        assert_eq!(server.await.unwrap().len(), 4);
-    }
-
-    #[tokio::test]
-    async fn previous_foreign_or_corrupt_page_state_rejected_without_network() {
-        let (baseline, _) = prepare(full("Simple text", "Current"), &[]).await.unwrap();
-        let mut wrong = baseline.chunks;
-        assert!(!wrong.is_empty());
-        wrong[0].metadata.page_id = OTHER.into();
-        let client = NotionClient::integration("test-credential")
-            .unwrap()
-            .with_fast_fixture_transport();
-        let err = client
-            .prepare_scoped_page(
-                &PageId(PAGE.into()),
-                &PageId(ROOT.into()),
-                &scope(),
-                &wrong,
-                ChunkConfig::default(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(err.kind, BackendErrorKind::InvalidInput);
-        wrong[0].metadata.page_id = PAGE.into();
-        for field in ["workspace", "root"] {
-            let mut foreign = wrong.clone();
-            if field == "workspace" {
-                foreign[0].metadata.source.workspace_id = OTHER.into();
-            } else {
-                foreign[0].metadata.source.root_page_id = OTHER.into();
-            }
-            let err = client
-                .prepare_scoped_page(
-                    &PageId(PAGE.into()),
-                    &PageId(ROOT.into()),
-                    &scope(),
-                    &foreign,
-                    ChunkConfig::default(),
-                )
-                .await
-                .unwrap_err();
-            assert_eq!(err.kind, BackendErrorKind::InvalidInput);
-        }
-        wrong[0].content_hash = "forged".into();
-        let (client, server) =
-            fixture(full("Simple text", "Current").into_iter().take(6).collect()).await;
-        let err = client
-            .prepare_scoped_page(
-                &PageId(PAGE.into()),
-                &PageId(ROOT.into()),
-                &scope(),
-                &wrong,
-                ChunkConfig::default(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(err.kind, BackendErrorKind::Conflict);
-        assert_eq!(server.await.unwrap().len(), 6);
-    }
-
-    #[tokio::test]
-    async fn metadata_or_markdown_race_is_conflict_not_snapshot() {
-        let mut routes = full("# One\n", "Current");
-        routes[7] = (format!("pages/{PAGE}/markdown"), markdown("# New\n"));
-        let (client, server) = fixture(routes.into_iter().take(8).collect()).await;
-        let failure = client
-            .prepare_scoped_page(
-                &PageId(PAGE.into()),
-                &PageId(ROOT.into()),
-                &scope(),
-                &[],
-                ChunkConfig::default(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(failure.kind, BackendErrorKind::Conflict);
-        assert_eq!(server.await.unwrap().len(), 8);
-    }
-
-    #[tokio::test]
-    async fn changed_physical_ancestry_during_final_check_is_conflict() {
-        let mut routes = full("Content\n", "Current");
-        routes[8].1["last_edited_time"] = json!("2026-10-10T10:11:00Z");
-        let (client, server) = fixture(routes).await;
-        let failure = client
-            .prepare_scoped_page(
-                &PageId(PAGE.into()),
-                &PageId(ROOT.into()),
-                &scope(),
-                &[],
-                ChunkConfig::default(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(failure.kind, BackendErrorKind::Conflict);
-        assert_eq!(server.await.unwrap().len(), 12);
-    }
-    fn relations(mut routes: Vec<Route>, name: &str, targets: &[&str], second: bool) -> Vec<Route> {
-        for (path, value) in &mut routes {
-            if path == &format!("pages/{PAGE}") {
-                value["properties"][name] = json!({"id":"rel%3A1","type":"relation","relation":targets.iter().map(|id| json!({"id":id})).collect::<Vec<_>>(),"has_more":false});
-                if second {
-                    value["properties"]["Other relation"] = json!({"id":"rel2","type":"relation","relation":[{"id":OTHER}],"has_more":false});
-                }
-            }
-        }
-        routes
-    }
+    /// Target authorization reads only the target's physical chain.
     fn target_chain(parent: &str) -> Vec<Route> {
-        vec![
-            (
-                format!("pages/{OTHER}"),
-                metadata(OTHER, parent, "Target", REVISION),
-            ),
-            (
-                format!("pages/{parent}"),
-                metadata(parent, "workspace", "Ancestor", REVISION),
-            ),
-            (
-                format!("pages/{parent}"),
-                metadata(parent, "workspace", "Ancestor", REVISION),
-            ),
-            (
-                format!("pages/{OTHER}"),
-                metadata(OTHER, parent, "Target", REVISION),
-            ),
-        ]
-    }
-    fn source_read(name: &str, targets: &[&str]) -> Vec<Route> {
-        relations(
-            vec![
-                (
-                    format!("pages/{PAGE}"),
-                    metadata(PAGE, ROOT, "Current", REVISION),
-                ),
-                (format!("pages/{PAGE}/markdown"), markdown("Body")),
-            ],
-            name,
-            targets,
-            false,
-        )
-    }
-    fn validation(name: &str, targets: &[&str], target: Vec<Route>) -> Vec<Route> {
-        let mut routes = chain(ROOT);
-        routes.extend(source_read(name, targets));
-        routes.extend(target);
-        routes.extend(source_read(name, targets));
-        routes.extend(chain(ROOT));
-        routes
+        let target = (
+            format!("pages/{OTHER}"),
+            200,
+            metadata(OTHER, parent, "Target", REVISION),
+        );
+        let ancestor = (
+            format!("pages/{parent}"),
+            200,
+            metadata(parent, "workspace", "Ancestor", REVISION),
+        );
+        vec![target.clone(), ancestor.clone(), ancestor, target]
     }
     async fn proposal(
         adapter: &crate::relation_proposal::RelationProposalAdapter,
+        page: &WalkedPage,
     ) -> Result<crate::relation_proposal::RelationProposal, BackendError> {
         adapter
-            .prepare(
-                &PageId(PAGE.into()),
-                &PageId(ROOT.into()),
-                &[],
-                ChunkConfig::default(),
-            )
+            .prepare_walked(page, &[], ChunkConfig::default())
             .await
     }
+
     #[tokio::test]
     async fn relation_proposals_keep_names_membership_duplicates_and_zero_edges_together() {
         use crate::relation_proposal::RelationProposalAdapter;
@@ -690,13 +523,16 @@ mod tests {
             ("Renamed", vec![OTHER], false, 1),
             ("Empty", vec![], false, 0),
         ] {
-            let mut routes = relations(full("Body", "Current"), name, &targets, second);
-            if !targets.is_empty() || second {
-                routes.extend(target_chain(ROOT));
-            }
+            let routes = if !targets.is_empty() || second {
+                target_chain(ROOT)
+            } else {
+                vec![]
+            };
             let (client, server) = fixture(routes).await;
             let adapter = RelationProposalAdapter::new(client, scope()).unwrap();
-            let result = proposal(&adapter).await.unwrap();
+            let result = proposal(&adapter, &with_relations(name, &targets, second))
+                .await
+                .unwrap();
             assert_eq!(result.edges().len(), expected);
             // The standalone sidecar feeds the merged typed owned-commit API,
             // without introducing a production Notion -> retrieval dependency.
@@ -745,34 +581,24 @@ mod tests {
             if expected > 0 {
                 assert_eq!(result.edges()[0].display_name(), Some(name));
             }
+            // Only the target's chain is read; never the page itself again.
             let requests = server.await.unwrap();
-            assert!(
-                requests
-                    .iter()
-                    .all(|p| !p.ends_with("/markdown") || p == &format!("pages/{PAGE}/markdown"))
-            );
+            assert!(requests.iter().all(|p| !p.contains(PAGE)));
         }
-        // Removed properties produce a complete empty replacement too.
-        let (client, server) = fixture(full("Body", "Current")).await;
-        let result = proposal(&RelationProposalAdapter::new(client, scope()).unwrap())
-            .await
-            .unwrap();
-        assert!(result.edges().is_empty());
-        server.await.unwrap();
     }
+
     #[tokio::test]
-    async fn unresolved_projection_keeps_references_and_fresh_source_checks_without_target_requests()
-     {
+    async fn unresolved_projection_keeps_references_without_any_request() {
         use crate::relation_proposal::{ProjectionMode, RelationProposalAdapter};
         use notion_knowledge_core::graph::GraphTarget;
         for targets in [vec![], vec![OTHER, OTHER]] {
-            let mut routes = relations(full("Body", "Current"), "Related", &targets, false);
-            routes.extend(validation("Related", &targets, vec![]));
-            let (client, server) = fixture(routes).await;
-            let adapter = RelationProposalAdapter::new(client, scope())
+            let client = offline();
+            let adapter = RelationProposalAdapter::new(client.clone(), scope())
                 .unwrap()
                 .with_projection_mode(ProjectionMode::UnresolvedTargets);
-            let prepared = proposal(&adapter).await.unwrap();
+            let prepared = proposal(&adapter, &with_relations("Related", &targets, false))
+                .await
+                .unwrap();
             assert!(prepared.targets().is_empty()); // No fabricated denied observations.
             assert!(prepared.edges().iter().all(|e| matches!(e.target(), GraphTarget::Unresolved { reference } if reference == OTHER)));
             let other_mode = adapter
@@ -780,9 +606,7 @@ mod tests {
                 .with_projection_mode(ProjectionMode::ResolveTargets);
             assert!(other_mode.revalidate(&prepared).await.is_err()); // Even empty proposals are mode-bound.
             drop(adapter.revalidate(&prepared).await.unwrap());
-            let requests = server.await.unwrap();
-            assert!(requests.iter().all(|p| !p.contains(OTHER)));
-            assert!(requests.iter().filter(|p| p.ends_with("/markdown")).count() >= 4);
+            assert_eq!(client.request_metrics().attempts, 0);
         }
     }
 
@@ -792,34 +616,27 @@ mod tests {
         use notion_knowledge_core::graph::GraphTarget;
         for variant in 0..5 {
             let mut config = scope();
-            let mut routes: Vec<_> =
-                relations(full("Body", "Current"), "Authorized root", &[OTHER], false)
-                    .into_iter()
-                    .map(|(p, v)| (p, 200, v))
-                    .collect();
-            if variant < 2 {
+            let routes = if variant < 2 {
                 let ancestor = if variant == 0 { WORKSPACE } else { ROOT };
                 if variant == 1 {
                     config.exclusions.page_ids.insert(OTHER.into());
                 }
-                routes.extend(target_chain(ancestor).into_iter().map(|(p, v)| (p, 200, v)));
+                target_chain(ancestor)
             } else {
-                routes.push((
+                let status = [404, 403, 200][variant - 2];
+                vec![(
                     format!("pages/{OTHER}"),
-                    if variant == 2 {
-                        404
-                    } else if variant == 3 {
-                        403
-                    } else {
-                        200
-                    },
+                    status,
                     json!({"private":"never expose"}),
-                ));
-            }
-            let (client, server) = fixture_status(routes).await;
-            let result = proposal(&RelationProposalAdapter::new(client, config).unwrap())
-                .await
-                .unwrap();
+                )]
+            };
+            let (client, server) = fixture(routes).await;
+            let result = proposal(
+                &RelationProposalAdapter::new(client, config).unwrap(),
+                &with_relations("Authorized root", &[OTHER], false),
+            )
+            .await
+            .unwrap();
             assert_eq!(
                 result.edges()[0].target(),
                 &GraphTarget::Unresolved {
@@ -830,45 +647,15 @@ mod tests {
             server.await.unwrap(); // Exact routes exclude target content/discovery.
         }
     }
-    #[tokio::test]
-    async fn owned_relation_revalidation_rejects_source_and_target_changes_without_timestamp_help()
-    {
-        use crate::relation_proposal::RelationProposalAdapter;
-        for variant in 0..4 {
-            let mut routes = relations(full("Body", "Current"), "Related", &[OTHER], false);
-            routes.extend(target_chain(ROOT));
-            if variant < 2 {
-                routes.extend(chain(ROOT));
-                routes.extend(source_read(
-                    if variant == 0 { "Renamed" } else { "Related" },
-                    if variant == 0 { &[OTHER] } else { &[] },
-                ));
-            } else {
-                let mut target = target_chain(if variant == 2 { WORKSPACE } else { ROOT });
-                if variant == 3 {
-                    for (_, v) in &mut target {
-                        v["last_edited_time"] = json!("2026-10-10T11:11:00Z");
-                    }
-                }
-                // Failure is detected immediately after the target pass.
-                routes.extend(chain(ROOT));
-                routes.extend(source_read("Related", &[OTHER]));
-                routes.extend(target);
-            }
-            let (client, server) = fixture(routes).await;
-            let adapter = RelationProposalAdapter::new(client, scope()).unwrap();
-            let result = proposal(&adapter).await.unwrap();
-            assert!(adapter.revalidate(&result).await.is_err());
-            server.await.unwrap();
-        }
-    }
+
     #[tokio::test]
     async fn current_policy_owner_fences_old_proposals_and_waits_for_acknowledgment_guard() {
         use crate::relation_proposal::RelationProposalAdapter;
         for variant in 0..4 {
-            let (client, server) = fixture(full("Body", "Current")).await;
-            let adapter = RelationProposalAdapter::new(client, scope()).unwrap();
-            let result = proposal(&adapter).await.unwrap();
+            let adapter = RelationProposalAdapter::new(offline(), scope()).unwrap();
+            let result = proposal(&adapter, &walked("Body", "Current"))
+                .await
+                .unwrap();
             let mut changed = scope();
             changed.generation += 1;
             match variant {
@@ -882,14 +669,12 @@ mod tests {
             adapter.replace_policy(changed).await.unwrap();
             assert!(adapter.revalidate(&result).await.is_err());
             assert!(adapter.replace_policy(scope()).await.is_err()); // No ABA policy reuse.
-            server.await.unwrap();
         }
-        let mut routes = relations(full("Body", "Current"), "Related", &[OTHER], false);
-        routes.extend(target_chain(ROOT));
-        routes.extend(validation("Related", &[OTHER], target_chain(ROOT)));
-        let (client, server) = fixture(routes).await;
+        let client = offline();
         let adapter = RelationProposalAdapter::new(client.clone(), scope()).unwrap();
-        let result = proposal(&adapter).await.unwrap();
+        let result = proposal(&adapter, &walked("Body", "Current"))
+            .await
+            .unwrap();
         let other_owner = RelationProposalAdapter::new(client, scope()).unwrap();
         assert!(other_owner.revalidate(&result).await.is_err());
         let authority = adapter.revalidate(&result).await.unwrap();
@@ -904,93 +689,33 @@ mod tests {
         );
         drop(authority);
         update.await.unwrap();
-        server.await.unwrap();
     }
+
     #[tokio::test]
-    async fn relation_preparation_rejects_policy_replacement_during_authoritative_reads() {
+    async fn walk_children_skip_authorization_but_other_targets_do_not() {
         use crate::relation_proposal::RelationProposalAdapter;
-        let (client, server) = fixture(full("Body", "Current")).await;
-        let observer = client.clone();
-        let adapter = RelationProposalAdapter::new(client, scope()).unwrap();
-        let worker = adapter.clone();
-        let preparing = tokio::spawn(async move { proposal(&worker).await });
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while observer.request_metrics().attempts == 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        let mut next = scope();
-        next.generation += 1;
-        adapter.replace_policy(next).await.unwrap();
-        assert!(preparing.await.unwrap().is_err());
-        server.await.unwrap();
-    }
-    #[tokio::test]
-    async fn relation_commit_rejects_source_physical_move_after_preparation() {
-        use crate::relation_proposal::RelationProposalAdapter;
-        let mut routes = full("Body", "Current");
-        routes.extend(chain(OTHER));
-        let (client, server) = fixture(routes).await;
-        let adapter = RelationProposalAdapter::new(client, scope()).unwrap();
-        let result = proposal(&adapter).await.unwrap();
-        assert!(adapter.revalidate(&result).await.is_err());
-        server.await.unwrap();
-    }
-    #[tokio::test]
-    async fn denied_relation_target_changes_require_fresh_preparation() {
-        use crate::relation_proposal::RelationProposalAdapter;
-        const OUTSIDE: &str = "55555555-5555-5555-5555-555555555555";
-        for excluded in [false, true] {
-            let mut config = scope();
-            if excluded {
-                config.exclusions.page_ids.insert(OTHER.into());
-            }
-            let initial_parent = if excluded { ROOT } else { WORKSPACE };
-            let mut routes = relations(full("Body", "Current"), "Related", &[OTHER], false);
-            routes.extend(target_chain(initial_parent));
-            routes.extend(chain(ROOT));
-            routes.extend(source_read("Related", &[OTHER]));
-            routes.extend(target_chain(OUTSIDE));
-            let (client, server) = fixture(routes).await;
-            let adapter = RelationProposalAdapter::new(client, config).unwrap();
-            let result = proposal(&adapter).await.unwrap();
-            assert!(result.targets()[OTHER].is_err());
-            assert_eq!(
-                adapter.revalidate(&result).await.err().unwrap().kind,
-                BackendErrorKind::Conflict
-            );
-            server.await.unwrap();
-        }
-    }
-    #[tokio::test]
-    async fn unresolved_relation_failure_class_changes_require_fresh_preparation() {
-        use crate::relation_proposal::RelationProposalAdapter;
-        let mut routes: Vec<_> = relations(full("Body", "Current"), "Related", &[OTHER], false)
-            .into_iter()
-            .map(|(p, v)| (p, 200, v))
-            .collect();
-        routes.push((
-            format!("pages/{OTHER}"),
-            403,
-            json!({"private":"unavailable"}),
-        ));
-        routes.extend(chain(ROOT).into_iter().map(|(p, v)| (p, 200, v)));
-        routes.extend(
-            source_read("Related", &[OTHER])
-                .into_iter()
-                .map(|(p, v)| (p, 200, v)),
-        );
-        routes.push((format!("pages/{OTHER}"), 404, json!({"private":"missing"})));
-        let (client, server) = fixture_status(routes).await;
-        let adapter = RelationProposalAdapter::new(client, scope()).unwrap();
-        let result = proposal(&adapter).await.unwrap();
-        assert!(result.targets()[OTHER].is_err());
+        use notion_knowledge_core::graph::GraphTarget;
+        // A target the walk vouched for as its child: resolved with no request.
+        let client = offline();
+        let adapter = RelationProposalAdapter::new(client.clone(), scope()).unwrap();
+        let mut page = with_relations("Related", &[OTHER], false);
+        page.children.insert(OTHER.into());
+        let result = proposal(&adapter, &page).await.unwrap();
         assert_eq!(
-            adapter.revalidate(&result).await.err().unwrap().kind,
-            BackendErrorKind::Conflict
+            result.edges()[0].target(),
+            &GraphTarget::Page {
+                page_id: OTHER.into()
+            }
         );
-        server.await.unwrap();
+        assert_eq!(client.request_metrics().attempts, 0);
+
+        // The same target, not vouched for, still goes through the gate.
+        let (client, server) = fixture(target_chain(ROOT)).await;
+        let adapter = RelationProposalAdapter::new(client, scope()).unwrap();
+        let result = proposal(&adapter, &with_relations("Related", &[OTHER], false))
+            .await
+            .unwrap();
+        assert!(result.targets()[OTHER].is_ok());
+        assert_eq!(server.await.unwrap().len(), 4);
     }
 }

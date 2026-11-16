@@ -133,6 +133,11 @@ async fn open_current(
 }
 
 impl GuardedChunkTable {
+    /// The bound index directory (test pause hooks are keyed by it).
+    pub(crate) fn index_directory(&self) -> &std::path::Path {
+        &self.index_directory
+    }
+
     /// Verify trusted operator configuration, including the directory inode
     /// identity already pinned by the SQLite/index commit coordinator.
     pub fn bind(
@@ -760,9 +765,10 @@ impl GuardedChunkTable {
     /// Atomically replace one page's chunk membership in LanceDB, maintain
     /// the real lexical and any present vector index, THEN checkpoint SQLite.
     ///
-    /// The fallible async callback re-reads source revision, ancestry and
-    /// effective scope while the external lock is held. It MUST NOT spawn
-    /// detached I/O. A rejected callback leaves searchable state unchanged.
+    /// The fallible async callback runs while the external lock is held, for
+    /// fenced local bookkeeping and policy authority. It makes no source
+    /// request and MUST NOT spawn detached I/O. A rejected callback leaves
+    /// searchable state unchanged.
     ///
     /// Conflict means discard preparation and prepare again; in particular
     /// this is required when replaying apply-before-checkpoint interruptions.
@@ -780,13 +786,14 @@ impl GuardedChunkTable {
         self.commit_page_with_authority(prepared, lease, clock, source)
     }
 
-    /// Retain source and policy authority through all effects and final acknowledgment.
+    /// Retain the callback's policy authority through all effects and final
+    /// acknowledgment.
     pub fn commit_page_with_authority<F, Fut, Authority>(
         &self,
         prepared: PreparedPageMutation,
         lease: Lease,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
-        precommit_source_check: F,
+        fenced: F,
     ) -> impl Future<Output = Result<CommitOutcome, CommitError>> + Send + 'static
     where
         F: FnOnce() -> Fut + Send + 'static,
@@ -837,7 +844,7 @@ impl GuardedChunkTable {
                     }
                 }
                 context.revalidate().map_err(fence_failure)?;
-                let authority = precommit_source_check().await?;
+                let authority = fenced().await?;
                 context.revalidate().map_err(fence_failure)?;
                 lexical_binding::verify(&directory, &lexical).map_err(failure)?;
                 let predicate = format!(

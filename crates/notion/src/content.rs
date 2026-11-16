@@ -71,7 +71,14 @@ impl NotionClient {
     pub async fn read_content(&self, input: &str) -> Result<PageContent, BackendError> {
         let id = page_id(input)?;
         let page = self.fetch_page(&id.0).await?;
-        let content = self.markdown_body(&id).await?;
+        let markdown = self.read_markdown(&id).await?;
+        Ok(PageContent { page, markdown })
+    }
+
+    /// One complete enhanced-Markdown read, for a caller that already holds
+    /// the page's metadata. Incomplete content fails.
+    pub async fn read_markdown(&self, page: &PageId) -> Result<String, BackendError> {
+        let content = self.markdown_body(page).await?;
         if content.truncated || !content.unknown_block_ids.is_empty() {
             return Err(error(BackendErrorKind::UnsupportedContent));
         }
@@ -80,10 +87,7 @@ impl NotionClient {
             notion_knowledge_core::logging::SyncCount::ContentRead,
             1,
         );
-        Ok(PageContent {
-            page,
-            markdown: content.markdown,
-        })
+        Ok(content.markdown)
     }
 }
 

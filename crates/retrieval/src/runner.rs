@@ -263,20 +263,9 @@ impl AuthoritativeReconciliationRunner {
         self.planner.plan().await.map_err(RunnerError::Planning)
     }
 
-    /// Plan against an already completed walk instead of walking again.
-    pub async fn dry_run_walk(
-        &self,
-        walk: &notion_knowledge_notion::walk::TreeWalk,
-    ) -> Result<ReconciliationPlan, RunnerError> {
-        self.planner
-            .plan_walk(walk)
-            .await
-            .map_err(RunnerError::Planning)
-    }
-
     /// Admit an already prepared read-only inventory under a fresh writer
     /// lease. A changed local predecessor conflicts instead of recording a
-    /// plan against stale cache state. Source effects still revalidate on apply.
+    /// plan against stale cache state.
     pub async fn record_inventory_plan(
         &self,
         run: &str,

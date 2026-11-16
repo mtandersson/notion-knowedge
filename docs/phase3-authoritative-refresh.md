@@ -47,12 +47,11 @@ Metadata, title, timestamp, URL and properties update citations without
 re-embedding, and removed chunks are excluded from the complete snapshot.
 
 Finally `commit_page` serializes a real SQLite receipt and LanceDB mutation
-under the **cross-process directory-inode guard** from #254. Its async precommit
-check rereads fresh authoritative metadata and Markdown and reauthorizes
-physical ancestry under that guard, rejecting any change to selected ID,
-source revision, title, properties, URL, content or scope. The guard compares
-the pinned Lance table version and current SQLite fence; a conflict requires
-discarding the stale proposal and starting over from new authoritative reads.
+under the **cross-process directory-inode guard** from #254. The page is not
+read again under that guard (owner decision, option b): the guarded callback
+only records a durable plan's proposal and holds the current relation policy.
+The guard compares the pinned Lance table version and current SQLite fence; a
+conflict requires discarding the stale proposal and preparing again.
 
 The durable event ID remains stable across retries. Before acknowledgement,
 refresh retries may replace a pending/failed proposal with freshly authorized
@@ -71,8 +70,8 @@ unserialized write or source-side mutation exists in this workflow.
 
 ## Limits
 
-- Notion does not provide an atomic page snapshot/CAS. A change after the final
-  precommit read can be picked up by the next webhook/reconciliation event.
+- Notion does not provide an atomic page snapshot/CAS. A change after the
+  page's single read is picked up by the next walk, webhook or reconciliation.
 - This refresh path indexes **allowed active pages only**. Authoritative
   inactive/out-of-scope deletion and tombstones use the
   [shared lifecycle handler](phase3-lifecycle-effects.md); uncertain Notion

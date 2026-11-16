@@ -1,12 +1,14 @@
 //! Walk the tree down from the configured root. A page is in scope iff this
 //! walk reached it: child pages come from `<page>` tags in each page's
 //! Markdown and rows from data-source queries. Links and mentions are never
-//! followed, and search is never used.
+//! followed. Search may supply page metadata (see [`crate::search`]) but
+//! never decides which pages are reached.
 use crate::{
     NotionClient,
     content::MarkdownBody,
     links::child_tags,
     pages::{PAGE_VERSION, inactive, metadata, page_id},
+    search::SearchMetadata,
 };
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use notion_knowledge_core::{
@@ -50,6 +52,10 @@ pub struct WalkedPage {
     pub entry: InventoryEntry,
     pub content: Option<PageContent>,
     pub skip: Option<SkipReason>,
+    /// Child pages tagged in this page whose search listing names this page
+    /// as their physical parent: the walk's own child test, so relation and
+    /// link targets among them need no further authorization.
+    pub children: BTreeSet<String>,
 }
 
 /// The result of one walk. `entries` holds every reached page once (sorted by
@@ -160,12 +166,13 @@ impl Visit {
             entry,
             content: None,
             skip: Some(reason),
+            children: BTreeSet::new(),
         });
     }
 }
 
 impl NotionClient {
-    async fn walk_request(
+    pub(crate) async fn walk_request(
         &self,
         method: Method,
         path: &str,
@@ -253,6 +260,7 @@ impl NotionClient {
         root: String,
         row: Option<Value>,
         rules: &ExclusionRules,
+        search: &SearchMetadata,
     ) -> Result<Visit, BackendError> {
         let mut visit = Visit {
             id: id.clone(),
@@ -271,9 +279,20 @@ impl NotionClient {
             return Ok(visit);
         }
         let page_ref = PageId(id.clone());
-        let value = match row {
-            Some(value) => value,
-            None => {
+        // A complete search listing under the same page parent replaces the
+        // metadata read; anything else (missing, partial, moved, nested under
+        // a block, or the root) is read directly.
+        let listed = match &parent {
+            InventoryParent::Page(expected) => search
+                .get(&id)
+                .filter(|listed| listed.parent_page_id.as_ref() == Some(expected))
+                .map(|listed| listed.page.clone()),
+            _ => None,
+        };
+        let value = match (listed.is_some(), row) {
+            (true, _) => Value::Null,
+            (false, Some(value)) => value,
+            (false, None) => {
                 visit.calls += 1;
                 match self.fetch_page_value(&page_ref).await {
                     Ok(value) => value,
@@ -286,8 +305,12 @@ impl NotionClient {
                 }
             }
         };
-        let page = metadata(&value, &page_ref)?;
+        let page = match listed {
+            Some(page) => page,
+            None => metadata(&value, &page_ref)?,
+        };
         if let InventoryParent::Page(expected) = &parent
+            && !value.is_null()
             && !self.parent_is(&value, expected, &mut visit).await?
         {
             // Not physically under this page, for example a linked view.
@@ -316,6 +339,23 @@ impl NotionClient {
         let mut children = child_references(&body.markdown);
         self.follow_unknown_blocks(&body, &mut children, &mut visit)
             .await?;
+        // descendants_of keeps the page and prunes everything below it.
+        let pruned = rules.descendants_of.contains(&id);
+        let listed_children = children
+            .iter()
+            .filter_map(|child| match child {
+                ChildRef::Page(child) => Some(child),
+                ChildRef::Database(_) => None,
+            })
+            .filter(|child| {
+                !pruned
+                    && rules.exclusion(child, SourceType::Page).is_none()
+                    && search.get(*child).is_some_and(|listed| {
+                        listed.parent_page_id.as_ref() == Some(&id) && !listed.page.archived
+                    })
+            })
+            .cloned()
+            .collect();
         visit.pages.push(WalkedPage {
             entry,
             content: complete.then_some(PageContent {
@@ -323,9 +363,9 @@ impl NotionClient {
                 markdown: body.markdown,
             }),
             skip: None,
+            children: listed_children,
         });
-        // descendants_of keeps the page and prunes everything below it.
-        if rules.descendants_of.contains(&id) {
+        if pruned {
             return Ok(visit);
         }
         for child in children {
@@ -527,6 +567,34 @@ impl NotionClient {
         scope: &LifecycleScope,
         sink: Option<&tokio::sync::mpsc::Sender<WalkedPage>>,
     ) -> Result<TreeWalk, BackendError> {
+        self.walk(scope, sink, SearchMetadata::new(), 0).await
+    }
+
+    /// [`Self::walk_tree`] that first lists search metadata, so a reached
+    /// page whose listing is complete costs only its Markdown read. A failed
+    /// listing (other than revoked credentials) only costs those reads back.
+    pub async fn walk_tree_with_search(
+        &self,
+        scope: &LifecycleScope,
+        sink: Option<&tokio::sync::mpsc::Sender<WalkedPage>>,
+    ) -> Result<TreeWalk, BackendError> {
+        let mut calls = 0;
+        let search = match self.search_pages(&mut calls).await {
+            Ok(search) => search,
+            Err(e) if e.kind == BackendErrorKind::Unauthenticated => return Err(e),
+            Err(_) => SearchMetadata::new(),
+        };
+        self.walk(scope, sink, search, calls).await
+    }
+
+    async fn walk(
+        &self,
+        scope: &LifecycleScope,
+        sink: Option<&tokio::sync::mpsc::Sender<WalkedPage>>,
+        search: SearchMetadata,
+        search_calls: u64,
+    ) -> Result<TreeWalk, BackendError> {
+        let search = &search;
         let normalize = |ids: &BTreeSet<String>| {
             ids.iter()
                 .map(|v| page_id(v).map(|v| v.0))
@@ -564,7 +632,7 @@ impl NotionClient {
             entries: Vec::new(),
             skipped: Vec::new(),
             complete: true,
-            calls: 0,
+            calls: search_calls,
         };
         let mut progress = SyncProgressLog::new(SyncPhase::Discovery);
         let mut processed = 0;
@@ -600,7 +668,7 @@ impl NotionClient {
                             parent,
                             root,
                             row,
-                        } => self.visit_page(id, parent, root, row, rules).await,
+                        } => self.visit_page(id, parent, root, row, rules, search).await,
                         Node::Database { id, owner, root } => {
                             self.visit_database(id, owner, root, rules).await
                         }
@@ -1214,5 +1282,163 @@ mod tests {
             }
         }
         assert_eq!(ids(&walk), allowed);
+    }
+
+    /// Root -> pages A, P, Q (all tagged in the root's Markdown).
+    fn flat_tree() -> Routes {
+        let mut routes = Routes::new();
+        let tags = [A, P, Q].map(page_tag).concat();
+        add_page(&mut routes, ROOT, parent("workspace", ""), &tags);
+        for id in [A, P, Q] {
+            add_page(&mut routes, id, parent("page_id", ROOT), "Body\n");
+        }
+        routes
+    }
+    fn listing(pages: Vec<Value>) -> (u16, Value) {
+        (
+            200,
+            json!({"object":"list","results":pages,"has_more":false,"next_cursor":null}),
+        )
+    }
+    fn fetched(requests: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+        let mut ids: Vec<_> = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r.strip_prefix("GET /v1/pages/"))
+            .filter(|r| !r.ends_with("/markdown"))
+            .map(str::to_owned)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    #[tokio::test]
+    async fn walk_uses_search_metadata_and_skips_fetch_page() {
+        let mut routes = flat_tree();
+        let listed = [A, P, Q].map(|id| metadata(id, parent("page_id", ROOT)));
+        routes.insert("POST /v1/search".into(), listing(listed.to_vec()));
+        let (client, requests) = serve(routes).await;
+        let (sink, mut pages) = tokio::sync::mpsc::channel(16);
+        let walk = client
+            .walk_tree_with_search(&scope(ExclusionRules::default()), Some(&sink))
+            .await
+            .unwrap();
+        drop(sink);
+        assert!(walk.authoritative());
+        assert_eq!(ids(&walk), [ROOT, P, A, Q]);
+        // One listing, the root's two reads, then one Markdown read per page.
+        assert_eq!(fetched(&requests), [ROOT]);
+        assert_eq!(walk.calls, 1 + 2 + 3);
+        assert_eq!(requests.lock().unwrap().len() as u64, walk.calls);
+        while let Some(page) = pages.recv().await {
+            assert_eq!(page.content.unwrap().page.title, "Private title");
+        }
+    }
+
+    #[tokio::test]
+    async fn walk_falls_back_to_fetch_page_for_missing_partial_or_moved_entries() {
+        let mut routes = flat_tree();
+        let mut partial = metadata(P, parent("page_id", ROOT));
+        partial.as_object_mut().unwrap().remove("properties");
+        let moved = metadata(Q, parent("page_id", O));
+        // A is missing from the listing.
+        routes.insert("POST /v1/search".into(), listing(vec![partial, moved]));
+        let (client, requests) = serve(routes).await;
+        let walk = client
+            .walk_tree_with_search(&scope(ExclusionRules::default()), None)
+            .await
+            .unwrap();
+        assert!(walk.authoritative());
+        assert_eq!(ids(&walk), [ROOT, P, A, Q]);
+        let mut expected = vec![ROOT.to_owned(), A.into(), P.into(), Q.into()];
+        expected.sort();
+        assert_eq!(fetched(&requests), expected);
+    }
+
+    #[tokio::test]
+    async fn search_only_pages_outside_walk_are_never_indexed() {
+        let mut routes = flat_tree();
+        let mut listed = [A, P, Q]
+            .map(|id| metadata(id, parent("page_id", ROOT)))
+            .to_vec();
+        listed.push(metadata(O, parent("page_id", ROOT)));
+        listed.push(metadata(X, parent("workspace", "")));
+        routes.insert("POST /v1/search".into(), listing(listed));
+        add_page(&mut routes, O, parent("page_id", ROOT), "Untagged\n");
+        let (client, requests) = serve(routes).await;
+        let walk = client
+            .walk_tree_with_search(&scope(ExclusionRules::default()), None)
+            .await
+            .unwrap();
+        assert_eq!(ids(&walk), [ROOT, P, A, Q]);
+        assert!(!walk.readable().contains(O) && !walk.readable().contains(X));
+        assert!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|r| !r.contains(O) && !r.contains(X))
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_search_listing_falls_back_to_reading_every_page() {
+        // No search route: the listing 404s and the walk reads metadata itself.
+        let (client, requests) = serve(flat_tree()).await;
+        let walk = client
+            .walk_tree_with_search(&scope(ExclusionRules::default()), None)
+            .await
+            .unwrap();
+        assert_eq!(ids(&walk), [ROOT, P, A, Q]);
+        assert_eq!(fetched(&requests).len(), 4);
+    }
+
+    #[tokio::test]
+    async fn walk_vouches_only_for_listed_unexcluded_children_of_the_page() {
+        let mut routes = flat_tree();
+        // A is listed under ROOT, P is listed under another page, Q is missing.
+        let listed = vec![
+            metadata(A, parent("page_id", ROOT)),
+            metadata(P, parent("page_id", O)),
+        ];
+        routes.insert("POST /v1/search".into(), listing(listed));
+        let (client, _) = serve(routes.clone()).await;
+        let (sink, mut pages) = tokio::sync::mpsc::channel(16);
+        client
+            .walk_tree_with_search(&scope(ExclusionRules::default()), Some(&sink))
+            .await
+            .unwrap();
+        drop(sink);
+        let mut root = None;
+        while let Some(page) = pages.recv().await {
+            if page.entry.page_id == ROOT {
+                root = Some(page);
+            }
+        }
+        assert_eq!(root.unwrap().children, BTreeSet::from([A.to_owned()]));
+
+        // An excluded child, and every child of a pruned page, is never vouched for.
+        for exclusions in [
+            ExclusionRules {
+                page_ids: BTreeSet::from([A.to_owned()]),
+                ..Default::default()
+            },
+            ExclusionRules {
+                descendants_of: BTreeSet::from([ROOT.to_owned()]),
+                ..Default::default()
+            },
+        ] {
+            let (client, _) = serve(routes.clone()).await;
+            let (sink, mut pages) = tokio::sync::mpsc::channel(16);
+            client
+                .walk_tree_with_search(&scope(exclusions), Some(&sink))
+                .await
+                .unwrap();
+            drop(sink);
+            while let Some(page) = pages.recv().await {
+                assert!(page.children.is_empty(), "{:?}", page.entry.page_id);
+            }
+        }
     }
 }

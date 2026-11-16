@@ -1,53 +1,28 @@
-//! Physically authorized relation proposals. No discovery, target content or writes.
-use crate::{NotionClient, prepare::ScopedPageSnapshot};
+//! Relation proposals for a prepared page. No discovery, target content or writes.
+//! Source scope comes from the walk; only relation targets are authorized here.
+use crate::{
+    NotionClient,
+    prepare::{ScopedPageSnapshot, prepare_content},
+    walk::WalkedPage,
+};
 use notion_knowledge_core::{
-    backend::{BackendError, BackendErrorKind, BackendFuture, Page, PageContent, PageId},
+    backend::{BackendError, BackendErrorKind, Page, PageContent, PageId},
     chunking::ChunkConfig,
     graph::GraphEdge,
     indexed::{IndexedChunk, IndexedMetadata, PropertyValue, SourceMetadata},
-    lifecycle::{LifecycleEvidence, LifecycleScope, PageLifecycle},
+    inventory::InventoryParent,
+    lifecycle::{LifecycleEvidence, LifecycleScope},
     relations::relation_edges_with_names,
     root_scope::{RootScopeGate, ScopeError},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 
 type TargetOutcomes = BTreeMap<String, Result<(), ScopeError>>;
-type TargetObservation = Result<LifecycleEvidence, BackendErrorKind>;
-type TargetEvidence = BTreeMap<String, TargetObservation>;
-type CandidateProjection = (Vec<GraphEdge>, TargetOutcomes, TargetEvidence);
-
-// Record the real provider observation without weakening RootScopeGate's
-// independent verification. Denied chains and sanitized failure classes must
-// also remain stable; a denied-to-denied move still requires fresh preparation.
-struct RecordingLifecycle {
-    client: NotionClient,
-    observation: Mutex<Option<TargetObservation>>,
-}
-impl PageLifecycle for RecordingLifecycle {
-    fn lifecycle<'a>(
-        &'a self,
-        page: &'a PageId,
-        scope: &'a LifecycleScope,
-    ) -> BackendFuture<'a, LifecycleEvidence> {
-        Box::pin(async move {
-            let result = self.client.lifecycle(page, scope).await;
-            *self.observation.lock().map_err(|_| conflict())? =
-                Some(result.as_ref().cloned().map_err(|failure| failure.kind));
-            result
-        })
-    }
-    fn revalidate_lifecycle<'a>(
-        &'a self,
-        evidence: &'a LifecycleEvidence,
-        scope: &'a LifecycleScope,
-    ) -> BackendFuture<'a, ()> {
-        self.client.revalidate_lifecycle(evidence, scope)
-    }
-}
+type CandidateProjection = (Vec<GraphEdge>, TargetOutcomes);
 
 fn conflict() -> BackendError {
     BackendError {
@@ -82,7 +57,7 @@ pub struct RelationProposal {
     edges: Vec<GraphEdge>,
     links: Vec<GraphEdge>,
     targets: TargetOutcomes,
-    evidence: TargetEvidence,
+    scope: LifecycleScope,
     owner: Arc<RwLock<LifecycleScope>>,
     mode: ProjectionMode,
 }
@@ -146,8 +121,8 @@ impl RelationProposalAdapter {
         metadata: &IndexedMetadata,
         names: &BTreeMap<String, String>,
         content: Option<&PageContent>,
-        source: &LifecycleEvidence,
         scope: &LifecycleScope,
+        children: &BTreeSet<String>,
     ) -> Result<CandidateProjection, BackendError> {
         let mut targets = BTreeSet::new();
         for value in metadata.properties.values() {
@@ -179,43 +154,23 @@ impl RelationProposalAdapter {
         relation_edges_with_names(metadata, names, &BTreeSet::from([metadata.page_id.clone()]))
             .map_err(|_| conflict())?;
         let mut outcomes = BTreeMap::new();
-        let mut evidence = BTreeMap::new();
         let mut allowed = BTreeSet::from([metadata.page_id.clone()]);
-        for target in targets
-            .into_iter()
-            .filter(|_| self.mode == ProjectionMode::ResolveTargets)
-        {
-            let recording = Arc::new(RecordingLifecycle {
-                client: self.client.clone(),
-                observation: Mutex::new(None),
-            });
-            let gate =
-                RootScopeGate::new(recording.clone(), scope.clone()).map_err(|_| conflict())?;
-            let outcome = gate.authorize(&PageId(target.clone())).await.map(|_| ());
-            // Invalid candidate IDs are rejected before provider I/O. Preserve
-            // that stable failure without inventing physical evidence.
-            let observed = recording
-                .observation
-                .lock()
-                .map_err(|_| conflict())?
-                .take()
-                .unwrap_or(Err(BackendErrorKind::InvalidInput));
-            if target == metadata.page_id {
-                match &observed {
-                    // Only a successful, different observation is a source
-                    // change; a failed lookup (auth, outage) is never retried.
-                    Ok(current) if current != source => {
-                        return Err(crate::prepare::source_changed());
-                    }
-                    Ok(_) => {}
-                    Err(_) => return Err(conflict()),
+        if self.mode == ProjectionMode::ResolveTargets {
+            let gate = RootScopeGate::new(Arc::new(self.client.clone()), scope.clone())
+                .map_err(|_| conflict())?;
+            // The page itself is in scope by the walk; only other targets
+            // need their own authorization.
+            for target in targets.into_iter().filter(|t| *t != metadata.page_id) {
+                let outcome = if children.contains(&target) {
+                    Ok(())
+                } else {
+                    gate.authorize(&PageId(target.clone())).await.map(|_| ())
+                };
+                if outcome.is_ok() {
+                    allowed.insert(target.clone());
                 }
+                outcomes.insert(target, outcome);
             }
-            evidence.insert(target.clone(), observed);
-            if outcome.is_ok() {
-                allowed.insert(target.clone());
-            }
-            outcomes.insert(target, outcome);
         }
         let mut edges =
             relation_edges_with_names(metadata, names, &allowed).map_err(|_| conflict())?;
@@ -224,7 +179,7 @@ impl RelationProposalAdapter {
                 crate::link_graph::page_link_edges(content, &allowed).map_err(|_| conflict())?,
             );
         }
-        Ok((edges, outcomes, evidence))
+        Ok((edges, outcomes))
     }
     /// Read-only metadata proposal for reconciliation planning. It never fetches
     /// Markdown or confers commit authority; apply must prepare and revalidate.
@@ -264,35 +219,81 @@ impl RelationProposalAdapter {
             },
             properties: page.properties.clone(),
         };
-        let (edges, _, _) = self
-            .targets(&metadata, &page.relation_names, None, evidence, &scope)
+        let (edges, _) = self
+            .targets(
+                &metadata,
+                &page.relation_names,
+                None,
+                &scope,
+                &BTreeSet::new(),
+            )
             .await?;
-        if self.client.fetch_page(&page.id.0).await? != *page || *self.policy.read().await != scope
-        {
+        if *self.policy.read().await != scope {
             return Err(conflict());
         }
-        self.client.revalidate_lifecycle(evidence, &scope).await?;
         Ok(edges)
     }
-    pub async fn prepare(
+    /// Propose a page from the walk's single read. Only relation targets
+    /// may cause requests (their authorization), never the page itself.
+    pub async fn prepare_walked(
         &self,
-        page: &PageId,
-        root: &PageId,
+        walked: &WalkedPage,
         previous: &[IndexedChunk],
         chunks: ChunkConfig,
     ) -> Result<RelationProposal, BackendError> {
         let scope = self.policy.read().await.clone();
         let snapshot = self
             .client
-            .prepare_scoped_page(page, root, &scope, previous, chunks)
-            .await?;
-        let (edges, targets, evidence) = self
+            .prepare_walked_page(walked, &scope, previous, chunks)?;
+        self.propose(snapshot, scope, &walked.children).await
+    }
+
+    /// Propose a page from content the caller already read, for example to
+    /// prepare it again after its indexed chunks changed.
+    pub async fn prepare_content(
+        &self,
+        content: PageContent,
+        parent: InventoryParent,
+        root: &PageId,
+        previous: &[IndexedChunk],
+        chunks: ChunkConfig,
+    ) -> Result<RelationProposal, BackendError> {
+        let scope = self.policy.read().await.clone();
+        let snapshot = prepare_content(content, parent, root, &scope, previous, chunks)?;
+        self.propose(snapshot, scope, &BTreeSet::new()).await
+    }
+
+    /// Read one page once (metadata and Markdown) and propose it. For a
+    /// single-page caller whose own lifecycle read placed the page.
+    pub async fn prepare_read(
+        &self,
+        page: &PageId,
+        parent: InventoryParent,
+        root: &PageId,
+        previous: &[IndexedChunk],
+        chunks: ChunkConfig,
+    ) -> Result<RelationProposal, BackendError> {
+        let content = self.client.read_content(&page.0).await?;
+        if content.page.id != *page {
+            return Err(conflict());
+        }
+        self.prepare_content(content, parent, root, previous, chunks)
+            .await
+    }
+
+    async fn propose(
+        &self,
+        snapshot: ScopedPageSnapshot,
+        scope: LifecycleScope,
+        children: &BTreeSet<String>,
+    ) -> Result<RelationProposal, BackendError> {
+        let (edges, targets) = self
             .targets(
                 &snapshot.document.metadata,
                 &snapshot.relation_names,
-                Some(&snapshot.source),
-                &snapshot.evidence,
+                Some(snapshot.source()),
                 &scope,
+                children,
             )
             .await?;
         if *self.policy.read().await != scope {
@@ -306,12 +307,13 @@ impl RelationProposalAdapter {
             edges,
             links,
             targets,
-            evidence,
+            scope,
             owner: self.policy.clone(),
             mode: self.mode,
         })
     }
     /// Retain the same current policy owner for an authoritative removal.
+    /// The caller's lifecycle read is not repeated.
     pub async fn revalidate_removal(
         &self,
         evidence: &LifecycleEvidence,
@@ -325,14 +327,25 @@ impl RelationProposalAdapter {
         {
             return Err(conflict());
         }
-        self.client.revalidate_lifecycle(evidence, &scope).await?;
         Ok(RelationAuthority { _policy: scope })
     }
 
+    /// Hold the current policy for a removal a complete walk decided.
+    pub async fn removal_authority(
+        &self,
+        scope: &LifecycleScope,
+    ) -> Result<RelationAuthority, BackendError> {
+        let current = self.policy.clone().read_owned().await;
+        if *current != *scope {
+            return Err(conflict());
+        }
+        Ok(RelationAuthority { _policy: current })
+    }
+
     /// Invoke INSIDE the operation-owned commit, before any effects or receipt.
-    /// Freshly check source content/membership/names, physical chains and current
-    /// policy; keep the returned guard alive through acknowledgment. Notion has
-    /// no atomic snapshot/CAS: a later upstream edit requires another refresh.
+    /// Checks only that the proposal belongs to this adapter's current policy
+    /// and mode, and holds that policy through acknowledgment. Source is not
+    /// read again: a later upstream edit or move is picked up by the next walk.
     pub async fn revalidate(
         &self,
         proposal: &RelationProposal,
@@ -341,46 +354,9 @@ impl RelationProposalAdapter {
             return Err(conflict());
         }
         let scope = self.policy.clone().read_owned().await;
-        if *scope != proposal.snapshot.evidence.scope {
+        if *scope != proposal.scope {
             return Err(conflict());
         }
-        self.client
-            .revalidate_lifecycle(&proposal.snapshot.evidence, &scope)
-            .await?;
-        let page = &proposal.snapshot.source.page.id.0;
-        if crate::media_identity::canonical_content(self.client.read_content(page).await?)
-            != proposal.snapshot.source
-        {
-            return Err(conflict());
-        }
-        let (edges, targets, evidence) = self
-            .targets(
-                &proposal.snapshot.document.metadata,
-                &proposal.snapshot.relation_names,
-                Some(&proposal.snapshot.source),
-                &proposal.snapshot.evidence,
-                &scope,
-            )
-            .await?;
-        let (links, edges): (Vec<_>, Vec<_>) = edges
-            .into_iter()
-            .partition(|edge| edge.relation_type().starts_with("link:"));
-        if edges != proposal.edges
-            || links != proposal.links
-            || targets != proposal.targets
-            || evidence != proposal.evidence
-        {
-            return Err(conflict());
-        }
-        // Bracket candidate work with the full authoritative source, then its chain.
-        if crate::media_identity::canonical_content(self.client.read_content(page).await?)
-            != proposal.snapshot.source
-        {
-            return Err(conflict());
-        }
-        self.client
-            .revalidate_lifecycle(&proposal.snapshot.evidence, &scope)
-            .await?;
         Ok(RelationAuthority { _policy: scope })
     }
 }

@@ -49,9 +49,6 @@ impl CountingProvider {
     fn embeddings(&self) -> usize {
         self.count.load(Ordering::SeqCst)
     }
-    fn race_on_next_embedding(&self, source: Arc<Mutex<Model>>) {
-        *self.race.lock().unwrap() = Some(source);
-    }
 }
 impl EmbeddingProvider for CountingProvider {
     fn metadata(&self) -> &EmbeddingMetadata {
@@ -298,7 +295,7 @@ async fn create_metadata_content_delete_duplicate_and_persistent_restart() {
         1
     );
     assert!(source.body_reads.load(Ordering::SeqCst) > 0);
-    assert!(source.attempts.load(Ordering::SeqCst) >= 20);
+    assert!(source.attempts.load(Ordering::SeqCst) >= 2);
     index
         .guarded()
         .ensure_vector_index(
@@ -576,53 +573,6 @@ async fn out_of_scope_recovery_archive_and_failed_source_do_not_corrupt_index() 
             .outcome,
         CommitOutcome::Applied
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn changed_source_during_embedding_fails_commit_without_ack_or_index_mutation() {
-    let index = Fixture::new();
-    index.create().await;
-    let source = HttpNotion::start().await;
-    let handler = index.handler(source.client());
-    let provider = CountingProvider::new(index.embed.clone());
-    provider.race_on_next_embedding(source.state.clone());
-    let page = PageId(PAGE.into());
-    let root = PageId(ROOT.into());
-    let failure = handler
-        .refresh_page(
-            &page,
-            &root,
-            "raced-source",
-            &provider,
-            index.lease.clone(),
-            clock(),
-        )
-        .await;
-    assert_eq!(failure.unwrap_err(), RefreshError::Conflict);
-    assert_eq!(index.table().await.count_rows().await.unwrap(), 0);
-    assert!(
-        index
-            .coordinator
-            .state()
-            .page_state(PAGE)
-            .unwrap()
-            .is_none()
-    );
-    // Retry the original durable work item after the authoritative source
-    // changes. No replacement webhook/event ID is required for recovery.
-    let redo = handler
-        .refresh_page(
-            &page,
-            &root,
-            "raced-source",
-            &provider,
-            index.lease.clone(),
-            clock(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(redo.outcome, CommitOutcome::Applied);
-    assert!(index.table().await.count_rows().await.unwrap() > 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1408,33 +1358,6 @@ async fn lifecycle_failures_never_authorize_removal_or_acknowledgement() {
         RefreshError::Conflict
     );
     assert_eq!(index.guarded().page_chunks(PAGE).await.unwrap(), original);
-    // A source restore after removal preparation but inside the owned commit
-    // must reject the obsolete delete before touching either index family.
-    let state = source.state.clone();
-    let fired = Arc::new(AtomicBool::new(false));
-    let race_clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || {
-        if !fired.swap(true, Ordering::SeqCst) {
-            state.lock().unwrap().archived = false;
-        }
-        111
-    });
-    assert_eq!(
-        handler
-            .apply_lifecycle(&page, "raced-delete", &provider, newer.clone(), race_clock)
-            .await
-            .unwrap_err(),
-        RefreshError::Conflict
-    );
-    assert_eq!(index.guarded().page_chunks(PAGE).await.unwrap(), original);
-    assert_eq!(
-        index
-            .coordinator
-            .receipt("raced-delete")
-            .unwrap()
-            .unwrap()
-            .failure,
-        Some(notion_knowledge_core::reconciliation::FailureClass::Conflict)
-    );
     source.change(|m| m.archived = true);
     handler
         .apply_lifecycle(
@@ -1654,66 +1577,6 @@ async fn lifecycle_excluded_ancestry_removes_and_changed_scope_generation_fences
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lifecycle_refresh_rejects_same_root_ancestry_change_at_commit() {
-    let index = Fixture::new();
-    index.create().await;
-    let source = HttpNotion::start().await;
-    let handler = index.handler(source.client());
-    let provider = CountingProvider::new(index.embed.clone());
-    let page = PageId(PAGE.into());
-    let state = source.state.clone();
-    let fired = Arc::new(AtomicBool::new(false));
-    let race_clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || {
-        if !fired.swap(true, Ordering::SeqCst) {
-            state.lock().unwrap().root_revision = "2026-10-10T12:00:09Z".into();
-        }
-        10
-    });
-    assert_eq!(
-        handler
-            .apply_lifecycle(
-                &page,
-                "ancestor-changed",
-                &provider,
-                index.lease.clone(),
-                race_clock
-            )
-            .await
-            .unwrap_err(),
-        RefreshError::Conflict
-    );
-    assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
-    assert!(
-        index
-            .coordinator
-            .state()
-            .page_state(PAGE)
-            .unwrap()
-            .is_none()
-    );
-    handler
-        .apply_lifecycle(
-            &page,
-            "ancestor-changed",
-            &provider,
-            index.lease.clone(),
-            clock(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        index
-            .table()
-            .await
-            .fts_query("text", "Saffron", 10)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owned_empty_page_can_be_tombstoned_without_chunks_or_embeddings() {
     let index = Fixture::new();
     index.create().await;
@@ -1831,6 +1694,7 @@ async fn planner_dry_run_missing_metadata_stale_unchanged_restored_and_empty_pag
         m.level = 3;
         m.root_revision = "2026-10-10T11:01:00Z".into();
     });
+    // A parent's own edit is not part of its child's identity.
     let ancestry = planner(&index, &source).plan().await.unwrap();
     assert_eq!(
         ancestry
@@ -1839,7 +1703,7 @@ async fn planner_dry_run_missing_metadata_stale_unchanged_restored_and_empty_pag
             .find(|p| p.page_id == PAGE)
             .unwrap()
             .difference,
-        Difference::Stale
+        Difference::Unchanged
     );
     source.change(|m| m.title = "Metadata only".into());
     let stale = planner(&index, &source).plan().await.unwrap();
@@ -2007,8 +1871,8 @@ async fn planner_absence_access_failures_and_races_never_authorize_deletion() {
             .find(|p| p.page_id == PAGE)
             .unwrap()
             .difference,
-        // The root lost or regained a child tag: its new revision also moves ROOT and OTHER.
-        Difference::Stale
+        // The root lost a child tag; PAGE itself, still readable, is unchanged.
+        Difference::Unchanged
     );
     // A transiently incomplete walk (a repeated query cursor) never deletes.
     source.change(|m| {
@@ -2050,15 +1914,9 @@ async fn planner_absence_access_failures_and_races_never_authorize_deletion() {
     let bad = planner(&index, &source).plan().await.unwrap();
     assert!(bad.errors.contains_key(PAGE));
     assert!(bad.pages.iter().any(|p| p.page_id == OTHER));
+    // Metadata edits while planning are not re-read; the next run sees them.
     source.change(|m| {
         m.inaccessible_page = false;
-        m.race_metadata = true;
-    });
-    let race = planner(&index, &source).plan().await.unwrap();
-    assert_eq!(race.errors.get(PAGE), Some(&PlanError::Conflict));
-    assert_eq!(index.guarded().page_chunks(PAGE).await.unwrap(), before);
-    source.change(|m| {
-        m.race_metadata = false;
         m.race_move = true;
     });
     let move_race = planner(&index, &source).plan().await.unwrap();
@@ -2274,8 +2132,10 @@ fn record_plan(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn missing_page_plans_recheck_metadata_and_scope_before_indexing() {
-    for moved in [false, true] {
+async fn missing_page_plans_recheck_scope_before_indexing() {
+    // An exact-metadata edit after inventory is no longer rejected at apply
+    // (no commit-time source recheck); a move still fails the lifecycle check.
+    for moved in [true] {
         let index = Fixture::new();
         index.create().await;
         let source = HttpNotion::start().await;
@@ -2490,8 +2350,8 @@ async fn reconciliation_stale_archive_move_restore_and_incomplete_traversal_appl
         .apply("restored", index.lease.clone(), clock(), &provider)
         .await
         .unwrap();
-    // The root regained a child tag: its new revision also moves ROOT, OTHER and the row.
-    assert_eq!((restored.changed, restored.deleted), (4, 0));
+    // The root regained a child tag: PAGE and the root itself change.
+    assert_eq!((restored.changed, restored.deleted), (2, 0));
     assert!(
         !index
             .coordinator
@@ -2653,31 +2513,6 @@ async fn reconciliation_bad_page_isolated_source_and_embedding_races_are_durable
         .await
         .unwrap();
     assert_eq!((retry.changed, retry.failed_pages()), (3, 0));
-    source.change(|m| {
-        m.markdown.push_str("\nA fresh section.\n");
-        m.revision = "2026-10-10T12:02:00Z".into();
-    });
-    let before = index.guarded().page_chunks(PAGE).await.unwrap();
-    let plan = service.dry_run().await.unwrap();
-    record_plan(&index, "owned-source-race", &plan);
-    provider.race_on_next_embedding(source.state.clone());
-    let race = service
-        .apply("owned-source-race", index.lease.clone(), clock(), &provider)
-        .await
-        .unwrap();
-    assert_eq!(race.failed.get(PAGE), Some(&DurableFailure::Conflict));
-    assert_eq!(index.guarded().page_chunks(PAGE).await.unwrap(), before);
-    let retry = service
-        .retry_page(
-            "owned-source-race",
-            PAGE,
-            index.lease.clone(),
-            clock(),
-            &provider,
-        )
-        .await
-        .unwrap();
-    assert_eq!((retry.changed, retry.failed_pages()), (1, 0));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2836,161 +2671,6 @@ async fn reconciliation_index_failure_retains_separate_failed_work_until_explici
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reconciliation_cancelled_observer_retains_owned_commit_then_recovers_real_receipt() {
-    let index = Fixture::new();
-    index.create().await;
-    let source = HttpNotion::start().await;
-    let provider = Arc::new(CountingProvider::new(index.embed.clone()));
-    *provider.boundary_pause.lock().unwrap() = Some(source.pause.clone());
-    let service = runner(&index, &source);
-    let plan = service.dry_run().await.unwrap();
-    record_plan(&index, "cancelled", &plan);
-    let operation = index
-        .coordinator
-        .reconciliation_plan("cancelled")
-        .unwrap()
-        .pages[PAGE]
-        .operation_id
-        .clone();
-    let owned = service.clone();
-    let embedding = provider.clone();
-    let lease = index.lease.clone();
-    let task = tokio::spawn(async move {
-        owned
-            .apply("cancelled", lease, clock(), embedding.as_ref())
-            .await
-    });
-    tokio::time::timeout(
-        std::time::Duration::from_secs(20),
-        source.pause.started.notified(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        index
-            .coordinator
-            .receipt(&operation)
-            .unwrap()
-            .unwrap()
-            .status,
-        notion_knowledge_retrieval::commit::ReceiptStatus::Pending
-    );
-    task.abort();
-    assert!(task.await.unwrap_err().is_cancelled());
-    source.pause.proceed.notify_one();
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            if index
-                .coordinator
-                .receipt(&operation)
-                .unwrap()
-                .is_some_and(|r| {
-                    r.status == notion_knowledge_retrieval::commit::ReceiptStatus::Applied
-                })
-            {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert!(
-        index
-            .coordinator
-            .reconciliation_progress("cancelled")
-            .unwrap()
-            .pending
-            .contains(PAGE)
-    );
-    assert!(!index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
-    assert!(
-        index
-            .coordinator
-            .current_relation_projection_complete(PAGE)
-            .unwrap()
-    );
-    let progress = service
-        .apply("cancelled", index.lease.clone(), clock(), provider.as_ref())
-        .await
-        .unwrap();
-    assert_eq!((progress.changed, progress.failed_pages()), (3, 0));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reconciliation_owned_source_poll_expires_lease_and_new_fence_resumes_without_effects() {
-    use notion_knowledge_core::reconciliation::JournalError;
-    let index = Fixture::new();
-    index.create().await;
-    let source = HttpNotion::start().await;
-    let provider = Arc::new(CountingProvider::new(index.embed.clone()));
-    *provider.boundary_pause.lock().unwrap() = Some(source.pause.clone());
-    let service = runner(&index, &source);
-    let plan = service.dry_run().await.unwrap();
-    record_plan(&index, "expiry", &plan);
-    let operation = index
-        .coordinator
-        .reconciliation_plan("expiry")
-        .unwrap()
-        .pages[PAGE]
-        .operation_id
-        .clone();
-    let now = Arc::new(std::sync::atomic::AtomicI64::new(10));
-    let observed = now.clone();
-    let timed_clock: Arc<dyn Fn() -> i64 + Send + Sync> =
-        Arc::new(move || observed.load(Ordering::SeqCst));
-    let owned = service.clone();
-    let embedding = provider.clone();
-    let lease = index.lease.clone();
-    let timer = timed_clock.clone();
-    let task = tokio::spawn(async move {
-        owned
-            .apply("expiry", lease, timer, embedding.as_ref())
-            .await
-    });
-    tokio::time::timeout(
-        std::time::Duration::from_secs(20),
-        source.pause.started.notified(),
-    )
-    .await
-    .unwrap();
-    now.store(110, Ordering::SeqCst);
-    let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(matches!(
-        result,
-        Err(notion_knowledge_retrieval::runner::RunnerError::Journal(
-            JournalError::LeaseLost
-        ))
-    ));
-    assert_eq!(
-        index
-            .coordinator
-            .receipt(&operation)
-            .unwrap()
-            .unwrap()
-            .status,
-        notion_knowledge_retrieval::commit::ReceiptStatus::Failed
-    );
-    assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
-    source.pause.proceed.notify_one();
-    let lease = index.coordinator.state().acquire_lease(110, 100).unwrap();
-    let resumed = service
-        .apply("expiry", lease, timed_clock, provider.as_ref())
-        .await
-        .unwrap();
-    assert_eq!((resumed.changed, resumed.failed_pages()), (3, 0));
-    assert!(
-        service
-            .apply("expiry", index.lease.clone(), clock(), provider.as_ref())
-            .await
-            .is_err()
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconciliation_generation_policy_and_expired_fence_reject_pending_plan_without_effects() {
     let index = Fixture::new();
     index.create().await;
@@ -3122,39 +2802,6 @@ async fn reconciliation_inflight_webhook_and_authoritative_move_cannot_overwrite
         .unwrap();
     // The root lost or regained a child tag: its new revision also moves ROOT and OTHER.
     assert_eq!((retry.deleted, retry.failed_pages()), (1, 2));
-    assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reconciliation_owned_source_outage_is_source_failure_without_index_mutation() {
-    use notion_knowledge_retrieval::durable_plan::DurableFailure;
-    let index = Fixture::new();
-    index.create().await;
-    let source = HttpNotion::start().await;
-    let service = runner(&index, &source);
-    let provider = Arc::new(CountingProvider::new(index.embed.clone()));
-    let plan = service.dry_run().await.unwrap();
-    record_plan(&index, "owned-outage", &plan);
-    *provider.boundary_pause.lock().unwrap() = Some(source.pause.clone());
-    let owned = service.clone();
-    let embedding = provider.clone();
-    let lease = index.lease.clone();
-    let task = tokio::spawn(async move {
-        owned
-            .apply("owned-outage", lease, clock(), embedding.as_ref())
-            .await
-    });
-    tokio::time::timeout(
-        std::time::Duration::from_secs(20),
-        source.pause.started.notified(),
-    )
-    .await
-    .unwrap();
-    source.change(|m| m.inaccessible_page = true);
-    source.pause.proceed.notify_one();
-    let progress = task.await.unwrap().unwrap();
-    assert_eq!(progress.failed.get(PAGE), Some(&DurableFailure::Source));
-    assert_eq!(progress.changed, 2);
     assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
 }
 
@@ -3347,58 +2994,6 @@ async fn reconciliation_owned_lock_wait_expires_without_releasing_another_live_o
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reconciliation_binding_change_during_owned_precommit_rejects_effect_and_preserves_resume()
-{
-    for change in [
-        "UPDATE index_commit_binding SET epoch=2",
-        "UPDATE index_commit_binding SET scope='new-policy'",
-    ] {
-        let index = Fixture::new();
-        index.create().await;
-        let source = HttpNotion::start().await;
-        let service = runner(&index, &source);
-        let provider = Arc::new(CountingProvider::new(index.embed.clone()));
-        let plan = service.dry_run().await.unwrap();
-        record_plan(&index, "owned-binding", &plan);
-        *provider.boundary_pause.lock().unwrap() = Some(source.pause.clone());
-        let owned = service.clone();
-        let embedding = provider.clone();
-        let lease = index.lease.clone();
-        let task = tokio::spawn(async move {
-            owned
-                .apply("owned-binding", lease, clock(), embedding.as_ref())
-                .await
-        });
-        tokio::time::timeout(
-            std::time::Duration::from_secs(20),
-            source.pause.started.notified(),
-        )
-        .await
-        .unwrap();
-        let sql = rusqlite::Connection::open(&index.db).unwrap();
-        sql.execute_batch(change).unwrap();
-        source.pause.proceed.notify_one();
-        assert!(task.await.unwrap().is_err());
-        assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
-        sql.execute(
-            "UPDATE index_commit_binding SET epoch=1,scope=?1",
-            [index.journal_scope.identity()],
-        )
-        .unwrap();
-        let progress = service
-            .apply(
-                "owned-binding",
-                index.lease.clone(),
-                clock(),
-                provider.as_ref(),
-            )
-            .await
-            .unwrap();
-        assert_eq!((progress.changed, progress.failed_pages()), (3, 0));
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconciliation_mixed_inventory_counts_missing_stale_restored_orphan_and_unchanged_once() {
     use notion_knowledge_retrieval::planner::Difference;
     const RESTORED: &str = "66666666-6666-6666-6666-666666666666";
@@ -3460,11 +3055,11 @@ async fn reconciliation_mixed_inventory_counts_missing_stale_restored_orphan_and
         m.title = "Stale exact metadata".into();
     });
     let dry = service.dry_run().await.unwrap();
-    // Until slice 2 drops lifecycle evidence, the root's new revision also
-    // makes its direct children stale: their ancestry revision changed.
+    // The root's child tags changed, so only the root itself is stale; its
+    // other children keep their identity.
     assert_eq!(
         (dry.scanned, dry.planned_refresh(), dry.planned_delete()),
-        (6, 5, 1)
+        (6, 4, 1)
     );
     for (id, difference) in [
         (PAGE, Difference::Stale),
@@ -3472,7 +3067,7 @@ async fn reconciliation_mixed_inventory_counts_missing_stale_restored_orphan_and
         (RESTORED, Difference::Restored),
         (ORPHAN, Difference::Orphan),
         (ROOT, Difference::Stale),
-        (OTHER, Difference::Stale),
+        (OTHER, Difference::Unchanged),
     ] {
         assert_eq!(
             dry.pages
@@ -3498,7 +3093,7 @@ async fn reconciliation_mixed_inventory_counts_missing_stale_restored_orphan_and
             progress.failed_pages(),
             progress.run_failures.len()
         ),
-        (6, 5, 1, 5, 1, 0, 0, 0)
+        (6, 4, 1, 4, 1, 1, 0, 0)
     );
     assert_eq!(progress.successful.len(), 6);
     assert!(progress.pending.is_empty());
@@ -4308,105 +3903,6 @@ async fn relation_graph_and_final_ack_failures_preserve_checkpoint_and_replay_af
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn installed_target_authority_race_rejects_effects_and_excluded_targets_stay_unresolved() {
-    use notion_knowledge_core::graph::{GraphEdgeStore, GraphTarget};
-    let mut index = Fixture::new();
-    index.create().await;
-    let source = HttpNotion::start().await;
-    source.change(|m| {
-        m.relation_name = Some("Targets".into());
-        m.relation_targets = vec![OTHER.into()];
-    });
-    let provider = CountingProvider::new(index.embed.clone());
-    *provider.target_race.lock().unwrap() = Some(source.state.clone());
-    let page = PageId(PAGE.into());
-    let root = PageId(ROOT.into());
-    assert_eq!(
-        index
-            .handler(source.client())
-            .refresh_page(
-                &page,
-                &root,
-                "target-race",
-                &provider,
-                index.lease.clone(),
-                clock()
-            )
-            .await
-            .unwrap_err(),
-        RefreshError::Conflict
-    );
-    assert!(
-        index
-            .coordinator
-            .state()
-            .page_state(PAGE)
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        index
-            .coordinator
-            .state()
-            .edges_from(PAGE)
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(index.table().await.count_rows().await.unwrap(), 0);
-    index
-        .handler(source.client())
-        .refresh_page(
-            &page,
-            &root,
-            "target-race",
-            &provider,
-            index.lease.clone(),
-            clock(),
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        index.coordinator.state().edges_from(PAGE).unwrap()[0].target(),
-        GraphTarget::Unresolved { .. }
-    ));
-    source.change(|m| m.inaccessible_other = false);
-    let mut scope = authority();
-    scope.generation = 2;
-    scope.exclusions.page_ids.insert(OTHER.into());
-    index.journal_scope = notion_knowledge_retrieval::planner::production_scope(&scope).unwrap();
-    let binding = CommitBinding::new("chunks", WORKSPACE, &index.journal_scope, "2", 2).unwrap();
-    index.coordinator = index
-        .coordinator
-        .change_scope(binding, &index.lease, 10)
-        .unwrap();
-    let handler = AuthoritativePageRefresh::new(
-        source.client(),
-        index.guarded(),
-        index.coordinator.clone(),
-        scope,
-        &index.journal_scope,
-        chunk_config(),
-    )
-    .unwrap();
-    handler
-        .refresh_page(
-            &page,
-            &root,
-            "excluded-target",
-            &provider,
-            index.lease.clone(),
-            clock(),
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        index.coordinator.state().edges_from(PAGE).unwrap()[0].target(),
-        GraphTarget::Unresolved { .. }
-    ));
-    assert!(index.guarded().page_chunks(OTHER).await.unwrap().is_empty());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconciliation_recovers_missing_applied_projection_with_durable_repair_before_ack() {
     use notion_knowledge_core::graph::GraphEdgeStore;
     use notion_knowledge_retrieval::commit::ReceiptStatus;
@@ -4499,83 +3995,6 @@ async fn reconciliation_recovers_missing_applied_projection_with_durable_repair_
         index.coordinator.state().edges_from(PAGE).unwrap()[0].display_name(),
         Some("Recovered")
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unchanged_owned_source_poll_releases_guard_after_cancelled_observer_and_lease_loss() {
-    let index = Fixture::new();
-    index.create().await;
-    let source = HttpNotion::start().await;
-    let provider = Arc::new(CountingProvider::new(index.embed.clone()));
-    let handler = index.handler(source.client());
-    handler
-        .refresh_page(
-            &PageId(PAGE.into()),
-            &PageId(ROOT.into()),
-            "noop-seed",
-            provider.as_ref(),
-            index.lease.clone(),
-            clock(),
-        )
-        .await
-        .unwrap();
-    let checkpoint = index.coordinator.state().page_state(PAGE).unwrap();
-    *source.pause.owned_directory.lock().unwrap() = Some(index.index.clone());
-    source.pause.armed.store(true, Ordering::SeqCst);
-    let now = Arc::new(std::sync::atomic::AtomicI64::new(10));
-    let owned_now = now.clone();
-    let clock: Arc<dyn Fn() -> i64 + Send + Sync> =
-        Arc::new(move || owned_now.load(Ordering::SeqCst));
-    let lease = index.lease.clone();
-    let owned_provider = provider.clone();
-    let task = tokio::spawn(async move {
-        handler
-            .refresh_page(
-                &PageId(PAGE.into()),
-                &PageId(ROOT.into()),
-                "unchanged-cancelled",
-                owned_provider.as_ref(),
-                lease,
-                clock,
-            )
-            .await
-    });
-    tokio::time::timeout(
-        std::time::Duration::from_secs(20),
-        source.pause.started.notified(),
-    )
-    .await
-    .unwrap();
-    task.abort();
-    assert!(task.await.unwrap_err().is_cancelled());
-    now.store(110, Ordering::SeqCst);
-    tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        index.coordinator.drain_owned(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    let probe = fs::File::open(&index.index).unwrap();
-    probe.try_lock().unwrap();
-    assert_eq!(
-        index.coordinator.state().page_state(PAGE).unwrap(),
-        checkpoint
-    );
-    assert!(
-        index
-            .coordinator
-            .current_relation_projection_complete(PAGE)
-            .unwrap()
-    );
-    assert!(
-        index
-            .coordinator
-            .receipt("unchanged-cancelled")
-            .unwrap()
-            .is_none()
-    );
-    source.pause.proceed.notify_one();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4906,8 +4325,8 @@ async fn reconciliation_converges_target_only_changes_and_rebuilds_derived_relat
         )
         .await
         .unwrap();
-    // The root lost or regained a child tag: its new revision also moves ROOT and OTHER.
-    assert_eq!((restored.changed, restored.failed_pages()), (3, 0));
+    // The root regained a child tag: PAGE and the root itself change.
+    assert_eq!((restored.changed, restored.failed_pages()), (2, 0));
     assert_eq!(index.coordinator.state().edges_from(PAGE).unwrap().len(), 2);
     source.change(|m| {
         m.hide_page = true;
@@ -5646,87 +5065,110 @@ async fn owned_drain_retains_failures_even_when_cancelled_observers_never_consum
         .unwrap();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn inline_page_whose_source_changes_once_is_prepared_again_and_committed() {
-    let index = Fixture::new();
-    index.create().await;
-    let source = HttpNotion::start().await;
-    let handler = index.handler(source.client());
-    let provider = CountingProvider::new(index.embed.clone());
-    let page = PageId(PAGE.into());
-    let root = PageId(ROOT.into());
-
-    source.change(|m| m.race_metadata_once = true);
-    let during_preparation = handler
-        .refresh_inline(
-            &page,
-            &root,
-            "inline-prepare",
-            &provider,
-            index.lease.clone(),
-            clock(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(during_preparation.outcome, CommitOutcome::Applied);
-
-    source.change(|m| m.markdown = "# Intro\n\nJuniper gnocchi.\n".into());
-    provider.race_on_next_embedding(source.state.clone());
-    let during_commit = handler
-        .refresh_inline(
-            &page,
-            &root,
-            "inline-commit",
-            &provider,
-            index.lease.clone(),
-            clock(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(during_commit.outcome, CommitOutcome::Applied);
-    let chunks = index.guarded().page_chunks(PAGE).await.unwrap();
-    assert!(chunks.iter().any(|c| c.text.contains("Juniper")));
+/// Every page one walk reached, as the sync consumer receives them.
+async fn walked_pages(
+    source: &HttpNotion,
+    scope: &LifecycleScope,
+) -> std::collections::BTreeMap<String, notion_knowledge_notion::walk::WalkedPage> {
+    let (send, mut receive) = tokio::sync::mpsc::channel(64);
+    let client = source.client();
+    let walk = async move { client.walk_tree_with_search(scope, Some(&send)).await };
+    let collect = async {
+        let mut pages = std::collections::BTreeMap::new();
+        while let Some(page) = receive.recv().await {
+            pages.insert(page.entry.page_id.clone(), page);
+        }
+        pages
+    };
+    let (walk, pages) = tokio::join!(walk, collect);
+    walk.unwrap();
+    pages
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn inline_page_whose_source_keeps_changing_is_a_page_local_source_failure() {
+#[tokio::test]
+async fn walked_page_is_prepared_and_committed_without_reading_it_again() {
     let index = Fixture::new();
     index.create().await;
     let source = HttpNotion::start().await;
     let handler = index.handler(source.client());
     let provider = CountingProvider::new(index.embed.clone());
-    let page = PageId(PAGE.into());
-    let root = PageId(ROOT.into());
+    let pages = walked_pages(&source, &index.scope).await;
+    let walked = source.requests().len();
+    let prepared = handler
+        .prepare_walked(&pages[PAGE], "walked")
+        .await
+        .unwrap();
+    let result = handler
+        .refresh_prefetched(prepared, &provider, index.lease.clone(), clock())
+        .await
+        .unwrap();
+    assert_eq!(result.outcome, CommitOutcome::Applied);
+    assert_eq!(source.requests().len(), walked, "no request after the walk");
+    let chunks = index.guarded().page_chunks(PAGE).await.unwrap();
+    assert!(chunks.iter().any(|c| c.text.contains("Saffron")));
+}
 
-    source.change(|m| m.race_metadata = true);
-    let failure = handler
-        .refresh_inline(
-            &page,
-            &root,
-            "inline-churn",
-            &provider,
-            index.lease.clone(),
-            clock(),
-        )
-        .await;
-    assert_eq!(failure.unwrap_err(), RefreshError::Source);
-    assert_eq!(provider.embeddings(), 0);
-    assert_eq!(index.table().await.count_rows().await.unwrap(), 0);
+#[tokio::test]
+async fn source_change_after_the_walk_read_commits_that_read_without_a_recheck() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let handler = index.handler(source.client());
+    let provider = CountingProvider::new(index.embed.clone());
+    let pages = walked_pages(&source, &index.scope).await;
+    let prepared = handler.prepare_walked(&pages[PAGE], "stale").await.unwrap();
+    // Edited and moved out after its single read: the next walk reconciles it.
+    source.change(|m| {
+        m.markdown = "# Intro\n\nJuniper gnocchi.\n".into();
+        m.parent = FOREIGN.into();
+    });
+    let walked = source.requests().len();
+    let result = handler
+        .refresh_prefetched(prepared, &provider, index.lease.clone(), clock())
+        .await
+        .unwrap();
+    assert_eq!(result.outcome, CommitOutcome::Applied);
+    assert_eq!(source.requests().len(), walked);
+    let chunks = index.guarded().page_chunks(PAGE).await.unwrap();
+    assert!(chunks.iter().any(|c| c.text.contains("Saffron")));
+    assert!(!chunks.iter().any(|c| c.text.contains("Juniper")));
+}
 
-    // The same durable work item completes once the source settles.
-    source.change(|m| m.race_metadata = false);
-    let settled = handler
-        .refresh_inline(
-            &page,
-            &root,
-            "inline-churn",
+#[tokio::test]
+async fn unreached_page_is_removed_without_reading_it() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let handler = index.handler(source.client());
+    let provider = CountingProvider::new(index.embed.clone());
+    let pages = walked_pages(&source, &index.scope).await;
+    let prepared = handler.prepare_walked(&pages[PAGE], "index").await.unwrap();
+    handler
+        .refresh_prefetched(prepared, &provider, index.lease.clone(), clock())
+        .await
+        .unwrap();
+    let before = source.requests().len();
+    let removed = handler
+        .remove_unreached(
+            &PageId(PAGE.into()),
+            "walk-removal",
             &provider,
             index.lease.clone(),
             clock(),
         )
         .await
         .unwrap();
-    assert_eq!(settled.outcome, CommitOutcome::Applied);
+    assert_eq!(removed.outcome, CommitOutcome::Applied);
+    assert_eq!(source.requests().len(), before);
+    assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+    assert!(
+        index
+            .coordinator
+            .state()
+            .page_state(PAGE)
+            .unwrap()
+            .is_some_and(|state| state.is_tombstone())
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5751,20 +5193,11 @@ async fn receipt_authority_conflict_during_preparation_is_never_retried_as_a_sou
     let embedded = provider.embeddings();
 
     // The receipt belongs to another page, so this work item has no authority.
-    let other = PageId(OTHER.into());
-    let prefetch = handler.prefetch_page(&other, &root, "shared-receipt").await;
-    assert_eq!(prefetch.err(), Some(RefreshError::Conflict));
-    let inline = handler
-        .refresh_inline(
-            &other,
-            &root,
-            "shared-receipt",
-            &provider,
-            index.lease.clone(),
-            clock(),
-        )
+    let pages = walked_pages(&source, &index.scope).await;
+    let prepared = handler
+        .prepare_walked(&pages[OTHER], "shared-receipt")
         .await;
-    assert_eq!(inline.unwrap_err(), RefreshError::Conflict);
+    assert_eq!(prepared.err(), Some(RefreshError::Conflict));
     assert_eq!(provider.embeddings(), embedded);
     assert!(index.guarded().page_chunks(OTHER).await.unwrap().is_empty());
 }
@@ -5810,5 +5243,305 @@ async fn incomplete_walk_with_repeated_cursor_plans_no_deletes() {
     assert!(
         state.inventory_entry(PAGE).unwrap().is_some(),
         "unreached entries stay"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconciliation_cancelled_observer_retains_owned_commit_then_recovers_real_receipt() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let provider = Arc::new(CountingProvider::new(index.embed.clone()));
+    *provider.boundary_pause.lock().unwrap() = Some(source.pause.clone());
+    pause_owned_commits(&index.index, source.pause.clone());
+    let service = runner(&index, &source);
+    let plan = service.dry_run().await.unwrap();
+    record_plan(&index, "cancelled", &plan);
+    let operation = index
+        .coordinator
+        .reconciliation_plan("cancelled")
+        .unwrap()
+        .pages[PAGE]
+        .operation_id
+        .clone();
+    let owned = service.clone();
+    let embedding = provider.clone();
+    let lease = index.lease.clone();
+    let task = tokio::spawn(async move {
+        owned
+            .apply("cancelled", lease, clock(), embedding.as_ref())
+            .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        source.pause.started.notified(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        index
+            .coordinator
+            .receipt(&operation)
+            .unwrap()
+            .unwrap()
+            .status,
+        notion_knowledge_retrieval::commit::ReceiptStatus::Pending
+    );
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    source.pause.proceed.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if index
+                .coordinator
+                .receipt(&operation)
+                .unwrap()
+                .is_some_and(|r| {
+                    r.status == notion_knowledge_retrieval::commit::ReceiptStatus::Applied
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        index
+            .coordinator
+            .reconciliation_progress("cancelled")
+            .unwrap()
+            .pending
+            .contains(PAGE)
+    );
+    assert!(!index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+    assert!(
+        index
+            .coordinator
+            .current_relation_projection_complete(PAGE)
+            .unwrap()
+    );
+    let progress = service
+        .apply("cancelled", index.lease.clone(), clock(), provider.as_ref())
+        .await
+        .unwrap();
+    assert_eq!((progress.changed, progress.failed_pages()), (3, 0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconciliation_owned_source_poll_expires_lease_and_new_fence_resumes_without_effects() {
+    use notion_knowledge_core::reconciliation::JournalError;
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let provider = Arc::new(CountingProvider::new(index.embed.clone()));
+    *provider.boundary_pause.lock().unwrap() = Some(source.pause.clone());
+    pause_owned_commits(&index.index, source.pause.clone());
+    let service = runner(&index, &source);
+    let plan = service.dry_run().await.unwrap();
+    record_plan(&index, "expiry", &plan);
+    let operation = index
+        .coordinator
+        .reconciliation_plan("expiry")
+        .unwrap()
+        .pages[PAGE]
+        .operation_id
+        .clone();
+    let now = Arc::new(std::sync::atomic::AtomicI64::new(10));
+    let observed = now.clone();
+    let timed_clock: Arc<dyn Fn() -> i64 + Send + Sync> =
+        Arc::new(move || observed.load(Ordering::SeqCst));
+    let owned = service.clone();
+    let embedding = provider.clone();
+    let lease = index.lease.clone();
+    let timer = timed_clock.clone();
+    let task = tokio::spawn(async move {
+        owned
+            .apply("expiry", lease, timer, embedding.as_ref())
+            .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        source.pause.started.notified(),
+    )
+    .await
+    .unwrap();
+    now.store(110, Ordering::SeqCst);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        result,
+        Err(notion_knowledge_retrieval::runner::RunnerError::Journal(
+            JournalError::LeaseLost
+        ))
+    ));
+    assert_eq!(
+        index
+            .coordinator
+            .receipt(&operation)
+            .unwrap()
+            .unwrap()
+            .status,
+        notion_knowledge_retrieval::commit::ReceiptStatus::Failed
+    );
+    assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+    source.pause.proceed.notify_one();
+    let lease = index.coordinator.state().acquire_lease(110, 100).unwrap();
+    let resumed = service
+        .apply("expiry", lease, timed_clock, provider.as_ref())
+        .await
+        .unwrap();
+    assert_eq!((resumed.changed, resumed.failed_pages()), (3, 0));
+    assert!(
+        service
+            .apply("expiry", index.lease.clone(), clock(), provider.as_ref())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unchanged_owned_source_poll_releases_guard_after_cancelled_observer_and_lease_loss() {
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    let provider = Arc::new(CountingProvider::new(index.embed.clone()));
+    let handler = index.handler(source.client());
+    handler
+        .refresh_page(
+            &PageId(PAGE.into()),
+            &PageId(ROOT.into()),
+            "noop-seed",
+            provider.as_ref(),
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let checkpoint = index.coordinator.state().page_state(PAGE).unwrap();
+    *source.pause.owned_directory.lock().unwrap() = Some(index.index.clone());
+    pause_owned_commits(&index.index, source.pause.clone());
+    source.pause.armed.store(true, Ordering::SeqCst);
+    let now = Arc::new(std::sync::atomic::AtomicI64::new(10));
+    let owned_now = now.clone();
+    let clock: Arc<dyn Fn() -> i64 + Send + Sync> =
+        Arc::new(move || owned_now.load(Ordering::SeqCst));
+    let lease = index.lease.clone();
+    let owned_provider = provider.clone();
+    let task = tokio::spawn(async move {
+        handler
+            .refresh_page(
+                &PageId(PAGE.into()),
+                &PageId(ROOT.into()),
+                "unchanged-cancelled",
+                owned_provider.as_ref(),
+                lease,
+                clock,
+            )
+            .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        source.pause.started.notified(),
+    )
+    .await
+    .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    now.store(110, Ordering::SeqCst);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        index.coordinator.drain_owned(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let probe = fs::File::open(&index.index).unwrap();
+    probe.try_lock().unwrap();
+    assert_eq!(
+        index.coordinator.state().page_state(PAGE).unwrap(),
+        checkpoint
+    );
+    assert!(
+        index
+            .coordinator
+            .current_relation_projection_complete(PAGE)
+            .unwrap()
+    );
+    assert!(
+        index
+            .coordinator
+            .receipt("unchanged-cancelled")
+            .unwrap()
+            .is_none()
+    );
+    source.pause.proceed.notify_one();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconciliation_binding_change_during_owned_precommit_rejects_effect_and_preserves_resume()
+{
+    for change in [
+        "UPDATE index_commit_binding SET epoch=2",
+        "UPDATE index_commit_binding SET scope='new-policy'",
+    ] {
+        let index = Fixture::new();
+        index.create().await;
+        let source = HttpNotion::start().await;
+        let service = runner(&index, &source);
+        let provider = Arc::new(CountingProvider::new(index.embed.clone()));
+        let plan = service.dry_run().await.unwrap();
+        record_plan(&index, "owned-binding", &plan);
+        *provider.boundary_pause.lock().unwrap() = Some(source.pause.clone());
+        pause_owned_commits(&index.index, source.pause.clone());
+        let owned = service.clone();
+        let embedding = provider.clone();
+        let lease = index.lease.clone();
+        let task = tokio::spawn(async move {
+            owned
+                .apply("owned-binding", lease, clock(), embedding.as_ref())
+                .await
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            source.pause.started.notified(),
+        )
+        .await
+        .unwrap();
+        let sql = rusqlite::Connection::open(&index.db).unwrap();
+        sql.execute_batch(change).unwrap();
+        source.pause.proceed.notify_one();
+        assert!(task.await.unwrap().is_err());
+        assert!(index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+        sql.execute(
+            "UPDATE index_commit_binding SET epoch=1,scope=?1",
+            [index.journal_scope.identity()],
+        )
+        .unwrap();
+        let progress = service
+            .apply(
+                "owned-binding",
+                index.lease.clone(),
+                clock(),
+                provider.as_ref(),
+            )
+            .await
+            .unwrap();
+        assert_eq!((progress.changed, progress.failed_pages()), (3, 0));
+    }
+}
+
+/// Hold the owned commit (guard and fence held, before effects) whenever
+/// `pause` is armed: the boundary the removed in-guard source read used to give.
+fn pause_owned_commits(index: &std::path::Path, pause: Arc<RequestPause>) {
+    notion_knowledge_retrieval::test_hooks::set_commit_pause(
+        index,
+        Arc::new(move || {
+            let pause = pause.clone();
+            Box::pin(async move { pause.hold().await })
+        }),
     );
 }

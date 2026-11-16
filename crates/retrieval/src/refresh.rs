@@ -4,19 +4,21 @@
 //! The webhook is only a hint for which ID to inspect. The actual Notion
 //! credential/scope and local index binding come from trusted operator config.
 //! No receipts are acknowledged until the guarded local commit completes.
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::Arc;
 
 use notion_knowledge_core::{
     aliases::AliasSources,
     backend::{BackendErrorKind, PageId},
     chunking::ChunkConfig,
     embedding::EmbeddingProvider,
+    inventory::InventoryParent,
     lifecycle::{LifecycleEvidence, LifecycleScope, LifecycleStatus, PageLifecycle},
     reconciliation::{FailureClass, Lease, ReconciliationScope},
-    root_scope::RootScopeGate,
     sync_state::{PageSyncState, SyncStateStore},
 };
-use notion_knowledge_notion::{NotionClient, relation_proposal::RelationProposalAdapter};
+use notion_knowledge_notion::{
+    NotionClient, relation_proposal::RelationProposalAdapter, walk::WalkedPage,
+};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -27,13 +29,15 @@ use crate::{
     },
 };
 
-// Owned operations use a coarse failure port. Invalid credentials must remain
-// fatal there, rather than being flattened into a skippable source/conflict error.
-fn source_revalidation_failure(kind: BackendErrorKind) -> FailureClass {
+fn source_failure(kind: BackendErrorKind) -> RefreshError {
     match kind {
-        BackendErrorKind::Unauthenticated => FailureClass::Unavailable,
-        BackendErrorKind::Conflict => FailureClass::Conflict,
-        _ => FailureClass::Source,
+        BackendErrorKind::PermissionDenied => RefreshError::OutOfScope,
+        BackendErrorKind::Conflict => RefreshError::Conflict,
+        BackendErrorKind::Unauthenticated => RefreshError::Unauthenticated,
+        BackendErrorKind::InvalidInput | BackendErrorKind::UnsupportedContent => {
+            RefreshError::PermanentSource
+        }
+        _ => RefreshError::Source,
     }
 }
 
@@ -162,8 +166,6 @@ impl AuthoritativePageRefresh {
         {
             return Err(RefreshError::InvalidConfiguration);
         }
-        RootScopeGate::new(notion.clone(), scope.clone())
-            .map_err(|_| RefreshError::InvalidConfiguration)?;
         let relations = RelationProposalAdapter::new((*notion).clone(), scope.clone())
             .map_err(|_| RefreshError::InvalidConfiguration)?;
         Ok(Self {
@@ -282,36 +284,29 @@ impl AuthoritativePageRefresh {
             let root = PageId(root.clone());
             // The durable plan was revalidated above from current state; a
             // read-ahead preparation replaces only the source read that follows.
-            if let Some((previous, proposal)) = self
+            let (previous, proposal) = match self
                 .matching_prefetch(prefetched, page, &root, operation_id, true)
                 .await?
             {
-                return Box::pin(self.embed_and_commit(
-                    page,
-                    operation_id,
-                    previous,
-                    proposal,
-                    provider,
-                    lease,
-                    clock,
-                    true,
-                    expected,
-                    None,
-                ))
-                .await;
-            }
-            return self
-                .refresh_page_inner(
-                    page,
-                    &root,
-                    operation_id,
-                    provider,
-                    lease,
-                    clock,
-                    true,
-                    expected,
-                )
-                .await;
+                Some(prepared) => prepared,
+                None => {
+                    let prepared =
+                        Box::pin(self.prepare_source(page, &evidence, &root, operation_id)).await?;
+                    (prepared.previous, prepared.proposal)
+                }
+            };
+            return Box::pin(self.embed_and_commit(
+                page,
+                operation_id,
+                previous,
+                proposal,
+                provider,
+                lease,
+                clock,
+                true,
+                expected.map(|expected| (expected, evidence)),
+            ))
+            .await;
         }
         let previous = self.guard.page_chunks(&page.0).await?;
         let owned_state = self
@@ -495,6 +490,7 @@ impl AuthoritativePageRefresh {
             .guard
             .commit_page_with_authority(prepared, lease, clock, move || async move {
                 owned_revalidation(
+                    handler.guard.index_directory().to_path_buf(),
                     async {
                         if let Some(expected) = &expected {
                             handler.check_expected(expected, &evidence).await?;
@@ -514,7 +510,7 @@ impl AuthoritativePageRefresh {
                             .relations
                             .revalidate_removal(&evidence)
                             .await
-                            .map_err(|error| source_revalidation_failure(error.kind))
+                            .map_err(|_| FailureClass::Conflict)
                     },
                     owned_clock.clone(),
                     expires_at,
@@ -539,83 +535,80 @@ impl AuthoritativePageRefresh {
         lease: Lease,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Result<RefreshResult, RefreshError> {
-        self.refresh_page_inner(
+        let evidence = self
+            .notion
+            .lifecycle(page, &self.scope)
+            .await
+            .map_err(|error| source_failure(error.kind))?;
+        let LifecycleStatus::Allowed { roots } = &evidence.status else {
+            return Err(RefreshError::OutOfScope);
+        };
+        if !roots.contains(&root.0) {
+            return Err(RefreshError::OutOfScope);
+        }
+        let PrefetchedPage {
+            previous, proposal, ..
+        } = Box::pin(self.prepare_source(page, &evidence, root, operation_id)).await?;
+        Box::pin(self.embed_and_commit(
             page,
-            root,
             operation_id,
+            previous,
+            proposal,
             provider,
             lease,
             clock,
             false,
             None,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn refresh_page_inner(
-        &self,
-        page: &PageId,
-        root: &PageId,
-        operation_id: &str,
-        provider: &dyn EmbeddingProvider,
-        lease: Lease,
-        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
-        lifecycle: bool,
-        expected: Option<ExpectedReconciliation>,
-    ) -> Result<RefreshResult, RefreshError> {
-        let PrefetchedPage {
-            previous,
-            proposal: relation_proposal,
-            ..
-        } = Box::pin(self.prefetch_page(page, root, operation_id)).await?;
-        Box::pin(self.embed_and_commit(
-            page,
-            operation_id,
-            previous,
-            relation_proposal,
-            provider,
-            lease,
-            clock,
-            lifecycle,
-            expected,
-            None,
         ))
         .await
     }
 
-    /// Read-only source preparation for one page: local receipt authority,
-    /// current Notion authorization, content and chunk drafts. No embedding,
-    /// index version, lease or durable effect is captured here, so a caller may
-    /// run several of these concurrently ahead of the single embedding/commit
-    /// consumer. Commit still revalidates the source inside its owned guard.
-    pub async fn prefetch_page(
+    /// Prepare a page the walk reached from its single read. No request is
+    /// made for the page itself; only relation targets are authorized. The
+    /// receipt authority and this page's indexed chunks are local state.
+    pub async fn prepare_walked(
         &self,
-        page: &PageId,
-        root: &PageId,
+        walked: &WalkedPage,
         operation_id: &str,
     ) -> Result<PrefetchedPage, RefreshError> {
-        Box::pin(self.prepare_source(page, root, operation_id, None)).await
+        let page = PageId(walked.entry.page_id.clone());
+        let root = PageId(walked.entry.root_id.clone());
+        if !self.scope.roots.contains(&root) || operation_id.is_empty() {
+            return Err(RefreshError::InvalidConfiguration);
+        }
+        self.coordinator
+            .validate_page_receipt_authority(operation_id, &page.0)?;
+        let previous = self.guard.page_chunks(&page.0).await?;
+        let proposal = self
+            .relations
+            .prepare_walked(walked, &previous, self.chunk_config)
+            .await
+            .map_err(|e| source_failure(e.kind))?;
+        Ok(PrefetchedPage {
+            page,
+            root,
+            operation: operation_id.to_owned(),
+            previous,
+            proposal,
+        })
     }
 
     /// Read-ahead source preparation for a planned reconciliation page. The
-    /// root is the single configured root, or else the page's indexed
-    /// provenance; the consumer discards it unless its own lifecycle read
-    /// selects the same root. No durable plan state is checked or captured
-    /// here: that stays with the consumer. Any failure yields `None`, and the
-    /// consumer then prepares the page itself exactly as without read-ahead.
+    /// consumer discards it unless its own lifecycle read selects the same
+    /// root. No durable plan state is checked or captured here: that stays
+    /// with the consumer. Any failure yields `None`, and the consumer then
+    /// prepares the page itself exactly as without read-ahead.
     pub(crate) async fn prefetch_reconciliation(
         &self,
         page: &PageId,
         operation_id: &str,
     ) -> Option<PrefetchedPage> {
-        let root = if let [root] = self.scope.roots.as_slice() {
-            root.clone()
-        } else {
-            let previous = self.guard.page_chunks(&page.0).await.ok()?;
-            PageId(previous.first()?.metadata.source.root_page_id.clone())
+        let evidence = self.notion.lifecycle(page, &self.scope).await.ok()?;
+        let LifecycleStatus::Allowed { roots } = &evidence.status else {
+            return None;
         };
-        Box::pin(self.prefetch_page(page, &root, operation_id))
+        let root = PageId(roots.first()?.clone());
+        Box::pin(self.prepare_source(page, &evidence, &root, operation_id))
             .await
             .ok()
     }
@@ -655,49 +648,28 @@ impl AuthoritativePageRefresh {
         Ok(Some((prefetched.previous, prefetched.proposal)))
     }
 
-    /// [`Self::prefetch_page`], additionally marking `source_changed` when the
-    /// conflict means only that the source changed during preparation
-    /// ([`notion_knowledge_notion::prepare::SOURCE_CHANGED`]). Receipt
-    /// authority, scope policy, bounds, lock, lease, storage and ownership
-    /// conflicts are never marked and stay fatal.
+    /// One read of a page whose physical chain the caller's lifecycle read
+    /// verified (metadata and Markdown), then local preparation.
     async fn prepare_source(
         &self,
         page: &PageId,
+        evidence: &LifecycleEvidence,
         root: &PageId,
         operation_id: &str,
-        source_changed: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<PrefetchedPage, RefreshError> {
         if !self.scope.roots.contains(root) || operation_id.is_empty() {
             return Err(RefreshError::InvalidConfiguration);
         }
-
+        let parent = InventoryParent::from_evidence(evidence).ok_or(RefreshError::Source)?;
         self.coordinator
             .validate_page_receipt_authority(operation_id, &page.0)?;
-
-        // This is trusted local indexed state, NOT a physical scope decision.
-        // The notion adapter validates its previous-page provenance/IDs/hash
-        // after live Notion ancestry authorization.
+        // Trusted local indexed state, NOT a physical scope decision.
         let previous = self.guard.page_chunks(&page.0).await?;
         let proposal = self
             .relations
-            .prepare(page, root, &previous, self.chunk_config)
+            .prepare_read(page, parent, root, &previous, self.chunk_config)
             .await
-            .map_err(|e| match e.kind {
-                BackendErrorKind::PermissionDenied => RefreshError::OutOfScope,
-                BackendErrorKind::Conflict => {
-                    if e.operation == notion_knowledge_notion::prepare::SOURCE_CHANGED
-                        && let Some(flag) = source_changed
-                    {
-                        flag.store(true, Ordering::SeqCst);
-                    }
-                    RefreshError::Conflict
-                }
-                BackendErrorKind::Unauthenticated => RefreshError::Unauthenticated,
-                BackendErrorKind::InvalidInput | BackendErrorKind::UnsupportedContent => {
-                    RefreshError::PermanentSource
-                }
-                _ => RefreshError::Source,
-            })?;
+            .map_err(|e| source_failure(e.kind))?;
         Ok(PrefetchedPage {
             page: page.clone(),
             root: root.clone(),
@@ -707,11 +679,11 @@ impl AuthoritativePageRefresh {
         })
     }
 
-    /// Embed and durably commit a page prepared by [`Self::prefetch_page`].
+    /// Embed and durably commit a page prepared by [`Self::prepare_walked`].
     /// The guarded mutation plan (pinned index version, receipt and projection
     /// state) is built here from current local state, never from prefetch time.
-    /// When this page's own indexed chunks changed while it waited, its
-    /// chunk-identity preparation is stale and the source is prepared again.
+    /// When this page's own indexed chunks changed while it waited, its chunk
+    /// identities are prepared again from the same read, without a request.
     pub async fn refresh_prefetched(
         &self,
         prefetched: PrefetchedPage,
@@ -726,142 +698,88 @@ impl AuthoritativePageRefresh {
             previous,
             proposal,
         } = prefetched;
-        let (previous, proposal) = if self.guard.page_chunks(&page.0).await? == previous {
-            self.coordinator
-                .validate_page_receipt_authority(&operation, &page.0)?;
-            (previous, proposal)
+        self.coordinator
+            .validate_page_receipt_authority(&operation, &page.0)?;
+        let current = self.guard.page_chunks(&page.0).await?;
+        let proposal = if current == previous {
+            proposal
         } else {
-            drop((previous, proposal));
-            let fresh = Box::pin(self.prefetch_page(&page, &root, &operation)).await?;
-            (fresh.previous, fresh.proposal)
+            let snapshot = proposal.snapshot();
+            self.relations
+                .prepare_content(
+                    snapshot.source().clone(),
+                    snapshot.parent.clone(),
+                    &root,
+                    &current,
+                    self.chunk_config,
+                )
+                .await
+                .map_err(|e| source_failure(e.kind))?
         };
-        Box::pin(self.commit_with_one_retry(
-            &page, &root, &operation, previous, proposal, provider, lease, clock, true,
+        Box::pin(self.embed_and_commit(
+            &page, &operation, current, proposal, provider, lease, clock, false, None,
         ))
         .await
     }
 
-    /// Prepare and commit a page the streaming consumer could not take from
-    /// the prefetch queue (too large to retain, or its source changed while it
-    /// was prefetched). It gets the same single bounded re-preparation as a
-    /// queued prefetched page: a source change during preparation or commit
-    /// re-prepares once from current state, and a page that changes again is a
-    /// page-local transient [`RefreshError::Source`] failure. Any other conflict
-    /// (receipt authority, lease, ownership, storage) is returned unchanged.
-    /// The bound is per call: a page the producer already saw change during
-    /// prefetch is handed here and may be prepared at most twice more.
-    pub async fn refresh_inline(
+    /// Remove a page a complete walk no longer reached (moved out, trashed,
+    /// revoked or deleted). The walk is the evidence: nothing is read again.
+    pub async fn remove_unreached(
         &self,
         page: &PageId,
-        root: &PageId,
         operation_id: &str,
         provider: &dyn EmbeddingProvider,
         lease: Lease,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Result<RefreshResult, RefreshError> {
-        let changed = std::sync::atomic::AtomicBool::new(false);
-        let (prepared, retry) =
-            match Box::pin(self.prepare_source(page, root, operation_id, Some(&changed))).await {
-                Err(RefreshError::Conflict) if changed.load(Ordering::SeqCst) => {
-                    // The single retry is spent on re-preparation.
-                    (
-                        Box::pin(self.prepare_once_more(page, root, operation_id)).await?,
-                        false,
-                    )
-                }
-                prepared => (prepared?, true),
-            };
-        Box::pin(self.commit_with_one_retry(
-            page,
-            root,
+        self.coordinator
+            .validate_page_receipt_authority(operation_id, &page.0)?;
+        let checkpoint = PageSyncState::tombstone(page.0.clone(), None)
+            .map_err(|_| RefreshError::InvalidConfiguration)?;
+        let revision = format!(
+            "{:x}",
+            Sha256::digest(format!("walk-removal:{operation_id}:{}", page.0).as_bytes())
+        );
+        let projection =
+            RelationProjection::new(self.coordinator.binding(), &page.0, true, vec![])?
+                .with_links(vec![])?;
+        let aliases = self
+            .alias_sources
+            .as_ref()
+            .map(|sources| {
+                AliasProjection::tombstone(
+                    self.coordinator.binding(),
+                    &self.coordinator.alias_root(&page.0)?,
+                    &page.0,
+                    sources,
+                )
+                .map(AliasProjection::with_owned_root_cleanup)
+            })
+            .transpose()?;
+        let operation = PageOperation::retryable_lifecycle(
             operation_id,
-            prepared.previous,
-            prepared.proposal,
-            provider,
-            lease,
-            clock,
-            retry,
-        ))
-        .await
-    }
-
-    /// The single re-preparation after a source change. A source that changes
-    /// again is a page-local transient failure; other errors are unchanged.
-    async fn prepare_once_more(
-        &self,
-        page: &PageId,
-        root: &PageId,
-        operation_id: &str,
-    ) -> Result<PrefetchedPage, RefreshError> {
-        let changed = std::sync::atomic::AtomicBool::new(false);
-        match Box::pin(self.prepare_source(page, root, operation_id, Some(&changed))).await {
-            Err(RefreshError::Conflict) if changed.load(Ordering::SeqCst) => {
-                Err(RefreshError::Source)
-            }
-            prepared => prepared,
-        }
-    }
-
-    /// Embed and commit a prepared page. When guarded source revalidation
-    /// reports the page changed and nothing was committed, it is prepared once
-    /// more (if `retry`) and committed through the same guards; a page that
-    /// keeps changing is a page-local transient source failure.
-    #[allow(clippy::too_many_arguments)]
-    async fn commit_with_one_retry(
-        &self,
-        page: &PageId,
-        root: &PageId,
-        operation: &str,
-        previous: Vec<notion_knowledge_core::indexed::IndexedChunk>,
-        proposal: notion_knowledge_notion::relation_proposal::RelationProposal,
-        provider: &dyn EmbeddingProvider,
-        lease: Lease,
-        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
-        retry: bool,
-    ) -> Result<RefreshResult, RefreshError> {
-        let changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let first = Box::pin(self.embed_and_commit(
-            page,
-            operation,
-            previous,
-            proposal,
-            provider,
-            lease.clone(),
-            clock.clone(),
-            false,
-            None,
-            Some(changed.clone()),
-        ))
-        .await;
-        if !matches!(first, Err(RefreshError::Conflict)) || !changed.load(Ordering::SeqCst) {
-            return first;
-        }
-        if !retry {
-            return Err(RefreshError::Source);
-        }
-        // The source changed after preparation and nothing was committed.
-        // Prepare this page once more from current source and local state;
-        // every guard still applies. A page that keeps changing is a
-        // page-local transient source failure, so its siblings continue.
-        changed.store(false, Ordering::SeqCst);
-        let fresh = Box::pin(self.prepare_once_more(page, root, operation)).await?;
-        let retry = Box::pin(self.embed_and_commit(
-            page,
-            operation,
-            fresh.previous,
-            fresh.proposal,
-            provider,
-            lease,
-            clock,
-            false,
-            None,
-            Some(changed.clone()),
-        ))
-        .await;
-        if matches!(retry, Err(RefreshError::Conflict)) && changed.load(Ordering::SeqCst) {
-            return Err(RefreshError::Source);
-        }
-        retry
+            &revision,
+            PageAction::Delete,
+            checkpoint,
+        )
+        .map_err(RefreshError::from)?
+        .with_relation_projection(projection)?;
+        let operation = self.attach_aliases(operation, aliases)?;
+        let prepared = self.guard.prepare_page(provider, operation, &[]).await?;
+        let diff = prepared.metrics();
+        let handler = self.clone();
+        let outcome = self
+            .guard
+            .commit_page_with_authority(prepared, lease, clock, move || async move {
+                handler
+                    .relations
+                    .removal_authority(&handler.scope)
+                    .await
+                    .map_err(|_| FailureClass::Conflict)
+            })
+            .await
+            .map_err(RefreshError::from)?;
+        Ok(RefreshResult { outcome, diff })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -875,17 +793,9 @@ impl AuthoritativePageRefresh {
         lease: Lease,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
         lifecycle: bool,
-        expected: Option<ExpectedReconciliation>,
-        // Set when guarded source revalidation reports the page changed.
-        source_changed: Option<Arc<std::sync::atomic::AtomicBool>>,
+        // A durable plan's expectation and the lifecycle read it is checked against.
+        expected: Option<(ExpectedReconciliation, LifecycleEvidence)>,
     ) -> Result<RefreshResult, RefreshError> {
-        let mark_changed = move |kind: BackendErrorKind| {
-            if kind == BackendErrorKind::Conflict
-                && let Some(flag) = &source_changed
-            {
-                flag.store(true, Ordering::SeqCst);
-            }
-        };
         let proposal = relation_proposal.snapshot().clone();
         let projection = RelationProjection::new(
             self.coordinator.binding(),
@@ -921,8 +831,7 @@ impl AuthoritativePageRefresh {
             archived: false,
             properties: document.metadata.properties.clone(),
         };
-        let metadata_identity =
-            crate::planner::metadata_identity(&metadata_page, &proposal.evidence);
+        let metadata_identity = crate::planner::metadata_identity(&metadata_page, &proposal.parent);
         let checkpoint = PageSyncState::present(
             page.0.clone(),
             document.content_hash.clone(),
@@ -962,7 +871,6 @@ impl AuthoritativePageRefresh {
             new.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
             if old == new {
                 let handler = self.clone();
-                let mark_changed = mark_changed.clone();
                 let expected_projection = projection.clone();
                 let expected_aliases = aliases.clone();
                 let proposal = relation_proposal;
@@ -970,19 +878,11 @@ impl AuthoritativePageRefresh {
                 let expected_metadata = metadata_identity.clone();
                 let expected_chunks = new.clone();
                 self.check_owned_snapshot(lease, clock, move |context| async move {
-                    let _authority =
-                        handler
-                            .relations
-                            .revalidate(&proposal)
-                            .await
-                            .map_err(|error| {
-                                mark_changed(error.kind);
-                                if error.kind == BackendErrorKind::Unauthenticated {
-                                    FailureClass::Unavailable
-                                } else {
-                                    FailureClass::Conflict
-                                }
-                            })?;
+                    let _authority = handler
+                        .relations
+                        .revalidate(&proposal)
+                        .await
+                        .map_err(|_| FailureClass::Conflict)?;
                     context.revalidate().map_err(|_| FailureClass::Conflict)?;
                     let mut current = handler
                         .guard
@@ -1042,16 +942,12 @@ impl AuthoritativePageRefresh {
                 .is_some_and(|r| r.status == ReceiptStatus::Applied)
         {
             let handler = self.clone();
-            let mark_changed = mark_changed.clone();
             self.check_owned_snapshot(lease, clock, move |context| async move {
                 let _authority = handler
                     .relations
                     .revalidate(&relation_proposal)
                     .await
-                    .map_err(|error| {
-                        mark_changed(error.kind);
-                        FailureClass::Conflict
-                    })?;
+                    .map_err(|_| FailureClass::Conflict)?;
                 context.revalidate().map_err(|_| FailureClass::Conflict)?;
                 if !handler
                     .aliases_complete(&aliases)
@@ -1133,11 +1029,10 @@ impl AuthoritativePageRefresh {
             .await?;
         let diff = prepared.metrics();
 
-        // The commit's callback is invoked by the operation-owned runtime
-        // after its cross-process Lance directory guard and SQLite fencing.
-        // Reject every changed source field or physical ancestry; no event
-        // name, cached root, index URL, or revision hint grants authority.
-        let guarded_evidence = proposal.evidence;
+        // The commit's callback runs inside the operation-owned runtime, after
+        // its cross-process Lance directory guard and SQLite fencing. It makes
+        // no source request: it records a durable plan's proposal under the
+        // fence and holds the current policy through acknowledgment.
         let owned_clock = clock.clone();
         let expires_at = lease.expires_at;
         let expected_lease = lease.clone();
@@ -1146,9 +1041,10 @@ impl AuthoritativePageRefresh {
             .guard
             .commit_page_with_authority(prepared, lease, clock, move || async move {
                 owned_revalidation(
+                    handler.guard.index_directory().to_path_buf(),
                     async {
-                        if let Some(expected) = &expected {
-                            handler.check_expected(expected, &guarded_evidence).await?;
+                        if let Some((expected, evidence)) = &expected {
+                            handler.check_expected(expected, evidence).await?;
                             handler
                                 .coordinator
                                 .prepare_reconciliation_operation(
@@ -1156,7 +1052,7 @@ impl AuthoritativePageRefresh {
                                     owned_clock(),
                                     &expected.run,
                                     &expected_operation,
-                                    &guarded_evidence,
+                                    evidence,
                                     expected.replan,
                                 )
                                 .map_err(|_| FailureClass::Conflict)?;
@@ -1165,10 +1061,7 @@ impl AuthoritativePageRefresh {
                             .relations
                             .revalidate(&relation_proposal)
                             .await
-                            .map_err(|error| {
-                                mark_changed(error.kind);
-                                source_revalidation_failure(error.kind)
-                            })
+                            .map_err(|_| FailureClass::Conflict)
                     },
                     owned_clock.clone(),
                     expires_at,
@@ -1196,9 +1089,10 @@ impl AuthoritativePageRefresh {
     {
         let owned_clock = clock.clone();
         let expires_at = lease.expires_at;
+        let index = self.guard.index_directory().to_path_buf();
         self.coordinator
             .maintain(lease, clock, move |context| async move {
-                owned_revalidation(check(context), owned_clock, expires_at).await
+                owned_revalidation(index, check(context), owned_clock, expires_at).await
             })
     }
 
@@ -1222,7 +1116,8 @@ impl AuthoritativePageRefresh {
             })
     }
 
-    /// Complete local snapshot and exact metadata, independently of extraction.
+    /// The plan still matches the lifecycle read and the complete local
+    /// snapshot. Local state only: the source is not read again here.
     async fn check_expected(
         &self,
         expected: &ExpectedReconciliation,
@@ -1258,20 +1153,7 @@ impl AuthoritativePageRefresh {
         {
             return Err(FailureClass::Conflict);
         }
-        if let Some(identity) = &expected.page.metadata_identity {
-            let page = self
-                .notion
-                .fetch_page(&expected.page.page_id)
-                .await
-                .map_err(|error| source_revalidation_failure(error.kind))?;
-            if crate::planner::metadata_identity(&page, evidence) != *identity {
-                return Err(FailureClass::Conflict);
-            }
-        }
-        self.notion
-            .revalidate_lifecycle(evidence, &self.scope)
-            .await
-            .map_err(|error| source_revalidation_failure(error.kind))
+        Ok(())
     }
 
     /// An unchanged canonical page still verifies the full source/relation
@@ -1322,9 +1204,11 @@ impl AuthoritativePageRefresh {
             Some(prepared) => prepared,
             None => {
                 let previous = self.guard.page_chunks(&expected.page.page_id).await?;
+                let parent =
+                    InventoryParent::from_evidence(&evidence).ok_or(RefreshError::Source)?;
                 let proposal = self
                     .relations
-                    .prepare(&page_id, &root, &previous, self.chunk_config)
+                    .prepare_read(&page_id, parent, &root, &previous, self.chunk_config)
                     .await
                     .map_err(|error| {
                         if error.kind == BackendErrorKind::Unauthenticated {
@@ -1417,6 +1301,7 @@ impl AuthoritativePageRefresh {
         self.coordinator
             .submit_with_authority(operation, lease, clock, move |context| async move {
                 owned_revalidation(
+                    handler.guard.index_directory().to_path_buf(),
                     async {
                         handler.check_expected(&expected, &evidence).await?;
                         context.revalidate().map_err(|_| FailureClass::Conflict)?;
@@ -1489,8 +1374,9 @@ impl AuthoritativePageRefresh {
             let previous = self.guard.page_chunks(&page).await?;
             Some(
                 self.relations
-                    .prepare(
+                    .prepare_read(
                         &PageId(page.clone()),
+                        InventoryParent::from_evidence(&evidence).ok_or(RefreshError::Source)?,
                         &PageId(roots.first().ok_or(RefreshError::Conflict)?.clone()),
                         &previous,
                         self.chunk_config,
@@ -1513,6 +1399,7 @@ impl AuthoritativePageRefresh {
         self.coordinator
             .maintain(lease, clock, move |context| async move {
                 owned_revalidation(
+                    handler.guard.index_directory().to_path_buf(),
                     async {
                         let _authority = if let Some(proposal) = &proposal {
                             let authority = handler
@@ -1598,10 +1485,18 @@ impl AuthoritativePageRefresh {
 /// the caller loses ownership. Dropping its observer alone cannot release that
 /// runtime's index directory guard. All messages remain sanitized enum classes.
 async fn owned_revalidation<Authority>(
+    index: std::path::PathBuf,
     source: impl std::future::Future<Output = Result<Authority, FailureClass>>,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     expires_at: i64,
 ) -> Result<Authority, FailureClass> {
+    #[cfg(any(test, feature = "test-fixtures"))]
+    let source = async move {
+        crate::test_hooks::commit_pause(&index).await;
+        source.await
+    };
+    #[cfg(not(any(test, feature = "test-fixtures")))]
+    drop(index);
     tokio::pin!(source);
     loop {
         if clock() >= expires_at {

@@ -9,6 +9,7 @@ use notion_knowledge_core::{
     aliases::AliasSources,
     backend::{BackendErrorKind, Page, PageId},
     indexed::IndexedChunk,
+    inventory::InventoryParent,
     lifecycle::{LifecycleEvidence, LifecycleScope, LifecycleStatus, PageLifecycle},
     reconciliation::ReconciliationScope,
     sync_state::{PageSyncState, SyncStateStore},
@@ -52,15 +53,15 @@ pub fn production_scope(scope: &LifecycleScope) -> Result<ReconciliationScope, P
     )
     .map_err(|_| PlanError::Ownership)
 }
-/// v1 includes exact citation/property metadata and complete physical ancestry.
-/// Unknown legacy identities conservatively require refresh, even for empty pages.
-pub(crate) fn metadata_identity(page: &Page, evidence: &LifecycleEvidence) -> String {
+/// v2 includes exact citation/property metadata, `last_edited_time` and the
+/// walk's parent. Unknown legacy identities conservatively require refresh.
+pub(crate) fn metadata_identity(page: &Page, parent: &InventoryParent) -> String {
     let properties = serde_json::to_string(&page.properties).expect("typed properties serialize");
     format!(
         "{:x}",
         Sha256::digest(
             format!(
-                "metadata-v1:{:?}:{:?}:{:?}:{:?}:{}:{properties}:{evidence:?}",
+                "metadata-v2:{:?}:{:?}:{:?}:{:?}:{}:{properties}:{parent:?}",
                 page.id, page.url, page.title, page.last_edited_time, page.archived
             )
             .as_bytes()
@@ -280,7 +281,7 @@ impl AuthoritativeReconciliationPlanner {
     /// tree first; no operational metadata, content extraction, embedding,
     /// or acknowledgments are written.
     pub async fn plan(&self) -> Result<ReconciliationPlan, PlanError> {
-        let walk = self.notion.walk_tree(&self.scope, None).await;
+        let walk = self.notion.walk_tree_with_search(&self.scope, None).await;
         self.plan_from(walk.as_ref().map_err(|error| error.kind))
             .await
     }
@@ -438,7 +439,9 @@ impl AuthoritativeReconciliationPlanner {
                 .fetch_page(id)
                 .await
                 .map_err(|error| source_error(error.kind))?;
-            let identity = metadata_identity(&page, &evidence);
+            let parent =
+                InventoryParent::from_evidence(&evidence).ok_or(PlanError::UnsupportedSource)?;
+            let identity = metadata_identity(&page, &parent);
             // A missing page always needs refresh. Relation completeness and
             // repeated snapshot checks cannot change that decision. Apply still
             // prepares fresh content and validates scope/metadata before commit.
@@ -495,16 +498,6 @@ impl AuthoritativeReconciliationPlanner {
                 }
                 Some(_) => Difference::Stale,
             };
-            // Exact page metadata gets its own second read: lifecycle only
-            // compares ancestry/timestamps, which cannot detect property races.
-            let fresh = self
-                .notion
-                .fetch_page(id)
-                .await
-                .map_err(|error| source_error(error.kind))?;
-            if fresh != page {
-                return Err(PlanError::Conflict);
-            }
             (difference, Some(identity))
         } else {
             if discovered {
@@ -536,10 +529,6 @@ impl AuthoritativeReconciliationPlanner {
             }
             (Difference::Orphan, None)
         };
-        self.notion
-            .revalidate_lifecycle(&evidence, &self.scope)
-            .await
-            .map_err(|_| PlanError::Conflict)?;
         Ok(Some(PlannedPage {
             page_id: id.into(),
             difference,

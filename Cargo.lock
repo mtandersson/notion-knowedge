@@ -4842,6 +4842,7 @@ dependencies = [
  "notion-knowledge-core",
  "notion-knowledge-mcp",
  "notion-knowledge-notion",
+ "notion-knowledge-retrieval",
  "object_store 0.14.2",
  "quick-xml",
  "rusqlite",

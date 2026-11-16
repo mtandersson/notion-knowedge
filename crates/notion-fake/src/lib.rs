@@ -72,6 +72,8 @@ pub struct Model {
     pub rows: Vec<String>,
     /// The data-source query keeps returning the same cursor.
     pub repeat_query_cursor: bool,
+    /// `POST /v1/search` fails, so the walk reads every page's metadata.
+    pub search_unavailable: bool,
 }
 impl Default for Model {
     fn default() -> Self {
@@ -107,6 +109,7 @@ impl Default for Model {
             extra: Default::default(),
             rows: vec![],
             repeat_query_cursor: false,
+            search_unavailable: false,
         }
     }
 }
@@ -121,7 +124,15 @@ pub struct RequestPause {
     pub proceed: tokio::sync::Notify,
 }
 impl RequestPause {
-    fn ready(&self) -> bool {
+    /// Pause here once when armed: notify `started`, then wait for `proceed`.
+    pub async fn hold(&self) {
+        if self.ready() {
+            self.started.notify_one();
+            self.proceed.notified().await;
+        }
+    }
+    /// Consume the arming if the pause should fire now.
+    pub fn ready(&self) -> bool {
         if !self.armed.load(Ordering::SeqCst) {
             return false;
         }
@@ -237,8 +248,29 @@ fn root_revision(snapshot: &Model) -> String {
     format!("2026-10-10T10:{:02}:{:02}Z", seconds / 60, seconds % 60)
 }
 
+/// Every readable page, as one search listing would return it.
+fn search(snapshot: &Model, bodies: usize) -> Value {
+    let ids = [ROOT, PAGE, OTHER, FOREIGN]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(snapshot.extra.keys().cloned())
+        .chain(snapshot.rows.iter().cloned());
+    let results: Vec<_> = ids
+        .map(|id| respond(&format!("/v1/pages/{id}"), snapshot.clone(), bodies))
+        .filter(|page| page["object"] == "page")
+        .collect();
+    json!({"object":"list","results":results,"has_more":false,"next_cursor":null})
+}
+
 fn respond(route: &str, snapshot: Model, bodies: usize) -> Value {
     let not_found = json!({"object":"error", "code":"object_not_found"});
+    if route == "/v1/search" {
+        return if snapshot.search_unavailable {
+            not_found
+        } else {
+            search(&snapshot, bodies)
+        };
+    }
     if (snapshot.unauthenticated_content && route == format!("/v1/pages/{PAGE}/markdown"))
         || (snapshot.unauthenticated_page_metadata && route == format!("/v1/pages/{PAGE}"))
     {
@@ -427,6 +459,7 @@ impl FakeNotion {
                 let post = req.starts_with("POST ");
                 assert!(
                     req.starts_with("GET /v1/")
+                        || (post && route == "/v1/search")
                         || (post
                             && route.starts_with("/v1/data_sources/")
                             && route.ends_with("/query"))

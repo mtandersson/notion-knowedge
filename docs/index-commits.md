@@ -228,12 +228,12 @@ exact index/table/workspace/scope/generation/epoch and page, resolved and unreso
 targets, stable property provenance, optional human labels and tombstone state.
 Duplicate identical edges normalize away; conflicting labels for one edge fail
 validation. An empty live projection and an empty tombstone are distinct valid
-effects. This is derived data, never source or target authorization. Callers must
-supply freshly verified source/target evidence through the guarded precommit check.
+effects. This is derived data, never source or target authorization. Source scope
+comes from the walk that read the page; targets are authorized at preparation.
 
 The actual `GuardedChunkTable::commit_page` still owns the cross-process directory
 guard and detached runtime: it reopens and checks the pinned Lance version,
-revalidates source and the lease, then replaces vectors and finishes FTS/vector
+revalidates the lease and fence, then replaces vectors and finishes FTS/vector
 maintenance. Only then does the coordinator's final fenced SQLite transaction
 replace relation-family edges, record completeness, update the page checkpoint
 and acknowledge the receipt. Relation-only component callers retain link edges;
@@ -306,10 +306,10 @@ The integration must construct retrieval's generation/index-bound
 `RelationProjection` from the proposal's exact edges and attach it to the owning
 page operation. **Inside the operation-owned commit**, before vector/graph effects
 or acknowledgment, call `adapter.revalidate(&proposal)` and retain its returned
-`RelationAuthority` through effects and final acknowledgment. Revalidation brackets
-candidate metadata reads with full source membership/label/content comparisons and
-physical source checks, compares exact target observations, and checks the
-current policy owner. A changed source, target or policy requires fresh preparation.
+`RelationAuthority` through effects and final acknowledgment. Revalidation makes
+no source request: it checks that the proposal belongs to the adapter's current
+policy owner and projection mode. A changed policy requires fresh preparation; a
+changed source or target is picked up by the next walk.
 The policy guard does not replace the SQLite generation/lease fence or directory
 guard. Upstream Notion reads remain sequential observations, without atomic CAS;
 subsequent upstream changes require another authoritative refresh.
