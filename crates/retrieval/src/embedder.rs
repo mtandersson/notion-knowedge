@@ -1,8 +1,10 @@
 //! The one place that turns embedding configuration into a provider.
 //!
-//! Every runtime builds its provider here, so a different backend changes this
-//! function only. A provider whose vector identity does not match the expected
-//! index identity is rejected before any caller can embed with it.
+//! Every server runtime builds its provider here, so a different backend
+//! changes this module only. A caller that already knows the expected index
+//! identity can pass it, and a mismatched provider is then rejected before it
+//! is returned. Callers that pass `None` rely on the index runtime's own
+//! `ensure_compatible` check against persisted metadata.
 use std::{future::Future, path::PathBuf, sync::Arc};
 
 use notion_knowledge_core::embedding::{EmbeddingError, EmbeddingMetadata, EmbeddingProvider};
@@ -107,23 +109,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn factory_returns_provider_with_matching_or_unchecked_identity() {
-        let calls = Arc::new(AtomicUsize::new(0));
+    async fn factory_returns_unused_provider_with_matching_or_unchecked_identity() {
         for expected in [Some(identity("v1")), None] {
+            let calls = Arc::new(AtomicUsize::new(0));
             let provider = load_stub(identity("v1"), expected.as_ref(), calls.clone())
                 .await
                 .expect("compatible provider");
             assert_eq!(provider.metadata(), &identity("v1"));
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
         }
     }
 
     #[tokio::test]
-    async fn backend_failure_is_returned_unchanged() {
+    async fn backend_failure_is_returned_without_identity_check() {
         let config = config();
-        let result = load_with(&config, None, |_| async {
-            Err(EmbeddingError::UnsupportedModel)
+        let result = load_with(&config, Some(&identity("v1")), |_| async {
+            Err(EmbeddingError::Unavailable)
         })
         .await;
+        assert_eq!(result.err(), Some(EmbeddingError::Unavailable));
+    }
+
+    #[cfg(not(feature = "local-qwen"))]
+    #[tokio::test]
+    async fn local_qwen_is_unsupported_without_the_feature() {
+        let result = load_configured_embedder(&config(), None).await;
         assert_eq!(result.err(), Some(EmbeddingError::UnsupportedModel));
     }
 }
