@@ -408,6 +408,52 @@ mod inventory {
     }
 
     #[test]
+    fn removals_of_rows_under_a_newly_inaccessible_database_wait_for_a_second_walk() {
+        let store = SqliteSyncStateStore::open_in_memory().unwrap();
+        let row = InventoryParent::DataSource {
+            data_source_id: "S".into(),
+            database_id: "DB".into(),
+            owner_page_id: "A".into(),
+        };
+        store
+            .replace_inventory(
+                "run-1",
+                &[
+                    entry("A", InventoryParent::Root, "t", false),
+                    entry("R", row, "t", false),
+                    entry("R2", page("R"), "t", false),
+                ],
+            )
+            .unwrap();
+        let unreached = ["R", "R2"].map(String::from);
+        // Walk 2: the database answers 404, so its rows are not reached.
+        let held = store.held_removals(&["DB".to_owned()], &unreached).unwrap();
+        assert_eq!(held, unreached.clone().into());
+        store
+            .replace_inventory("run-2", &[entry("A", InventoryParent::Root, "t", false)])
+            .unwrap();
+        // Walk 3 sees the same 404: the rows are removed.
+        let held = store.held_removals(&["DB".to_owned()], &unreached).unwrap();
+        assert!(held.is_empty(), "{held:?}");
+    }
+
+    #[test]
+    fn a_page_readable_again_holds_nothing_beyond_genuine_removals() {
+        let store = SqliteSyncStateStore::open_in_memory().unwrap();
+        store
+            .replace_inventory(
+                "run-1",
+                &[
+                    entry("A", InventoryParent::Root, "t", false),
+                    entry("D", page("A"), "t", false),
+                ],
+            )
+            .unwrap();
+        let held = store.held_removals(&[], &["D".to_owned()]).unwrap();
+        assert!(held.is_empty(), "{held:?}");
+    }
+
+    #[test]
     fn inventory_parent_chain_ends_at_root_or_is_none() {
         let store = SqliteSyncStateStore::open_in_memory().unwrap();
         store

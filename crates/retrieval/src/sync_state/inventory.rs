@@ -294,12 +294,22 @@ impl SqliteSyncStateStore {
             return Ok(BTreeSet::new());
         }
         let mut held = BTreeSet::new();
+        // A database or data source has no row of its own: its rows match by
+        // their parent, and after one walk they have left the inventory.
+        let under_new = |id: &str| -> Result<bool, SyncStateError> {
+            Ok(new.contains(id)
+                || matches!(
+                    self.inventory_entry(id)?.map(|e| e.parent),
+                    Some(InventoryParent::DataSource { data_source_id, database_id, .. })
+                        if new.contains(data_source_id.as_str()) || new.contains(database_id.as_str())
+                ))
+        };
         for page in candidates {
-            if new.contains(page.as_str())
-                || self
-                    .inventory_parent_chain(page)?
-                    .is_some_and(|chain| chain.iter().any(|a| new.contains(a.as_str())))
-            {
+            let mut hold = under_new(page)?;
+            for ancestor in self.inventory_parent_chain(page)?.unwrap_or_default() {
+                hold = hold || under_new(&ancestor)?;
+            }
+            if hold {
                 held.insert(page.clone());
             }
         }
