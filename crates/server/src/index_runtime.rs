@@ -142,11 +142,6 @@ impl From<&'static str> for SyncError {
         Self::new(SyncFailure::Unavailable, reason)
     }
 }
-impl PartialEq<&str> for SyncError {
-    fn eq(&self, other: &&str) -> bool {
-        self.reason == *other
-    }
-}
 impl std::fmt::Display for SyncError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.reason)

@@ -1302,7 +1302,7 @@ async fn walk_removal_stalled_past_its_deadline_releases_the_index_guard() {
     )
     .await
     .expect("a stalled removal must give up at its deadline");
-    assert_eq!(result.unwrap_err(), "cache sync removal timeout");
+    assert_eq!(result.unwrap_err().reason, "cache sync removal timeout");
     // The pause was never released: the deadline poll freed the guard.
     let guard = std::fs::File::open(&f.settings.index).unwrap();
     guard.try_lock().unwrap();

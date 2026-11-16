@@ -206,35 +206,32 @@ pub mod runtime {
                             .complete_schedule(&lease, now, ID, success)
                             .map(drop)
                     }
-                    // A rejected credential cannot heal by retrying: hold the
-                    // cycle without consuming an attempt until the backoff
-                    // ceiling, then try again.
-                    Some(Err(SyncError {
-                        failure: SyncFailure::Unauthenticated,
-                        ..
-                    })) => coordinator
-                        .postpone_schedule(
-                            &lease,
-                            now,
-                            ID,
-                            now.saturating_add(self.settings.maximum_backoff),
-                        )
-                        .map(drop),
                     Some(Err(error)) => {
-                        let class = match error.failure {
-                            SyncFailure::Index => FailureClass::Index,
-                            SyncFailure::Authority => FailureClass::Conflict,
-                            SyncFailure::Unavailable | SyncFailure::Unauthenticated => {
-                                FailureClass::Unavailable
-                            }
+                        let fail = |class| {
+                            let event = format!(
+                                "attempt-{}",
+                                notion_knowledge_core::logging::CorrelationId::new().as_str()
+                            );
+                            coordinator
+                                .fail_schedule(&lease, now, ID, &event, class)
+                                .map(drop)
                         };
-                        let event = format!(
-                            "attempt-{}",
-                            notion_knowledge_core::logging::CorrelationId::new().as_str()
-                        );
-                        coordinator
-                            .fail_schedule(&lease, now, ID, &event, class)
-                            .map(drop)
+                        match error.failure {
+                            // A rejected credential cannot heal by retrying:
+                            // hold the cycle without consuming an attempt
+                            // until the backoff ceiling, then try again.
+                            SyncFailure::Unauthenticated => coordinator
+                                .postpone_schedule(
+                                    &lease,
+                                    now,
+                                    ID,
+                                    now.saturating_add(self.settings.maximum_backoff),
+                                )
+                                .map(drop),
+                            SyncFailure::Index => fail(FailureClass::Index),
+                            SyncFailure::Authority => fail(FailureClass::Conflict),
+                            SyncFailure::Unavailable => fail(FailureClass::Unavailable),
+                        }
                     }
                 };
                 match recorded {
