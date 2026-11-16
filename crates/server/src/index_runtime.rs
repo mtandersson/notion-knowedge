@@ -791,6 +791,9 @@ impl IndexRuntime {
         let state = self.coordinator.state();
         let unavailable = |_| "cache inventory state unavailable";
         let mut out = HitSync::default();
+        // Pages of this run sent to the consumer: the only placeable parents
+        // besides the inventory (never skipped, trashed or excluded ones).
+        let mut sent = Vec::new();
         // Oldest first, so a new parent is placed before its new children.
         for hit in hits.into_iter().rev() {
             let previous = state.inventory_entry(&hit.page_id).map_err(unavailable)?;
@@ -832,7 +835,7 @@ impl IndexRuntime {
             {
                 continue;
             }
-            let Some((parent, root)) = self.place(&hit, previous, &out.entries)? else {
+            let Some((parent, root)) = self.place(&hit, previous, &sent)? else {
                 out.unplaced += 1;
                 continue;
             };
@@ -864,6 +867,7 @@ impl IndexRuntime {
                 }
                 continue;
             }
+            sent.push(page.entry.clone());
             send.send(page)
                 .await
                 .map_err(|_| "cache inventory failed")?;
@@ -892,7 +896,9 @@ impl IndexRuntime {
         Ok(match &hit.parent {
             HitParent::Page(parent) if placed.iter().any(|e| &e.page_id == parent) => {
                 let entry = placed.iter().find(|e| &e.page_id == parent).unwrap();
-                Some((InventoryParent::Page(parent.clone()), entry.root_id.clone()))
+                // Pruned the same way as an inventoried parent.
+                (!self.source_scope.exclusions.descendants_of.contains(parent))
+                    .then(|| (InventoryParent::Page(parent.clone()), entry.root_id.clone()))
             }
             HitParent::Page(parent) => {
                 let Some(entry) = state.inventory_entry(parent).map_err(unavailable)? else {

@@ -146,6 +146,7 @@ struct Fixture {
     state: PathBuf,
     settings: WorkerSettings,
     provider: Arc<Provider>,
+    scope: LifecycleScope,
 }
 fn authority() -> LifecycleScope {
     LifecycleScope {
@@ -157,6 +158,9 @@ fn authority() -> LifecycleScope {
 }
 impl Fixture {
     async fn new(http: &HttpNotion) -> Self {
+        Self::with_scope(http, authority()).await
+    }
+    async fn with_scope(http: &HttpNotion, scope: LifecycleScope) -> Self {
         notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Off);
         let dir = tempfile::tempdir().unwrap();
         let settings = WorkerSettings {
@@ -177,6 +181,7 @@ impl Fixture {
             state,
             settings,
             provider,
+            scope,
         };
         fixture.open(http, OpenMode::Initialize).await;
         fixture
@@ -185,7 +190,7 @@ impl Fixture {
         IndexRuntime::compose(
             &self.settings,
             &self.state,
-            authority(),
+            self.scope.clone(),
             http.client(),
             self.provider.clone(),
             mode,
@@ -207,7 +212,7 @@ impl Fixture {
             Command::parse(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap(),
             &self.settings,
             &self.state,
-            authority(),
+            self.scope.clone(),
             http.client(),
             self.provider.clone(),
             stop,
@@ -1417,6 +1422,84 @@ async fn incremental_places_a_new_child_under_a_new_parent_in_one_search() {
         entry.parent,
         notion_knowledge_core::inventory::InventoryParent::Page(NEW.into())
     );
+}
+
+/// NEW and its child FOREIGN are both edited inside one catch-up search;
+/// `parent` makes NEW unindexable. FOREIGN must never be placed under it.
+async fn child_of_unindexable_new_parent_is_not_placed(
+    parent: impl FnOnce(&mut notion_fake::Model, &mut LifecycleScope),
+) {
+    let http = start_notion().await;
+    let mut scope = authority();
+    let mut model = notion_fake::Model::default();
+    parent(&mut model, &mut scope);
+    let f = Fixture::with_scope(&http, scope).await;
+    sync(&f, &http, SyncMode::Full).await;
+    http.change(|m| {
+        m.extra.insert(
+            NEW_PARENT.into(),
+            ExtraPage {
+                title: "New".into(),
+                visible: true,
+                archived: false,
+            },
+        );
+        m.foreign_parent = NEW_PARENT.into();
+        m.foreign_revision = "2026-10-11T12:00:00Z".into();
+        if let Some(page) = model.extra.get(NEW_PARENT) {
+            m.extra.get_mut(NEW_PARENT).unwrap().archived = page.archived;
+        }
+    });
+    let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+    let state = runtime.coordinator.state().clone();
+    let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
+    let mut lease = state.acquire_lease(now, 90).unwrap();
+    let totals = runtime
+        .sync_from_walk(
+            &PageDeadline {
+                timeout_seconds: 60,
+            },
+            &mut lease,
+            SyncMode::Incremental,
+        )
+        .await
+        .unwrap();
+    state.release_lease(&lease, now).unwrap();
+    assert_eq!(totals.drift.unplaced, 1, "{totals:?}");
+    assert!(state.inventory_entry(FOREIGN).unwrap().is_none());
+    assert!(!indexed_pages(&runtime.coordinator).contains(FOREIGN));
+}
+const NEW_PARENT: &str = "cccccccc-0000-0000-0000-00000000000c";
+
+#[tokio::test]
+async fn incremental_never_places_children_of_a_descendants_excluded_new_page() {
+    child_of_unindexable_new_parent_is_not_placed(|_, scope| {
+        scope.exclusions.descendants_of.insert(NEW_PARENT.into());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn incremental_never_places_children_of_an_excluded_new_page() {
+    child_of_unindexable_new_parent_is_not_placed(|_, scope| {
+        scope.exclusions.page_ids.insert(NEW_PARENT.into());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn incremental_never_places_children_of_a_trashed_new_page() {
+    child_of_unindexable_new_parent_is_not_placed(|m, _| {
+        m.extra.insert(
+            NEW_PARENT.into(),
+            ExtraPage {
+                title: "New".into(),
+                visible: true,
+                archived: true,
+            },
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
