@@ -74,14 +74,15 @@ impl LocalStatus {
             let state = SqliteSyncStateStore::open_read_only(path).ok()?;
             let schema = state.schema_version().ok()?;
             let counts = inbox.and_then(|(w, s, i)| state.scoped_webhook_counts(&w, &s, &i).ok());
-            Some((schema, counts))
+            Some((schema, counts, inventory(&state)))
         })
         .await
         .ok()
         .flatten();
-        if let Some((schema, counts)) = inspected {
+        if let Some((schema, counts, inventory)) = inspected {
             result.operational_schema_version = Some(schema);
             result.webhooks = counts;
+            result.inventory = inventory;
         } else {
             return result;
         }
@@ -134,6 +135,52 @@ impl LocalStatus {
         }
         result
     }
+}
+/// `None` until a sync has inventoried at least one page.
+fn inventory(
+    state: &SqliteSyncStateStore,
+) -> Option<notion_knowledge_core::sync_status::InventoryStatus> {
+    use notion_knowledge_core::{
+        inventory::InventoryOutcome,
+        sync_status::{Drift, InventoryStatus, OutOfSyncPage},
+    };
+    let counts = state.inventory_counts().ok()?;
+    let last = state.last_sync().ok()?;
+    if counts.total == 0 && last.is_none() {
+        return None;
+    }
+    let drift = last.as_ref().map(|l| l.drift).unwrap_or_default();
+    let out_of_sync = state
+        .out_of_sync_pages(100)
+        .ok()?
+        .into_iter()
+        .map(|(page_id, outcome)| OutOfSyncPage {
+            page_id,
+            outcome: match outcome {
+                InventoryOutcome::Skipped(reason) => format!("skipped:{}", reason.as_str()),
+                InventoryOutcome::Failed(class) => format!("failed:{}", class.as_str()),
+                InventoryOutcome::Indexed { .. } => "indexed".into(),
+            },
+        })
+        .collect();
+    Some(InventoryStatus {
+        total: counts.total,
+        indexed: counts.indexed,
+        skipped: counts.skipped,
+        failed: counts.failed,
+        pending: counts.pending,
+        walk_complete: last.as_ref().map(|l| l.complete),
+        held: last.as_ref().map_or(0, |l| l.held),
+        drift: Drift {
+            added: drift.added,
+            changed: drift.changed,
+            moved: drift.moved,
+            removed: drift.removed,
+            trashed: drift.trashed,
+            unplaced: drift.unplaced,
+        },
+        out_of_sync,
+    })
 }
 impl SyncStatusSource for LocalStatus {
     fn status(

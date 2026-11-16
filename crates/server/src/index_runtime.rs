@@ -18,26 +18,6 @@ use notion_knowledge_retrieval::{
 };
 use std::{path::Path, sync::Arc};
 
-pub(crate) fn has_fatal_sync_failure(
-    progress: &notion_knowledge_retrieval::durable_plan::DurableProgress,
-) -> bool {
-    progress
-        .failed
-        .values()
-        .chain(progress.planning_failures.values())
-        .chain(progress.run_failures.values())
-        .any(|failure| {
-            use notion_knowledge_retrieval::durable_plan::DurableFailure;
-            matches!(
-                failure,
-                DurableFailure::Index
-                    | DurableFailure::Ownership
-                    | DurableFailure::Unauthenticated
-                    | DurableFailure::TraversalUnauthenticated
-            )
-        })
-}
-
 /// Concurrent read-only page preparations ahead of the embedding consumer.
 pub(crate) const PREFETCH_WORKERS: usize = 2;
 /// Completed preparations queued for the consumer beyond those in flight.
@@ -82,9 +62,42 @@ enum PageWork {
     TimedOut,
 }
 
+/// The per-page deadline every sync page and removal runs under.
+#[derive(Debug, Clone, Copy)]
+pub struct PageDeadline {
+    pub timeout_seconds: u64,
+}
+
+/// What one sync reads. Every mode feeds the same consumer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncMode {
+    /// Walk the tree: the only mode that replaces the inventory and removes
+    /// pages it no longer reached.
+    Full,
+    /// Search for pages edited since the inventory's newest edit and place
+    /// them through its parent map. Falls back to `Full` with no inventory.
+    Incremental,
+    /// One page retrieve placed through the parent map (callbacks).
+    Page(notion_knowledge_core::backend::PageId),
+}
+
+/// Pages a search or single retrieve found, settled against the inventory.
+#[derive(Default)]
+struct HitSync {
+    entries: Vec<notion_knowledge_core::inventory::InventoryEntry>,
+    skipped: Vec<notion_knowledge_core::discovery::SkippedContent>,
+    /// In the inventory and confirmed trashed, archived or excluded.
+    removals: Vec<String>,
+    unplaced: u64,
+}
+enum Discovered {
+    Walk(notion_knowledge_notion::walk::TreeWalk),
+    Hits(HitSync),
+}
+
 /// Page counts of one [`IndexRuntime::sync_from_walk`] run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct SyncTotals {
+pub struct SyncTotals {
     /// Every page the walk reached, including skipped ones.
     pub inventory: u64,
     pub indexed: u64,
@@ -97,8 +110,10 @@ pub(crate) struct SyncTotals {
     /// Unreached pages under a page that became inaccessible in this walk,
     /// kept until the next walk confirms it.
     pub held: u64,
-    /// The walk was authoritative (no unproven subtree).
+    /// The walk was authoritative (no unproven subtree). Never set by
+    /// incremental or single-page syncs.
     pub complete: bool,
+    pub drift: notion_knowledge_core::inventory::DriftCounts,
 }
 
 struct SyncEmbedding<'a>(&'a dyn EmbeddingProvider);
@@ -345,7 +360,7 @@ impl IndexRuntime {
     /// Never renew a lease while an old owned commit may still hold its guard.
     async fn settle_page_timeout(
         &self,
-        settings: &WorkerSettings,
+        settings: &PageDeadline,
         lease: &mut notion_knowledge_core::reconciliation::Lease,
         operation: &str,
     ) -> Result<bool, &'static str> {
@@ -422,16 +437,18 @@ impl IndexRuntime {
         Ok(applied)
     }
 
-    /// The one sync path: walk the tree once, prepare each reached page from
-    /// that walk's read, and commit it. The walk is the inventory: it is
-    /// persisted with each page's outcome, and only a complete walk replaces
-    /// it and removes indexed pages it no longer reached. Nothing is read
-    /// again to recheck a page before its commit (staleness is bounded by
-    /// the next walk).
-    async fn sync_from_walk(
+    /// The one sync path: discover pages (a walk, a search, or one page),
+    /// prepare each from that read, and commit it. The walk is the inventory:
+    /// it is persisted with each page's outcome, and only a complete walk
+    /// replaces it and removes indexed pages it no longer reached. Nothing is
+    /// read again to recheck a page before its commit (staleness is bounded
+    /// by the next walk). Search metadata the walk reuses can be one walk
+    /// stale for the same reason.
+    pub async fn sync_from_walk(
         &self,
-        settings: &WorkerSettings,
+        settings: &PageDeadline,
         lease: &mut notion_knowledge_core::reconciliation::Lease,
+        mode: SyncMode,
     ) -> Result<SyncTotals, &'static str> {
         use futures::StreamExt;
         use notion_knowledge_core::{
@@ -446,12 +463,41 @@ impl IndexRuntime {
         };
         // Parked reconciliation read-ahead must not hold the shared budget.
         self.runner.discard_read_ahead();
+        let state = self.coordinator.state();
+        let since = match &mode {
+            SyncMode::Incremental => state
+                .inventory_high_water()
+                .map_err(|_| "cache inventory state unavailable")?,
+            _ => None,
+        };
+        let full = mode == SyncMode::Full || (mode == SyncMode::Incremental && since.is_none());
         let (send, receive) = tokio::sync::mpsc::channel(8);
         let walk = async move {
             let send = send;
-            self.source
-                .walk_tree_with_search(&self.source_scope, Some(&send))
+            if full {
+                return self
+                    .source
+                    .walk_tree_with_search(&self.source_scope, Some(&send))
+                    .await
+                    .map(Discovered::Walk)
+                    .map_err(|_| "cache inventory failed");
+            }
+            let hits = match mode {
+                SyncMode::Page(page) => match self.source.page_hit(&page).await {
+                    Ok(hit) => hit.into_iter().collect(),
+                    Err(e) if notion_knowledge_core::discovery::inaccessible(e.kind) => vec![],
+                    Err(_) => return Err("cache inventory failed"),
+                },
+                _ => self
+                    .source
+                    .search_changed_since(since.as_deref().unwrap_or_default())
+                    .await
+                    .map_err(|_| "cache inventory failed")?,
+            };
+            let single = hits.len() == 1 && since.is_none();
+            Box::pin(self.discover_hits(hits, single, &send))
                 .await
+                .map(Discovered::Hits)
         };
         // Bounded read-ahead: preparation of later pages overlaps the one
         // embedding/commit consumer. Each preparation reserves worst-case bytes
@@ -659,26 +705,209 @@ impl IndexRuntime {
             );
             Ok::<_, &'static str>((totals, outcomes))
         };
-        let (walk, (), (mut totals, outcomes)) = tokio::try_join!(
-            async { Box::pin(walk).await.map_err(|_| "cache inventory failed") },
-            Box::pin(produce),
-            Box::pin(consume)
-        )?;
-        // Read the previous inventory before this walk replaces it.
-        let held = if walk.authoritative() {
-            self.held_removals(&walk)?
-        } else {
-            Default::default()
+        let (discovered, (), (mut totals, outcomes)) =
+            tokio::try_join!(Box::pin(walk), Box::pin(produce), Box::pin(consume))?;
+        let run_id = match discovered {
+            Discovered::Walk(walk) => {
+                // Read the previous inventory before this walk replaces it.
+                let held = if walk.authoritative() {
+                    self.held_removals(&walk)?
+                } else {
+                    Default::default()
+                };
+                let diff = self.record_inventory(&walk, outcomes)?;
+                totals.drift = diff.drift();
+                totals.held = held.len() as u64;
+                totals.inventory = walk.entries.len() as u64;
+                totals.skipped += walk.skipped.len() as u64;
+                totals.complete = walk.authoritative();
+                if walk.authoritative() {
+                    totals.removed =
+                        Box::pin(self.remove_unreached(settings, lease, &walk, &held)).await?;
+                }
+                walk.run_id
+            }
+            Discovered::Hits(hits) => {
+                let run = notion_knowledge_core::logging::CorrelationId::new()
+                    .as_str()
+                    .to_owned();
+                let unavailable = |_| "cache inventory state unavailable";
+                for entry in &hits.entries {
+                    let diff = state
+                        .upsert_inventory_entry(&run, entry)
+                        .map_err(unavailable)?
+                        .drift();
+                    totals.drift.added += diff.added;
+                    totals.drift.changed += diff.changed;
+                    totals.drift.moved += diff.moved;
+                    totals.drift.trashed += diff.trashed;
+                }
+                self.record_outcomes(&hits.entries, &hits.skipped, outcomes)?;
+                totals.inventory = hits.entries.len() as u64;
+                totals.skipped += hits.skipped.len() as u64;
+                totals.drift.unplaced = hits.unplaced;
+                totals.removed =
+                    Box::pin(self.remove_pages(settings, lease, &run, &hits.removals)).await?;
+                run
+            }
         };
-        self.record_inventory(&walk, outcomes)?;
-        totals.held = held.len() as u64;
-        totals.inventory = walk.entries.len() as u64;
-        totals.skipped += walk.skipped.len() as u64;
-        totals.complete = walk.authoritative();
-        if walk.authoritative() {
-            totals.removed = Box::pin(self.remove_unreached(settings, lease, &walk, &held)).await?;
+        let mut walk = (totals.complete, totals.held);
+        if !full {
+            totals.drift.removed = totals.removed;
+            // Completeness describes the last walk; a search does not change it.
+            walk = state
+                .last_sync()
+                .map_err(|_| "cache inventory state unavailable")?
+                .map_or((false, 0), |last| (last.complete, last.held));
         }
+        state
+            .record_sync(&notion_knowledge_core::inventory::SyncRecord {
+                run_id,
+                incremental: !full,
+                complete: walk.0,
+                held: walk.1,
+                drift: totals.drift,
+                finished_at: now_ms() / 1000,
+            })
+            .map_err(|_| "cache inventory state unavailable")?;
         Ok(totals)
+    }
+
+    /// Settle search hits (or one retrieved page) against the inventory and
+    /// send each placed, changed page to the consumer. A hit whose parent
+    /// chain the inventory cannot resolve is counted and never indexed; the
+    /// next full walk settles it. A trashed hit is confirmed by one page
+    /// retrieve before removal, since search lags (`single` hits already are
+    /// a retrieve).
+    async fn discover_hits(
+        &self,
+        hits: Vec<notion_knowledge_notion::search::SearchHit>,
+        single: bool,
+        send: &tokio::sync::mpsc::Sender<notion_knowledge_notion::walk::WalkedPage>,
+    ) -> Result<HitSync, &'static str> {
+        use notion_knowledge_core::discovery::{SkipReason, SkippedContent, inaccessible};
+        let state = self.coordinator.state();
+        let unavailable = |_| "cache inventory state unavailable";
+        let mut out = HitSync::default();
+        for hit in hits {
+            let previous = state.inventory_entry(&hit.page_id).map_err(unavailable)?;
+            if hit.in_trash {
+                let Some(mut entry) = previous else { continue };
+                let confirmed = single
+                    || match self
+                        .source
+                        .page_hit(&notion_knowledge_core::backend::PageId(hit.page_id.clone()))
+                        .await
+                    {
+                        Ok(confirmed) => confirmed.is_some_and(|c| c.in_trash),
+                        Err(e) if inaccessible(e.kind) => false,
+                        Err(_) => return Err("cache inventory failed"),
+                    };
+                if confirmed {
+                    entry.in_trash = true;
+                    entry.last_edited_time = hit.last_edited_time.clone();
+                    out.skipped.push(SkippedContent {
+                        id: hit.page_id.clone(),
+                        reason: SkipReason::Archived,
+                    });
+                    out.removals.push(hit.page_id.clone());
+                    out.entries.push(entry);
+                }
+                continue;
+            }
+            // Read after its edit minute closed: a later edit would show.
+            if !single
+                && state
+                    .inventory_settled_at(&hit.page_id, &hit.last_edited_time)
+                    .map_err(unavailable)?
+                    .zip(
+                        chrono::DateTime::parse_from_rfc3339(&hit.last_edited_time)
+                            .ok()
+                            .map(|t| t.timestamp()),
+                    )
+                    .is_some_and(|(fetched, edited)| fetched >= edited + 120)
+            {
+                continue;
+            }
+            let Some((parent, root)) = self.place(&hit, previous)? else {
+                out.unplaced += 1;
+                continue;
+            };
+            let page = match self
+                .source
+                .read_placed(&self.source_scope, &hit, parent, root)
+                .await
+            {
+                Ok(Some(page)) => page,
+                Ok(None) => {
+                    out.unplaced += 1;
+                    continue;
+                }
+                Err(e) if inaccessible(e.kind) => {
+                    out.unplaced += 1;
+                    continue;
+                }
+                Err(_) => return Err("cache inventory failed"),
+            };
+            out.entries.push(page.entry.clone());
+            if let Some(reason) = page.skip {
+                out.skipped.push(SkippedContent {
+                    id: hit.page_id.clone(),
+                    reason,
+                });
+                // An unreadable body is doubt, not removal: the walk decides.
+                if reason != SkipReason::Inaccessible {
+                    out.removals.push(hit.page_id.clone());
+                }
+                continue;
+            }
+            send.send(page)
+                .await
+                .map_err(|_| "cache inventory failed")?;
+        }
+        Ok(out)
+    }
+
+    /// Where the inventory places a hit: under a configured root, under an
+    /// inventoried page with a chain to the root, beside rows of a known data
+    /// source, or, for a known page whose parent search cannot name (a
+    /// block), where the last walk found it. `None` is unplaced.
+    fn place(
+        &self,
+        hit: &notion_knowledge_notion::search::SearchHit,
+        previous: Option<notion_knowledge_core::inventory::InventoryEntry>,
+    ) -> Result<Option<(notion_knowledge_core::inventory::InventoryParent, String)>, &'static str>
+    {
+        use notion_knowledge_core::inventory::{InventoryOutcome, InventoryParent};
+        use notion_knowledge_notion::search::HitParent;
+        let state = self.coordinator.state();
+        let unavailable = |_| "cache inventory state unavailable";
+        if self.source_scope.roots.iter().any(|r| r.0 == hit.page_id) {
+            return Ok(Some((InventoryParent::Root, hit.page_id.clone())));
+        }
+        Ok(match &hit.parent {
+            HitParent::Page(parent) => {
+                let Some(entry) = state.inventory_entry(parent).map_err(unavailable)? else {
+                    return Ok(None);
+                };
+                let pruned = self.source_scope.exclusions.descendants_of.contains(parent)
+                    || matches!(
+                        state.inventory_outcome(parent).map_err(unavailable)?,
+                        Some(InventoryOutcome::Skipped(_))
+                    );
+                (!pruned
+                    && state
+                        .inventory_parent_chain(parent)
+                        .map_err(unavailable)?
+                        .is_some())
+                .then(|| (InventoryParent::Page(parent.clone()), entry.root_id))
+            }
+            HitParent::DataSource(source) => state
+                .inventory_data_source(source)
+                .map_err(unavailable)?
+                .map(|row| (row.parent, row.root_id)),
+            HitParent::Other => previous.map(|entry| (entry.parent, entry.root_id)),
+        })
     }
 
     /// Indexed pages a complete walk did not reach that sit under a page
@@ -714,36 +943,59 @@ impl IndexRuntime {
     /// `held` pages wait for the next walk (see [`Self::held_removals`]).
     async fn remove_unreached(
         &self,
-        settings: &WorkerSettings,
+        settings: &PageDeadline,
         lease: &mut notion_knowledge_core::reconciliation::Lease,
         walk: &notion_knowledge_notion::walk::TreeWalk,
         held: &std::collections::BTreeSet<String>,
     ) -> Result<u64, &'static str> {
-        use notion_knowledge_core::sync_state::SyncStateStore;
         let readable = walk.readable();
+        let unreached: Vec<_> = self
+            .coordinator
+            .owned_page_ids()
+            .map_err(|_| "cache sync state unavailable")?
+            .into_iter()
+            .filter(|page| !readable.contains(page) && !held.contains(page))
+            .collect();
+        self.remove_pages(settings, lease, &walk.run_id, &unreached)
+            .await
+    }
+
+    /// Remove each indexed page of `pages`; pages not indexed are ignored.
+    async fn remove_pages(
+        &self,
+        settings: &PageDeadline,
+        lease: &mut notion_knowledge_core::reconciliation::Lease,
+        run_id: &str,
+        pages: &[String],
+    ) -> Result<u64, &'static str> {
+        use notion_knowledge_core::sync_state::SyncStateStore;
         let mut removed = 0;
         let state = self.coordinator.state();
         let ttl = settings.timeout_seconds as i64 + 30;
-        let indexed = self
-            .coordinator
-            .owned_page_ids()
-            .map_err(|_| "cache sync state unavailable")?;
-        for page in &indexed {
-            if readable.contains(page)
-                || held.contains(page)
-                || !state
-                    .page_state(page)
-                    .map_err(|_| "cache sync state unavailable")?
-                    .is_some_and(|state| !state.is_tombstone())
+        for page in pages {
+            if !state
+                .page_state(page)
+                .map_err(|_| "cache sync state unavailable")?
+                .is_some_and(|state| !state.is_tombstone())
             {
                 continue;
             }
             *lease = state
                 .renew_lease(lease, now_ms() / 1000, ttl)
                 .map_err(|_| "cache sync lease unavailable")?;
-            let operation = format!("walk-removal-{}-{page}", walk.run_id);
-            let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| now_ms() / 1000);
-            tokio::time::timeout(
+            let operation = format!("walk-removal-{run_id}-{page}");
+            // Past the deadline the clock expires, so the owned commit's
+            // deadline poll gives up its index guard instead of holding it.
+            let expired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = expired.clone();
+            let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || {
+                if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    i64::MAX
+                } else {
+                    now_ms() / 1000
+                }
+            });
+            let result = tokio::time::timeout(
                 std::time::Duration::from_secs(settings.timeout_seconds),
                 Box::pin(self.handler.remove_unreached(
                     &notion_knowledge_core::backend::PageId(page.clone()),
@@ -753,13 +1005,15 @@ impl IndexRuntime {
                     clock,
                 )),
             )
-            .await
-            .map_err(|_| "cache sync removal timeout")?
-            .map_err(|_| "cache sync removal failed")?;
+            .await;
+            expired.store(true, std::sync::atomic::Ordering::SeqCst);
             self.coordinator
                 .drain_owned()
                 .await
                 .map_err(|_| "cache sync drain failed")?;
+            result
+                .map_err(|_| "cache sync removal timeout")?
+                .map_err(|_| "cache sync removal failed")?;
             removed += 1;
         }
         Ok(removed)
@@ -777,8 +1031,20 @@ impl IndexRuntime {
         let diff = state
             .record_walk(&walk.run_id, &walk.entries, walk.authoritative())
             .map_err(unavailable)?;
+        self.record_outcomes(&walk.entries, &walk.skipped, outcomes)?;
+        Ok(diff)
+    }
+
+    fn record_outcomes(
+        &self,
+        entries: &[notion_knowledge_core::inventory::InventoryEntry],
+        skipped: &[notion_knowledge_core::discovery::SkippedContent],
+        outcomes: Vec<(String, InventoryOutcome)>,
+    ) -> Result<(), &'static str> {
+        let state = self.coordinator.state();
+        let unavailable = |_| "cache inventory state unavailable";
         let now = now_ms() / 1000;
-        for skipped in &walk.skipped {
+        for skipped in skipped {
             state
                 .record_inventory_outcome(
                     &skipped.id,
@@ -787,8 +1053,7 @@ impl IndexRuntime {
                 )
                 .map_err(unavailable)?;
         }
-        let revisions: std::collections::BTreeMap<_, _> = walk
-            .entries
+        let revisions: std::collections::BTreeMap<_, _> = entries
             .iter()
             .map(|e| (e.page_id.as_str(), e.last_edited_time.as_str()))
             .collect();
@@ -805,14 +1070,14 @@ impl IndexRuntime {
                 .record_inventory_outcome(&page, &outcome, now)
                 .map_err(unavailable)?;
         }
-        Ok(diff)
+        Ok(())
     }
 
     /// Local preparation for one walked page. No request is made for the
     /// page itself; relation targets share the client's rate limiter.
     async fn prepare_walked_page(
         &self,
-        settings: &WorkerSettings,
+        settings: &PageDeadline,
         budget: &PrefetchBudget,
         index: usize,
         walked: notion_knowledge_notion::walk::WalkedPage,
@@ -881,7 +1146,11 @@ impl IndexRuntime {
         let result = async {
             let totals = tokio::time::timeout(
                 Duration::from_secs(settings.inventory_timeout_seconds),
-                Box::pin(self.sync_from_walk(settings, &mut lease)),
+                Box::pin(self.sync_from_walk(
+                    &PageDeadline { timeout_seconds },
+                    &mut lease,
+                    SyncMode::Full,
+                )),
             )
             .await
             .map_err(|_| "cache inventory timeout; retry startup")??;
@@ -1330,7 +1599,13 @@ mod timeout_tests {
                 status
             );
             let result = runtime
-                .settle_page_timeout(&settings, &mut lease, "timed-out")
+                .settle_page_timeout(
+                    &PageDeadline {
+                        timeout_seconds: settings.timeout_seconds,
+                    },
+                    &mut lease,
+                    "timed-out",
+                )
                 .await;
             if status == ReceiptStatus::Applied {
                 assert_eq!(result, Ok(true)); // Caller must use existing recovery/ack.
@@ -1357,7 +1632,13 @@ mod timeout_tests {
             drop(observer);
             assert!(
                 runtime
-                    .settle_page_timeout(&settings, &mut lease, "no-receipt")
+                    .settle_page_timeout(
+                        &PageDeadline {
+                            timeout_seconds: settings.timeout_seconds
+                        },
+                        &mut lease,
+                        "no-receipt"
+                    )
                     .await
                     .is_err()
             );
@@ -1384,7 +1665,13 @@ mod timeout_tests {
                     .unwrap();
             }
             let result = runtime
-                .settle_page_timeout(&settings, &mut lease, "no-receipt")
+                .settle_page_timeout(
+                    &PageDeadline {
+                        timeout_seconds: settings.timeout_seconds,
+                    },
+                    &mut lease,
+                    "no-receipt",
+                )
                 .await;
             if lose_actual_lease {
                 assert!(result.is_err());

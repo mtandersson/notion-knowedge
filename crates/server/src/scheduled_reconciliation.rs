@@ -55,11 +55,14 @@ impl Settings {
 #[cfg(all(unix, feature = "webhook-worker"))]
 pub mod runtime {
     use super::Settings;
-    use crate::{index_runtime::IndexRuntime, webhook_worker::runtime::now_ms};
-    use notion_knowledge_core::reconciliation::{
-        FailureClass, JournalError, ReconciliationJournal,
+    use crate::{
+        index_runtime::{IndexRuntime, PageDeadline, SyncMode, SyncTotals},
+        webhook_worker::runtime::now_ms,
     };
-    use notion_knowledge_retrieval::{runner::RunnerError, schedule::SchedulePolicy};
+    use notion_knowledge_core::reconciliation::{
+        FailureClass, JournalError, Lease, ReconciliationJournal,
+    };
+    use notion_knowledge_retrieval::schedule::SchedulePolicy;
     use std::{sync::Arc, time::Duration};
     use tokio_util::sync::CancellationToken;
     pub const ID: &str = "periodic";
@@ -72,135 +75,174 @@ pub mod runtime {
     }
     impl Worker {
         pub async fn run(&self, stop: CancellationToken) -> Result<(), &'static str> {
+            let mut first = true;
             loop {
                 if stop.is_cancelled() {
                     return Ok(());
                 }
-                self.tick(stop.clone()).await?;
+                // A restart inside the interval catches up through search.
+                if !self.tick(stop.clone()).await? && std::mem::take(&mut first) {
+                    self.catch_up(stop.clone()).await?;
+                }
+                first = false;
                 tokio::select! { _ = stop.cancelled() => return Ok(()), _ = tokio::time::sleep(self.poll) => {} }
             }
         }
+
+        fn lease(&self) -> Result<Option<Lease>, &'static str> {
+            let ttl = self.timeout.as_secs() as i64 + 30;
+            match self
+                .index
+                .coordinator
+                .state()
+                .acquire_lease(now_ms() / 1000, ttl)
+            {
+                Ok(lease) => Ok(Some(lease)),
+                Err(JournalError::Busy) => Ok(None),
+                Err(_) => Err("scheduled lease unavailable"),
+            }
+        }
+
+        fn release(&self, lease: &Lease) -> Result<(), &'static str> {
+            // No read-ahead outlives this cycle's writer lease.
+            self.index.runner.discard_read_ahead();
+            match self
+                .index
+                .coordinator
+                .state()
+                .release_lease(lease, now_ms() / 1000)
+            {
+                Ok(()) | Err(JournalError::LeaseLost) => Ok(()),
+                Err(_) => Err("scheduled lease release failed"),
+            }
+        }
+
+        /// One sync under the inventory budget, then search preparation.
+        /// `None` when stopped; owned effects are drained either way.
+        async fn sync(
+            &self,
+            stop: &CancellationToken,
+            lease: &mut Lease,
+            mode: SyncMode,
+        ) -> Result<Option<Result<SyncTotals, &'static str>>, &'static str> {
+            let page = PageDeadline {
+                timeout_seconds: self.timeout.as_secs(),
+            };
+            let index = &self.index;
+            let outcome = tokio::select! { biased;
+                _ = stop.cancelled() => None,
+                _ = tokio::time::sleep(self.inventory_timeout) => Some(Err("scheduled sync timeout")),
+                result = async {
+                    let totals = Box::pin(index.sync_from_walk(&page, lease, mode)).await?;
+                    let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| now_ms() / 1000);
+                    crate::index_runtime::prepare_search_if_missing(&index.coordinator, &index.handler, lease.clone(), clock)
+                        .await
+                        .map_err(|_| "scheduled search preparation failed")?;
+                    Ok(totals)
+                } => Some(result),
+            };
+            if !matches!(outcome, Some(Ok(_))) {
+                // Never renew a running effect. After drain, an expired lease
+                // leaves the cycle's run for the next service owner.
+                index
+                    .coordinator
+                    .drain_owned()
+                    .await
+                    .map_err(|_| "scheduled drain failed")?;
+            }
+            Ok(outcome)
+        }
+
+        /// Run the periodic full walk when it is due. The cycle completes on
+        /// the next interval; a failed walk backs off and retries.
         pub async fn tick(&self, stop: CancellationToken) -> Result<bool, &'static str> {
             if stop.is_cancelled() {
                 return Ok(false);
             }
             let coordinator = &self.index.coordinator;
-            let state = coordinator.state();
-            let ttl = self.timeout.as_secs() as i64 + 30;
-            let mut lease = match state.acquire_lease(now_ms() / 1000, ttl) {
-                Ok(l) => l,
-                Err(JournalError::Busy) => return Ok(false),
-                Err(_) => return Err("scheduled lease unavailable"),
+            let Some(mut lease) = self.lease()? else {
+                return Ok(false);
             };
             let result = async {
-                let now = now_ms()/1000;
-                let policy = SchedulePolicy::new(self.settings.interval, self.settings.attempts, self.settings.backoff, self.settings.maximum_backoff).map_err(|_| "scheduled policy invalid")?;
-                coordinator.register_schedule(&lease, now, ID, policy, now).map_err(|_| "scheduled authority incompatible")?;
-                if !coordinator.due_schedules(now, 1000).map_err(|_| "scheduled state unavailable")?.iter().any(|s| s.schedule_id == ID) { return Ok(false) }
-                let proposal = format!("periodic-{}", notion_knowledge_core::logging::CorrelationId::new().as_str());
-                let schedule = match coordinator.claim_schedule(&lease, now, ID, &proposal) {
-                    Ok(s) => s, Err(JournalError::Busy) => return Ok(false), Err(_) => return Err("scheduled claim unavailable"),
-                };
-                let run = schedule.active_run.ok_or("scheduled run unavailable")?;
-                loop {
-                    let inventory = self.index.inventory_pending(&run)
-                        .map_err(|_| "scheduled state unavailable")?;
-                    let attempt = stop.child_token();
-                    let cancelled = attempt.clone();
-                    let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || if cancelled.is_cancelled() { i64::MAX } else { now_ms()/1000 });
-                    let prepared = if inventory {
-                        state.release_lease(&lease, now_ms()/1000).map_err(|_| "scheduled lease lost")?;
-                        let plan = tokio::select! { biased;
-                            _ = stop.cancelled() => { attempt.cancel(); Err(RunnerError::Journal(JournalError::Unavailable)) },
-                            _ = tokio::time::sleep(self.inventory_timeout) => { attempt.cancel(); Err(RunnerError::Journal(JournalError::Unavailable)) },
-                            result = self.index.runner.dry_run() => result,
-                        };
-                        lease = match state.acquire_lease(now_ms()/1000, ttl) {
-                            Ok(lease) => lease,
-                            Err(JournalError::Busy) => return Ok(false),
-                            Err(_) => return Err("scheduled lease unavailable"),
-                        };
-                        // Rebind the existing scheduled run even when planning
-                        // failed, so failure/checkpoint records use this fence.
-                        state.start_or_resume(&lease, now_ms()/1000, &run, &self.index.scope)
-                            .map_err(|_| "scheduled run unavailable")?;
-                        plan.map(Some)
-                    } else {
-                        Ok(None)
-                    };
-                    lease = state.renew_lease(&lease, now_ms()/1000, ttl)
-                        .map_err(|_| "scheduled lease lost")?;
-                    let result = match prepared {
-                        Err(error) => Some(Err(error)),
-                        Ok(prepared) => tokio::select! { biased;
-                        _ = stop.cancelled() => { attempt.cancel(); None },
-                        _ = tokio::time::sleep(self.timeout) => { attempt.cancel(); Some(Err(RunnerError::Journal(JournalError::Unavailable))) },
-                        result = async {
-                            let progress = if let Some(plan) = prepared {
-                                self.index.runner.record_inventory_plan(&run, &plan, lease.clone(), clock.clone()).await?
-                            } else {
-                                self.index.runner.apply_next(&run, lease.clone(), clock.clone(), self.index.provider.as_ref()).await?
-                            };
-                            if progress.pending.is_empty() && !crate::index_runtime::has_fatal_sync_failure(&progress) {
-                                crate::index_runtime::prepare_search_if_missing(coordinator, &self.index.handler, lease.clone(), clock)
-                                    .await.map_err(|_| RunnerError::Journal(JournalError::Unavailable))?;
-                            }
-                            Ok::<_, RunnerError>(progress)
-                        } => Some(result),
-                        },
-                    };
-                    if attempt.is_cancelled() {
-                        self.index.runner.discard_read_ahead();
-                        coordinator.drain_owned().await.map_err(|_| "scheduled drain failed")?;
-                        // Never renew a running effect. After drain, an expired lease
-                        // leaves its durable checkpoint for the next service owner.
-                        if stop.is_cancelled() {
-                            match coordinator.checkpoint_schedule(&lease, now_ms()/1000, ID) { Ok(_) | Err(JournalError::LeaseLost) => {}, Err(_) => return Err("scheduled checkpoint unavailable") }
-                            return Ok(true)
-                        }
-                    }
-                    match result {
-                        Some(Ok(p)) => {
-                            if p.pending.is_empty() && (p.failed_pages() > 0 || !p.run_failures.is_empty()) {
-                                if crate::index_runtime::has_fatal_sync_failure(&p) {
-                                    coordinator.hold_schedule(&lease, now_ms()/1000, ID).map_err(|_| "scheduled hold unavailable")?;
-                                } else {
-                                    // Preserve source failures, then try the source again on
-                                    // the normal interval instead of requiring manual repair.
-                                    let now = now_ms()/1000;
-                                    let next = now.checked_add(self.settings.interval).ok_or("scheduled deadline unavailable")?;
-                                    coordinator.abandon_schedule(&lease, now, ID, next).map_err(|_| "scheduled source skips unavailable")?;
-                                }
-                                return Ok(true)
-                            }
-                            if p.pending.is_empty() { return Ok(true) }
-
-                        }
-                        Some(Err(RunnerError::Journal(JournalError::Busy | JournalError::LeaseLost))) => return Ok(false),
-                        Some(Err(RunnerError::InvalidConfiguration | RunnerError::Journal(JournalError::ScopeMismatch | JournalError::InvalidInput | JournalError::InvalidTransition))) => return Err("scheduled authority invalid"),
-                        Some(Err(error)) => {
-                            use notion_knowledge_retrieval::planner::PlanError;
-                            let class = match error {
-                                RunnerError::Planning(PlanError::Index | PlanError::Ownership) => FailureClass::Index,
-                                RunnerError::Planning(PlanError::Conflict) => FailureClass::Conflict,
-                                RunnerError::Planning(_) => FailureClass::Source,
-                                _ => FailureClass::Unavailable,
-                            };
-                            let event = format!("attempt-{}", notion_knowledge_core::logging::CorrelationId::new().as_str());
-                            match coordinator.fail_schedule(&lease, now_ms()/1000, ID, &event, class) { Ok(_) | Err(JournalError::LeaseLost) => {}, Err(_) => return Err("scheduled failure unavailable") }
-                            return Ok(true)
-                        }
-                        None => return Ok(true),
-                    }
+                let now = now_ms() / 1000;
+                let policy = SchedulePolicy::new(
+                    self.settings.interval,
+                    self.settings.attempts,
+                    self.settings.backoff,
+                    self.settings.maximum_backoff,
+                )
+                .map_err(|_| "scheduled policy invalid")?;
+                coordinator
+                    .register_schedule(&lease, now, ID, policy, now)
+                    .map_err(|_| "scheduled authority incompatible")?;
+                if !coordinator
+                    .due_schedules(now, 1000)
+                    .map_err(|_| "scheduled state unavailable")?
+                    .iter()
+                    .any(|s| s.schedule_id == ID)
+                {
+                    return Ok(false);
                 }
-            }.await;
-            // No read-ahead outlives this cycle's writer lease.
-            self.index.runner.discard_read_ahead();
-            match state.release_lease(&lease, now_ms() / 1000) {
-                Ok(()) | Err(JournalError::LeaseLost) => {}
-                Err(_) => return Err("scheduled lease release failed"),
+                let proposal = format!(
+                    "periodic-{}",
+                    notion_knowledge_core::logging::CorrelationId::new().as_str()
+                );
+                match coordinator.claim_schedule(&lease, now, ID, &proposal) {
+                    Ok(_) => {}
+                    Err(JournalError::Busy) => return Ok(false),
+                    Err(_) => return Err("scheduled claim unavailable"),
+                }
+                let outcome = self.sync(&stop, &mut lease, SyncMode::Full).await?;
+                let now = now_ms() / 1000;
+                let recorded = match outcome {
+                    None => coordinator.checkpoint_schedule(&lease, now, ID).map(drop),
+                    Some(Ok(totals)) => {
+                        let success = totals.complete && totals.failed == 0 && totals.held == 0;
+                        coordinator
+                            .complete_schedule(&lease, now, ID, success)
+                            .map(drop)
+                    }
+                    Some(Err(error)) => {
+                        let class = if error.contains("index") {
+                            FailureClass::Index
+                        } else if error.contains("authority") {
+                            FailureClass::Conflict
+                        } else {
+                            FailureClass::Unavailable
+                        };
+                        let event = format!(
+                            "attempt-{}",
+                            notion_knowledge_core::logging::CorrelationId::new().as_str()
+                        );
+                        coordinator
+                            .fail_schedule(&lease, now, ID, &event, class)
+                            .map(drop)
+                    }
+                };
+                match recorded {
+                    Ok(()) | Err(JournalError::LeaseLost) => Ok(true),
+                    Err(_) => Err("scheduled state unavailable"),
+                }
             }
+            .await;
+            self.release(&lease)?;
             result
+        }
+
+        /// One incremental sync outside the schedule. Failures are left to
+        /// the next full walk.
+        async fn catch_up(&self, stop: CancellationToken) -> Result<(), &'static str> {
+            let Some(mut lease) = self.lease()? else {
+                return Ok(());
+            };
+            let admitted = self
+                .index
+                .coordinator
+                .ensure_no_active_reconciliation(&lease, now_ms() / 1000);
+            if admitted.is_ok() {
+                self.sync(&stop, &mut lease, SyncMode::Incremental).await?;
+            }
+            self.release(&lease)
         }
     }
 }

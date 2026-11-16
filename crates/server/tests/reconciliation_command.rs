@@ -9,7 +9,7 @@ use notion_knowledge_core::{
     reconciliation::ReconciliationJournal,
 };
 use notion_knowledge_server::{
-    index_runtime::{IndexRuntime, OpenMode},
+    index_runtime::{IndexRuntime, OpenMode, PageDeadline, SyncMode, SyncTotals},
     reconciliation_command::{Command, Output, runtime::execute},
     webhook_worker::WorkerSettings,
 };
@@ -976,55 +976,70 @@ async fn await_schedule(
 }
 #[tokio::test]
 async fn actual_scheduled_http_preserves_deadline_restart_and_unchanged_next_cycle() {
-    use notion_knowledge_retrieval::schedule::{
-        ScheduleEventKind, SchedulePolicy, ScheduleReconfiguration,
-    };
     use notion_knowledge_server::webhook_worker::runtime::now_ms;
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
     let (worker, stop, server) =
         scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
     let finished = await_schedule(&worker, |s| s.cycle == 1 && s.active_run.is_none()).await;
-    let events = worker
-        .coordinator
-        .schedule_events("periodic", 0, 100)
-        .unwrap();
-    let run = events
-        .iter()
-        .find(|e| e.kind == ScheduleEventKind::Completed)
-        .unwrap()
-        .run_id
-        .clone()
-        .unwrap();
-    let progress = worker.coordinator.reconciliation_progress(&run).unwrap();
-    assert_eq!(
-        (
-            progress.scanned,
-            progress.changed,
-            progress.deleted,
-            progress.failed_pages()
-        ),
-        (3, 3, 0, 0)
-    );
+    let counts = worker.state.inventory_counts().unwrap();
+    assert_eq!((counts.total, counts.indexed), (3, 3));
+    let last = worker.state.last_sync().unwrap().unwrap();
+    assert!(last.complete && !last.incremental);
+    assert_eq!(last.drift.added, 3);
     assert!(finished.next_deadline >= now_ms() / 1000 + 58);
+    assert!(
+        worker
+            .coordinator
+            .last_successful_reconciliation()
+            .unwrap()
+            .is_some()
+    );
     stop.cancel();
     server.await.unwrap().unwrap();
-    let before = f.snapshot();
-    let dry = f.command(&http, &["--reconcile", "dry-run"]).await;
-    assert_eq!(dry.json["planned_refresh"], 0);
-    assert_eq!(before, f.snapshot());
     let bodies = http.body_reads.load(Ordering::SeqCst);
     let embeddings = f.provider.count.load(Ordering::SeqCst);
+    let requests = http.requests().len();
+    // A restart inside the interval only catches up through search.
     let (worker, stop, server) =
         scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while !worker.state.last_sync().unwrap().unwrap().incremental {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(worker.coordinator.schedule("periodic").unwrap(), finished);
+    assert!(
+        http.requests()[requests..]
+            .iter()
+            .all(|r| r == "/v1/search")
+    );
     assert_eq!(http.body_reads.load(Ordering::SeqCst), bodies);
     assert_eq!(f.provider.count.load(Ordering::SeqCst), embeddings);
-    // Manual schedule changes require quiescent owned workers.
     stop.cancel();
     server.await.unwrap().unwrap();
-    let now = now_ms() / 1000;
+    make_schedule_due(&worker);
+    let (worker, stop, server) =
+        scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
+    await_schedule(&worker, |s| s.cycle == 2 && s.active_run.is_none()).await;
+    // The unchanged cycle walks the tree again but embeds nothing.
+    assert!(http.body_reads.load(Ordering::SeqCst) > bodies);
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), embeddings);
+    let status = f
+        .command(&http, &["--reconcile", "schedule", "status"])
+        .await;
+    assert_eq!(status.exit, 0);
+    assert_eq!(status.json["cycle"], 2);
+    stop.cancel();
+    server.await.unwrap().unwrap();
+}
+
+/// Make the next scheduled cycle due now. Requires quiescent workers.
+fn make_schedule_due(worker: &notion_knowledge_server::webhook_worker::runtime::Worker) {
+    use notion_knowledge_retrieval::schedule::{SchedulePolicy, ScheduleReconfiguration};
+    let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
     let lease = worker.state.acquire_lease(now, 30).unwrap();
     worker
         .coordinator
@@ -1040,173 +1055,410 @@ async fn actual_scheduled_http_preserves_deadline_restart_and_unchanged_next_cyc
         )
         .unwrap();
     worker.state.release_lease(&lease, now).unwrap();
+}
+
+#[tokio::test]
+async fn drift_walk_detects_move_trash_revoke_and_add_in_one_pass() {
+    let http = start_notion().await;
+    let extra = |title: &str| ExtraPage {
+        title: title.into(),
+        visible: true,
+        archived: false,
+    };
+    const A: &str = "aaaaaaaa-0000-0000-0000-00000000000a";
+    const B: &str = "bbbbbbbb-0000-0000-0000-00000000000b";
+    http.change(|m| {
+        m.extra.insert(A.into(), extra("Trashed later"));
+    });
+    let f = Fixture::new(&http).await;
+    let (worker, stop, server) =
+        scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
+    await_schedule(&worker, |s| s.cycle == 1 && s.active_run.is_none()).await;
+    stop.cancel();
+    server.await.unwrap().unwrap();
+    http.change(|m| {
+        m.extra.insert(B.into(), extra("Added later"));
+        m.extra.get_mut(A).unwrap().archived = true;
+        // Moved out of the root: no longer tagged, parented elsewhere.
+        m.hide_page = true;
+        m.parent = FOREIGN.into();
+        m.inaccessible_other = true;
+    });
+    make_schedule_due(&worker);
     let (worker, stop, server) =
         scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
     await_schedule(&worker, |s| s.cycle == 2 && s.active_run.is_none()).await;
-    // The unchanged cycle still revalidates authoritative relation membership.
-    assert!(http.body_reads.load(Ordering::SeqCst) > bodies);
-    assert_eq!(f.provider.count.load(Ordering::SeqCst), embeddings);
-    let status = f
-        .command(&http, &["--reconcile", "schedule", "status"])
-        .await;
-    assert_eq!(status.exit, 0);
-    assert_eq!(status.json["cycle"], 2);
     stop.cancel();
     server.await.unwrap().unwrap();
-}
-
-#[tokio::test]
-async fn actual_scheduled_http_cancellation_resumes_same_pending_plan_without_implicit_retry() {
-    use notion_knowledge_retrieval::schedule::{ScheduleEventKind, ScheduleStatus};
-    let http = start_notion().await;
-    let f = Fixture::new(&http).await;
-    f.provider.pause.store(true, Ordering::SeqCst);
-    let (worker, stop, server) =
-        scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
-    tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        f.provider.entered.notified(),
-    )
-    .await
-    .unwrap();
-    let pending = worker.coordinator.schedule("periodic").unwrap();
-    let run = pending.active_run.clone().unwrap();
-    let inventory = worker.coordinator.reconciliation_plan(&run).unwrap();
-    let busy = f
-        .command(&http, &["--reconcile", "apply", "competing"])
-        .await;
-    assert_eq!(busy.exit, 4);
-    assert_eq!(worker.coordinator.schedule("periodic").unwrap().attempts, 0);
-    stop.cancel();
-    server.await.unwrap().unwrap();
+    let last = worker.state.last_sync().unwrap().unwrap();
+    assert!(last.complete);
     assert_eq!(
-        worker.coordinator.schedule("periodic").unwrap().active_run,
-        Some(run.clone())
+        (last.drift.added, last.drift.trashed, last.drift.removed),
+        (1, 1, 1)
+    );
+    // OTHER answers 404 for the first time: its removal waits one walk.
+    assert_eq!(last.held, 1);
+    let indexed = indexed_pages(&worker.coordinator);
+    assert_eq!(
+        indexed,
+        [ROOT, OTHER, B].map(String::from).into_iter().collect()
+    );
+    assert!(worker.state.inventory_entry(PAGE).unwrap().is_none());
+    let status = local_status(&f).await;
+    let inventory = status["inventory"].clone();
+    assert_eq!(inventory["walk_complete"], true);
+    assert_eq!(inventory["held"], 1);
+    assert_eq!(
+        inventory["total"],
+        ["indexed", "skipped", "failed", "pending"]
+            .iter()
+            .map(|k| inventory[k].as_u64().unwrap())
+            .sum::<u64>()
     );
     assert!(
-        worker
-            .coordinator
-            .schedule_events("periodic", 0, 100)
+        inventory["out_of_sync"]
+            .as_array()
             .unwrap()
             .iter()
-            .any(|e| e.kind == ScheduleEventKind::Cancelled)
+            .any(|p| p["page_id"] == OTHER && p["outcome"] == "skipped:inaccessible")
     );
+    let body = status.to_string();
+    for title in ["Root", "First", "Separate", "Trashed later", "Added later"] {
+        assert!(!body.contains(title), "{title}");
+    }
+    // The next walk confirms the revocation and removes the held page.
+    make_schedule_due(&worker);
     let (worker, stop, server) =
         scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
-    let done = await_schedule(&worker, |s| s.active_run.is_none()).await;
-    assert_eq!(done.cycle, 1);
-    assert_eq!(done.status, ScheduleStatus::Ready);
-    assert_eq!(
-        worker.coordinator.reconciliation_plan(&run).unwrap(),
-        inventory
-    );
-    assert_eq!(
-        worker
-            .coordinator
-            .reconciliation_progress(&run)
-            .unwrap()
-            .changed,
-        3
-    );
+    await_schedule(&worker, |s| s.cycle == 3 && s.active_run.is_none()).await;
     stop.cancel();
     server.await.unwrap().unwrap();
+    assert_eq!(worker.state.last_sync().unwrap().unwrap().held, 0);
+    let indexed = indexed_pages(&worker.coordinator);
+    assert_eq!(indexed, [ROOT, B].map(String::from).into_iter().collect());
+}
+
+/// The `knowledge_sync_status` payload over this fixture's state.
+async fn local_status(f: &Fixture) -> Value {
+    use notion_knowledge_core::sync_status::SyncStatusSource;
+    let state = f.state.clone();
+    let config = notion_knowledge_server::config::Config::from_lookup(|name| match name {
+        "NK_NOTION_AUTH" => Some("integration".into()),
+        "NOTION_TOKEN" => Some("fixture-credential".into()),
+        "NK_WEBHOOK_MODE" => Some("verified".into()),
+        "NK_WEBHOOK_WORKSPACE_ID" => Some(WORKSPACE.into()),
+        "NK_WEBHOOK_SUBSCRIPTION_ID" => Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into()),
+        "NK_WEBHOOK_INTEGRATION_ID" => Some("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".into()),
+        "NK_WEBHOOK_VERIFICATION_TOKEN" => Some("fixture-signing".into()),
+        "NK_WEBHOOK_STATE_FILE" => Some(state.clone().into_os_string()),
+        _ => None,
+    })
+    .unwrap();
+    serde_json::to_value(
+        notion_knowledge_server::sync_status::LocalStatus::from_config(&config)
+            .status()
+            .await,
+    )
+    .unwrap()
+}
+
+/// One sync through the shared runtime: totals and the indexed page ids.
+async fn sync(
+    f: &Fixture,
+    http: &HttpNotion,
+    mode: SyncMode,
+) -> (SyncTotals, std::collections::BTreeSet<String>) {
+    let runtime = f.open(http, OpenMode::ExistingWrite).await;
+    let state = runtime.coordinator.state().clone();
+    let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
+    let mut lease = state.acquire_lease(now, 90).unwrap();
+    let totals = runtime
+        .sync_from_walk(
+            &PageDeadline {
+                timeout_seconds: 60,
+            },
+            &mut lease,
+            mode,
+        )
+        .await
+        .unwrap();
+    state.release_lease(&lease, now).unwrap();
+    (totals, indexed_pages(&runtime.coordinator))
+}
+
+/// Pages with live (not removed) index content.
+fn indexed_pages(
+    coordinator: &notion_knowledge_retrieval::commit::IndexCommitCoordinator,
+) -> std::collections::BTreeSet<String> {
+    use notion_knowledge_core::sync_state::SyncStateStore;
+    coordinator
+        .owned_page_ids()
+        .unwrap()
+        .into_iter()
+        .filter(|page| {
+            coordinator
+                .state()
+                .page_state(page)
+                .unwrap()
+                .is_some_and(|state| !state.is_tombstone())
+        })
+        .collect()
+}
+
+fn new_requests(http: &HttpNotion, before: usize) -> Vec<String> {
+    http.requests()[before..].to_vec()
 }
 
 #[tokio::test]
-async fn actual_scheduled_http_holds_failed_pages_until_explicit_manual_recovery() {
-    use notion_knowledge_retrieval::schedule::ScheduleStatus;
+async fn unchanged_rerun_embeds_nothing() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
-    f.provider.fail_next.store(true, Ordering::SeqCst);
-    let (worker, stop, server) =
-        scheduled_server_workers(&f, &http, std::time::Duration::from_secs(60), 1, true).await;
-    let held = await_schedule(&worker, |s| s.status == ScheduleStatus::HeldPages).await;
-    let run = held.active_run.clone().unwrap();
-    let count = f.provider.count.load(Ordering::SeqCst);
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    assert_eq!(f.provider.count.load(Ordering::SeqCst), count);
-    assert_eq!(held.attempts, 0);
-    let failed = worker.coordinator.reconciliation_progress(&run).unwrap();
-    assert!(failed.failed.contains_key(PAGE));
-    assert_eq!(failed.failed.len(), 1);
-    assert_eq!(
-        failed.changed, 2,
-        "the first bad page must not stop later healthy pages"
-    );
-    assert!(failed.pending.is_empty());
-    // The operator rejection must test held-page policy, not race a live
-    // webhook poll for the common writer lease. Quiesce before that assertion.
-    stop.cancel();
-    server.await.unwrap().unwrap();
-    assert_eq!(
-        f.command(&http, &["--reconcile", "schedule", "retry", "0"])
-            .await
-            .exit,
-        3
-    );
-    let (worker, stop, server) =
-        scheduled_server_workers(&f, &http, std::time::Duration::from_secs(60), 1, true).await;
-    assert_eq!(
-        worker.coordinator.schedule("periodic").unwrap().status,
-        ScheduleStatus::HeldPages
-    );
-    use notion_knowledge_core::webhook::{EventState, WebhookEvent, WebhookInbox};
-    let event = WebhookEvent {
-        id: "cccccccc-cccc-cccc-cccc-000000000002".into(),
-        timestamp: "2026-10-10T12:00:00Z".into(),
-        workspace_id: WORKSPACE.into(),
-        subscription_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into(),
-        integration_id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".into(),
-        event_type: "page.content_updated".into(),
-        entity_id: OTHER.into(),
-        entity_type: "page".into(),
-        attempt_number: 1,
+    let (first, _) = sync(&f, &http, SyncMode::Full).await;
+    assert_eq!(first.indexed, 3);
+    let embedded = f.provider.count.load(Ordering::SeqCst);
+    let (second, _) = sync(&f, &http, SyncMode::Full).await;
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), embedded);
+    assert_eq!((second.indexed, second.unchanged), (0, second.inventory));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn page_moved_out_between_read_and_commit_is_removed_on_next_walk() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    let commits = Arc::new(RequestPause::default());
+    pause_owned_commits(&f.settings.index, commits.clone());
+    commits.armed.store(true, Ordering::SeqCst);
+    let moved = async {
+        commits.started.notified().await;
+        http.change(|m| {
+            m.hide_page = true;
+            m.parent = FOREIGN.into();
+        });
+        commits.proceed.notify_one();
     };
-    worker.state.receive(&event).unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(60), async {
-        loop {
-            if worker.state.event(&event.key()).unwrap().unwrap().state == EventState::Succeeded {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|error| {
-        panic!(
-            "webhook did not finish while failed pages were held: {error:?}; event={:?}",
-            worker.state.event(&event.key()).unwrap()
-        )
-    });
-    assert_eq!(
-        worker.coordinator.schedule("periodic").unwrap().status,
-        ScheduleStatus::HeldPages
-    );
-    assert_eq!(
-        worker
-            .coordinator
-            .reconciliation_progress(&run)
-            .unwrap()
-            .failed,
-        failed.failed
-    );
-    stop.cancel();
-    server.await.unwrap().unwrap();
-    for page in failed.failed.keys() {
-        let out = f
-            .command(&http, &["--reconcile", "retry", &run, page])
-            .await;
-        assert!(out.exit == 0 || out.exit == 3, "{:?}", out.json);
-    }
-    let resumed = f.command(&http, &["--reconcile", "resume", &run]).await;
-    assert_eq!(resumed.exit, 0, "{:?}", resumed.json);
+    let ((_, indexed), ()) = tokio::join!(sync(&f, &http, SyncMode::Full), moved);
+    // Nothing rechecks the page before its commit (accepted staleness).
+    assert!(indexed.contains(PAGE));
+    let (totals, indexed) = sync(&f, &http, SyncMode::Full).await;
+    assert!(!indexed.contains(PAGE));
+    assert_eq!((totals.removed, totals.drift.removed), (1, 1));
+    let state = f.open(&http, OpenMode::ExistingWrite).await;
     assert!(
-        !worker
+        state
             .coordinator
-            .reconciliation_failure_evidence(&run, 0, 100)
+            .state()
+            .inventory_entry(PAGE)
             .unwrap()
-            .is_empty()
+            .is_none()
     );
+}
+
+#[tokio::test]
+async fn trashed_page_is_removed_after_one_walk() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    sync(&f, &http, SyncMode::Full).await;
+    http.change(|m| m.archived = true);
+    let (totals, indexed) = sync(&f, &http, SyncMode::Full).await;
+    assert!(!indexed.contains(PAGE));
+    assert_eq!((totals.removed, totals.drift.trashed), (1, 1));
+    let status = local_status(&f).await;
+    assert!(
+        status["inventory"]["out_of_sync"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["page_id"] == PAGE && p["outcome"] == "skipped:archived")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn walk_removal_stalled_past_its_deadline_releases_the_index_guard() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    sync(&f, &http, SyncMode::Full).await;
+    http.change(|m| m.archived = true);
+    // An incremental sync commits nothing for settled pages, so the only
+    // owned commit is PAGE's removal.
+    let commits = Arc::new(RequestPause::default());
+    pause_owned_commits(&f.settings.index, commits.clone());
+    commits.armed.store(true, Ordering::SeqCst);
+    let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+    let state = runtime.coordinator.state().clone();
+    let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
+    let mut lease = state.acquire_lease(now, 90).unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        runtime.sync_from_walk(
+            &PageDeadline { timeout_seconds: 1 },
+            &mut lease,
+            SyncMode::Incremental,
+        ),
+    )
+    .await
+    .expect("a stalled removal must give up at its deadline");
+    assert_eq!(result.unwrap_err(), "cache sync removal timeout");
+    // The pause was never released: the deadline poll freed the guard.
+    let guard = std::fs::File::open(&f.settings.index).unwrap();
+    guard.try_lock().unwrap();
+    drop(guard);
+    state.release_lease(&lease, now).unwrap();
+    notion_knowledge_retrieval::test_hooks::clear_commit_pause(&f.settings.index);
+    let (totals, indexed) = sync(&f, &http, SyncMode::Incremental).await;
+    assert!(!indexed.contains(PAGE));
+    assert_eq!(totals.removed, 1);
+}
+
+#[tokio::test]
+async fn revoked_subtree_is_held_for_one_walk_then_removed() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    sync(&f, &http, SyncMode::Full).await;
+    http.change(|m| m.inaccessible_page = true);
+    let (totals, indexed) = sync(&f, &http, SyncMode::Full).await;
+    assert!(totals.complete && indexed.contains(PAGE));
+    assert_eq!((totals.held, totals.removed), (1, 0));
+    let (totals, indexed) = sync(&f, &http, SyncMode::Full).await;
+    assert!(!indexed.contains(PAGE));
+    assert_eq!((totals.held, totals.removed), (0, 1));
+}
+
+#[tokio::test]
+async fn incremental_with_no_changes_only_calls_search() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    sync(&f, &http, SyncMode::Full).await;
+    let (before, embedded) = (
+        http.requests().len(),
+        f.provider.count.load(Ordering::SeqCst),
+    );
+    let (totals, _) = sync(&f, &http, SyncMode::Incremental).await;
+    assert_eq!(new_requests(&http, before), ["/v1/search"]);
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), embedded);
+    assert_eq!(
+        (totals.indexed, totals.removed, totals.inventory),
+        (0, 0, 0)
+    );
+}
+
+#[tokio::test]
+async fn incremental_refreshes_only_changed_page() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    sync(&f, &http, SyncMode::Full).await;
+    http.change(|m| {
+        m.revision = "2026-10-11T12:00:00Z".into();
+        m.markdown.push_str("More basil.\n");
+    });
+    let before = http.requests().len();
+    let (totals, indexed) = sync(&f, &http, SyncMode::Incremental).await;
+    let reads: Vec<_> = new_requests(&http, before)
+        .into_iter()
+        .filter(|r| r.starts_with("/v1/pages/"))
+        .collect();
+    assert_eq!(reads, [format!("/v1/pages/{PAGE}/markdown")]);
+    assert_eq!((totals.indexed, totals.drift.changed), (1, 1));
+    assert!(indexed.contains(PAGE));
+}
+
+#[tokio::test]
+async fn incremental_indexes_new_page_under_an_inventoried_parent() {
+    const NEW: &str = "cccccccc-0000-0000-0000-00000000000c";
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    sync(&f, &http, SyncMode::Full).await;
+    http.change(|m| {
+        m.extra.insert(
+            NEW.into(),
+            ExtraPage {
+                title: "New".into(),
+                visible: true,
+                archived: false,
+            },
+        );
+    });
+    let (totals, indexed) = sync(&f, &http, SyncMode::Incremental).await;
+    assert!(indexed.contains(NEW));
+    assert_eq!(totals.drift.added, 1);
+}
+
+#[tokio::test]
+async fn search_hit_with_unknown_parent_is_counted_not_indexed() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    sync(&f, &http, SyncMode::Full).await;
+    http.change(|m| {
+        m.foreign_parent = "99999999-9999-9999-9999-999999999999".into();
+        m.foreign_revision = "2026-10-11T12:00:00Z".into();
+    });
+    let before = http.requests().len();
+    let (totals, indexed) = sync(&f, &http, SyncMode::Incremental).await;
+    assert_eq!(totals.drift.unplaced, 1);
+    assert!(!indexed.contains(FOREIGN));
+    assert!(
+        !new_requests(&http, before)
+            .iter()
+            .any(|r| r.contains(FOREIGN))
+    );
+}
+
+#[tokio::test]
+async fn trashed_in_search_is_confirmed_before_removal() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    sync(&f, &http, SyncMode::Full).await;
+    http.change(|m| m.stale_search_trash = true);
+    let before = http.requests().len();
+    let (totals, indexed) = sync(&f, &http, SyncMode::Incremental).await;
+    assert!(new_requests(&http, before).contains(&format!("/v1/pages/{PAGE}")));
+    assert!(indexed.contains(PAGE));
+    assert_eq!(totals.removed, 0);
+    // Search agrees with the page once it is really trashed.
+    http.change(|m| m.archived = true);
+    let (totals, indexed) = sync(&f, &http, SyncMode::Incremental).await;
+    assert!(!indexed.contains(PAGE));
+    assert_eq!((totals.removed, totals.drift.removed), (1, 1));
+}
+
+#[tokio::test]
+async fn incremental_rereads_pages_edited_in_the_last_synced_minute() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    // Notion timestamps are minute-granular: a second edit in this minute
+    // keeps the same `last_edited_time`.
+    let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
+    let minute = chrono::DateTime::from_timestamp(now, 0)
+        .unwrap()
+        .format("%Y-%m-%dT%H:%M:00.000Z")
+        .to_string();
+    http.change(|m| m.revision = minute);
+    sync(&f, &http, SyncMode::Full).await;
+    http.change(|m| m.markdown.push_str("Same minute.\n"));
+    let (totals, _) = sync(&f, &http, SyncMode::Incremental).await;
+    assert_eq!(totals.indexed, 1);
+}
+
+#[tokio::test]
+async fn single_page_refresh_reads_one_page_through_the_parent_map() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    sync(&f, &http, SyncMode::Full).await;
+    http.change(|m| m.markdown.push_str("Callback edit.\n"));
+    let before = http.requests().len();
+    let (totals, _) = sync(&f, &http, SyncMode::Page(PageId(PAGE.into()))).await;
+    assert_eq!(
+        new_requests(&http, before),
+        [
+            format!("/v1/pages/{PAGE}"),
+            format!("/v1/pages/{PAGE}/markdown")
+        ]
+    );
+    assert_eq!(totals.indexed, 1);
+    // An unplaced page is counted and left to the next walk.
+    http.change(|m| m.foreign_parent = "99999999-9999-9999-9999-999999999999".into());
+    let (totals, indexed) = sync(&f, &http, SyncMode::Page(PageId(FOREIGN.into()))).await;
+    assert_eq!(totals.drift.unplaced, 1);
+    assert!(!indexed.contains(FOREIGN));
 }
 
 #[tokio::test]
@@ -1280,107 +1532,13 @@ async fn actual_scheduled_http_timeout_exhaustion_is_inspectable_and_explicit_ab
 }
 
 #[tokio::test]
-async fn actual_scheduled_http_reprocesses_stale_and_safely_deletes_authoritative_orphans() {
-    use notion_knowledge_retrieval::schedule::ScheduleEventKind;
-    let http = start_notion().await;
-    let f = Fixture::new(&http).await;
-    let (worker, stop, server) =
-        scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
-    await_schedule(&worker, |s| s.cycle == 1 && s.active_run.is_none()).await;
-    stop.cancel();
-    server.await.unwrap().unwrap();
-    http.change(|m| {
-        m.title = "Changed metadata".into();
-        m.revision = "2026-10-11T12:00:00Z".into();
-        m.markdown.push_str("More basil.");
-    });
-    assert_eq!(
-        f.command(
-            &http,
-            &[
-                "--reconcile",
-                "schedule",
-                "configure",
-                "60",
-                "2",
-                "1",
-                "1",
-                "0"
-            ]
-        )
-        .await
-        .exit,
-        0
-    );
-    let (worker, stop, server) =
-        scheduled_server_attempts(&f, &http, std::time::Duration::from_secs(60), 2).await;
-    await_schedule(&worker, |s| s.cycle == 2 && s.active_run.is_none()).await;
-    let events = worker
-        .coordinator
-        .schedule_events("periodic", 0, 100)
-        .unwrap();
-    let run = events
-        .iter()
-        .rev()
-        .find(|e| e.kind == ScheduleEventKind::Completed)
-        .unwrap()
-        .run_id
-        .as_ref()
-        .unwrap();
-    let p = worker.coordinator.reconciliation_progress(run).unwrap();
-    assert_eq!(
-        (
-            p.scanned,
-            p.changed,
-            p.deleted,
-            p.unchanged,
-            p.failed_pages()
-        ),
-        (3, 1, 0, 2, 0)
-    );
-    stop.cancel();
-    server.await.unwrap().unwrap();
-    http.change(|m| {
-        m.hide_page = true;
-        m.archived = true;
-    });
-    assert_eq!(
-        f.command(&http, &["--reconcile", "schedule", "interval", "60", "0"])
-            .await
-            .exit,
-        0
-    );
-    let (worker, stop, server) =
-        scheduled_server_attempts(&f, &http, std::time::Duration::from_secs(60), 2).await;
-    await_schedule(&worker, |s| s.cycle == 3 && s.active_run.is_none()).await;
-    let events = worker
-        .coordinator
-        .schedule_events("periodic", 0, 100)
-        .unwrap();
-    let run = events
-        .iter()
-        .rev()
-        .find(|e| e.kind == ScheduleEventKind::Completed)
-        .unwrap()
-        .run_id
-        .as_ref()
-        .unwrap();
-    let p = worker.coordinator.reconciliation_progress(run).unwrap();
-    // Removing PAGE's child tag edits the root; OTHER keeps its identity.
-    assert_eq!(
-        (p.changed, p.deleted, p.unchanged, p.failed_pages()),
-        (1, 1, 1, 0)
-    );
-    stop.cancel();
-    server.await.unwrap().unwrap();
-}
-
-#[tokio::test]
 async fn actual_scheduled_http_transient_source_attempts_back_off_then_exhaust_without_spinning() {
     use notion_knowledge_retrieval::schedule::{ScheduleEventKind, ScheduleStatus};
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
-    // Stall the source during inventory so its deadline determines the retry path.
+    // Stall the source during the walk so its deadline determines the retry
+    // path: without search, the walk reads PAGE's metadata itself.
+    http.change(|m| m.search_unavailable = true);
     http.pause.armed.store(true, Ordering::SeqCst);
     let (worker, stop, server) = scheduled_server_budgets(
         &f,
@@ -3105,59 +3263,6 @@ async fn periodic_sync_retries_unreadable_pages_on_the_next_normal_cycle() {
 }
 
 #[tokio::test]
-async fn scheduled_inventory_uses_its_budget_before_bounded_page_work() {
-    use notion_knowledge_server::scheduled_reconciliation::{Settings, runtime::Worker};
-    use std::time::Duration;
-    let http = start_notion().await;
-    let f = Fixture::new(&http).await;
-    // This budget contract owns one scheduled attempt. Combined HTTP-worker
-    // contention and periodic mutation refresh have separate integration cases.
-    let worker = Worker {
-        index: f.open(&http, OpenMode::ExistingWrite).await,
-        settings: Settings {
-            interval: 60,
-            attempts: 1,
-            backoff: 1,
-            maximum_backoff: 1,
-        },
-        poll: Duration::from_millis(10),
-        timeout: Duration::from_secs(1),
-        inventory_timeout: Duration::from_secs(7200),
-    };
-    http.pause.armed.store(true, Ordering::SeqCst);
-    f.provider.pause.store(true, Ordering::SeqCst);
-    let observed = async {
-        http.pause.started.notified().await;
-        assert_writer_available_during_inventory(&f.state);
-        tokio::time::sleep(Duration::from_millis(1100)).await;
-        http.pause.proceed.notify_one();
-        f.provider.entered.notified().await;
-    };
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(15), async {
-        tokio::join!(worker.tick(CancellationToken::new()), observed)
-    })
-    .await
-    .expect("inventory must survive the page budget and page work must then expire");
-    assert!(result.unwrap());
-    let schedule = worker.index.coordinator.schedule("periodic").unwrap();
-    assert_eq!(schedule.attempts, 1);
-    assert_eq!(
-        schedule.status,
-        notion_knowledge_retrieval::schedule::ScheduleStatus::Exhausted
-    );
-    let run = schedule.active_run.unwrap();
-    assert!(
-        !worker
-            .index
-            .coordinator
-            .reconciliation_progress(&run)
-            .unwrap()
-            .pending
-            .is_empty()
-    );
-}
-
-#[tokio::test]
 async fn explicit_retry_replans_with_inventory_budget_then_keeps_the_page_deadline() {
     use std::time::Duration;
     let http = start_notion().await;
@@ -3908,42 +4013,6 @@ async fn manual_apply_read_ahead_is_bounded_while_embedding_is_paused() {
     assert_eq!(f.provider.max_active.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn scheduled_cycle_fetches_next_planned_page_while_one_embedding_is_paused() {
-    let http = start_notion().await;
-    add_extra_pages(&http, 12);
-    let f = Fixture::new(&http).await;
-    http.reset_markdown_pages();
-    f.provider.hold.store(true, Ordering::SeqCst);
-    let (worker, stop, server) =
-        scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
-    await_held_embedding(&f).await;
-    await_markdown_pages(&http, 2).await;
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    let fetched = http.markdown_pages.lock().unwrap().len();
-    assert!(
-        fetched <= 3,
-        "held page and two read-ahead workers; got {fetched}"
-    );
-    assert_eq!(f.provider.active.load(Ordering::SeqCst), 1);
-    f.provider.hold_release.add_permits(1);
-    await_schedule(&worker, |s| s.cycle == 1 && s.active_run.is_none()).await;
-    let run = worker
-        .coordinator
-        .schedule_events("periodic", 0, 100)
-        .unwrap()
-        .into_iter()
-        .find(|e| e.kind == notion_knowledge_retrieval::schedule::ScheduleEventKind::Completed)
-        .unwrap()
-        .run_id
-        .unwrap();
-    let progress = worker.coordinator.reconciliation_progress(&run).unwrap();
-    assert_eq!((progress.changed, progress.failed_pages()), (15, 0));
-    assert_eq!(f.provider.max_active.load(Ordering::SeqCst), 1);
-    stop.cancel();
-    server.await.unwrap().unwrap();
-}
-
 #[tokio::test]
 async fn initial_sync_records_inventory_totals_equal_outcomes() {
     let http = start_notion().await;
@@ -4036,8 +4105,10 @@ async fn full_sync_makes_two_calls_per_plain_page_and_one_per_row() {
 async fn cancelled_command_drains_its_submitted_owned_guard_before_releasing_the_writer() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
-    *f.provider.boundary_pause.lock().unwrap() = Some(http.pause.clone());
-    pause_owned_commits(&f.settings.index, http.pause.clone());
+    // Armed by the embedding, fired only inside the owned commit.
+    let commits = Arc::new(RequestPause::default());
+    *f.provider.boundary_pause.lock().unwrap() = Some(commits.clone());
+    pause_owned_commits(&f.settings.index, commits.clone());
     let stop = CancellationToken::new();
     let pending = f.command_cancel(
         &http,
@@ -4047,7 +4118,7 @@ async fn cancelled_command_drains_its_submitted_owned_guard_before_releasing_the
     let cancel = async {
         tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            http.pause.started.notified(),
+            commits.started.notified(),
         )
         .await
         .unwrap();
@@ -4065,7 +4136,7 @@ async fn cancelled_command_drains_its_submitted_owned_guard_before_releasing_the
     let guard = std::fs::File::open(&f.settings.index).unwrap();
     guard.try_lock().unwrap();
     drop(guard);
-    http.pause.proceed.notify_one();
+    commits.proceed.notify_one();
     counts(
         &f.command(&http, &["--reconcile", "resume", "owned-cancel"])
             .await,
@@ -4079,13 +4150,15 @@ async fn cancelled_command_drains_its_submitted_owned_guard_before_releasing_the
 async fn actual_scheduled_http_shutdown_drains_live_owned_effect_before_release() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
-    *f.provider.boundary_pause.lock().unwrap() = Some(http.pause.clone());
-    pause_owned_commits(&f.settings.index, http.pause.clone());
+    // Armed by the embedding, fired only inside the owned commit.
+    let commits = Arc::new(RequestPause::default());
+    *f.provider.boundary_pause.lock().unwrap() = Some(commits.clone());
+    pause_owned_commits(&f.settings.index, commits.clone());
     let (worker, stop, server) =
         scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
     tokio::time::timeout(
         std::time::Duration::from_secs(60),
-        http.pause.started.notified(),
+        commits.started.notified(),
     )
     .await
     .unwrap();
@@ -4116,7 +4189,7 @@ async fn actual_scheduled_http_shutdown_drains_live_owned_effect_before_release(
             notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000,
         )
         .unwrap();
-    http.pause.proceed.notify_one();
+    commits.proceed.notify_one();
     let (worker, stop, server) =
         scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
     await_schedule(&worker, |s| s.cycle == 1 && s.active_run.is_none()).await;
@@ -4125,7 +4198,7 @@ async fn actual_scheduled_http_shutdown_drains_live_owned_effect_before_release(
 }
 
 /// Hold the owned commit (guard and fence held, before effects) whenever
-/// `pause` is armed: the boundary the removed in-guard source read used to give.
+/// `pause` is armed. Give it its own pause so no source read can fire it.
 fn pause_owned_commits(index: &std::path::Path, pause: Arc<RequestPause>) {
     notion_knowledge_retrieval::test_hooks::set_commit_pause(
         index,

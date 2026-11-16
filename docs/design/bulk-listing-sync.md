@@ -139,6 +139,9 @@ discovered by walking it:
   resync removes it.
 - Staleness is bounded by the reconciliation interval. Ownership, lease and
   receipt fences stay, as do per-page atomic commits and the #649 deadlines.
+- The search metadata a walk reuses instead of per-page reads can likewise be
+  one walk stale (for example a page search still lists as trashed); the next
+  walk corrects it.
 - Relations with the page graph off stay unresolved references and cost no calls.
 
 ### 1b. Search as a change accelerator (incremental only)
@@ -149,6 +152,13 @@ discovered by walking it:
   parent map.
 - Search misses are covered by the periodic full walk (§4). Search never
   decides scope alone.
+- As built: search sorts descending and stops at the inventory's newest edit
+  time, keeping hits from that same minute. A hit already indexed at its
+  revision is skipped only when it was read at least two minutes after that
+  minute, so a second edit within the minute is still read. A hit whose parent
+  chain the inventory cannot resolve is counted as `unplaced` and left to the
+  next walk. A restart inside the interval runs one incremental sync; the
+  periodic cycle always walks.
 
 ### 4. Inventory resource and drift detection
 

@@ -3,7 +3,8 @@ use super::{SqliteSyncStateStore, map_sqlite_error};
 use notion_knowledge_core::{
     discovery::SkipReason,
     inventory::{
-        InventoryCounts, InventoryDiff, InventoryEntry, InventoryOutcome, InventoryParent,
+        DriftCounts, InventoryCounts, InventoryDiff, InventoryEntry, InventoryOutcome,
+        InventoryParent, SyncRecord,
     },
     reconciliation::FailureClass,
     sync_state::SyncStateError,
@@ -314,6 +315,146 @@ impl SqliteSyncStateStore {
             }
         }
         Ok(held)
+    }
+
+    pub fn record_sync(&self, sync: &SyncRecord) -> Result<(), SyncStateError> {
+        let d = &sync.drift;
+        self.lock_connection()?
+            .execute(
+                "INSERT OR REPLACE INTO inventory_walk (singleton, run_id, mode, complete, held,
+                     added, changed, moved, removed, trashed, unplaced, finished_at)
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    sync.run_id,
+                    if sync.incremental {
+                        "incremental"
+                    } else {
+                        "full"
+                    },
+                    sync.complete,
+                    sync.held as i64,
+                    d.added as i64,
+                    d.changed as i64,
+                    d.moved as i64,
+                    d.removed as i64,
+                    d.trashed as i64,
+                    d.unplaced as i64,
+                    sync.finished_at
+                ],
+            )
+            .map_err(map_sqlite_error)?;
+        Ok(())
+    }
+
+    pub fn last_sync(&self) -> Result<Option<SyncRecord>, SyncStateError> {
+        let n = |row: &rusqlite::Row<'_>, i| row.get::<_, i64>(i).map(|v| v as u64);
+        self.lock_connection()?
+            .query_row(
+                "SELECT run_id, mode, complete, held, added, changed, moved, removed, trashed,
+                     unplaced, finished_at FROM inventory_walk WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok(SyncRecord {
+                        run_id: row.get(0)?,
+                        incremental: row.get::<_, String>(1)? == "incremental",
+                        complete: row.get(2)?,
+                        held: n(row, 3)?,
+                        drift: DriftCounts {
+                            added: n(row, 4)?,
+                            changed: n(row, 5)?,
+                            moved: n(row, 6)?,
+                            removed: n(row, 7)?,
+                            trashed: n(row, 8)?,
+                            unplaced: n(row, 9)?,
+                        },
+                        finished_at: row.get(10)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(map_sqlite_error)
+    }
+
+    /// The newest edit time the inventory holds: where an incremental search
+    /// stops. Notion's own clock, so local clock skew cannot skip a change.
+    pub fn inventory_high_water(&self) -> Result<Option<String>, SyncStateError> {
+        self.lock_connection()?
+            .query_row(
+                "SELECT MAX(last_edited_time) FROM page_inventory WHERE last_edited_time != ''",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(map_sqlite_error)
+    }
+
+    /// The inventory entry of a data-source row's siblings: how a new row is
+    /// placed under the page that tagged its database.
+    pub fn inventory_data_source(
+        &self,
+        data_source_id: &str,
+    ) -> Result<Option<InventoryEntry>, SyncStateError> {
+        let db = self.lock_connection()?;
+        db.query_row(
+            &format!("{SELECT} WHERE parent_kind = 'data_source' AND parent_id = ?1 LIMIT 1"),
+            [data_source_id],
+            read_entry,
+        )
+        .optional()
+        .map_err(map_sqlite_error)?
+        .map_or(Ok(None), |entry| {
+            entry.ok_or(SyncStateError::CorruptState).map(Some)
+        })
+    }
+
+    /// When `page_id` was last indexed at exactly `revision`, if it was.
+    pub fn inventory_settled_at(
+        &self,
+        page_id: &str,
+        revision: &str,
+    ) -> Result<Option<i64>, SyncStateError> {
+        self.lock_connection()?
+            .query_row(
+                "SELECT last_fetched_at FROM page_inventory
+                 WHERE page_id = ?1 AND outcome = 'indexed' AND indexed_revision = ?2",
+                params![page_id, revision],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
+            .map_err(map_sqlite_error)
+    }
+
+    /// The recorded outcome of one page, if it has one.
+    pub fn inventory_outcome(
+        &self,
+        page_id: &str,
+    ) -> Result<Option<InventoryOutcome>, SyncStateError> {
+        let row: Option<(Option<String>, Option<String>, Option<String>)> = self
+            .lock_connection()?
+            .query_row(
+                "SELECT outcome, outcome_detail, indexed_revision FROM page_inventory WHERE page_id = ?1",
+                [page_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(map_sqlite_error)?;
+        Ok(match row {
+            Some((Some(kind), detail, revision)) => {
+                let detail = detail.unwrap_or_default();
+                Some(match kind.as_str() {
+                    "indexed" => InventoryOutcome::Indexed {
+                        revision: revision.unwrap_or_default(),
+                    },
+                    "skipped" => InventoryOutcome::Skipped(
+                        SkipReason::parse(&detail).ok_or(SyncStateError::CorruptState)?,
+                    ),
+                    _ => InventoryOutcome::Failed(
+                        FailureClass::parse(&detail).ok_or(SyncStateError::CorruptState)?,
+                    ),
+                })
+            }
+            _ => None,
+        })
     }
 
     pub fn inventory_counts(&self) -> Result<InventoryCounts, SyncStateError> {

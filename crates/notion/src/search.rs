@@ -108,3 +108,109 @@ impl NotionClient {
         Ok(pages)
     }
 }
+
+/// Where a search hit says it lives, for placement against the inventory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HitParent {
+    Page(String),
+    DataSource(String),
+    /// A block, the workspace, or anything the inventory cannot resolve alone.
+    Other,
+}
+
+/// One changed page from search (or one page retrieve). Search may lag;
+/// it only says which pages to look at, never whether they are in scope.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchHit {
+    pub page_id: String,
+    pub parent: HitParent,
+    pub last_edited_time: String,
+    pub in_trash: bool,
+    pub(crate) value: Value,
+}
+
+impl SearchHit {
+    pub(crate) fn parse(value: Value) -> Option<Self> {
+        let PageId(page_id) = page_id(value["id"].as_str()?).ok()?;
+        let parent = &value["parent"];
+        let parent = match parent["type"].as_str() {
+            Some("page_id") => HitParent::Page(page_id_of(&parent["page_id"])?),
+            Some("data_source_id") => HitParent::DataSource(page_id_of(&parent["data_source_id"])?),
+            _ => HitParent::Other,
+        };
+        Some(Self {
+            page_id,
+            parent,
+            last_edited_time: value["last_edited_time"].as_str()?.to_owned(),
+            in_trash: crate::pages::inactive(&value)?,
+            value,
+        })
+    }
+}
+
+fn page_id_of(value: &Value) -> Option<String> {
+    page_id(value.as_str()?).ok().map(|PageId(id)| id)
+}
+
+impl NotionClient {
+    /// Pages edited at or after `since`, newest first. Timestamps are
+    /// minute-granular, so pages edited in the `since` minute are listed again
+    /// and the caller compares them against the inventory.
+    pub async fn search_changed_since(&self, since: &str) -> Result<Vec<SearchHit>, BackendError> {
+        let mut hits = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut cursors = BTreeSet::new();
+        for _ in 0..MAX_SEARCH_PAGES {
+            let mut body = json!({
+                "filter": {"property": "object", "value": "page"},
+                "sort": {"direction": "descending", "timestamp": "last_edited_time"},
+                "page_size": 100,
+            });
+            if let Some(cursor) = &cursor {
+                body["start_cursor"] = json!(cursor);
+            }
+            let value = self
+                .walk_request(Method::POST, "search", Some(&body))
+                .await?;
+            let results = value["results"]
+                .as_array()
+                .filter(|_| value["object"] == "list")
+                .ok_or(BackendError {
+                    kind: BackendErrorKind::Internal,
+                    operation: "notion.search",
+                    retry_after: None,
+                    committed_page_id: None,
+                })?;
+            let mut older = false;
+            for hit in results
+                .iter()
+                .filter(|page| page["object"] == "page")
+                .cloned()
+                .filter_map(SearchHit::parse)
+            {
+                if hit.last_edited_time.as_str() < since {
+                    older = true;
+                } else if hits.len() < MAX_SEARCH_ENTRIES {
+                    hits.push(hit);
+                }
+            }
+            match value["next_cursor"].as_str() {
+                Some(next)
+                    if !older
+                        && value["has_more"] == true
+                        && !next.is_empty()
+                        && cursors.insert(next.to_owned()) =>
+                {
+                    cursor = Some(next.to_owned());
+                }
+                _ => return Ok(hits),
+            }
+        }
+        Ok(hits)
+    }
+
+    /// One page retrieve as a hit: the single-page (callback) path.
+    pub async fn page_hit(&self, page: &PageId) -> Result<Option<SearchHit>, BackendError> {
+        Ok(SearchHit::parse(self.fetch_page_value(page).await?))
+    }
+}

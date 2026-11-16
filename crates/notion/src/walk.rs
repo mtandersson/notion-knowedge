@@ -587,6 +587,47 @@ impl NotionClient {
         self.walk(scope, sink, search, calls).await
     }
 
+    /// Read one placed hit the way the walk reads a reached page, from the
+    /// hit's own metadata: one Markdown read. `None` when the hit is not
+    /// physically under `parent` after all (for example a linked view).
+    /// Children it tags are not followed; new children are hits themselves.
+    pub async fn read_placed(
+        &self,
+        scope: &LifecycleScope,
+        hit: &crate::search::SearchHit,
+        parent: InventoryParent,
+        root: String,
+    ) -> Result<Option<WalkedPage>, BackendError> {
+        let rules = Self::rules(scope)?;
+        let visit = self
+            .visit_page(
+                hit.page_id.clone(),
+                parent,
+                root,
+                Some(hit.value.clone()),
+                &rules,
+                &SearchMetadata::new(),
+            )
+            .await?;
+        if visit.rejected.is_some() {
+            return Ok(None);
+        }
+        Ok(visit.pages.into_iter().next())
+    }
+
+    fn rules(scope: &LifecycleScope) -> Result<ExclusionRules, BackendError> {
+        let normalize = |ids: &BTreeSet<String>| {
+            ids.iter()
+                .map(|v| page_id(v).map(|v| v.0))
+                .collect::<Result<BTreeSet<_>, _>>()
+        };
+        Ok(ExclusionRules {
+            page_ids: normalize(&scope.exclusions.page_ids)?,
+            descendants_of: normalize(&scope.exclusions.descendants_of)?,
+            source_types: scope.exclusions.source_types.clone(),
+        })
+    }
+
     async fn walk(
         &self,
         scope: &LifecycleScope,
@@ -595,16 +636,7 @@ impl NotionClient {
         search_calls: u64,
     ) -> Result<TreeWalk, BackendError> {
         let search = &search;
-        let normalize = |ids: &BTreeSet<String>| {
-            ids.iter()
-                .map(|v| page_id(v).map(|v| v.0))
-                .collect::<Result<BTreeSet<_>, _>>()
-        };
-        let rules = ExclusionRules {
-            page_ids: normalize(&scope.exclusions.page_ids)?,
-            descendants_of: normalize(&scope.exclusions.descendants_of)?,
-            source_types: scope.exclusions.source_types.clone(),
-        };
+        let rules = Self::rules(scope)?;
         if scope.roots.is_empty() {
             return Err(error(BackendErrorKind::InvalidInput));
         }

@@ -84,6 +84,44 @@ pub struct InventoryDiff {
     pub unchanged: usize,
 }
 
+/// What one sync found changed against the previous inventory. `unplaced`
+/// counts search hits whose parent chain the inventory could not resolve;
+/// they are left for the next full walk.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct DriftCounts {
+    pub added: u64,
+    pub changed: u64,
+    pub moved: u64,
+    pub removed: u64,
+    pub trashed: u64,
+    pub unplaced: u64,
+}
+impl InventoryDiff {
+    pub fn drift(&self) -> DriftCounts {
+        DriftCounts {
+            added: self.added.len() as u64,
+            changed: self.changed.len() as u64,
+            moved: self.moved.len() as u64,
+            removed: self.removed.len() as u64,
+            trashed: self.trashed.len() as u64,
+            unplaced: 0,
+        }
+    }
+}
+
+/// The last finished sync: whether its walk was complete (only a complete
+/// walk replaces the inventory and removes pages), and what it changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SyncRecord {
+    pub run_id: String,
+    pub incremental: bool,
+    pub complete: bool,
+    /// Removals deferred one walk under a newly inaccessible page.
+    pub held: u64,
+    pub drift: DriftCounts,
+    pub finished_at: i64,
+}
+
 /// `indexed + skipped + failed + pending == total` always holds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct InventoryCounts {
