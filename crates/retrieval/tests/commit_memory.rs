@@ -116,7 +116,7 @@ async fn probe_rss_against_committed_pages() {
     let scope = ReconciliationScope::new(vec!["root".into()], vec![], "policy", "v1").unwrap();
     let binding = CommitBinding::new("chunks", "workspace", &scope, "v1", 1).unwrap();
     let coordinator =
-        IndexCommitCoordinator::initialize(&index, &root.join("state.sqlite"), binding).unwrap();
+        IndexCommitCoordinator::initialize(&index, root.join("state.sqlite"), binding).unwrap();
     let lease = coordinator.state().acquire_lease(10, 100).unwrap();
     let embedding = EmbeddingMetadata::new("fake".into(), "m".into(), "v1".into(), DIM).unwrap();
     let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| 10);
