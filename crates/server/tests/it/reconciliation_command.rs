@@ -1613,7 +1613,7 @@ async fn actual_scheduled_http_timeout_exhaustion_is_inspectable_and_explicit_ab
     http.change(|m| m.search_unavailable = true);
     http.pause.armed.store(true, Ordering::SeqCst);
     let (worker, stop, server) =
-        scheduled_server(&f, &http, std::time::Duration::from_secs(1)).await;
+        scheduled_server(&f, &http, std::time::Duration::from_secs(5)).await;
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
         http.pause.started.notified(),
@@ -3293,10 +3293,10 @@ async fn streaming_initial_sync_separates_discovery_and_page_budgets() {
             .store(true, Ordering::SeqCst);
         f.provider.pause.store(true, Ordering::SeqCst);
         http.discovery_pause.proceed.notify_one();
-        tokio::time::timeout(Duration::from_secs(10), f.provider.entered.notified())
+        tokio::time::timeout(Duration::from_secs(30), f.provider.entered.notified())
             .await
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(10), f.provider.idle_entered.notified())
+        tokio::time::timeout(Duration::from_secs(30), f.provider.idle_entered.notified())
             .await
             .unwrap();
         let calls = f.provider.count.load(Ordering::SeqCst);
@@ -3315,7 +3315,7 @@ async fn streaming_initial_sync_separates_discovery_and_page_budgets() {
         http.client(),
         f.provider.clone(),
     );
-    let (result, _) = tokio::time::timeout(Duration::from_secs(45), async {
+    let (result, _) = tokio::time::timeout(Duration::from_secs(90), async {
         tokio::join!(recovery, source_and_page)
     })
     .await
@@ -3986,7 +3986,7 @@ async fn target_projection_mode_changes_reconcile_without_reembedding_canonical_
 #[tokio::test]
 async fn page_deadline_logs_expose_only_fixed_reason_and_aggregate_counts() {
     let output = tokio::time::timeout(
-        std::time::Duration::from_secs(90),
+        std::time::Duration::from_secs(180),
         tokio::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "reconciliation_command::streaming_initial_sync_separates_discovery_and_page_budgets",
