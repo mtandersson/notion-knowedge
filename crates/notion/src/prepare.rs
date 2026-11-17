@@ -452,11 +452,26 @@ mod tests {
     }
     /// The last walk's placement of pages: each id with its ancestors, nearest
     /// first and ending at its root.
-    struct Placement(std::collections::BTreeMap<String, Vec<String>>);
+    struct Placement(
+        std::collections::BTreeMap<String, notion_knowledge_core::inventory::PlacedChain>,
+    );
     impl notion_knowledge_core::inventory::InventoryPlacement for Placement {
-        fn placed_chain(&self, page_id: &str) -> Option<Vec<String>> {
+        fn placed_chain(
+            &self,
+            page_id: &str,
+        ) -> Option<notion_knowledge_core::inventory::PlacedChain> {
             self.0.get(page_id).cloned()
         }
+    }
+    /// `OTHER` placed as a database row under the root.
+    fn placed_row() -> std::sync::Arc<Placement> {
+        std::sync::Arc::new(Placement(std::collections::BTreeMap::from([(
+            OTHER.to_owned(),
+            notion_knowledge_core::inventory::PlacedChain {
+                ancestors: vec![ROOT.into()],
+                data_sources: vec![("source".into(), "database".into())],
+            },
+        )])))
     }
     fn placed(entries: &[(&str, &[&str])]) -> std::sync::Arc<Placement> {
         std::sync::Arc::new(Placement(
@@ -465,7 +480,10 @@ mod tests {
                 .map(|(id, chain)| {
                     (
                         (*id).to_owned(),
-                        chain.iter().map(|s| (*s).to_owned()).collect(),
+                        notion_knowledge_core::inventory::PlacedChain {
+                            ancestors: chain.iter().map(|s| (*s).to_owned()).collect(),
+                            data_sources: vec![],
+                        },
                     )
                 })
                 .collect(),
@@ -577,7 +595,9 @@ mod tests {
         use crate::relation_proposal::RelationProposalAdapter;
         use notion_knowledge_core::graph::GraphTarget;
         const EXCLUDED: &str = "55555555-5555-5555-5555-555555555555";
-        let cases: [(&str, Option<std::sync::Arc<Placement>>); 6] = [
+        let cases: [(&str, Option<std::sync::Arc<Placement>>); 8] = [
+            ("row of excluded data source", Some(placed_row())),
+            ("row of excluded database", Some(placed_row())),
             ("no inventory", None),
             ("absent from inventory", Some(placed(&[]))),
             ("under another root", Some(placed(&[(OTHER, &[WORKSPACE])]))),
@@ -602,6 +622,18 @@ mod tests {
                 }
                 "under excluded page" => {
                     config.exclusions.page_ids.insert(EXCLUDED.into());
+                }
+                "row of excluded data source" => {
+                    config
+                        .exclusions
+                        .source_types
+                        .insert(notion_knowledge_core::discovery::SourceType::DataSource);
+                }
+                "row of excluded database" => {
+                    config
+                        .exclusions
+                        .source_types
+                        .insert(notion_knowledge_core::discovery::SourceType::Database);
                 }
                 _ => {}
             }
@@ -696,6 +728,19 @@ mod tests {
             .await
             .unwrap();
         assert!(result.targets()[OTHER].is_ok());
+        // A row of an allowed database, and a target that is itself an
+        // excluded-descendants page (only its descendants are excluded).
+        let mut config = scope();
+        config.exclusions.descendants_of.insert(OTHER.into());
+        for inventory in [placed_row(), placed(&[(OTHER, &[ROOT])])] {
+            let adapter = RelationProposalAdapter::new(client.clone(), config.clone())
+                .unwrap()
+                .with_inventory(inventory);
+            let row = proposal(&adapter, &with_relations("Related", &[OTHER], false))
+                .await
+                .unwrap();
+            assert!(row.targets()[OTHER].is_ok());
+        }
         assert_eq!(
             result.edges()[0].target(),
             &GraphTarget::Page {

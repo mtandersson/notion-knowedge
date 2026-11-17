@@ -112,11 +112,12 @@ impl RelationProposalAdapter {
     /// its chain and no ancestor whose descendants are excluded. A target the
     /// inventory does not hold stays unresolved until a walk places it.
     fn placed(&self, target: &str, scope: &LifecycleScope) -> Result<(), ScopeError> {
-        let chain = self
+        let placed = self
             .inventory
             .as_ref()
             .and_then(|inventory| inventory.placed_chain(target))
             .ok_or(ScopeError::Unverifiable)?;
+        let chain = &placed.ancestors;
         let root = chain.last().map_or(target, String::as_str);
         if !scope.roots.iter().any(|r| r.0 == root) {
             return Err(ScopeError::Denied);
@@ -126,7 +127,17 @@ impl RelationProposalAdapter {
             .any(|id| scope.exclusions.exclusion(id, SourceType::Page).is_some())
             || chain
                 .iter()
-                .any(|id| scope.exclusions.descendants_of.contains(id));
+                .any(|id| scope.exclusions.descendants_of.contains(id))
+            || placed.data_sources.iter().any(|(source, database)| {
+                scope
+                    .exclusions
+                    .exclusion(source, SourceType::DataSource)
+                    .is_some()
+                    || scope
+                        .exclusions
+                        .exclusion(database, SourceType::Database)
+                        .is_some()
+            });
         if excluded {
             return Err(ScopeError::Denied);
         }

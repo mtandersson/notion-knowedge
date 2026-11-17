@@ -516,19 +516,41 @@ impl SqliteSyncStateStore {
 }
 
 impl notion_knowledge_core::inventory::InventoryPlacement for SqliteSyncStateStore {
-    fn placed_chain(&self, page_id: &str) -> Option<Vec<String>> {
-        let entry = self.inventory_entry(page_id).ok()??;
-        // A trashed or unreadable child, or a page the walk skipped, is not
-        // a placed target.
-        if entry.in_trash
-            || entry.last_edited_time.is_empty()
-            || matches!(
-                self.inventory_outcome(page_id).ok()?,
-                Some(InventoryOutcome::Skipped(_))
-            )
-        {
-            return None;
+    /// Every entry on the chain, the page included, must be live: not
+    /// trashed, read (a revision) and neither skipped nor failed in its walk.
+    /// Entries are those of the latest walk: a complete walk replaces the
+    /// inventory and an incremental one upserts what it read.
+    fn placed_chain(&self, page_id: &str) -> Option<notion_knowledge_core::inventory::PlacedChain> {
+        let mut placed = notion_knowledge_core::inventory::PlacedChain::default();
+        let mut seen = BTreeSet::new();
+        let mut current = page_id.to_owned();
+        loop {
+            if !seen.insert(current.clone()) || seen.len() > MAX_CHAIN {
+                return None;
+            }
+            let entry = self.inventory_entry(&current).ok()??;
+            if entry.in_trash
+                || entry.last_edited_time.is_empty()
+                || matches!(
+                    self.inventory_outcome(&current).ok()?,
+                    Some(InventoryOutcome::Skipped(_) | InventoryOutcome::Failed(_))
+                )
+            {
+                return None;
+            }
+            current = match entry.parent {
+                InventoryParent::Root => return Some(placed),
+                InventoryParent::Page(id) => id,
+                InventoryParent::DataSource {
+                    data_source_id,
+                    database_id,
+                    owner_page_id,
+                } => {
+                    placed.data_sources.push((data_source_id, database_id));
+                    owner_page_id
+                }
+            };
+            placed.ancestors.push(current.clone());
         }
-        self.inventory_parent_chain(page_id).ok()?
     }
 }

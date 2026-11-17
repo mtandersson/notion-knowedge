@@ -466,12 +466,47 @@ mod inventory {
                     entry("T", page("A"), "t", true),
                     entry("N", page("A"), "", false),
                     entry("U", page("missing"), "t", false),
+                    entry("TC", page("T"), "t", false),
+                    entry("NC", page("N"), "t", false),
+                    entry("S", page("A"), "t", false),
+                    entry("SC", page("S"), "t", false),
+                    entry("F", page("A"), "t", false),
+                    entry("FC", page("F"), "t", false),
+                    entry(
+                        "R",
+                        InventoryParent::DataSource {
+                            data_source_id: "ds".into(),
+                            database_id: "db".into(),
+                            owner_page_id: "B".into(),
+                        },
+                        "t",
+                        false,
+                    ),
                 ],
             )
             .unwrap();
-        assert_eq!(store.placed_chain("B"), Some(vec!["A".to_owned()]));
-        assert_eq!(store.placed_chain("A"), Some(vec![]));
-        for absent in ["T", "N", "U", "unknown"] {
+        store
+            .record_inventory_outcome("S", &InventoryOutcome::Skipped(SkipReason::ExcludedPage), 1)
+            .unwrap();
+        store
+            .record_inventory_outcome("F", &InventoryOutcome::Failed(FailureClass::Source), 1)
+            .unwrap();
+        assert_eq!(
+            store.placed_chain("R"),
+            Some(notion_knowledge_core::inventory::PlacedChain {
+                ancestors: vec!["B".into(), "A".into()],
+                data_sources: vec![("ds".into(), "db".into())],
+            })
+        );
+        let chain = |p: &[&str]| {
+            Some(notion_knowledge_core::inventory::PlacedChain {
+                ancestors: p.iter().map(|s| (*s).to_owned()).collect(),
+                data_sources: vec![],
+            })
+        };
+        assert_eq!(store.placed_chain("B"), chain(&["A"]));
+        assert_eq!(store.placed_chain("A"), chain(&[]));
+        for absent in ["T", "N", "U", "unknown", "TC", "NC", "S", "SC", "F", "FC"] {
             assert_eq!(store.placed_chain(absent), None, "{absent}");
         }
     }

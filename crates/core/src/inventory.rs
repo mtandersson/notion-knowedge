@@ -21,10 +21,20 @@ pub enum InventoryParent {
 /// whether a relation or link target is inside the configured scope without a
 /// Notion request.
 pub trait InventoryPlacement: Send + Sync {
-    /// The page's ancestor pages, nearest first and ending at its root (empty
-    /// for a root). `None` when the page is not a readable, live inventory
-    /// entry, its chain does not reach a root, or the inventory is unreadable.
-    fn placed_chain(&self, page_id: &str) -> Option<Vec<String>>;
+    /// The page's placement under a root. `None` when the page or any
+    /// ancestor is not a readable, live, successfully walked inventory entry,
+    /// its chain does not reach a root, or the inventory is unreadable.
+    fn placed_chain(&self, page_id: &str) -> Option<PlacedChain>;
+}
+
+/// Where the inventory places a page.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlacedChain {
+    /// Ancestor pages, nearest first and ending at the root (empty for a root).
+    pub ancestors: Vec<String>,
+    /// `(data_source_id, database_id)` of every database the page or an
+    /// ancestor is a row of.
+    pub data_sources: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
