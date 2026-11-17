@@ -153,6 +153,15 @@ discovered by walking it:
   next walk; a target that moved out stays resolved until then. An
   unreadable inventory fails the page as unavailable instead;
   with no inventory configured, targets stay unresolved. Post-walk resolution is #705.
+- As built (#690), MCP reads: knowledge_search, knowledge_get, knowledge_related
+  and graph boost authorize a page from the inventory, with no Notion request
+  (`ReadScopeGate`). The plan applies decision (b) to reads. **Staleness
+  window:** a page moved out of the root, trashed, made unreadable or newly
+  excluded in Notion stays readable, including by fresh get, until the next
+  walk records it. A page newly placed under a root stays unreadable until
+  then too. Request-bound OAuth reads keep the live check with the caller's
+  grant, because no walk records an inventory for that grant. With no state
+  file configured, every operator read is denied.
 
 ### 1b. Search as a change accelerator (incremental only)
 
