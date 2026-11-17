@@ -22,8 +22,16 @@ impl Membership for StateInventory {
     }
 }
 
-pub(crate) fn from_config(config: &crate::config::Config) -> Arc<dyn Membership> {
-    Arc::new(StateInventory(config.webhook_state_file.clone()))
+/// Reads are authorized from the shared state file, so serving without one
+/// would fail every read at request time. Refuse to start instead.
+pub(crate) fn from_config(
+    config: &crate::config::Config,
+) -> Result<Arc<dyn Membership>, &'static str> {
+    let path = config
+        .webhook_state_file
+        .clone()
+        .ok_or("read authorization needs the shared sync state file")?;
+    Ok(Arc::new(StateInventory(Some(path))))
 }
 
 #[cfg(test)]

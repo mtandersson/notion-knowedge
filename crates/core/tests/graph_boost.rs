@@ -1,12 +1,17 @@
 use notion_knowledge_core::{
+    backend::PageId,
+    discovery::ExclusionRules,
     graph::{GraphEdge, GraphEdgeStore, GraphTarget},
     graph_boost::{GraphBoostConfig, GraphBoostedHybrid, rank_candidates},
+    inventory::{InventoryEntry, InventoryParent},
+    lifecycle::LifecycleScope,
+    root_scope::{Membership, ReadAuthority, ReadScopeGate, ScopeError},
     search::{HybridSearch, RetrievalPath, SearchFuture, SearchHit, SearchSource, SemanticQuery},
     sync_state::SyncStateError,
 };
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 fn hit(page: &str, id: &str, score: f32, joined: bool) -> SearchHit {
@@ -389,4 +394,152 @@ fn graph_boost_enforces_combined_adjacency_even_for_non_candidate_neighbors() {
             vec![(false, 256), (true, 256 - outgoing)]
         );
     }
+}
+
+const ROOT: &str = "22222222-2222-2222-2222-222222222222";
+const PAGE_A: &str = "11111111-1111-1111-1111-111111111111";
+const PAGE_B: &str = "33333333-3333-3333-3333-333333333333";
+
+/// A store whose read snapshot is observable: `held` is true exactly while
+/// the owned snapshot guard is alive.
+#[derive(Default)]
+struct FencedGraph {
+    held: Arc<AtomicBool>,
+    snapshots: AtomicUsize,
+}
+struct FenceGuard(Arc<AtomicBool>);
+impl Drop for FenceGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+macro_rules! empty_edge_store {
+    () => {
+        fn replace_page_edges(&self, _: &str, _: &[GraphEdge]) -> Result<(), SyncStateError> {
+            Err(SyncStateError::Unavailable)
+        }
+        fn replace_page_relation_edges(
+            &self,
+            _: &str,
+            _: &[GraphEdge],
+        ) -> Result<(), SyncStateError> {
+            Err(SyncStateError::Unavailable)
+        }
+        fn replace_page_link_edges(&self, _: &str, _: &[GraphEdge]) -> Result<(), SyncStateError> {
+            Err(SyncStateError::Unavailable)
+        }
+        fn edges_from(&self, _: &str) -> Result<Vec<GraphEdge>, SyncStateError> {
+            Ok(vec![])
+        }
+        fn edges_to(&self, _: &str) -> Result<Vec<GraphEdge>, SyncStateError> {
+            Ok(vec![])
+        }
+        fn edges_from_bounded(&self, _: &str, _: usize) -> Result<Vec<GraphEdge>, SyncStateError> {
+            Ok(vec![])
+        }
+        fn edges_to_bounded(&self, _: &str, _: usize) -> Result<Vec<GraphEdge>, SyncStateError> {
+            Ok(vec![])
+        }
+    };
+}
+impl GraphEdgeStore for FenceGuard {
+    empty_edge_store!();
+}
+impl GraphEdgeStore for FencedGraph {
+    fn read_snapshot(&self) -> Result<Option<Box<dyn GraphEdgeStore>>, SyncStateError> {
+        self.snapshots.fetch_add(1, Ordering::SeqCst);
+        self.held.store(true, Ordering::SeqCst);
+        Ok(Some(Box::new(FenceGuard(self.held.clone()))))
+    }
+    empty_edge_store!();
+}
+
+/// Records whether the fence was held at each inventory lookup.
+struct FenceWatchingInventory {
+    held: Arc<AtomicBool>,
+    lookups: Mutex<Vec<bool>>,
+    entries: std::collections::BTreeMap<String, InventoryEntry>,
+}
+impl Membership for FenceWatchingInventory {
+    fn parent_chain(&self, page: &str) -> Result<Option<Vec<InventoryEntry>>, ScopeError> {
+        self.lookups
+            .lock()
+            .unwrap()
+            .push(self.held.load(Ordering::SeqCst));
+        self.entries.parent_chain(page)
+    }
+}
+
+struct FenceWatchingHybrid {
+    held: Arc<AtomicBool>,
+    observed: Mutex<Vec<bool>>,
+}
+impl HybridSearch for FenceWatchingHybrid {
+    fn search(&self, _: SemanticQuery) -> SearchFuture<'_> {
+        self.observed
+            .lock()
+            .unwrap()
+            .push(self.held.load(Ordering::SeqCst));
+        Box::pin(async move {
+            Ok(vec![
+                hit(PAGE_A, "a", 1.0, true),
+                hit(PAGE_B, "b", 0.9, false),
+            ])
+        })
+    }
+}
+
+fn inventory_entry(page: &str, parent: InventoryParent) -> (String, InventoryEntry) {
+    (
+        page.into(),
+        InventoryEntry {
+            page_id: page.into(),
+            parent,
+            root_id: ROOT.into(),
+            last_edited_time: "2026-11-17T00:00:00Z".into(),
+            in_trash: false,
+        },
+    )
+}
+
+#[tokio::test]
+async fn graph_read_fence_spans_the_index_read_and_inventory_authorization() {
+    let graph = Arc::new(FencedGraph::default());
+    let inventory = Arc::new(FenceWatchingInventory {
+        held: graph.held.clone(),
+        lookups: Mutex::new(vec![]),
+        entries: [
+            inventory_entry(ROOT, InventoryParent::Root),
+            inventory_entry(PAGE_A, InventoryParent::Page(ROOT.into())),
+            inventory_entry(PAGE_B, InventoryParent::Page(ROOT.into())),
+        ]
+        .into(),
+    });
+    let gate = ReadScopeGate::new(
+        inventory.clone(),
+        LifecycleScope {
+            workspace_id: "44444444-4444-4444-4444-444444444444".into(),
+            generation: 1,
+            roots: vec![PageId(ROOT.into())],
+            exclusions: ExclusionRules::default(),
+        },
+    )
+    .unwrap();
+    let inner = Arc::new(FenceWatchingHybrid {
+        held: graph.held.clone(),
+        observed: Mutex::new(vec![]),
+    });
+    let boosted = GraphBoostedHybrid::new(inner.clone(), graph.clone(), on(1, 0.2, 4))
+        .unwrap()
+        .with_root_gate(ReadAuthority::Inventory(gate));
+    let mut request = query(2);
+    request.root_page_ids = Some(vec![ROOT.into()]);
+
+    assert_eq!(boosted.search(request).await.unwrap().len(), 2);
+    assert_eq!(graph.snapshots.load(Ordering::SeqCst), 1);
+    assert_eq!(*inner.observed.lock().unwrap(), [true]);
+    // Every returned candidate was authorized while the writers were fenced out.
+    assert_eq!(*inventory.lookups.lock().unwrap(), [true, true]);
+    // The fence is released when the query returns.
+    assert!(!graph.held.load(Ordering::SeqCst));
 }

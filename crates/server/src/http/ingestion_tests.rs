@@ -265,7 +265,7 @@ fn config(path: &std::path::Path, bearer: bool) -> Config {
         ("NK_FILE_SOURCE_HOSTS", "fixture.example".into()),
         ("NK_FILE_AUDIT_FILE", path.display().to_string()),
     ]);
-    Config::from_lookup(|key| {
+    let mut config = Config::from_lookup(|key| {
         if bearer && key == "NK_HTTP_BEARER_TOKEN" {
             return Some(BEARER.into());
         }
@@ -274,7 +274,10 @@ fn config(path: &std::path::Path, bearer: bool) -> Config {
         }
         values.get(key).map(std::ffi::OsString::from)
     })
-    .unwrap()
+    .unwrap();
+    // Read authorization consults the shared sync state's page inventory.
+    config.webhook_state_file = Some(path.with_file_name("state.sqlite"));
+    config
 }
 async fn fixture(
     image: bool,
