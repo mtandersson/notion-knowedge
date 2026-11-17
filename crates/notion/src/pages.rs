@@ -345,7 +345,17 @@ impl NotionClient {
                     path.push_str(&format!("&start_cursor={}", query_value(cursor)));
                 }
                 *calls += 1;
-                let list = self.walk_request(reqwest::Method::GET, &path, None).await?;
+                // The page itself was readable: a 404/403 here is about this
+                // property (for example a hidden related database), not the page.
+                let list = self
+                    .walk_request(reqwest::Method::GET, &path, None)
+                    .await
+                    .map_err(|e| match e.kind {
+                        BackendErrorKind::NotFound | BackendErrorKind::PermissionDenied => {
+                            error(BackendErrorKind::UnsupportedContent)
+                        }
+                        _ => e,
+                    })?;
                 let results = list["results"]
                     .as_array()
                     .filter(|_| list["object"] == "list")
