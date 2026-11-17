@@ -229,6 +229,29 @@ async fn verified_write_refresh_survives_restart_and_session_logout_with_no_repe
     assert_eq!(written.receipt.page_id, PAGE);
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oauth_refresh_whose_user_gets_404_leaves_the_page_indexed_for_everyone() {
+    let h = harness().await;
+    let index = Index::new(&h).await;
+    let (_, auth) = authorize(&h).await;
+    let (written, queue) = create(&h, &index, &auth).await;
+    let before = index.coordinator.state().page_state(PAGE).unwrap().unwrap();
+    // This user cannot read the page; the shared index must not forget it.
+    h.page_status.store(404, Ordering::SeqCst);
+    index
+        .worker(&h)
+        .tick(CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        queue.status(&written.refresh).unwrap(),
+        Some(IndexStatus::Completed)
+    );
+    let after = index.coordinator.state().page_state(PAGE).unwrap().unwrap();
+    assert!(!after.is_tombstone());
+    assert_eq!(after.content_hash(), before.content_hash());
+    assert!(!index.guard.page_chunks(PAGE).await.unwrap().is_empty());
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_index_refresh_retries_under_same_grant_without_repeating_verified_create() {
     let h = harness().await;
     let index = Index::new(&h).await;
