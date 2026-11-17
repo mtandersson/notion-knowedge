@@ -78,7 +78,8 @@ pub enum SyncMode {
     /// pages it no longer reached.
     Full,
     /// Search for pages edited since the inventory's newest edit and place
-    /// them through its parent map. Falls back to `Full` with no inventory.
+    /// them through its parent map. Falls back to `Full` with no inventory,
+    /// and is followed by `Full` when the search listing is cut short.
     Incremental,
     /// One page retrieve placed through the parent map (callbacks).
     Page(notion_knowledge_core::backend::PageId),
@@ -170,7 +171,8 @@ pub struct SyncTotals {
     /// kept until the next walk confirms it.
     pub held: u64,
     /// The walk was authoritative (no unproven subtree). Never set by
-    /// incremental or single-page syncs.
+    /// single-page syncs, or by incremental syncs except through the full
+    /// walk that follows a cut-short search listing.
     pub complete: bool,
     pub drift: notion_knowledge_core::inventory::DriftCounts,
 }
@@ -920,6 +922,24 @@ impl IndexRuntime {
                 finished_at: now_ms() / 1000,
             })
             .map_err(|_| "cache inventory state unavailable")?;
+        if truncated {
+            // A cut-short listing may have missed older changes that no later
+            // search returns (the high-water mark has moved past them). Recover
+            // them now with a full walk under the same lease and budget instead
+            // of waiting for the next periodic walk.
+            // The walk's figures (inventory, drift, completeness) describe the
+            // result; the incremental pass's own drift is already recorded.
+            // Pages it committed come back unchanged, so work is not double
+            // counted. A failed walk fails the call; the inventory stays
+            // marked incomplete for the next walk.
+            let recovered = Box::pin(self.sync_from_walk(settings, lease, SyncMode::Full)).await?;
+            return Ok(SyncTotals {
+                indexed: totals.indexed + recovered.indexed,
+                failed: totals.failed + recovered.failed,
+                removed: totals.removed + recovered.removed,
+                ..recovered
+            });
+        }
         Ok(totals)
     }
 
