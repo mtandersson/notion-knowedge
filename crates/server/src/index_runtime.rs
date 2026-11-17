@@ -171,7 +171,8 @@ pub struct SyncTotals {
     /// kept until the next walk confirms it.
     pub held: u64,
     /// The walk was authoritative (no unproven subtree). Never set by
-    /// incremental or single-page syncs.
+    /// single-page syncs, or by incremental syncs except through the full
+    /// walk that follows a cut-short search listing.
     pub complete: bool,
     pub drift: notion_knowledge_core::inventory::DriftCounts,
 }
@@ -926,6 +927,11 @@ impl IndexRuntime {
             // search returns (the high-water mark has moved past them). Recover
             // them now with a full walk under the same lease and budget instead
             // of waiting for the next periodic walk.
+            // The walk's figures (inventory, drift, completeness) describe the
+            // result; the incremental pass's own drift is already recorded.
+            // Pages it committed come back unchanged, so work is not double
+            // counted. A failed walk fails the call; the inventory stays
+            // marked incomplete for the next walk.
             let recovered = Box::pin(self.sync_from_walk(settings, lease, SyncMode::Full)).await?;
             return Ok(SyncTotals {
                 indexed: totals.indexed + recovered.indexed,
