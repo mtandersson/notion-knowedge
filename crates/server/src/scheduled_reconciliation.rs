@@ -67,7 +67,7 @@ pub mod runtime {
     use tokio_util::sync::CancellationToken;
     pub const ID: &str = "periodic";
     pub struct Worker {
-        pub index: IndexRuntime,
+        pub index: Arc<IndexRuntime>,
         pub settings: Settings,
         pub poll: Duration,
         pub timeout: Duration,

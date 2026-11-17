@@ -72,8 +72,8 @@ pub async fn compose(
         config,
         Transport::Http,
         source.clone(),
-        worker.provider.clone(),
-        worker.handler.chunks().clone(),
+        worker.index.provider.clone(),
+        worker.index.handler.chunks().clone(),
         worker.coordinator.clone(),
     )
     .await?;

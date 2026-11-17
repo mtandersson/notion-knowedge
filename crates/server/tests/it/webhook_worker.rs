@@ -15,8 +15,8 @@ use notion_knowledge_retrieval::{
     commit::{CommitBinding, IndexCommitCoordinator},
     refresh::AuthoritativePageRefresh,
 };
+use notion_knowledge_server::index_runtime::{IndexRuntime, RuntimeParts};
 use serde_json::{Value, json};
-use sha2::Digest;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -43,6 +43,8 @@ struct Model {
     archived: bool,
     root_revision: String,
     repair_bad: bool,
+    /// PAGE answers 404: deleted or access revoked.
+    gone: bool,
     unsupported: bool,
     joined: bool,
     linked: bool,
@@ -57,6 +59,7 @@ impl Default for Model {
             archived: false,
             root_revision: "2026-10-10T11:00:00Z".into(),
             repair_bad: false,
+            gone: false,
             unsupported: false,
             joined: false,
             linked: true,
@@ -159,7 +162,11 @@ impl HttpNotion {
                     mutations.fetch_add(1, Ordering::SeqCst);
                 }
                 let snapshot = values.lock().unwrap().clone();
-                let mut response = if route == format!("/v1/pages/{ROOT}/markdown") {
+                let mut response = if snapshot.gone
+                    && route.starts_with(&format!("/v1/pages/{PAGE}"))
+                {
+                    json!({"object":"error", "code":"object_not_found"})
+                } else if route == format!("/v1/pages/{ROOT}/markdown") {
                     // The walk reaches both children through their <page> tags.
                     let markdown = [PAGE, OTHER]
                         .map(|id| {
@@ -238,6 +245,10 @@ impl HttpNotion {
                 }
                 let bad = fail.swap(false, Ordering::SeqCst);
                 let status = if bad {
+                    503
+                } else if response.get("code").is_some() && route.starts_with("/v1/pages/66666666")
+                {
+                    // The isolated bad page fails until repaired.
                     503
                 } else if response.get("code").is_some() {
                     404
@@ -397,38 +408,32 @@ impl TestRuntime {
             .unwrap();
         state.release_lease(&lease, now_ms() / 1000).unwrap();
         let source = HttpNotion::start().await;
-        let handler = AuthoritativePageRefresh::new(
+        if joined {
+            source.change(|m| m.joined = true);
+        }
+        let embeddings = Arc::new(AtomicUsize::new(0));
+        let runtime_index = index_runtime(
             source.client(),
             guard,
             coordinator.clone(),
-            scope,
-            &journal,
-            ChunkConfig {
-                target_chars: 1000,
-                overlap_chars: 0,
-            },
-        )
-        .unwrap();
-        let handler = if joined {
-            source.change(|m| m.joined = true);
-            handler.with_alias_sources(
+            scope.clone(),
+            journal,
+            Arc::new(Provider {
+                metadata,
+                count: embeddings.clone(),
+            }),
+            joined.then(|| {
                 notion_knowledge_core::aliases::AliasSources::new(true, vec!["alias".into()])
-                    .unwrap(),
-            )
-        } else {
-            handler
-        };
-        let embeddings = Arc::new(AtomicUsize::new(0));
+                    .unwrap()
+            }),
+        );
+        seed_walk(&source, &state, &scope).await;
         let worker = Arc::new(Worker {
             webhook_enabled: true,
             scheduled: None,
             state,
             coordinator,
-            handler,
-            provider: Arc::new(Provider {
-                metadata,
-                count: embeddings.clone(),
-            }),
+            index: runtime_index,
             scope: InboxScope {
                 workspace_id: WORKSPACE.into(),
                 subscription_id: SUB.into(),
@@ -451,7 +456,7 @@ impl TestRuntime {
         LanceChunkTable::open(
             &self.index,
             "chunks",
-            self.worker.provider.metadata().clone(),
+            self.worker.index.provider.metadata().clone(),
         )
         .await
         .unwrap()
@@ -460,6 +465,68 @@ impl TestRuntime {
         .unwrap()
         .len()
     }
+}
+
+/// The runtime the worker syncs each claimed page through.
+fn index_runtime(
+    source: Arc<NotionClient>,
+    table: GuardedChunkTable,
+    coordinator: Arc<IndexCommitCoordinator>,
+    scope: LifecycleScope,
+    journal: ReconciliationScope,
+    provider: Arc<dyn EmbeddingProvider>,
+    alias_sources: Option<notion_knowledge_core::aliases::AliasSources>,
+) -> Arc<IndexRuntime> {
+    Arc::new(
+        IndexRuntime::from_parts(RuntimeParts {
+            source,
+            table,
+            coordinator,
+            scope,
+            journal,
+            provider,
+            chunk_config: ChunkConfig {
+                target_chars: 1000,
+                overlap_chars: 0,
+            },
+            alias_sources,
+            projection_mode: Default::default(),
+            page_timeout_seconds: 10,
+            lexical: None,
+        })
+        .unwrap(),
+    )
+}
+
+/// Record a walk of the fixture tree as the inventory, without indexing, so
+/// claimed pages are placed by its parent map as in production. Request
+/// counters start after it.
+async fn seed_walk(
+    source: &HttpNotion,
+    state: &notion_knowledge_retrieval::sync_state::SqliteSyncStateStore,
+    scope: &LifecycleScope,
+) {
+    let walk = source.client().walk_tree(scope, None).await.unwrap();
+    state
+        .record_walk(&walk.run_id, &walk.entries, walk.authoritative())
+        .unwrap();
+    source.attempts.store(0, Ordering::SeqCst);
+    source.body_reads.store(0, Ordering::SeqCst);
+}
+
+fn owned_operation(runtime: &TestRuntime) -> String {
+    rusqlite::Connection::open(&runtime.db)
+        .unwrap()
+        .query_row("SELECT operation_id FROM index_commit_receipts", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
+}
+
+fn set_provider(worker: &mut Arc<Worker>, provider: Arc<dyn EmbeddingProvider>) {
+    Arc::get_mut(&mut Arc::get_mut(worker).unwrap().index)
+        .unwrap()
+        .provider = provider;
 }
 
 struct UnavailableEmbedding(EmbeddingMetadata);
@@ -532,9 +599,11 @@ async fn mutation_refresh_preserves_verified_write_on_index_failure_and_retries_
     assert!(!result.replayed);
     assert_eq!(result.receipt.last_edited_time, "2026-10-10T12:00:01Z");
     assert_eq!(runtime.source.writes.load(Ordering::SeqCst), 1);
-    let provider = runtime.worker.provider.clone();
-    Arc::get_mut(&mut runtime.worker).unwrap().provider =
-        Arc::new(UnavailableEmbedding(provider.metadata().clone()));
+    let provider = runtime.worker.index.provider.clone();
+    set_provider(
+        &mut runtime.worker,
+        Arc::new(UnavailableEmbedding(provider.metadata().clone())),
+    );
     tick(&runtime.worker, false).await;
     assert_eq!(
         state.status(&result.refresh).unwrap(),
@@ -563,7 +632,7 @@ async fn mutation_refresh_preserves_verified_write_on_index_failure_and_retries_
     assert_eq!(replay.index, IndexStatus::Failed);
     assert_eq!(replay.receipt, result.receipt);
     assert_eq!(runtime.source.writes.load(Ordering::SeqCst), 1);
-    Arc::get_mut(&mut runtime.worker).unwrap().provider = provider;
+    set_provider(&mut runtime.worker, provider);
     state.retry_mutation_refresh(&result.refresh).unwrap();
     tick(&runtime.worker, false).await;
     assert_eq!(
@@ -830,7 +899,8 @@ async fn transient_failure_retries_and_unknown_hint_is_permanent() {
     tick(&runtime.worker, false).await;
     let pending = inspect(&runtime.worker, &transient);
     assert_eq!(pending.state, EventState::Pending);
-    assert_eq!(pending.last_failure, Some(EventFailure::Source));
+    // The page retrieve failed: the source was unavailable, so it retries.
+    assert_eq!(pending.last_failure, Some(EventFailure::Unavailable));
     tick(&runtime.worker, false).await;
     assert_eq!(inspect(&runtime.worker, &unknown).state, EventState::Failed);
     assert_eq!(inspect(&runtime.worker, &unknown).cycle_attempts, 1);
@@ -894,7 +964,7 @@ async fn debounce_and_lifecycle_follow_authority_and_recover_effects_before_inbo
     let guard = GuardedChunkTable::bind(
         &runtime.index,
         "chunks",
-        runtime.worker.provider.metadata().clone(),
+        runtime.worker.index.provider.metadata().clone(),
         reopened.clone(),
     )
     .unwrap();
@@ -910,19 +980,15 @@ async fn debounce_and_lifecycle_follow_authority_and_recover_effects_before_inbo
         scheduled: None,
         state: reopened.state().clone(),
         coordinator: reopened.clone(),
-        handler: AuthoritativePageRefresh::new(
+        index: index_runtime(
             runtime.source.client(),
             guard,
             reopened,
             scope,
-            &journal,
-            ChunkConfig {
-                target_chars: 1000,
-                overlap_chars: 0,
-            },
-        )
-        .unwrap(),
-        provider: runtime.worker.provider.clone(),
+            journal,
+            runtime.worker.index.provider.clone(),
+            None,
+        ),
         scope: runtime.worker.scope.clone(),
         integration: INTEGRATION.into(),
         poll: Duration::from_millis(20),
@@ -947,11 +1013,47 @@ async fn debounce_and_lifecycle_follow_authority_and_recover_effects_before_inbo
     runtime.worker.state.receive(&restored).unwrap();
     tick(&runtime.worker, false).await;
     assert!(runtime.searchable("Saffron").await > 0);
+    // Moved under a page the inventory does not hold: unplaced, so it stays
+    // until the next walk settles it, and the event still succeeds.
     runtime.source.change(|m| m.parent = FOREIGN.into());
     let moved = event(PAGE, "page.moved");
     runtime.worker.state.receive(&moved).unwrap();
     tick(&runtime.worker, false).await;
+    assert_eq!(
+        inspect(&runtime.worker, &moved).state,
+        EventState::Succeeded
+    );
+    assert_eq!(unplaced(&runtime), 1);
+    assert!(runtime.searchable("Saffron").await > 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn page_answering_not_found_to_its_callback_is_removed_without_a_walk() {
+    let runtime = TestRuntime::new().await;
+    let created = event(PAGE, "page.created");
+    runtime.worker.state.receive(&created).unwrap();
+    tick(&runtime.worker, false).await;
+    assert!(runtime.searchable("Saffron").await > 0);
+    runtime.source.change(|m| m.gone = true);
+    let deleted = event(PAGE, "page.deleted");
+    runtime.worker.state.receive(&deleted).unwrap();
+    tick(&runtime.worker, false).await;
+    assert_eq!(
+        inspect(&runtime.worker, &deleted).state,
+        EventState::Succeeded
+    );
     assert_eq!(runtime.searchable("Saffron").await, 0);
+}
+
+fn unplaced(runtime: &TestRuntime) -> u64 {
+    runtime
+        .worker
+        .state
+        .last_sync()
+        .unwrap()
+        .unwrap()
+        .drift
+        .unplaced
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1109,13 +1211,13 @@ async fn mutation_refresh_expired_ownership_during_embedding_cannot_commit_under
         page_id: PAGE.into(),
     };
     runtime.worker.state.admit(&key).unwrap();
-    let provider = runtime.worker.provider.clone();
+    let provider = runtime.worker.index.provider.clone();
     let paused = Arc::new(PausedProvider {
         metadata: provider.metadata().clone(),
         entered: tokio::sync::Notify::new(),
         proceed: tokio::sync::Notify::new(),
     });
-    Arc::get_mut(&mut runtime.worker).unwrap().provider = paused.clone();
+    set_provider(&mut runtime.worker, paused.clone());
     let worker = runtime.worker.clone();
     let task = tokio::spawn(async move { worker.tick(CancellationToken::new(), false).await });
     tokio::time::timeout(Duration::from_secs(5), paused.entered.notified())
@@ -1131,7 +1233,7 @@ async fn mutation_refresh_expired_ownership_during_embedding_cannot_commit_under
     task.await.unwrap().unwrap();
     assert_eq!(runtime.searchable("Saffron").await, 0);
     assert!(runtime.worker.state.page_state(PAGE).unwrap().is_none());
-    Arc::get_mut(&mut runtime.worker).unwrap().provider = provider;
+    set_provider(&mut runtime.worker, provider);
     tick(&runtime.worker, false).await;
     assert_eq!(
         runtime.worker.state.status(&key).unwrap(),
@@ -1169,11 +1271,11 @@ impl EmbeddingProvider for PausedProvider {
 async fn shared_index_fence_and_expired_inbox_ownership_reject_stale_commit() {
     let mut runtime = TestRuntime::new().await;
     let paused = Arc::new(PausedProvider {
-        metadata: runtime.worker.provider.metadata().clone(),
+        metadata: runtime.worker.index.provider.metadata().clone(),
         entered: tokio::sync::Notify::new(),
         proceed: tokio::sync::Notify::new(),
     });
-    Arc::get_mut(&mut runtime.worker).unwrap().provider = paused.clone();
+    set_provider(&mut runtime.worker, paused.clone());
     let e = event(PAGE, "page.created");
     runtime.worker.state.receive(&e).unwrap();
     let competing = runtime
@@ -1218,11 +1320,11 @@ async fn writer_lease_takeover_rejects_stale_effects_without_fatal_cleanup_or_re
 {
     let mut runtime = TestRuntime::new().await;
     let paused = Arc::new(PausedProvider {
-        metadata: runtime.worker.provider.metadata().clone(),
+        metadata: runtime.worker.index.provider.metadata().clone(),
         entered: tokio::sync::Notify::new(),
         proceed: tokio::sync::Notify::new(),
     });
-    Arc::get_mut(&mut runtime.worker).unwrap().provider = paused.clone();
+    set_provider(&mut runtime.worker, paused.clone());
     let stale = event(PAGE, "page.created");
     runtime.worker.state.receive(&stale).unwrap();
     let worker = runtime.worker.clone();
@@ -1302,7 +1404,7 @@ async fn fatal_worker_storage_failure_stops_the_actual_http_serving_lifecycle() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unsupported_authoritative_content_and_unowned_out_of_scope_page_fail_permanently() {
+async fn unsupported_content_fails_permanently_and_out_of_scope_page_is_unplaced() {
     let runtime = TestRuntime::new().await;
     runtime.source.change(|m| m.unsupported = true);
     let unsupported = event(PAGE, "page.created");
@@ -1312,12 +1414,16 @@ async fn unsupported_authoritative_content_and_unowned_out_of_scope_page_fail_pe
     }
     tick(&runtime.worker, false).await;
     tick(&runtime.worker, false).await;
-    for e in [&unsupported, &outside] {
-        let observed = inspect(&runtime.worker, e);
-        assert_eq!(observed.state, EventState::Failed);
-        assert_eq!(observed.cycle_attempts, 1);
-        assert_eq!(observed.failure, Some(EventFailure::Source));
-    }
+    // Both settle in one attempt: no retry can read the unsupported page,
+    // and the page outside the root cannot be placed by the inventory.
+    let observed = inspect(&runtime.worker, &unsupported);
+    assert_eq!(observed.state, EventState::Failed);
+    assert_eq!(observed.cycle_attempts, 1);
+    assert_eq!(observed.failure, Some(EventFailure::Source));
+    let observed = inspect(&runtime.worker, &outside);
+    assert_eq!(observed.state, EventState::Succeeded);
+    assert_eq!(observed.cycle_attempts, 1);
+    assert_eq!(unplaced(&runtime), 1);
     assert_eq!(runtime.searchable("Saffron").await, 0);
 }
 
@@ -1474,7 +1580,7 @@ async fn installed_retrieval(
         config,
         transport,
         runtime.source.client(),
-        runtime.worker.provider.clone(),
+        runtime.worker.index.provider.clone(),
     )
     .await
 }
@@ -1587,7 +1693,7 @@ async fn configured_lexical_expansion_preserves_scoped_content_and_rebuilds_afte
         &runtime.db,
         config.notion_scope.clone().unwrap(),
         runtime.source.client(),
-        runtime.worker.provider.clone(),
+        runtime.worker.index.provider.clone(),
         CancellationToken::new(),
     )
     .await;
@@ -1665,7 +1771,7 @@ async fn commit_search_fixture(runtime: &TestRuntime) {
     let guard = GuardedChunkTable::bind(
         &runtime.index,
         "chunks",
-        runtime.worker.provider.metadata().clone(),
+        runtime.worker.index.provider.metadata().clone(),
         runtime.worker.coordinator.clone(),
     )
     .unwrap();
@@ -1720,7 +1826,7 @@ async fn reopened_committed_index_serves_all_modes_over_stdio_and_revalidates_ph
     let version = GuardedChunkTable::bind(
         &runtime.index,
         "chunks",
-        runtime.worker.provider.metadata().clone(),
+        runtime.worker.index.provider.metadata().clone(),
         runtime.worker.coordinator.clone(),
     )
     .unwrap()
@@ -1740,7 +1846,7 @@ async fn reopened_committed_index_serves_all_modes_over_stdio_and_revalidates_ph
         GuardedChunkTable::bind(
             &runtime.index,
             "chunks",
-            runtime.worker.provider.metadata().clone(),
+            runtime.worker.index.provider.metadata().clone(),
             runtime.worker.coordinator.clone()
         )
         .unwrap()
@@ -2503,11 +2609,14 @@ fn pause_owned_commits(runtime: &TestRuntime) {
 async fn shutdown_cancels_owned_commit_source_read_releases_fence_and_restart_processes_healthy_page()
  {
     let mut runtime = TestRuntime::new().await;
-    let metadata = runtime.worker.provider.metadata().clone();
-    Arc::get_mut(&mut runtime.worker).unwrap().provider = Arc::new(PauseSourceProvider {
-        metadata,
-        pause: runtime.source.pause_next.clone(),
-    });
+    let metadata = runtime.worker.index.provider.metadata().clone();
+    set_provider(
+        &mut runtime.worker,
+        Arc::new(PauseSourceProvider {
+            metadata,
+            pause: runtime.source.pause_next.clone(),
+        }),
+    );
     pause_owned_commits(&runtime);
     let interrupted = event(PAGE, "page.created");
     runtime.worker.state.receive(&interrupted).unwrap();
@@ -2533,15 +2642,8 @@ async fn shutdown_cancels_owned_commit_source_read_releases_fence_and_restart_pr
         .unwrap()
         .unwrap()
         .unwrap();
-    let operation = format!(
-        "webhook-{:x}",
-        sha2::Sha256::digest(format!(
-            "{}:{}:{:?}",
-            WORKSPACE,
-            SUB,
-            vec![interrupted.id.clone()]
-        ))
-    );
+    // The sync names its own operation; this page's is the only receipt.
+    let operation = owned_operation(&runtime);
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if runtime
@@ -2564,19 +2666,33 @@ async fn shutdown_cancels_owned_commit_source_read_releases_fence_and_restart_pr
     // for the cancelled page's original inbox lease to expire.
     let healthy = event(OTHER, "page.created");
     runtime.worker.state.receive(&healthy).unwrap();
-    let metadata = runtime.worker.provider.metadata().clone();
+    let metadata = runtime.worker.index.provider.metadata().clone();
     let original = runtime.worker.clone();
     let provider: Arc<dyn EmbeddingProvider> = Arc::new(Provider {
         metadata,
         count: Arc::new(AtomicUsize::new(0)),
     });
+    let scope = LifecycleScope {
+        workspace_id: WORKSPACE.into(),
+        generation: 1,
+        roots: vec![PageId(ROOT.into())],
+        exclusions: ExclusionRules::default(),
+    };
+    let journal = notion_knowledge_retrieval::planner::production_scope(&scope).unwrap();
     let restarted = Worker {
         webhook_enabled: true,
         scheduled: None,
         state: original.state.clone(),
         coordinator: original.coordinator.clone(),
-        handler: original.handler.clone(),
-        provider,
+        index: index_runtime(
+            runtime.source.client(),
+            original.index.chunks().clone(),
+            original.coordinator.clone(),
+            scope,
+            journal,
+            provider,
+            None,
+        ),
         scope: original.scope.clone(),
         integration: original.integration.clone(),
         poll: original.poll,
@@ -2604,12 +2720,15 @@ async fn deadline_cancellation_retains_due_retry_and_allows_healthy_page_progres
             .await
             .unwrap(),
     );
-    let metadata = runtime.worker.provider.metadata().clone();
+    let metadata = runtime.worker.index.provider.metadata().clone();
+    set_provider(
+        &mut runtime.worker,
+        Arc::new(PauseSourceProvider {
+            metadata,
+            pause: runtime.source.pause_next.clone(),
+        }),
+    );
     let worker = Arc::get_mut(&mut runtime.worker).unwrap();
-    worker.provider = Arc::new(PauseSourceProvider {
-        metadata,
-        pause: runtime.source.pause_next.clone(),
-    });
     worker.timeout = Duration::from_secs(6);
     pause_owned_commits(&runtime);
     let bad = event(PAGE, "page.created");
@@ -2624,10 +2743,8 @@ async fn deadline_cancellation_retains_due_retry_and_allows_healthy_page_progres
     // its cancellation by waiting for the owned index receipt to be marked
     // failed; a one-second wall-clock allowance for both cancellation and
     // background cleanup is not reliable under parallel feature CI load.
-    let operation = format!(
-        "webhook-{:x}",
-        sha2::Sha256::digest(format!("{}:{}:{:?}", WORKSPACE, SUB, vec![bad.id.clone()]))
-    );
+    // The sync names its own operation; this page's is the only receipt.
+    let operation = owned_operation(&runtime);
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if runtime
@@ -2691,12 +2808,15 @@ async fn deadline_cancellation_retains_due_retry_and_allows_healthy_page_progres
     );
     assert_eq!(runtime.searchable("Saffron").await, 0);
     runtime.source.proceed.notify_one();
-    let metadata = runtime.worker.provider.metadata().clone();
+    let metadata = runtime.worker.index.provider.metadata().clone();
+    set_provider(
+        &mut runtime.worker,
+        Arc::new(Provider {
+            metadata,
+            count: runtime.embeddings.clone(),
+        }),
+    );
     let worker = Arc::get_mut(&mut runtime.worker).unwrap();
-    worker.provider = Arc::new(Provider {
-        metadata,
-        count: runtime.embeddings.clone(),
-    });
     worker.timeout = Duration::from_secs(10);
     let healthy = event(OTHER, "page.created");
     runtime.worker.state.receive(&healthy).unwrap();
@@ -2749,11 +2869,14 @@ async fn installed_graph_denies_reads_after_interrupted_owned_producer_commit() 
     )
     .await
     .unwrap();
-    let metadata = runtime.worker.provider.metadata().clone();
-    Arc::get_mut(&mut runtime.worker).unwrap().provider = Arc::new(PauseSourceProvider {
-        metadata,
-        pause: runtime.source.pause_next.clone(),
-    });
+    let metadata = runtime.worker.index.provider.metadata().clone();
+    set_provider(
+        &mut runtime.worker,
+        Arc::new(PauseSourceProvider {
+            metadata,
+            pause: runtime.source.pause_next.clone(),
+        }),
+    );
     pause_owned_commits(&runtime);
     runtime.source.change(|m| {
         m.markdown = "Changed Saffron.".into();

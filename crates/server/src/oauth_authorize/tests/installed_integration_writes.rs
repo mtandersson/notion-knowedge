@@ -115,7 +115,7 @@ async fn private_integration_http_guards_writes_and_refreshes_once_without_oauth
     .await
     .unwrap();
     let scheduled = Arc::new(crate::scheduled_reconciliation::runtime::Worker {
-        index,
+        index: Arc::new(index),
         settings: config.reconciliation_schedule.clone().unwrap(),
         poll: Duration::from_millis(20),
         timeout: Duration::from_secs(10),
@@ -131,8 +131,7 @@ async fn private_integration_http_guards_writes_and_refreshes_once_without_oauth
         },
         integration: String::new(),
         coordinator: scheduled.index.coordinator.clone(),
-        handler: scheduled.index.handler.clone(),
-        provider: scheduled.index.provider.clone(),
+        index: scheduled.index.clone(),
         poll: Duration::from_millis(20),
         timeout: Duration::from_secs(10),
         log_enabled: false,

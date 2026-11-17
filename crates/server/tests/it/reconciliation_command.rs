@@ -891,13 +891,12 @@ async fn scheduled_server_budgets(
         scheduled_reconciliation::{Settings, runtime::Worker as Scheduled},
         webhook_worker::runtime::Worker,
     };
-    let index = f.open(source, OpenMode::ExistingWrite).await;
+    let index = Arc::new(f.open(source, OpenMode::ExistingWrite).await);
     let worker = Arc::new(Worker {
         webhook_enabled,
         state: index.coordinator.state().clone(),
         coordinator: index.coordinator.clone(),
-        handler: index.handler.clone(),
-        provider: index.provider.clone(),
+        index: index.clone(),
         scope: notion_knowledge_core::webhook::InboxScope {
             workspace_id: WORKSPACE.into(),
             subscription_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into(),
@@ -3373,7 +3372,7 @@ async fn periodic_sync_retries_unreadable_pages_on_the_next_normal_cycle() {
     let f = Fixture::new(&http).await;
     http.state.lock().unwrap().unsupported_page_content = true;
     let worker = Worker {
-        index: f.open(&http, OpenMode::ExistingWrite).await,
+        index: Arc::new(f.open(&http, OpenMode::ExistingWrite).await),
         settings: Settings {
             interval: 86400,
             attempts: 1,

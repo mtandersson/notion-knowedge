@@ -189,6 +189,33 @@ async fn seed_with_plan(
         .await
         .unwrap();
     coordinator.state().release_lease(&lease, now()).unwrap();
+    // The inventory a walk of the root would record: refreshed pages are
+    // placed through its parent map.
+    let root = scope
+        .roots
+        .first()
+        .expect("fixture scope needs a physical root")
+        .0
+        .clone();
+    let entry = |page: &str, parent| notion_knowledge_core::inventory::InventoryEntry {
+        page_id: page.into(),
+        parent,
+        root_id: root.clone(),
+        last_edited_time: revision.into(),
+        in_trash: false,
+    };
+    use notion_knowledge_core::inventory::InventoryParent;
+    coordinator
+        .state()
+        .record_walk(
+            "oauth-content-seed",
+            &[
+                entry(&root, InventoryParent::Root),
+                entry(page_id, InventoryParent::Page(root.clone())),
+            ],
+            true,
+        )
+        .unwrap();
     // Startup composition must accept this exact committed read-only binding.
     table.search_snapshot().await.unwrap();
     Seeded {
