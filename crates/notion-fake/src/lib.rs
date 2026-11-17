@@ -66,6 +66,8 @@ pub struct Model {
     pub relation_name: Option<String>,
     pub relation_property_id: String,
     pub relation_targets: Vec<String>,
+    /// The relation's property item endpoint answers 404.
+    pub unreadable_relation_items: bool,
     /// Adds the alias multi-select and an unselected rich-text property.
     pub alias_properties: bool,
     pub alias_names: Vec<String>,
@@ -113,6 +115,7 @@ impl Default for Model {
             relation_name: None,
             relation_property_id: "related-stable".into(),
             relation_targets: vec![],
+            unreadable_relation_items: false,
             alias_properties: false,
             alias_names: vec![],
             extra: Default::default(),
@@ -343,9 +346,27 @@ fn respond(route: &str, snapshot: Model, bodies: usize) -> Value {
             page["properties"]["Unselected"] = json!({"id":"not-selected","type":"rich_text","rich_text":[{"type":"text","plain_text":"Never an alias","text":{"content":"Never an alias"}}]});
         }
         if let Some(name) = &snapshot.relation_name {
-            page["properties"][name] = json!({"id":snapshot.relation_property_id, "type":"relation", "relation": snapshot.relation_targets.iter().map(|id|json!({"id":id})).collect::<Vec<_>>(),"has_more":false});
+            // Like Notion, the page object carries at most 25 relation items;
+            // the rest come from the property item endpoint.
+            page["properties"][name] = json!({"id":snapshot.relation_property_id, "type":"relation", "relation": snapshot.relation_targets.iter().take(25).map(|id|json!({"id":id})).collect::<Vec<_>>(),"has_more":snapshot.relation_targets.len() > 25});
         }
         page
+    } else if let Some(query) = route
+        .strip_prefix(&format!(
+            "/v1/pages/{PAGE}/properties/{}?page_size=100",
+            snapshot.relation_property_id
+        ))
+        .filter(|_| snapshot.relation_name.is_some() && !snapshot.unreadable_relation_items)
+    {
+        // Ten items per response, cursors are item offsets.
+        let start = query
+            .strip_prefix("&start_cursor=")
+            .map_or(0, |cursor| cursor.parse::<usize>().unwrap());
+        let end = (start + 10).min(snapshot.relation_targets.len());
+        json!({"object":"list","type":"property_item",
+            "results":snapshot.relation_targets[start..end].iter().map(|id|json!({"object":"property_item","id":snapshot.relation_property_id,"type":"relation","relation":{"id":id}})).collect::<Vec<_>>(),
+            "has_more":end < snapshot.relation_targets.len(),
+            "next_cursor":(end < snapshot.relation_targets.len()).then(|| end.to_string())})
     } else if route == format!("/v1/pages/{OTHER}/markdown") {
         markdown(OTHER, "# Separate\n\nUntouched cinnamon.\n", false)
     } else if route == format!("/v1/pages/{OTHER}") {

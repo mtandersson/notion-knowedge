@@ -9,6 +9,46 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 pub const PAGE_VERSION: &str = "2026-03-11";
+/// Marks a relation or people value whose items were read in full through the
+/// property item endpoint. Never present in a Notion response key we keep.
+const PAGINATED: &str = "__nk_paginated";
+/// Items read for one truncated property before the page is unsupported.
+const MAX_PROPERTY_ITEMS: usize = 10_000;
+/// Whether `value` (one page property) is cut at Notion's inline limit.
+fn truncated(value: &Value) -> bool {
+    match value["type"].as_str() {
+        Some("relation") => value["has_more"] == true,
+        Some("people") => value["people"].as_array().is_some_and(|a| a.len() >= 25),
+        _ => false,
+    }
+}
+/// Removes every property still cut at the inline limit, so the rest of the
+/// page parses. Such a page must not be treated as complete.
+pub(crate) fn drop_truncated(value: &mut Value) {
+    if let Some(properties) = value["properties"].as_object_mut() {
+        properties.retain(|_, property| property[PAGINATED] == true || !truncated(property));
+    }
+}
+/// Percent-encodes an opaque cursor for a query string.
+fn query_value(input: &str) -> String {
+    input
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+/// Notion property ids are already percent-encoded path segments.
+fn segment(input: &str) -> bool {
+    !input.is_empty()
+        && input
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"%-._~".contains(&b))
+}
 fn error(kind: BackendErrorKind) -> BackendError {
     BackendError {
         kind,
@@ -177,8 +217,11 @@ fn property(value: &Value) -> Result<PropertyValue, BackendError> {
             if kind == "relation" && !value["has_more"].is_boolean() {
                 return Err(error(BackendErrorKind::Internal));
             }
-            if value["has_more"] == true
-                || (kind == "people" && v.as_array().is_some_and(|a| a.len() >= 25))
+            // Paginated by `complete_properties`: the list is whole.
+            let complete = value[PAGINATED] == true;
+            if !complete
+                && (value["has_more"] == true
+                    || (kind == "people" && v.as_array().is_some_and(|a| a.len() >= 25)))
             {
                 return Err(error(BackendErrorKind::UnsupportedContent));
             }
@@ -260,7 +303,91 @@ impl NotionClient {
     /// Fresh exact metadata. Does not read page content, cache or follow links.
     pub async fn fetch_page(&self, input: &str) -> Result<Page, BackendError> {
         let id = page_id(input)?;
-        metadata(&self.fetch_page_value(&id).await?, &id)
+        let mut value = self.fetch_page_value(&id).await?;
+        self.complete_properties(&id, &mut value, &mut 0).await?;
+        metadata(&value, &id)
+    }
+
+    /// Replaces each relation or people property Notion cut at its inline
+    /// 25-item limit with every item from the property item endpoint, so one
+    /// long property costs that page extra reads instead of failing it.
+    /// `calls` counts the reads made.
+    pub(crate) async fn complete_properties(
+        &self,
+        id: &PageId,
+        value: &mut Value,
+        calls: &mut u64,
+    ) -> Result<(), BackendError> {
+        let Some(properties) = value["properties"].as_object() else {
+            return Ok(());
+        };
+        let cut: Vec<(String, String, String)> = properties
+            .iter()
+            .filter(|(_, property)| truncated(property))
+            .map(|(name, property)| {
+                (
+                    name.clone(),
+                    property["id"].as_str().unwrap_or_default().to_owned(),
+                    property["type"].as_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect();
+        for (name, key, kind) in cut {
+            if !segment(&key) {
+                return Err(error(BackendErrorKind::UnsupportedContent));
+            }
+            let mut items = Vec::new();
+            let mut cursor: Option<String> = None;
+            let mut cursors = std::collections::BTreeSet::new();
+            loop {
+                let mut path = format!("pages/{}/properties/{key}?page_size=100", id.0);
+                if let Some(cursor) = &cursor {
+                    path.push_str(&format!("&start_cursor={}", query_value(cursor)));
+                }
+                *calls += 1;
+                // The page itself was readable: a 404/403 here is about this
+                // property (for example a hidden related database), not the page.
+                let list = self
+                    .walk_request(reqwest::Method::GET, &path, None)
+                    .await
+                    .map_err(|e| match e.kind {
+                        BackendErrorKind::NotFound | BackendErrorKind::PermissionDenied => {
+                            error(BackendErrorKind::UnsupportedContent)
+                        }
+                        _ => e,
+                    })?;
+                let results = list["results"]
+                    .as_array()
+                    .filter(|_| list["object"] == "list")
+                    .ok_or_else(|| error(BackendErrorKind::Internal))?;
+                for item in results {
+                    if item["object"] != "property_item" || item["type"] != kind.as_str() {
+                        return Err(error(BackendErrorKind::Internal));
+                    }
+                    let id = string(&item[kind.as_str()]["id"])?;
+                    items.push(serde_json::json!({ "id": id }));
+                }
+                if items.len() > MAX_PROPERTY_ITEMS {
+                    return Err(error(BackendErrorKind::UnsupportedContent));
+                }
+                if list["has_more"] != true {
+                    break;
+                }
+                // A missing, malformed or repeated cursor cannot prove the
+                // list is whole.
+                match list["next_cursor"].as_str() {
+                    Some(next) if !next.is_empty() && cursors.insert(next.to_owned()) => {
+                        cursor = Some(next.to_owned());
+                    }
+                    _ => return Err(error(BackendErrorKind::UnsupportedContent)),
+                }
+            }
+            let property = &mut value["properties"][&name];
+            property[kind.as_str()] = Value::Array(items);
+            property["has_more"] = Value::Bool(false);
+            property[PAGINATED] = Value::Bool(true);
+        }
+        Ok(())
     }
 
     /// The raw page object, for callers that also need its physical parent.
@@ -430,7 +557,9 @@ mod tests {
                 end: None
             }
         );
+        // A cut list that cannot be paginated is never a whole page.
         value["properties"]["Related"]["has_more"] = json!(true);
+        value["properties"]["Related"]["id"] = json!("not/a-segment");
         assert_eq!(
             fetch(ID, 200, value.to_string()).await.0.unwrap_err().kind,
             BackendErrorKind::UnsupportedContent
@@ -583,7 +712,9 @@ mod tests {
             );
         }
         let mut value = fixture();
+        // A cut list that cannot be paginated is never a whole page.
         value["properties"]["Related"]["has_more"] = json!(true);
+        value["properties"]["Related"]["id"] = json!("not/a-segment");
         assert_eq!(
             fetch(ID, 200, value.to_string()).await.0.unwrap_err().kind,
             BackendErrorKind::UnsupportedContent
