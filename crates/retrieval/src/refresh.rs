@@ -167,7 +167,8 @@ impl AuthoritativePageRefresh {
             return Err(RefreshError::InvalidConfiguration);
         }
         let relations = RelationProposalAdapter::new((*notion).clone(), scope.clone())
-            .map_err(|_| RefreshError::InvalidConfiguration)?;
+            .map_err(|_| RefreshError::InvalidConfiguration)?
+            .with_inventory(coordinator.state().clone());
         Ok(Self {
             relations,
             alias_sources: None,

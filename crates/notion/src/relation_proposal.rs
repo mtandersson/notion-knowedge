@@ -1,5 +1,6 @@
 //! Relation proposals for a prepared page. No discovery, target content or writes.
-//! Source scope comes from the walk; only relation targets are authorized here.
+//! Source scope comes from the walk; only relation targets are authorized here,
+//! from the walk inventory rather than a live ancestor read.
 use crate::{
     NotionClient,
     prepare::{ScopedPageSnapshot, prepare_content},
@@ -8,9 +9,10 @@ use crate::{
 use notion_knowledge_core::{
     backend::{BackendError, BackendErrorKind, Page, PageContent, PageId},
     chunking::ChunkConfig,
+    discovery::SourceType,
     graph::GraphEdge,
     indexed::{IndexedChunk, IndexedMetadata, PropertyValue, SourceMetadata},
-    inventory::InventoryParent,
+    inventory::{InventoryParent, InventoryPlacement},
     lifecycle::{LifecycleEvidence, LifecycleScope},
     relations::relation_edges_with_names,
     root_scope::{RootScopeGate, ScopeError},
@@ -48,6 +50,7 @@ pub struct RelationProposalAdapter {
     client: NotionClient,
     mode: ProjectionMode,
     policy: Arc<RwLock<LifecycleScope>>,
+    inventory: Option<Arc<dyn InventoryPlacement>>,
 }
 
 /// Complete effect plus source snapshot. Private fields prevent mixing labels,
@@ -95,6 +98,64 @@ impl RelationProposalAdapter {
             client,
             mode: ProjectionMode::default(),
             policy: Arc::new(RwLock::new(policy)),
+            inventory: None,
+        })
+    }
+    /// Resolve relation and link targets through this walk inventory. Without
+    /// one, every target other than a walked child stays unresolved.
+    pub fn with_inventory(mut self, inventory: Arc<dyn InventoryPlacement>) -> Self {
+        self.inventory = Some(inventory);
+        self
+    }
+    /// Membership from the inventory alone, never a Notion request: the
+    /// target must be placed under a current root, with no excluded page on
+    /// its chain and no ancestor whose descendants are excluded. A target the
+    /// inventory does not hold stays unresolved until a walk places it.
+    fn placed(
+        &self,
+        target: &str,
+        scope: &LifecycleScope,
+    ) -> Result<Result<(), ScopeError>, BackendError> {
+        let Some(inventory) = &self.inventory else {
+            return Ok(Err(ScopeError::Unverifiable));
+        };
+        let placed = match inventory.placed_chain(target) {
+            Ok(Some(placed)) => placed,
+            Ok(None) => return Ok(Err(ScopeError::Unverifiable)),
+            Err(_) => {
+                return Err(BackendError {
+                    kind: BackendErrorKind::Unavailable,
+                    operation: "notion.relation_proposal.inventory",
+                    retry_after: None,
+                    committed_page_id: None,
+                });
+            }
+        };
+        let chain = &placed.ancestors;
+        let root = chain.last().map_or(target, String::as_str);
+        if !scope.roots.iter().any(|r| r.0 == root) {
+            return Ok(Err(ScopeError::Denied));
+        }
+        let excluded = std::iter::once(target)
+            .chain(chain.iter().map(String::as_str))
+            .any(|id| scope.exclusions.exclusion(id, SourceType::Page).is_some())
+            || chain
+                .iter()
+                .any(|id| scope.exclusions.descendants_of.contains(id))
+            || placed.data_sources.iter().any(|(source, database)| {
+                scope
+                    .exclusions
+                    .exclusion(source, SourceType::DataSource)
+                    .is_some()
+                    || scope
+                        .exclusions
+                        .exclusion(database, SourceType::Database)
+                        .is_some()
+            });
+        Ok(if excluded {
+            Err(ScopeError::Denied)
+        } else {
+            Ok(())
         })
     }
     /// Trusted immutable composition setting; never infer from source references.
@@ -116,7 +177,7 @@ impl RelationProposalAdapter {
         *current = next;
         Ok(())
     }
-    async fn targets(
+    fn targets(
         &self,
         metadata: &IndexedMetadata,
         names: &BTreeMap<String, String>,
@@ -156,15 +217,13 @@ impl RelationProposalAdapter {
         let mut outcomes = BTreeMap::new();
         let mut allowed = BTreeSet::from([metadata.page_id.clone()]);
         if self.mode == ProjectionMode::ResolveTargets {
-            let gate = RootScopeGate::new(Arc::new(self.client.clone()), scope.clone())
-                .map_err(|_| conflict())?;
             // The page itself is in scope by the walk; only other targets
-            // need their own authorization.
+            // need their own authorization, from local state.
             for target in targets.into_iter().filter(|t| *t != metadata.page_id) {
                 let outcome = if children.contains(&target) {
                     Ok(())
                 } else {
-                    gate.authorize(&PageId(target.clone())).await.map(|_| ())
+                    self.placed(&target, scope)?
                 };
                 if outcome.is_ok() {
                     allowed.insert(target.clone());
@@ -219,22 +278,20 @@ impl RelationProposalAdapter {
             },
             properties: page.properties.clone(),
         };
-        let (edges, _) = self
-            .targets(
-                &metadata,
-                &page.relation_names,
-                None,
-                &scope,
-                &BTreeSet::new(),
-            )
-            .await?;
+        let (edges, _) = self.targets(
+            &metadata,
+            &page.relation_names,
+            None,
+            &scope,
+            &BTreeSet::new(),
+        )?;
         if *self.policy.read().await != scope {
             return Err(conflict());
         }
         Ok(edges)
     }
-    /// Propose a page from the walk's single read. Only relation targets
-    /// may cause requests (their authorization), never the page itself.
+    /// Propose a page from the walk's single read. No request is made:
+    /// targets are authorized from the walk's children and inventory.
     pub async fn prepare_walked(
         &self,
         walked: &WalkedPage,
@@ -287,15 +344,13 @@ impl RelationProposalAdapter {
         scope: LifecycleScope,
         children: &BTreeSet<String>,
     ) -> Result<RelationProposal, BackendError> {
-        let (edges, targets) = self
-            .targets(
-                &snapshot.document.metadata,
-                &snapshot.relation_names,
-                Some(snapshot.source()),
-                &scope,
-                children,
-            )
-            .await?;
+        let (edges, targets) = self.targets(
+            &snapshot.document.metadata,
+            &snapshot.relation_names,
+            Some(snapshot.source()),
+            &scope,
+            children,
+        )?;
         if *self.policy.read().await != scope {
             return Err(conflict());
         }

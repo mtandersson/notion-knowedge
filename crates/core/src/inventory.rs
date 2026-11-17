@@ -17,6 +17,30 @@ pub enum InventoryParent {
     },
 }
 
+/// Read-only placement of a page in the last walk's inventory, used to decide
+/// whether a relation or link target is inside the configured scope without a
+/// Notion request.
+pub trait InventoryPlacement: Send + Sync {
+    /// The page's placement under a root. `None` when the page or any
+    /// ancestor is not a readable, live, successfully walked inventory entry
+    /// or its chain does not reach a root. An unreadable inventory is an
+    /// error, never an absent page.
+    fn placed_chain(
+        &self,
+        page_id: &str,
+    ) -> Result<Option<PlacedChain>, crate::sync_state::SyncStateError>;
+}
+
+/// Where the inventory places a page.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlacedChain {
+    /// Ancestor pages, nearest first and ending at the root (empty for a root).
+    pub ancestors: Vec<String>,
+    /// `(data_source_id, database_id)` of every database the page or an
+    /// ancestor is a row of.
+    pub data_sources: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct InventoryEntry {
     pub page_id: String,

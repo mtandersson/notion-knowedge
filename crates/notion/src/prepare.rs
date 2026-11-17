@@ -193,13 +193,14 @@ mod tests {
         discovery::ExclusionRules, indexed::PropertyValue, inventory::InventoryEntry,
     };
     use serde_json::{Value, json};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     const PAGE: &str = "11111111-1111-1111-1111-111111111111";
     const ROOT: &str = "22222222-2222-2222-2222-222222222222";
     const OTHER: &str = "33333333-3333-3333-3333-333333333333";
     const WORKSPACE: &str = "44444444-4444-4444-4444-444444444444";
     const REVISION: &str = "2026-10-10T10:10:00Z";
+    /// A target whose inventory read fails.
+    const UNREADABLE: &str = "66666666-6666-6666-6666-666666666666";
 
     fn scope() -> LifecycleScope {
         LifecycleScope {
@@ -442,46 +443,6 @@ mod tests {
         assert_eq!(client.request_metrics().attempts, 0);
     }
 
-    type Route = (String, u16, Value);
-
-    /// Serves `routes` in order and returns the paths requested.
-    async fn fixture(routes: Vec<Route>) -> (NotionClient, tokio::task::JoinHandle<Vec<String>>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut client = NotionClient::integration("fixture-credential")
-            .unwrap()
-            .with_fast_fixture_transport();
-        client.api_root = format!("http://{}/v1", listener.local_addr().unwrap());
-        let task = tokio::spawn(async move {
-            let mut requests = Vec::new();
-            for (path, status, value) in routes {
-                let (mut stream, _) =
-                    tokio::time::timeout(std::time::Duration::from_secs(10), listener.accept())
-                        .await
-                        .unwrap()
-                        .unwrap();
-                let mut received = Vec::new();
-                while !received.windows(4).any(|v| v == b"\r\n\r\n") {
-                    let mut bytes = [0; 2048];
-                    let n = stream.read(&mut bytes).await.unwrap();
-                    assert!(n > 0);
-                    received.extend_from_slice(&bytes[..n]);
-                }
-                let headers = String::from_utf8(received).unwrap();
-                assert!(
-                    headers.starts_with(&format!("GET /v1/{path} HTTP/1.1\r\n")),
-                    "{headers}"
-                );
-                requests.push(path);
-                let body = value.to_string();
-                stream.write_all(format!(
-                    "HTTP/1.1 {status} fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                ).as_bytes()).await.unwrap();
-            }
-            requests
-        });
-        (client, task)
-    }
     fn with_relations(name: &str, targets: &[&str], second: bool) -> WalkedPage {
         let mut value = metadata(PAGE, ROOT, "Current", REVISION);
         value["properties"][name] = json!({"id":"rel%3A1","type":"relation","relation":targets.iter().map(|id| json!({"id":id})).collect::<Vec<_>>(),"has_more":false});
@@ -491,19 +452,50 @@ mod tests {
         }
         walked_with(&value, "Body", InventoryParent::Page(ROOT.into()))
     }
-    /// Target authorization reads only the target's physical chain.
-    fn target_chain(parent: &str) -> Vec<Route> {
-        let target = (
-            format!("pages/{OTHER}"),
-            200,
-            metadata(OTHER, parent, "Target", REVISION),
-        );
-        let ancestor = (
-            format!("pages/{parent}"),
-            200,
-            metadata(parent, "workspace", "Ancestor", REVISION),
-        );
-        vec![target.clone(), ancestor.clone(), ancestor, target]
+    /// The last walk's placement of pages: each id with its ancestors, nearest
+    /// first and ending at its root.
+    struct Placement(
+        std::collections::BTreeMap<String, notion_knowledge_core::inventory::PlacedChain>,
+    );
+    impl notion_knowledge_core::inventory::InventoryPlacement for Placement {
+        fn placed_chain(
+            &self,
+            page_id: &str,
+        ) -> Result<
+            Option<notion_knowledge_core::inventory::PlacedChain>,
+            notion_knowledge_core::sync_state::SyncStateError,
+        > {
+            match page_id {
+                UNREADABLE => Err(notion_knowledge_core::sync_state::SyncStateError::CorruptState),
+                _ => Ok(self.0.get(page_id).cloned()),
+            }
+        }
+    }
+    /// `OTHER` placed as a database row under the root.
+    fn placed_row() -> std::sync::Arc<Placement> {
+        std::sync::Arc::new(Placement(std::collections::BTreeMap::from([(
+            OTHER.to_owned(),
+            notion_knowledge_core::inventory::PlacedChain {
+                ancestors: vec![ROOT.into()],
+                data_sources: vec![("source".into(), "database".into())],
+            },
+        )])))
+    }
+    fn placed(entries: &[(&str, &[&str])]) -> std::sync::Arc<Placement> {
+        std::sync::Arc::new(Placement(
+            entries
+                .iter()
+                .map(|(id, chain)| {
+                    (
+                        (*id).to_owned(),
+                        notion_knowledge_core::inventory::PlacedChain {
+                            ancestors: chain.iter().map(|s| (*s).to_owned()).collect(),
+                            data_sources: vec![],
+                        },
+                    )
+                })
+                .collect(),
+        ))
     }
     async fn proposal(
         adapter: &crate::relation_proposal::RelationProposalAdapter,
@@ -523,13 +515,10 @@ mod tests {
             ("Renamed", vec![OTHER], false, 1),
             ("Empty", vec![], false, 0),
         ] {
-            let routes = if !targets.is_empty() || second {
-                target_chain(ROOT)
-            } else {
-                vec![]
-            };
-            let (client, server) = fixture(routes).await;
-            let adapter = RelationProposalAdapter::new(client, scope()).unwrap();
+            let client = offline();
+            let adapter = RelationProposalAdapter::new(client.clone(), scope())
+                .unwrap()
+                .with_inventory(placed(&[(OTHER, &[ROOT])]));
             let result = proposal(&adapter, &with_relations(name, &targets, second))
                 .await
                 .unwrap();
@@ -581,9 +570,8 @@ mod tests {
             if expected > 0 {
                 assert_eq!(result.edges()[0].display_name(), Some(name));
             }
-            // Only the target's chain is read; never the page itself again.
-            let requests = server.await.unwrap();
-            assert!(requests.iter().all(|p| !p.contains(PAGE)));
+            // Targets resolve from the inventory; nothing is read again.
+            assert_eq!(client.request_metrics().attempts, 0);
         }
     }
 
@@ -611,41 +599,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn relation_labels_never_authorize_outside_excluded_broken_or_inaccessible_targets() {
+    async fn targets_absent_outside_or_excluded_in_the_inventory_stay_unresolved() {
         use crate::relation_proposal::RelationProposalAdapter;
         use notion_knowledge_core::graph::GraphTarget;
-        for variant in 0..5 {
+        const EXCLUDED: &str = "55555555-5555-5555-5555-555555555555";
+        let cases: [(&str, Option<std::sync::Arc<Placement>>); 8] = [
+            ("row of excluded data source", Some(placed_row())),
+            ("row of excluded database", Some(placed_row())),
+            ("no inventory", None),
+            ("absent from inventory", Some(placed(&[]))),
+            ("under another root", Some(placed(&[(OTHER, &[WORKSPACE])]))),
+            ("excluded page", Some(placed(&[(OTHER, &[ROOT])]))),
+            (
+                "under excluded descendant",
+                Some(placed(&[(OTHER, &[EXCLUDED, ROOT])])),
+            ),
+            (
+                "under excluded page",
+                Some(placed(&[(OTHER, &[EXCLUDED, ROOT])])),
+            ),
+        ];
+        for (case, inventory) in cases {
             let mut config = scope();
-            let routes = if variant < 2 {
-                let ancestor = if variant == 0 { WORKSPACE } else { ROOT };
-                if variant == 1 {
+            match case {
+                "excluded page" => {
                     config.exclusions.page_ids.insert(OTHER.into());
                 }
-                target_chain(ancestor)
-            } else {
-                let status = [404, 403, 200][variant - 2];
-                vec![(
-                    format!("pages/{OTHER}"),
-                    status,
-                    json!({"private":"never expose"}),
-                )]
-            };
-            let (client, server) = fixture(routes).await;
-            let result = proposal(
-                &RelationProposalAdapter::new(client, config).unwrap(),
-                &with_relations("Authorized root", &[OTHER], false),
-            )
-            .await
-            .unwrap();
+                "under excluded descendant" => {
+                    config.exclusions.descendants_of.insert(EXCLUDED.into());
+                }
+                "under excluded page" => {
+                    config.exclusions.page_ids.insert(EXCLUDED.into());
+                }
+                "row of excluded data source" => {
+                    config
+                        .exclusions
+                        .source_types
+                        .insert(notion_knowledge_core::discovery::SourceType::DataSource);
+                }
+                "row of excluded database" => {
+                    config
+                        .exclusions
+                        .source_types
+                        .insert(notion_knowledge_core::discovery::SourceType::Database);
+                }
+                _ => {}
+            }
+            let client = offline();
+            let mut adapter = RelationProposalAdapter::new(client.clone(), config).unwrap();
+            if let Some(inventory) = inventory {
+                adapter = adapter.with_inventory(inventory);
+            }
+            let result = proposal(&adapter, &with_relations("Related", &[OTHER], false))
+                .await
+                .unwrap();
             assert_eq!(
                 result.edges()[0].target(),
                 &GraphTarget::Unresolved {
                     reference: OTHER.into()
-                }
+                },
+                "{case}"
             );
-            assert!(result.targets()[OTHER].is_err());
-            server.await.unwrap(); // Exact routes exclude target content/discovery.
+            assert!(result.targets()[OTHER].is_err(), "{case}");
+            assert_eq!(client.request_metrics().attempts, 0, "{case}");
         }
+    }
+
+    #[tokio::test]
+    async fn unreadable_inventory_fails_the_proposal_instead_of_dropping_the_target() {
+        use crate::relation_proposal::RelationProposalAdapter;
+        let client = offline();
+        let adapter = RelationProposalAdapter::new(client.clone(), scope())
+            .unwrap()
+            .with_inventory(placed(&[]));
+        let error = proposal(&adapter, &with_relations("Related", &[UNREADABLE], false))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.kind, BackendErrorKind::Unavailable);
+        assert_eq!(client.request_metrics().attempts, 0);
     }
 
     #[tokio::test]
@@ -692,7 +724,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn walk_children_skip_authorization_but_other_targets_do_not() {
+    async fn walk_children_and_inventory_placed_targets_resolve_without_requests() {
         use crate::relation_proposal::RelationProposalAdapter;
         use notion_knowledge_core::graph::GraphTarget;
         // A target the walk vouched for as its child: resolved with no request.
@@ -709,13 +741,35 @@ mod tests {
         );
         assert_eq!(client.request_metrics().attempts, 0);
 
-        // The same target, not vouched for, still goes through the gate.
-        let (client, server) = fixture(target_chain(ROOT)).await;
-        let adapter = RelationProposalAdapter::new(client, scope()).unwrap();
+        // The same target, not a child but placed under the root by the
+        // inventory: resolved with no request either.
+        let client = offline();
+        let adapter = RelationProposalAdapter::new(client.clone(), scope())
+            .unwrap()
+            .with_inventory(placed(&[(OTHER, &[ROOT])]));
         let result = proposal(&adapter, &with_relations("Related", &[OTHER], false))
             .await
             .unwrap();
         assert!(result.targets()[OTHER].is_ok());
-        assert_eq!(server.await.unwrap().len(), 4);
+        // A row of an allowed database, and a target that is itself an
+        // excluded-descendants page (only its descendants are excluded).
+        let mut config = scope();
+        config.exclusions.descendants_of.insert(OTHER.into());
+        for inventory in [placed_row(), placed(&[(OTHER, &[ROOT])])] {
+            let adapter = RelationProposalAdapter::new(client.clone(), config.clone())
+                .unwrap()
+                .with_inventory(inventory);
+            let row = proposal(&adapter, &with_relations("Related", &[OTHER], false))
+                .await
+                .unwrap();
+            assert!(row.targets()[OTHER].is_ok());
+        }
+        assert_eq!(
+            result.edges()[0].target(),
+            &GraphTarget::Page {
+                page_id: OTHER.into()
+            }
+        );
+        assert_eq!(client.request_metrics().attempts, 0);
     }
 }
