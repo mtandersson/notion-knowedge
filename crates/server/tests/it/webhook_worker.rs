@@ -513,7 +513,6 @@ fn index_runtime(
             },
             alias_sources,
             projection_mode: Default::default(),
-            page_timeout_seconds: 10,
             lexical: None,
         })
         .unwrap(),
@@ -1706,7 +1705,7 @@ async fn configured_lexical_expansion_preserves_scoped_content_and_rebuilds_afte
         source.revision = "2026-10-10T12:00:01Z".into();
     }
     let command = notion_knowledge_server::reconciliation_command::Command::parse(
-        &["--reconcile", "apply", "lexical-configured-refresh"].map(str::to_owned),
+        &["--reconcile", "apply"].map(str::to_owned),
     )
     .unwrap();
     let updated = notion_knowledge_server::reconciliation_command::runtime::execute(

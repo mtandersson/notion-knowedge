@@ -215,9 +215,10 @@ def execute(args):
                 manifest["assets_sha256"][name] = hashlib.file_digest(model, "sha256").hexdigest()
         manifest["phase"] = "reconcile"
         save()
-        result = command(binary, ["--reconcile", "apply", manifest["run_id"]], env, args.timeout)
-        require(result.get("operation") == "reconciliation" and result.get("phase") == "Completed" and
-                result.get("errors") == 0 and result.get("pending") == 0,
+        result = command(binary, ["--reconcile", "apply"], env, args.timeout)
+        require(result.get("operation") == "reconciliation" and result.get("status") == "finished" and
+                result.get("complete") is True and result.get("errors") == 0 and
+                result.get("held") == 0,
                 "Reconciliation did not complete cleanly")
         manifest["phase"] = "index"
         save()

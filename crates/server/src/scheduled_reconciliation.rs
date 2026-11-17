@@ -108,8 +108,6 @@ pub mod runtime {
         }
 
         fn release(&self, lease: &Lease) -> Result<(), &'static str> {
-            // No read-ahead outlives this cycle's writer lease.
-            self.index.runner.discard_read_ahead();
             match self
                 .index
                 .coordinator

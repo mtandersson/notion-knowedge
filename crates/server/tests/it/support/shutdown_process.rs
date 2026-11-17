@@ -280,8 +280,9 @@ async fn sigterm_drains_or_rolls_back_native_work_and_preserves_acknowledged_web
             count: Arc::new(AtomicUsize::new(0)),
         };
         handler
-            .apply_lifecycle(
+            .refresh_page(
                 &PageId(PAGE.into()),
+                &PageId(ROOT.into()),
                 "shutdown-event-recovery",
                 &provider,
                 lease.clone(),

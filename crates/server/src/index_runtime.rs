@@ -6,15 +6,14 @@ use notion_knowledge_core::{
     chunking::ChunkConfig,
     embedding::EmbeddingProvider,
     lifecycle::LifecycleScope,
-    reconciliation::{JournalError, ReconciliationJournal, ReconciliationScope, RunPhase},
+    reconciliation::{ReconciliationJournal, ReconciliationScope},
 };
 use notion_knowledge_notion::NotionClient;
 use notion_knowledge_retrieval::{
     chunks::{GuardedChunkTable, lexical_binding::LexicalCachePlan},
     commit::{CommitBinding, IndexCommitCoordinator},
-    planner::{AuthoritativeReconciliationPlanner, production_scope},
+    planner::production_scope,
     refresh::AuthoritativePageRefresh,
-    runner::AuthoritativeReconciliationRunner,
 };
 use std::{path::Path, sync::Arc};
 
@@ -162,6 +161,18 @@ impl std::fmt::Display for SyncError {
     }
 }
 
+/// What a full sync would change, from a read-only walk ([`IndexRuntime::dry_run`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DryRun {
+    /// Every page the walk reached, including skipped ones.
+    pub inventory: u64,
+    /// Settled by the walk itself (excluded, archived, unreadable).
+    pub skipped: u64,
+    /// The walk was authoritative, so its `removed` count is meaningful.
+    pub complete: bool,
+    pub drift: notion_knowledge_core::inventory::DriftCounts,
+}
+
 /// Page counts of one [`IndexRuntime::sync_from_walk`] run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SyncTotals {
@@ -225,7 +236,6 @@ pub struct IndexRuntime {
     pub coordinator: Arc<IndexCommitCoordinator>,
     pub scope: ReconciliationScope,
     pub handler: AuthoritativePageRefresh,
-    pub runner: AuthoritativeReconciliationRunner,
     pub provider: Arc<dyn EmbeddingProvider>,
     alias_sources: Option<notion_knowledge_core::aliases::AliasSources>,
     table: GuardedChunkTable,
@@ -536,6 +546,27 @@ impl IndexRuntime {
         self.sync(settings, lease, mode, clock).await
     }
 
+    /// Walk the tree and compare it with the stored inventory. Nothing is
+    /// written: no inventory, outcome, receipt, embedding or index change.
+    pub async fn dry_run(&self) -> Result<DryRun, SyncError> {
+        let walk = self
+            .source
+            .walk_tree_with_search(&self.source_scope, None)
+            .await
+            .map_err(|e| SyncError::source(&e))?;
+        let diff = self
+            .coordinator
+            .state()
+            .preview_walk(&walk.entries, walk.authoritative())
+            .map_err(|_| SyncError::from("cache inventory state unavailable"))?;
+        Ok(DryRun {
+            inventory: walk.entries.len() as u64,
+            skipped: walk.skipped.len() as u64,
+            complete: walk.authoritative(),
+            drift: diff.drift(),
+        })
+    }
+
     /// Sync one page ([`SyncMode::Page`]) for a claimed callback: a webhook
     /// event or a post-write refresh. `claim` is the claim's clock: every
     /// commit and removal of this sync is fenced by it, so an expired,
@@ -597,8 +628,6 @@ impl IndexRuntime {
         let indexed = || InventoryOutcome::Indexed {
             revision: String::new(),
         };
-        // Parked reconciliation read-ahead must not hold the shared budget.
-        self.runner.discard_read_ahead();
         let state = self.coordinator.state();
         let since = match &mode {
             SyncMode::Incremental => state
@@ -1559,16 +1588,6 @@ impl IndexRuntime {
         result
     }
 
-    /// An absent or inventory-phase run still needs read-only planning before
-    /// writer admission. Other phases retain their existing page attempts.
-    pub(crate) fn inventory_pending(&self, run: &str) -> Result<bool, JournalError> {
-        match self.coordinator.state().run(run, &self.scope) {
-            Ok(run) => Ok(run.phase == RunPhase::Inventory),
-            Err(JournalError::InvalidTransition) => Ok(true),
-            Err(error) => Err(error),
-        }
-    }
-
     /// Local operator composition only; no caller may choose a workspace/root.
     /// Candidates remain subject to authoritative content authorization.
     pub fn lookup_alias(
@@ -1722,7 +1741,6 @@ impl IndexRuntime {
             },
             alias_sources: Some(settings.alias_sources.clone()),
             projection_mode: settings.projection_mode,
-            page_timeout_seconds: settings.timeout_seconds,
             lexical,
         })
     }
@@ -1741,7 +1759,6 @@ impl IndexRuntime {
             chunk_config,
             alias_sources,
             projection_mode,
-            page_timeout_seconds,
             lexical,
         } = parts;
         let handler = AuthoritativePageRefresh::new(
@@ -1758,38 +1775,11 @@ impl IndexRuntime {
             Some(sources) => handler.with_alias_sources(sources.clone()),
             None => handler,
         };
-        let planner = AuthoritativeReconciliationPlanner::new(
-            source.clone(),
-            table.clone(),
-            coordinator.clone(),
-            scope.clone(),
-        )
-        .map_err(|_| "authoritative planner incompatible")?
-        .with_projection_mode(projection_mode);
-        let planner = match &alias_sources {
-            Some(sources) => planner.with_alias_sources(sources.clone()),
-            None => planner,
-        };
-        let runner = AuthoritativeReconciliationRunner::new(
-            planner,
-            handler.clone(),
-            coordinator.clone(),
-            journal.clone(),
-        )
-        .map_err(|_| "authoritative runner incompatible")?;
-        // Scheduled, manual and cache-reset reconciliation share the bounded
-        // read-ahead of initial streaming: same workers and the same budget.
         let prefetch_budget = PrefetchBudget::new(PREFETCH_BUDGET_KIB, PREFETCH_RESERVE_KIB);
-        let runner = runner.with_read_ahead(
-            PREFETCH_WORKERS,
-            prefetch_budget.clone(),
-            std::time::Duration::from_secs(page_timeout_seconds),
-        );
         Ok(Self {
             coordinator,
             scope: journal,
             handler,
-            runner,
             provider,
             alias_sources,
             table,
@@ -1813,8 +1803,6 @@ pub struct RuntimeParts {
     /// `None` projects no aliases.
     pub alias_sources: Option<notion_knowledge_core::aliases::AliasSources>,
     pub projection_mode: notion_knowledge_notion::relation_proposal::ProjectionMode,
-    /// Bounds reconciliation read-ahead preparation of one page.
-    pub page_timeout_seconds: u64,
     pub lexical: Option<LexicalCachePlan>,
 }
 

@@ -383,7 +383,7 @@ competing writers before an initial operator population, then run:
 scripts/compose-dev.sh -f compose.indexer.yaml stop
 scripts/compose-dev.sh -f compose.indexer.yaml run --rm -T --no-deps \
   -e NK_WEBHOOK_WORKER=false -e NK_WEBHOOK_MODE=disabled \
-  notion-knowledge --reconcile apply initial-population-1
+  notion-knowledge --reconcile apply
 scripts/compose-dev.sh -f compose.indexer.yaml run --rm -T --no-deps \
   -e NK_WEBHOOK_WORKER=false -e NK_WEBHOOK_MODE=disabled \
   notion-knowledge --index ensure

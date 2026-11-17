@@ -43,22 +43,21 @@ settings and explicitly reconcile existing state:
 
 ```sh
 notion-knowledge-server --reconcile dry-run
-notion-knowledge-server --reconcile rebuild-aliases alias-source-change-1
-notion-knowledge-server --reconcile status alias-source-change-1
+notion-knowledge-server --reconcile rebuild-aliases
 ```
 
-Use a fresh run ID. `rebuild-aliases` uses the existing owned maintenance guard,
+`rebuild-aliases` uses the existing owned maintenance guard,
 writer lease and Inventory transaction to invalidate only alias completeness;
 then normal authoritative reconciliation repopulates unchanged and empty pages.
 It retains alias rows until each replacement commits, relations, links, immutable
-receipts, webhook inbox and scheduling history. A normal new `apply` run also
+receipts, webhook inbox and scheduling history. A normal `apply` also
 recognizes changed configuration. Never delete SQLite wholesale. Stop other
 callers or deploy their configuration together to avoid alternating policies.
 
-Read-only open, startup, status and dry-run never migrate, invalidate or repair
+Read-only open, startup and dry-run never migrate, invalidate or repair
 state. Existing incompatible schemas fail closed; explicit writable
 initialization performs supported migration. Pending or Failed work remains
-retryable through the existing resume/retry workflow. Alias persistence failure
+retryable by the next `apply` or `retry PAGE`. Alias persistence failure
 rolls back SQLite acknowledgment even if Lance effects already occurred.
 Historical Applied receipts remain immutable; repairs receive distinct durable
 IDs, and incomplete repairs replay before a reverted-source no-op can succeed.

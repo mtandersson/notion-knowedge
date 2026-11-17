@@ -12,7 +12,7 @@ use notion_knowledge_core::{
     chunking::ChunkConfig,
     embedding::EmbeddingProvider,
     inventory::InventoryParent,
-    lifecycle::{LifecycleEvidence, LifecycleScope, LifecycleStatus, PageLifecycle},
+    lifecycle::LifecycleScope,
     reconciliation::{FailureClass, Lease, ReconciliationScope},
     sync_state::{PageSyncState, SyncStateStore},
 };
@@ -94,14 +94,6 @@ pub struct RefreshResult {
     pub diff: ChunkDiffMetrics,
 }
 
-/// A proposal checked again inside the operation-owned commit boundary.
-#[derive(Clone)]
-pub(crate) struct ExpectedReconciliation {
-    pub run: String,
-    pub page: crate::durable_plan::DurablePage,
-    pub replan: bool,
-}
-
 /// Source-prepared page content awaiting the embedding/commit consumer.
 /// It carries no index version, lease or receipt decision; those are taken
 /// fresh by [`AuthoritativePageRefresh::refresh_prefetched`].
@@ -146,6 +138,7 @@ impl PrefetchedPage {
 
 #[derive(Clone)]
 pub struct AuthoritativePageRefresh {
+    #[cfg(any(test, feature = "test-fixtures"))]
     notion: Arc<NotionClient>,
     relations: RelationProposalAdapter,
     alias_sources: Option<AliasSources>,
@@ -187,6 +180,7 @@ impl AuthoritativePageRefresh {
         Ok(Self {
             relations,
             alias_sources: None,
+            #[cfg(any(test, feature = "test-fixtures"))]
             notion,
             guard,
             coordinator,
@@ -215,11 +209,6 @@ impl AuthoritativePageRefresh {
             .as_ref()
             .map_or(Ok(true), |p| self.coordinator.alias_projection_complete(p))
     }
-    fn current_aliases_complete(&self, page: &str) -> Result<bool, CommitError> {
-        self.alias_sources.as_ref().map_or(Ok(true), |s| {
-            self.coordinator.current_alias_projection_complete(page, s)
-        })
-    }
     fn unfinished_alias_repair(&self, operation: &str, page: &str) -> Result<bool, CommitError> {
         if self.alias_sources.is_none() {
             return Ok(false);
@@ -246,302 +235,9 @@ impl AuthoritativePageRefresh {
         })
     }
 
-    /// Apply a page hint using current authoritative status, never its event
-    /// type. All allowed transitions share the canonical refresh pipeline.
-    /// Negative evidence is revalidated inside the same SQLite/Lance guard.
-    pub async fn apply_lifecycle(
-        &self,
-        page: &PageId,
-        operation_id: &str,
-        provider: &dyn EmbeddingProvider,
-        lease: Lease,
-        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
-    ) -> Result<RefreshResult, RefreshError> {
-        self.apply_lifecycle_expected(page, operation_id, provider, lease, clock, None, None)
-            .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn apply_lifecycle_expected(
-        &self,
-        page: &PageId,
-        operation_id: &str,
-        provider: &dyn EmbeddingProvider,
-        lease: Lease,
-        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
-        expected: Option<ExpectedReconciliation>,
-        // Read-ahead source preparation; used only if it still matches.
-        prefetched: Option<PrefetchedPage>,
-    ) -> Result<RefreshResult, RefreshError> {
-        let evidence =
-            self.notion
-                .lifecycle(page, &self.scope)
-                .await
-                .map_err(|error| match error.kind {
-                    BackendErrorKind::Conflict => RefreshError::Conflict,
-                    BackendErrorKind::Unauthenticated => RefreshError::Unauthenticated,
-                    BackendErrorKind::InvalidInput | BackendErrorKind::UnsupportedContent => {
-                        RefreshError::PermanentSource
-                    }
-                    _ => RefreshError::Source,
-                })?;
-        if let Some(expected) = &expected {
-            self.check_expected(expected, &evidence)
-                .await
-                .map_err(|e| match e {
-                    FailureClass::Source => RefreshError::Source,
-                    FailureClass::Index => RefreshError::Index,
-                    FailureClass::Unavailable => RefreshError::Unavailable,
-                    FailureClass::Conflict => RefreshError::Conflict,
-                })?;
-        }
-        if let LifecycleStatus::Allowed { roots } = &evidence.status {
-            let root = roots.first().ok_or(RefreshError::Source)?;
-            let root = PageId(root.clone());
-            // The durable plan was revalidated above from current state; a
-            // read-ahead preparation replaces only the source read that follows.
-            let (previous, proposal) = match self
-                .matching_prefetch(prefetched, page, &root, operation_id, true)
-                .await?
-            {
-                Some(prepared) => prepared,
-                None => {
-                    let prepared =
-                        Box::pin(self.prepare_source(page, &evidence, &root, operation_id)).await?;
-                    (prepared.previous, prepared.proposal)
-                }
-            };
-            return Box::pin(self.embed_and_commit(
-                page,
-                operation_id,
-                previous,
-                proposal,
-                provider,
-                lease,
-                clock,
-                true,
-                expected.map(|expected| (expected, evidence)),
-            ))
-            .await;
-        }
-        let previous = self.guard.page_chunks(&page.0).await?;
-        let owned_state = self
-            .coordinator
-            .state()
-            .page_state(&page.0)
-            .map_err(|_| RefreshError::Unavailable)?
-            .is_some();
-        let owned_work = self
-            .coordinator
-            .owns_page_work(&page.0)
-            .map_err(RefreshError::from)?;
-        if (!owned_state && !owned_work && previous.is_empty())
-            || previous.iter().any(|chunk| {
-                chunk.metadata.source.workspace_id != self.scope.workspace_id
-                    || !self
-                        .scope
-                        .roots
-                        .iter()
-                        .any(|root| root.0 == chunk.metadata.source.root_page_id)
-            })
-        {
-            return Err(RefreshError::OutOfScope);
-        }
-        let selected = evidence.ancestry.first().ok_or(RefreshError::Source)?;
-        let checkpoint = PageSyncState::tombstone(page.0.clone(), Some(selected.revision.clone()))
-            .map_err(|_| RefreshError::InvalidConfiguration)?;
-        // Evidence includes the physical chain and policy, not merely a source
-        // timestamp. Its debug representation contains no private content.
-        let revision = format!("{:x}", Sha256::digest(format!("{evidence:?}").as_bytes()));
-        self.coordinator
-            .validate_page_receipt_authority(operation_id, &page.0)?;
-        // Replaying an old acknowledged delete cannot delete a later restored
-        // snapshot. Its current projection must still be durably complete.
-        if self
-            .coordinator
-            .receipt(operation_id)?
-            .is_some_and(|r| r.status == ReceiptStatus::Applied)
-            && self
-                .coordinator
-                .state()
-                .page_state(&page.0)
-                .map_err(|_| RefreshError::Index)?
-                .is_some_and(|state| !state.is_tombstone())
-        {
-            if self.unfinished_alias_repair(operation_id, &page.0)?
-                || self
-                    .coordinator
-                    .unfinished_relation_repair_id(operation_id)?
-                    .is_some()
-            {
-                return Err(RefreshError::Conflict);
-            }
-            let handler = self.clone();
-            let page = page.clone();
-            self.check_owned_snapshot(lease, clock, move |context| async move {
-                let _authority = handler
-                    .relations
-                    .revalidate_removal(&evidence)
-                    .await
-                    .map_err(|_| FailureClass::Conflict)?;
-                context.revalidate().map_err(|_| FailureClass::Conflict)?;
-                if !handler
-                    .current_aliases_complete(&page.0)
-                    .map_err(|_| FailureClass::Index)?
-                    || !handler
-                        .coordinator
-                        .current_body_links_complete(&page.0)
-                        .map_err(|_| FailureClass::Index)?
-                {
-                    return Err(FailureClass::Conflict);
-                }
-                Ok(())
-            })
-            .await?;
-            return Ok(RefreshResult {
-                outcome: CommitOutcome::AlreadyApplied,
-                diff: Default::default(),
-            });
-        }
-        let projection =
-            RelationProjection::new(self.coordinator.binding(), &page.0, true, vec![])?
-                .with_links(vec![])?;
-        let aliases = self
-            .alias_sources
-            .as_ref()
-            .map(|sources| {
-                AliasProjection::tombstone(
-                    self.coordinator.binding(),
-                    &self.coordinator.alias_root(&page.0)?,
-                    &page.0,
-                    sources,
-                )
-                .map(AliasProjection::with_owned_root_cleanup)
-            })
-            .transpose()?;
-        let alias_complete = self.aliases_complete(&aliases)?;
-        let alias_unfinished = self.unfinished_alias_repair(operation_id, &page.0)?;
-        if self
-            .coordinator
-            .receipt(operation_id)?
-            .is_some_and(|r| r.status == ReceiptStatus::Applied)
-            && alias_complete
-            && !alias_unfinished
-            && self.coordinator.relation_projection_complete(&projection)?
-            && self
-                .coordinator
-                .unfinished_relation_repair_id(operation_id)?
-                .is_none()
-        {
-            let handler = self.clone();
-            self.check_owned_snapshot(lease, clock, move |context| async move {
-                let _authority = handler
-                    .relations
-                    .revalidate_removal(&evidence)
-                    .await
-                    .map_err(|_| FailureClass::Conflict)?;
-                context.revalidate().map_err(|_| FailureClass::Conflict)?;
-                if !handler
-                    .aliases_complete(&aliases)
-                    .map_err(|_| FailureClass::Index)?
-                    || !handler
-                        .coordinator
-                        .relation_projection_complete(&projection)
-                        .map_err(|_| FailureClass::Index)?
-                {
-                    return Err(FailureClass::Conflict);
-                }
-                Ok(())
-            })
-            .await?;
-            return Ok(RefreshResult {
-                outcome: CommitOutcome::AlreadyApplied,
-                diff: Default::default(),
-            });
-        }
-        let repair_id;
-        let operation_id = if self
-            .coordinator
-            .receipt(operation_id)?
-            .is_some_and(|r| r.status == ReceiptStatus::Applied)
-            && (!alias_complete
-                || alias_unfinished
-                || !self.coordinator.relation_projection_complete(&projection)?
-                || self
-                    .coordinator
-                    .unfinished_relation_repair_id(operation_id)?
-                    .is_some())
-        {
-            repair_id = if let Some(unfinished) = self
-                .coordinator
-                .unfinished_relation_repair_id(operation_id)?
-            {
-                unfinished
-            } else if self.alias_sources.is_some() {
-                self.coordinator.alias_repair_id(operation_id, &page.0)?
-            } else {
-                self.coordinator.relation_repair_id(operation_id)?
-            };
-            &repair_id
-        } else {
-            operation_id
-        };
-        let operation = PageOperation::retryable_lifecycle(
-            operation_id,
-            &revision,
-            PageAction::Delete,
-            checkpoint,
-        )
-        .map_err(RefreshError::from)?
-        .with_relation_projection(projection)?;
-        let operation = self.attach_aliases(operation, aliases)?;
-        let expected_operation = operation.clone();
-        let prepared = self.guard.prepare_page(provider, operation, &[]).await?;
-        let diff = prepared.metrics();
-        let owned_clock = clock.clone();
-        let expires_at = lease.expires_at;
-        let expected_lease = lease.clone();
-        let handler = self.clone();
-        let outcome = self
-            .guard
-            .commit_page_with_authority(prepared, lease, clock, move || async move {
-                owned_revalidation(
-                    handler.guard.index_directory().to_path_buf(),
-                    async {
-                        if let Some(expected) = &expected {
-                            handler.check_expected(expected, &evidence).await?;
-                            handler
-                                .coordinator
-                                .prepare_reconciliation_operation(
-                                    &expected_lease,
-                                    owned_clock(),
-                                    &expected.run,
-                                    &expected_operation,
-                                    &evidence,
-                                    expected.replan,
-                                )
-                                .map_err(|_| FailureClass::Conflict)?;
-                        }
-                        handler
-                            .relations
-                            .revalidate_removal(&evidence)
-                            .await
-                            .map_err(|_| FailureClass::Conflict)
-                    },
-                    owned_clock.clone(),
-                    expires_at,
-                )
-                .await
-            })
-            .await
-            .map_err(RefreshError::from)?;
-        Ok(RefreshResult { outcome, diff })
-    }
-
-    /// A single refresh for a page hinted by a webhook, manual command, or
-    /// reconciliation. Callers own bounded retries and durable inbox claims.
-    /// A lost SQLite fence or stale Lance version is a retryable conflict; the
-    /// earlier proposal MUST be discarded and recomputed.
+    /// Fixture seam: walk the source and sync one page it reached, as a
+    /// single-page sync does. Never part of production composition.
+    #[cfg(any(test, feature = "test-fixtures"))]
     pub async fn refresh_page(
         &self,
         page: &PageId,
@@ -551,32 +247,30 @@ impl AuthoritativePageRefresh {
         lease: Lease,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Result<RefreshResult, RefreshError> {
-        let evidence = self
-            .notion
-            .lifecycle(page, &self.scope)
-            .await
-            .map_err(|error| source_failure(error.kind))?;
-        let LifecycleStatus::Allowed { roots } = &evidence.status else {
-            return Err(RefreshError::OutOfScope);
+        let (send, mut receive) = tokio::sync::mpsc::channel(64);
+        let walk = async move {
+            self.notion
+                .walk_tree_with_search(&self.scope, Some(&send))
+                .await
         };
-        if !roots.contains(&root.0) {
+        let collect = async {
+            let mut found = None;
+            while let Some(walked) = receive.recv().await {
+                if walked.entry.page_id == page.0 {
+                    found = Some(walked);
+                }
+            }
+            found
+        };
+        let (walk, found) = tokio::join!(walk, collect);
+        walk.map_err(|e| source_failure(e.kind))?;
+        let walked = found.ok_or(RefreshError::OutOfScope)?;
+        if walked.skip.is_some() || walked.entry.root_id != root.0 {
             return Err(RefreshError::OutOfScope);
         }
-        let PrefetchedPage {
-            previous, proposal, ..
-        } = Box::pin(self.prepare_source(page, &evidence, root, operation_id)).await?;
-        Box::pin(self.embed_and_commit(
-            page,
-            operation_id,
-            previous,
-            proposal,
-            provider,
-            lease,
-            clock,
-            false,
-            None,
-        ))
-        .await
+        let prepared = self.prepare_walked(&walked, operation_id).await?;
+        self.refresh_prefetched(prepared, provider, lease, clock)
+            .await
     }
 
     /// Prepare a page the walk reached from its single read. No request is
@@ -609,76 +303,8 @@ impl AuthoritativePageRefresh {
         })
     }
 
-    /// Read-ahead source preparation for a planned reconciliation page. The
-    /// consumer discards it unless its own lifecycle read selects the same
-    /// root. No durable plan state is checked or captured here: that stays
-    /// with the consumer. Any failure yields `None`, and the consumer then
-    /// prepares the page itself exactly as without read-ahead.
-    pub(crate) async fn prefetch_reconciliation(
-        &self,
-        page: &PageId,
-        operation_id: &str,
-    ) -> Option<PrefetchedPage> {
-        let evidence = self.notion.lifecycle(page, &self.scope).await.ok()?;
-        let LifecycleStatus::Allowed { roots } = &evidence.status else {
-            return None;
-        };
-        let root = PageId(roots.first()?.clone());
-        Box::pin(self.prepare_source(page, &evidence, &root, operation_id))
-            .await
-            .ok()
-    }
-
-    /// Take a read-ahead preparation only if it was made for this page,
-    /// operation and root and this page's indexed chunks did not change since,
-    /// so its chunk identities are still current. `authority` re-checks the
-    /// receipt authority the inline preparation would have checked.
-    async fn matching_prefetch(
-        &self,
-        prefetched: Option<PrefetchedPage>,
-        page: &PageId,
-        root: &PageId,
-        operation_id: &str,
-        authority: bool,
-    ) -> Result<
-        Option<(
-            Vec<notion_knowledge_core::indexed::IndexedChunk>,
-            notion_knowledge_notion::relation_proposal::RelationProposal,
-        )>,
-        RefreshError,
-    > {
-        let Some(prefetched) = prefetched else {
-            return Ok(None);
-        };
-        if prefetched.page != *page
-            || prefetched.root != *root
-            || prefetched.operation != operation_id
-            || self.guard.page_chunks(&page.0).await? != prefetched.previous
-        {
-            return Ok(None);
-        }
-        if authority {
-            self.coordinator
-                .validate_page_receipt_authority(operation_id, &page.0)?;
-        }
-        Ok(Some((prefetched.previous, prefetched.proposal)))
-    }
-
-    /// One read of a page whose physical chain the caller's lifecycle read
-    /// verified (metadata and Markdown), then local preparation.
-    async fn prepare_source(
-        &self,
-        page: &PageId,
-        evidence: &LifecycleEvidence,
-        root: &PageId,
-        operation_id: &str,
-    ) -> Result<PrefetchedPage, RefreshError> {
-        let parent = InventoryParent::from_evidence(evidence).ok_or(RefreshError::Source)?;
-        self.prepare_source_with(page, parent, root, operation_id)
-            .await
-    }
-
-    /// [`Self::prepare_source`] for a caller that already holds the page's parent.
+    /// One read of a page whose parent the caller holds (metadata and Markdown),
+    /// then local preparation.
     async fn prepare_source_with(
         &self,
         page: &PageId,
@@ -741,8 +367,6 @@ impl AuthoritativePageRefresh {
             provider,
             lease,
             clock,
-            false,
-            None,
         ))
         .await
     }
@@ -784,9 +408,9 @@ impl AuthoritativePageRefresh {
                 .await
                 .map_err(|e| source_failure(e.kind))?
         };
-        Box::pin(self.embed_and_commit(
-            &page, &operation, current, proposal, provider, lease, clock, false, None,
-        ))
+        Box::pin(
+            self.embed_and_commit(&page, &operation, current, proposal, provider, lease, clock),
+        )
         .await
     }
 
@@ -869,9 +493,6 @@ impl AuthoritativePageRefresh {
         provider: &dyn EmbeddingProvider,
         lease: Lease,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
-        lifecycle: bool,
-        // A durable plan's expectation and the lifecycle read it is checked against.
-        expected: Option<(ExpectedReconciliation, LifecycleEvidence)>,
     ) -> Result<RefreshResult, RefreshError> {
         let proposal = relation_proposal.snapshot().clone();
         let projection = RelationProjection::new(
@@ -926,7 +547,6 @@ impl AuthoritativePageRefresh {
         // A genuinely unchanged page is a no-op, including durable state.
         // Metadata/links are compared too, so citations are still refreshed.
         if complete
-            && expected.is_none()
             && !has_receipt
             && self
                 .coordinator
@@ -1083,23 +703,13 @@ impl AuthoritativePageRefresh {
         } else {
             operation_id
         };
-        let operation = if lifecycle {
-            PageOperation::retryable_lifecycle(
-                operation_id,
-                &revision,
-                PageAction::Refresh,
-                checkpoint,
-            )
-        } else {
-            PageOperation::retryable_refresh(operation_id, &revision, checkpoint)
-        }
-        .map_err(RefreshError::from)?
-        .with_metadata_identity(metadata_identity)
-        .map_err(RefreshError::from)?
-        .with_relation_projection(projection)
-        .map_err(RefreshError::from)?;
+        let operation = PageOperation::retryable_refresh(operation_id, &revision, checkpoint)
+            .map_err(RefreshError::from)?
+            .with_metadata_identity(metadata_identity)
+            .map_err(RefreshError::from)?
+            .with_relation_projection(projection)
+            .map_err(RefreshError::from)?;
         let operation = self.attach_aliases(operation, aliases)?;
-        let expected_operation = operation.clone();
         let prepared = self
             .guard
             .prepare_page(provider, operation, &chunks)
@@ -1108,11 +718,9 @@ impl AuthoritativePageRefresh {
 
         // The commit's callback runs inside the operation-owned runtime, after
         // its cross-process Lance directory guard and SQLite fencing. It makes
-        // no source request: it records a durable plan's proposal under the
-        // fence and holds the current policy through acknowledgment.
+        // no source request: it holds the current policy through acknowledgment.
         let owned_clock = clock.clone();
         let expires_at = lease.expires_at;
-        let expected_lease = lease.clone();
         let handler = self.clone();
         let result = self
             .guard
@@ -1120,20 +728,6 @@ impl AuthoritativePageRefresh {
                 owned_revalidation(
                     handler.guard.index_directory().to_path_buf(),
                     async {
-                        if let Some((expected, evidence)) = &expected {
-                            handler.check_expected(expected, evidence).await?;
-                            handler
-                                .coordinator
-                                .prepare_reconciliation_operation(
-                                    &expected_lease,
-                                    owned_clock(),
-                                    &expected.run,
-                                    &expected_operation,
-                                    evidence,
-                                    expected.replan,
-                                )
-                                .map_err(|_| FailureClass::Conflict)?;
-                        }
                         handler
                             .relations
                             .revalidate(&relation_proposal)
@@ -1171,390 +765,6 @@ impl AuthoritativePageRefresh {
             .maintain(lease, clock, move |context| async move {
                 owned_revalidation(index, check(context), owned_clock, expires_at).await
             })
-    }
-
-    pub(crate) fn projection_mode(
-        &self,
-    ) -> notion_knowledge_notion::relation_proposal::ProjectionMode {
-        self.relations.projection_mode()
-    }
-
-    pub(crate) fn alias_configuration_identity(&self) -> Option<String> {
-        self.alias_sources.as_ref().map(AliasSources::identity)
-    }
-
-    pub(crate) fn is_bound_to(&self, coordinator: &Arc<IndexCommitCoordinator>) -> bool {
-        Arc::ptr_eq(&self.coordinator, coordinator)
-            && self.guard.is_bound_to(coordinator)
-            && crate::planner::production_scope(&self.scope).is_ok_and(|s| {
-                self.coordinator
-                    .binding()
-                    .matches_policy(&self.scope.workspace_id, &s)
-            })
-    }
-
-    /// The plan still matches the lifecycle read and the complete local
-    /// snapshot. Local state only: the source is not read again here.
-    async fn check_expected(
-        &self,
-        expected: &ExpectedReconciliation,
-        evidence: &LifecycleEvidence,
-    ) -> Result<(), FailureClass> {
-        use crate::durable_plan::{DurablePlan, ProposedDifference};
-        if DurablePlan::lifecycle_digest(evidence) != expected.page.lifecycle_digest
-            || (expected.page.difference == ProposedDifference::Orphan)
-                == matches!(evidence.status, LifecycleStatus::Allowed { .. })
-        {
-            return Err(FailureClass::Conflict);
-        }
-        let planner = crate::planner::AuthoritativeReconciliationPlanner::new(
-            self.notion.clone(),
-            self.guard.clone(),
-            self.coordinator.clone(),
-            self.scope.clone(),
-        )
-        .map_err(|_| FailureClass::Conflict)?
-        .with_projection_mode(self.relations.projection_mode());
-        let planner = if let Some(sources) = &self.alias_sources {
-            planner.with_alias_sources(sources.clone())
-        } else {
-            planner
-        };
-        let local = planner.local_inventory().await.map_err(|e| match e {
-            crate::planner::PlanError::Index => FailureClass::Index,
-            _ => FailureClass::Conflict,
-        })?;
-        if DurablePlan::local_digest(local.get(&expected.page.page_id).filter(|p| {
-            !p.chunks.is_empty() || p.checkpoint.is_some() || p.metadata_identity.is_some()
-        })) != expected.page.local_digest
-        {
-            return Err(FailureClass::Conflict);
-        }
-        Ok(())
-    }
-
-    /// An unchanged canonical page still verifies the full source/relation
-    /// snapshot. Missing derived rows are repaired through the normal refresh
-    /// pipeline; intact pages commit only their projection and Unchanged receipt.
-    pub(crate) async fn apply_unchanged(
-        &self,
-        expected: ExpectedReconciliation,
-        provider: &dyn EmbeddingProvider,
-        lease: Lease,
-        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
-        prefetched: Option<PrefetchedPage>,
-    ) -> Result<(), RefreshError> {
-        let evidence = self
-            .notion
-            .lifecycle(&PageId(expected.page.page_id.clone()), &self.scope)
-            .await
-            .map_err(|error| {
-                if error.kind == BackendErrorKind::Unauthenticated {
-                    RefreshError::Unauthenticated
-                } else {
-                    RefreshError::Source
-                }
-            })?;
-        let checkpoint = self
-            .coordinator
-            .state()
-            .page_state(&expected.page.page_id)
-            .map_err(|_| RefreshError::Index)?
-            .ok_or(RefreshError::Conflict)?;
-        let root = match &evidence.status {
-            LifecycleStatus::Allowed { roots } => {
-                PageId(roots.first().ok_or(RefreshError::Conflict)?.clone())
-            }
-            _ => return Err(RefreshError::Conflict),
-        };
-        let page_id = PageId(expected.page.page_id.clone());
-        let (previous, proposal) = match self
-            .matching_prefetch(
-                prefetched,
-                &page_id,
-                &root,
-                &expected.page.operation_id,
-                false,
-            )
-            .await?
-        {
-            Some(prepared) => prepared,
-            None => {
-                let previous = self.guard.page_chunks(&expected.page.page_id).await?;
-                let parent =
-                    InventoryParent::from_evidence(&evidence).ok_or(RefreshError::Source)?;
-                let proposal = self
-                    .relations
-                    .prepare_read(&page_id, parent, &root, &previous, self.chunk_config)
-                    .await
-                    .map_err(|error| {
-                        if error.kind == BackendErrorKind::Unauthenticated {
-                            RefreshError::Unauthenticated
-                        } else {
-                            RefreshError::Source
-                        }
-                    })?;
-                (previous, proposal)
-            }
-        };
-        let mut prepared_chunks = proposal.snapshot().chunks.clone();
-        let mut previous_chunks = previous;
-        prepared_chunks.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
-        previous_chunks.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
-        if checkpoint.content_hash() != Some(proposal.snapshot().document.content_hash.as_str()) {
-            return Err(RefreshError::Conflict);
-        }
-        if prepared_chunks != previous_chunks {
-            // The source revision and canonical body still agree with the
-            // checkpoint. An incomplete local subset is disposable cache loss,
-            // not a source conflict. Reclassify this operation as Refresh so the
-            // existing diff path embeds only missing rows. The exact planned
-            // local/source identities remain checked inside the owned commit.
-            if !previous_chunks.iter().all(|chunk| {
-                prepared_chunks
-                    .binary_search_by(|candidate| candidate.chunk_id.cmp(&chunk.chunk_id))
-                    .is_ok_and(|index| prepared_chunks[index] == *chunk)
-            }) {
-                return Err(RefreshError::Conflict);
-            }
-            let mut repair = expected;
-            repair.replan = true;
-            let page = PageId(repair.page.page_id.clone());
-            let operation = repair.page.operation_id.clone();
-            // Keep the full refresh future out of the unchanged fast path's
-            // stack frame, including callers that never need this fallback.
-            return Box::pin(self.apply_lifecycle_expected(
-                &page,
-                &operation,
-                provider,
-                lease,
-                clock,
-                Some(repair),
-                None,
-            ))
-            .await
-            .map(|_| ());
-        }
-        let projection = RelationProjection::new(
-            self.coordinator.binding(),
-            &expected.page.page_id,
-            false,
-            proposal.edges().to_vec(),
-        )?
-        .with_links(proposal.links().to_vec())?;
-        let operation = PageOperation::retryable_lifecycle(
-            &expected.page.operation_id,
-            &expected.page.lifecycle_digest,
-            PageAction::Unchanged,
-            checkpoint,
-        )
-        .map_err(RefreshError::from)?
-        .with_metadata_identity(
-            expected
-                .page
-                .metadata_identity
-                .clone()
-                .ok_or(RefreshError::Conflict)?,
-        )
-        .map_err(RefreshError::from)?
-        .with_relation_projection(projection)?;
-        let aliases = self
-            .alias_sources
-            .as_ref()
-            .map(|sources| {
-                AliasProjection::from_indexed(
-                    self.coordinator.binding(),
-                    &proposal.snapshot().document.metadata,
-                    sources,
-                )
-                .map(AliasProjection::with_owned_root_cleanup)
-            })
-            .transpose()?;
-        let operation = self.attach_aliases(operation, aliases)?;
-        let handler = self.clone();
-        let prepared = operation.clone();
-        let owned_lease = lease.clone();
-        let owned_clock = clock.clone();
-        self.coordinator
-            .submit_with_authority(operation, lease, clock, move |context| async move {
-                owned_revalidation(
-                    handler.guard.index_directory().to_path_buf(),
-                    async {
-                        handler.check_expected(&expected, &evidence).await?;
-                        context.revalidate().map_err(|_| FailureClass::Conflict)?;
-                        handler
-                            .coordinator
-                            .prepare_reconciliation_operation(
-                                &owned_lease,
-                                owned_clock(),
-                                &expected.run,
-                                &prepared,
-                                &evidence,
-                                expected.replan,
-                            )
-                            .map_err(|_| FailureClass::Conflict)?;
-                        handler
-                            .relations
-                            .revalidate(&proposal)
-                            .await
-                            .map_err(|_| FailureClass::Conflict)
-                    },
-                    owned_clock.clone(),
-                    owned_lease.expires_at,
-                )
-                .await
-            })
-            .await
-            .map_err(RefreshError::from)?;
-        Ok(())
-    }
-
-    /// Recover historical Applied work without reinterpreting it using new source.
-    /// Ownership, lease and source accessibility are still checked under the guard.
-    pub(crate) async fn recover_reconciliation(
-        &self,
-        provider: &dyn EmbeddingProvider,
-        run: String,
-        page: String,
-        lease: Lease,
-        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
-    ) -> Result<(), RefreshError> {
-        let operation = self
-            .coordinator
-            .reconciliation_plan(&run)
-            .map_err(|_| RefreshError::Conflict)?
-            .pages
-            .get(&page)
-            .ok_or(RefreshError::Conflict)?
-            .operation_id
-            .clone();
-        self.apply_lifecycle(
-            &PageId(page.clone()),
-            &operation,
-            provider,
-            lease.clone(),
-            clock.clone(),
-        )
-        .await?;
-        let evidence = self
-            .notion
-            .lifecycle(&PageId(page.clone()), &self.scope)
-            .await
-            .map_err(|error| {
-                if error.kind == BackendErrorKind::Unauthenticated {
-                    RefreshError::Unauthenticated
-                } else {
-                    RefreshError::Source
-                }
-            })?;
-        let proposal = if let LifecycleStatus::Allowed { roots } = &evidence.status {
-            let previous = self.guard.page_chunks(&page).await?;
-            Some(
-                self.relations
-                    .prepare_read(
-                        &PageId(page.clone()),
-                        InventoryParent::from_evidence(&evidence).ok_or(RefreshError::Source)?,
-                        &PageId(roots.first().ok_or(RefreshError::Conflict)?.clone()),
-                        &previous,
-                        self.chunk_config,
-                    )
-                    .await
-                    .map_err(|error| {
-                        if error.kind == BackendErrorKind::Unauthenticated {
-                            RefreshError::Unauthenticated
-                        } else {
-                            RefreshError::Source
-                        }
-                    })?,
-            )
-        } else {
-            None
-        };
-        let handler = self.clone();
-        let owned_lease = lease.clone();
-        let owned_clock = clock.clone();
-        self.coordinator
-            .maintain(lease, clock, move |context| async move {
-                owned_revalidation(
-                    handler.guard.index_directory().to_path_buf(),
-                    async {
-                        let _authority = if let Some(proposal) = &proposal {
-                            let authority = handler
-                                .relations
-                                .revalidate(proposal)
-                                .await
-                                .map_err(|_| FailureClass::Conflict)?;
-                            let aliases = handler
-                                .alias_sources
-                                .as_ref()
-                                .map(|sources| {
-                                    AliasProjection::from_indexed(
-                                        handler.coordinator.binding(),
-                                        &proposal.snapshot().document.metadata,
-                                        sources,
-                                    )
-                                    .map(AliasProjection::with_owned_root_cleanup)
-                                })
-                                .transpose()
-                                .map_err(|_| FailureClass::Index)?;
-                            if !handler
-                                .aliases_complete(&aliases)
-                                .map_err(|_| FailureClass::Index)?
-                            {
-                                return Err(FailureClass::Conflict);
-                            }
-                            let exact = RelationProjection::new(
-                                handler.coordinator.binding(),
-                                &page,
-                                false,
-                                proposal.edges().to_vec(),
-                            )
-                            .and_then(|projection| projection.with_links(proposal.links().to_vec()))
-                            .map_err(|_| FailureClass::Index)?;
-                            if !handler
-                                .coordinator
-                                .relation_projection_complete(&exact)
-                                .map_err(|_| FailureClass::Index)?
-                            {
-                                return Err(FailureClass::Conflict);
-                            }
-                            authority
-                        } else {
-                            handler
-                                .relations
-                                .revalidate_removal(&evidence)
-                                .await
-                                .map_err(|_| FailureClass::Conflict)?
-                        };
-                        context.revalidate().map_err(|_| FailureClass::Conflict)?;
-                        if !handler
-                            .current_aliases_complete(&page)
-                            .map_err(|_| FailureClass::Index)?
-                            || !handler
-                                .coordinator
-                                .current_body_links_complete(&page)
-                                .map_err(|_| FailureClass::Index)?
-                        {
-                            return Err(FailureClass::Index);
-                        }
-                        handler
-                            .coordinator
-                            .acknowledge_reconciliation_receipt(
-                                &owned_lease,
-                                owned_clock(),
-                                &run,
-                                &page,
-                            )
-                            .map_err(|_| FailureClass::Conflict)?;
-                        Ok(())
-                    },
-                    owned_clock.clone(),
-                    owned_lease.expires_at,
-                )
-                .await
-            })
-            .await
-            .map_err(RefreshError::from)
     }
 }
 

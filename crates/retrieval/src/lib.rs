@@ -58,9 +58,6 @@ pub mod planner;
 #[cfg(all(unix, feature = "local-lancedb"))]
 pub mod durable_plan;
 
-#[cfg(all(unix, feature = "local-lancedb"))]
-pub mod runner;
-
 /// Retained-byte budget shared by bounded source read-ahead.
 pub mod prefetch;
 

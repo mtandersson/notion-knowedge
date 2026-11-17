@@ -27,11 +27,11 @@ assert 'NK_OAUTH_WRITES' not in os.environ
 assert 'NK_WEBHOOK_WORKER' not in os.environ
 root = os.environ['NK_NOTION_SCOPE_ROOTS']
 mode = os.environ.get('SMOKE_FIXTURE_MODE', '')
-if sys.argv[1:] == ['--reconcile', 'apply', sys.argv[-1]]:
+if sys.argv[1:] == ['--reconcile', 'apply']:
     if mode == 'command-failure':
         print('secret-do-not-disclose upstream raw text', file=sys.stderr)
         sys.exit(3)
-    print(json.dumps(dict(operation='reconciliation', phase='Applying' if mode == 'incomplete' else 'Completed', errors=0, pending=0)))
+    print(json.dumps(dict(operation='reconciliation', status='finished', complete=mode != 'incomplete', errors=0, held=0)))
     sys.exit(0)
 if sys.argv[1:] == ['--index', 'ensure']:
     print(json.dumps(dict(operation='index', status='complete')))
