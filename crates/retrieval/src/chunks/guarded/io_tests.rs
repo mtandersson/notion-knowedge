@@ -2080,3 +2080,88 @@ async fn compaction_keeps_versions_an_open_reader_depends_on() {
     // The reader's version predates compaction and stays readable.
     assert_eq!(ranked_ids(&reader, "shared", vector).await, before);
 }
+
+fn peak_rss_kib() -> u64 {
+    fs::read_to_string("/proc/self/status")
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))
+        .and_then(|value| value.trim().trim_end_matches("kB").trim().parse().ok())
+        .unwrap()
+}
+
+/// Peak memory of the first maintenance pass over a production-sized table
+/// that was never compacted: one fragment per page, 1024-dimension vectors.
+/// Run with `--ignored --nocapture`; NK_STORAGE_BENCH_PAGES and
+/// NK_STORAGE_BENCH_CHUNKS size it (defaults 3000 pages x 15 chunks).
+#[tokio::test]
+#[ignore = "measurement; minutes of IO"]
+async fn storage_maintenance_peak_memory_on_a_production_sized_table() {
+    let env = |name: &str, default: usize| {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(default)
+    };
+    let (pages, chunks) = (
+        env("NK_STORAGE_BENCH_PAGES", 3000),
+        env("NK_STORAGE_BENCH_CHUNKS", 15),
+    );
+    let mut f = Fixture::new();
+    f.embedding =
+        EmbeddingMetadata::new("count".into(), "test-model".into(), "v1".into(), 1024).unwrap();
+    f.create().await;
+    let readable = f.readable().await;
+    let body = "lorem ipsum dolor sit amet consectetur ".repeat(20);
+    for page in 0..pages {
+        let rows: Vec<_> = (0..chunks)
+            .map(|chunk| {
+                let id = format!("p{page}");
+                let mut indexed = page_chunk(&id, &format!("{body} page {page} chunk {chunk}"));
+                indexed.chunk_id = format!("{id}-{chunk}");
+                let seed = (page * chunks + chunk) as f32;
+                let vector = (0..1024)
+                    .map(|i| ((seed + i as f32) * 0.618).sin())
+                    .collect();
+                crate::chunks::EmbeddedChunk::new(indexed, vector)
+            })
+            .collect();
+        let batch = super::rows_to_batch(&rows, &f.embedding).unwrap();
+        readable.table.add(batch).execute().await.unwrap();
+    }
+    let table = f.guarded();
+    table
+        .ensure_vector_index(
+            VectorIndexConfig {
+                num_partitions: Some(16),
+                ..Default::default()
+            },
+            f.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let (fragments, versions) = storage_shape(&f).await;
+    fs::write("/proc/self/clear_refs", "5").unwrap();
+    let baseline = peak_rss_kib();
+    let started = std::time::Instant::now();
+    table
+        .optimize_indexes(f.lease.clone(), clock())
+        .await
+        .unwrap();
+    let peak = peak_rss_kib();
+    let (fragments_after, versions_after) = storage_shape(&f).await;
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "rows": pages * chunks,
+            "fragments": [fragments, fragments_after],
+            "versions": [versions, versions_after],
+            "pass_ms": started.elapsed().as_millis() as u64,
+            "baseline_rss_kib": baseline,
+            "peak_rss_kib": peak,
+        })
+    );
+    assert!(fragments_after < super::STORAGE_COMPACT_SMALL_FRAGMENTS);
+    assert!(peak < 4 * 1024 * 1024, "peak RSS {peak} KiB");
+}
