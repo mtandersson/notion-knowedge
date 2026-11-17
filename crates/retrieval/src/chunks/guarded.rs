@@ -40,11 +40,16 @@ pub struct GuardedChunkTable {
 ///
 /// Each page commit writes at least one new fragment and one new version.
 /// Without maintenance both grow with the number of pages ever committed.
-/// With it, after a pass:
+/// With it, after a pass, approximately (Lance merges only neighbouring
+/// fragments that the same index segments cover, so an isolated small
+/// fragment can remain):
 ///
-/// - fragments: at most `ceil(rows / target_rows_per_fragment)` full
-///   fragments plus fewer than `compact_small_fragments` small ones;
-/// - versions: those created within `version_retention`, plus the current one.
+/// - fragments: about `ceil(rows / target_rows_per_fragment)` full fragments
+///   plus fewer than `compact_small_fragments` small ones;
+/// - index segments: one per pass since the last threshold step, so fewer
+///   than `compact_small_fragments` per index;
+/// - versions: those created within `version_retention` (a count set by the
+///   commit rate), plus the current one.
 ///
 /// Receipts and checkpoints live in SQLite and name no Lance version; a page
 /// commit compares the version it prepared against the current one under the
@@ -1064,8 +1069,10 @@ impl GuardedChunkTable {
                     .map_err(failure)?;
                 // Coalesce the fragments written since the last pass while no
                 // index covers them yet, so each pass adds one indexed fragment
-                // and one index delta rather than one per page.
-                compact(&current, &storage).await?;
+                // and one index delta rather than one per page. Deleted rows
+                // are left to the threshold step, so this rewrites no indexed
+                // fragment for deletions alone.
+                compact(&current, &storage, false).await?;
                 context.revalidate().map_err(fence_failure)?;
                 current.optimize_fts_index().await.map_err(failure)?;
                 let indices = current
@@ -1140,7 +1147,7 @@ async fn maintain_storage(
             .await
             .map_err(|_| FailureClass::Index)?;
         context.revalidate().map_err(fence_failure)?;
-        compact(current, storage).await?;
+        compact(current, storage, true).await?;
         context.revalidate().map_err(fence_failure)?;
     }
     let prune = current
@@ -1189,9 +1196,11 @@ async fn maintain_storage(
 async fn compact(
     current: &LanceChunkTable,
     storage: &StorageMaintenance,
+    materialize_deletions: bool,
 ) -> Result<(), FailureClass> {
     let options = lancedb::table::optimize::CompactionOptions {
         target_rows_per_fragment: storage.target_rows_per_fragment,
+        materialize_deletions,
         num_threads: Some(STORAGE_COMPACTION_THREADS),
         ..Default::default()
     };

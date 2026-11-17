@@ -1897,6 +1897,28 @@ fn small_storage_bounds(retention: std::time::Duration) -> super::StorageMainten
     }
 }
 
+/// Segment count of each FTS and vector index of the current table.
+async fn index_segments(f: &Fixture) -> Vec<u32> {
+    let current = super::open_current(&f.index, "chunks", &f.embedding, &None)
+        .await
+        .unwrap();
+    let mut counts = Vec::new();
+    for name in super::CHUNK_FTS_INDEXES
+        .iter()
+        .map(|(name, _)| *name)
+        .chain([super::CHUNK_VECTOR_INDEX_NAME])
+    {
+        let stats = current
+            .table
+            .index_stats(name)
+            .await
+            .unwrap()
+            .expect("index exists");
+        counts.push(stats.num_indices.unwrap_or(1));
+    }
+    counts
+}
+
 /// Fragment and version counts of the current table.
 async fn storage_shape(f: &Fixture) -> (usize, usize) {
     let current = super::open_current(&f.index, "chunks", &f.embedding, &None)
@@ -2004,6 +2026,12 @@ async fn storage_stays_bounded_and_search_unchanged_after_many_commits() {
         .optimize_indexes(f.lease.clone(), clock())
         .await
         .unwrap();
+    let segments_before = index_segments(&f).await;
+    // FTS optimization keeps one segment; the vector index adds one per pass.
+    assert!(
+        segments_before.last() > Some(&1),
+        "segments {segments_before:?}"
+    );
     let (fragments_before, versions_before) = storage_shape(&f).await;
     assert!(fragments_before >= 2, "the pass has fragments to compact");
     let vector = ["shared body 7".len() as f32, 1.0, 0.0];
@@ -2022,6 +2050,8 @@ async fn storage_stays_bounded_and_search_unchanged_after_many_commits() {
         .unwrap();
 
     let (fragments, versions) = storage_shape(&f).await;
+    let segments = index_segments(&f).await;
+    assert!(segments.iter().all(|s| *s == 1), "segments {segments:?}");
     assert!(
         fragments < fragments_before,
         "fragments {fragments_before} -> {fragments}"
@@ -2081,6 +2111,46 @@ async fn compaction_keeps_versions_an_open_reader_depends_on() {
     assert_eq!(ranked_ids(&reader, "shared", vector).await, before);
 }
 
+/// Commits eight pages, records the version, then commits eight more and runs
+/// a pass under `retention`; returns that version and its row count.
+async fn version_before_a_pass(f: &Fixture, retention: std::time::Duration) -> (u64, usize) {
+    let table = seeded_with_vector_index(f)
+        .await
+        .with_storage_maintenance(small_storage_bounds(retention));
+    for page in 0..8 {
+        commit_new_page(f, &table, &format!("page-{page}"), &format!("body {page}")).await;
+    }
+    let reader = f.readable().await;
+    let version = reader.table.version().await.unwrap();
+    let rows = reader.count_rows().await.unwrap();
+    for page in 8..16 {
+        commit_new_page(f, &table, &format!("page-{page}"), &format!("body {page}")).await;
+    }
+    table
+        .optimize_indexes(f.lease.clone(), clock())
+        .await
+        .unwrap();
+    (version, rows)
+}
+
+#[tokio::test]
+async fn a_version_inside_the_retention_window_reopens_from_disk_after_a_pass() {
+    let f = Fixture::new();
+    let (version, rows) = version_before_a_pass(&f, super::STORAGE_VERSION_RETENTION).await;
+    // A fresh connection has no cached files: it reads the version from disk.
+    let fresh = f.readable().await;
+    fresh.table.checkout(version).await.unwrap();
+    assert_eq!(fresh.table.count_rows(None).await.unwrap(), rows);
+}
+
+#[tokio::test]
+async fn a_version_outside_the_retention_window_is_pruned_by_a_pass() {
+    let f = Fixture::new();
+    let (version, _) = version_before_a_pass(&f, std::time::Duration::ZERO).await;
+    let fresh = f.readable().await;
+    assert!(fresh.table.checkout(version).await.is_err());
+}
+
 fn peak_rss_kib() -> u64 {
     fs::read_to_string("/proc/self/status")
         .unwrap()
@@ -2112,6 +2182,12 @@ async fn storage_maintenance_peak_memory_on_a_production_sized_table() {
         EmbeddingMetadata::new("count".into(), "test-model".into(), "v1".into(), 1024).unwrap();
     f.create().await;
     let readable = f.readable().await;
+    let setup = f
+        .guarded()
+        .with_storage_maintenance(super::StorageMaintenance {
+            compact_small_fragments: usize::MAX,
+            ..Default::default()
+        });
     let body = "lorem ipsum dolor sit amet consectetur ".repeat(20);
     for page in 0..pages {
         let rows: Vec<_> = (0..chunks)
@@ -2128,19 +2204,35 @@ async fn storage_maintenance_peak_memory_on_a_production_sized_table() {
             .collect();
         let batch = super::rows_to_batch(&rows, &f.embedding).unwrap();
         readable.table.add(batch).execute().await.unwrap();
+        // Index in 60 sync-sized steps without the threshold step, so the
+        // measured pass merges over 32 vector segments per index, as production does.
+        if (page + 1) % (pages / 60).max(1) == 0 {
+            if page + 1 == (pages / 60).max(1) {
+                setup
+                    .ensure_vector_index(
+                        VectorIndexConfig {
+                            num_partitions: Some(16),
+                            ..Default::default()
+                        },
+                        f.lease.clone(),
+                        clock(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            setup
+                .optimize_indexes(f.lease.clone(), clock())
+                .await
+                .unwrap();
+        }
     }
     let table = f.guarded();
-    table
-        .ensure_vector_index(
-            VectorIndexConfig {
-                num_partitions: Some(16),
-                ..Default::default()
-            },
-            f.lease.clone(),
-            clock(),
-        )
-        .await
-        .unwrap();
+    // Leave a tail of unindexed one-page fragments, as a sync does.
+    let segments_before = index_segments(&f).await;
+    assert!(
+        segments_before.last() >= Some(&32),
+        "segments {segments_before:?}"
+    );
     let (fragments, versions) = storage_shape(&f).await;
     fs::write("/proc/self/clear_refs", "5").unwrap();
     let baseline = peak_rss_kib();
@@ -2156,6 +2248,7 @@ async fn storage_maintenance_peak_memory_on_a_production_sized_table() {
         serde_json::json!({
             "rows": pages * chunks,
             "fragments": [fragments, fragments_after],
+            "segments": [segments_before, index_segments(&f).await],
             "versions": [versions, versions_after],
             "pass_ms": started.elapsed().as_millis() as u64,
             "baseline_rss_kib": baseline,
