@@ -3731,6 +3731,35 @@ async fn a_relation_past_the_inline_limit_is_read_in_full_without_failing_the_wa
 }
 
 #[tokio::test]
+async fn text_with_more_than_25_mentions_is_read_in_full_without_failing_the_walk() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    let targets: Vec<String> = (0..30)
+        .map(|n| format!("bbbbbbbb-0000-0000-0000-{n:012}"))
+        .collect();
+    http.change(|m| m.mention_targets = targets.clone());
+    fs::remove_dir_all(&f.settings.index).unwrap();
+    let runtime = IndexRuntime::recover(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(out_of_sync(&runtime).is_empty());
+    let state = runtime.coordinator.state();
+    assert_eq!(state.inventory_counts().unwrap().indexed, 3);
+    let page = http.client().fetch_page(PAGE).await.unwrap();
+    let expected: String = targets.iter().map(|id| format!("@{id} ")).collect();
+    assert_eq!(
+        page.properties["mentions-stable"],
+        notion_knowledge_core::indexed::PropertyValue::Text(expected)
+    );
+}
+
+#[tokio::test]
 async fn an_unreadable_long_relation_fails_only_its_page() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
