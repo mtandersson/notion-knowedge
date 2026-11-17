@@ -3668,6 +3668,98 @@ async fn truncated_walk_read_fails_only_that_page_without_a_second_read() {
 }
 
 #[tokio::test]
+async fn a_relation_past_the_inline_limit_is_read_in_full_without_failing_the_walk() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    let targets: Vec<String> = (0..30)
+        .map(|n| format!("aaaaaaaa-0000-0000-0000-{n:012}"))
+        .collect();
+    http.change(|m| {
+        m.relation_name = Some("Related".into());
+        m.relation_targets = targets.clone();
+    });
+    fs::remove_dir_all(&f.settings.index).unwrap();
+    let runtime = IndexRuntime::recover(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(out_of_sync(&runtime).is_empty());
+    let state = runtime.coordinator.state();
+    assert_eq!(state.inventory_counts().unwrap().indexed, 3);
+    assert!(!state.cache_rebuild_pending().unwrap());
+    let mut related: Vec<String> =
+        notion_knowledge_core::graph::GraphEdgeStore::edges_from(&**state, PAGE)
+            .unwrap()
+            .iter()
+            .filter(|edge| edge.relation_type().starts_with("relation:"))
+            .map(|edge| match edge.target() {
+                notion_knowledge_core::graph::GraphTarget::Page { page_id } => page_id.clone(),
+                notion_knowledge_core::graph::GraphTarget::Unresolved { reference } => {
+                    reference.clone()
+                }
+                other => panic!("{other:?}"),
+            })
+            .collect();
+    related.sort();
+    assert_eq!(related, targets);
+}
+
+#[tokio::test]
+async fn an_unreadable_long_relation_fails_only_its_page() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    http.change(|m| {
+        m.relation_name = Some("Related".into());
+        m.relation_targets = (0..30)
+            .map(|n| format!("aaaaaaaa-0000-0000-0000-{n:012}"))
+            .collect();
+        m.unreadable_relation_items = true;
+    });
+    fs::remove_dir_all(&f.settings.index).unwrap();
+    let runtime = IndexRuntime::recover(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        out_of_sync(&runtime),
+        [(
+            PAGE.to_owned(),
+            notion_knowledge_core::inventory::InventoryOutcome::Failed(
+                notion_knowledge_core::reconciliation::FailureClass::Source
+            )
+        )]
+    );
+    assert_eq!(
+        runtime
+            .coordinator
+            .state()
+            .inventory_counts()
+            .unwrap()
+            .indexed,
+        2
+    );
+    assert!(
+        !runtime
+            .chunks()
+            .page_chunks(OTHER)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(runtime.chunks().page_chunks(PAGE).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn streaming_progress_reports_actual_commits_and_failed_pages() {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(15),

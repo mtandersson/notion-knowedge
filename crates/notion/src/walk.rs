@@ -7,7 +7,7 @@ use crate::{
     NotionClient,
     content::MarkdownBody,
     links::child_tags,
-    pages::{PAGE_VERSION, inactive, metadata, page_id},
+    pages::{PAGE_VERSION, drop_truncated, inactive, metadata, page_id},
     search::SearchMetadata,
 };
 use futures_util::{StreamExt, stream::FuturesUnordered};
@@ -305,6 +305,33 @@ impl NotionClient {
                 }
             }
         };
+        let mut value = value;
+        // A cut property that cannot be read in full fails only this page:
+        // it stays in the walk without content, like a truncated body, and
+        // its children are still reached. Transient failures fail the walk.
+        let mut partial = false;
+        if !value.is_null() {
+            match self
+                .complete_properties(&page_ref, &mut value, &mut visit.calls)
+                .await
+            {
+                Ok(()) => {}
+                Err(e)
+                    if matches!(
+                        e.kind,
+                        BackendErrorKind::UnsupportedContent
+                            | BackendErrorKind::InvalidInput
+                            | BackendErrorKind::Internal
+                            | BackendErrorKind::NotFound
+                            | BackendErrorKind::PermissionDenied
+                    ) =>
+                {
+                    drop_truncated(&mut value);
+                    partial = true;
+                }
+                Err(e) => return Err(e),
+            }
+        }
         let page = match listed {
             Some(page) => page,
             None => metadata(&value, &page_ref)?,
@@ -335,7 +362,7 @@ impl NotionClient {
             }
             Err(e) => return Err(e),
         };
-        let complete = !body.truncated && body.unknown_block_ids.is_empty();
+        let complete = !partial && !body.truncated && body.unknown_block_ids.is_empty();
         let mut children = child_references(&body.markdown);
         self.follow_unknown_blocks(&body, &mut children, &mut visit)
             .await?;
