@@ -921,23 +921,6 @@ impl IndexRuntime {
                 run
             }
         };
-        // Fold the tail of pages committed since the last cadence pass into
-        // the search indexes. Committed rows stay searchable if this fails; the
-        // next commit or sync repeats it.
-        let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| now_ms() / 1000);
-        let chunks = self.handler.chunks();
-        if chunks.has_pending_optimization()
-            && let Err(error) = Box::pin(chunks.optimize_indexes(lease.clone(), clock)).await
-        {
-            eprintln!(
-                "{}",
-                serde_json::json!({
-                    "operation": "index_optimize",
-                    "outcome": "deferred",
-                    "error": format!("{error:?}"),
-                })
-            );
-        }
         let mut walk = (totals.complete, totals.held);
         if !full {
             totals.drift.removed = totals.removed;
@@ -960,6 +943,23 @@ impl IndexRuntime {
                 finished_at: now_ms() / 1000,
             })
             .map_err(|_| "cache inventory state unavailable")?;
+        // Fold the tail of pages committed since the last cadence pass into
+        // the search indexes. Committed rows stay searchable if this fails; the
+        // next commit or sync repeats it.
+        let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| now_ms() / 1000);
+        let chunks = self.handler.chunks();
+        if chunks.has_pending_optimization()
+            && let Err(error) = Box::pin(chunks.optimize_indexes(lease.clone(), clock)).await
+        {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "operation": "index_optimize",
+                    "outcome": "deferred",
+                    "error": format!("{error:?}"),
+                })
+            );
+        }
         if truncated {
             // A cut-short listing may have missed older changes that no later
             // search returns (the high-water mark has moved past them). Recover
