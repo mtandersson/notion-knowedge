@@ -1608,9 +1608,18 @@ async fn actual_scheduled_http_timeout_exhaustion_is_inspectable_and_explicit_ab
     use notion_knowledge_retrieval::schedule::{ScheduleEventKind, ScheduleStatus};
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
+    // Stall the source so the run deadline, not run speed, ends the attempt:
+    // without search, the walk must read PAGE's metadata itself.
+    http.change(|m| m.search_unavailable = true);
     http.pause.armed.store(true, Ordering::SeqCst);
     let (worker, stop, server) =
-        scheduled_server(&f, &http, std::time::Duration::from_millis(150)).await;
+        scheduled_server(&f, &http, std::time::Duration::from_secs(5)).await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        http.pause.started.notified(),
+    )
+    .await
+    .unwrap();
     let exhausted = await_schedule(&worker, |s| s.status == ScheduleStatus::Exhausted).await;
     assert_eq!(exhausted.attempts, 1);
     let old_run = exhausted.active_run.clone().unwrap();
@@ -1632,6 +1641,7 @@ async fn actual_scheduled_http_timeout_exhaustion_is_inspectable_and_explicit_ab
     assert_eq!(worker.coordinator.schedule("periodic").unwrap(), exhausted);
     stop.cancel();
     server.await.unwrap().unwrap();
+    http.change(|m| m.search_unavailable = false);
     http.pause.proceed.notify_one();
     assert_eq!(
         f.command(&http, &["--reconcile", "schedule", "abandon", "0"])
@@ -3262,7 +3272,9 @@ async fn streaming_initial_sync_separates_discovery_and_page_budgets() {
     let http = start_notion().await;
     let mut f = Fixture::new(&http).await;
     notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Info);
-    f.settings.timeout_seconds = 1;
+    // The page budget must exceed one real page commit even on a loaded
+    // runner; only the discovery wait below is meant to outlast it.
+    f.settings.timeout_seconds = 5;
     f.settings.inventory_timeout_seconds = 7200;
     http.discovery_pause.armed.store(true, Ordering::SeqCst);
     let source_and_page = async {
@@ -3275,16 +3287,16 @@ async fn streaming_initial_sync_separates_discovery_and_page_budgets() {
         await_cached_page(&f.state, ROOT).await;
         // Discovery may wait longer than a page budget after an earlier page
         // has already committed. A subsequent embedding keeps its own bound.
-        tokio::time::sleep(Duration::from_millis(1100)).await;
+        tokio::time::sleep(Duration::from_millis(5100)).await;
         f.provider
             .retain_when_cancelled
             .store(true, Ordering::SeqCst);
         f.provider.pause.store(true, Ordering::SeqCst);
         http.discovery_pause.proceed.notify_one();
-        tokio::time::timeout(Duration::from_secs(10), f.provider.entered.notified())
+        tokio::time::timeout(Duration::from_secs(30), f.provider.entered.notified())
             .await
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(10), f.provider.idle_entered.notified())
+        tokio::time::timeout(Duration::from_secs(30), f.provider.idle_entered.notified())
             .await
             .unwrap();
         let calls = f.provider.count.load(Ordering::SeqCst);
@@ -3303,7 +3315,7 @@ async fn streaming_initial_sync_separates_discovery_and_page_budgets() {
         http.client(),
         f.provider.clone(),
     );
-    let (result, _) = tokio::time::timeout(Duration::from_secs(15), async {
+    let (result, _) = tokio::time::timeout(Duration::from_secs(90), async {
         tokio::join!(recovery, source_and_page)
     })
     .await
@@ -4065,7 +4077,7 @@ async fn target_projection_mode_changes_reconcile_without_reembedding_canonical_
 #[tokio::test]
 async fn page_deadline_logs_expose_only_fixed_reason_and_aggregate_counts() {
     let output = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(180),
         tokio::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "reconciliation_command::streaming_initial_sync_separates_discovery_and_page_budgets",
@@ -4077,7 +4089,12 @@ async fn page_deadline_logs_expose_only_fixed_reason_and_aggregate_counts() {
     .await
     .unwrap()
     .unwrap();
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let events: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stderr)
         .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
