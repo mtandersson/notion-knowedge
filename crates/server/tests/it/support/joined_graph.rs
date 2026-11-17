@@ -250,22 +250,25 @@ async fn reads_cannot_start_without_the_shared_sync_state_file() {
     let runtime = fixture().await;
     let mut config = config(&runtime, false);
     config.webhook_state_file = None;
-    assert!(
+    const REFUSED: &str = "read authorization needs the shared sync state file";
+    assert_eq!(
         installed_retrieval(&runtime, &config, Transport::Stdio)
             .await
-            .is_err()
+            .err(),
+        Some(REFUSED)
     );
     // The scope-only composition (no retrieval index) refuses it too, rather
     // than serving reads that deny everything.
     config.retrieval = None;
     config.graph_index = None;
-    assert!(
+    assert_eq!(
         notion_knowledge_server::root_scope::attach_root_scope(
             notion_knowledge_mcp::KnowledgeServer::default(),
             &config,
             Transport::Stdio
         )
-        .is_err()
+        .err(),
+        Some(REFUSED)
     );
 }
 

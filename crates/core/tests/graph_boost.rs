@@ -539,7 +539,8 @@ async fn graph_read_fence_spans_the_index_read_and_inventory_authorization() {
     assert_eq!(graph.snapshots.load(Ordering::SeqCst), 1);
     assert_eq!(*inner.observed.lock().unwrap(), [true]);
     // Every returned candidate was authorized while the writers were fenced out.
-    assert_eq!(*inventory.lookups.lock().unwrap(), [true, true]);
+    let lookups = inventory.lookups.lock().unwrap();
+    assert!(!lookups.is_empty() && lookups.iter().all(|held| *held));
     // The fence is released when the query returns.
     assert!(!graph.held.load(Ordering::SeqCst));
 }

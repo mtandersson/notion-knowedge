@@ -474,13 +474,19 @@ async fn live_read_authority_denies_when_ancestry_is_outside_unreadable_or_chang
     foreign.ancestry.truncate(1);
     let backend = Arc::new(FakeLifecycle::new(foreign));
     let authority = ReadAuthority::Live(RootScopeGate::new(backend, current.clone()).unwrap());
-    assert!(authority.authorize(&PageId(PAGE.into())).await.is_err());
+    assert_eq!(
+        authority.authorize(&PageId(PAGE.into())).await.err(),
+        Some(ScopeError::Denied)
+    );
 
     // A page the caller's grant cannot read.
     let backend = Arc::new(FakeLifecycle::new(valid_evidence(&current)));
     *backend.evidence.lock().unwrap() = None;
     let authority = ReadAuthority::Live(RootScopeGate::new(backend, current.clone()).unwrap());
-    assert!(authority.authorize(&PageId(PAGE.into())).await.is_err());
+    assert_eq!(
+        authority.authorize(&PageId(PAGE.into())).await.err(),
+        Some(ScopeError::Unverifiable)
+    );
 
     // Ancestry that moves between the fetch and the revalidation.
     let backend = Arc::new(FakeLifecycle::new(valid_evidence(&current)));

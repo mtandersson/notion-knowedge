@@ -7,16 +7,13 @@ use notion_knowledge_retrieval::sync_state::SqliteSyncStateStore;
 use std::{path::PathBuf, sync::Arc};
 
 /// Opens the shared state file read-only for each lookup, so a page placed
-/// or removed by another process's walk is seen at once. No state file, or
-/// one not yet created, authorizes nothing.
-pub(crate) struct StateInventory(Option<PathBuf>);
+/// or removed by another process's walk is seen at once. A state file not yet
+/// created authorizes nothing.
+pub(crate) struct StateInventory(PathBuf);
 
 impl Membership for StateInventory {
     fn parent_chain(&self, page: &str) -> Result<Option<Vec<InventoryEntry>>, ScopeError> {
-        let Some(path) = &self.0 else {
-            return Ok(None);
-        };
-        SqliteSyncStateStore::open_read_only(path)
+        SqliteSyncStateStore::open_read_only(&self.0)
             .and_then(|store| store.inventory_lineage(page))
             .map_err(|_| ScopeError::Unverifiable)
     }
@@ -31,7 +28,7 @@ pub(crate) fn from_config(
         .webhook_state_file
         .clone()
         .ok_or("read authorization needs the shared sync state file")?;
-    Ok(Arc::new(StateInventory(Some(path))))
+    Ok(Arc::new(StateInventory(path)))
 }
 
 #[cfg(test)]
@@ -54,7 +51,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.sqlite");
         let writer = SqliteSyncStateStore::open(&path).unwrap();
-        let reader = StateInventory(Some(path));
+        let reader = StateInventory(path);
         assert_eq!(reader.parent_chain("page").unwrap(), None);
 
         writer
@@ -78,9 +75,8 @@ mod tests {
             .unwrap();
         assert_eq!(reader.parent_chain("page").unwrap(), None);
 
-        assert_eq!(StateInventory(None).parent_chain("page").unwrap(), None);
         assert_eq!(
-            StateInventory(Some(dir.path().join("absent.sqlite"))).parent_chain("page"),
+            StateInventory(dir.path().join("absent.sqlite")).parent_chain("page"),
             Err(ScopeError::Unverifiable)
         );
     }
