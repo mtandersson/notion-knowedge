@@ -119,6 +119,21 @@ impl PrefetchedPage {
     pub fn operation(&self) -> &str {
         &self.operation
     }
+    /// Relation and link targets the inventory could not place when this page
+    /// was prepared. A later walk step may place them.
+    pub fn unresolved_targets(&self) -> Vec<String> {
+        self.proposal
+            .targets()
+            .iter()
+            .filter(|(_, outcome)| {
+                matches!(
+                    outcome,
+                    Err(notion_knowledge_core::root_scope::ScopeError::Unverifiable)
+                )
+            })
+            .map(|(target, _)| target.clone())
+            .collect()
+    }
     /// Conservative estimate of the heap bytes this prepared page retains.
     pub fn retained_bytes(&self) -> usize {
         self.previous
@@ -658,10 +673,22 @@ impl AuthoritativePageRefresh {
         root: &PageId,
         operation_id: &str,
     ) -> Result<PrefetchedPage, RefreshError> {
+        let parent = InventoryParent::from_evidence(evidence).ok_or(RefreshError::Source)?;
+        self.prepare_source_with(page, parent, root, operation_id)
+            .await
+    }
+
+    /// [`Self::prepare_source`] for a caller that already holds the page's parent.
+    async fn prepare_source_with(
+        &self,
+        page: &PageId,
+        parent: InventoryParent,
+        root: &PageId,
+        operation_id: &str,
+    ) -> Result<PrefetchedPage, RefreshError> {
         if !self.scope.roots.contains(root) || operation_id.is_empty() {
             return Err(RefreshError::InvalidConfiguration);
         }
-        let parent = InventoryParent::from_evidence(evidence).ok_or(RefreshError::Source)?;
         self.coordinator
             .validate_page_receipt_authority(operation_id, &page.0)?;
         // Trusted local indexed state, NOT a physical scope decision.
@@ -678,6 +705,46 @@ impl AuthoritativePageRefresh {
             previous,
             proposal,
         })
+    }
+
+    /// Whether the inventory now places any of these targets in scope.
+    pub async fn any_resolvable(&self, targets: &[String]) -> Result<bool, RefreshError> {
+        self.relations
+            .any_resolvable(targets)
+            .await
+            .map_err(|e| source_failure(e.kind))
+    }
+
+    /// Resolve a page's relation and link targets after the inventory that
+    /// places them was recorded. One read of the page, then the normal commit:
+    /// unchanged chunks are neither embedded nor rewritten, only the page's
+    /// relation projection changes.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn resolve_relations(
+        &self,
+        page: &PageId,
+        parent: InventoryParent,
+        root: &PageId,
+        operation_id: &str,
+        provider: &dyn EmbeddingProvider,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Result<RefreshResult, RefreshError> {
+        let PrefetchedPage {
+            previous, proposal, ..
+        } = Box::pin(self.prepare_source_with(page, parent, root, operation_id)).await?;
+        Box::pin(self.embed_and_commit(
+            page,
+            operation_id,
+            previous,
+            proposal,
+            provider,
+            lease,
+            clock,
+            false,
+            None,
+        ))
+        .await
     }
 
     /// Embed and durably commit a page prepared by [`Self::prepare_walked`].

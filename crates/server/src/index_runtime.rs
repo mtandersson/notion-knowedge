@@ -22,6 +22,11 @@ use std::{path::Path, sync::Arc};
 pub(crate) const PREFETCH_WORKERS: usize = 2;
 /// Completed preparations queued for the consumer beyond those in flight.
 const PREFETCH_QUEUE: usize = 1;
+/// Most pages whose relation targets one walk resolves after recording its
+/// inventory. Others resolve at the next walk.
+const RELATION_PASS_LIMIT: usize = 500;
+/// Longest one walk spends on that pass before leaving the rest to the next.
+const RELATION_PASS_BUDGET: std::time::Duration = std::time::Duration::from_secs(300);
 /// Shared retained-byte budget (KiB) for in-flight, queued and committing pages.
 pub(crate) const PREFETCH_BUDGET_KIB: usize = 64 * 1024;
 /// Worst-case reservation (KiB) per preparation: the 8 MiB streamed Markdown
@@ -688,6 +693,8 @@ impl IndexRuntime {
             let mut totals = SyncTotals::default();
             let mut processed = 0;
             let mut outcomes = Vec::new();
+            // Committed pages whose targets the inventory could not place yet.
+            let mut unresolved: Vec<(String, Vec<String>)> = Vec::new();
             let state = self.coordinator.state();
             let ttl = settings.timeout_seconds as i64 + 30;
             loop {
@@ -736,6 +743,7 @@ impl IndexRuntime {
                 });
                 let deadline = std::time::Duration::from_secs(settings.timeout_seconds);
                 let embedding = SyncEmbedding(self.provider.as_ref());
+                let pending_targets = std::sync::Mutex::new(Vec::new());
                 let result = match work {
                     PageWork::Failed(error) => Ok(Err(error)),
                     PageWork::TimedOut => Err(()),
@@ -750,6 +758,8 @@ impl IndexRuntime {
                                 ),
                                 PageWork::Failed(_) | PageWork::TimedOut => unreachable!(),
                             };
+                            *pending_targets.lock().expect("targets") =
+                                prefetched.unresolved_targets();
                             let result = Box::pin(self.handler.refresh_prefetched(
                                 prefetched,
                                 &embedding,
@@ -778,6 +788,11 @@ impl IndexRuntime {
                 match result {
                     Ok(Ok(result)) => {
                         outcomes.push((page.0.clone(), indexed()));
+                        let targets =
+                            std::mem::take(&mut *pending_targets.lock().expect("targets"));
+                        if !targets.is_empty() {
+                            unresolved.push((page.0.clone(), targets));
+                        }
                         if result.outcome == CommitOutcome::AlreadyApplied {
                             totals.unchanged += 1;
                         } else {
@@ -867,9 +882,9 @@ impl IndexRuntime {
                 totals.failed as usize,
                 true,
             );
-            Ok::<_, SyncError>((totals, outcomes))
+            Ok::<_, SyncError>((totals, outcomes, unresolved))
         };
-        let (discovered, (), (mut totals, outcomes)) =
+        let (discovered, (), (mut totals, outcomes, unresolved)) =
             tokio::try_join!(Box::pin(walk), Box::pin(produce), Box::pin(consume))?;
         let mut truncated = false;
         let run_id = match discovered {
@@ -892,6 +907,7 @@ impl IndexRuntime {
                         Box::pin(self.remove_unreached(settings, lease, &walk, &held, &base))
                             .await?;
                 }
+                Box::pin(self.resolve_relations(settings, lease, &walk, unresolved, &base)).await?;
                 walk.run_id
             }
             Discovered::Hits(hits) => {
@@ -1201,6 +1217,102 @@ impl IndexRuntime {
             .collect();
         self.remove_pages(settings, lease, &walk.run_id, &unreached, base)
             .await
+    }
+
+    /// After the walk recorded its inventory, resolve the relation and link
+    /// targets that inventory now places in scope. A page committed during the
+    /// walk could not see targets the walk reached later, so on a first walk
+    /// they stayed unresolved until the next one. Each affected page is read
+    /// once and committed again: unchanged chunks are not embedded. The pass
+    /// is bounded by page count and time; a page left over, or one that fails,
+    /// resolves at the next walk. A page failure never fails the walk.
+    async fn resolve_relations(
+        &self,
+        settings: &PageDeadline,
+        lease: &mut notion_knowledge_core::reconciliation::Lease,
+        walk: &notion_knowledge_notion::walk::TreeWalk,
+        unresolved: Vec<(String, Vec<String>)>,
+        base: &Clock,
+    ) -> Result<(), SyncError> {
+        let state = self.coordinator.state();
+        let ttl = settings.timeout_seconds as i64 + 30;
+        let entries: std::collections::BTreeMap<_, _> = walk
+            .entries
+            .iter()
+            .map(|entry| (entry.page_id.as_str(), entry))
+            .collect();
+        let mut resolved = 0;
+        let started = std::time::Instant::now();
+        for (page, targets) in unresolved {
+            let Some(entry) = entries.get(page.as_str()).filter(|entry| !entry.in_trash) else {
+                continue;
+            };
+            if !self
+                .handler
+                .any_resolvable(&targets)
+                .await
+                .is_ok_and(|resolvable| resolvable)
+            {
+                continue;
+            }
+            if resolved == RELATION_PASS_LIMIT {
+                break;
+            }
+            resolved += 1;
+            // A lost claim ends the pass; the walk's own record then fails its fence.
+            if Self::fence(lease, base).is_err() || started.elapsed() > RELATION_PASS_BUDGET {
+                break;
+            }
+            let Ok(renewed) = state.renew_lease(lease, now_ms() / 1000, ttl) else {
+                break;
+            };
+            *lease = renewed;
+            let operation = format!(
+                "relations-{}",
+                notion_knowledge_core::logging::CorrelationId::new().as_str()
+            );
+            let expired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let _attempt = Attempt(expired.clone());
+            let flag = expired.clone();
+            let claim = base.clone();
+            let clock: Clock = Arc::new(move || {
+                if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    i64::MAX
+                } else {
+                    claim()
+                }
+            });
+            let embedding = SyncEmbedding(self.provider.as_ref());
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(settings.timeout_seconds),
+                Box::pin(self.handler.resolve_relations(
+                    &notion_knowledge_core::backend::PageId(page.clone()),
+                    entry.parent.clone(),
+                    &notion_knowledge_core::backend::PageId(entry.root_id.clone()),
+                    &operation,
+                    &embedding,
+                    lease.clone(),
+                    clock,
+                )),
+            )
+            .await;
+            expired.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.coordinator
+                .drain_owned()
+                .await
+                .map_err(|_| "cache sync drain failed")?;
+            if !matches!(result, Ok(Ok(_))) {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "operation": "resolve_relations",
+                        "outcome": "deferred",
+                        "page": page,
+                    })
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Remove each indexed page of `pages`; pages not indexed are ignored.
