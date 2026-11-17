@@ -162,6 +162,34 @@ impl Fixture {
             .create_empty(self.lease.clone(), clock())
             .await
             .unwrap();
+        // What a walk of the root tree records; relation and link targets
+        // are placed through this inventory.
+        self.place(ROOT, None, true);
+        self.place(PAGE, Some(ROOT), true);
+        self.place(OTHER, Some(ROOT), true);
+    }
+    /// Record `page` in the inventory as a walk would: under `parent`, or as
+    /// a root, and unreadable (no revision) unless `readable`.
+    fn place(&self, page: &str, parent: Option<&str>, readable: bool) {
+        use notion_knowledge_core::inventory::{InventoryEntry, InventoryParent};
+        self.coordinator
+            .state()
+            .upsert_inventory_entry(
+                "fixture-walk",
+                &InventoryEntry {
+                    page_id: page.into(),
+                    parent: parent
+                        .map_or(InventoryParent::Root, |p| InventoryParent::Page(p.into())),
+                    root_id: ROOT.into(),
+                    last_edited_time: if readable {
+                        "2026-10-10T10:10:00Z".into()
+                    } else {
+                        String::new()
+                    },
+                    in_trash: false,
+                },
+            )
+            .unwrap();
     }
     async fn table(&self) -> LanceChunkTable {
         LanceChunkTable::open(&self.index, "chunks", self.embed.clone())
@@ -3558,6 +3586,7 @@ async fn installed_relations_replace_only_their_family_and_repair_both_noop_path
         Some("Renamed ingredients")
     );
     source.change(|m| m.inaccessible_other = true);
+    index.place(OTHER, Some(ROOT), false);
     handler
         .refresh_page(
             &page,
@@ -3581,6 +3610,7 @@ async fn installed_relations_replace_only_their_family_and_repair_both_noop_path
     );
     assert!(index.guarded().page_chunks(OTHER).await.unwrap().is_empty());
     source.change(|m| m.inaccessible_other = false);
+    index.place(OTHER, Some(ROOT), true);
     source.change(|m| m.relation_name = None);
     handler
         .refresh_page(
@@ -4010,6 +4040,7 @@ async fn reconciliation_converges_target_only_changes_and_rebuilds_derived_relat
         m.relation_targets = vec![FOREIGN.into(), FOREIGN.into()];
         m.foreign_parent = ROOT.into();
     });
+    index.place(FOREIGN, Some(ROOT), true);
     let provider = CountingProvider::new(index.embed.clone());
     let service = runner(&index, &source);
     let link = GraphEdge::new(
@@ -4074,6 +4105,7 @@ async fn reconciliation_converges_target_only_changes_and_rebuilds_derived_relat
             m.foreign_parent = parent.into();
             m.inaccessible_foreign = inaccessible;
         });
+        index.place(FOREIGN, Some(parent), !inaccessible);
         let bodies = source.body_reads.load(Ordering::SeqCst);
         let plan = service.dry_run().await.unwrap();
         assert_eq!(
@@ -4545,6 +4577,7 @@ async fn target_only_excluded_and_broken_ancestry_converge_without_source_change
         m.relation_targets = vec![FOREIGN.into()];
         m.foreign_parent = ROOT.into();
     });
+    index.place(FOREIGN, Some(ROOT), true);
     let provider = CountingProvider::new(index.embed.clone());
     let service = runner(&index, &source);
     let first = service
@@ -4565,6 +4598,7 @@ async fn target_only_excluded_and_broken_ancestry_converge_without_source_change
         ("reentry-broken", ROOT, true),
     ] {
         source.change(|m| m.foreign_parent = parent.into());
+        index.place(FOREIGN, Some(parent), true);
         let plan = service.dry_run().await.unwrap();
         assert_eq!(
             plan.pages
@@ -4752,6 +4786,7 @@ async fn owned_body_links_follow_authorized_snapshot_cleanup_and_durable_repair(
     assert_eq!(reopened.state().edges_from(PAGE).unwrap(), edges);
     // Target policy denial changes the link effect without indexing target content.
     source.change(|m| m.inaccessible_other = true);
+    index.place(OTHER, Some(ROOT), false);
     restarted
         .refresh_page(
             &page,
@@ -4848,6 +4883,7 @@ async fn reconciliation_commits_body_links_and_never_acknowledges_missing_link_r
         m.relation_name = Some("Related".into());
         m.relation_targets = vec![OTHER.into()];
     });
+    index.place(FOREIGN, Some(ROOT), true);
     let provider = CountingProvider::new(index.embed.clone());
     let service = runner(&index, &source);
     let first = service
@@ -4867,6 +4903,7 @@ async fn reconciliation_commits_body_links_and_never_acknowledges_missing_link_r
     // This target is referenced exclusively by the body: metadata-only planning
     // selects Unchanged, whose owning application must still update the graph.
     source.change(|m| m.inaccessible_foreign = true);
+    index.place(FOREIGN, Some(ROOT), false);
     let denied = service
         .apply(
             "body-only-target-denied",
@@ -4888,6 +4925,7 @@ async fn reconciliation_commits_body_links_and_never_acknowledges_missing_link_r
             .all(|edge| matches!(edge.target(), GraphTarget::Unresolved { .. }))
     );
     source.change(|m| m.inaccessible_foreign = false);
+    index.place(FOREIGN, Some(ROOT), true);
     let restored = service
         .apply(
             "body-only-target-restored",
