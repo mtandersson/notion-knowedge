@@ -151,7 +151,8 @@ discovered by walking it:
   are prepared while the walk streams and the walk is recorded when it
   ends, so a target this walk is first to reach stays unresolved until the
   next walk; a target that moved out stays resolved until then. An
-  unreadable inventory fails the page instead. Post-walk resolution is #705.
+  unreadable inventory fails the page as unavailable instead;
+  with no inventory configured, targets stay unresolved. Post-walk resolution is #705.
 
 ### 1b. Search as a change accelerator (incremental only)
 
