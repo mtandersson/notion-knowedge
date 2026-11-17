@@ -14,7 +14,7 @@ use notion_knowledge_core::{
         PageLifecycle, PhysicalParent,
     },
     reconciliation::ReconciliationJournal,
-    root_scope::{ReadScopeGate, RootScopeGate},
+    root_scope::{ReadAuthority, ReadScopeGate, RootScopeGate},
     search::{HybridSearch, LexicalQuery, LexicalSearch, SemanticQuery, SemanticSearch},
     source::{SourceExpandQuery, SourceExpansion, StableSourceRef},
     sync_state::PageSyncState,
@@ -585,7 +585,7 @@ pub async fn run_with_lexical(
                 boost_config(b),
             )
             .map_err(|_| "invalid graph")?
-            .with_root_gate(read_gate.clone()),
+            .with_root_gate(ReadAuthority::Inventory(read_gate.clone())),
         )
     } else {
         hybrid

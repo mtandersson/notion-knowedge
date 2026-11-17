@@ -61,11 +61,6 @@ pub(crate) fn mcp_transport(
     } else {
         None
     };
-    let handler = if handler.requires_request_scope() {
-        handler.and_request_membership(crate::inventory_membership::from_config(settings))
-    } else {
-        handler
-    };
     let handler = if oauth.is_some() {
         handler.with_http_authorization_required()
     } else {

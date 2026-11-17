@@ -364,7 +364,6 @@ mod read_gate {
         let gate = gate(inventory(), ExclusionRules::default());
         for page in [ROOT, MIDDLE, LEAF, ROW] {
             let permit = gate.authorize(&PageId(page.into())).unwrap();
-            assert_eq!(permit.root(), ROOT);
             assert!(permit.belongs_to_any(&[ROOT.into()]));
             assert!(!permit.belongs_to_any(&[OTHER_ROOT.into()]));
         }

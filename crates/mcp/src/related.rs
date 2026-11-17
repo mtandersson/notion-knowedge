@@ -5,7 +5,7 @@
 use notion_knowledge_core::{
     backend::PageId,
     graph::{GraphEdge, GraphEdgeStore, GraphTarget},
-    root_scope::{ReadScopeGate, ScopeError},
+    root_scope::{ReadAuthority, ScopeError},
 };
 use rmcp::model::{Tool, ToolAnnotations};
 use serde::{Deserialize, Serialize};
@@ -89,8 +89,12 @@ fn target_key(edge: &GraphEdge) -> &str {
     }
 }
 
-fn authorized(gate: &ReadScopeGate, id: &str, roots: &[String]) -> Result<bool, RelatedError> {
-    match gate.authorize(&PageId(id.to_owned())) {
+async fn authorized(
+    gate: &ReadAuthority,
+    id: &str,
+    roots: &[String],
+) -> Result<bool, RelatedError> {
+    match gate.authorize(&PageId(id.to_owned())).await {
         Ok(permit) => Ok(permit.belongs_to_any(roots)),
         Err(ScopeError::Denied) => Ok(false),
         Err(_) => Err(RelatedError::Unavailable),
@@ -103,11 +107,11 @@ fn authorized(gate: &ReadScopeGate, id: &str, roots: &[String]) -> Result<bool, 
 pub async fn navigate(
     input: &RelatedRequest,
     graph: &dyn GraphEdgeStore,
-    gate: &ReadScopeGate,
+    gate: &ReadAuthority,
     roots: &[String],
 ) -> Result<RelatedResponse, RelatedError> {
     input.validate().map_err(|_| RelatedError::Inaccessible)?;
-    if roots.is_empty() || !authorized(gate, &input.page_id, roots)? {
+    if roots.is_empty() || !authorized(gate, &input.page_id, roots).await? {
         return Err(RelatedError::Inaccessible);
     }
 
@@ -170,7 +174,7 @@ pub async fn navigate(
                 (edge.source_page_id(), "incoming")
             };
             // Never use graph links or caller supplied IDs as permission proofs.
-            if !authorized(gate, neighbor, roots)? {
+            if !authorized(gate, neighbor, roots).await? {
                 continue;
             }
             let key = (

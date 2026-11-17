@@ -3563,11 +3563,14 @@ async fn installed_relations_replace_only_their_family_and_repair_both_noop_path
             .filter(|e| e.relation_type().starts_with("relation:"))
             .all(|e| e.display_name() == Some("Renamed ingredients"))
     );
-    let gate = notion_knowledge_core::root_scope::ReadScopeGate::new(
-        index.coordinator.state().clone(),
-        authority(),
-    )
-    .unwrap();
+    walked_under_root(index.coordinator.state(), &[PAGE, OTHER]);
+    let gate = notion_knowledge_core::root_scope::ReadAuthority::Inventory(
+        notion_knowledge_core::root_scope::ReadScopeGate::new(
+            index.coordinator.state().clone(),
+            authority(),
+        )
+        .unwrap(),
+    );
     let navigation = notion_knowledge_mcp::related::navigate(
         &notion_knowledge_mcp::related::RelatedRequest {
             page_id: PAGE.into(),
@@ -4169,11 +4172,14 @@ async fn reconciliation_converges_target_only_changes_and_rebuilds_derived_relat
         .await
         .unwrap();
     assert_eq!((renamed.changed, renamed.failed_pages()), (1, 0));
-    let gate = notion_knowledge_core::root_scope::ReadScopeGate::new(
-        index.coordinator.state().clone(),
-        authority(),
-    )
-    .unwrap();
+    walked_under_root(index.coordinator.state(), &[PAGE, OTHER, FOREIGN]);
+    let gate = notion_knowledge_core::root_scope::ReadAuthority::Inventory(
+        notion_knowledge_core::root_scope::ReadScopeGate::new(
+            index.coordinator.state().clone(),
+            authority(),
+        )
+        .unwrap(),
+    );
     let navigation = notion_knowledge_mcp::related::navigate(
         &notion_knowledge_mcp::related::RelatedRequest {
             page_id: PAGE.into(),
@@ -5591,4 +5597,27 @@ fn pause_owned_commits(index: &std::path::Path, pause: Arc<RequestPause>) {
             Box::pin(async move { pause.hold().await })
         }),
     );
+}
+
+/// Record the tree walk that read authorization consults: each page directly
+/// under ROOT.
+fn walked_under_root(
+    state: &notion_knowledge_retrieval::sync_state::SqliteSyncStateStore,
+    pages: &[&str],
+) {
+    use notion_knowledge_core::inventory::{InventoryEntry, InventoryParent};
+    let entry = |id: &str, parent| InventoryEntry {
+        page_id: id.into(),
+        parent,
+        root_id: ROOT.into(),
+        last_edited_time: "2026-11-16T00:00:00Z".into(),
+        in_trash: false,
+    };
+    let mut entries = vec![entry(ROOT, InventoryParent::Root)];
+    entries.extend(
+        pages
+            .iter()
+            .map(|page| entry(page, InventoryParent::Page(ROOT.into()))),
+    );
+    state.replace_inventory("walk", &entries).unwrap();
 }

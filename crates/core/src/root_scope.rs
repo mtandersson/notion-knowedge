@@ -256,21 +256,51 @@ pub struct ReadScopeGate {
     scope: LifecycleScope,
 }
 
-/// Proof that one page sat under a configured root at the last walk.
+/// Proof that one page sat under these configured roots.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopePermit {
-    root: String,
+    roots: Vec<String>,
 }
 
 impl ScopePermit {
-    /// The configured root whose walk reached the page.
-    pub fn root(&self) -> &str {
-        &self.root
-    }
-
     /// Restrict the permit to the effective operator/caller intersection.
     pub fn belongs_to_any(&self, roots: &[String]) -> bool {
-        roots.contains(&self.root)
+        self.roots.iter().any(|root| roots.contains(root))
+    }
+}
+
+/// How a read is authorized. Operator compositions read the page inventory
+/// their own walk records. Request-bound (OAuth) reads keep the live check
+/// with the caller's grant: no walk records an inventory for that grant.
+#[derive(Clone)]
+pub enum ReadAuthority {
+    Inventory(ReadScopeGate),
+    Live(RootScopeGate),
+}
+
+impl ReadAuthority {
+    pub fn configured_scope(&self) -> &LifecycleScope {
+        match self {
+            Self::Inventory(gate) => gate.configured_scope(),
+            Self::Live(gate) => gate.configured_scope(),
+        }
+    }
+
+    /// Inventory reads never await; live reads fetch and revalidate ancestry.
+    pub async fn authorize(&self, page: &PageId) -> Result<ScopePermit, ScopeError> {
+        match self {
+            Self::Inventory(gate) => gate.authorize(page),
+            Self::Live(gate) => {
+                let permit = gate.authorize(page).await?;
+                gate.revalidate(&permit, gate.configured_scope()).await?;
+                let LifecycleStatus::Allowed { roots } = &permit.evidence.status else {
+                    return Err(ScopeError::Denied);
+                };
+                Ok(ScopePermit {
+                    roots: roots.clone(),
+                })
+            }
+        }
     }
 }
 
@@ -321,7 +351,7 @@ impl ReadScopeGate {
                         return Err(ScopeError::Denied);
                     }
                     return Ok(ScopePermit {
-                        root: entry.page_id.clone(),
+                        roots: vec![entry.page_id.clone()],
                     });
                 }
                 InventoryParent::Page(parent) => {

@@ -69,9 +69,7 @@ pub struct KnowledgeServer {
     lexical_search: Option<Arc<dyn notion_knowledge_core::search::LexicalSearch>>,
     source_expansion: Option<Arc<dyn notion_knowledge_core::source::SourceExpansion>>,
     root_page_ids: Arc<[String]>,
-    root_gate: Option<notion_knowledge_core::root_scope::ReadScopeGate>,
-    /// Page inventory for request-bound reads; each request supplies its scope.
-    request_membership: Option<Arc<dyn notion_knowledge_core::root_scope::Membership>>,
+    root_gate: Option<notion_knowledge_core::root_scope::ReadAuthority>,
     snippet_chars: usize,
     max_upload_files: usize,
     file_ingestion: Option<Arc<dyn upload::FileIngestion>>,
@@ -124,7 +122,6 @@ impl Default for KnowledgeServer {
             source_expansion: None,
             root_page_ids: Arc::from(Vec::<String>::new()),
             root_gate: None,
-            request_membership: None,
         }
     }
 }
@@ -172,15 +169,6 @@ impl KnowledgeServer {
         factory: Arc<dyn upload::RequestFileIngestionFactory>,
     ) -> Self {
         self.request_file_ingestion = Some(factory);
-        self
-    }
-    /// The page inventory that authorizes request-bound reads. Without it,
-    /// every request-bound page authorization is denied.
-    pub fn and_request_membership(
-        mut self,
-        membership: Arc<dyn notion_knowledge_core::root_scope::Membership>,
-    ) -> Self {
-        self.request_membership = Some(membership);
         self
     }
     pub fn requires_request_scope(&self) -> bool {
@@ -363,12 +351,32 @@ impl KnowledgeServer {
     /// Notion to authorize; staleness is bounded by reconciliation.
     /// This does not enable Notion mutations.
     pub fn and_authoritative_scope(
-        mut self,
+        self,
         membership: Arc<dyn notion_knowledge_core::root_scope::Membership>,
         scope: notion_knowledge_core::lifecycle::LifecycleScope,
     ) -> Result<Self, &'static str> {
         let gate = notion_knowledge_core::root_scope::ReadScopeGate::new(membership, scope)
             .map_err(|_| "invalid authoritative root scope")?;
+        self.install_root_gate(notion_knowledge_core::root_scope::ReadAuthority::Inventory(
+            gate,
+        ))
+    }
+
+    /// Request-bound reads check live ancestry with the caller's own grant.
+    fn and_live_authoritative_scope(
+        self,
+        source: Arc<dyn notion_knowledge_core::lifecycle::PageLifecycle>,
+        scope: notion_knowledge_core::lifecycle::LifecycleScope,
+    ) -> Result<Self, &'static str> {
+        let gate = notion_knowledge_core::root_scope::RootScopeGate::new(source, scope)
+            .map_err(|_| "invalid authoritative root scope")?;
+        self.install_root_gate(notion_knowledge_core::root_scope::ReadAuthority::Live(gate))
+    }
+
+    fn install_root_gate(
+        mut self,
+        gate: notion_knowledge_core::root_scope::ReadAuthority,
+    ) -> Result<Self, &'static str> {
         if self.root_page_ids.iter().any(|id| {
             !gate
                 .configured_scope()
@@ -662,7 +670,7 @@ impl KnowledgeServer {
                 if let Some(ids) = &page_ids {
                     for id in ids {
                         let page = notion_knowledge_core::backend::PageId(id.clone());
-                        let Ok(permit) = gate.authorize(&page) else {
+                        let Ok(permit) = gate.authorize(&page).await else {
                             return Ok(error("source_not_accessible: page not in approved scope"));
                         };
                         if !permit.belongs_to_any(&effective_roots) {
@@ -752,7 +760,7 @@ impl KnowledgeServer {
                             }
                             let page =
                                 notion_knowledge_core::backend::PageId(hit.source.page_id.clone());
-                            let Ok(permit) = gate.authorize(&page) else {
+                            let Ok(permit) = gate.authorize(&page).await else {
                                 return Ok(error(
                                     "source_not_accessible: search returned unapproved page",
                                 ));
@@ -882,7 +890,7 @@ impl KnowledgeServer {
                 for reference in &refs {
                     if let notion_knowledge_core::source::StableSourceRef::Page(id) = reference {
                         let page = notion_knowledge_core::backend::PageId(id.clone());
-                        let Ok(permit) = gate.authorize(&page) else {
+                        let Ok(permit) = gate.authorize(&page).await else {
                             return Ok(error("source_not_accessible: page not in approved scope"));
                         };
                         if !permit.belongs_to_any(&authorized_roots) {
@@ -909,7 +917,7 @@ impl KnowledgeServer {
                             let page = notion_knowledge_core::backend::PageId(
                                 source.provenance.page_id.clone(),
                             );
-                            let Ok(permit) = gate.authorize(&page) else {
+                            let Ok(permit) = gate.authorize(&page).await else {
                                 return Ok(error(
                                     "source_not_accessible: expanded page not in approved scope",
                                 ));
@@ -956,7 +964,7 @@ impl KnowledgeServer {
                             let page = notion_knowledge_core::backend::PageId(
                                 source.provenance.page_id.clone(),
                             );
-                            let Ok(permit) = gate.authorize(&page) else {
+                            let Ok(permit) = gate.authorize(&page).await else {
                                 return Ok(error(
                                     "source_not_accessible: page moved outside approved scope",
                                 ));
@@ -1032,20 +1040,6 @@ impl KnowledgeServer {
             }
             _ => Err(rmcp::ErrorData::invalid_params("unknown tool", None)),
         }
-    }
-}
-
-/// No page inventory is configured: no page is authorized.
-struct NoInventory;
-impl notion_knowledge_core::root_scope::Membership for NoInventory {
-    fn parent_chain(
-        &self,
-        _: &str,
-    ) -> Result<
-        Option<Vec<notion_knowledge_core::inventory::InventoryEntry>>,
-        notion_knowledge_core::root_scope::ScopeError,
-    > {
-        Ok(None)
     }
 }
 
@@ -1231,12 +1225,7 @@ impl ServerHandler for KnowledgeServer {
         })?;
         let mut scoped = self
             .clone()
-            .and_authoritative_scope(
-                self.request_membership
-                    .clone()
-                    .unwrap_or_else(|| Arc::new(NoInventory)),
-                adapters.scope.clone(),
-            )
+            .and_live_authoritative_scope(adapters.source.clone(), adapters.scope.clone())
             .map_err(|_| {
                 rmcp::ErrorData::invalid_request("request authorization unavailable", None)
             })?

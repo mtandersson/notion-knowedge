@@ -5,7 +5,7 @@ use notion_knowledge_core::{
     graph::{GraphEdge, GraphEdgeStore, GraphTarget},
     inventory::{InventoryEntry, InventoryParent},
     lifecycle::LifecycleScope,
-    root_scope::{Membership, ReadScopeGate, ScopeError},
+    root_scope::{Membership, ReadAuthority, ReadScopeGate, ScopeError},
     sync_state::SyncStateError,
 };
 use notion_knowledge_mcp::{
@@ -53,17 +53,19 @@ impl Membership for InventoryFixture {
         }))
     }
 }
-fn gate() -> ReadScopeGate {
-    ReadScopeGate::new(
-        Arc::new(InventoryFixture),
-        LifecycleScope {
-            workspace_id: WORKSPACE.into(),
-            generation: 1,
-            roots: vec![PageId(ROOT.into())],
-            exclusions: ExclusionRules::default(),
-        },
+fn gate() -> ReadAuthority {
+    ReadAuthority::Inventory(
+        ReadScopeGate::new(
+            Arc::new(InventoryFixture),
+            LifecycleScope {
+                workspace_id: WORKSPACE.into(),
+                generation: 1,
+                roots: vec![PageId(ROOT.into())],
+                exclusions: ExclusionRules::default(),
+            },
+        )
+        .unwrap(),
     )
-    .unwrap()
 }
 fn edge(source: &str, target: &str, relation: &str, provenance: &str) -> GraphEdge {
     GraphEdge::new(
