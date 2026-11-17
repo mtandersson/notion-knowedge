@@ -178,6 +178,7 @@ async fn joined_committed_bilingual_aliases_navigation_and_off_on_ranking_surviv
         vec![PAGE.to_string()]
     );
     runtime.source.change(|m| m.parent = FOREIGN.into());
+    runtime.rewalk().await;
     let output = wire_stdio(
         on.clone(),
         vec![query(2), related_request(3, json!({"page_id":PAGE}))],
@@ -194,6 +195,7 @@ async fn joined_committed_bilingual_aliases_navigation_and_off_on_ranking_surviv
         m.archived = true;
         m.revision = "2026-10-10T14:00:00Z".into();
     });
+    runtime.rewalk().await;
     runtime
         .worker
         .state
@@ -220,19 +222,15 @@ async fn installed_boost_holds_one_committed_read_fence_and_fails_closed_on_pend
     let on = installed_retrieval(&runtime, &config, Transport::Stdio)
         .await
         .unwrap();
-    runtime.source.pause_next.store(true, Ordering::SeqCst);
-    let pending = tokio::spawn(wire_stdio(on.clone(), vec![query(2)]));
-    tokio::time::timeout(Duration::from_secs(10), runtime.source.entered.notified())
-        .await
-        .unwrap();
-    // Authorization may await network I/O while the graph+index revision remains fenced.
+    // Authorization reads the inventory without calling Notion; the fence is
+    // released once the query returns.
+    let requests = runtime.source.attempts.load(Ordering::SeqCst);
+    assert_eq!(
+        hits(&wire_stdio(on.clone(), vec![query(2)]).await[1]).len(),
+        3
+    );
+    assert_eq!(runtime.source.attempts.load(Ordering::SeqCst), requests);
     let writer = std::fs::File::open(&runtime.index).unwrap();
-    assert!(matches!(
-        writer.try_lock(),
-        Err(std::fs::TryLockError::WouldBlock)
-    ));
-    runtime.source.proceed.notify_one();
-    assert_eq!(hits(&pending.await.unwrap()[1]).len(), 3);
     assert!(writer.try_lock().is_ok());
     drop(writer);
     rusqlite::Connection::open(&runtime.db)
@@ -364,6 +362,7 @@ async fn authenticated_http_uses_same_committed_boost_and_navigation_with_fresh_
     assert_eq!(before, std::fs::read(&runtime.db).unwrap());
     assert_eq!(index, storage_files(&runtime.index));
     runtime.source.change(|m| m.parent = FOREIGN.into());
+    runtime.rewalk().await;
     let denied = http_calls(
         &runtime,
         config(&runtime, true),

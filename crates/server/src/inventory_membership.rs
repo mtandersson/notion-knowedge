@@ -25,3 +25,55 @@ impl Membership for StateInventory {
 pub(crate) fn from_config(config: &crate::config::Config) -> Arc<dyn Membership> {
     Arc::new(StateInventory(config.webhook_state_file.clone()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notion_knowledge_core::inventory::InventoryParent;
+
+    fn entry(id: &str, parent: InventoryParent) -> InventoryEntry {
+        InventoryEntry {
+            page_id: id.into(),
+            parent,
+            root_id: "root".into(),
+            last_edited_time: "2026-11-17T00:00:00Z".into(),
+            in_trash: false,
+        }
+    }
+
+    #[test]
+    fn sees_each_walk_another_process_records_and_denies_without_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite");
+        let writer = SqliteSyncStateStore::open(&path).unwrap();
+        let reader = StateInventory(Some(path));
+        assert_eq!(reader.parent_chain("page").unwrap(), None);
+
+        writer
+            .replace_inventory(
+                "walk-1",
+                &[
+                    entry("root", InventoryParent::Root),
+                    entry("page", InventoryParent::Page("root".into())),
+                ],
+            )
+            .unwrap();
+        let chain = reader.parent_chain("page").unwrap().unwrap();
+        assert_eq!(
+            chain.iter().map(|e| e.page_id.as_str()).collect::<Vec<_>>(),
+            ["page", "root"]
+        );
+
+        // The next walk no longer reaches the page: the same reader sees it.
+        writer
+            .replace_inventory("walk-2", &[entry("root", InventoryParent::Root)])
+            .unwrap();
+        assert_eq!(reader.parent_chain("page").unwrap(), None);
+
+        assert_eq!(StateInventory(None).parent_chain("page").unwrap(), None);
+        assert_eq!(
+            StateInventory(Some(dir.path().join("absent.sqlite"))).parent_chain("page"),
+            Err(ScopeError::Unverifiable)
+        );
+    }
+}
