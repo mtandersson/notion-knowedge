@@ -4628,3 +4628,81 @@ fn pause_owned_commits(index: &std::path::Path, pause: Arc<RequestPause>) {
         }),
     );
 }
+
+#[tokio::test]
+async fn expired_claim_cannot_write_inventory_or_drift_metadata() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    // Not indexed, so no commit or removal runs that a fence would reject
+    // first: only the inventory and drift writes are left to refuse.
+    http.change(|m| m.inaccessible_page = true);
+    let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+    let state = runtime.coordinator.state().clone();
+    let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
+    let mut lease = state.acquire_lease(now, 90).unwrap();
+    let expired: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| i64::MAX);
+    let error = runtime
+        .sync_page(
+            &PageDeadline {
+                timeout_seconds: 60,
+            },
+            &mut lease,
+            PageId(PAGE.into()),
+            expired,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.failure,
+        notion_knowledge_server::index_runtime::SyncFailure::Authority
+    );
+    assert!(state.last_sync().unwrap().is_none());
+    // The same sync under a live claim records its drift.
+    runtime
+        .sync_page(
+            &PageDeadline {
+                timeout_seconds: 60,
+            },
+            &mut lease,
+            PageId(PAGE.into()),
+            Arc::new(|| notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000),
+        )
+        .await
+        .unwrap();
+    assert!(state.last_sync().unwrap().is_some());
+}
+
+#[tokio::test]
+async fn a_page_deadline_is_counted_as_a_timeout_not_only_a_failure() {
+    use std::time::Duration;
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+    let state = runtime.coordinator.state().clone();
+    let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
+    let mut lease = state.acquire_lease(now, 90).unwrap();
+    // The embedding call outlasts the one-second page deadline.
+    f.provider.hold.store(true, Ordering::SeqCst);
+    let release = async {
+        tokio::time::timeout(Duration::from_secs(10), f.provider.held.notified())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        f.provider.hold_release.add_permits(1);
+    };
+    let (totals, ()) = tokio::join!(
+        async {
+            runtime
+                .sync_from_walk(
+                    &PageDeadline { timeout_seconds: 1 },
+                    &mut lease,
+                    SyncMode::Full,
+                )
+                .await
+                .unwrap()
+        },
+        release
+    );
+    assert_eq!((totals.failed, totals.timed_out), (1, 1), "{totals:?}");
+    assert_eq!(totals.permanent, 0);
+}

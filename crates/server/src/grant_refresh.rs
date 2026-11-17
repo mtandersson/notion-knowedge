@@ -342,8 +342,9 @@ impl GrantRefreshWorker {
         let deadline = PageDeadline {
             timeout_seconds: self.settings.timeout.as_secs(),
         };
-        // A page the inventory cannot place counts in `drift.unplaced`; the
-        // next walk indexes it.
+        // A page the inventory cannot place counts in `drift.unplaced` and is
+        // not indexed. An OAuth-only deployment never walks, so that is not a
+        // completed refresh: report it and let the queue retry or give up.
         let result = Box::pin(index.sync_page_as_user(
             &deadline,
             &mut lease,
@@ -351,7 +352,8 @@ impl GrantRefreshWorker {
             clock,
         ))
         .await;
-        result.is_ok_and(|totals| totals.failed == 0) && authority.validate(false).is_ok()
+        result.is_ok_and(|totals| totals.failed == 0 && totals.drift.unplaced == 0)
+            && authority.validate(false).is_ok()
     }
 }
 fn now() -> i64 {

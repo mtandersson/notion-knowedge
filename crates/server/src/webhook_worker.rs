@@ -480,6 +480,8 @@ pub mod runtime {
                         // A page the inventory cannot place is counted in
                         // `drift.unplaced` and settled by the next walk.
                         Ok(totals) if totals.failed == 0 => ProcessingOutcome::Succeeded,
+                        // A page deadline is a slow dependency, not a source verdict.
+                        Ok(totals) if totals.timed_out > 0 => ProcessingOutcome::Retryable(EventFailure::Unavailable),
                         Ok(totals) if totals.failed == totals.permanent => ProcessingOutcome::Permanent(EventFailure::Source),
                         Ok(_) => ProcessingOutcome::Retryable(EventFailure::Source),
                         Err(error) => match error.failure {
