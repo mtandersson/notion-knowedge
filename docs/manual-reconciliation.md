@@ -154,6 +154,10 @@ notion-knowledge-server --reconcile schedule configure INTERVAL ATTEMPTS BACKOFF
 ```
 
 Status is read-only and reports the durable deadline, active run, cycle, attempts,
+any hold on the active cycle (`hold` is `held_unauthenticated` with a fixed
+`hold_reason` while a rejected credential holds the cycle, including during the
+retry, until that retry records an outcome; otherwise `null`; in history the hold
+is a `Cancelled` event with failure `Source` that spends no attempt),
 classified bounded history and active-run scanned/changed/deleted/unchanged/error
 counts. History pages contain at most 1000 events; `history_next` supplies the next cursor.
 Run status also reports retained classified failure evidence after successful retry. Source titles, content, URLs,

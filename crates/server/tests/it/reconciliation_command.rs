@@ -1684,7 +1684,7 @@ async fn actual_scheduled_http_timeout_exhaustion_is_inspectable_and_explicit_ab
 
 #[tokio::test]
 async fn actual_scheduled_http_rejected_credential_holds_the_cycle_without_consuming_attempts() {
-    use notion_knowledge_retrieval::schedule::{ScheduleEventKind, ScheduleStatus};
+    use notion_knowledge_retrieval::schedule::{ScheduleEventKind, ScheduleHold, ScheduleStatus};
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
     http.change(|m| m.unauthenticated = true);
@@ -1708,6 +1708,17 @@ async fn actual_scheduled_http_rejected_credential_holds_the_cycle_without_consu
     .await;
     // Held past more than one backoff ceiling: still no attempt consumed.
     assert_eq!((held.status, held.attempts), (ScheduleStatus::Ready, 0));
+    // The operator sees why the cycle is held, with a fixed reason.
+    assert_eq!(held.hold, Some(ScheduleHold::Unauthenticated));
+    let status = f
+        .command(&http, &["--reconcile", "schedule", "status"])
+        .await;
+    assert_eq!(status.exit, 0);
+    assert_eq!(status.json["hold"], "held_unauthenticated");
+    assert_eq!(
+        status.json["hold_reason"],
+        "source rejected the credential; the scheduled sync retries once per maximum backoff until the credential is fixed"
+    );
     assert!(
         !events()
             .iter()
@@ -1717,7 +1728,7 @@ async fn actual_scheduled_http_rejected_credential_holds_the_cycle_without_consu
     // Once the credential is accepted again, the same cycle completes.
     http.change(|m| m.unauthenticated = false);
     let done = await_schedule(&worker, |s| s.active_run.is_none()).await;
-    assert_eq!((done.cycle, done.attempts), (1, 0));
+    assert_eq!((done.cycle, done.attempts, done.hold), (1, 0, None));
     assert_eq!(worker.state.inventory_counts().unwrap().indexed, 3);
     stop.cancel();
     server.await.unwrap().unwrap();
