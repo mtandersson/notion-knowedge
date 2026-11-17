@@ -665,6 +665,7 @@ pub mod runtime {
             Err(_) => return Output::error("state_failure", 3),
         };
         let mut json = serde_json::json!({"operation":"reconciliation_schedule", "history_next":events.last().map(|e|e.sequence), "status":format!("{:?}",schedule.status), "next_deadline":schedule.next_deadline,"attempts":schedule.attempts,"cycle":schedule.cycle,"active_run":schedule.active_run,
+            "hold":schedule.hold.map(|h|h.as_str()),"hold_reason":schedule.hold.map(|h|h.reason()),
             "history":events.iter().map(|e|serde_json::json!({"sequence":e.sequence,"cycle":e.cycle,"at_seconds":e.at_seconds,"kind":format!("{:?}",e.kind),"failure":e.failure.as_ref().map(|f|format!("{f:?}")),"attempt":e.attempt,"deadline":e.deadline})).collect::<Vec<_>>()});
         if let Some(run) = schedule.active_run {
             json["run"] = status(runtime, &run, "inspected", None).json;

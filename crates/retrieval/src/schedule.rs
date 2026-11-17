@@ -73,6 +73,32 @@ pub struct Schedule {
     pub status: ScheduleStatus,
     pub attempts: i64,
     pub cycle: i64,
+    /// Why the active cycle is held without spending its attempt budget, if
+    /// it is. Derived from the latest durable event of the current cycle.
+    pub hold: Option<ScheduleHold>,
+}
+/// A hold on the active cycle that retrying alone cannot clear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleHold {
+    /// The source rejected the credential (401). The cycle is retried once
+    /// per maximum backoff until an operator fixes the credential.
+    Unauthenticated,
+}
+impl ScheduleHold {
+    /// Stable machine-readable name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unauthenticated => "held_unauthenticated",
+        }
+    }
+    /// Fixed operator-facing reason; never an upstream error string.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::Unauthenticated => {
+                "source rejected the credential; the scheduled sync retries once per maximum backoff until the credential is fixed"
+            }
+        }
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScheduleEventKind {
@@ -161,6 +187,7 @@ fn load(
     {
         return Err(JournalError::ScopeMismatch);
     }
+    let hold = hold(db, id, row.13, row.10.as_deref())?;
     Ok(Schedule {
         schedule_id: id.into(),
         policy: SchedulePolicy::new(row.5, row.6, row.7, row.8)?,
@@ -175,6 +202,31 @@ fn load(
         },
         attempts: row.12,
         cycle: row.13,
+        hold,
+    })
+}
+/// A postponement is a Cancelled event with the Source class; any later
+/// recorded outcome of the cycle (completion, failure, checkpoint, operator
+/// recovery) or a new cycle clears it. A retry in flight is still reported as
+/// held until it records its outcome.
+fn hold(
+    db: &Connection,
+    id: &str,
+    cycle: i64,
+    run: Option<&str>,
+) -> Result<Option<ScheduleHold>, JournalError> {
+    let Some(run) = run else { return Ok(None) };
+    let last: Option<(i64, Option<i64>, Option<String>)> = db
+        .query_row(
+            "SELECT kind,failure,run_id FROM reconciliation_schedule_events WHERE schedule_id=?1 AND cycle=?2 ORDER BY sequence DESC LIMIT 1",
+            params![id, cycle],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(sql)?;
+    Ok(match last {
+        Some((7, Some(0), Some(r))) if r == run => Some(ScheduleHold::Unauthenticated),
+        _ => None,
     })
 }
 fn event(
@@ -491,7 +543,8 @@ impl IndexCommitCoordinator {
             )
             .map_err(sql)?;
             let s = load(db, self, id)?;
-            event(db, &s, now, 7, None, None)?;
+            event(db, &s, now, 7, Some(number(&FailureClass::Source)), None)?;
+            let s = load(db, self, id)?;
             Ok(s)
         })
     }
