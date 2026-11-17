@@ -1237,6 +1237,53 @@ async fn unchanged_rerun_embeds_nothing() {
     assert_eq!((second.indexed, second.unchanged), (0, second.inventory));
 }
 
+/// Relation targets resolve through the walk inventory, which exists only when
+/// the walk ends: the first sync must resolve them itself, and a second sync of
+/// the same content must neither embed nor re-read a page for relations.
+#[tokio::test]
+async fn first_sync_resolves_a_relation_between_pages_it_walks() {
+    use notion_knowledge_core::graph::{GraphEdgeStore, GraphTarget};
+    let http = start_notion().await;
+    http.change(|m| m.relation_name = Some("Related".into()));
+    let f = Fixture::new(&http).await;
+    let (first, indexed) = sync(&f, &http, SyncMode::Full).await;
+    assert!(indexed.contains(PAGE) && indexed.contains(OTHER));
+    assert_eq!(first.failed, 0);
+    let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+    let relations: Vec<_> = runtime
+        .coordinator
+        .state()
+        .edges_from(PAGE)
+        .unwrap()
+        .into_iter()
+        .filter(|edge| edge.relation_type().starts_with("relation:"))
+        .collect();
+    assert_eq!(relations.len(), 1);
+    assert!(matches!(
+        relations[0].target(),
+        GraphTarget::Page { page_id } if page_id == OTHER
+    ));
+    assert!(
+        runtime
+            .coordinator
+            .current_relation_projection_complete(PAGE)
+            .unwrap()
+    );
+    let embedded = f.provider.count.load(Ordering::SeqCst);
+    let before = http.requests().len();
+    let (second, _) = sync(&f, &http, SyncMode::Full).await;
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), embedded);
+    assert_eq!((second.indexed, second.unchanged), (0, second.inventory));
+    // The walk's own read only: no pass, since nothing is left unresolved.
+    assert_eq!(
+        new_requests(&http, before)
+            .iter()
+            .filter(|r| r.ends_with(&format!("{PAGE}/markdown")))
+            .count(),
+        1
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn page_moved_out_between_read_and_commit_is_removed_on_next_walk() {
     let http = start_notion().await;

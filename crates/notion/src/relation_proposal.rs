@@ -158,6 +158,20 @@ impl RelationProposalAdapter {
             Ok(())
         })
     }
+    /// Whether any of these targets is now placed in scope by the inventory,
+    /// so that a page whose projection left it unresolved would resolve it.
+    pub async fn any_resolvable(&self, targets: &[String]) -> Result<bool, BackendError> {
+        if self.mode != ProjectionMode::ResolveTargets {
+            return Ok(false);
+        }
+        let scope = self.policy.read().await.clone();
+        for target in targets {
+            if self.placed(target, &scope)?.is_ok() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     /// Trusted immutable composition setting; never infer from source references.
     pub fn with_projection_mode(mut self, mode: ProjectionMode) -> Self {
         self.mode = mode;
