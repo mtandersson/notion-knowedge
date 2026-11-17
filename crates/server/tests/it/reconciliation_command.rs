@@ -1269,7 +1269,13 @@ async fn first_sync_resolves_a_relation_between_pages_it_walks() {
             .current_relation_projection_complete(PAGE)
             .unwrap()
     );
+    // Every chunk was embedded once: the resolving pass embedded nothing.
     let embedded = f.provider.count.load(Ordering::SeqCst);
+    let mut chunks = 0;
+    for page in &indexed {
+        chunks += runtime.chunks().page_chunks(page).await.unwrap().len();
+    }
+    assert_eq!(embedded, chunks);
     let before = http.requests().len();
     let (second, _) = sync(&f, &http, SyncMode::Full).await;
     assert_eq!(f.provider.count.load(Ordering::SeqCst), embedded);

@@ -25,6 +25,8 @@ const PREFETCH_QUEUE: usize = 1;
 /// Most pages whose relation targets one walk resolves after recording its
 /// inventory. Others resolve at the next walk.
 const RELATION_PASS_LIMIT: usize = 500;
+/// Longest one walk spends on that pass before leaving the rest to the next.
+const RELATION_PASS_BUDGET: std::time::Duration = std::time::Duration::from_secs(300);
 /// Shared retained-byte budget (KiB) for in-flight, queued and committing pages.
 pub(crate) const PREFETCH_BUDGET_KIB: usize = 64 * 1024;
 /// Worst-case reservation (KiB) per preparation: the 8 MiB streamed Markdown
@@ -1222,8 +1224,8 @@ impl IndexRuntime {
     /// walk could not see targets the walk reached later, so on a first walk
     /// they stayed unresolved until the next one. Each affected page is read
     /// once and committed again: unchanged chunks are not embedded. The pass
-    /// is bounded; a page left over, or one that fails, resolves at the next
-    /// walk. A page failure never fails the walk.
+    /// is bounded by page count and time; a page left over, or one that fails,
+    /// resolves at the next walk. A page failure never fails the walk.
     async fn resolve_relations(
         &self,
         settings: &PageDeadline,
@@ -1240,6 +1242,7 @@ impl IndexRuntime {
             .map(|entry| (entry.page_id.as_str(), entry))
             .collect();
         let mut resolved = 0;
+        let started = std::time::Instant::now();
         for (page, targets) in unresolved {
             let Some(entry) = entries.get(page.as_str()).filter(|entry| !entry.in_trash) else {
                 continue;
@@ -1256,10 +1259,14 @@ impl IndexRuntime {
                 break;
             }
             resolved += 1;
-            Self::fence(lease, base)?;
-            *lease = state
-                .renew_lease(lease, now_ms() / 1000, ttl)
-                .map_err(|_| "cache sync lease unavailable")?;
+            // A lost claim ends the pass; the walk's own record then fails its fence.
+            if Self::fence(lease, base).is_err() || started.elapsed() > RELATION_PASS_BUDGET {
+                break;
+            }
+            let Ok(renewed) = state.renew_lease(lease, now_ms() / 1000, ttl) else {
+                break;
+            };
+            *lease = renewed;
             let operation = format!(
                 "relations-{}",
                 notion_knowledge_core::logging::CorrelationId::new().as_str()
