@@ -330,7 +330,7 @@ async fn binding_survives_migration_and_aliases_but_rejects_other_state_table_wo
  {
     let f = Fixture::new();
     let raw = Connection::open(&f.state).unwrap();
-    raw.execute_batch(include_str!("../migrations/0001_initial.sql"))
+    raw.execute_batch(include_str!("../../migrations/0001_initial.sql"))
         .unwrap();
     raw.execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at_unix INTEGER NOT NULL);INSERT INTO schema_migrations VALUES(1,'initial_sync_state',0);INSERT INTO page_sync_state VALUES('old','old-hash',NULL,0,0);").unwrap();
     drop(raw);
@@ -636,7 +636,12 @@ async fn expiry_during_effect_never_acknowledges_but_keeps_guard_until_completio
 
 fn child(f: &Fixture, index: &Path, state: &Path, name: &str, lease: &Lease, mode: &str) -> Child {
     Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "commit_child", "--ignored", "--nocapture"])
+        .args([
+            "--exact",
+            "index_commits::commit_child",
+            "--ignored",
+            "--nocapture",
+        ])
         .env("NK_COMMIT_TEST_ROOT", &f.root)
         .env("NK_COMMIT_TEST_INDEX", index)
         .env("NK_COMMIT_TEST_STATE", state)

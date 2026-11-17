@@ -221,8 +221,8 @@ cargo test --workspace --locked
 The transport process smoke tests can also be run alone:
 
 ```sh
-cargo test -p notion-knowledge-server --test stdio
-cargo test -p notion-knowledge-server --test http
+cargo test -p notion-knowledge-server --test it stdio::
+cargo test -p notion-knowledge-server --test it http::
 ```
 
 Format and lint:
@@ -375,9 +375,12 @@ The always-running **CI gate** is the stable check to require when branch protec
 is available. See [CI selection and verification](docs/ci.md) for the path map,
 check migration, and actual-run evidence.
 
-CI retains separate check names for formatting, Clippy, type
-checking, unit tests, the release build, final-image container smoke tests,
-dependency vulnerabilities, and committed secrets.
+The required gate covers formatting, Clippy (which also type-checks every
+target), workspace unit tests, dependency vulnerabilities and committed secrets.
+Native-feature Clippy and tests and the release build run as optional checks,
+and final-image container smoke tests run from `.github/workflows/container.yml`
+on main, nightly and container-input PRs. Optional checks that run for a PR must
+pass before it merges.
 The release-build job also uploads
 a short-lived Linux server artifact for downstream validation and future
 release automation.

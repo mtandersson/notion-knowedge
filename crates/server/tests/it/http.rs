@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 use std::{process::Stdio, time::Duration};
 
 use reqwest::{Client, Response, StatusCode};

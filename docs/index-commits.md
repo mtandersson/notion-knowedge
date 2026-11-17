@@ -120,7 +120,7 @@ or authority is inferred from a temporary file.
 No credentials, source calls, embeddings or LanceDB feature are needed:
 
 ```sh
-nix develop --command cargo test -p notion-knowledge-retrieval --test index_commits --locked
+nix develop --command cargo test -p notion-knowledge-retrieval --test it index_commits:: --locked
 nix develop --command cargo test --workspace --locked
 nix develop --command cargo clippy --workspace --all-targets --locked -- -D warnings
 ```

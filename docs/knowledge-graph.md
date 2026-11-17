@@ -51,8 +51,8 @@ those production workflows are already connected.
 ## Verification
 
 ```sh
-cargo test -p notion-knowledge-retrieval --test graph
-cargo test -p notion-knowledge-retrieval --test sync_state
+cargo test -p notion-knowledge-retrieval --test it graph::
+cargo test -p notion-knowledge-retrieval --test it sync_state::
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```

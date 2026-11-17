@@ -103,7 +103,7 @@ remains #145. This command is operational manual execution, not a scheduler.
 Run credential-free real-command fixtures with:
 
 ```sh
-nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test reconciliation_command --test reconciliation_dispatch --locked
+nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test it --locked
 ```
 
 The fixtures invoke the real argument/service/shared-composition boundary with

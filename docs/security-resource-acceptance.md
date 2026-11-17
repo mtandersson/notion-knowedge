@@ -31,7 +31,7 @@ management and webhook routes do not consume MCP capacity.
 Run in the pinned development environment:
 
 ```sh
-cargo test -p notion-knowledge-server --test admission --test session_bounds --locked
+cargo test -p notion-knowledge-server --test it --locked
 cargo test -p notion-knowledge-server --lib cancelled_ --locked
 cargo test -p notion-knowledge-mcp --test tool_admission --locked
 ```

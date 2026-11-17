@@ -1,7 +1,6 @@
 #![cfg(all(unix, feature = "webhook-worker"))]
 //! Credential-free, real Notion HTTP -> real SQLite/LanceDB integration.
-#[path = "support/listener_shutdown.rs"]
-mod listener_shutdown;
+use crate::listener_shutdown;
 use notion_knowledge_core::{
     backend::PageId,
     chunking::ChunkConfig,

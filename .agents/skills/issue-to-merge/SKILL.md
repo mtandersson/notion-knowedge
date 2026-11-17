@@ -49,7 +49,10 @@ Run the narrowest useful local checks, then any relevant build, lint, race,
 and browser checks. Review the final diff. Make a Conventional Commit with a
 short explanatory body; mark a breaking change in the commit message. Push
 updates to the early draft PR, include the closing issue reference, and mark it
-ready after review. Inspect the repository CI and merge once its relevant jobs pass. Confirm the PR merged and the issue closed. If no required
+ready after review. Inspect the repository CI and merge once its relevant jobs pass:
+the required CI gate, plus every optional job that ran for the PR (native
+Clippy and tests, release build, and the Container smoke workflow) when its
+inputs are native or container changes. Confirm the PR merged and the issue closed. If no required
 checks are configured, state that and rely on the observed CI and local checks.
 
 Report each issue, PR, review outcome, checks, and merge state. For an epic,

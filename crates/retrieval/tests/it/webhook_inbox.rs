@@ -145,9 +145,9 @@ fn migration_preserves_legacy_receipts_and_rolls_back_failed_new_receipts() {
     let db = Database::new();
     {
         let raw = rusqlite::Connection::open(&db.0).unwrap();
-        raw.execute_batch(include_str!("../migrations/0001_initial.sql"))
+        raw.execute_batch(include_str!("../../migrations/0001_initial.sql"))
             .unwrap();
-        raw.execute_batch(include_str!("../migrations/0002_reconciliation.sql"))
+        raw.execute_batch(include_str!("../../migrations/0002_reconciliation.sql"))
             .unwrap();
         raw.execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at_unix INTEGER NOT NULL); INSERT INTO schema_migrations VALUES(1,'initial_sync_state',0),(2,'reconciliation_journal',0); INSERT INTO webhook_events(event_id) VALUES ('13950b26-c203-4f3b-b97d-93ec06319565');").unwrap();
     }
@@ -379,11 +379,11 @@ fn v3_upgrade_preserves_running_failed_receipts_and_other_tables() {
     let db = Database::new();
     {
         let raw = rusqlite::Connection::open(&db.0).unwrap();
-        raw.execute_batch(include_str!("../migrations/0001_initial.sql"))
+        raw.execute_batch(include_str!("../../migrations/0001_initial.sql"))
             .unwrap();
-        raw.execute_batch(include_str!("../migrations/0002_reconciliation.sql"))
+        raw.execute_batch(include_str!("../../migrations/0002_reconciliation.sql"))
             .unwrap();
-        raw.execute_batch(include_str!("../migrations/0003_webhook_inbox.sql"))
+        raw.execute_batch(include_str!("../../migrations/0003_webhook_inbox.sql"))
             .unwrap();
         raw.execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at_unix INTEGER NOT NULL); INSERT INTO schema_migrations VALUES(1,'initial_sync_state',0),(2,'reconciliation_journal',0),(3,'webhook_inbox',0); INSERT INTO webhook_events(event_id) VALUES ('legacy'); INSERT INTO page_sync_state(page_id,content_hash,tombstoned) VALUES ('retained-page','retained-hash',0); INSERT INTO crawl_checkpoints(checkpoint_key,cursor) VALUES ('crawl','next'); INSERT INTO index_versions(index_name,version) VALUES ('chunks','v1'); INSERT INTO reconciliation_runs(run_id,scope,fence,phase,checkpoint,next_deadline) VALUES ('retained-run','scope',1,0,'checkpoint',123);").unwrap();
         for (id, state, generation, lease, failure) in

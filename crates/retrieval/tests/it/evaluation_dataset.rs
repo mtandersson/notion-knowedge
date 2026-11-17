@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 fn dataset() -> Value {
     serde_json::from_str(include_str!(
-        "../../../eval/retrieval/personal-knowledge-v1.json"
+        "../../../../eval/retrieval/personal-knowledge-v1.json"
     ))
     .expect("versioned dataset must be valid JSON")
 }

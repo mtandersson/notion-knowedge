@@ -3,15 +3,21 @@
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
 
 SCRIPT = Path(__file__).with_name('ci-jobs.py').resolve()
-ALL = {'agent-layout', 'fmt', 'clippy', 'check', 'test', 'native-build', 'native-test', 'build', 'container',
-       'dependencies', 'secrets'}
+WORKFLOWS = SCRIPT.parents[1] / '.github/workflows'
+REQUIRED = {'agent-layout', 'fmt', 'clippy', 'test', 'dependencies', 'secrets'}
+OPTIONAL = {'clippy-features', 'test-local-qwen', 'native-build', 'native-test', 'build'}
+ALL = REQUIRED | OPTIONAL
 SECURITY = {'dependencies', 'secrets'}
-WORKSPACE = {'fmt', 'clippy', 'check', 'test', 'native-build', 'native-test', 'build', 'container'}
+WORKSPACE = {'fmt', 'clippy', 'clippy-features', 'test', 'test-local-qwen', 'native-build',
+             'native-test', 'build'}
+# Container inputs select nothing here: container.yml runs the smoke.
+CONTAINER_ONLY = set()
 
 
 def git(repo, *args):
@@ -60,19 +66,21 @@ class Selection(unittest.TestCase):
             '.agents/skills/writing-tests/SKILL.md': {'agent-layout'},
             'scripts/check-agent-layout.sh': {'agent-layout'},
             'crates/core/src/lib.rs': WORKSPACE,
-            'crates/server/tests/http.rs': WORKSPACE,
-            'eval/retrieval/personal-knowledge-v1.json': {'test', 'native-build', 'native-test'},
+            'crates/server/tests/it/http.rs': WORKSPACE,
+            'eval/retrieval/personal-knowledge-v1.json': {'test', 'test-local-qwen', 'native-build',
+                                                          'native-test'},
             'Cargo.lock': WORKSPACE,
             'Cargo.toml': WORKSPACE,
             'crates/core/Cargo.toml': WORKSPACE,
             'crates/server/build.rs': WORKSPACE,
-            'Dockerfile': {'container'},
-            '.dockerignore': {'container'},
-            'scripts/smoke-container.py': {'container'},
-            'compose.yaml': {'container'},
-            'scripts/compose-dev.sh': {'container'},
-            'scripts/smoke-compose.py': {'container'},
+            'Dockerfile': CONTAINER_ONLY,
+            '.dockerignore': CONTAINER_ONLY,
+            'scripts/smoke-container.py': CONTAINER_ONLY,
+            'compose.yaml': CONTAINER_ONLY,
+            'scripts/compose-dev.sh': CONTAINER_ONLY,
+            'scripts/smoke-compose.py': CONTAINER_ONLY,
             '.github/workflows/ci.yml': ALL,
+            '.github/workflows/container.yml': ALL,
             'flake.nix': ALL,
             'flake.lock': ALL,
             'rust-toolchain.toml': ALL,
@@ -92,7 +100,7 @@ class Selection(unittest.TestCase):
 
     def test_mixed_inputs_and_unusual_filenames_are_conservative(self):
         self.assertEqual(self.selection(['README.md', 'AGENTS.md', 'Dockerfile']),
-                         SECURITY | {'agent-layout', 'container'})
+                         SECURITY | {'agent-layout'})
         self.assertEqual(self.selection(['docs/read\tme\n.md']), SECURITY)
         self.assertEqual(self.selection(['README.md', 'unknown\npath']), ALL)
 
@@ -108,10 +116,10 @@ class Selection(unittest.TestCase):
 
 class Gate(unittest.TestCase):
     def needs(self, selected):
+        # Actions passes only the gate's own needs; optional jobs are outputs only.
         needs = {'changes': {'result': 'success', 'outputs': {
             job: 'true' if job in selected else 'false' for job in ALL}}}
-        needs.update({job: {'result': 'success' if job in selected else 'skipped'} for job in ALL})
-        needs['container-main'] = {'result': 'skipped'}
+        needs.update({job: {'result': 'success' if job in selected else 'skipped'} for job in REQUIRED})
         return needs
 
     def gate(self, needs):
@@ -119,34 +127,12 @@ class Gate(unittest.TestCase):
                               capture_output=True,
                               env={**os.environ, 'CI_NEEDS': json.dumps(needs)})
 
-    def test_alternate_main_registry_job_satisfies_gate_and_both_are_required(self):
-        for selected in (ALL, SECURITY | {'container'}):
-            pr = self.needs(selected)
-            pr['container-main'] = {'result': 'skipped'}
-            self.assertEqual(self.gate(pr).returncode, 0)
-            main = self.needs(selected)
-            main['container-main'] = {'result': 'success'}
-            main['container']['result'] = 'skipped'
-            self.assertEqual(self.gate(main).returncode, 0)
-            for r1, r2 in [('skipped', 'skipped'), ('success', 'success'),
-                           ('skipped', 'failure'), ('failure', 'skipped')]:
-                invalid = self.needs(selected)
-                invalid['container']['result'] = r1
-                invalid['container-main'] = {'result': r2}
-                with self.subTest(container=r1, main=r2):
-                    self.assertNotEqual(self.gate(invalid).returncode, 0)
-        disabled = self.needs(SECURITY)
-        disabled['container-main'] = {'result': 'skipped'}
-        self.assertEqual(self.gate(disabled).returncode, 0)
-        disabled['container-main'] = {'result': 'success'}
-        self.assertNotEqual(self.gate(disabled).returncode, 0)
-
     def test_full_success_and_intentional_skips_pass(self):
-        for selected in (ALL, SECURITY, SECURITY | {'test'}, SECURITY | {'container'}):
+        for selected in (ALL, SECURITY, SECURITY | {'test'}, SECURITY | {'build'}):
             self.assertEqual(self.gate(self.needs(selected)).returncode, 0)
 
     def test_every_selected_failure_cancellation_skip_and_missing_result_blocks(self):
-        for job in ALL:
+        for job in REQUIRED:
             for result in ('failure', 'cancelled', 'skipped', None):
                 needs = self.needs(ALL)
                 needs[job]['result'] = result
@@ -170,21 +156,75 @@ class Gate(unittest.TestCase):
     def test_unselected_failed_or_cancelled_jobs_still_block(self):
         for result in ('failure', 'cancelled', None):
             needs = self.needs(SECURITY)
-            needs['build']['result'] = result
+            needs['fmt']['result'] = result
             self.assertNotEqual(self.gate(needs).returncode, 0)
+
+    def test_required_gate_excludes_optional_feature_and_container_jobs(self):
+        workflow = (WORKFLOWS / 'ci.yml').read_text()
+        gate = workflow.split('\n  gate:\n', 1)[1]
+        needs = re.search(r'^    needs: \[([^\]]*)\]$', gate, re.M).group(1)
+        self.assertEqual({job.strip() for job in needs.split(',')}, {'changes'} | REQUIRED)
+        jobs = set(re.findall(r'^  ([a-z-]+):$', workflow.split('\njobs:\n', 1)[1], re.M))
+        self.assertEqual(jobs, {'changes', 'gate'} | ALL)
+        for job in ALL - SECURITY:
+            with self.subTest(job=job):
+                self.assertIn(f'      {job}: ${{{{ steps.select.outputs.{job} }}}}', workflow)
+                self.assertIn(f"if: needs.changes.outputs.{job} == 'true'", workflow)
+
+    def test_check_job_removed_and_clippy_covers_all_targets(self):
+        workflow = (WORKFLOWS / 'ci.yml').read_text()
+        self.assertNotIn('\n  check:\n', workflow)
+        self.assertNotIn('cargo check', workflow)
+        clippy = workflow.split('\n  clippy:\n', 1)[1].split('\n  clippy-features:\n', 1)[0]
+        self.assertIn('nix develop --command cargo clippy --workspace --all-targets --locked -- -D warnings',
+                      clippy)
+        self.assertNotIn('.#spike', clippy)
+        features = workflow.split('\n  clippy-features:\n', 1)[1].split('\n  test:\n', 1)[0]
+        self.assertEqual(features.count('nix develop .#spike --command cargo clippy'), 4)
+        self.assertIn('job: clippy-features', features)
+
+    def test_debug_info_and_incremental_settings_apply_to_every_cargo_job(self):
+        workflow = (WORKFLOWS / 'ci.yml').read_text()
+        env = workflow.split('\nenv:\n', 1)[1].split('\njobs:\n', 1)[0]
+        for setting in ('CARGO_INCREMENTAL: 0', 'CARGO_PROFILE_DEV_DEBUG: line-tables-only',
+                        'CARGO_PROFILE_TEST_DEBUG: line-tables-only'):
+            self.assertIn(setting, env)
+            self.assertEqual(workflow.count(setting.split(':')[0] + ':'), 1)
+
+
+class ContainerWorkflow(unittest.TestCase):
+    def test_container_workflow_runs_on_main_schedule_and_container_paths(self):
+        workflow = (WORKFLOWS / 'container.yml').read_text()
+        triggers = workflow.split('\non:\n', 1)[1].split('\npermissions:\n', 1)[0]
+        pull = triggers.split('  pull_request:\n', 1)[1].split('\n  push:\n', 1)[0]
+        paths = set(re.findall(r'^      - (\S+)$', pull, re.M))
+        for path in ('Dockerfile', '.dockerignore', 'compose.yaml', 'scripts/*container*',
+                     'scripts/smoke-*.py', 'nix/**', 'flake.lock', 'Cargo.lock', 'crates/*/Cargo.toml',
+                     '.github/workflows/container.yml'):
+            self.assertIn(path, paths)
+        self.assertIn('  push:\n    branches:\n      - main\n', triggers)
+        self.assertIn('  schedule:\n    - cron: "0 3 * * *"\n', triggers)
+        self.assertIn('  workflow_dispatch:\n', triggers)
+        self.assertNotIn('container_smoke_steps', (WORKFLOWS / 'ci.yml').read_text())
 
 
 class NativeTestDistribution(unittest.TestCase):
     def test_native_execution_consumes_binaries_while_other_suites_start_independently(self):
-        workflow = SCRIPT.parents[1].joinpath('.github/workflows/ci.yml').read_text()
+        workflow = (WORKFLOWS / 'ci.yml').read_text()
         direct = workflow.split('  test:\n', 1)[1].split('  native-build:\n', 1)[0]
+        qwen = direct.split('  test-local-qwen:\n', 1)[1]
+        direct = direct.split('  test-local-qwen:\n', 1)[0]
         build = workflow.split('  native-build:\n', 1)[1].split('  native-test:\n', 1)[0]
         run = workflow.split('  native-test:\n', 1)[1].split('  build:\n', 1)[0]
         self.assertIn('needs: changes', direct)
         self.assertNotIn('needs: [changes, native-build]', direct)
-        self.assertIn('suite: workspace', direct)
-        self.assertIn('suite: local-qwen', direct)
-        self.assertIn('--lib --tests --example production-eval --no-run', build)
+        self.assertIn('cargo test --workspace --locked', direct)
+        self.assertIn('needs: changes', qwen)
+        self.assertIn('.#spike --command cargo test -p notion-knowledge-retrieval --features local-qwen', qwen)
+        self.assertIn('--lib --tests $NATIVE_EXAMPLES --no-run', build)
+        # The production evaluation example links on main only, not on PRs.
+        self.assertIn("NATIVE_EXAMPLES: ${{ github.event_name != 'pull_request' && '--example production-eval' || '' }}",
+                      build)
         self.assertIn('--doc --locked', build)
         self.assertIn('scripts/test-compression-compat.py', build)
         self.assertIn('needs: [changes, native-build]', run)
@@ -200,11 +240,11 @@ class ContainerRegistryCachePublication(unittest.TestCase):
     """Registry manifests are published only by trusted main, after smoke."""
 
     def setUp(self):
-        self.workflow = (SCRIPT.parent.parent / '.github/workflows/ci.yml').read_text()
+        self.workflow = (WORKFLOWS / 'container.yml').read_text()
 
     def check_contract(self, workflow):
         pr = workflow.split('\n  container:\n', 1)[1].split('\n  container-main:\n', 1)[0]
-        main = workflow.split('\n  container-main:\n', 1)[1].split('\n  dependencies:\n', 1)[0]
+        main = workflow.split('\n  container-main:\n', 1)[1]
         self.assertIn('packages: read', pr)
         self.assertNotIn('packages: write', pr)
         self.assertIn('packages: write', main)
@@ -247,13 +287,13 @@ class ContainerRegistryCachePublication(unittest.TestCase):
             self.assertNotIn('ignore-error=true', required_block)
         self.assertNotIn('continue-on-error:', pr)
         self.assertIn('GITHUB_STEP_SUMMARY', pr)
-        self.assertIn('CI gate', workflow)
 
     def test_registry_export_is_main_only_and_required_smoke_is_not_optional(self):
         self.check_contract(self.workflow)
-        self.assertEqual(self.workflow.count(
+        ci = (WORKFLOWS / 'ci.yml').read_text()
+        self.assertEqual(ci.count(
             "if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'"),
-            self.workflow.count("uses: ./.github/actions/cargo-cache-save"))
+            ci.count("uses: ./.github/actions/cargo-cache-save"))
         pr = self.workflow.split('\n  container:\n', 1)[1].split('\n  container-main:\n', 1)[0]
         self.assertEqual(pr.count(
             "if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'"), 3)

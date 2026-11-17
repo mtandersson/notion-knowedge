@@ -145,8 +145,8 @@ separate index recovery procedure; this command rebuilds derived relations only.
 Credential-free verification:
 
 ```sh
-nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --test authoritative_refresh --locked
-nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test reconciliation_command --locked
+nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --test it authoritative_refresh:: --locked
+nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test it reconciliation_command:: --locked
 ```
 
 ## Original #374 acceptance audit

@@ -3,6 +3,9 @@ name = "notion-knowledge-server"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+# One integration binary per crate: each test binary links the full dependency
+# graph, so separate tests/*.rs files dominated native link time.
+autotests = false
 
 [features]
 default = []
@@ -39,3 +42,11 @@ rusqlite = { version = "0.41.0", default-features = false, features = ["bundled"
 tokio = { workspace = true, features = ["process", "io-util", "time"] }
 
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+
+[[test]]
+name = "allocator_bounds"
+path = "tests/allocator_bounds.rs"

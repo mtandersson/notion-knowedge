@@ -32,7 +32,7 @@ class CargoSnapshots(unittest.TestCase):
         subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
 
     def key(self, **kwargs):
-        values = dict(job='check', profile='debug', platform='Linux-X64',
+        values = dict(job='clippy', profile='debug', platform='Linux-X64',
                       toolchain=['rustc pinned', 'cargo pinned'], environment={})
         values.update(kwargs)
         return cache.keys(self.root, **values)
@@ -84,13 +84,15 @@ class CargoSnapshots(unittest.TestCase):
 
     def test_every_configured_ci_suite_can_restore_an_isolated_snapshot(self):
         workflow = Path(cache.__file__).resolve().parents[1] / '.github/workflows/ci.yml'
-        # Lanes of one suite share compiled artifacts; different suites remain
-        # isolated even when a suite appears in several matrix rows.
-        direct = workflow.read_text().split('  test:\n', 1)[1].split('  native-build:\n', 1)[0]
-        suites = set(re.findall(r'- suite: ([A-Za-z0-9_-]+)', direct))
-        self.assertTrue(suites)
-        snapshots = [self.key(job=f'test-{suite}') for suite in suites]
-        self.assertEqual(len({entry['prefix'] for entry in snapshots}), len(suites))
+        # Every Cargo job restores its own snapshot; dependency downloads stay shared.
+        jobs = re.findall(r'uses: ./.github/actions/cargo-cache-restore\n\s+with:\n\s+job: (\S+)\n\s+profile: (\S+)',
+                          workflow.read_text())
+        self.assertEqual({job for job, _ in jobs},
+                         {'clippy', 'clippy-features', 'test-workspace', 'test-local-qwen',
+                          'test-native-build', 'build'})
+        self.assertEqual(len(jobs), len({job for job, _ in jobs}))
+        snapshots = [self.key(job=job, profile=profile) for job, profile in jobs]
+        self.assertEqual(len({entry['prefix'] for entry in snapshots}), len(jobs))
         self.assertEqual(len({entry['downloads-key'] for entry in snapshots}), 1)
 
     def test_actions_save_only_when_no_compatible_target_was_restored(self):
@@ -174,7 +176,7 @@ class CargoSnapshots(unittest.TestCase):
         env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ['PATH'], GITHUB_OUTPUT=str(output))
         env.pop('RUSTC', None)
         result = subprocess.run(['python3', str(Path(cache.__file__).resolve()), 'key',
-                                 '--job', 'check', '--profile', 'debug', '--os', 'Linux', '--arch', 'X64'],
+                                 '--job', 'clippy', '--profile', 'debug', '--os', 'Linux', '--arch', 'X64'],
                                 cwd=self.root, env=env, check=True, capture_output=True, text=True)
         emitted = dict(line.split('=', 1) for line in output.read_text().splitlines())
         self.assertEqual(emitted, json.loads(result.stdout))

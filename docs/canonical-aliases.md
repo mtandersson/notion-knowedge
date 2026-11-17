@@ -79,7 +79,7 @@ Standalone `PageAliasStore` remains a component port, not an authorization gate.
 
 ## Installed acceptance evidence
 
-`crates/server/tests/reconciliation_command.rs` exercises the actual shared
+`crates/server/tests/it/reconciliation_command.rs` exercises the actual shared
 `IndexRuntime`, real Notion HTTP fixtures and committed SQLite/LanceDB state:
 
 - `installed_aliases_preserve_ambiguity_explicit_sources_rebuild_and_restart`

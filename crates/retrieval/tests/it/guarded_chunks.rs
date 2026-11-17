@@ -475,7 +475,7 @@ fn two_process_real_lance_writers_survive_observer_cancellation_and_reject_stale
         std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "process_writer_child",
+                "guarded_chunks::process_writer_child",
                 "--ignored",
                 "--nocapture",
             ])

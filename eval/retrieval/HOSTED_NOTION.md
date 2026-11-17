@@ -76,7 +76,7 @@ establishes surface distinctions, not this connection's entitlements.
 ## Validation and CI
 
 ```sh
-nix develop --command cargo test -p notion-knowledge-retrieval --test hosted_baseline --locked
+nix develop --command cargo test -p notion-knowledge-retrieval --test it hosted_baseline:: --locked
 ```
 
 The offline tests enforce dataset/query alignment, explicit observation context

@@ -245,7 +245,7 @@ reconciliation/index writer and its separate integration tests.
 Run the integrity and coverage checks with the repository toolchain:
 
 ```sh
-nix develop --command cargo test -p notion-knowledge-retrieval --test evaluation_dataset --locked
+nix develop --command cargo test -p notion-knowledge-retrieval --test it evaluation_dataset:: --locked
 ```
 
 These tests run in the normal workspace CI. They check unique/resolvable source

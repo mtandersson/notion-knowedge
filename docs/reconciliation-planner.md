@@ -52,5 +52,5 @@ Credential-free integration verification uses fake authoritative HTTP and real
 SQLite/LanceDB adapters in `authoritative_refresh`:
 
 ```sh
-nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --test authoritative_refresh --locked
+nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --test it authoritative_refresh:: --locked
 ```

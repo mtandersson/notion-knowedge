@@ -102,8 +102,8 @@ uses production adapters rather than an application callback double.
 Run the acceptance tests with the pinned optional-feature toolchain:
 
 ```sh
-nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --test authoritative_refresh --locked
-nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --test durable_plan --locked
+nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --test it authoritative_refresh:: --locked
+nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --test it durable_plan:: --locked
 nix develop .#spike --command cargo test --workspace --features notion-knowledge-server/webhook-worker --locked
 ```
 

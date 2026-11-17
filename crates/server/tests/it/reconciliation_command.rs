@@ -821,7 +821,7 @@ async fn read_only_commands_reject_previous_schema_without_migration_or_auxiliar
     let f = Fixture::new(&http).await;
     let db = rusqlite::Connection::open(&f.state).unwrap();
     db.execute_batch(include_str!(
-        "../../retrieval/tests/fixtures/remove_schedule_schema.sql"
+        "../../../retrieval/tests/it/fixtures/remove_schedule_schema.sql"
     ))
     .unwrap();
     drop(db);
@@ -3674,7 +3674,7 @@ async fn streaming_progress_reports_actual_commits_and_failed_pages() {
         tokio::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "truncated_walk_read_fails_only_that_page_without_a_second_read",
+                "reconciliation_command::truncated_walk_read_fails_only_that_page_without_a_second_read",
                 "--nocapture",
             ])
             .stdin(std::process::Stdio::null())
@@ -3795,7 +3795,7 @@ async fn embedding_input_limits_remain_visible_while_siblings_commit_and_normal_
 async fn embedding_input_limit_logs_contain_only_the_typed_reason_and_counts() {
     let output = tokio::time::timeout(std::time::Duration::from_secs(30),
         tokio::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "embedding_input_limits_remain_visible_while_siblings_commit_and_normal_sync_can_retry", "--nocapture"])
+            .args(["--exact", "reconciliation_command::embedding_input_limits_remain_visible_while_siblings_commit_and_normal_sync_can_retry", "--nocapture"])
             .stdin(std::process::Stdio::null()).kill_on_drop(true).output()).await.unwrap().unwrap();
     assert!(
         output.status.success(),
@@ -3977,7 +3977,7 @@ async fn page_deadline_logs_expose_only_fixed_reason_and_aggregate_counts() {
         std::time::Duration::from_secs(30),
         tokio::process::Command::new(std::env::current_exe().unwrap())
             .args([
-                "streaming_initial_sync_separates_discovery_and_page_budgets",
+                "reconciliation_command::streaming_initial_sync_separates_discovery_and_page_budgets",
                 "--exact",
                 "--nocapture",
             ])

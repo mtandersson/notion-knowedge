@@ -2,7 +2,7 @@
 
 The permanent CI unit-test job runs the retrieval crate with its optional
 local-lancedb feature. The new integration test at
-crates/retrieval/tests/ci_retrieval_quality.rs is part of that job; it fails
+crates/retrieval/tests/it/ci_retrieval_quality.rs is part of that job; it fails
 CI when native search ranking drops below fixed thresholds.
 
 ## Corpus and measurements
@@ -29,7 +29,7 @@ and ranking path*, not semantic model relevance or production search quality.
 
 ## Run and baseline maintenance
 
-    nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --test ci_retrieval_quality --locked
+    nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --test it ci_retrieval_quality:: --locked
 
 The existing CI Unit tests job runs the same integration test as part of
 its local-lancedb feature suite, and CI gate requires the selected tests to pass.

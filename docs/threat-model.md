@@ -79,7 +79,7 @@ Implemented protections and their limits:
   and semantic outputs are bounded at 512 KiB. These do **not** bound total
   concurrent sessions or requests; [installed admission budgets](security-resource-acceptance.md)
   separately bound those process-local resources. Deployment containment remains #416.
-  [Transport tests](../crates/server/tests/http.rs) cover those current gates.
+  [Transport tests](../crates/server/tests/it/http.rs) cover those current gates.
 - [Health diagnostics](diagnostics.md) expose fixed identity and dependency
   states without tokens, signed URLs or upstream errors. `/health` has explicit
   Host/Origin gates, requires no session or credential, and is intended for

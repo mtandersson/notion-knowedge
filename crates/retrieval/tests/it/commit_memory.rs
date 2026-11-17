@@ -4,7 +4,7 @@
 //! it isolates Lance commits; with `NK_QWEN_ASSETS` (feature local-qwen) it
 //! adds real model activations. Compare `MALLOC_ARENA_MAX` unset vs 2:
 //! `NK_PROBE_PAGES=40 NK_PROBE_REPS=16 NK_PROBE_GAP_MS=2000 cargo test
-//! --release --features local-lancedb,local-qwen --test commit_memory --
+//! --release --features local-lancedb,local-qwen --test it commit_memory --
 //! --ignored --nocapture`.
 use notion_knowledge_core::{
     embedding::{EmbeddingFuture, EmbeddingMetadata, EmbeddingProvider},

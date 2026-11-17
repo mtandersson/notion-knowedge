@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 fn baseline() -> Value {
     serde_json::from_str(include_str!(
-        "../../../eval/retrieval/hosted-notion-2026-10-01.json"
+        "../../../../eval/retrieval/hosted-notion-2026-10-01.json"
     ))
     .unwrap()
 }
@@ -12,7 +12,7 @@ fn baseline() -> Value {
 #[test]
 fn baseline_preserves_every_fixture_query_and_its_information_need() {
     let dataset: Value = serde_json::from_str(include_str!(
-        "../../../eval/retrieval/personal-knowledge-v1.json"
+        "../../../../eval/retrieval/personal-knowledge-v1.json"
     ))
     .unwrap();
     let record = baseline();

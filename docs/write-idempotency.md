@@ -56,5 +56,5 @@ or the read/write window in Notion. The Notion API has not been proven to
 support atomic compare-and-swap; #302 remains necessary. No MCP write tool is
 exposed by this change.
 
-Run `cargo test -p notion-knowledge-retrieval --test idempotency --locked`
+Run `cargo test -p notion-knowledge-retrieval --test it idempotency:: --locked`
 plus workspace formatting, Clippy, and full CI.

@@ -209,11 +209,11 @@ fn intent_insert_failure_rolls_back_held_queue_and_preserves_other_admissions() 
     raw.execute_batch("DROP TRIGGER fail_intent").unwrap();
     db.begin_file_refresh_intent(&key, &auth, 0, 10).unwrap();
     for n in 2..=MAX_HELD_PER_WORKSPACE as usize {
-        db.begin_file_refresh_intent(&crate::key(n), &auth, 0, 10)
+        db.begin_file_refresh_intent(&crate::file_refresh_intents::key(n), &auth, 0, 10)
             .unwrap();
     }
     assert!(
-        db.begin_file_refresh_intent(&crate::key(100), &auth, 0, 10)
+        db.begin_file_refresh_intent(&crate::file_refresh_intents::key(100), &auth, 0, 10)
             .is_err()
     );
     assert_eq!(

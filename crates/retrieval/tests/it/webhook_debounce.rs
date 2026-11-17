@@ -266,10 +266,10 @@ fn v4_upgrade_preserves_pending_retry_failed_budget_and_existing_operational_sta
     let path = path();
     let raw = rusqlite::Connection::open(&path).unwrap();
     for migration in [
-        include_str!("../migrations/0001_initial.sql"),
-        include_str!("../migrations/0002_reconciliation.sql"),
-        include_str!("../migrations/0003_webhook_inbox.sql"),
-        include_str!("../migrations/0004_webhook_recovery.sql"),
+        include_str!("../../migrations/0001_initial.sql"),
+        include_str!("../../migrations/0002_reconciliation.sql"),
+        include_str!("../../migrations/0003_webhook_inbox.sql"),
+        include_str!("../../migrations/0004_webhook_recovery.sql"),
     ] {
         raw.execute_batch(migration).unwrap();
     }

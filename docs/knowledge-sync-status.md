@@ -50,6 +50,6 @@ freshness or production readiness.
 Verify with the pinned production toolchain:
 
 ```sh
-nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test sync_status --locked
-nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --test authoritative_refresh --locked
+nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test it sync_status:: --locked
+nix develop .#spike --command cargo test -p notion-knowledge-retrieval --features local-lancedb --test it authoritative_refresh:: --locked
 ```

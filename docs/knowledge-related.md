@@ -99,6 +99,6 @@ Credential-free joined smoke, using typed local Notion fixtures, actual
 production commits, reopened SQLite authority and real MCP transports:
 
 ```sh
-nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test webhook_worker installed_graph --locked
-nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test webhook_worker authenticated_http_serves_committed --locked
+nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test it installed_graph --locked
+nix develop .#spike --command cargo test -p notion-knowledge-server --features webhook-worker --test it authenticated_http_serves_committed --locked
 ```
