@@ -78,7 +78,8 @@ pub enum SyncMode {
     /// pages it no longer reached.
     Full,
     /// Search for pages edited since the inventory's newest edit and place
-    /// them through its parent map. Falls back to `Full` with no inventory.
+    /// them through its parent map. Falls back to `Full` with no inventory,
+    /// and is followed by `Full` when the search listing is cut short.
     Incremental,
     /// One page retrieve placed through the parent map (callbacks).
     Page(notion_knowledge_core::backend::PageId),
@@ -920,6 +921,19 @@ impl IndexRuntime {
                 finished_at: now_ms() / 1000,
             })
             .map_err(|_| "cache inventory state unavailable")?;
+        if truncated {
+            // A cut-short listing may have missed older changes that no later
+            // search returns (the high-water mark has moved past them). Recover
+            // them now with a full walk under the same lease and budget instead
+            // of waiting for the next periodic walk.
+            let recovered = Box::pin(self.sync_from_walk(settings, lease, SyncMode::Full)).await?;
+            return Ok(SyncTotals {
+                indexed: totals.indexed + recovered.indexed,
+                failed: totals.failed + recovered.failed,
+                removed: totals.removed + recovered.removed,
+                ..recovered
+            });
+        }
         Ok(totals)
     }
 

@@ -1346,24 +1346,34 @@ async fn incremental_with_no_changes_only_calls_search() {
 }
 
 #[tokio::test]
-async fn cut_short_search_listing_reports_the_inventory_incomplete_until_a_full_walk() {
+async fn cut_short_search_listing_recovers_missed_changes_with_a_full_walk() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
     sync(&f, &http, SyncMode::Full).await;
-    assert_eq!(local_status(&f).await["inventory"]["walk_complete"], true);
-    // The listing reports more results but its cursor cannot be followed.
-    http.change(|m| m.repeat_search_cursor = true);
-    sync(&f, &http, SyncMode::Incremental).await;
+    // An edit the listing never reaches: it reports more results but its
+    // cursor cannot be followed.
+    http.change(|m| {
+        m.repeat_search_cursor = true;
+        m.revision = "2026-10-11T12:00:00Z".into();
+        m.markdown.push_str("Missed basil.\n");
+    });
+    let before = http.requests().len();
+    let (totals, indexed) = sync(&f, &http, SyncMode::Incremental).await;
+    let requests = new_requests(&http, before);
+    assert!(
+        requests.contains(&format!("/v1/pages/{PAGE}/markdown")),
+        "{requests:?}"
+    );
+    assert!(totals.complete && totals.indexed >= 1);
+    assert!(indexed.contains(PAGE));
     let state = f.open(&http, OpenMode::ExistingWrite).await;
     let last = state.coordinator.state().last_sync().unwrap().unwrap();
-    assert!(last.incremental && !last.complete);
-    assert_eq!(local_status(&f).await["inventory"]["walk_complete"], false);
-    // A complete search cannot vouch for what the cut-short one missed.
-    http.change(|m| m.repeat_search_cursor = false);
-    sync(&f, &http, SyncMode::Incremental).await;
-    assert_eq!(local_status(&f).await["inventory"]["walk_complete"], false);
-    sync(&f, &http, SyncMode::Full).await;
+    assert!(!last.incremental && last.complete);
     assert_eq!(local_status(&f).await["inventory"]["walk_complete"], true);
+    // The recovered edit is settled: a later complete search finds no work.
+    http.change(|m| m.repeat_search_cursor = false);
+    let (totals, _) = sync(&f, &http, SyncMode::Incremental).await;
+    assert_eq!(totals.indexed, 0);
 }
 
 #[tokio::test]
