@@ -32,6 +32,24 @@ pub struct GuardedChunkTable {
     embedding: EmbeddingMetadata,
     coordinator: Arc<IndexCommitCoordinator>,
     lexical_binding: Option<LexicalIndexBinding>,
+    cadence: Arc<std::sync::Mutex<OptimizeCadence>>,
+}
+
+/// Committed pages after which the commit path runs index optimization.
+/// Between optimizations at most this many pages' rows are outside the FTS and
+/// vector indexes; search still finds them by scanning unindexed fragments.
+pub const INDEX_OPTIMIZE_EVERY_PAGES: u32 = 32;
+/// A pending tail older than this is optimized at the next committed page.
+pub const INDEX_OPTIMIZE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// In-process count of pages committed since the last successful index
+/// optimization. Shared by clones of one binding. It is only a scheduling hint:
+/// after a restart, a crash or a failed pass the next pass folds every
+/// unindexed row regardless of this count.
+#[derive(Default)]
+struct OptimizeCadence {
+    pending: u32,
+    oldest: Option<std::time::Instant>,
 }
 
 /// Expand content only from a compatible committed snapshot. Hold the shared
@@ -260,6 +278,7 @@ impl GuardedChunkTable {
             embedding,
             coordinator,
             lexical_binding,
+            cadence: Default::default(),
         })
     }
 
@@ -323,8 +342,9 @@ impl GuardedChunkTable {
     }
 
     /// Build or refresh the configured vector index under the same external
-    /// guard. Call after the initial crawl has populated real vectors; new page
-    /// commits subsequently keep any existing vector index up to date.
+    /// guard. Call after the initial crawl has populated real vectors; page
+    /// commits then keep any existing vector index current through
+    /// [`Self::optimize_indexes`] on a bounded cadence.
     pub fn ensure_vector_index(
         &self,
         config: VectorIndexConfig,
@@ -805,8 +825,13 @@ impl GuardedChunkTable {
         let embedding = self.embedding.clone();
         let lexical = self.lexical_binding.clone();
         let operation = prepared.operation.clone();
-        self.coordinator
-            .submit_with_authority(operation, lease, clock, move |context| async move {
+        let this = self.clone();
+        let maintenance = (lease.clone(), clock.clone());
+        let commit = self.coordinator.submit_with_authority(
+            operation,
+            lease,
+            clock,
+            move |context| async move {
                 if prepared.embedding != embedding
                     || prepared.lexical_binding != lexical
                     || context.binding().table() != table_name
@@ -873,8 +898,51 @@ impl GuardedChunkTable {
                         .await
                         .map_err(|_| FailureClass::Index)?;
                 }
-                // No detached maintenance: serialization extends to the end of
-                // both index families' real on-disk mutations.
+                Ok(authority)
+            },
+        );
+        async move {
+            let outcome = commit.await?;
+            if outcome == CommitOutcome::Applied && this.record_commit() {
+                // The page is durable; a failed pass is retried by the next one.
+                let _ = this.optimize_indexes(maintenance.0, maintenance.1).await;
+            }
+            Ok(outcome)
+        }
+    }
+
+    /// Count one committed page and report whether optimization is due.
+    fn record_commit(&self) -> bool {
+        let mut cadence = self.cadence.lock().unwrap_or_else(|e| e.into_inner());
+        cadence.pending = cadence.pending.saturating_add(1);
+        let oldest = *cadence.oldest.get_or_insert_with(std::time::Instant::now);
+        cadence.pending >= INDEX_OPTIMIZE_EVERY_PAGES || oldest.elapsed() >= INDEX_OPTIMIZE_INTERVAL
+    }
+
+    /// Fold every row written since the last pass into the FTS indexes and any
+    /// existing vector index, as one guarded maintenance step. Page commits
+    /// call this on a bounded cadence; sync calls it once at the end. It writes
+    /// no receipt and is idempotent, so a crash or cancel before it completes
+    /// leaves committed rows searchable and the next pass repairs the indexes.
+    pub fn optimize_indexes(
+        &self,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> impl Future<Output = Result<(), CommitError>> + Send + 'static {
+        let directory = self.index_directory.clone();
+        let table_name = self.table_name.clone();
+        let embedding = self.embedding.clone();
+        let lexical = self.lexical_binding.clone();
+        let cadence = self.cadence.clone();
+        let started = std::time::Instant::now();
+        let pass = self
+            .coordinator
+            .maintain(lease, clock, move |context| async move {
+                let current = open_current(&directory, &table_name, &embedding, &lexical)
+                    .await
+                    .map_err(failure)?;
+                context.revalidate().map_err(fence_failure)?;
+                lexical_binding::verify(&directory, &lexical).map_err(failure)?;
                 current
                     .ensure_fts_index(&if lexical.is_some() {
                         FtsIndexConfig::lexical_expansion_v1()
@@ -897,6 +965,7 @@ impl GuardedChunkTable {
                         .validate_vector_index_layout()
                         .await
                         .map_err(failure)?;
+                    context.revalidate().map_err(fence_failure)?;
                     current
                         .table
                         .optimize(OptimizeAction::Index(
@@ -906,8 +975,18 @@ impl GuardedChunkTable {
                         .await
                         .map_err(|_| FailureClass::Index)?;
                 }
-                Ok(authority)
-            })
+                Ok(())
+            });
+        async move {
+            pass.await?;
+            // Pages committed while the pass ran may be unindexed; keep them
+            // pending so the bound covers them.
+            let mut cadence = cadence.lock().unwrap_or_else(|e| e.into_inner());
+            if cadence.oldest.is_some_and(|oldest| oldest <= started) {
+                *cadence = OptimizeCadence::default();
+            }
+            Ok(())
+        }
     }
 }
 

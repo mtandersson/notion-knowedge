@@ -824,6 +824,19 @@ impl IndexRuntime {
                 run
             }
         };
+        // Fold the tail of pages committed since the last cadence pass into
+        // the search indexes. Committed rows stay searchable if this fails; the
+        // next commit or sync repeats it.
+        let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| now_ms() / 1000);
+        if Box::pin(self.handler.chunks().optimize_indexes(lease.clone(), clock))
+            .await
+            .is_err()
+        {
+            eprintln!(
+                "{}",
+                serde_json::json!({"operation": "index_optimize", "status": "deferred"})
+            );
+        }
         let mut walk = (totals.complete, totals.held);
         if !full {
             totals.drift.removed = totals.removed;

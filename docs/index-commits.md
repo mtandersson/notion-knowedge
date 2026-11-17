@@ -378,3 +378,19 @@ from other physical roots owned by the same binding during a root transition;
 standalone projections continue to replace only their explicit namespace.
 `rebuild-aliases` uses the existing guarded Inventory maintenance transaction and
 invalidates only alias completeness, retaining operational history.
+
+## Index optimization cadence
+
+A page commit performs only the fenced `merge_insert` (or page delete) and its
+receipt. FTS and vector index optimization is a separate guarded maintenance
+step, `GuardedChunkTable::optimize_indexes`, run under the same coordinator
+guard and lease. The commit path runs it after every
+`INDEX_OPTIMIZE_EVERY_PAGES` (32) committed pages, or at the next commit once
+the oldest pending page is older than `INDEX_OPTIMIZE_INTERVAL` (60 s), and
+every sync runs it once before recording the sync. Search therefore scans at
+most 32 pages of unindexed rows (plus any rows from a failed pass) with an
+exact flat scan beside the indexes; Lance searches unindexed fragments for
+both FTS and vector queries, which the guarded io tests verify on the pinned
+version. The pass writes no receipt and is idempotent: a crash, cancel or
+failure after a commit leaves the commit acknowledged and its rows searchable,
+and the next pass folds them in. A failed pass never fails the page commit.

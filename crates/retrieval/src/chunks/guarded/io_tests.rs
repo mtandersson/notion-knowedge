@@ -557,7 +557,8 @@ fn independent_writer_waits_through_real_data_and_index_io_after_cancellation_an
     fs::write(f.root.join("fresh-fence"), fresh.fence.to_string()).unwrap();
     fs::write(f.root.join("two-begin"), "").unwrap();
     wait_for(|| f.root.join("two-submitted").exists());
-    for stage in ["data", "index"] {
+    // A page commit writes data only; index optimization is a separate pass.
+    for stage in ["data"] {
         wait_for(|| f.root.join(format!("{stage}-entered")).exists());
         std::thread::sleep(std::time::Duration::from_millis(150));
         assert!(!f.root.join("two-finished").exists());
@@ -728,8 +729,16 @@ async fn real_io_child() {
         Arc::new(move || fs::read_to_string(&time_path).unwrap().parse().unwrap());
     let observer = table.commit_page(prepared, lease, clock, || async { Ok(()) });
     if name == "one" && root.join("fail-index").exists() {
+        assert_eq!(observer.await, Ok(CommitOutcome::Applied));
+        let lease = Lease {
+            fence,
+            expires_at: 110,
+        };
+        let time_path = root.join("time");
+        let clock: Arc<dyn Fn() -> i64 + Send + Sync> =
+            Arc::new(move || fs::read_to_string(&time_path).unwrap().parse().unwrap());
         assert_eq!(
-            observer.await,
+            table.optimize_indexes(lease, clock).await,
             Err(CommitError::Operation(FailureClass::Index))
         );
     } else if name == "one" {
@@ -737,7 +746,7 @@ async fn real_io_child() {
         drop(observer);
         fs::write(root.join("observer-dropped"), "").unwrap();
         // Eager operation ownership means observer drop is not completion.
-        wait_for(|| root.join("index-release").exists());
+        wait_for(|| root.join("data-release").exists());
         // Taking the same directory guard proves all IO and final ack attempt
         // have finished before the child exits.
         let guard = std::fs::File::open(root.join("index")).unwrap();
@@ -757,7 +766,7 @@ async fn real_io_child() {
 }
 
 #[test]
-fn failed_real_index_write_is_unacknowledged_and_new_fence_replay_repairs_search() {
+fn failed_index_optimization_keeps_the_commit_acknowledged_and_the_next_pass_repairs_it() {
     let rt = runtime();
     let f = Fixture::new();
     rt.block_on(f.create());
@@ -771,38 +780,39 @@ fn failed_real_index_write_is_unacknowledged_and_new_fence_replay_repairs_search
     assert!(one.wait().unwrap().success());
     assert!(
         f.root.join("index-entered").exists(),
-        "failure must be inside real maintenance"
+        "failure must be inside real index maintenance"
+    );
+    // The page commit is durable and acknowledged independently of the pass.
+    assert_eq!(
+        f.coordinator.receipt("one").unwrap().unwrap().status,
+        ReceiptStatus::Applied
     );
     assert_eq!(
-        f.coordinator.receipt("one").unwrap().unwrap().failure,
-        Some(FailureClass::Index)
+        f.coordinator
+            .state()
+            .page_state("page")
+            .unwrap()
+            .unwrap()
+            .content_hash(),
+        Some("one")
     );
-    assert!(f.coordinator.state().page_state("page").unwrap().is_none());
     let fresh = f.coordinator.state().acquire_lease(110, 100).unwrap();
     rt.block_on(async {
-        // Read raw persisted rows through a preparation handle, whose opening
-        // cannot perform startup repairs, proving apply preceded index failure.
-        let current = super::open_current(&f.index, "chunks", &f.embedding, &None)
-            .await
-            .unwrap();
-        assert_eq!(current.count_rows().await.unwrap(), 1);
-        let table = f.guarded();
-        let provider = CountingProvider::new(f.embedding.clone());
-        let replay = table
-            .prepare_page(
-                &provider,
-                operation("one", "one", false),
-                &[chunk("one", "leaderblueberry", "one")],
-            )
-            .await
-            .unwrap();
-        assert_eq!(provider.total(), 0);
+        let readable = f.readable().await;
         assert_eq!(
-            table
-                .commit_page(replay, fresh.clone(), Arc::new(|| 110), || async { Ok(()) })
-                .await,
-            Ok(CommitOutcome::Applied)
+            readable
+                .fts_query("text", "leaderblueberry", 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "unindexed committed rows stay searchable"
         );
+        let table = f.guarded();
+        table
+            .optimize_indexes(fresh.clone(), Arc::new(|| 110))
+            .await
+            .unwrap();
         table
             .ensure_vector_index(
                 VectorIndexConfig {
@@ -816,6 +826,7 @@ fn failed_real_index_write_is_unacknowledged_and_new_fence_replay_repairs_search
             )
             .await
             .unwrap();
+        assert!(unindexed_rows(&f).await.iter().all(|rows| *rows == 0));
         let readable = f.readable().await;
         assert_eq!(readable.count_rows().await.unwrap(), 1);
         assert_eq!(
@@ -835,19 +846,6 @@ fn failed_real_index_write_is_unacknowledged_and_new_fence_replay_repairs_search
             1
         );
     });
-    assert_eq!(
-        f.coordinator.receipt("one").unwrap().unwrap().status,
-        ReceiptStatus::Applied
-    );
-    assert_eq!(
-        f.coordinator
-            .state()
-            .page_state("page")
-            .unwrap()
-            .unwrap()
-            .content_hash(),
-        Some("one")
-    );
 }
 
 #[tokio::test]
@@ -1724,3 +1722,163 @@ async fn guarded_index_maintenance_rechecks_lease_after_index_inspection_before_
 }
 
 mod lexical_identity;
+
+fn page_operation(id: &str, page: &str) -> PageOperation {
+    let checkpoint = PageSyncState::present(
+        page.into(),
+        format!("hash:{page}"),
+        Some("revision-v1".into()),
+    )
+    .unwrap();
+    PageOperation::new(id, "revision-v1", PageAction::Refresh, checkpoint).unwrap()
+}
+
+fn page_chunk(page: &str, text: &str) -> IndexedChunk {
+    let mut chunk = chunk(&format!("{page}-chunk"), text, "Title");
+    chunk.metadata.page_id = page.into();
+    chunk.metadata.url = format!("https://example.invalid/{page}");
+    chunk
+}
+
+async fn commit_new_page(f: &Fixture, table: &GuardedChunkTable, page: &str, text: &str) {
+    let provider = CountingProvider::new(f.embedding.clone());
+    let prepared = table
+        .prepare_page(
+            &provider,
+            page_operation(&format!("op-{page}"), page),
+            &[page_chunk(page, text)],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        table
+            .commit_page(prepared, f.lease.clone(), clock(), || async { Ok(()) })
+            .await
+            .unwrap(),
+        CommitOutcome::Applied
+    );
+}
+
+async fn unindexed_rows(f: &Fixture) -> Vec<usize> {
+    let current = super::open_current(&f.index, "chunks", &f.embedding, &None)
+        .await
+        .unwrap();
+    let mut counts = Vec::new();
+    for name in super::CHUNK_FTS_INDEXES
+        .iter()
+        .map(|(name, _)| *name)
+        .chain([super::CHUNK_VECTOR_INDEX_NAME])
+    {
+        counts.push(
+            current
+                .table
+                .index_stats(name)
+                .await
+                .unwrap()
+                .expect("index exists")
+                .num_unindexed_rows,
+        );
+    }
+    counts
+}
+
+async fn found_by_both_rankers(
+    table: &GuardedChunkTable,
+    page: &str,
+    word: &str,
+    vector: [f32; 3],
+) -> bool {
+    let snapshot = table.search_snapshot().await.unwrap();
+    let lexical = snapshot
+        .lexical_search(crate::chunks::LexicalQuery {
+            query: word.into(),
+            limit: 10,
+            page_ids: None,
+            root_page_ids: None,
+            metadata: Default::default(),
+        })
+        .await
+        .unwrap();
+    let semantic = snapshot.vector_query(&vector, 10, 1).await.unwrap();
+    lexical.iter().any(|hit| hit.source.page_id == page)
+        && semantic
+            .iter()
+            .any(|hit| hit.chunk_id == format!("{page}-chunk"))
+}
+
+#[tokio::test]
+async fn pages_committed_after_the_last_optimization_are_found_by_lexical_and_vector_search() {
+    let f = Fixture::new();
+    f.create().await;
+    let table = f.guarded();
+    commit_new_page(&f, &table, "seed", "seed baseline").await;
+    table
+        .ensure_vector_index(
+            VectorIndexConfig {
+                num_partitions: Some(1),
+                ..Default::default()
+            },
+            f.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    table
+        .optimize_indexes(f.lease.clone(), clock())
+        .await
+        .unwrap();
+    assert!(unindexed_rows(&f).await.iter().all(|rows| *rows == 0));
+
+    // CountingProvider embeds text of length n as [n, 1, 0].
+    let text = "zanzibar marmalade";
+    commit_new_page(&f, &table, "fresh", text).await;
+    assert!(
+        unindexed_rows(&f).await.iter().all(|rows| *rows >= 1),
+        "a single commit must not run index optimization"
+    );
+    let vector = [text.len() as f32, 1.0, 0.0];
+    assert!(found_by_both_rankers(&table, "fresh", "zanzibar", vector).await);
+
+    table
+        .optimize_indexes(f.lease.clone(), clock())
+        .await
+        .unwrap();
+    assert!(unindexed_rows(&f).await.iter().all(|rows| *rows == 0));
+    assert!(found_by_both_rankers(&table, "fresh", "zanzibar", vector).await);
+}
+
+#[tokio::test]
+async fn commits_optimize_indexes_once_the_page_cadence_is_reached() {
+    let f = Fixture::new();
+    f.create().await;
+    let table = f.guarded();
+    commit_new_page(&f, &table, "seed", "seed baseline").await;
+    table
+        .ensure_vector_index(
+            VectorIndexConfig {
+                num_partitions: Some(1),
+                ..Default::default()
+            },
+            f.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    table
+        .optimize_indexes(f.lease.clone(), clock())
+        .await
+        .unwrap();
+    // Count from a fresh binding, which starts with no pending pages.
+    let table = f.guarded();
+    for page in 1..super::INDEX_OPTIMIZE_EVERY_PAGES {
+        commit_new_page(&f, &table, &format!("page-{page}"), &format!("body {page}")).await;
+        assert!(
+            unindexed_rows(&f)
+                .await
+                .iter()
+                .all(|rows| *rows as u32 == page)
+        );
+    }
+    commit_new_page(&f, &table, "last", "final body").await;
+    assert!(unindexed_rows(&f).await.iter().all(|rows| *rows == 0));
+}
