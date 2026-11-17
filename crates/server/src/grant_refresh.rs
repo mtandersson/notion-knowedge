@@ -344,7 +344,7 @@ impl GrantRefreshWorker {
         };
         // A page the inventory cannot place counts in `drift.unplaced`; the
         // next walk indexes it.
-        let result = Box::pin(index.sync_page(
+        let result = Box::pin(index.sync_page_as_user(
             &deadline,
             &mut lease,
             PageId(claim.key.page_id.clone()),
