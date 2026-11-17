@@ -105,7 +105,10 @@ pub(crate) fn attach_client(
         .notion_scope
         .as_ref()
         .ok_or("authoritative scope unavailable")?;
-    let handler = handler.and_authoritative_scope(Arc::new(source.clone()), scope.clone())?;
+    let handler = handler.and_authoritative_scope(
+        crate::inventory_membership::from_config(config),
+        scope.clone(),
+    )?;
     let Some(settings) = &config.file_ingestion else {
         return Ok(handler);
     };

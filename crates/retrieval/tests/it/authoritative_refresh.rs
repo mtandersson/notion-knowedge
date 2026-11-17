@@ -3563,8 +3563,11 @@ async fn installed_relations_replace_only_their_family_and_repair_both_noop_path
             .filter(|e| e.relation_type().starts_with("relation:"))
             .all(|e| e.display_name() == Some("Renamed ingredients"))
     );
-    let gate = notion_knowledge_core::root_scope::RootScopeGate::new(source.client(), authority())
-        .unwrap();
+    let gate = notion_knowledge_core::root_scope::ReadScopeGate::new(
+        index.coordinator.state().clone(),
+        authority(),
+    )
+    .unwrap();
     let navigation = notion_knowledge_mcp::related::navigate(
         &notion_knowledge_mcp::related::RelatedRequest {
             page_id: PAGE.into(),
@@ -4166,8 +4169,11 @@ async fn reconciliation_converges_target_only_changes_and_rebuilds_derived_relat
         .await
         .unwrap();
     assert_eq!((renamed.changed, renamed.failed_pages()), (1, 0));
-    let gate = notion_knowledge_core::root_scope::RootScopeGate::new(source.client(), authority())
-        .unwrap();
+    let gate = notion_knowledge_core::root_scope::ReadScopeGate::new(
+        index.coordinator.state().clone(),
+        authority(),
+    )
+    .unwrap();
     let navigation = notion_knowledge_mcp::related::navigate(
         &notion_knowledge_mcp::related::RelatedRequest {
             page_id: PAGE.into(),

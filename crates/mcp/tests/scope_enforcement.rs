@@ -1,12 +1,11 @@
 //! End-to-end MCP authorization regressions: no indexed content escapes a
 //! missing, foreign, moved or unverifiable physical Notion root scope.
 use notion_knowledge_core::{
-    backend::{BackendError, BackendErrorKind, BackendFuture, PageId},
+    backend::PageId,
     discovery::ExclusionRules,
-    lifecycle::{
-        LifecycleEvidence, LifecycleKind, LifecycleNode, LifecycleScope, LifecycleStatus,
-        PageLifecycle, PhysicalParent,
-    },
+    inventory::{InventoryEntry, InventoryParent},
+    lifecycle::LifecycleScope,
+    root_scope::{Membership, ScopeError},
     search::{SearchFuture, SearchHit, SearchSource, SemanticQuery, SemanticSearch},
     source::{
         ExpandedSource, SourceContentScope, SourceExpandQuery, SourceExpansion,
@@ -47,77 +46,31 @@ impl Physical {
     }
 }
 
-fn failure() -> BackendError {
-    BackendError {
-        kind: BackendErrorKind::Unavailable,
-        operation: "fixture.physical_root",
-        retry_after: None,
-        committed_page_id: None,
-    }
-}
-
-fn physical_node(id: &str, parent: PhysicalParent) -> LifecycleNode {
-    LifecycleNode {
-        id: id.into(),
-        kind: LifecycleKind::Page,
-        revision: "2026-10-10T12:00:00Z".into(),
-        inactive: false,
+fn entry(id: &str, parent: InventoryParent) -> InventoryEntry {
+    InventoryEntry {
+        page_id: id.into(),
         parent,
+        root_id: ROOT.into(),
+        last_edited_time: "2026-10-10T12:00:00Z".into(),
+        in_trash: false,
     }
 }
 
-impl PageLifecycle for Physical {
-    fn lifecycle<'a>(
-        &'a self,
-        page: &'a PageId,
-        scope: &'a LifecycleScope,
-    ) -> BackendFuture<'a, LifecycleEvidence> {
-        Box::pin(async move {
-            let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
-            if matches!(self.mode, Ancestry::Missing) {
-                return Err(failure());
-            }
-            let allowed = match self.mode {
-                Ancestry::Allowed => true,
-                Ancestry::Foreign | Ancestry::Missing => false,
-                Ancestry::MovedAfterFirst => attempt == 0,
-            };
-            let parent_id = if allowed { ROOT } else { WORKSPACE };
-            Ok(LifecycleEvidence {
-                scope: scope.clone(),
-                status: if allowed {
-                    LifecycleStatus::Allowed {
-                        roots: vec![ROOT.into()],
-                    }
-                } else {
-                    LifecycleStatus::OutsideScope
-                },
-                ancestry: vec![
-                    physical_node(
-                        &page.0,
-                        PhysicalParent::Object {
-                            kind: LifecycleKind::Page,
-                            id: parent_id.into(),
-                        },
-                    ),
-                    physical_node(parent_id, PhysicalParent::Workspace),
-                ],
-            })
-        })
-    }
-
-    fn revalidate_lifecycle<'a>(
-        &'a self,
-        evidence: &'a LifecycleEvidence,
-        current_scope: &'a LifecycleScope,
-    ) -> BackendFuture<'a, ()> {
-        Box::pin(async move {
-            if &evidence.scope == current_scope {
-                Ok(())
-            } else {
-                Err(failure())
-            }
-        })
+impl Membership for Physical {
+    fn parent_chain(&self, page: &str) -> Result<Option<Vec<InventoryEntry>>, ScopeError> {
+        let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
+        let allowed = match self.mode {
+            Ancestry::Allowed => true,
+            Ancestry::Missing => return Err(ScopeError::Unverifiable),
+            Ancestry::Foreign => false,
+            Ancestry::MovedAfterFirst => attempt == 0,
+        };
+        // A foreign page was walked from a root this policy does not configure.
+        let root = if allowed { ROOT } else { WORKSPACE };
+        Ok(Some(vec![
+            entry(page, InventoryParent::Page(root.into())),
+            entry(root, InventoryParent::Root),
+        ]))
     }
 }
 
