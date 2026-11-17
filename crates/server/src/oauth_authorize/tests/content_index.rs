@@ -170,6 +170,11 @@ async fn seed_with_plan(
             .await,
         Ok(CommitOutcome::Applied)
     );
+    // As at the end of a sync, fold the committed page into the FTS indexes.
+    table
+        .optimize_indexes(lease.clone(), clock.clone())
+        .await
+        .unwrap();
     table
         .ensure_vector_index(
             VectorIndexConfig {
