@@ -48,18 +48,30 @@ pub const INDEX_OPTIMIZE_INTERVAL: std::time::Duration = std::time::Duration::fr
 /// unindexed row regardless of this count.
 #[derive(Default)]
 struct OptimizeCadence {
-    pending: u32,
+    /// Pages committed through this binding.
+    committed: u64,
+    /// Highest `committed` value a successful pass has covered.
+    indexed: u64,
+    /// When the oldest still-pending page was counted.
     oldest: Option<std::time::Instant>,
+    /// A commit-triggered pass is running; later commits do not stack another.
+    in_flight: bool,
+    /// After a failed pass, commits do not retry before this instant.
+    retry_after: Option<std::time::Instant>,
 }
 
 impl OptimizeCadence {
-    /// Start a new cadence window after a failed pass.
-    fn restart(&mut self) {
-        self.pending = 0;
-        self.restart_window();
+    fn pending(&self) -> u64 {
+        self.committed - self.indexed
     }
-    fn restart_window(&mut self) {
-        self.oldest = Some(std::time::Instant::now());
+}
+
+/// Clears the in-flight mark however the commit-triggered pass ends,
+/// including when its observer is dropped.
+struct InFlight(Arc<std::sync::Mutex<OptimizeCadence>>);
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).in_flight = false;
     }
 }
 
@@ -915,14 +927,12 @@ impl GuardedChunkTable {
         async move {
             let outcome = commit.await?;
             if outcome == CommitOutcome::Applied && this.record_commit() {
-                // The page is durable. A failed pass restarts the cadence, so
-                // persistent failure costs one attempt per cadence window, not
-                // per commit; the next successful pass folds every row in.
+                // The page is durable. A failed pass keeps its pages pending
+                // and delays the next commit-triggered attempt by one interval,
+                // so persistent failure costs one attempt per interval, not per
+                // commit; the next successful pass folds every row in.
+                let _in_flight = InFlight(this.cadence.clone());
                 if let Err(error) = this.optimize_indexes(maintenance.0, maintenance.1).await {
-                    this.cadence
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .restart();
                     eprintln!(
                         "{}",
                         serde_json::json!({
@@ -942,16 +952,22 @@ impl GuardedChunkTable {
         self.cadence
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .pending
+            .pending()
             > 0
     }
 
     /// Count one committed page and report whether optimization is due.
     fn record_commit(&self) -> bool {
         let mut cadence = self.cadence.lock().unwrap_or_else(|e| e.into_inner());
-        cadence.pending = cadence.pending.saturating_add(1);
-        let oldest = *cadence.oldest.get_or_insert_with(std::time::Instant::now);
-        cadence.pending >= INDEX_OPTIMIZE_EVERY_PAGES || oldest.elapsed() >= INDEX_OPTIMIZE_INTERVAL
+        cadence.committed += 1;
+        let now = std::time::Instant::now();
+        let oldest = *cadence.oldest.get_or_insert(now);
+        let due = !cadence.in_flight
+            && cadence.retry_after.is_none_or(|retry| now >= retry)
+            && (cadence.pending() >= u64::from(INDEX_OPTIMIZE_EVERY_PAGES)
+                || now.duration_since(oldest) >= INDEX_OPTIMIZE_INTERVAL);
+        cadence.in_flight |= due;
+        due
     }
 
     /// Fold every row written since the last pass into the FTS indexes and any
@@ -973,7 +989,7 @@ impl GuardedChunkTable {
             .cadence
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .pending;
+            .committed;
         let pass = self
             .coordinator
             .maintain(lease, clock, move |context| async move {
@@ -1017,17 +1033,19 @@ impl GuardedChunkTable {
                 Ok(())
             });
         async move {
-            pass.await?;
-            // Pages committed after the pass was requested may be unindexed;
-            // keep them pending so the bound covers them.
+            let result = pass.await;
             let mut cadence = cadence.lock().unwrap_or_else(|e| e.into_inner());
-            cadence.pending = cadence.pending.saturating_sub(covered);
-            if cadence.pending == 0 {
-                cadence.oldest = None;
+            let now = std::time::Instant::now();
+            if result.is_ok() {
+                // Pages counted after the pass was requested may be unindexed;
+                // they stay pending so the bound covers them.
+                cadence.indexed = cadence.indexed.max(covered);
+                cadence.retry_after = None;
+                cadence.oldest = (cadence.pending() > 0).then_some(now);
             } else {
-                cadence.restart_window();
+                cadence.retry_after = Some(now + INDEX_OPTIMIZE_INTERVAL);
             }
-            Ok(())
+            result
         }
     }
 }

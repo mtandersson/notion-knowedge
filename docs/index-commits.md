@@ -395,8 +395,9 @@ queries, which the guarded io tests verify on the pinned version. The pass
 writes no receipt and its effect on search is idempotent (each run still adds
 Lance versions). A crash, cancel or failure after a commit leaves the commit
 acknowledged and its rows searchable; a failed pass never fails the page commit,
-is logged as `index_optimize` `deferred`, and restarts the cadence window, so
-persistent failure retries once per window rather than on every commit while
-the tail grows until a pass succeeds. The optimizing pass runs inside the
+is logged as `index_optimize` `deferred`, and keeps its pages pending (so the
+end-of-sync pass still runs). Commit-triggered retries wait one interval and
+never overlap, so persistent failure costs one attempt per interval rather than
+one per commit, while the tail grows until a pass succeeds. The optimizing pass runs inside the
 observer of the commit that reached the cadence; dropping that observer skips
 the pass, and the pending count survives for the next commit.
