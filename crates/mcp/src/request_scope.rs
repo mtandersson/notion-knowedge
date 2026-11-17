@@ -9,6 +9,8 @@ use std::sync::Arc;
 pub trait RequestBoundMutations: NotionWrite + NotionSectionWrite {}
 impl<T: NotionWrite + NotionSectionWrite> RequestBoundMutations for T {}
 
+/// Reads are authorized from the page inventory; the lifecycle port remains
+/// only for the write gate.
 pub trait RequestBoundSource: NotionRead + PageLifecycle {
     /// Recheck the exact request binding before disclosing a completed result.
     fn validate(&self) -> BackendFuture<'_, ()>;

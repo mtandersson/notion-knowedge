@@ -8,12 +8,13 @@ use notion_knowledge_core::{
     indexed::{
         IndexedChunk, IndexedMetadata, LinkTarget, PropertyValue, SchemaVersion, SourceMetadata,
     },
+    inventory::{InventoryEntry, InventoryParent},
     lifecycle::{
         LifecycleEvidence, LifecycleKind, LifecycleNode, LifecycleScope, LifecycleStatus,
         PageLifecycle, PhysicalParent,
     },
     reconciliation::ReconciliationJournal,
-    root_scope::RootScopeGate,
+    root_scope::{ReadAuthority, ReadScopeGate, RootScopeGate},
     search::{HybridSearch, LexicalQuery, LexicalSearch, SemanticQuery, SemanticSearch},
     source::{SourceExpandQuery, SourceExpansion, StableSourceRef},
     sync_state::PageSyncState,
@@ -307,6 +308,32 @@ pub async fn run_with_lexical(
         )),
         scope.clone(),
     )?;
+    // Reads authorize from the walk's inventory: every page sits under ROOT.
+    let walked = |id: String, parent, edited: String| {
+        (
+            id.clone(),
+            InventoryEntry {
+                page_id: id,
+                parent,
+                root_id: ROOT.into(),
+                last_edited_time: edited,
+                in_trash: false,
+            },
+        )
+    };
+    let inventory: BTreeMap<String, InventoryEntry> = r
+        .pages
+        .iter()
+        .map(|p| {
+            walked(
+                page_id(&p.id),
+                InventoryParent::Page(ROOT.into()),
+                revision(p),
+            )
+        })
+        .chain([walked(ROOT.into(), InventoryParent::Root, "root".into())])
+        .collect();
+    let read_gate = ReadScopeGate::new(Arc::new(inventory), scope.clone())?;
     let corpus_hash = hash(&serde_json::to_vec(&r.pages)?);
     let mut config = json!({"vector":"IVF_FLAT", "distance":"Cosine", "partitions":1,"nprobes":1,"sample_rate":8,"max_iterations":20,"fts":"production default body/title/identifier indices", "rrf":{"rank_constant":60,"semantic_weight":1,"lexical_weight":1,"candidate_limit":100}});
     if let Some(plan) = &lexical {
@@ -558,7 +585,7 @@ pub async fn run_with_lexical(
                 boost_config(b),
             )
             .map_err(|_| "invalid graph")?
-            .with_root_gate(gate.clone()),
+            .with_root_gate(ReadAuthority::Inventory(read_gate.clone())),
         )
     } else {
         hybrid
@@ -603,7 +630,7 @@ pub async fn run_with_lexical(
             })
             .await
             .is_ok()
-        || gate.authorize(&PageId(foreign_root.into())).await.is_ok()
+        || read_gate.authorize(&PageId(foreign_root.into())).is_ok()
     {
         return Err("root boundary disclosed unauthorized content".into());
     }
@@ -652,8 +679,12 @@ pub async fn run_with_lexical(
             let (id, text, page) = reverse
                 .get(&hit.source.chunk_id)
                 .ok_or("unknown production source")?;
-            let permit = gate.authorize(&PageId(hit.source.page_id.clone())).await?;
-            gate.revalidate(&permit, &scope).await?;
+            if !read_gate
+                .authorize(&PageId(hit.source.page_id.clone()))?
+                .belongs_to_any(&[ROOT.into()])
+            {
+                return Err("production search disclosed an unapproved page".into());
+            }
             if hit.text != **text
                 || hit.source.page_id != page_id(&page.id)
                 || hit.source.last_edited_time != revision(page)

@@ -167,15 +167,21 @@ impl HttpNotion {
                 {
                     json!({"object":"error", "code":"object_not_found"})
                 } else if route == format!("/v1/pages/{ROOT}/markdown") {
-                    // The walk reaches both children through their <page> tags.
-                    let markdown = [PAGE, OTHER]
+                    // The walk reaches the children through their <page> tags.
+                    let children: &[&str] = if snapshot.joined {
+                        &[PAGE, OTHER, THIRD]
+                    } else {
+                        &[PAGE, OTHER]
+                    };
+                    let markdown = children
+                        .iter()
                         .map(|id| {
                             format!(
                                 "<page url=\"https://www.notion.so/{}\">Child</page>\n",
                                 id.replace('-', "")
                             )
                         })
-                        .concat();
+                        .collect::<String>();
                     json!({"object":"page_markdown","id":ROOT,"markdown":markdown,"truncated":false,"unknown_block_ids":[]})
                 } else if route == format!("/v1/pages/{PAGE}/markdown") {
                     bodies.fetch_add(1, Ordering::SeqCst);
@@ -361,6 +367,7 @@ struct TestRuntime {
     index: std::path::PathBuf,
     db: std::path::PathBuf,
     embeddings: Arc<AtomicUsize>,
+    scope: LifecycleScope,
 }
 impl TestRuntime {
     async fn new() -> Self {
@@ -450,7 +457,22 @@ impl TestRuntime {
             index,
             db,
             embeddings,
+            scope,
         }
+    }
+    /// Run the next reconciliation walk: MCP reads authorize from the
+    /// inventory it records, so a move takes effect for reads here.
+    async fn rewalk(&self) {
+        let walk = self
+            .source
+            .client()
+            .walk_tree(&self.scope, None)
+            .await
+            .unwrap();
+        self.worker
+            .state
+            .record_walk(&walk.run_id, &walk.entries, walk.authoritative())
+            .unwrap();
     }
     async fn searchable(&self, text: &str) -> usize {
         LanceChunkTable::open(
@@ -1749,6 +1771,7 @@ async fn configured_lexical_expansion_preserves_scoped_content_and_rebuilds_afte
             .contains("lexical_dictionary_v1")
     );
     runtime.source.state.lock().unwrap().parent = FOREIGN.into();
+    runtime.rewalk().await;
     let denied = wire_stdio(
         rebuilt,
         vec![search_request(2, "lexical", json!({"page_ids":[PAGE]}))],
@@ -1923,6 +1946,7 @@ async fn reopened_committed_index_serves_all_modes_over_stdio_and_revalidates_ph
         output[2]
     );
     runtime.source.change(|m| m.parent = FOREIGN.into());
+    runtime.rewalk().await;
     let handler = installed_retrieval(
         &runtime,
         &config,
@@ -1937,6 +1961,7 @@ async fn reopened_committed_index_serves_all_modes_over_stdio_and_revalidates_ph
         output[1]
     );
     runtime.source.change(|m| m.parent = ROOT.into());
+    runtime.rewalk().await;
     let handler = installed_retrieval(
         &runtime,
         &config,
@@ -2542,6 +2567,8 @@ async fn installed_trusted_fresh_get_uses_authoritative_source_without_reading_o
     );
     assert_eq!(std::fs::read(&runtime.db).unwrap(), before);
     runtime.source.change(|model| model.parent = FOREIGN.into());
+    runtime.rewalk().await;
+    let before = std::fs::read(&runtime.db).unwrap();
     let reads = runtime.source.body_reads.load(Ordering::SeqCst);
     let output = wire_stdio(handler, vec![request(4, "fresh")]).await;
     assert_eq!(output[1]["result"]["isError"], true);

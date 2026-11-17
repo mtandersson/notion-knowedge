@@ -1,13 +1,11 @@
 //! Contract tests for #63: relation direction, bounded traversal and physical scope.
 use notion_knowledge_core::{
-    backend::{BackendError, BackendErrorKind, BackendFuture, PageId},
+    backend::PageId,
     discovery::ExclusionRules,
     graph::{GraphEdge, GraphEdgeStore, GraphTarget},
-    lifecycle::{
-        LifecycleEvidence, LifecycleKind, LifecycleNode, LifecycleScope, LifecycleStatus,
-        PageLifecycle, PhysicalParent,
-    },
-    root_scope::RootScopeGate,
+    inventory::{InventoryEntry, InventoryParent},
+    lifecycle::LifecycleScope,
+    root_scope::{Membership, ReadAuthority, ReadScopeGate, ScopeError},
     sync_state::SyncStateError,
 };
 use notion_knowledge_mcp::{
@@ -26,89 +24,48 @@ const C: &str = "44444444-4444-4444-4444-444444444444";
 const BLOCKED: &str = "55555555-5555-5555-5555-555555555555";
 const WORKSPACE: &str = "66666666-6666-6666-6666-666666666666";
 
-fn denied() -> BackendError {
-    BackendError {
-        kind: BackendErrorKind::PermissionDenied,
-        operation: "related.fixture",
-        retry_after: None,
-        committed_page_id: None,
-    }
-}
-fn node(id: &str, parent: PhysicalParent) -> LifecycleNode {
-    LifecycleNode {
-        id: id.into(),
-        kind: LifecycleKind::Page,
-        revision: "2026-10-14T00:00:00Z".into(),
-        inactive: false,
+/// Every page was walked directly under `ROOT`; `BLOCKED` was never
+/// reached, and the inventory read for `UNREADABLE` fails.
+struct InventoryFixture;
+const UNREADABLE: &str = "77777777-7777-7777-7777-777777777777";
+fn entry(id: &str, parent: InventoryParent) -> InventoryEntry {
+    InventoryEntry {
+        page_id: id.into(),
         parent,
+        root_id: ROOT.into(),
+        last_edited_time: "2026-10-14T00:00:00Z".into(),
+        in_trash: false,
     }
 }
-struct LifecycleFixture;
-impl PageLifecycle for LifecycleFixture {
-    fn lifecycle<'a>(
-        &'a self,
-        page: &'a PageId,
-        scope: &'a LifecycleScope,
-    ) -> BackendFuture<'a, LifecycleEvidence> {
-        Box::pin(async move {
-            if page.0 == BLOCKED {
-                return Ok(LifecycleEvidence {
-                    scope: scope.clone(),
-                    status: LifecycleStatus::OutsideScope,
-                    ancestry: vec![node(BLOCKED, PhysicalParent::Workspace)],
-                });
-            }
-            if page.0 == "77777777-7777-7777-7777-777777777777" {
-                return Err(denied());
-            }
-            let ancestry = if page.0 == ROOT {
-                vec![node(ROOT, PhysicalParent::Workspace)]
-            } else {
-                vec![
-                    node(
-                        &page.0,
-                        PhysicalParent::Object {
-                            kind: LifecycleKind::Page,
-                            id: ROOT.into(),
-                        },
-                    ),
-                    node(ROOT, PhysicalParent::Workspace),
-                ]
-            };
-            Ok(LifecycleEvidence {
-                scope: scope.clone(),
-                status: LifecycleStatus::Allowed {
-                    roots: vec![ROOT.into()],
-                },
-                ancestry,
-            })
-        })
-    }
-    fn revalidate_lifecycle<'a>(
-        &'a self,
-        evidence: &'a LifecycleEvidence,
-        scope: &'a LifecycleScope,
-    ) -> BackendFuture<'a, ()> {
-        Box::pin(async move {
-            if &evidence.scope == scope {
-                Ok(())
-            } else {
-                Err(denied())
-            }
-        })
+impl Membership for InventoryFixture {
+    fn parent_chain(&self, page: &str) -> Result<Option<Vec<InventoryEntry>>, ScopeError> {
+        if page == BLOCKED {
+            return Ok(None);
+        }
+        if page == UNREADABLE {
+            return Err(ScopeError::Unverifiable);
+        }
+        let root = entry(ROOT, InventoryParent::Root);
+        Ok(Some(if page == ROOT {
+            vec![root]
+        } else {
+            vec![entry(page, InventoryParent::Page(ROOT.into())), root]
+        }))
     }
 }
-fn gate() -> RootScopeGate {
-    RootScopeGate::new(
-        Arc::new(LifecycleFixture),
-        LifecycleScope {
-            workspace_id: WORKSPACE.into(),
-            generation: 1,
-            roots: vec![PageId(ROOT.into())],
-            exclusions: ExclusionRules::default(),
-        },
+fn gate() -> ReadAuthority {
+    ReadAuthority::Inventory(
+        ReadScopeGate::new(
+            Arc::new(InventoryFixture),
+            LifecycleScope {
+                workspace_id: WORKSPACE.into(),
+                generation: 1,
+                roots: vec![PageId(ROOT.into())],
+                exclusions: ExclusionRules::default(),
+            },
+        )
+        .unwrap(),
     )
-    .unwrap()
 }
 fn edge(source: &str, target: &str, relation: &str, provenance: &str) -> GraphEdge {
     GraphEdge::new(
@@ -376,7 +333,7 @@ async fn mcp_exposes_scoped_graph_only_when_installed_and_checks_wire_contract()
     );
     let configured = KnowledgeServer::default()
         .and_authoritative_scope(
-            Arc::new(LifecycleFixture),
+            Arc::new(InventoryFixture),
             gate().configured_scope().clone(),
         )
         .unwrap()
@@ -405,7 +362,7 @@ async fn mcp_exposes_scoped_graph_only_when_installed_and_checks_wire_contract()
     );
     let invalid = KnowledgeServer::default()
         .and_authoritative_scope(
-            Arc::new(LifecycleFixture),
+            Arc::new(InventoryFixture),
             gate().configured_scope().clone(),
         )
         .unwrap()
@@ -528,7 +485,7 @@ async fn authoritative_relation_labels_survive_sqlite_and_rename_without_changin
             assert!(reader.edges_to(BLOCKED).unwrap().is_empty());
             let configured = KnowledgeServer::default()
                 .and_authoritative_scope(
-                    Arc::new(LifecycleFixture),
+                    Arc::new(InventoryFixture),
                     gate().configured_scope().clone(),
                 )
                 .unwrap()

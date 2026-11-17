@@ -1,14 +1,18 @@
 //! Server-side root authorization for authoritative Notion page operations.
 //!
-//! This is a reusable policy gate; callers must place it before *every* read,
-//! search result disclosure, or mutation and revalidate near a mutation. It
-//! deliberately keeps no positive authorization cache.
+//! Two gates share one policy check. [`ReadScopeGate`] authorizes reads,
+//! search result disclosure and graph lookups from the page inventory the
+//! last tree walk recorded: it is synchronous and never calls Notion, and its
+//! staleness is bounded by reconciliation. [`RootScopeGate`] fetches fresh
+//! physical ancestry for writes and revalidates near a mutation. Neither keeps
+//! a positive authorization cache.
 
 use std::{collections::BTreeSet, sync::Arc};
 
 use crate::{
     backend::PageId,
     discovery::SourceType,
+    inventory::{InventoryEntry, InventoryParent},
     lifecycle::{
         LifecycleEvidence, LifecycleKind, LifecycleScope, LifecycleStatus, PageLifecycle,
         PhysicalParent,
@@ -229,5 +233,173 @@ impl RootScopeGate {
             return Err(ScopeError::Denied);
         }
         Ok(())
+    }
+}
+
+/// Where the last tree walk placed each page. Implemented by the sync state
+/// store over its page inventory; never by a Notion client.
+pub trait Membership: Send + Sync {
+    /// The page's own inventory entry, then each ancestor's entry up to and
+    /// including the configured root it was walked from. `None` when the
+    /// page or any link of its chain is absent from the inventory, or the
+    /// chain repeats.
+    fn parent_chain(&self, page: &str) -> Result<Option<Vec<InventoryEntry>>, ScopeError>;
+}
+
+/// Read authorization from the page inventory. A page is readable only when
+/// the last walk reached it through pages and data sources none of which is
+/// trashed, unreadable or excluded, from a root the current policy still
+/// configures. Moves and exclusions in Notion take effect at the next walk.
+#[derive(Clone)]
+pub struct ReadScopeGate {
+    membership: Arc<dyn Membership>,
+    scope: LifecycleScope,
+}
+
+/// Proof that one page sat under these configured roots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopePermit {
+    roots: Vec<String>,
+}
+
+impl ScopePermit {
+    /// Restrict the permit to the effective operator/caller intersection.
+    pub fn belongs_to_any(&self, roots: &[String]) -> bool {
+        self.roots.iter().any(|root| roots.contains(root))
+    }
+}
+
+/// How a read is authorized. Operator compositions read the page inventory
+/// their own walk records. Request-bound (OAuth) reads keep the live check
+/// with the caller's grant: no walk records an inventory for that grant.
+#[derive(Clone)]
+pub enum ReadAuthority {
+    Inventory(ReadScopeGate),
+    Live(RootScopeGate),
+}
+
+impl ReadAuthority {
+    pub fn configured_scope(&self) -> &LifecycleScope {
+        match self {
+            Self::Inventory(gate) => gate.configured_scope(),
+            Self::Live(gate) => gate.configured_scope(),
+        }
+    }
+
+    /// Inventory reads never await; live reads fetch and revalidate ancestry.
+    pub async fn authorize(&self, page: &PageId) -> Result<ScopePermit, ScopeError> {
+        match self {
+            Self::Inventory(gate) => gate.authorize(page),
+            Self::Live(gate) => {
+                let permit = gate.authorize(page).await?;
+                gate.revalidate(&permit, gate.configured_scope()).await?;
+                let LifecycleStatus::Allowed { roots } = &permit.evidence.status else {
+                    return Err(ScopeError::Denied);
+                };
+                Ok(ScopePermit {
+                    roots: roots.clone(),
+                })
+            }
+        }
+    }
+}
+
+impl ReadScopeGate {
+    pub fn new(membership: Arc<dyn Membership>, scope: LifecycleScope) -> Result<Self, ScopeError> {
+        if !valid_scope(&scope) {
+            return Err(ScopeError::InvalidConfiguration);
+        }
+        Ok(Self { membership, scope })
+    }
+
+    /// Trust roots only from this server-constructed policy.
+    pub fn configured_scope(&self) -> &LifecycleScope {
+        &self.scope
+    }
+
+    /// A direct page ID is not proof of authority: check the page's recorded
+    /// chain against the current roots and exclusions. No network.
+    pub fn authorize(&self, page: &PageId) -> Result<ScopePermit, ScopeError> {
+        let exclusions = &self.scope.exclusions;
+        if !canonical_id(&page.0) || exclusions.source_types.contains(&SourceType::Page) {
+            return Err(ScopeError::Denied);
+        }
+        let chain = self
+            .membership
+            .parent_chain(&page.0)
+            .map_err(|_| ScopeError::Unverifiable)?
+            .ok_or(ScopeError::Denied)?;
+        if chain.first().is_none_or(|entry| entry.page_id != page.0) {
+            return Err(ScopeError::Unverifiable);
+        }
+        for (index, entry) in chain.iter().enumerate() {
+            // An unreadable (404/403) or trashed link vouches for nothing below it.
+            if entry.in_trash
+                || entry.last_edited_time.is_empty()
+                || exclusions.page_ids.contains(&entry.page_id)
+                || (index > 0 && exclusions.descendants_of.contains(&entry.page_id))
+            {
+                return Err(ScopeError::Denied);
+            }
+            let next = chain.get(index + 1).map(|next| next.page_id.as_str());
+            match &entry.parent {
+                InventoryParent::Root => {
+                    if next.is_some() {
+                        return Err(ScopeError::Unverifiable);
+                    }
+                    if !self.scope.roots.iter().any(|root| root.0 == entry.page_id) {
+                        return Err(ScopeError::Denied);
+                    }
+                    return Ok(ScopePermit {
+                        roots: vec![entry.page_id.clone()],
+                    });
+                }
+                InventoryParent::Page(parent) => {
+                    if next != Some(parent.as_str()) {
+                        return Err(ScopeError::Unverifiable);
+                    }
+                }
+                InventoryParent::DataSource {
+                    data_source_id,
+                    database_id,
+                    owner_page_id,
+                } => {
+                    if exclusions
+                        .exclusion(data_source_id, SourceType::DataSource)
+                        .or_else(|| exclusions.exclusion(database_id, SourceType::Database))
+                        .is_some()
+                    {
+                        return Err(ScopeError::Denied);
+                    }
+                    if next != Some(owner_page_id.as_str()) {
+                        return Err(ScopeError::Unverifiable);
+                    }
+                }
+            }
+        }
+        Err(ScopeError::Unverifiable)
+    }
+}
+
+/// An in-memory inventory keyed by page ID, for compositions and tests that
+/// hold the walk's entries directly.
+impl Membership for std::collections::BTreeMap<String, InventoryEntry> {
+    fn parent_chain(&self, page: &str) -> Result<Option<Vec<InventoryEntry>>, ScopeError> {
+        let mut chain: Vec<InventoryEntry> = Vec::new();
+        let mut current = page;
+        loop {
+            let Some(entry) = self.get(current) else {
+                return Ok(None);
+            };
+            if chain.iter().any(|seen| seen.page_id == entry.page_id) {
+                return Ok(None);
+            }
+            chain.push(entry.clone());
+            current = match &entry.parent {
+                InventoryParent::Root => return Ok(Some(chain)),
+                InventoryParent::Page(id) => id,
+                InventoryParent::DataSource { owner_page_id, .. } => owner_page_id,
+            };
+        }
     }
 }

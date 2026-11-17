@@ -287,6 +287,49 @@ async fn http_oauth_lifecycle_reads_refreshes_revokes_and_reauthorizes() {
     );
 }
 
+/// The shared inventory places the page under the root, but OAuth reads still
+/// check the caller's own grant: a page that grant cannot read is never
+/// disclosed from the index.
+#[cfg(all(unix, feature = "webhook-worker"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oauth_search_authorizes_with_the_callers_grant_not_the_shared_inventory() {
+    let h = harness().await;
+    let token = mint(&h).await;
+    let (session, _) = initialize(&h, &token).await;
+    let search = || {
+        tool(
+            "knowledge_search",
+            json!({"query":"Saffron","limit":5,"mode":"lexical","filters":{}}),
+        )
+    };
+    h.page_status.store(403, Ordering::SeqCst);
+    let before = h.page_reads.load(Ordering::SeqCst);
+    let denied = reply(
+        rpc(&h, &token, Some(&session), search())
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(h.page_reads.load(Ordering::SeqCst) > before, "{denied}");
+    assert!(
+        !denied.to_string().contains("Saffron private evidence"),
+        "{denied}"
+    );
+    h.page_status.store(200, Ordering::SeqCst);
+    let allowed = reply(
+        rpc(&h, &token, Some(&session), search())
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        allowed.to_string().contains("Saffron private evidence"),
+        "{allowed}"
+    );
+}
+
 #[cfg(all(unix, feature = "webhook-worker"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn private_index_content_is_not_disclosed_on_permission_loss_or_callback_replacement() {

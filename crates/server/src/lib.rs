@@ -74,6 +74,8 @@ mod oauth_mcp;
 
 mod oauth_content;
 
+mod inventory_membership;
+
 mod notion_grant_lease;
 
 /// Grant-bound durable refresh building blocks; shipping installation is separate.

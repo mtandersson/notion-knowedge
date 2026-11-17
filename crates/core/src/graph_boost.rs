@@ -6,7 +6,7 @@
 use crate::{
     backend::PageId,
     graph::{GraphEdgeStore, GraphTarget},
-    root_scope::RootScopeGate,
+    root_scope::ReadAuthority,
     search::{
         HybridSearch, RetrievalPath, SearchFuture, SearchHit, SearchUnavailable, SemanticQuery,
     },
@@ -67,7 +67,7 @@ pub struct GraphBoostedHybrid {
     inner: Arc<dyn HybridSearch>,
     graph: Arc<dyn GraphEdgeStore>,
     config: GraphBoostConfig,
-    scope: Option<RootScopeGate>,
+    scope: Option<ReadAuthority>,
 }
 impl GraphBoostedHybrid {
     pub fn new(
@@ -89,7 +89,7 @@ impl GraphBoostedHybrid {
 
     /// All hybrid candidates must be authorized BEFORE graph traversal.
     /// Otherwise an excluded intermediate could change visible result order.
-    pub fn with_root_gate(mut self, gate: RootScopeGate) -> Self {
+    pub fn with_root_gate(mut self, gate: ReadAuthority) -> Self {
         self.scope = Some(gate);
         self
     }
@@ -104,7 +104,7 @@ impl HybridSearch for GraphBoostedHybrid {
                 return Err(SearchUnavailable);
             }
             // Hold one owned graph read fence across the underlying index read,
-            // graph traversal and awaited physical authorization. Persistent
+            // graph traversal and read authorization. Persistent
             // adapters must allow nested read snapshots but exclude all writers.
             let snapshot = self.graph.read_snapshot().map_err(|_| SearchUnavailable)?;
             let graph = snapshot.as_deref().unwrap_or(self.graph.as_ref());
@@ -132,12 +132,7 @@ impl HybridSearch for GraphBoostedHybrid {
                         .authorize(&PageId(candidate.source.page_id.clone()))
                         .await
                         .map_err(|_| SearchUnavailable)?;
-                    if !permit.belongs_to_any(&roots)
-                        || scope
-                            .revalidate(&permit, scope.configured_scope())
-                            .await
-                            .is_err()
-                    {
+                    if !permit.belongs_to_any(&roots) {
                         return Err(SearchUnavailable);
                     }
                 }

@@ -260,7 +260,7 @@ pub(crate) async fn attach_existing(
             Arc::new(table),
             scope.roots.iter().map(|r| r.0.clone()).collect(),
         )?
-        .and_authoritative_scope(source.clone(), scope)
+        .and_authoritative_scope(crate::inventory_membership::from_config(config), scope)
         .map(|h| {
             h.and_fresh_source(source)
                 .and_search(adapters.semantic)

@@ -5,7 +5,7 @@
 use notion_knowledge_core::{
     backend::PageId,
     graph::{GraphEdge, GraphEdgeStore, GraphTarget},
-    root_scope::{RootScopeGate, ScopeError},
+    root_scope::{ReadAuthority, ScopeError},
 };
 use rmcp::model::{Tool, ToolAnnotations};
 use serde::{Deserialize, Serialize};
@@ -90,22 +90,15 @@ fn target_key(edge: &GraphEdge) -> &str {
 }
 
 async fn authorized(
-    gate: &RootScopeGate,
+    gate: &ReadAuthority,
     id: &str,
     roots: &[String],
 ) -> Result<bool, RelatedError> {
-    let permit = match gate.authorize(&PageId(id.to_owned())).await {
-        Ok(permit) => permit,
-        Err(ScopeError::Denied) => return Ok(false),
-        Err(_) => return Err(RelatedError::Unavailable),
-    };
-    if !permit.belongs_to_any(roots) {
-        return Ok(false);
+    match gate.authorize(&PageId(id.to_owned())).await {
+        Ok(permit) => Ok(permit.belongs_to_any(roots)),
+        Err(ScopeError::Denied) => Ok(false),
+        Err(_) => Err(RelatedError::Unavailable),
     }
-    gate.revalidate(&permit, gate.configured_scope())
-        .await
-        .map_err(|_| RelatedError::Unavailable)?;
-    Ok(true)
 }
 
 /// Scope is supplied by the trusted MCP composition root, never tool JSON.
@@ -114,7 +107,7 @@ async fn authorized(
 pub async fn navigate(
     input: &RelatedRequest,
     graph: &dyn GraphEdgeStore,
-    gate: &RootScopeGate,
+    gate: &ReadAuthority,
     roots: &[String],
 ) -> Result<RelatedResponse, RelatedError> {
     input.validate().map_err(|_| RelatedError::Inaccessible)?;

@@ -69,7 +69,7 @@ pub struct KnowledgeServer {
     lexical_search: Option<Arc<dyn notion_knowledge_core::search::LexicalSearch>>,
     source_expansion: Option<Arc<dyn notion_knowledge_core::source::SourceExpansion>>,
     root_page_ids: Arc<[String]>,
-    root_gate: Option<notion_knowledge_core::root_scope::RootScopeGate>,
+    root_gate: Option<notion_knowledge_core::root_scope::ReadAuthority>,
     snippet_chars: usize,
     max_upload_files: usize,
     file_ingestion: Option<Arc<dyn upload::FileIngestion>>,
@@ -346,15 +346,37 @@ impl KnowledgeServer {
             .collect()
     }
 
-    /// The trusted composition root supplies a workspace and physical roots.
+    /// The trusted composition root supplies a workspace, physical roots and
+    /// the page inventory that read authorization consults. Reads never call
+    /// Notion to authorize; staleness is bounded by reconciliation.
     /// This does not enable Notion mutations.
     pub fn and_authoritative_scope(
-        mut self,
+        self,
+        membership: Arc<dyn notion_knowledge_core::root_scope::Membership>,
+        scope: notion_knowledge_core::lifecycle::LifecycleScope,
+    ) -> Result<Self, &'static str> {
+        let gate = notion_knowledge_core::root_scope::ReadScopeGate::new(membership, scope)
+            .map_err(|_| "invalid authoritative root scope")?;
+        self.install_root_gate(notion_knowledge_core::root_scope::ReadAuthority::Inventory(
+            gate,
+        ))
+    }
+
+    /// Request-bound reads check live ancestry with the caller's own grant.
+    fn and_live_authoritative_scope(
+        self,
         source: Arc<dyn notion_knowledge_core::lifecycle::PageLifecycle>,
         scope: notion_knowledge_core::lifecycle::LifecycleScope,
     ) -> Result<Self, &'static str> {
         let gate = notion_knowledge_core::root_scope::RootScopeGate::new(source, scope)
             .map_err(|_| "invalid authoritative root scope")?;
+        self.install_root_gate(notion_knowledge_core::root_scope::ReadAuthority::Live(gate))
+    }
+
+    fn install_root_gate(
+        mut self,
+        gate: notion_knowledge_core::root_scope::ReadAuthority,
+    ) -> Result<Self, &'static str> {
         if self.root_page_ids.iter().any(|id| {
             !gate
                 .configured_scope()
@@ -651,12 +673,7 @@ impl KnowledgeServer {
                         let Ok(permit) = gate.authorize(&page).await else {
                             return Ok(error("source_not_accessible: page not in approved scope"));
                         };
-                        if !permit.belongs_to_any(&effective_roots)
-                            || gate
-                                .revalidate(&permit, gate.configured_scope())
-                                .await
-                                .is_err()
-                        {
+                        if !permit.belongs_to_any(&effective_roots) {
                             return Ok(error("source_not_accessible: page not in approved scope"));
                         }
                     }
@@ -748,12 +765,7 @@ impl KnowledgeServer {
                                     "source_not_accessible: search returned unapproved page",
                                 ));
                             };
-                            if !permit.belongs_to_any(&effective_roots)
-                                || gate
-                                    .revalidate(&permit, gate.configured_scope())
-                                    .await
-                                    .is_err()
-                            {
+                            if !permit.belongs_to_any(&effective_roots) {
                                 return Ok(error(
                                     "source_not_accessible: search returned unapproved page",
                                 ));
@@ -881,12 +893,7 @@ impl KnowledgeServer {
                         let Ok(permit) = gate.authorize(&page).await else {
                             return Ok(error("source_not_accessible: page not in approved scope"));
                         };
-                        if !permit.belongs_to_any(&authorized_roots)
-                            || gate
-                                .revalidate(&permit, gate.configured_scope())
-                                .await
-                                .is_err()
-                        {
+                        if !permit.belongs_to_any(&authorized_roots) {
                             return Ok(error("source_not_accessible: page not in approved scope"));
                         }
                     }
@@ -919,10 +926,6 @@ impl KnowledgeServer {
                                 || !permit.belongs_to_any(std::slice::from_ref(
                                     &source.provenance.root_page_id,
                                 ))
-                                || gate
-                                    .revalidate(&permit, gate.configured_scope())
-                                    .await
-                                    .is_err()
                             {
                                 return Ok(error(
                                     "source_not_accessible: expanded page not in approved scope",
@@ -970,10 +973,6 @@ impl KnowledgeServer {
                                 || !permit.belongs_to_any(std::slice::from_ref(
                                     &source.provenance.root_page_id,
                                 ))
-                                || gate
-                                    .revalidate(&permit, gate.configured_scope())
-                                    .await
-                                    .is_err()
                             {
                                 return Ok(error(
                                     "source_not_accessible: page moved outside approved scope",
@@ -1226,7 +1225,7 @@ impl ServerHandler for KnowledgeServer {
         })?;
         let mut scoped = self
             .clone()
-            .and_authoritative_scope(adapters.source.clone(), adapters.scope.clone())
+            .and_live_authoritative_scope(adapters.source.clone(), adapters.scope.clone())
             .map_err(|_| {
                 rmcp::ErrorData::invalid_request("request authorization unavailable", None)
             })?

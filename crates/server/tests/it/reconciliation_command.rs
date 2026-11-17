@@ -4137,11 +4137,22 @@ async fn target_projection_mode_changes_reconcile_without_reembedding_canonical_
         assert!(progress.pending.is_empty());
         let edges = runtime.coordinator.state().edges_from(PAGE).unwrap();
         assert_eq!(edges.len(), 2);
+        // Reads authorize from the walk's inventory, which this runner path does not record.
+        let walk = http.client().walk_tree(&authority(), None).await.unwrap();
+        runtime
+            .coordinator
+            .state()
+            .record_walk(&walk.run_id, &walk.entries, walk.authoritative())
+            .unwrap();
         let committed =
             notion_knowledge_retrieval::graph::CommittedGraph::new(runtime.coordinator.clone());
-        let gate =
-            notion_knowledge_core::root_scope::RootScopeGate::new(http.client(), authority())
-                .unwrap();
+        let gate = notion_knowledge_core::root_scope::ReadAuthority::Inventory(
+            notion_knowledge_core::root_scope::ReadScopeGate::new(
+                runtime.coordinator.state().clone(),
+                authority(),
+            )
+            .unwrap(),
+        );
         let related = notion_knowledge_mcp::related::navigate(
             &notion_knowledge_mcp::related::RelatedRequest {
                 page_id: PAGE.into(),

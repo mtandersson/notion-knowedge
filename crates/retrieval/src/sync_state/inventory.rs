@@ -239,23 +239,42 @@ impl SqliteSyncStateStore {
         &self,
         page_id: &str,
     ) -> Result<Option<Vec<String>>, SyncStateError> {
+        Ok(self.inventory_lineage(page_id)?.map(|lineage| {
+            lineage
+                .into_iter()
+                .skip(1)
+                .map(|entry| entry.page_id)
+                .collect()
+        }))
+    }
+
+    /// The page's own entry, then each ancestor's entry up to and including
+    /// the root page, read in one consistent pass. `None` when the chain
+    /// leaves the inventory or repeats.
+    pub fn inventory_lineage(
+        &self,
+        page_id: &str,
+    ) -> Result<Option<Vec<InventoryEntry>>, SyncStateError> {
         let db = self.lock_connection()?;
-        let mut chain = Vec::new();
+        let mut lineage = Vec::new();
         let mut seen = BTreeSet::from([page_id.to_owned()]);
         let mut current = page_id.to_owned();
         loop {
             let Some(next) = entry(&db, &current)? else {
                 return Ok(None);
             };
-            let parent = match next.parent {
-                InventoryParent::Root => return Ok(Some(chain)),
-                InventoryParent::Page(id) => id,
-                InventoryParent::DataSource { owner_page_id, .. } => owner_page_id,
+            let parent = match &next.parent {
+                InventoryParent::Root => {
+                    lineage.push(next);
+                    return Ok(Some(lineage));
+                }
+                InventoryParent::Page(id) => id.clone(),
+                InventoryParent::DataSource { owner_page_id, .. } => owner_page_id.clone(),
             };
-            if !seen.insert(parent.clone()) || chain.len() >= MAX_CHAIN {
+            lineage.push(next);
+            if !seen.insert(parent.clone()) || lineage.len() > MAX_CHAIN {
                 return Ok(None);
             }
-            chain.push(parent.clone());
             current = parent;
         }
     }
@@ -557,5 +576,15 @@ impl notion_knowledge_core::inventory::InventoryPlacement for SqliteSyncStateSto
             };
             placed.ancestors.push(current.clone());
         }
+    }
+}
+
+impl notion_knowledge_core::root_scope::Membership for SqliteSyncStateStore {
+    fn parent_chain(
+        &self,
+        page: &str,
+    ) -> Result<Option<Vec<InventoryEntry>>, notion_knowledge_core::root_scope::ScopeError> {
+        self.inventory_lineage(page)
+            .map_err(|_| notion_knowledge_core::root_scope::ScopeError::Unverifiable)
     }
 }
