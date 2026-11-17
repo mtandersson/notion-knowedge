@@ -171,6 +171,9 @@ pub struct SyncTotals {
     /// Of `failed`, pages a retry cannot fix (unsupported source content,
     /// an embedding input over the limit).
     pub permanent: u64,
+    /// Of `failed`, pages that hit the per-page deadline: a slow dependency,
+    /// not a source failure.
+    pub timed_out: u64,
     pub removed: u64,
     /// Unreached pages under a page that became inaccessible in this walk,
     /// kept until the next walk confirms it.
@@ -843,6 +846,7 @@ impl IndexRuntime {
                         } else {
                             outcomes.push((page.0.clone(), Failed(FailureClass::Unavailable)));
                             totals.failed += 1;
+                            totals.timed_out += 1;
                             sync_count(SyncCount::SkippedPage, 1);
                             progress.page_timeout();
                         }
@@ -876,6 +880,7 @@ impl IndexRuntime {
                 } else {
                     Default::default()
                 };
+                Self::fence(lease, &base)?;
                 let diff = self.record_inventory(&walk, outcomes)?;
                 totals.drift = diff.drift();
                 totals.held = held.len() as u64;
@@ -895,6 +900,7 @@ impl IndexRuntime {
                     .as_str()
                     .to_owned();
                 let unavailable = |_| "cache inventory state unavailable";
+                Self::fence(lease, &base)?;
                 for entry in &hits.entries {
                     let diff = state
                         .upsert_inventory_entry(&run, entry)
@@ -943,6 +949,7 @@ impl IndexRuntime {
                 .map_err(|_| "cache inventory state unavailable")?
                 .map_or((false, 0), |last| (last.complete && !truncated, last.held));
         }
+        Self::fence(lease, &base)?;
         state
             .record_sync(&notion_knowledge_core::inventory::SyncRecord {
                 run_id,
@@ -967,11 +974,28 @@ impl IndexRuntime {
             return Ok(SyncTotals {
                 indexed: totals.indexed + recovered.indexed,
                 failed: totals.failed + recovered.failed,
+                timed_out: totals.timed_out + recovered.timed_out,
                 removed: totals.removed + recovered.removed,
                 ..recovered
             });
         }
         Ok(totals)
+    }
+
+    /// Inventory and drift writes need the same authority as index commits:
+    /// the claim clock (expired, taken over or cancelled reads as the end of
+    /// time) and the writer lease must both still be live.
+    fn fence(
+        lease: &notion_knowledge_core::reconciliation::Lease,
+        base: &Clock,
+    ) -> Result<(), SyncError> {
+        if base() >= lease.expires_at {
+            return Err(SyncError::new(
+                SyncFailure::Authority,
+                "cache sync claim lost before inventory write",
+            ));
+        }
+        Ok(())
     }
 
     /// Settle search hits (or one retrieved page) against the inventory and
