@@ -615,16 +615,18 @@ impl IndexRuntime {
                 SyncMode::Page(page) | SyncMode::UserPage(page) => {
                     match self.source.page_hit(&page).await {
                         Ok(hit) => (hit.into_iter().collect(), true),
-                        // The callback's own retrieve confirms the page is gone
-                        // or revoked: remove it if indexed. Without this, a setup
-                        // that never walks would keep it searchable.
-                        // A user's own authority cannot confirm that: hold the page.
+                        // One user's own authority cannot confirm the page is gone
+                        // for everyone: hold it until an integration read or the
+                        // next walk decides.
                         Err(e)
                             if user_scoped
                                 && notion_knowledge_core::discovery::inaccessible(e.kind) =>
                         {
                             return Ok(Discovered::Hits(HitSync::default()));
                         }
+                        // The integration callback's own retrieve confirms the page
+                        // is gone or revoked: remove it if indexed. Without this, a
+                        // setup that never walks would keep it searchable.
                         Err(e) if notion_knowledge_core::discovery::inaccessible(e.kind) => {
                             return Ok(Discovered::Hits(HitSync {
                                 removals: vec![page.0.clone()],
