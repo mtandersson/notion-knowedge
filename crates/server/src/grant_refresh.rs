@@ -2,6 +2,7 @@
 //! Admission requires live request write authority. Accepted jobs subsequently
 //! use durable grant read authority, independently of the originating bearer.
 #![cfg(all(unix, feature = "webhook-worker"))]
+use crate::index_runtime::{IndexRuntime, PageDeadline, RuntimeParts};
 use crate::{
     notion_grant_store::StoredGrant, notion_oauth_runtime::NotionOAuthRuntime,
     oauth_content::RequestGrantAuthority,
@@ -26,7 +27,6 @@ use notion_knowledge_retrieval::{
     planner::production_scope,
     sync_state::SqliteSyncStateStore,
 };
-use crate::index_runtime::{IndexRuntime, PageDeadline, RuntimeParts};
 use std::{
     sync::Arc,
     time::{Duration, Instant},

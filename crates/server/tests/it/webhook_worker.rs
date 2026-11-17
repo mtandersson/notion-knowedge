@@ -581,8 +581,10 @@ async fn mutation_refresh_preserves_verified_write_on_index_failure_and_retries_
     assert_eq!(result.receipt.last_edited_time, "2026-10-10T12:00:01Z");
     assert_eq!(runtime.source.writes.load(Ordering::SeqCst), 1);
     let provider = runtime.worker.index.provider.clone();
-    set_provider(&mut runtime.worker,
-        Arc::new(UnavailableEmbedding(provider.metadata().clone())));
+    set_provider(
+        &mut runtime.worker,
+        Arc::new(UnavailableEmbedding(provider.metadata().clone())),
+    );
     tick(&runtime.worker, false).await;
     assert_eq!(
         state.status(&result.refresh).unwrap(),
@@ -2548,10 +2550,13 @@ async fn shutdown_cancels_owned_commit_source_read_releases_fence_and_restart_pr
  {
     let mut runtime = TestRuntime::new().await;
     let metadata = runtime.worker.index.provider.metadata().clone();
-    set_provider(&mut runtime.worker, Arc::new(PauseSourceProvider {
-        metadata,
-        pause: runtime.source.pause_next.clone(),
-    }));
+    set_provider(
+        &mut runtime.worker,
+        Arc::new(PauseSourceProvider {
+            metadata,
+            pause: runtime.source.pause_next.clone(),
+        }),
+    );
     pause_owned_commits(&runtime);
     let interrupted = event(PAGE, "page.created");
     runtime.worker.state.receive(&interrupted).unwrap();
@@ -2814,10 +2819,13 @@ async fn installed_graph_denies_reads_after_interrupted_owned_producer_commit() 
     .await
     .unwrap();
     let metadata = runtime.worker.index.provider.metadata().clone();
-    set_provider(&mut runtime.worker, Arc::new(PauseSourceProvider {
-        metadata,
-        pause: runtime.source.pause_next.clone(),
-    }));
+    set_provider(
+        &mut runtime.worker,
+        Arc::new(PauseSourceProvider {
+            metadata,
+            pause: runtime.source.pause_next.clone(),
+        }),
+    );
     pause_owned_commits(&runtime);
     runtime.source.change(|m| {
         m.markdown = "Changed Saffron.".into();

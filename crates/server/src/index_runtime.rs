@@ -544,8 +544,9 @@ impl IndexRuntime {
         lease: &'a mut notion_knowledge_core::reconciliation::Lease,
         mode: SyncMode,
         base: Clock,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<SyncTotals, SyncError>> + Send + 'a>>
-    {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<SyncTotals, SyncError>> + Send + 'a>,
+    > {
         Box::pin(self.sync_inner(settings, lease, mode, base))
     }
 
@@ -844,7 +845,8 @@ impl IndexRuntime {
                 totals.complete = walk.authoritative();
                 if walk.authoritative() {
                     totals.removed =
-                        Box::pin(self.remove_unreached(settings, lease, &walk, &held, &base)).await?;
+                        Box::pin(self.remove_unreached(settings, lease, &walk, &held, &base))
+                            .await?;
                 }
                 walk.run_id
             }
@@ -869,7 +871,8 @@ impl IndexRuntime {
                 totals.skipped += hits.skipped.len() as u64;
                 totals.drift.unplaced = hits.unplaced;
                 totals.removed =
-                    Box::pin(self.remove_pages(settings, lease, &run, &hits.removals, &base)).await?;
+                    Box::pin(self.remove_pages(settings, lease, &run, &hits.removals, &base))
+                        .await?;
                 run
             }
         };

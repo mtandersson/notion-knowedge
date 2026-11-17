@@ -116,6 +116,7 @@ impl WorkerSettings {
 
 #[cfg(all(unix, feature = "webhook-worker"))]
 pub mod runtime {
+    use crate::index_runtime::{SyncError, SyncFailure};
     use notion_knowledge_core::{
         backend::PageId,
         reconciliation::ReconciliationJournal,
@@ -125,11 +126,9 @@ pub mod runtime {
         },
     };
     use notion_knowledge_retrieval::{
-        commit::IndexCommitCoordinator,
-        mutation_refresh::MutationRefreshClaim,
+        commit::IndexCommitCoordinator, mutation_refresh::MutationRefreshClaim,
         sync_state::SqliteSyncStateStore,
     };
-    use crate::index_runtime::{SyncError, SyncFailure};
     use std::{
         sync::Arc,
         time::{Duration, SystemTime, UNIX_EPOCH},
