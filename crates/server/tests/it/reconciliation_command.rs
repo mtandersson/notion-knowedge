@@ -3760,6 +3760,46 @@ async fn text_with_more_than_25_mentions_is_read_in_full_without_failing_the_wal
 }
 
 #[tokio::test]
+async fn unreadable_text_past_the_mention_limit_fails_only_its_page() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    http.change(|m| {
+        m.mention_targets = (0..30)
+            .map(|n| format!("bbbbbbbb-0000-0000-0000-{n:012}"))
+            .collect();
+        m.unreadable_mention_items = true;
+    });
+    fs::remove_dir_all(&f.settings.index).unwrap();
+    let runtime = IndexRuntime::recover(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        out_of_sync(&runtime),
+        [(
+            PAGE.to_owned(),
+            notion_knowledge_core::inventory::InventoryOutcome::Failed(
+                notion_knowledge_core::reconciliation::FailureClass::Source
+            )
+        )]
+    );
+    assert!(
+        !runtime
+            .chunks()
+            .page_chunks(OTHER)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(runtime.chunks().page_chunks(PAGE).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn an_unreadable_long_relation_fails_only_its_page() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;

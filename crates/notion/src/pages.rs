@@ -36,8 +36,8 @@ fn truncated(value: &Value) -> bool {
 pub(crate) fn drop_truncated(value: &mut Value) {
     if let Some(properties) = value["properties"].as_object_mut() {
         properties.retain(|_, property| {
-            // The page needs its title; the cut one stands in on a page that is
-            // already marked incomplete.
+            // The page needs its title, so the cut one stands in. Callers must
+            // treat the page as incomplete, as the walk does.
             if property["type"] == "title" && truncated(property) {
                 property[PAGINATED] = Value::Bool(true);
             }
@@ -532,6 +532,24 @@ mod tests {
             assert!(headers.contains("authorization: bearer test-credential\r\n"));
             assert!(headers.contains(&format!("notion-version: {PAGE_VERSION}\r\n")));
         }
+    }
+    #[test]
+    fn a_cut_title_stands_in_and_cut_text_is_dropped() {
+        let mention =
+            json!({"type":"mention","plain_text":"@x","mention":{"type":"user","user":{"id":ID}}});
+        let mut value = fixture();
+        value["properties"]["Renamed title"]["title"] = json!(vec![mention.clone(); 25]);
+        value["properties"]["Text"] =
+            json!({"id":"text","type":"rich_text","rich_text":vec![mention; 25]});
+        let id = PageId(ID.to_owned());
+        assert_eq!(
+            metadata(&value, &id).unwrap_err().kind,
+            BackendErrorKind::UnsupportedContent
+        );
+        drop_truncated(&mut value);
+        let page = metadata(&value, &id).unwrap();
+        assert_eq!(page.title, "@x".repeat(25));
+        assert!(!page.properties.contains_key("text"));
     }
     #[tokio::test]
     async fn complete_properties_at_limits_preserve_values_and_types() {

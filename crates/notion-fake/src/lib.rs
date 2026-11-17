@@ -70,6 +70,8 @@ pub struct Model {
     pub unreadable_relation_items: bool,
     /// Page ids mentioned, in order, by a `Mentions` rich-text property.
     pub mention_targets: Vec<String>,
+    /// The mentions' property item endpoint answers 404.
+    pub unreadable_mention_items: bool,
     /// Adds the alias multi-select and an unselected rich-text property.
     pub alias_properties: bool,
     pub alias_names: Vec<String>,
@@ -119,6 +121,7 @@ impl Default for Model {
             relation_targets: vec![],
             unreadable_relation_items: false,
             mention_targets: vec![],
+            unreadable_mention_items: false,
             alias_properties: false,
             alias_names: vec![],
             extra: Default::default(),
@@ -365,7 +368,7 @@ fn respond(route: &str, snapshot: Model, bodies: usize) -> Value {
         .strip_prefix(&format!(
             "/v1/pages/{PAGE}/properties/mentions-stable?page_size=100"
         ))
-        .filter(|_| !snapshot.mention_targets.is_empty())
+        .filter(|_| !snapshot.mention_targets.is_empty() && !snapshot.unreadable_mention_items)
     {
         let start = query
             .strip_prefix("&start_cursor=")
