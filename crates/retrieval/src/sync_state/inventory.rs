@@ -520,26 +520,31 @@ impl notion_knowledge_core::inventory::InventoryPlacement for SqliteSyncStateSto
     /// trashed, read (a revision) and neither skipped nor failed in its walk.
     /// Entries are those of the latest walk: a complete walk replaces the
     /// inventory and an incremental one upserts what it read.
-    fn placed_chain(&self, page_id: &str) -> Option<notion_knowledge_core::inventory::PlacedChain> {
+    fn placed_chain(
+        &self,
+        page_id: &str,
+    ) -> Result<Option<notion_knowledge_core::inventory::PlacedChain>, SyncStateError> {
         let mut placed = notion_knowledge_core::inventory::PlacedChain::default();
         let mut seen = BTreeSet::new();
         let mut current = page_id.to_owned();
         loop {
             if !seen.insert(current.clone()) || seen.len() > MAX_CHAIN {
-                return None;
+                return Ok(None);
             }
-            let entry = self.inventory_entry(&current).ok()??;
+            let Some(entry) = self.inventory_entry(&current)? else {
+                return Ok(None);
+            };
             if entry.in_trash
                 || entry.last_edited_time.is_empty()
                 || matches!(
-                    self.inventory_outcome(&current).ok()?,
+                    self.inventory_outcome(&current)?,
                     Some(InventoryOutcome::Skipped(_) | InventoryOutcome::Failed(_))
                 )
             {
-                return None;
+                return Ok(None);
             }
             current = match entry.parent {
-                InventoryParent::Root => return Some(placed),
+                InventoryParent::Root => return Ok(Some(placed)),
                 InventoryParent::Page(id) => id,
                 InventoryParent::DataSource {
                     data_source_id,

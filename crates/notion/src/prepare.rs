@@ -199,6 +199,8 @@ mod tests {
     const OTHER: &str = "33333333-3333-3333-3333-333333333333";
     const WORKSPACE: &str = "44444444-4444-4444-4444-444444444444";
     const REVISION: &str = "2026-10-10T10:10:00Z";
+    /// A target whose inventory read fails.
+    const UNREADABLE: &str = "66666666-6666-6666-6666-666666666666";
 
     fn scope() -> LifecycleScope {
         LifecycleScope {
@@ -459,8 +461,14 @@ mod tests {
         fn placed_chain(
             &self,
             page_id: &str,
-        ) -> Option<notion_knowledge_core::inventory::PlacedChain> {
-            self.0.get(page_id).cloned()
+        ) -> Result<
+            Option<notion_knowledge_core::inventory::PlacedChain>,
+            notion_knowledge_core::sync_state::SyncStateError,
+        > {
+            match page_id {
+                UNREADABLE => Err(notion_knowledge_core::sync_state::SyncStateError::CorruptState),
+                _ => Ok(self.0.get(page_id).cloned()),
+            }
         }
     }
     /// `OTHER` placed as a database row under the root.
@@ -655,6 +663,21 @@ mod tests {
             assert!(result.targets()[OTHER].is_err(), "{case}");
             assert_eq!(client.request_metrics().attempts, 0, "{case}");
         }
+    }
+
+    #[tokio::test]
+    async fn unreadable_inventory_fails_the_proposal_instead_of_dropping_the_target() {
+        use crate::relation_proposal::RelationProposalAdapter;
+        let client = offline();
+        let adapter = RelationProposalAdapter::new(client.clone(), scope())
+            .unwrap()
+            .with_inventory(placed(&[]));
+        let error = proposal(&adapter, &with_relations("Related", &[UNREADABLE], false))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.kind, BackendErrorKind::Unavailable);
+        assert_eq!(client.request_metrics().attempts, 0);
     }
 
     #[tokio::test]

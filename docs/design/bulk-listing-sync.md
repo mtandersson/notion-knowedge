@@ -143,6 +143,15 @@ discovered by walking it:
   one walk stale (for example a page search still lists as trashed); the next
   walk corrects it.
 - Relations with the page graph off stay unresolved references and cost no calls.
+- As built (#689): a relation or link target that is not one of the page's
+  walked children resolves through the inventory's parent map, with no
+  Notion request. The target and every ancestor must be live, read entries
+  (not trashed, skipped or failed) under a current root, with no excluded
+  page, descendant rule, database or data-source type on the chain. Pages
+  are prepared while the walk streams and the walk is recorded when it
+  ends, so a target this walk is first to reach stays unresolved until the
+  next walk; a target that moved out stays resolved until then. An
+  unreadable inventory fails the page instead. Post-walk resolution is #705.
 
 ### 1b. Search as a change accelerator (incremental only)
 

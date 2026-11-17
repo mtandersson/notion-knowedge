@@ -492,7 +492,7 @@ mod inventory {
             .record_inventory_outcome("F", &InventoryOutcome::Failed(FailureClass::Source), 1)
             .unwrap();
         assert_eq!(
-            store.placed_chain("R"),
+            store.placed_chain("R").unwrap(),
             Some(notion_knowledge_core::inventory::PlacedChain {
                 ancestors: vec!["B".into(), "A".into()],
                 data_sources: vec![("ds".into(), "db".into())],
@@ -504,10 +504,10 @@ mod inventory {
                 data_sources: vec![],
             })
         };
-        assert_eq!(store.placed_chain("B"), chain(&["A"]));
-        assert_eq!(store.placed_chain("A"), chain(&[]));
+        assert_eq!(store.placed_chain("B").unwrap(), chain(&["A"]));
+        assert_eq!(store.placed_chain("A").unwrap(), chain(&[]));
         for absent in ["T", "N", "U", "unknown", "TC", "NC", "S", "SC", "F", "FC"] {
-            assert_eq!(store.placed_chain(absent), None, "{absent}");
+            assert_eq!(store.placed_chain(absent).unwrap(), None, "{absent}");
         }
     }
 

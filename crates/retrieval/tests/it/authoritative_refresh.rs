@@ -169,7 +169,10 @@ impl Fixture {
         self.place(OTHER, Some(ROOT), true);
     }
     /// Record `page` in the inventory as a walk would: under `parent`, or as
-    /// a root, and unreadable (no revision) unless `readable`.
+    /// a root, and unreadable (no revision) unless `readable`. Targets the
+    /// fake walk never reaches (FOREIGN) are placed by hand: the placement
+    /// stands in for an earlier walk that reached them, since relation and
+    /// link targets resolve only from the inventory.
     fn place(&self, page: &str, parent: Option<&str>, readable: bool) {
         use notion_knowledge_core::inventory::{InventoryEntry, InventoryParent};
         self.coordinator

@@ -22,9 +22,13 @@ pub enum InventoryParent {
 /// Notion request.
 pub trait InventoryPlacement: Send + Sync {
     /// The page's placement under a root. `None` when the page or any
-    /// ancestor is not a readable, live, successfully walked inventory entry,
-    /// its chain does not reach a root, or the inventory is unreadable.
-    fn placed_chain(&self, page_id: &str) -> Option<PlacedChain>;
+    /// ancestor is not a readable, live, successfully walked inventory entry
+    /// or its chain does not reach a root. An unreadable inventory is an
+    /// error, never an absent page.
+    fn placed_chain(
+        &self,
+        page_id: &str,
+    ) -> Result<Option<PlacedChain>, crate::sync_state::SyncStateError>;
 }
 
 /// Where the inventory places a page.

@@ -111,16 +111,30 @@ impl RelationProposalAdapter {
     /// target must be placed under a current root, with no excluded page on
     /// its chain and no ancestor whose descendants are excluded. A target the
     /// inventory does not hold stays unresolved until a walk places it.
-    fn placed(&self, target: &str, scope: &LifecycleScope) -> Result<(), ScopeError> {
-        let placed = self
-            .inventory
-            .as_ref()
-            .and_then(|inventory| inventory.placed_chain(target))
-            .ok_or(ScopeError::Unverifiable)?;
+    fn placed(
+        &self,
+        target: &str,
+        scope: &LifecycleScope,
+    ) -> Result<Result<(), ScopeError>, BackendError> {
+        let Some(inventory) = &self.inventory else {
+            return Ok(Err(ScopeError::Unverifiable));
+        };
+        let placed = match inventory.placed_chain(target) {
+            Ok(Some(placed)) => placed,
+            Ok(None) => return Ok(Err(ScopeError::Unverifiable)),
+            Err(_) => {
+                return Err(BackendError {
+                    kind: BackendErrorKind::Unavailable,
+                    operation: "notion.relation_proposal.inventory",
+                    retry_after: None,
+                    committed_page_id: None,
+                });
+            }
+        };
         let chain = &placed.ancestors;
         let root = chain.last().map_or(target, String::as_str);
         if !scope.roots.iter().any(|r| r.0 == root) {
-            return Err(ScopeError::Denied);
+            return Ok(Err(ScopeError::Denied));
         }
         let excluded = std::iter::once(target)
             .chain(chain.iter().map(String::as_str))
@@ -138,10 +152,11 @@ impl RelationProposalAdapter {
                         .exclusion(database, SourceType::Database)
                         .is_some()
             });
-        if excluded {
-            return Err(ScopeError::Denied);
-        }
-        Ok(())
+        Ok(if excluded {
+            Err(ScopeError::Denied)
+        } else {
+            Ok(())
+        })
     }
     /// Trusted immutable composition setting; never infer from source references.
     pub fn with_projection_mode(mut self, mode: ProjectionMode) -> Self {
@@ -208,7 +223,7 @@ impl RelationProposalAdapter {
                 let outcome = if children.contains(&target) {
                     Ok(())
                 } else {
-                    self.placed(&target, scope)
+                    self.placed(&target, scope)?
                 };
                 if outcome.is_ok() {
                     allowed.insert(target.clone());

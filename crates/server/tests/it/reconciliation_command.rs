@@ -221,6 +221,18 @@ impl Fixture {
     }
     /// Populate through the core refresh seam without production ANN completion,
     /// for fixtures that deliberately construct missing or foreign indexes.
+    /// Record a prior walk of the root tree. Relation and link targets
+    /// resolve only from the inventory, so a target a walk has not placed
+    /// stays unresolved until the next walk.
+    async fn seed_inventory(&self, http: &HttpNotion) {
+        let runtime = self.open(http, OpenMode::ExistingWrite).await;
+        let walk = http.client().walk_tree(&self.scope, None).await.unwrap();
+        runtime
+            .coordinator
+            .state()
+            .record_walk(&walk.run_id, &walk.entries, walk.authoritative())
+            .unwrap();
+    }
     async fn populate(&self, http: &HttpNotion, run: &str) {
         let runtime = self.open(http, OpenMode::ExistingWrite).await;
         let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
@@ -1967,6 +1979,7 @@ async fn explicit_relation_rebuild_uses_shared_runtime_and_preserves_operational
         m.relation_name = Some("Ingredients".into());
     });
     let f = Fixture::new(&http).await;
+    f.seed_inventory(&http).await;
     counts(
         &f.command(&http, &["--reconcile", "apply", "seed"]).await,
         3,
@@ -4102,6 +4115,7 @@ async fn target_projection_mode_changes_reconcile_without_reembedding_canonical_
         source.relation_name = Some("Related".into());
         source.markdown = format!("[related](https://www.notion.so/{OTHER})\n");
     }
+    f.seed_inventory(&http).await;
     let mut first_vectors = 0;
     for (n, mode) in [
         ProjectionMode::UnresolvedTargets,
