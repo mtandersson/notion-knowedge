@@ -401,3 +401,33 @@ never overlap, so persistent failure costs one attempt per interval rather than
 one per commit, while the tail grows until a pass succeeds. The optimizing pass runs inside the
 observer of the commit that reached the cadence; dropping that observer skips
 the pass, and the pending count survives for the next commit.
+
+## Storage maintenance
+
+Every `optimize_indexes` pass also bounds Lance storage, under the same guard
+and lease, so it never overlaps a page commit and stops at the next fence
+revalidation when the lease is lost or the pass is cancelled:
+
+1. Before folding rows into the indexes it compacts the fragments written since
+   the last pass. Lance only merges fragments that the same index segments
+   cover, so these still-unindexed fragments are merged here; each pass then
+   adds one fragment and one delta segment per index rather than one per page.
+2. Once `STORAGE_COMPACT_SMALL_FRAGMENTS` (32) fragments hold fewer than
+   `STORAGE_TARGET_ROWS_PER_FRAGMENT` (100 000) rows, it merges every index
+   into one segment and compacts all small fragments into fragments of up to
+   that size. Compaction runs one rewrite task, so memory stays near one read
+   batch and one output row group.
+3. It prunes versions older than `STORAGE_VERSION_RETENTION` (10 minutes); the
+   current version is always kept.
+
+After a pass the table therefore has at most `ceil(rows / 100 000)` full
+fragments plus fewer than 32 small ones, at most 32 segments per index, and
+only the versions created within the last 10 minutes. Receipts and checkpoints
+live in SQLite and name no Lance version, and a commit compares its prepared
+version with the current one under the guard, so no commit or rollback path
+needs an old version; the window protects readers that opened a version before
+the pass, such as a search snapshot or a page preparation. A preparation whose
+version a pass replaced fails the commit as a conflict, as it does after any
+other write. Each pass logs a `storage_maintenance` line with the fragment,
+small-fragment and version counts, the versions and bytes pruned, and the
+table size, which serves the per-100-page measurement plan of #664.

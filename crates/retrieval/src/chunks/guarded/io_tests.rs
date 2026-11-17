@@ -1888,3 +1888,195 @@ async fn commits_optimize_indexes_once_the_page_cadence_is_reached() {
     commit_new_page(&f, &table, "last", "final body").await;
     assert!(unindexed_rows(&f).await.iter().all(|rows| *rows == 0));
 }
+
+fn small_storage_bounds(retention: std::time::Duration) -> super::StorageMaintenance {
+    super::StorageMaintenance {
+        compact_small_fragments: 4,
+        version_retention: retention,
+        ..Default::default()
+    }
+}
+
+/// Fragment and version counts of the current table.
+async fn storage_shape(f: &Fixture) -> (usize, usize) {
+    let current = super::open_current(&f.index, "chunks", &f.embedding, &None)
+        .await
+        .unwrap();
+    let fragments = current
+        .table
+        .stats()
+        .await
+        .unwrap()
+        .fragment_stats
+        .num_fragments;
+    let versions = current.table.list_versions().await.unwrap().len();
+    (fragments, versions)
+}
+
+/// Every hit from both rankers with its score, over the whole corpus, so the
+/// comparison does not depend on how ties at a result limit are broken.
+async fn ranked_ids(snapshot: &LanceChunkTable, word: &str, vector: [f32; 3]) -> Vec<String> {
+    let mut lexical: Vec<String> = snapshot
+        .lexical_search(crate::chunks::LexicalQuery {
+            query: word.into(),
+            limit: 100,
+            page_ids: None,
+            root_page_ids: None,
+            metadata: Default::default(),
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|hit| format!("lexical {} {:.4}", hit.source.chunk_id, hit.score))
+        .collect();
+    let mut semantic: Vec<String> = snapshot
+        .vector_query(&vector, 100, 1)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|hit| format!("vector {} {:.4}", hit.chunk_id, hit.distance))
+        .collect();
+    lexical.sort();
+    semantic.sort();
+    lexical.extend(semantic);
+    lexical
+}
+
+async fn seeded_with_vector_index(f: &Fixture) -> GuardedChunkTable {
+    f.create().await;
+    let table = f.guarded();
+    commit_new_page(f, &table, "seed", "seed baseline").await;
+    table
+        .ensure_vector_index(
+            VectorIndexConfig {
+                num_partitions: Some(1),
+                ..Default::default()
+            },
+            f.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    table
+}
+
+#[tokio::test]
+async fn storage_stays_bounded_and_search_unchanged_after_many_commits() {
+    let f = Fixture::new();
+    let table = seeded_with_vector_index(&f)
+        .await
+        .with_storage_maintenance(small_storage_bounds(std::time::Duration::ZERO));
+    let cadence = super::INDEX_OPTIMIZE_EVERY_PAGES as usize;
+    // Stays within the 100-hit search limit so every row is compared.
+    let pages = 2 * cadence + 20;
+    let (mut most_fragments, mut most_versions) = (0, 0);
+    for page in 0..pages {
+        commit_new_page(
+            &f,
+            &table,
+            &format!("page-{page}"),
+            &format!("shared body {page}"),
+        )
+        .await;
+        let (fragments, versions) = storage_shape(&f).await;
+        most_fragments = most_fragments.max(fragments);
+        most_versions = most_versions.max(versions);
+    }
+    // Each commit adds a fragment and a version; cadence passes keep both
+    // bounded by the pages between passes rather than by all pages committed.
+    assert!(
+        most_fragments <= cadence + 8,
+        "fragments peaked at {most_fragments}"
+    );
+    assert!(
+        most_versions <= 2 * cadence + 8,
+        "versions peaked at {most_versions}"
+    );
+    assert!(pages > 2 * cadence + 8);
+    // Index the tail without compacting, so the next pass changes storage only.
+    table
+        .clone()
+        .with_storage_maintenance(super::StorageMaintenance {
+            compact_small_fragments: usize::MAX,
+            version_retention: super::STORAGE_VERSION_RETENTION,
+            ..Default::default()
+        })
+        .optimize_indexes(f.lease.clone(), clock())
+        .await
+        .unwrap();
+    let (fragments_before, versions_before) = storage_shape(&f).await;
+    assert!(fragments_before >= 2, "the pass has fragments to compact");
+    let vector = ["shared body 7".len() as f32, 1.0, 0.0];
+    let before = ranked_ids(&table.search_snapshot().await.unwrap(), "shared", vector).await;
+    // Every page matches lexically; every row, seed included, semantically.
+    assert_eq!(before.len(), 2 * pages + 1);
+
+    let table = table.with_storage_maintenance(super::StorageMaintenance {
+        compact_small_fragments: 2,
+        version_retention: std::time::Duration::ZERO,
+        ..Default::default()
+    });
+    table
+        .optimize_indexes(f.lease.clone(), clock())
+        .await
+        .unwrap();
+
+    let (fragments, versions) = storage_shape(&f).await;
+    assert!(
+        fragments < fragments_before,
+        "fragments {fragments_before} -> {fragments}"
+    );
+    assert!(versions <= 2, "versions {versions_before} -> {versions}");
+    let after = ranked_ids(&table.search_snapshot().await.unwrap(), "shared", vector).await;
+    assert_eq!(before, after);
+    assert_eq!(
+        f.coordinator.receipt("op-page-0").unwrap().unwrap().status,
+        ReceiptStatus::Applied
+    );
+    assert_eq!(table.page_chunks("page-0").await.unwrap().len(), 1);
+    // The table still accepts commits against the compacted version.
+    commit_new_page(&f, &table, "later", "shared later").await;
+}
+
+#[tokio::test]
+async fn compaction_keeps_versions_an_open_reader_depends_on() {
+    let f = Fixture::new();
+    let table = seeded_with_vector_index(&f)
+        .await
+        .with_storage_maintenance(small_storage_bounds(super::STORAGE_VERSION_RETENTION));
+    for page in 0..8 {
+        commit_new_page(
+            &f,
+            &table,
+            &format!("page-{page}"),
+            &format!("shared body {page}"),
+        )
+        .await;
+    }
+    let vector = ["shared body 3".len() as f32, 1.0, 0.0];
+    let reader = table.search_snapshot().await.unwrap();
+    let before = ranked_ids(&reader, "shared", vector).await;
+    let (fragments_before, _) = storage_shape(&f).await;
+
+    for page in 8..16 {
+        commit_new_page(
+            &f,
+            &table,
+            &format!("page-{page}"),
+            &format!("other body {page}"),
+        )
+        .await;
+    }
+    table
+        .optimize_indexes(f.lease.clone(), clock())
+        .await
+        .unwrap();
+    let (fragments, _) = storage_shape(&f).await;
+    assert!(
+        fragments < fragments_before,
+        "compaction ran: {fragments_before} -> {fragments}"
+    );
+
+    // The reader's version predates compaction and stays readable.
+    assert_eq!(ranked_ids(&reader, "shared", vector).await, before);
+}
