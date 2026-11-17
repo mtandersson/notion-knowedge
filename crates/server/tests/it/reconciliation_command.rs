@@ -3702,7 +3702,6 @@ async fn a_relation_past_the_inline_limit_is_read_in_full_without_failing_the_wa
                 notion_knowledge_core::graph::GraphTarget::Unresolved { reference } => {
                     reference.clone()
                 }
-                other => panic!("{other:?}"),
             })
             .collect();
     related.sort();
