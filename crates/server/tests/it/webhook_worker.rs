@@ -17,7 +17,6 @@ use notion_knowledge_retrieval::{
 };
 use notion_knowledge_server::index_runtime::{IndexRuntime, RuntimeParts};
 use serde_json::{Value, json};
-use sha2::Digest;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -239,6 +238,10 @@ impl HttpNotion {
                 }
                 let bad = fail.swap(false, Ordering::SeqCst);
                 let status = if bad {
+                    503
+                } else if response.get("code").is_some() && route.starts_with("/v1/pages/66666666")
+                {
+                    // The isolated bad page fails until repaired.
                     503
                 } else if response.get("code").is_some() {
                     404
@@ -502,6 +505,15 @@ async fn seed_walk(
         .unwrap();
     source.attempts.store(0, Ordering::SeqCst);
     source.body_reads.store(0, Ordering::SeqCst);
+}
+
+fn owned_operation(runtime: &TestRuntime) -> String {
+    rusqlite::Connection::open(&runtime.db)
+        .unwrap()
+        .query_row("SELECT operation_id FROM index_commit_receipts", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
 }
 
 fn set_provider(worker: &mut Arc<Worker>, provider: Arc<dyn EmbeddingProvider>) {
@@ -880,7 +892,8 @@ async fn transient_failure_retries_and_unknown_hint_is_permanent() {
     tick(&runtime.worker, false).await;
     let pending = inspect(&runtime.worker, &transient);
     assert_eq!(pending.state, EventState::Pending);
-    assert_eq!(pending.last_failure, Some(EventFailure::Source));
+    // The page retrieve failed: the source was unavailable, so it retries.
+    assert_eq!(pending.last_failure, Some(EventFailure::Unavailable));
     tick(&runtime.worker, false).await;
     assert_eq!(inspect(&runtime.worker, &unknown).state, EventState::Failed);
     assert_eq!(inspect(&runtime.worker, &unknown).cycle_attempts, 1);
@@ -993,11 +1006,29 @@ async fn debounce_and_lifecycle_follow_authority_and_recover_effects_before_inbo
     runtime.worker.state.receive(&restored).unwrap();
     tick(&runtime.worker, false).await;
     assert!(runtime.searchable("Saffron").await > 0);
+    // Moved under a page the inventory does not hold: unplaced, so it stays
+    // until the next walk settles it, and the event still succeeds.
     runtime.source.change(|m| m.parent = FOREIGN.into());
     let moved = event(PAGE, "page.moved");
     runtime.worker.state.receive(&moved).unwrap();
     tick(&runtime.worker, false).await;
-    assert_eq!(runtime.searchable("Saffron").await, 0);
+    assert_eq!(
+        inspect(&runtime.worker, &moved).state,
+        EventState::Succeeded
+    );
+    assert_eq!(unplaced(&runtime), 1);
+    assert!(runtime.searchable("Saffron").await > 0);
+}
+
+fn unplaced(runtime: &TestRuntime) -> u64 {
+    runtime
+        .worker
+        .state
+        .last_sync()
+        .unwrap()
+        .unwrap()
+        .drift
+        .unplaced
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1348,7 +1379,7 @@ async fn fatal_worker_storage_failure_stops_the_actual_http_serving_lifecycle() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unsupported_authoritative_content_and_unowned_out_of_scope_page_fail_permanently() {
+async fn unsupported_content_fails_permanently_and_out_of_scope_page_is_unplaced() {
     let runtime = TestRuntime::new().await;
     runtime.source.change(|m| m.unsupported = true);
     let unsupported = event(PAGE, "page.created");
@@ -1358,12 +1389,16 @@ async fn unsupported_authoritative_content_and_unowned_out_of_scope_page_fail_pe
     }
     tick(&runtime.worker, false).await;
     tick(&runtime.worker, false).await;
-    for e in [&unsupported, &outside] {
-        let observed = inspect(&runtime.worker, e);
-        assert_eq!(observed.state, EventState::Failed);
-        assert_eq!(observed.cycle_attempts, 1);
-        assert_eq!(observed.failure, Some(EventFailure::Source));
-    }
+    // Both settle in one attempt: no retry can read the unsupported page,
+    // and the page outside the root cannot be placed by the inventory.
+    let observed = inspect(&runtime.worker, &unsupported);
+    assert_eq!(observed.state, EventState::Failed);
+    assert_eq!(observed.cycle_attempts, 1);
+    assert_eq!(observed.failure, Some(EventFailure::Source));
+    let observed = inspect(&runtime.worker, &outside);
+    assert_eq!(observed.state, EventState::Succeeded);
+    assert_eq!(observed.cycle_attempts, 1);
+    assert_eq!(unplaced(&runtime), 1);
     assert_eq!(runtime.searchable("Saffron").await, 0);
 }
 
@@ -2582,15 +2617,8 @@ async fn shutdown_cancels_owned_commit_source_read_releases_fence_and_restart_pr
         .unwrap()
         .unwrap()
         .unwrap();
-    let operation = format!(
-        "webhook-{:x}",
-        sha2::Sha256::digest(format!(
-            "{}:{}:{:?}",
-            WORKSPACE,
-            SUB,
-            vec![interrupted.id.clone()]
-        ))
-    );
+    // The sync names its own operation; this page's is the only receipt.
+    let operation = owned_operation(&runtime);
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if runtime
@@ -2690,10 +2718,8 @@ async fn deadline_cancellation_retains_due_retry_and_allows_healthy_page_progres
     // its cancellation by waiting for the owned index receipt to be marked
     // failed; a one-second wall-clock allowance for both cancellation and
     // background cleanup is not reliable under parallel feature CI load.
-    let operation = format!(
-        "webhook-{:x}",
-        sha2::Sha256::digest(format!("{}:{}:{:?}", WORKSPACE, SUB, vec![bad.id.clone()]))
-    );
+    // The sync names its own operation; this page's is the only receipt.
+    let operation = owned_operation(&runtime);
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if runtime
