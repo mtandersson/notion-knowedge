@@ -592,8 +592,14 @@ impl IndexRuntime {
             let (hits, complete) = match mode {
                 SyncMode::Page(page) => match self.source.page_hit(&page).await {
                     Ok(hit) => (hit.into_iter().collect(), true),
+                    // The callback's own retrieve confirms the page is gone
+                    // or revoked: remove it if indexed. Without this, a setup
+                    // that never walks would keep it searchable.
                     Err(e) if notion_knowledge_core::discovery::inaccessible(e.kind) => {
-                        (vec![], true)
+                        return Ok(Discovered::Hits(HitSync {
+                            removals: vec![page.0.clone()],
+                            ..HitSync::default()
+                        }));
                     }
                     Err(e) => return Err(SyncError::source(&e)),
                 },
@@ -1036,6 +1042,11 @@ impl IndexRuntime {
             return Ok(Some((InventoryParent::Root, hit.page_id.clone())));
         }
         Ok(match &hit.parent {
+            // A configured root places its children with no inventory yet.
+            HitParent::Page(parent) if self.source_scope.roots.iter().any(|r| &r.0 == parent) => {
+                (!self.source_scope.exclusions.descendants_of.contains(parent))
+                    .then(|| (InventoryParent::Page(parent.clone()), parent.clone()))
+            }
             HitParent::Page(parent) if placed.iter().any(|e| &e.page_id == parent) => {
                 let entry = placed.iter().find(|e| &e.page_id == parent).unwrap();
                 // Pruned the same way as an inventoried parent.

@@ -43,6 +43,8 @@ struct Model {
     archived: bool,
     root_revision: String,
     repair_bad: bool,
+    /// PAGE answers 404: deleted or access revoked.
+    gone: bool,
     unsupported: bool,
     joined: bool,
     linked: bool,
@@ -57,6 +59,7 @@ impl Default for Model {
             archived: false,
             root_revision: "2026-10-10T11:00:00Z".into(),
             repair_bad: false,
+            gone: false,
             unsupported: false,
             joined: false,
             linked: true,
@@ -159,7 +162,11 @@ impl HttpNotion {
                     mutations.fetch_add(1, Ordering::SeqCst);
                 }
                 let snapshot = values.lock().unwrap().clone();
-                let mut response = if route == format!("/v1/pages/{ROOT}/markdown") {
+                let mut response = if snapshot.gone
+                    && route.starts_with(&format!("/v1/pages/{PAGE}"))
+                {
+                    json!({"object":"error", "code":"object_not_found"})
+                } else if route == format!("/v1/pages/{ROOT}/markdown") {
                     // The walk reaches both children through their <page> tags.
                     let markdown = [PAGE, OTHER]
                         .map(|id| {
@@ -1018,6 +1025,24 @@ async fn debounce_and_lifecycle_follow_authority_and_recover_effects_before_inbo
     );
     assert_eq!(unplaced(&runtime), 1);
     assert!(runtime.searchable("Saffron").await > 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn page_answering_not_found_to_its_callback_is_removed_without_a_walk() {
+    let runtime = TestRuntime::new().await;
+    let created = event(PAGE, "page.created");
+    runtime.worker.state.receive(&created).unwrap();
+    tick(&runtime.worker, false).await;
+    assert!(runtime.searchable("Saffron").await > 0);
+    runtime.source.change(|m| m.gone = true);
+    let deleted = event(PAGE, "page.deleted");
+    runtime.worker.state.receive(&deleted).unwrap();
+    tick(&runtime.worker, false).await;
+    assert_eq!(
+        inspect(&runtime.worker, &deleted).state,
+        EventState::Succeeded
+    );
+    assert_eq!(runtime.searchable("Saffron").await, 0);
 }
 
 fn unplaced(runtime: &TestRuntime) -> u64 {
