@@ -387,10 +387,16 @@ step, `GuardedChunkTable::optimize_indexes`, run under the same coordinator
 guard and lease. The commit path runs it after every
 `INDEX_OPTIMIZE_EVERY_PAGES` (32) committed pages, or at the next commit once
 the oldest pending page is older than `INDEX_OPTIMIZE_INTERVAL` (60 s), and
-every sync runs it once before recording the sync. Search therefore scans at
-most 32 pages of unindexed rows (plus any rows from a failed pass) with an
-exact flat scan beside the indexes; Lance searches unindexed fragments for
-both FTS and vector queries, which the guarded io tests verify on the pinned
-version. The pass writes no receipt and is idempotent: a crash, cancel or
-failure after a commit leaves the commit acknowledged and its rows searchable,
-and the next pass folds them in. A failed pass never fails the page commit.
+every sync that committed pages runs it once before recording the sync. Search
+therefore scans at most 32 pages of unindexed rows with an exact flat scan
+beside the indexes (a 1-3 chunk page adds a few rows, so the tail is on the
+order of 100 rows); Lance searches unindexed fragments for both FTS and vector
+queries, which the guarded io tests verify on the pinned version. The pass
+writes no receipt and its effect on search is idempotent (each run still adds
+Lance versions). A crash, cancel or failure after a commit leaves the commit
+acknowledged and its rows searchable; a failed pass never fails the page commit,
+is logged as `index_optimize` `deferred`, and restarts the cadence window, so
+persistent failure retries once per window rather than on every commit while
+the tail grows until a pass succeeds. The optimizing pass runs inside the
+observer of the commit that reached the cadence; dropping that observer skips
+the pass, and the pending count survives for the next commit.

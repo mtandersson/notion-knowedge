@@ -558,27 +558,25 @@ fn independent_writer_waits_through_real_data_and_index_io_after_cancellation_an
     fs::write(f.root.join("two-begin"), "").unwrap();
     wait_for(|| f.root.join("two-submitted").exists());
     // A page commit writes data only; index optimization is a separate pass.
-    for stage in ["data"] {
-        wait_for(|| f.root.join(format!("{stage}-entered")).exists());
-        std::thread::sleep(std::time::Duration::from_millis(150));
-        assert!(!f.root.join("two-finished").exists());
-        assert!(one.try_wait().unwrap().is_none());
-        assert!(two.try_wait().unwrap().is_none());
-        assert_eq!(
-            f.coordinator.receipt("one").unwrap().unwrap().status,
-            ReceiptStatus::Pending
-        );
-        assert_eq!(
-            f.coordinator
-                .state()
-                .page_state("page")
-                .unwrap()
-                .unwrap()
-                .content_hash(),
-            Some("seed")
-        );
-        fs::write(f.root.join(format!("{stage}-release")), "").unwrap();
-    }
+    wait_for(|| f.root.join("data-entered").exists());
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    assert!(!f.root.join("two-finished").exists());
+    assert!(one.try_wait().unwrap().is_none());
+    assert!(two.try_wait().unwrap().is_none());
+    assert_eq!(
+        f.coordinator.receipt("one").unwrap().unwrap().status,
+        ReceiptStatus::Pending
+    );
+    assert_eq!(
+        f.coordinator
+            .state()
+            .page_state("page")
+            .unwrap()
+            .unwrap()
+            .content_hash(),
+        Some("seed")
+    );
+    fs::write(f.root.join("data-release"), "").unwrap();
     wait_for(|| f.root.join("one-finished").exists() && f.root.join("two-finished").exists());
     assert!(one.wait().unwrap().success());
     assert!(two.wait().unwrap().success());
@@ -1789,18 +1787,26 @@ async fn found_by_both_rankers(
     vector: [f32; 3],
 ) -> bool {
     let snapshot = table.search_snapshot().await.unwrap();
-    let lexical = snapshot
-        .lexical_search(crate::chunks::LexicalQuery {
-            query: word.into(),
-            limit: 10,
-            page_ids: None,
-            root_page_ids: None,
-            metadata: Default::default(),
-        })
-        .await
-        .unwrap();
+    let mut found = true;
+    // Unfiltered and page/root-scoped lexical queries.
+    for (page_ids, root_page_ids) in [
+        (None, None),
+        (Some(vec![page.to_owned()]), Some(vec!["root".to_owned()])),
+    ] {
+        let lexical = snapshot
+            .lexical_search(crate::chunks::LexicalQuery {
+                query: word.into(),
+                limit: 10,
+                page_ids,
+                root_page_ids,
+                metadata: Default::default(),
+            })
+            .await
+            .unwrap();
+        found &= lexical.iter().any(|hit| hit.source.page_id == page);
+    }
     let semantic = snapshot.vector_query(&vector, 10, 1).await.unwrap();
-    lexical.iter().any(|hit| hit.source.page_id == page)
+    found
         && semantic
             .iter()
             .any(|hit| hit.chunk_id == format!("{page}-chunk"))

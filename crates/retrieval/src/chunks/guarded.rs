@@ -52,6 +52,17 @@ struct OptimizeCadence {
     oldest: Option<std::time::Instant>,
 }
 
+impl OptimizeCadence {
+    /// Start a new cadence window after a failed pass.
+    fn restart(&mut self) {
+        self.pending = 0;
+        self.restart_window();
+    }
+    fn restart_window(&mut self) {
+        self.oldest = Some(std::time::Instant::now());
+    }
+}
+
 /// Expand content only from a compatible committed snapshot. Hold the shared
 /// directory fence through all reads and reject replaced operational authority
 /// before releasing any content. This read path never repairs indexes.
@@ -904,11 +915,35 @@ impl GuardedChunkTable {
         async move {
             let outcome = commit.await?;
             if outcome == CommitOutcome::Applied && this.record_commit() {
-                // The page is durable; a failed pass is retried by the next one.
-                let _ = this.optimize_indexes(maintenance.0, maintenance.1).await;
+                // The page is durable. A failed pass restarts the cadence, so
+                // persistent failure costs one attempt per cadence window, not
+                // per commit; the next successful pass folds every row in.
+                if let Err(error) = this.optimize_indexes(maintenance.0, maintenance.1).await {
+                    this.cadence
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .restart();
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "operation": "index_optimize",
+                            "outcome": "deferred",
+                            "error": format!("{error:?}"),
+                        })
+                    );
+                }
             }
             Ok(outcome)
         }
+    }
+
+    /// Whether pages were committed through this binding since the last pass.
+    pub fn has_pending_optimization(&self) -> bool {
+        self.cadence
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending
+            > 0
     }
 
     /// Count one committed page and report whether optimization is due.
@@ -934,7 +969,11 @@ impl GuardedChunkTable {
         let embedding = self.embedding.clone();
         let lexical = self.lexical_binding.clone();
         let cadence = self.cadence.clone();
-        let started = std::time::Instant::now();
+        let covered = self
+            .cadence
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending;
         let pass = self
             .coordinator
             .maintain(lease, clock, move |context| async move {
@@ -979,11 +1018,14 @@ impl GuardedChunkTable {
             });
         async move {
             pass.await?;
-            // Pages committed while the pass ran may be unindexed; keep them
-            // pending so the bound covers them.
+            // Pages committed after the pass was requested may be unindexed;
+            // keep them pending so the bound covers them.
             let mut cadence = cadence.lock().unwrap_or_else(|e| e.into_inner());
-            if cadence.oldest.is_some_and(|oldest| oldest <= started) {
-                *cadence = OptimizeCadence::default();
+            cadence.pending = cadence.pending.saturating_sub(covered);
+            if cadence.pending == 0 {
+                cadence.oldest = None;
+            } else {
+                cadence.restart_window();
             }
             Ok(())
         }
