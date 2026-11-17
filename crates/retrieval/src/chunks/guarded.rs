@@ -33,7 +33,60 @@ pub struct GuardedChunkTable {
     coordinator: Arc<IndexCommitCoordinator>,
     lexical_binding: Option<LexicalIndexBinding>,
     cadence: Arc<std::sync::Mutex<OptimizeCadence>>,
+    storage: StorageMaintenance,
 }
+
+/// Bounds on Lance storage growth, applied by every index optimization pass.
+///
+/// Each page commit writes at least one new fragment and one new version.
+/// Without maintenance both grow with the number of pages ever committed.
+/// With it, after a pass, approximately (Lance merges only neighbouring
+/// fragments that the same index segments cover, so an isolated small
+/// fragment can remain):
+///
+/// - fragments: about `ceil(rows / target_rows_per_fragment)` full fragments
+///   plus fewer than `compact_small_fragments` small ones;
+/// - index segments: one per pass since the last threshold step, so fewer
+///   than `compact_small_fragments` per index;
+/// - versions: those created within `version_retention` (a count set by the
+///   commit rate), plus the current one.
+///
+/// Receipts and checkpoints live in SQLite and name no Lance version; a page
+/// commit compares the version it prepared against the current one under the
+/// commit fence, so it never needs an older version. The retention window only
+/// protects readers that opened a version before the pass, such as a search
+/// snapshot or a page preparation still reading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StorageMaintenance {
+    /// Compact once at least this many fragments are below the target size.
+    pub compact_small_fragments: usize,
+    /// Fragments with fewer rows are compaction candidates. Matches the
+    /// small-fragment threshold of Lance table statistics.
+    pub target_rows_per_fragment: usize,
+    /// Versions older than this are pruned; newer ones and the current one stay.
+    pub version_retention: std::time::Duration,
+}
+
+impl Default for StorageMaintenance {
+    fn default() -> Self {
+        Self {
+            compact_small_fragments: STORAGE_COMPACT_SMALL_FRAGMENTS,
+            target_rows_per_fragment: STORAGE_TARGET_ROWS_PER_FRAGMENT,
+            version_retention: STORAGE_VERSION_RETENTION,
+        }
+    }
+}
+
+/// See [`StorageMaintenance::compact_small_fragments`].
+pub const STORAGE_COMPACT_SMALL_FRAGMENTS: usize = 32;
+/// See [`StorageMaintenance::target_rows_per_fragment`].
+pub const STORAGE_TARGET_ROWS_PER_FRAGMENT: usize = 100_000;
+/// See [`StorageMaintenance::version_retention`]. Far longer than any search
+/// or page preparation holds a version open.
+pub const STORAGE_VERSION_RETENTION: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// Compaction rewrites with one task, so memory stays near one read batch
+/// plus one output row group instead of scaling with the CPU count.
+const STORAGE_COMPACTION_THREADS: usize = 1;
 
 /// Committed pages after which the commit path runs index optimization.
 /// Between optimizations at most this many pages' rows are outside the FTS and
@@ -302,6 +355,7 @@ impl GuardedChunkTable {
             coordinator,
             lexical_binding,
             cadence: Default::default(),
+            storage: StorageMaintenance::default(),
         })
     }
 
@@ -947,6 +1001,12 @@ impl GuardedChunkTable {
         }
     }
 
+    /// Replace the storage bounds applied by later optimization passes.
+    pub fn with_storage_maintenance(mut self, storage: StorageMaintenance) -> Self {
+        self.storage = storage;
+        self
+    }
+
     /// Whether pages were committed through this binding since the last pass.
     pub fn has_pending_optimization(&self) -> bool {
         self.cadence
@@ -985,6 +1045,7 @@ impl GuardedChunkTable {
         let embedding = self.embedding.clone();
         let lexical = self.lexical_binding.clone();
         let cadence = self.cadence.clone();
+        let storage = self.storage;
         let covered = self
             .cadence
             .lock()
@@ -1006,6 +1067,13 @@ impl GuardedChunkTable {
                     })
                     .await
                     .map_err(failure)?;
+                // Coalesce the fragments written since the last pass while no
+                // index covers them yet, so each pass adds one indexed fragment
+                // and one index delta rather than one per page. Deleted rows
+                // are left to the threshold step, so this rewrites no indexed
+                // fragment for deletions alone.
+                compact(&current, &storage, false).await?;
+                context.revalidate().map_err(fence_failure)?;
                 current.optimize_fts_index().await.map_err(failure)?;
                 let indices = current
                     .table
@@ -1030,7 +1098,8 @@ impl GuardedChunkTable {
                         .await
                         .map_err(|_| FailureClass::Index)?;
                 }
-                Ok(())
+                context.revalidate().map_err(fence_failure)?;
+                maintain_storage(&current, &storage, &context).await
             });
         async move {
             let result = pass.await;
@@ -1048,6 +1117,102 @@ impl GuardedChunkTable {
             result
         }
     }
+}
+
+/// Compact small fragments and prune versions outside the retention window.
+/// Runs after index optimization, so every compacted row is already indexed
+/// and Lance remaps the indexes to the rewritten fragments. Both steps are
+/// idempotent; a cancel or crash part-way leaves a valid table that the next
+/// pass maintains.
+async fn maintain_storage(
+    current: &LanceChunkTable,
+    storage: &StorageMaintenance,
+    context: &crate::commit::CommitContext,
+) -> Result<(), FailureClass> {
+    let before = current
+        .table
+        .stats()
+        .await
+        .map_err(|_| FailureClass::Index)?;
+    let compacted = before.fragment_stats.num_small_fragments >= storage.compact_small_fragments;
+    if compacted {
+        // Lance only compacts fragments that the same index segments cover.
+        // Each pass appends one delta segment per index, so merge every
+        // index into one segment first; then all small fragments coalesce.
+        current
+            .table
+            .optimize(OptimizeAction::Index(
+                OptimizeOptions::new().num_indices_to_merge(Some(usize::MAX)),
+            ))
+            .await
+            .map_err(|_| FailureClass::Index)?;
+        context.revalidate().map_err(fence_failure)?;
+        compact(current, storage, true).await?;
+        context.revalidate().map_err(fence_failure)?;
+    }
+    let prune = current
+        .table
+        .optimize(OptimizeAction::Prune {
+            older_than: Some(
+                lancedb::table::optimize::Duration::from_std(storage.version_retention)
+                    .map_err(|_| FailureClass::Index)?,
+            ),
+            delete_unverified: Some(false),
+            error_if_tagged_old_versions: Some(false),
+        })
+        .await
+        .map_err(|_| FailureClass::Index)?;
+    context.revalidate().map_err(fence_failure)?;
+    let after = current
+        .table
+        .stats()
+        .await
+        .map_err(|_| FailureClass::Index)?;
+    let versions = current
+        .table
+        .list_versions()
+        .await
+        .map_err(|_| FailureClass::Index)?
+        .len();
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "operation": "storage_maintenance",
+            "compacted": compacted,
+            "fragments_before": before.fragment_stats.num_fragments,
+            "fragments": after.fragment_stats.num_fragments,
+            "small_fragments": after.fragment_stats.num_small_fragments,
+            "versions": versions,
+            "versions_pruned": prune.prune.as_ref().map_or(0, |stats| stats.old_versions),
+            "bytes_removed": prune.prune.as_ref().map_or(0, |stats| stats.bytes_removed),
+            "table_bytes": after.total_bytes,
+        })
+    );
+    Ok(())
+}
+
+/// Rewrite small fragments that the same index segments cover into fragments
+/// of up to the target size. A no-op when no such neighbours exist.
+async fn compact(
+    current: &LanceChunkTable,
+    storage: &StorageMaintenance,
+    materialize_deletions: bool,
+) -> Result<(), FailureClass> {
+    let options = lancedb::table::optimize::CompactionOptions {
+        target_rows_per_fragment: storage.target_rows_per_fragment,
+        materialize_deletions,
+        num_threads: Some(STORAGE_COMPACTION_THREADS),
+        ..Default::default()
+    };
+    current
+        .table
+        .optimize(OptimizeAction::Compact {
+            options,
+            remap_options: None,
+        })
+        .await
+        .map(|_| ())
+        .map_err(|_| FailureClass::Index)
 }
 
 #[cfg(all(test, unix))]

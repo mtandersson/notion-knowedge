@@ -1888,3 +1888,373 @@ async fn commits_optimize_indexes_once_the_page_cadence_is_reached() {
     commit_new_page(&f, &table, "last", "final body").await;
     assert!(unindexed_rows(&f).await.iter().all(|rows| *rows == 0));
 }
+
+fn small_storage_bounds(retention: std::time::Duration) -> super::StorageMaintenance {
+    super::StorageMaintenance {
+        compact_small_fragments: 4,
+        version_retention: retention,
+        ..Default::default()
+    }
+}
+
+/// Segment count of each FTS and vector index of the current table.
+async fn index_segments(f: &Fixture) -> Vec<u32> {
+    let current = super::open_current(&f.index, "chunks", &f.embedding, &None)
+        .await
+        .unwrap();
+    let mut counts = Vec::new();
+    for name in super::CHUNK_FTS_INDEXES
+        .iter()
+        .map(|(name, _)| *name)
+        .chain([super::CHUNK_VECTOR_INDEX_NAME])
+    {
+        let stats = current
+            .table
+            .index_stats(name)
+            .await
+            .unwrap()
+            .expect("index exists");
+        counts.push(stats.num_indices.unwrap_or(1));
+    }
+    counts
+}
+
+/// Fragment and version counts of the current table.
+async fn storage_shape(f: &Fixture) -> (usize, usize) {
+    let current = super::open_current(&f.index, "chunks", &f.embedding, &None)
+        .await
+        .unwrap();
+    let fragments = current
+        .table
+        .stats()
+        .await
+        .unwrap()
+        .fragment_stats
+        .num_fragments;
+    let versions = current.table.list_versions().await.unwrap().len();
+    (fragments, versions)
+}
+
+/// Every hit from both rankers with its score, over the whole corpus, so the
+/// comparison does not depend on how ties at a result limit are broken.
+async fn ranked_ids(snapshot: &LanceChunkTable, word: &str, vector: [f32; 3]) -> Vec<String> {
+    let mut lexical: Vec<String> = snapshot
+        .lexical_search(crate::chunks::LexicalQuery {
+            query: word.into(),
+            limit: 100,
+            page_ids: None,
+            root_page_ids: None,
+            metadata: Default::default(),
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|hit| format!("lexical {} {:.4}", hit.source.chunk_id, hit.score))
+        .collect();
+    let mut semantic: Vec<String> = snapshot
+        .vector_query(&vector, 100, 1)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|hit| format!("vector {} {:.4}", hit.chunk_id, hit.distance))
+        .collect();
+    lexical.sort();
+    semantic.sort();
+    lexical.extend(semantic);
+    lexical
+}
+
+async fn seeded_with_vector_index(f: &Fixture) -> GuardedChunkTable {
+    f.create().await;
+    let table = f.guarded();
+    commit_new_page(f, &table, "seed", "seed baseline").await;
+    table
+        .ensure_vector_index(
+            VectorIndexConfig {
+                num_partitions: Some(1),
+                ..Default::default()
+            },
+            f.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    table
+}
+
+#[tokio::test]
+async fn storage_stays_bounded_and_search_unchanged_after_many_commits() {
+    let f = Fixture::new();
+    let table = seeded_with_vector_index(&f)
+        .await
+        .with_storage_maintenance(small_storage_bounds(std::time::Duration::ZERO));
+    let cadence = super::INDEX_OPTIMIZE_EVERY_PAGES as usize;
+    // Stays within the 100-hit search limit so every row is compared.
+    let pages = 2 * cadence + 20;
+    let (mut most_fragments, mut most_versions) = (0, 0);
+    for page in 0..pages {
+        commit_new_page(
+            &f,
+            &table,
+            &format!("page-{page}"),
+            &format!("shared body {page}"),
+        )
+        .await;
+        let (fragments, versions) = storage_shape(&f).await;
+        most_fragments = most_fragments.max(fragments);
+        most_versions = most_versions.max(versions);
+    }
+    // Each commit adds a fragment and a version; cadence passes keep both
+    // bounded by the pages between passes rather than by all pages committed.
+    assert!(
+        most_fragments <= cadence + 8,
+        "fragments peaked at {most_fragments}"
+    );
+    assert!(
+        most_versions <= 2 * cadence + 8,
+        "versions peaked at {most_versions}"
+    );
+    assert!(pages > 2 * cadence + 8);
+    // Index the tail without compacting, so the next pass changes storage only.
+    table
+        .clone()
+        .with_storage_maintenance(super::StorageMaintenance {
+            compact_small_fragments: usize::MAX,
+            version_retention: super::STORAGE_VERSION_RETENTION,
+            ..Default::default()
+        })
+        .optimize_indexes(f.lease.clone(), clock())
+        .await
+        .unwrap();
+    let segments_before = index_segments(&f).await;
+    // FTS optimization keeps one segment; the vector index adds one per pass.
+    assert!(
+        segments_before.last() > Some(&1),
+        "segments {segments_before:?}"
+    );
+    let (fragments_before, versions_before) = storage_shape(&f).await;
+    assert!(fragments_before >= 2, "the pass has fragments to compact");
+    let vector = ["shared body 7".len() as f32, 1.0, 0.0];
+    let before = ranked_ids(&table.search_snapshot().await.unwrap(), "shared", vector).await;
+    // Every page matches lexically; every row, seed included, semantically.
+    assert_eq!(before.len(), 2 * pages + 1);
+
+    let table = table.with_storage_maintenance(super::StorageMaintenance {
+        compact_small_fragments: 2,
+        version_retention: std::time::Duration::ZERO,
+        ..Default::default()
+    });
+    table
+        .optimize_indexes(f.lease.clone(), clock())
+        .await
+        .unwrap();
+
+    let (fragments, versions) = storage_shape(&f).await;
+    let segments = index_segments(&f).await;
+    assert!(segments.iter().all(|s| *s == 1), "segments {segments:?}");
+    assert!(
+        fragments < fragments_before,
+        "fragments {fragments_before} -> {fragments}"
+    );
+    assert!(versions <= 2, "versions {versions_before} -> {versions}");
+    let after = ranked_ids(&table.search_snapshot().await.unwrap(), "shared", vector).await;
+    assert_eq!(before, after);
+    assert_eq!(
+        f.coordinator.receipt("op-page-0").unwrap().unwrap().status,
+        ReceiptStatus::Applied
+    );
+    assert_eq!(table.page_chunks("page-0").await.unwrap().len(), 1);
+    // The table still accepts commits against the compacted version.
+    commit_new_page(&f, &table, "later", "shared later").await;
+}
+
+#[tokio::test]
+async fn compaction_keeps_versions_an_open_reader_depends_on() {
+    let f = Fixture::new();
+    let table = seeded_with_vector_index(&f)
+        .await
+        .with_storage_maintenance(small_storage_bounds(super::STORAGE_VERSION_RETENTION));
+    for page in 0..8 {
+        commit_new_page(
+            &f,
+            &table,
+            &format!("page-{page}"),
+            &format!("shared body {page}"),
+        )
+        .await;
+    }
+    let vector = ["shared body 3".len() as f32, 1.0, 0.0];
+    let reader = table.search_snapshot().await.unwrap();
+    let before = ranked_ids(&reader, "shared", vector).await;
+    let (fragments_before, _) = storage_shape(&f).await;
+
+    for page in 8..16 {
+        commit_new_page(
+            &f,
+            &table,
+            &format!("page-{page}"),
+            &format!("other body {page}"),
+        )
+        .await;
+    }
+    table
+        .optimize_indexes(f.lease.clone(), clock())
+        .await
+        .unwrap();
+    let (fragments, _) = storage_shape(&f).await;
+    assert!(
+        fragments < fragments_before,
+        "compaction ran: {fragments_before} -> {fragments}"
+    );
+
+    // The reader's version predates compaction and stays readable.
+    assert_eq!(ranked_ids(&reader, "shared", vector).await, before);
+}
+
+/// Commits eight pages, records the version, then commits eight more and runs
+/// a pass under `retention`; returns that version and its row count.
+async fn version_before_a_pass(f: &Fixture, retention: std::time::Duration) -> (u64, usize) {
+    let table = seeded_with_vector_index(f)
+        .await
+        .with_storage_maintenance(small_storage_bounds(retention));
+    for page in 0..8 {
+        commit_new_page(f, &table, &format!("page-{page}"), &format!("body {page}")).await;
+    }
+    let reader = f.readable().await;
+    let version = reader.table.version().await.unwrap();
+    let rows = reader.count_rows().await.unwrap();
+    for page in 8..16 {
+        commit_new_page(f, &table, &format!("page-{page}"), &format!("body {page}")).await;
+    }
+    table
+        .optimize_indexes(f.lease.clone(), clock())
+        .await
+        .unwrap();
+    (version, rows)
+}
+
+#[tokio::test]
+async fn a_version_inside_the_retention_window_reopens_from_disk_after_a_pass() {
+    let f = Fixture::new();
+    let (version, rows) = version_before_a_pass(&f, super::STORAGE_VERSION_RETENTION).await;
+    // A fresh connection has no cached files: it reads the version from disk.
+    let fresh = f.readable().await;
+    fresh.table.checkout(version).await.unwrap();
+    assert_eq!(fresh.table.count_rows(None).await.unwrap(), rows);
+}
+
+#[tokio::test]
+async fn a_version_outside_the_retention_window_is_pruned_by_a_pass() {
+    let f = Fixture::new();
+    let (version, _) = version_before_a_pass(&f, std::time::Duration::ZERO).await;
+    let fresh = f.readable().await;
+    assert!(fresh.table.checkout(version).await.is_err());
+}
+
+fn peak_rss_kib() -> u64 {
+    fs::read_to_string("/proc/self/status")
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))
+        .and_then(|value| value.trim().trim_end_matches("kB").trim().parse().ok())
+        .unwrap()
+}
+
+/// Peak memory of the first maintenance pass over a production-sized table
+/// that was never compacted: one fragment per page, 1024-dimension vectors.
+/// Run with `--ignored --nocapture`; NK_STORAGE_BENCH_PAGES and
+/// NK_STORAGE_BENCH_CHUNKS size it (defaults 3000 pages x 15 chunks).
+#[tokio::test]
+#[ignore = "measurement; minutes of IO"]
+async fn storage_maintenance_peak_memory_on_a_production_sized_table() {
+    let env = |name: &str, default: usize| {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(default)
+    };
+    let (pages, chunks) = (
+        env("NK_STORAGE_BENCH_PAGES", 3000),
+        env("NK_STORAGE_BENCH_CHUNKS", 15),
+    );
+    let mut f = Fixture::new();
+    f.embedding =
+        EmbeddingMetadata::new("count".into(), "test-model".into(), "v1".into(), 1024).unwrap();
+    f.create().await;
+    let readable = f.readable().await;
+    let setup = f
+        .guarded()
+        .with_storage_maintenance(super::StorageMaintenance {
+            compact_small_fragments: usize::MAX,
+            ..Default::default()
+        });
+    let body = "lorem ipsum dolor sit amet consectetur ".repeat(20);
+    for page in 0..pages {
+        let rows: Vec<_> = (0..chunks)
+            .map(|chunk| {
+                let id = format!("p{page}");
+                let mut indexed = page_chunk(&id, &format!("{body} page {page} chunk {chunk}"));
+                indexed.chunk_id = format!("{id}-{chunk}");
+                let seed = (page * chunks + chunk) as f32;
+                let vector = (0..1024)
+                    .map(|i| ((seed + i as f32) * 0.618).sin())
+                    .collect();
+                crate::chunks::EmbeddedChunk::new(indexed, vector)
+            })
+            .collect();
+        let batch = super::rows_to_batch(&rows, &f.embedding).unwrap();
+        readable.table.add(batch).execute().await.unwrap();
+        // Index in 60 sync-sized steps without the threshold step, so the
+        // measured pass merges over 32 vector segments per index, as production does.
+        if (page + 1) % (pages / 60).max(1) == 0 {
+            if page + 1 == (pages / 60).max(1) {
+                setup
+                    .ensure_vector_index(
+                        VectorIndexConfig {
+                            num_partitions: Some(16),
+                            ..Default::default()
+                        },
+                        f.lease.clone(),
+                        clock(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            setup
+                .optimize_indexes(f.lease.clone(), clock())
+                .await
+                .unwrap();
+        }
+    }
+    let table = f.guarded();
+    // Leave a tail of unindexed one-page fragments, as a sync does.
+    let segments_before = index_segments(&f).await;
+    assert!(
+        segments_before.last() >= Some(&32),
+        "segments {segments_before:?}"
+    );
+    let (fragments, versions) = storage_shape(&f).await;
+    fs::write("/proc/self/clear_refs", "5").unwrap();
+    let baseline = peak_rss_kib();
+    let started = std::time::Instant::now();
+    table
+        .optimize_indexes(f.lease.clone(), clock())
+        .await
+        .unwrap();
+    let peak = peak_rss_kib();
+    let (fragments_after, versions_after) = storage_shape(&f).await;
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "rows": pages * chunks,
+            "fragments": [fragments, fragments_after],
+            "segments": [segments_before, index_segments(&f).await],
+            "versions": [versions, versions_after],
+            "pass_ms": started.elapsed().as_millis() as u64,
+            "baseline_rss_kib": baseline,
+            "peak_rss_kib": peak,
+        })
+    );
+    assert!(fragments_after < super::STORAGE_COMPACT_SMALL_FRAGMENTS);
+    assert!(peak < 4 * 1024 * 1024, "peak RSS {peak} KiB");
+}

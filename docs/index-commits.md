@@ -401,3 +401,44 @@ never overlap, so persistent failure costs one attempt per interval rather than
 one per commit, while the tail grows until a pass succeeds. The optimizing pass runs inside the
 observer of the commit that reached the cadence; dropping that observer skips
 the pass, and the pending count survives for the next commit.
+
+## Storage maintenance
+
+Every `optimize_indexes` pass also bounds Lance storage, under the same guard
+and lease. The fence is rechecked between steps, not inside one: a lost lease
+or a cancel stops the pass at the next step boundary, and a single step (a
+segment merge or compaction of a large table, about 30 s for 45 000 rows) runs
+to completion first. Within that step Lance's own commit conflict handling,
+not the fence, keeps a concurrent writer that took over the lease safe.
+
+1. Before folding rows into the indexes it compacts every compactable group of
+   small fragments, without rewriting fragments for deleted rows. Lance only
+   merges neighbouring fragments that the same index segments cover, so in
+   practice this merges the still-unindexed fragments written since the last
+   pass; each pass then adds one fragment and one delta segment per index
+   rather than one per page.
+2. Once `STORAGE_COMPACT_SMALL_FRAGMENTS` (32) fragments hold fewer than
+   `STORAGE_TARGET_ROWS_PER_FRAGMENT` (100 000) rows, it merges every index
+   into one segment and compacts all small fragments (materializing deleted
+   rows) into fragments of up to that size. Merging rewrites the whole FTS
+   index, O(rows) once per about 32 passes, and reuses the existing IVF
+   centroids without retraining, as index optimization already did;
+   `rebuild_vector_index` retrains. Compaction runs one rewrite task, so memory stays near one read
+   batch and one output row group.
+3. It prunes versions older than `STORAGE_VERSION_RETENTION` (10 minutes); the
+   current version is always kept.
+
+After a pass the table therefore has approximately `ceil(rows / 100 000)`
+full fragments plus fewer than 32 small ones (an isolated small fragment
+between full ones is not merged), fewer than 32 segments per index (one per
+pass since the last merge), and only the versions created within the last 10
+minutes, a count set by the commit rate. Receipts and checkpoints
+live in SQLite and name no Lance version, and a commit compares its prepared
+version with the current one under the guard, so no commit or rollback path
+needs an old version; the window protects readers that opened a version before
+the pass, such as a search snapshot or a page preparation. A search snapshot
+held longer than 10 minutes can fail to read files that prune removed. A preparation whose
+version a pass replaced fails the commit as a conflict, as it does after any
+other write. Each pass logs a `storage_maintenance` line with the fragment,
+small-fragment and version counts, the versions and bytes pruned, and the
+table size, which serves the per-100-page measurement plan of #664.
