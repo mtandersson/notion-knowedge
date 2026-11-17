@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 pub const PAGE_VERSION: &str = "2026-03-11";
-/// Marks a relation or people value whose items were read in full through the
+/// Marks a relation, people, title or rich-text value whose items were read in full through the
 /// property item endpoint. Never present in a Notion response key we keep.
 const PAGINATED: &str = "__nk_paginated";
 /// Items read for one truncated property before the page is unsupported.
@@ -19,6 +19,15 @@ fn truncated(value: &Value) -> bool {
     match value["type"].as_str() {
         Some("relation") => value["has_more"] == true,
         Some("people") => value["people"].as_array().is_some_and(|a| a.len() >= 25),
+        Some(kind @ ("title" | "rich_text")) => value[kind].as_array().is_some_and(|a| {
+            a.iter()
+                .filter(|item| {
+                    item["type"] == "mention"
+                        && matches!(item["mention"]["type"].as_str(), Some("page" | "user"))
+                })
+                .count()
+                >= 25
+        }),
         _ => false,
     }
 }
@@ -26,7 +35,14 @@ fn truncated(value: &Value) -> bool {
 /// page parses. Such a page must not be treated as complete.
 pub(crate) fn drop_truncated(value: &mut Value) {
     if let Some(properties) = value["properties"].as_object_mut() {
-        properties.retain(|_, property| property[PAGINATED] == true || !truncated(property));
+        properties.retain(|_, property| {
+            // The page needs its title, so the cut one stands in. Callers must
+            // treat the page as incomplete, as the walk does.
+            if property["type"] == "title" && truncated(property) {
+                property[PAGINATED] = Value::Bool(true);
+            }
+            property[PAGINATED] == true || !truncated(property)
+        });
     }
 }
 /// Percent-encodes an opaque cursor for a query string.
@@ -175,15 +191,9 @@ fn property(value: &Value) -> Result<PropertyValue, BackendError> {
     }
     Ok(match kind {
         "title" | "rich_text" => {
-            if v.as_array().is_some_and(|a| {
-                a.iter()
-                    .filter(|item| {
-                        item["type"] == "mention"
-                            && matches!(item["mention"]["type"].as_str(), Some("page" | "user"))
-                    })
-                    .count()
-                    >= 25
-            }) {
+            // Notion cuts text at 25 page or user mentions; only a text read
+            // in full by `complete_properties` is whole.
+            if value[PAGINATED] != true && truncated(value) {
                 return Err(error(BackendErrorKind::UnsupportedContent));
             }
             Text(rich_text(v)?)
@@ -308,8 +318,9 @@ impl NotionClient {
         metadata(&value, &id)
     }
 
-    /// Replaces each relation or people property Notion cut at its inline
-    /// 25-item limit with every item from the property item endpoint, so one
+    /// Replaces each relation, people, title or rich-text property Notion cut
+    /// at its inline 25-item limit with every item from the property item
+    /// endpoint, so one
     /// long property costs that page extra reads instead of failing it.
     /// `calls` counts the reads made.
     pub(crate) async fn complete_properties(
@@ -364,8 +375,15 @@ impl NotionClient {
                     if item["object"] != "property_item" || item["type"] != kind.as_str() {
                         return Err(error(BackendErrorKind::Internal));
                     }
-                    let id = string(&item[kind.as_str()]["id"])?;
-                    items.push(serde_json::json!({ "id": id }));
+                    if matches!(kind.as_str(), "title" | "rich_text") {
+                        // Each item is one whole rich-text object, in order.
+                        let text = &item[kind.as_str()];
+                        string(&text["plain_text"])?;
+                        items.push(text.clone());
+                    } else {
+                        let id = string(&item[kind.as_str()]["id"])?;
+                        items.push(serde_json::json!({ "id": id }));
+                    }
                 }
                 if items.len() > MAX_PROPERTY_ITEMS {
                     return Err(error(BackendErrorKind::UnsupportedContent));
@@ -514,6 +532,24 @@ mod tests {
             assert!(headers.contains("authorization: bearer test-credential\r\n"));
             assert!(headers.contains(&format!("notion-version: {PAGE_VERSION}\r\n")));
         }
+    }
+    #[test]
+    fn a_cut_title_stands_in_and_cut_text_is_dropped() {
+        let mention =
+            json!({"type":"mention","plain_text":"@x","mention":{"type":"user","user":{"id":ID}}});
+        let mut value = fixture();
+        value["properties"]["Renamed title"]["title"] = json!(vec![mention.clone(); 25]);
+        value["properties"]["Text"] =
+            json!({"id":"text","type":"rich_text","rich_text":vec![mention; 25]});
+        let id = PageId(ID.to_owned());
+        assert_eq!(
+            metadata(&value, &id).unwrap_err().kind,
+            BackendErrorKind::UnsupportedContent
+        );
+        drop_truncated(&mut value);
+        let page = metadata(&value, &id).unwrap();
+        assert_eq!(page.title, "@x".repeat(25));
+        assert!(!page.properties.contains_key("text"));
     }
     #[tokio::test]
     async fn complete_properties_at_limits_preserve_values_and_types() {

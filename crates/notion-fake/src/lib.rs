@@ -68,6 +68,10 @@ pub struct Model {
     pub relation_targets: Vec<String>,
     /// The relation's property item endpoint answers 404.
     pub unreadable_relation_items: bool,
+    /// Page ids mentioned, in order, by a `Mentions` rich-text property.
+    pub mention_targets: Vec<String>,
+    /// The mentions' property item endpoint answers 404.
+    pub unreadable_mention_items: bool,
     /// Adds the alias multi-select and an unselected rich-text property.
     pub alias_properties: bool,
     pub alias_names: Vec<String>,
@@ -116,6 +120,8 @@ impl Default for Model {
             relation_property_id: "related-stable".into(),
             relation_targets: vec![],
             unreadable_relation_items: false,
+            mention_targets: vec![],
+            unreadable_mention_items: false,
             alias_properties: false,
             alias_names: vec![],
             extra: Default::default(),
@@ -193,6 +199,9 @@ fn tag(id: &str, title: &str) -> String {
     )
 }
 
+fn mention(id: &str) -> Value {
+    json!({"type":"mention","plain_text":format!("@{id} "),"mention":{"type":"page","page":{"id":id}}})
+}
 pub fn page_metadata(id: &str, parent: &str, title: &str, revision: &str, archived: bool) -> Value {
     json!({
         "object": "page",
@@ -350,7 +359,25 @@ fn respond(route: &str, snapshot: Model, bodies: usize) -> Value {
             // the rest come from the property item endpoint.
             page["properties"][name] = json!({"id":snapshot.relation_property_id, "type":"relation", "relation": snapshot.relation_targets.iter().take(25).map(|id|json!({"id":id})).collect::<Vec<_>>(),"has_more":snapshot.relation_targets.len() > 25});
         }
+        if !snapshot.mention_targets.is_empty() {
+            // Like Notion, inline text stops at 25 page mentions.
+            page["properties"]["Mentions"] = json!({"id":"mentions-stable","type":"rich_text","rich_text":snapshot.mention_targets.iter().take(25).map(|id|mention(id)).collect::<Vec<_>>()});
+        }
         page
+    } else if let Some(query) = route
+        .strip_prefix(&format!(
+            "/v1/pages/{PAGE}/properties/mentions-stable?page_size=100"
+        ))
+        .filter(|_| !snapshot.mention_targets.is_empty() && !snapshot.unreadable_mention_items)
+    {
+        let start = query
+            .strip_prefix("&start_cursor=")
+            .map_or(0, |cursor| cursor.parse::<usize>().unwrap());
+        let end = (start + 10).min(snapshot.mention_targets.len());
+        json!({"object":"list","type":"property_item",
+            "results":snapshot.mention_targets[start..end].iter().map(|id|json!({"object":"property_item","id":"mentions-stable","type":"rich_text","rich_text":mention(id)})).collect::<Vec<_>>(),
+            "has_more":end < snapshot.mention_targets.len(),
+            "next_cursor":(end < snapshot.mention_targets.len()).then(|| end.to_string())})
     } else if let Some(query) = route
         .strip_prefix(&format!(
             "/v1/pages/{PAGE}/properties/{}?page_size=100",
