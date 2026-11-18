@@ -1320,6 +1320,14 @@ async fn sync_walked(
         .await
 }
 
+/// Whether a walk still reaches the page as a live, readable page.
+async fn walk_reaches_live_page(source: &HttpNotion, scope: &LifecycleScope) -> bool {
+    walked_pages(source, scope)
+        .await
+        .get(PAGE)
+        .is_some_and(|walked| walked.skip.is_none() && !walked.entry.in_trash)
+}
+
 fn relation_edges(index: &Fixture) -> Vec<notion_knowledge_core::graph::GraphEdge> {
     use notion_knowledge_core::graph::GraphEdgeStore;
     index
@@ -1623,6 +1631,7 @@ async fn installed_relations_replace_only_their_family_and_repair_both_noop_path
     // A page the next walk no longer reaches (trashed, then moved out) is
     // removed without being read, and takes its relations with it.
     source.change(|m| m.archived = true);
+    assert!(!walk_reaches_live_page(&source, &index.scope).await);
     handler
         .remove_unreached(
             &page,
@@ -1668,6 +1677,7 @@ async fn installed_relations_replace_only_their_family_and_repair_both_noop_path
     .unwrap();
     assert_eq!(relation_edges(&index).len(), 1);
     source.change(|m| m.parent = FOREIGN.into());
+    assert!(!walk_reaches_live_page(&source, &index.scope).await);
     handler
         .remove_unreached(
             &page,
@@ -1695,7 +1705,7 @@ async fn installed_relations_replace_only_their_family_and_repair_both_noop_path
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reconciliation_recovers_missing_applied_projection_with_durable_repair_before_ack() {
+async fn missing_applied_projection_is_recovered_with_a_durable_repair_receipt() {
     use notion_knowledge_core::graph::GraphEdgeStore;
     use notion_knowledge_retrieval::commit::ReceiptStatus;
     let mut index = Fixture::new();
@@ -2035,6 +2045,7 @@ async fn owned_body_links_follow_authorized_snapshot_cleanup_and_durable_repair(
         .await
         .unwrap();
     source.change(|m| m.archived = true);
+    assert!(!walk_reaches_live_page(&source, &index.scope).await);
     restarted
         .remove_unreached(
             &page,
@@ -2050,7 +2061,7 @@ async fn owned_body_links_follow_authorized_snapshot_cleanup_and_durable_repair(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reconciliation_commits_body_links_and_never_acknowledges_missing_link_rows() {
+async fn walked_sync_commits_body_links_and_never_applies_with_missing_link_rows() {
     use notion_knowledge_core::graph::{GraphEdgeStore, GraphTarget};
     use notion_knowledge_retrieval::commit::ReceiptStatus;
     let index = Fixture::new();
