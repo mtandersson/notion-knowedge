@@ -495,7 +495,6 @@ pub mod runtime {
             Err(_) => return Output::error(class, exit.unwrap_or(3)),
         };
         let errors = usize::from(current.failure.is_some());
-        let mut json = serde_json::json!({});
         let failure_history = match runtime
             .coordinator
             .reconciliation_failure_evidence(run, 0, 1000)
@@ -503,12 +502,14 @@ pub mod runtime {
             Ok(events) => events,
             Err(_) => return Output::error("state_failure", 3),
         };
-        json["failure_history"] = serde_json::json!(failure_history.iter().map(|e|serde_json::json!({"sequence":e.sequence,"page_id":e.page_id,"kind":e.kind,"class":e.class})).collect::<Vec<_>>());
-        json["errors"] = errors.into();
-        json["operation"] = "reconciliation".into();
-        json["status"] = class.into();
-        json["phase"] = format!("{:?}", current.phase).into();
-        json["failure"] = current.failure.map(|f| format!("{f:?}")).into();
+        let json = serde_json::json!({
+            "operation": "reconciliation",
+            "status": class,
+            "phase": format!("{:?}", current.phase),
+            "failure": current.failure.map(|f| format!("{f:?}")),
+            "errors": errors,
+            "failure_history": failure_history.iter().map(|e| serde_json::json!({"sequence":e.sequence,"page_id":e.page_id,"kind":e.kind,"class":e.class})).collect::<Vec<_>>(),
+        });
         Output {
             json,
             exit: exit.unwrap_or(if errors > 0 { 3 } else { 0 }),

@@ -193,8 +193,7 @@ The failure policy is explicit:
 sanitized, paginated operator inspection: status, policy, deadline, active run,
 cycle, attempts, event times and enum failure classes. SQLite triggers preserve
 historical classified page/run failures when explicit retry clears current
-failure or later success completes a run; immutable planner failure documents
-remain available too. These APIs never store credentials, source bodies, titles,
+failure or later success completes a run. These APIs never store credentials, source bodies, titles,
 URLs or upstream error text. IDs and timing remain operational metadata and must
 not be logged on public surfaces. #353 must expose meaningful operator status
 and explicit recovery using these exact APIs, and prove the actual scheduled

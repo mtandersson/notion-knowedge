@@ -256,6 +256,55 @@ fn metadata_identity_migration_preserves_checkpoints_without_fabricating_identit
     assert_eq!(identities, 0);
 }
 
+#[test]
+fn schema_22_drops_populated_plan_tables_and_keeps_failure_history() {
+    let db = TestDb::new("drop-plan-tables");
+    drop(SqliteSyncStateStore::open(db.path()).unwrap());
+    let c = Connection::open(db.path()).unwrap();
+    c.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+    // Recreate a populated schema-21 database: plan tables plus their triggers.
+    c.execute_batch(include_str!(
+        "../../migrations/0010_reconciliation_plan.sql"
+    ))
+    .unwrap();
+    c.execute_batch(include_str!(
+        "../../migrations/0011_reconciliation_retry.sql"
+    ))
+    .unwrap();
+    c.execute_batch(
+        "CREATE TRIGGER reconciliation_page_failure_history AFTER UPDATE OF status,failure ON reconciliation_plan_progress
+          WHEN NEW.status=2 AND (OLD.status<>2 OR OLD.failure IS NOT NEW.failure)
+          BEGIN INSERT INTO reconciliation_failure_history(run_id,page_id,kind,class) VALUES(NEW.run_id,NEW.page_id,2,NEW.failure); END;
+         CREATE TRIGGER reconciliation_plan_failure_history AFTER INSERT ON reconciliation_plan_run_failures
+          BEGIN INSERT INTO reconciliation_failure_history(run_id,page_id,kind,class) VALUES(NEW.run_id,NULL,3,NEW.class); END;
+         INSERT INTO reconciliation_runs(run_id,scope,fence,phase) VALUES('run','scope',1,1);
+         INSERT INTO reconciliation_plans VALUES('run',1,'{}');
+         INSERT INTO reconciliation_plan_progress(run_id,page_id,operation_id) VALUES('run','page','op');
+         INSERT INTO reconciliation_retry_proposals VALUES('run','page','{}');
+         INSERT INTO reconciliation_plan_run_failures VALUES('run','planning-0','permission');
+         UPDATE reconciliation_plan_progress SET status=2,failure='source' WHERE page_id='page';
+         DELETE FROM schema_migrations WHERE version>=22;",
+    )
+    .unwrap();
+    drop(c);
+    let store = SqliteSyncStateStore::open(db.path()).unwrap();
+    assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    drop(store);
+    let c = Connection::open(db.path()).unwrap();
+    let count = |sql: &str| c.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+    assert_eq!(
+        count(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'reconciliation_plan%' OR name='reconciliation_retry_proposals' OR name IN('reconciliation_page_failure_history')"
+        ),
+        0
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM reconciliation_failure_history WHERE kind IN(2,3)"),
+        2
+    );
+    assert_eq!(count("SELECT COUNT(*) FROM pragma_foreign_key_check"), 0);
+}
+
 mod inventory {
     use super::TestDb;
     use notion_knowledge_core::{

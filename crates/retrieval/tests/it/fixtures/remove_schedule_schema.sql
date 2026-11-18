@@ -5,6 +5,8 @@ DROP TABLE page_alias_projections;
 DROP TABLE relation_operation_proposals;
 DROP TABLE page_relation_projections;
 ALTER TABLE graph_edges DROP COLUMN display_name;
+-- Not re-migratable on its own: schema 22 removed the plan tables that migration
+-- 12 reads. Callers must also remove the version-9 migrations or never reopen.
 DROP TRIGGER reconciliation_inventory_failure_history;
 DROP TRIGGER reconciliation_run_failure_history;
 DROP TABLE reconciliation_success;
