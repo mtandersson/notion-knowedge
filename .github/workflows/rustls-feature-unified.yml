@@ -25,6 +25,9 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CARGO_TARGET_DIR: target
+      # Match ci.yml so the read-only cache key (which hashes these) is compatible.
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - name: Checkout
@@ -38,11 +41,11 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      # Reuse the existing webhook-worker download/build cache read-only.
+      # Reuse the native webhook-worker build cache (test-native-build) read-only.
       - name: Restore pinned Cargo caches
         uses: ./.github/actions/cargo-cache-restore
         with:
-          job: test-webhook-worker
+          job: test-native-build
           profile: debug
 
       - name: Test the complete feature-unified workspace
