@@ -1108,3 +1108,43 @@ async fn page_work_ownership_requires_current_generation_page_and_non_superseded
     assert!(next.owns_page_work("page").unwrap());
     assert_eq!(c.owns_page_work("page"), Err(CommitError::BindingMismatch));
 }
+
+#[tokio::test]
+async fn owned_commit_and_maintenance_threads_report_to_the_pages_timings() {
+    use notion_knowledge_core::logging::page_timings::{ApiPhase, Bucket, PageTimings, timer};
+    let f = Fixture::new();
+    let c = f.coordinator();
+    let lease = c.state().acquire_lease(10, 100).unwrap();
+    let timings = PageTimings::default();
+    timings
+        .scope(ApiPhase::Commit, async {
+            c.submit(operation("timed"), lease.clone(), clock(10), |_| async {
+                let _merge = timer(Bucket::LanceMerge);
+                std::thread::sleep(std::time::Duration::from_millis(3));
+                Ok(())
+            })
+            .await
+            .unwrap();
+            c.maintain(lease.clone(), clock(10), |_| async {
+                let _fts = timer(Bucket::FtsOptimize);
+                std::thread::sleep(std::time::Duration::from_millis(3));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        })
+        .await;
+    let seen = timings.snapshot();
+    // Nanosecond figures: the hop must not lose the page, whatever the rounding.
+    assert!(seen.lance_merge >= 3_000_000, "{seen:?}");
+    assert!(seen.fts_optimize >= 3_000_000, "{seen:?}");
+    assert!(seen.receipt > 0, "{seen:?}");
+    // A commit outside any page scope records nothing anywhere.
+    let other = PageTimings::default();
+    c.submit(operation("unscoped"), lease, clock(10), |_| async {
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(other.snapshot().receipt, 0);
+}

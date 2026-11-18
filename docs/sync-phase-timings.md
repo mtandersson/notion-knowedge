@@ -19,7 +19,11 @@ fixture's titles, IDs or content appear in it.
 `status` is `page_committed`, `page_unchanged` (already applied; nothing was
 written) or `page_skipped` with a fixed `reason`: `embedding_input_limit`,
 `page_timeout`, `out_of_scope`, `permanent_source` or `source`. These lines
-replace the older separate `page_skipped` lines, so a page emits exactly one.
+replace the older separate `page_skipped` lines (which covered only
+`embedding_input_limit` and `page_timeout`), so a page emits exactly one line.
+Every settled page now logs at info level, so consumers that filtered on
+`status == "page_skipped"` also see the new reasons, and log volume is one line
+per page.
 Pages the walk itself skips (archived, excluded, unreadable) never reach the
 consumer and have no line; a failure that stops the whole sync (authentication,
 index or authority) has none either.
@@ -27,8 +31,9 @@ index or authority) has none either.
 ## The wall-time identity
 
 `wall_ms` is the consumer's wall time for the page: from asking for the next
-prepared page until the page settles. These fields are disjoint parts of it and
-**sum to `wall_ms` exactly**:
+prepared page until the page settles (the previous page's line and progress
+report fall in the next page's `consumer_wait_ms`). These fields are disjoint
+parts of it and **sum to `wall_ms` exactly**:
 
 | Field | Meaning |
 | --- | --- |
@@ -39,6 +44,11 @@ prepared page until the page settles. These fields are disjoint parts of it and
 | `vector_optimize_ms` | Vector-index layout check and optimize. |
 | `receipt_ms` | SQLite receipt begin and finish. |
 | `other_ms` | The remainder: reading and diffing the page's current chunks, relation projection, lease renewal, thread hand-off, storage compaction and pruning, and everything not listed above. |
+
+A page that hits its deadline is the one exception to completeness: its owned
+commit thread is not drained before the line is written, so time the thread
+spends after the deadline is not in that line (the page's `wall_ms` still adds
+up, the unfinished work being counted in `other_ms`).
 
 The index optimize pass runs on a cadence, not per page. Only the page whose
 commit triggers a pass pays for it, so `fts_optimize_ms` and
@@ -56,7 +66,7 @@ other, so they are **not** added to the sum:
 | `prepare_api_ops`, `prepare_api_ms` | Requests made authorizing relation and link targets while preparing the page. |
 | `commit_api_ops`, `commit_api_ms` | Requests made on the commit path. Sync no longer rechecks the source before committing, so this must be 0; it is kept to show that. |
 | `limiter_wait_ms` | Time the page's requests spent queued in the shared limiter's `admit()` (one request per 334 ms). It is part of the `*_api_ms` fields; subtract it for time on the wire. |
-| `queue_wait_ms` | How long the prepared page waited, ready, for the consumer. Large values mean embedding and commit are the bottleneck. |
+| `queue_wait_ms` | From the prepared page being handed to the bounded queue (including blocking while it is full) until the consumer received it. Large values mean embedding and commit are the bottleneck. |
 | `embedded_chunks`, `skipped_chunks` | Chunks embedded (added plus changed) and chunks reused unchanged, from the page's chunk diff. |
 
 The old issue wording named "authorization/lifecycle walk, content fetch and

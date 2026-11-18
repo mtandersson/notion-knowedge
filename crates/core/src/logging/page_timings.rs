@@ -171,14 +171,14 @@ pub fn with_thread<T>(timings: Option<PageTimings>, work: impl FnOnce() -> T) ->
 /// A point-in-time copy of one page's figures, in nanoseconds.
 #[derive(Clone, Debug, Default)]
 pub struct PageSnapshot {
-    api_ops: Vec<u64>,
-    api_nanos: Vec<u64>,
-    embed: u64,
-    lance_merge: u64,
-    fts_optimize: u64,
-    vector_optimize: u64,
-    receipt: u64,
-    limiter_wait: u64,
+    pub api_ops: Vec<u64>,
+    pub api_nanos: Vec<u64>,
+    pub embed: u64,
+    pub lance_merge: u64,
+    pub fts_optimize: u64,
+    pub vector_optimize: u64,
+    pub receipt: u64,
+    pub limiter_wait: u64,
 }
 
 /// What the consumer measured around one page, beside the page's own figures.
@@ -220,7 +220,10 @@ pub fn page_fields(snapshot: &PageSnapshot, wait: &PageWait) -> Vec<(String, u64
     let inside: u64 = parts.iter().map(|(_, n)| n).sum();
     let mut fields = vec![("wall_ms".to_owned(), wall / MS)];
     fields.extend(parts.iter().map(|(name, n)| ((*name).to_owned(), n / MS)));
-    // Truncating each part never lets their sum exceed the truncated total.
+    // The parts are measured inside the wall window (a timer still running
+    // when the page settles records nothing yet), so they never exceed it and
+    // truncating each never lets their sum exceed the truncated total. The
+    // clamp only guards a clock anomaly.
     let summed: u64 = fields[1..].iter().map(|(_, ms)| ms).sum();
     let other = if inside <= wall {
         fields[0].1 - summed

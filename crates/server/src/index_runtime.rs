@@ -894,7 +894,9 @@ impl IndexRuntime {
                             RefreshError::EmbeddingInputLimit => "embedding_input_limit",
                             RefreshError::OutOfScope => "out_of_scope",
                             RefreshError::PermanentSource => "permanent_source",
-                            _ => "source",
+                            RefreshError::Source => "source",
+                            // Excluded by the enclosing arm's pattern.
+                            _ => unreachable!("only page-local source failures are skipped"),
                         });
                     }
                     Ok(Err(RefreshError::Unauthenticated)) => {
@@ -949,7 +951,6 @@ impl IndexRuntime {
                     },
                 );
                 progress.page(end, &fields);
-                asked = std::time::Instant::now();
                 progress.report(
                     processed,
                     None,
@@ -957,6 +958,7 @@ impl IndexRuntime {
                     totals.failed as usize,
                     false,
                 );
+                asked = std::time::Instant::now();
             }
             progress.report(
                 processed,
