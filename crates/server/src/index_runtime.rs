@@ -1129,8 +1129,12 @@ impl IndexRuntime {
                     id: hit.page_id.clone(),
                     reason,
                 });
-                // An unreadable body is doubt, not removal: the walk decides.
-                if reason != SkipReason::Inaccessible {
+                // An unreadable body or unparseable metadata is doubt, not
+                // removal: the walk decides.
+                if !matches!(
+                    reason,
+                    SkipReason::Inaccessible | SkipReason::UnreadableMetadata
+                ) {
                     out.removals.push(hit.page_id.clone());
                 }
                 continue;

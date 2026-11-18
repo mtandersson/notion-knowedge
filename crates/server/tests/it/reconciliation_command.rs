@@ -1286,6 +1286,33 @@ async fn trashed_page_is_removed_after_one_walk() {
     );
 }
 
+#[tokio::test]
+async fn unparseable_metadata_keeps_an_indexed_page_in_incremental_and_full_syncs() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    sync(&f, &http, SyncMode::Full).await;
+    http.change(|m| {
+        m.revision = "2026-10-11T12:00:00Z".into();
+        m.unknown_property_type = true;
+    });
+    // Doubt is not removal, in the hit path or the walk.
+    let (_, indexed) = sync(&f, &http, SyncMode::Incremental).await;
+    assert!(indexed.contains(PAGE));
+    let (totals, indexed) = sync(&f, &http, SyncMode::Full).await;
+    assert!(indexed.contains(PAGE));
+    assert!(indexed.contains(OTHER));
+    assert_eq!(totals.removed, 0);
+    assert!(!totals.complete);
+    let status = local_status(&f).await;
+    assert!(
+        status["inventory"]["out_of_sync"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["page_id"] == PAGE && p["outcome"] == "skipped:unreadable_metadata")
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn walk_removal_stalled_past_its_deadline_releases_the_index_guard() {
     let http = start_notion().await;

@@ -334,7 +334,17 @@ impl NotionClient {
         }
         let page = match listed {
             Some(page) => page,
-            None => metadata(&value, &page_ref)?,
+            // Metadata that cannot be parsed (an unknown property type, say)
+            // fails only this page: it is a typed skip, and the walk is not
+            // authoritative so nothing is removed on its account.
+            None => match metadata(&value, &page_ref) {
+                Ok(page) => page,
+                Err(_) => {
+                    visit.incomplete = true;
+                    visit.skip_page(entry("", false), SkipReason::UnreadableMetadata);
+                    return Ok(visit);
+                }
+            },
         };
         if let InventoryParent::Page(expected) = &parent
             && !value.is_null()
@@ -1274,6 +1284,36 @@ mod tests {
             error.kind,
             notion_knowledge_core::backend::BackendErrorKind::Unavailable
         );
+    }
+
+    #[tokio::test]
+    async fn unparseable_page_metadata_skips_only_that_page() {
+        let mut routes = Routes::new();
+        add_page(
+            &mut routes,
+            ROOT,
+            parent("workspace", ""),
+            &format!("{}{}", page_tag(P), page_tag(A)),
+        );
+        let mut bad = metadata(P, parent("page_id", ROOT));
+        bad["properties"]["Future"] =
+            json!({"id":"future","type":"future_type","future_type":"private value"});
+        routes.insert(format!("GET /v1/pages/{P}"), (200, bad));
+        add_page(&mut routes, A, parent("page_id", ROOT), "sibling body");
+        let (client, _) = serve(routes).await;
+        let walk = client
+            .walk_tree(&scope(ExclusionRules::default()), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            walk.skipped,
+            [SkippedContent {
+                id: P.into(),
+                reason: SkipReason::UnreadableMetadata
+            }]
+        );
+        assert!(!walk.authoritative());
+        assert_eq!(walk.readable(), BTreeSet::from([ROOT.into(), A.into()]));
     }
 
     #[tokio::test]

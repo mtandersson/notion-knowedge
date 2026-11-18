@@ -74,6 +74,8 @@ pub struct Model {
     pub unreadable_mention_items: bool,
     /// Adds the alias multi-select and an unselected rich-text property.
     pub alias_properties: bool,
+    /// Adds a property of a type the adapter does not know.
+    pub unknown_property_type: bool,
     pub alias_names: Vec<String>,
     pub extra: BTreeMap<String, ExtraPage>,
     /// Row page ids of [`DATA_SOURCE`]; empty means no database is tagged.
@@ -123,6 +125,7 @@ impl Default for Model {
             mention_targets: vec![],
             unreadable_mention_items: false,
             alias_properties: false,
+            unknown_property_type: false,
             alias_names: vec![],
             extra: Default::default(),
             rows: vec![],
@@ -350,6 +353,10 @@ fn respond(route: &str, snapshot: Model, bodies: usize) -> Value {
             snapshot.archived,
         );
         page["properties"]["level"]["number"] = json!(snapshot.level);
+        if snapshot.unknown_property_type {
+            page["properties"]["Future"] =
+                json!({"id":"future","type":"future_type","future_type":{}});
+        }
         if snapshot.alias_properties {
             page["properties"]["Alternate names"] = json!({"id":"names","type":"multi_select","multi_select":snapshot.alias_names.iter().map(|name|json!({"id":"choice","name":name})).collect::<Vec<_>>()});
             page["properties"]["Unselected"] = json!({"id":"not-selected","type":"rich_text","rich_text":[{"type":"text","plain_text":"Never an alias","text":{"content":"Never an alias"}}]});
