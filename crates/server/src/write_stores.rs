@@ -69,20 +69,6 @@ pub fn validate_stores(
     if let Some(state) = config.webhook_state_file.as_deref() {
         paths.push(state);
     }
-    if let Some(grant) = &config.notion_grant_store {
-        for write in &paths {
-            for secret in [&grant.key_file, &grant.state_file] {
-                if *write == secret
-                    || std::fs::metadata(write)
-                        .ok()
-                        .zip(std::fs::metadata(secret).ok())
-                        .is_some_and(|(a, b)| a.dev() == b.dev() && a.ino() == b.ino())
-                {
-                    return Err("mutation stores must be separate from credential storage");
-                }
-            }
-        }
-    }
     for path in &paths {
         crate::file_ingestion::validate_audit_path(path)
             .map_err(|_| "mutation storage must be private and operator-owned")?;
@@ -199,17 +185,10 @@ mod tests {
             Err("mutation stores must be outside disposable index")
         );
         assert!(!ledger.exists());
-        config.retrieval = None;
-        config.notion_grant_store = Some(crate::config::GrantStoreSettings {
-            key_file: dir.path().join("key"),
-            state_file: ledger.clone(),
-        });
-        assert!(validate(&config).is_err());
-        assert!(!ledger.exists());
     }
 
     #[test]
-    fn durable_write_files_cannot_alias_each_other_state_or_credentials() {
+    fn durable_write_files_cannot_alias_each_other_or_state() {
         let dir = private();
         let ledger = dir.path().join("ledger.sqlite");
         let audit = dir.path().join("audit.sqlite");
@@ -227,12 +206,6 @@ mod tests {
         assert!(validate(&config).is_err());
         std::fs::remove_file(&audit).unwrap();
         std::fs::hard_link(&ledger, &state).unwrap();
-        assert!(validate(&config).is_err());
-        std::fs::remove_file(&state).unwrap();
-        config.notion_grant_store = Some(crate::config::GrantStoreSettings {
-            key_file: ledger.clone(),
-            state_file: dir.path().join("grant"),
-        });
         assert!(validate(&config).is_err());
     }
 }

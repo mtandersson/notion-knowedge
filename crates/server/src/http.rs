@@ -36,39 +36,16 @@ pub async fn serve(settings: crate::config::Config) -> io::Result<()> {
 }
 
 /// The same installed transport/budgets serve production and local fake-provider
-/// tests. OAuth starts with no content adapters until request-bound composition.
+/// tests.
 pub(crate) fn mcp_transport(
     settings: &crate::config::Config,
     handler: notion_knowledge_mcp::KnowledgeServer,
     sessions: Arc<crate::session_limits::BoundedSessions>,
     cancellation: tokio_util::sync::CancellationToken,
-    login: Option<Arc<crate::oauth_authorize::Login>>,
 ) -> axum::Router {
-    if let Some(login) = &login {
-        login.attach_sessions(&sessions);
-    }
-    let oauth = settings.oauth_discovery.as_ref();
-    let handler = if oauth.is_some() && !handler.requires_request_scope() {
-        notion_knowledge_mcp::KnowledgeServer::default()
-    } else {
-        handler
-    };
-    let content = if handler.requires_request_scope() {
-        settings
-            .notion_scope
-            .as_ref()
-            .and_then(|scope| login.as_ref()?.content_factory(scope.clone()))
-    } else {
-        None
-    };
-    let handler = if oauth.is_some() {
-        handler.with_http_authorization_required()
-    } else {
-        handler
-    };
     let handler = handler
         .with_tool_capacity(settings.mcp_tool_capacity)
-        .with_read_only(settings.read_only || oauth.is_some())
+        .with_read_only(settings.read_only)
         .with_destructive_writes_enabled(settings.destructive_writes_enabled)
         .with_capability_policy(settings.capability_policy.clone());
     let bind = settings.http_bind;
@@ -80,7 +57,7 @@ pub(crate) fn mcp_transport(
     ];
     config.cancellation_token = cancellation;
     let service = StreamableHttpService::new(move || Ok(handler.clone()), sessions.clone(), config);
-    let transport = axum::Router::new()
+    axum::Router::new()
         .nest_service("/mcp", service)
         .layer(middleware::from_fn_with_state(
             sessions.clone(),
@@ -97,21 +74,7 @@ pub(crate) fn mcp_transport(
         .layer(middleware::from_fn_with_state(
             Arc::new(Semaphore::new(settings.mcp_max_in_flight)),
             limit_mcp_requests,
-        ));
-    if let Some(discovery) = oauth {
-        transport.layer(middleware::from_fn_with_state(
-            crate::oauth_mcp::ResourceGate {
-                login,
-                sessions,
-                admission: Arc::new(Semaphore::new(settings.mcp_max_in_flight)),
-                metadata_url: discovery.protected_metadata_url(),
-                content,
-            },
-            crate::oauth_mcp::require_authorization,
         ))
-    } else {
-        transport
-    }
 }
 
 /// Both normal and explicit experimental composition use the same transport.
@@ -156,23 +119,16 @@ pub async fn serve_composed(
         )
         .await
         .map_err(io::Error::other)?
-    } else if settings.oauth_discovery.is_some() {
-        notion_knowledge_mcp::KnowledgeServer::default()
     } else {
         crate::root_scope::compose(handler, &settings, crate::root_scope::Transport::Http)
             .await
             .map_err(io::Error::other)?
     };
     #[cfg(not(all(unix, feature = "webhook-worker")))]
-    let handler = if settings.oauth_discovery.is_some() {
-        // Install OAuth request-bound readers in serve_installed, where they
-        // share the credential runtime. Keep integration composition out here.
-        notion_knowledge_mcp::KnowledgeServer::default()
-    } else {
+    let handler =
         crate::root_scope::compose(handler, &settings, crate::root_scope::Transport::Http)
             .await
-            .map_err(io::Error::other)?
-    };
+            .map_err(io::Error::other)?;
     serve_installed(
         settings,
         handler,
@@ -194,52 +150,6 @@ pub async fn serve_installed(
     shutdown: tokio_util::sync::CancellationToken,
 ) -> io::Result<()> {
     logging::set_level(settings.log_level);
-    // Construct ONE shared refresh coordinator per HTTP server. OAuth discovery
-    // remains fail-closed for MCP; an explicit sealed browser callback can share it.
-    let notion_oauth = crate::notion_oauth_runtime::NotionOAuthRuntime::from_config(&settings)
-        .map_err(|_| io::Error::other("Notion OAuth credential runtime unavailable"))?;
-    let oauth_login = crate::oauth_authorize::Login::from_config(&settings, notion_oauth.as_ref())
-        .map_err(|_| io::Error::other("Notion OAuth browser runtime unavailable"))?;
-    serve_with_oauth(
-        settings,
-        handler,
-        #[cfg(all(unix, feature = "webhook-worker"))]
-        worker,
-        shutdown,
-        notion_oauth,
-        oauth_login,
-    )
-    .await
-}
-
-/// Shipping lifecycle with typed credentials/model seams for local providers.
-/// Neither dependency can be selected by environment or MCP arguments.
-pub(crate) async fn serve_with_oauth(
-    settings: crate::config::Config,
-    handler: notion_knowledge_mcp::KnowledgeServer,
-    #[cfg(all(unix, feature = "webhook-worker"))] worker: Option<
-        Arc<crate::webhook_worker::runtime::Worker>,
-    >,
-    shutdown: tokio_util::sync::CancellationToken,
-    notion_oauth: Option<crate::notion_oauth_runtime::NotionOAuthRuntime>,
-    oauth_login: Option<Arc<crate::oauth_authorize::Login>>,
-) -> io::Result<()> {
-    let handler = if settings.oauth_discovery.is_some() && settings.notion_scope.is_some() {
-        if notion_oauth.is_none() || oauth_login.is_none() {
-            return Err(io::Error::other("OAuth content authorization unavailable"));
-        }
-        let handler = notion_knowledge_mcp::KnowledgeServer::default().with_request_bound_content();
-        #[cfg(all(unix, feature = "webhook-worker"))]
-        let handler = crate::retrieval_runtime::configured_oauth(
-            crate::graph_runtime::attach_request(handler, &settings).map_err(io::Error::other)?,
-            &settings,
-        )
-        .await
-        .map_err(io::Error::other)?;
-        handler
-    } else {
-        handler
-    };
     let bind = settings.http_bind;
     let shutdown_timeout = Duration::from_secs(settings.shutdown_timeout_seconds);
     let mut diagnostics = crate::diagnostics::bootstrap(&settings);
@@ -269,7 +179,6 @@ pub(crate) async fn serve_with_oauth(
         handler,
         session_manager.clone(),
         cancellation.clone(),
-        oauth_login.clone(),
     );
     let bearer = settings.bearer_fallback.map(Arc::new);
     // Operational state supplied for read activation is not webhook admission.
@@ -307,20 +216,13 @@ pub(crate) async fn serve_with_oauth(
         admission,
         settings.webhook_max_in_flight,
     );
-    let mcp = match settings.oauth_discovery {
-        Some(discovery) => {
-            crate::oauth_discovery::router_with_mcp(bind, discovery, oauth_login, Some(transport))
-        }
-        None => {
-            if let Some(token) = bearer {
-                transport.layer(middleware::from_fn_with_state(
-                    token,
-                    require_development_bearer,
-                ))
-            } else {
-                transport
-            }
-        }
+    let mcp = if let Some(token) = bearer {
+        transport.layer(middleware::from_fn_with_state(
+            token,
+            require_development_bearer,
+        ))
+    } else {
+        transport
     };
     let router = axum::Router::new()
         .merge(diagnostics)

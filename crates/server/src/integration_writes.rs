@@ -37,7 +37,6 @@ pub async fn compose(
         .as_ref()
         .ok_or("integration write stores unavailable")?;
     if config.read_only
-        || config.oauth_discovery.is_some()
         || !matches!(config.notion_auth, NotionAuth::Integration(_))
         || !crate::root_scope::trusted_transport(config, Transport::Http)
     {

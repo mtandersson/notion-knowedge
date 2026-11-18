@@ -270,130 +270,62 @@ fn check_validates_enabled_ingestion_bounds_and_private_audit_path_before_servin
     }
 }
 
-#[tokio::test]
-async fn sealed_grant_startup_rejects_unsafe_state_before_check_or_transport() {
-    use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
-    use std::{fs, os::unix::fs::PermissionsExt, process::Stdio};
-
-    // A version-1 compatibility fixture, not a production credential or key.
-    // Fixed key/nonce are confined to test-only envelopes with fake tokens.
-    fn envelope(record: &serde_json::Value) -> Vec<u8> {
-        let key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &[42u8; 32]).unwrap());
-        let mut payload = serde_json::to_vec(record).unwrap();
-        key.seal_in_place_append_tag(
-            Nonce::assume_unique_for_key([7u8; 12]),
-            Aad::from(b"notion-knowledge/notion-oauth-grant/v1"),
-            &mut payload,
-        )
-        .unwrap();
-        let mut file = b"NKGRANT1".to_vec();
-        file.extend_from_slice(&[7u8; 12]);
-        file.extend_from_slice(&payload);
-        file
-    }
-    async fn execute(settings: &[(&str, String)], arguments: &[&str]) -> Output {
-        let mut command =
-            tokio::process::Command::new(env!("CARGO_BIN_EXE_notion-knowledge-server"));
-        command
-            .env_clear()
-            .args(arguments)
-            .stdin(Stdio::null())
-            .kill_on_drop(true);
-        for (key, value) in settings {
-            command.env(key, value);
-        }
-        tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
-            .await
-            .unwrap()
-            .unwrap()
-    }
-    let record = serde_json::json!({
-        "schema":1, "grant_id":"0123456789abcdef0123456789abcdef", "epoch":1,
-        "notion_client_id":"notion-client", "workspace_id":"workspace-private", "owner_user_id":"user-private",
-        "bot_id":"bot-private", "issued_at_unix":1, "expires_at_unix":null,
-        "access_token":"access-private-sentinel", "refresh_token":"refresh-private-sentinel",
-    });
+#[cfg(unix)]
+#[test]
+fn removed_oauth_settings_and_old_grant_files_warn_once_and_never_block_startup() {
+    use std::process::{Command, Stdio};
     let directory = tempfile::tempdir().unwrap();
     let key = directory.path().join("key");
     let state = directory.path().join("state");
-    let settings = vec![
-        ("NK_OAUTH_ISSUER", "https://auth.example.com".into()),
-        (
-            "NK_OAUTH_RESOURCE",
-            "https://knowledge.example.com/mcp".into(),
-        ),
-        ("NK_OAUTH_CLIENT_ID", "chatgpt".into()),
+    // Old sealed grant files are left on disk and never read or decrypted.
+    std::fs::write(&key, b"key-private-sentinel").unwrap();
+    std::fs::write(&state, b"corrupt-private-sentinel").unwrap();
+    let removed = [
+        ("NK_OAUTH_ISSUER", "https://auth.example.com"),
+        ("NK_OAUTH_RESOURCE", "https://knowledge.example.com/mcp"),
+        ("NK_OAUTH_CLIENT_ID", "chatgpt"),
         (
             "NK_OAUTH_CLIENT_REDIRECT_URI",
-            "https://chatgpt.example.com/callback".into(),
+            "https://chatgpt.example.com/callback",
         ),
-        ("NK_NOTION_OAUTH_CLIENT_ID", "notion-client".into()),
-        (
-            "NK_NOTION_OAUTH_REDIRECT_URI",
-            "https://auth.example.com/oauth/notion/callback".into(),
-        ),
-        (
-            "NK_NOTION_OAUTH_CLIENT_SECRET",
-            "client-private-sentinel".into(),
-        ),
-        ("NK_NOTION_ALLOWED_WORKSPACE_ID", "workspace-private".into()),
-        ("NK_NOTION_ALLOWED_USER_ID", "user-private".into()),
-        ("NK_NOTION_GRANT_KEY_FILE", key.to_str().unwrap().into()),
-        ("NK_NOTION_GRANT_STATE_FILE", state.to_str().unwrap().into()),
+        ("NK_OAUTH_LOCAL_HTTP", "true"),
+        ("NK_NOTION_OAUTH_CLIENT_SECRET", "client-private-sentinel"),
+        ("NK_NOTION_GRANT_KEY_FILE", key.to_str().unwrap()),
+        ("NK_NOTION_GRANT_STATE_FILE", state.to_str().unwrap()),
     ];
-    fs::write(&key, [42u8; 32]).unwrap();
-    fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
-    // Missing state is safe, and the independently constructed valid envelope
-    // is accepted. Neither success establishes an authenticated MCP principal.
-    assert!(execute(&settings, &["--check"]).await.status.success());
-    fs::write(&state, envelope(&record)).unwrap();
-    fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(execute(&settings, &["--check"]).await.status.success());
-
-    for case in [
-        "missing-key",
-        "wrong-key",
-        "corrupt-state",
-        "foreign-workspace",
-        "foreign-user",
-        "foreign-client",
-        "unknown-schema",
-        "unsafe-state-mode",
-    ] {
-        fs::write(&key, [42u8; 32]).unwrap();
-        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
-        fs::write(&state, envelope(&record)).unwrap();
-        fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(execute(&settings, &["--check"]).await.status.success());
-        let mut changed = record.clone();
-        match case {
-            "foreign-workspace" => changed["workspace_id"] = "other-private-workspace".into(),
-            "foreign-user" => changed["owner_user_id"] = "other-private-user".into(),
-            "foreign-client" => changed["notion_client_id"] = "other-private-client".into(),
-            "unknown-schema" => changed["schema"] = 2.into(),
-            _ => {}
+    let execute = |arguments: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_notion-knowledge-server"));
+        command.env_clear().args(arguments).stdin(Stdio::null());
+        for (name, value) in removed {
+            command.env(name, value);
         }
-        fs::write(&state, envelope(&changed)).unwrap();
-        fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
-        match case {
-            "missing-key" => fs::remove_file(&key).unwrap(),
-            "wrong-key" => fs::write(&key, [41u8; 32]).unwrap(),
-            "corrupt-state" => fs::write(&state, b"corrupt-private-sentinel").unwrap(),
-            "unsafe-state-mode" => {
-                fs::set_permissions(&state, fs::Permissions::from_mode(0o644)).unwrap()
-            }
-            _ => {}
-        }
-        for arguments in [vec!["--check"], vec!["--http"], vec![]] {
-            let output = execute(&settings, &arguments).await;
-            assert_eq!(output.status.code(), Some(2), "{case}: {arguments:?}");
-            assert!(output.stdout.is_empty());
-            let stderr = String::from_utf8(output.stderr).unwrap();
-            assert!(stderr.contains("Notion grant state error:"));
-            assert!(!stderr.contains("bootstrap ready"));
-            assert!(!stderr.contains("Serving MCP"));
-            assert!(!stderr.contains("private"));
-            assert!(!stderr.contains(directory.path().to_str().unwrap()));
-        }
+        command.output().unwrap()
+    };
+    let output = execute(&["--check"]);
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let warnings: Vec<_> = stderr
+        .lines()
+        .filter(|line| line.contains("ignoring removed settings"))
+        .collect();
+    assert_eq!(warnings.len(), 1, "{stderr}");
+    for (name, _) in removed {
+        assert!(warnings[0].contains(name), "{name}");
     }
+    assert!(warnings[0].contains("may be deleted"));
+    assert!(stderr.contains("bootstrap ready"));
+    assert!(!stderr.contains("private"));
+    assert!(!stderr.contains(directory.path().to_str().unwrap()));
+
+    for argument in ["--notion-oauth-forget", "--notion-oauth-identity"] {
+        let output = execute(&[argument]);
+        assert_eq!(output.status.code(), Some(2), "{argument}");
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("no longer supported")
+        );
+    }
+    assert_eq!(std::fs::read(&key).unwrap(), b"key-private-sentinel");
+    assert_eq!(std::fs::read(&state).unwrap(), b"corrupt-private-sentinel");
 }

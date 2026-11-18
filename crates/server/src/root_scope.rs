@@ -15,9 +15,7 @@ pub enum Transport {
 
 pub(crate) fn trusted_transport(config: &Config, transport: Transport) -> bool {
     matches!(transport, Transport::Stdio)
-        || (config.bearer_fallback.is_some()
-            && config.http_bind.ip().is_loopback()
-            && config.oauth_discovery.is_none())
+        || (config.bearer_fallback.is_some() && config.http_bind.ip().is_loopback())
 }
 
 /// Shared installed composition for both trusted transports.
@@ -113,11 +111,8 @@ pub(crate) fn attach_client(
         return Ok(handler);
     };
     // HTTP's existing middleware checks this bearer on every session request.
-    // OAuth discovery is deliberately not an authenticated write transport.
     if matches!(transport, Transport::Http)
-        && (config.bearer_fallback.is_none()
-            || !config.http_bind.ip().is_loopback()
-            || config.oauth_discovery.is_some())
+        && (config.bearer_fallback.is_none() || !config.http_bind.ip().is_loopback())
     {
         return Ok(handler);
     }
