@@ -560,7 +560,7 @@ The [embedding provider contract](docs/embeddings.md) defines asynchronous batch
 execution and persisted provider/model/vector-space identity independently of
 local model runtimes.
 
-The [durable reconciliation journal](docs/reconciliation-journal.md) supplies scoped, fenced, resumable operational storage for periodic reconciliation.
+The [durable reconciliation journal](docs/reconciliation-journal.md) supplies the scoped, fenced operational storage (writer lease, schedule rows, page inventory and sync records) for reconciliation.
 
 The [manual authoritative reconciliation commands](docs/manual-reconciliation.md)
 run the same production composition as the webhook worker. Manual, scheduled and

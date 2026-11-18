@@ -3,7 +3,7 @@
 Build the Unix server with `--features webhook-worker` using the pinned Nix
 `.#spike` environment. Manual commands use the same production `IndexRuntime`
 as the webhook worker: authenticated Notion discovery/read, offline Qwen,
-guarded LanceDB, SQLite, and one coordinator `Arc` shared by the planner and
+guarded LanceDB, SQLite, and one coordinator `Arc` shared with
 `AuthoritativePageRefresh`. The canonical `chunks` table, full configured roots
 and all exclusions, `webhook-v1` policy, generation and epoch must match the
 existing index/state authority.
@@ -14,14 +14,12 @@ Configure `NK_NOTION_AUTH=integration`, secret `NOTION_TOKEN`,
 `NK_WEBHOOK_INDEX_DIR`, `NK_WEBHOOK_STATE_FILE`, `NK_WEBHOOK_QWEN_ASSETS` and
 `NK_WEBHOOK_TIMEOUT_SECONDS` (1–300, default 60) as the serving worker.
 Whole-scope inventory uses `NK_RECONCILIATION_INVENTORY_TIMEOUT_SECONDS`
-(1..86400, default 900). This includes dry-run, initial planning, and the full
-replan performed for an explicit failed-page retry. Ordinary page attempts keep
+(1..86400, default 900). This includes dry-run and the walk performed by each sync. Ordinary page attempts keep
 `NK_WEBHOOK_TIMEOUT_SECONDS`; individual upstream HTTP deadlines are unchanged.
 The same distinction applies to cache reset/resync and periodic reconciliation.
-Read-only inventory does not hold a writer lease. Recording the completed plan
-rechecks its local predecessor under fresh writer admission. Plan recording,
-page attempts and search preparation keep the shorter page budget and its
-existing lease cleanup margin. Leases renew only between owned attempts.
+Read-only inventory does not hold a writer lease. Page attempts and search
+preparation keep the shorter page budget and its existing lease cleanup margin.
+Leases renew only between owned attempts.
 
 Manual execution does not require `NK_WEBHOOK_WORKER=true` or verified webhook
 subscription/signing configuration. It never changes configured scope.
