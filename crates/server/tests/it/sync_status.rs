@@ -250,41 +250,31 @@ async fn installed_status_validates_real_index_metadata_without_model_assets_or_
         drop(table);
         if compatible {
             use notion_knowledge_core::reconciliation::ReconciliationJournal;
-            let lease = coordinator.state().acquire_lease(10, 100).unwrap();
-            for (run, completed_at, clean) in [
-                ("success", 20, true),
-                ("held", 30, false),
-                ("incomplete", 40, false),
-            ] {
-                coordinator
-                    .state()
-                    .start_or_resume(&lease, 10, run, &journal)
-                    .unwrap();
-                let mut plan = notion_knowledge_retrieval::planner::ReconciliationPlan {
-                    binding: coordinator.binding().clone(),
-                    index_version: 1,
-                    local: Default::default(),
-                    pages: vec![],
-                    errors: Default::default(),
-                    run_errors: vec![],
-                    scanned: 0,
-                    inspected_ids: Default::default(),
-                    traversal_complete: run != "incomplete",
-                };
-                if !clean && run == "held" {
-                    plan.errors.insert(
-                        "private-page-sentinel".into(),
-                        notion_knowledge_retrieval::planner::PlanError::Permission,
-                    );
-                }
-                coordinator
-                    .record_reconciliation_plan(&lease, 10, run, &plan)
-                    .unwrap();
-                coordinator
-                    .complete_reconciliation_plan(&lease, completed_at, run)
-                    .unwrap();
-            }
-            coordinator.state().release_lease(&lease, 40).unwrap();
+            let lease = coordinator.state().acquire_lease(10, 1000).unwrap();
+            let policy =
+                notion_knowledge_retrieval::schedule::SchedulePolicy::new(60, 3, 5, 8).unwrap();
+            coordinator
+                .register_schedule(&lease, 10, "periodic", policy, 10)
+                .unwrap();
+            // A completed walk is the only success evidence.
+            coordinator
+                .claim_schedule(&lease, 20, "periodic", "success")
+                .unwrap();
+            coordinator
+                .complete_schedule(&lease, 20, "periodic", true)
+                .unwrap();
+            // Completed with page failures: not a success.
+            coordinator
+                .claim_schedule(&lease, 80, "periodic", "held")
+                .unwrap();
+            coordinator
+                .complete_schedule(&lease, 90, "periodic", false)
+                .unwrap();
+            // Still running: not a success either.
+            coordinator
+                .claim_schedule(&lease, 200, "periodic", "incomplete")
+                .unwrap();
+            coordinator.state().release_lease(&lease, 200).unwrap();
         }
         drop(coordinator);
         config.notion_scope = Some(scope);

@@ -639,7 +639,7 @@ fn schema_eleven_upgrade_is_atomic_and_read_only_current_schema_inspection_creat
 }
 
 #[tokio::test]
-async fn abandonment_preserves_real_applied_receipts_and_refuses_unresolved_submission() {
+async fn abandonment_preserves_real_applied_receipts() {
     let f = Fixture::new();
     let c = f.open();
     let l = c.state().acquire_lease(10, 100).unwrap();
@@ -663,24 +663,8 @@ async fn abandonment_preserves_real_applied_receipts_and_refuses_unresolved_subm
     );
     let receipt = c.receipt("successful").unwrap().unwrap();
     assert_eq!(receipt.status, ReceiptStatus::Applied);
-    let raw = f.raw();
-    raw.execute_batch("INSERT INTO reconciliation_plans VALUES('run',1,'{}');INSERT INTO reconciliation_plan_progress(run_id,page_id,operation_id) VALUES('run','pending-page','pending-operation');INSERT INTO index_commit_receipts VALUES('pending-operation','v1','pending-page','revision',0,'hash',NULL,0,NULL,1);").unwrap();
-    let before = c.schedule("periodic").unwrap();
-    assert_eq!(
-        c.abandon_schedule(&l, 20, "periodic", 30),
-        Err(JournalError::Busy)
-    );
-    assert_eq!(before, c.schedule("periodic").unwrap());
-    // Model the durable receipt returned by recovering the already submitted work.
-    raw.execute(
-        "UPDATE index_commit_receipts SET status=1 WHERE operation_id='pending-operation'",
-        [],
-    )
-    .unwrap();
-    let recovered = c.receipt("pending-operation").unwrap().unwrap();
     c.abandon_schedule(&l, 20, "periodic", 30).unwrap();
     assert_eq!(c.receipt("successful").unwrap().unwrap(), receipt);
-    assert_eq!(c.receipt("pending-operation").unwrap().unwrap(), recovered);
     assert_eq!(
         c.state().renew_lease(&l, 20, 100),
         Err(JournalError::LeaseLost)

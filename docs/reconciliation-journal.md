@@ -78,102 +78,15 @@ contention/expiry/fencing, batch conflict and injected SQL write failure rollbac
 and crash after idempotent index application before acknowledgment with durable
 failure/retry/count consistency.
 
-## Authoritative plan contract (schema 10, version 1)
+## Removed: durable reconciliation plan (schemas 10 and 11)
 
-With `local-lancedb` enabled, `IndexCommitCoordinator` exposes the runner-facing
-`durable_plan` API. `record_reconciliation_plan(lease, now, run, &planner_plan)`
-converts the real planner result, records it and seals inventory in a single
-IMMEDIATE SQLite transaction. Start/resume the run first with the existing
-`ReconciliationJournal::start_or_resume` and the shared `production_scope`.
-The additive migration preserves legacy journal, sync-state and commit receipts;
-legacy acknowledgment/completion cannot bypass the new contract for these runs.
-
-`reconciliation_plan(run)` opens only against the current trusted coordinator
-binding and physical index/state identity. Persisted bytes cannot initialize
-index authority. Version 1 retains table/workspace, the complete root/exclusion/
-policy scope digest, generation/epoch, index snapshot version, traversal
-completeness, distinct successful inspected IDs (including no-work pages),
-proposed difference, metadata identity, lifecycle and local snapshot digests,
-per-page planning failures, and separately classified run failures. Source bodies,
-private property values and credentials are not persisted. Digest algorithms are
-explicitly versioned; changing their encoding requires a new contract version.
-
-Each work operation has a stable `reconcile-v1-…` identity derived from the run,
-full binding, page, proposed difference and source/local provenance. Exact plan
-replay is harmless; conflicting plan replay fails without changing progress.
-Replanning a whole inventory requires a new run and fresh authoritative reads.
-An operation may change its current action only through explicit per-page
-replanning before a successful receipt. This preserves prior successes and
-prevents a racing restore from being counted as deletion.
-
-The application handshake is:
-
-1. Reopen with operator-supplied trusted binding, acquire/resume the common lease,
-   and load plan/progress. Failed pages require `retry_reconciliation_page`.
-2. Prepare from fresh source/lifecycle and local state, compare
-   scope/generation/epoch and provenance, and reject conflicts. Repeat these
-   checks inside the shared owned index commit boundary before actual effects.
-   A persisted digest is a comparison target, **never** deletion authority.
-   Delete requires complete traversal plus fresh affirmative inactive/outside-scope
-   evidence. A candidate now Allowed requires explicit replanning to refresh;
-   do not apply its original deletion. Revalidate source metadata as well as
-   lifecycle and local state before effects. Version 1 exposes the digest helpers
-   for comparing freshly read planner-local/lifecycle snapshots.
-3. Call `prepare_reconciliation_operation` with the stable ID, exact prepared
-   checkpoint/revision/action and freshly scoped evidence. Without explicit
-   replanning, action and lifecycle digest must match the plan. Preparation is
-   fenced and persists the exact receipt target. It does not mutate LanceDB and
-   does not replace the runner's fresh authorization or external commit guard.
-4. Submit the real, idempotent operation through `IndexCommitCoordinator` and
-   await its real Applied/AlreadyApplied receipt. Apply precedes acknowledgment.
-   Source revalidation and actual LanceDB mutations are supplied by #346.
-5. Call `acknowledge_reconciliation_receipt`. It transactionally checks current
-   authority/fence and the real Applied receipt's operation/page/generation and
-   exact prepared revision/action/content hash/time before recording success.
-   Missing/Pending/Failed/Superseded or mismatched receipts cannot acknowledge.
-   Crash after apply but before acknowledgment retains a pending journal item and
-   an immutable Applied receipt. Reopen/replay/ack cannot repeat its count.
-   `prepared_reconciliation_operation(run, page)` recovers the exact persisted
-   revision/action/hash/time after reopen. New source changes cannot replace an
-   Applied preparation or reinterpret its outcome. Validate current trusted
-   authority, acknowledge the immutable historical receipt, and process a newer
-   source edit in a new plan/run. If replaying submit, reconstruct its original
-   persisted target rather than submitting the newer source checkpoint.
-
-`reconciliation_progress` derives counts from distinct persisted IDs and current
-statuses: scanned is successful inspections; planned refresh/delete are separate;
-changed/deleted/unchanged reflect **actual receipt action**, not proposed action.
-Page planning/application failures remain independently classified, and
-`failed_pages()` deduplicates their page IDs. Run failures use stable caller-owned
-failure IDs and retain their own classifications. Duplicate failure recording
-cannot inflate counts; a conflicting class for the same ID fails. Successful
-items cannot be failed/retried; failed items cannot be acknowledged until explicit
-retry. Retry clears the current failure while preserving other work and its
-success counts. `complete_reconciliation_plan` requires no pending items and
-retains failed items; after completion, a new run must replan them.
-
-Dry-run remains the exact read-only planner and writes **no** plan, progress,
-operational metadata, or application acknowledgment. Recording a durable plan is
-an explicit real-run operation.
-
-Verification: `cargo test -p notion-knowledge-retrieval --features local-lancedb
---test it durable_plan:: --locked` exercises real SQLite transactions, independent
-connections, reopen, schema migration, classified summaries, exact duplicate
-replay, explicit retry, stale lease/fence and scope/generation rejection,
-transaction rollback and real coordinator apply-before-ack receipt recovery.
-These storage tests perform no LanceDB mutation; the integrated source/index
-race and application matrix belongs to #346.
-
-## Guarded runner and persisted explicit retries (schema 11)
-
-The [authoritative runner](reconciliation-runner.md) now supplies the real shared
-source/Lance effects, owned precommit proposal validation and receipt recovery.
-`retry_reconciliation_proposal` atomically persists a fresh payload-free
-`DurablePage` proposal with Failed-to-Pending, retaining the stable operation ID.
-`reconciliation_page_proposal` returns that explicit proposal after reopen; the
-runner validates it under the actual owned guard before effects. It is evidence,
-never authorization. This closes the cancellation interval before preparation.
-Schema 11 preserves all existing journal/plans/receipts in an atomic migration.
+Schemas 10 and 11 stored a typed planner result, per-page progress and persisted
+retry proposals (`reconciliation_plans`, `reconciliation_plan_progress`,
+`reconciliation_plan_run_failures`, `reconciliation_retry_proposals`). Syncs now
+apply through `IndexRuntime::sync_from_walk`, which settles each page itself, so
+nothing wrote these tables. Schema 22 drops them; failure-history rows already
+copied from them are retained. The journal run, inventory, schedule and
+success tables remain.
 
 ## Scoped schedule authority (schema 12)
 
@@ -234,8 +147,7 @@ to reject another unfinished scheduled run. Cancellation records a checkpoint
 with `checkpoint_schedule` and preserves the same run/deadline/budget; the real
 runner owns durable inventory and page checkpoints.
 
-Successful `ReconciliationJournal::complete` and the actual runner's
-`complete_reconciliation_plan` advance the schedule to `now + interval`, clear
+Successful `ReconciliationJournal::complete` and `complete_schedule` advance the schedule to `now + interval`, clear
 its active identity and reset the current failure budget **in the same
 transaction as run completion**. The completed run records that deadline.
 Rollback leaves both run and schedule active. Restart therefore cannot repeat
@@ -281,8 +193,7 @@ The failure policy is explicit:
 sanitized, paginated operator inspection: status, policy, deadline, active run,
 cycle, attempts, event times and enum failure classes. SQLite triggers preserve
 historical classified page/run failures when explicit retry clears current
-failure or later success completes a run; immutable planner failure documents
-remain available too. These APIs never store credentials, source bodies, titles,
+failure or later success completes a run. These APIs never store credentials, source bodies, titles,
 URLs or upstream error text. IDs and timing remain operational metadata and must
 not be logged on public surfaces. #353 must expose meaningful operator status
 and explicit recovery using these exact APIs, and prove the actual scheduled

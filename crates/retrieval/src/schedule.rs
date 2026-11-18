@@ -241,7 +241,12 @@ fn event(
     Ok(())
 }
 fn page_failures(db: &Connection, run: &str) -> Result<bool, JournalError> {
-    db.query_row("SELECT EXISTS(SELECT 1 FROM reconciliation_inventory WHERE run_id=?1 AND status=2) OR EXISTS(SELECT 1 FROM reconciliation_plan_progress WHERE run_id=?1 AND status=2) OR EXISTS(SELECT 1 FROM reconciliation_plan_run_failures WHERE run_id=?1) OR EXISTS(SELECT 1 FROM reconciliation_plans p, json_each(p.document,'$.planning_failures') WHERE p.run_id=?1) OR EXISTS(SELECT 1 FROM reconciliation_plans p, json_each(p.document,'$.run_failures') WHERE p.run_id=?1)",[run],|r|r.get(0)).map_err(sql)
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM reconciliation_inventory WHERE run_id=?1 AND status=2)",
+        [run],
+        |r| r.get(0),
+    )
+    .map_err(sql)
 }
 
 /// One definition of logical live ownership for admission and owned commits.
@@ -586,8 +591,6 @@ impl IndexCommitCoordinator {
         let _guard = external(self)?;
         self.schedule_write(lease,now,|db| {
             let s=load(db,self,id)?;let run=s.active_run.as_deref().ok_or(JournalError::InvalidTransition)?;
-            let pending:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM reconciliation_plan_progress p JOIN index_commit_receipts r ON r.operation_id=p.operation_id WHERE p.run_id=?1 AND r.status=0)",[run],|r|r.get(0)).map_err(sql)?;
-            if pending {return Err(JournalError::Busy);}
             let owner:Option<String>=db.query_row("SELECT run_id FROM reconciliation_runs WHERE phase<>2 AND abandoned=0",[],|r|r.get(0)).optional().map_err(sql)?;
             if owner.as_deref().is_some_and(|v|v!=run){return Err(JournalError::Busy);}
             event(db,&s,now,5,None,None)?;

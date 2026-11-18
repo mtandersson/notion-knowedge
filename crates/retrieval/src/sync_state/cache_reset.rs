@@ -22,10 +22,6 @@ impl SqliteSyncStateStore {
             "
             DELETE FROM reconciliation_schedule_events;
             DELETE FROM reconciliation_schedules;
-            DELETE FROM reconciliation_retry_proposals;
-            DELETE FROM reconciliation_plan_progress;
-            DELETE FROM reconciliation_plan_run_failures;
-            DELETE FROM reconciliation_plans;
             DELETE FROM reconciliation_inventory;
             DELETE FROM reconciliation_success;
             DELETE FROM reconciliation_failure_history;
