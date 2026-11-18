@@ -43,8 +43,8 @@ operator-controlled migration path. Read-only opens do not migrate or repair.
 Back up durable operational state and the separate write ledger before upgrades.
 
 These are internal application/adapter capabilities. Default MCP discovery stays
-read-only. Installed semantic tool dispatch, operator configuration and explicit
-request-bound OAuth write authorization remain [#441](https://github.com/mtandersson/notion-knowedge/issues/441).
+read-only. Installed semantic tool dispatch and operator configuration are the
+[guarded integration writes](integration-semantic-writes.md); OAuth sessions are read-only.
 This child does not close parent #83/#10 or establish production ChatGPT writes.
 
 Credential-free verification:

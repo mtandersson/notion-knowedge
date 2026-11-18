@@ -188,13 +188,18 @@ impl Config {
         let mcp_max_streams = concurrency(&mut lookup, "NK_MCP_MAX_STREAMS", "16", 256)?;
         let mcp_stream_max_seconds =
             concurrency(&mut lookup, "NK_MCP_STREAM_MAX_SECONDS", "300", 3600)? as u64;
-        // Per-user OAuth writes were removed (#731); never silently ignore them.
+        // Per-user OAuth writes were removed (#731); never silently ignore a
+        // setting that asked for them. The documented explicit opt-out
+        // NK_OAUTH_WRITES=false requested nothing and stays accepted.
         for removed in [
             "NK_OAUTH_WRITES",
             "NK_OAUTH_WRITE_LEDGER_FILE",
             "NK_OAUTH_WRITE_AUDIT_FILE",
         ] {
-            if lookup(removed).is_some() {
+            let value = lookup(removed);
+            if value.is_some()
+                && !(removed == "NK_OAUTH_WRITES" && value.as_deref() == Some("false".as_ref()))
+            {
                 return Err(invalid(
                     removed,
                     "is no longer supported; OAuth writes were removed, use NK_INTEGRATION_WRITES",
@@ -1221,7 +1226,8 @@ mod tests {
         assert!(matches!(configured.notion_auth, NotionAuth::None));
         assert_eq!(configured.notion_scope.unwrap().workspace_id, WORKSPACE);
         for (removed, value) in [
-            ("NK_OAUTH_WRITES", "false"),
+            ("NK_OAUTH_WRITES", "true"),
+            ("NK_OAUTH_WRITES", "TRUE"),
             ("NK_OAUTH_WRITE_LEDGER_FILE", "/var/lib/notion/ledger"),
             ("NK_OAUTH_WRITE_AUDIT_FILE", "/var/lib/notion/audit"),
         ] {
@@ -1230,6 +1236,9 @@ mod tests {
             let error = parse(&stale).unwrap_err();
             assert_eq!(error.setting, removed);
         }
+        let mut opted_out = values.clone();
+        opted_out.push(("NK_OAUTH_WRITES", "false"));
+        assert!(parse(&opted_out).is_ok());
         values[11].1 = "cccccccc-cccc-cccc-cccc-cccccccccccc";
         assert_eq!(
             parse(&values).unwrap_err().setting,

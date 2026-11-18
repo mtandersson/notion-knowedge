@@ -50,8 +50,8 @@ enable `NK_RETRIEVAL=true` only with compatible assets and index state.
 
 For HTTP, set `NK_HTTP_HOST=127.0.0.1`, a free local `NK_HTTP_PORT`,
 `NK_HTTP_AUTH=bearer`, and a randomly generated `NK_HTTP_BEARER_TOKEN` in a
-private runtime environment file. Keep `NK_READ_ONLY=true`,
-`NK_OAUTH_WRITES=false` and file ingestion off. Omit OAuth discovery/login/grant
+private runtime environment file. Keep `NK_READ_ONLY=true`
+and file ingestion off. Omit OAuth discovery/login/grant
 settings from this separate environment. The server rejects simultaneous
 bearer and OAuth discovery configuration. See [bearer configuration](development-bearer-auth.md)
 for token syntax and request-level checks.
