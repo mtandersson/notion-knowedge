@@ -42,7 +42,7 @@ the semantic create schema does not accept icons or arbitrary properties.
 
 Append retains the existing guarded end-only workflow. Section confirmation
 occurs only for a new reserved intent, bound to trusted scope, operation, target,
-complete request fingerprint and idempotency key. Fresh physical scope and
+complete request fingerprint and idempotency key. Fresh
 source preconditions are checked after approval may have waited. A verified
 ledger replay returns its existing receipt without consuming another one-use
 approval. A declined, failed or unknown reserved intent is not automatically

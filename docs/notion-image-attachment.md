@@ -1,9 +1,9 @@
 # Native Notion image attachment (#71)
 
 This is an **adapter-only** primitive, not a public MCP mutation tool.
-`NotionClient::attach_uploaded_image(target, upload, caption, scope)` attaches
+`NotionClient::attach_uploaded_image(target, upload, caption)` attaches
 one previously uploaded PNG, JPEG, GIF or WebP to an **explicit page UUID**
-within the current operator-approved physical Notion root policy. It does not
+on any page the token can write (no root gate, #691). It does not
 accept arbitrary block IDs, caller-supplied URLs, or external image references.
 
 ## Guard order
@@ -12,12 +12,8 @@ accept arbitrary block IDs, caller-supplied URLs, or external image references.
    empty upload and invalid/bidi/control-character caption **before network**.
    Strip only leading/trailing caption whitespace, cap the caption at 2,000
    Unicode characters, serialize it as Notion rich text (never raw JSON).
-2. Build the `RootScopeGate` from the provided *operator-owned*
-   `LifecycleScope` and current authenticated `NotionClient`; authorize the
-   explicit page through live physical ancestry. Missing/unverifiable, inactive,
-   excluded or out-of-root pages fail closed. Re-fetch unchanged physical
-   ancestry and validate the original operator scope **immediately before**
-   the append. This is TOCTOU mitigation, not an atomic Notion transaction.
+2. No ancestry walk or root gate runs: Notion's own permission check for the
+   token decides whether the page is writable (owner decision, #691).
 3. `PATCH /v1/blocks/{page_id}/children` with exactly one native
    `image` block containing `image.type=file_upload`,
    `image.file_upload.id={uploaded_id}` and optional rich-text caption.
@@ -38,8 +34,7 @@ Issue #74 will add a general reusable cross-file verification workflow and
 bounded eventual-consistency retries; issue #72 handles non-image file blocks.
 
 Credential-free HTTP mock tests check success, exact native payload,
-authorization denial, malformed input before network use, changed physical
-ancestry before mutation, malformed creation receipt, and mismatched readback.
+malformed input before network use, malformed creation receipt, and mismatched readback.
 
 Validate with:
 ```bash

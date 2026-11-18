@@ -27,19 +27,19 @@ No whole-page replacement, no destructive override, no network PATCH retries.
 
 Call update_section_once with:
 - a fresh, authenticated NotionRead and the restricted NotionSectionWrite port
-- a root-scoped RootScopeGate constructed from trusted server configuration
+- the trusted `LifecycleScope` (workspace identity for the ledger claim; no root gate or ancestry walk on writes, #691)
 - the existing cross-process durable WriteIdempotencyStore (#78)
 - a canonical target PageId, explicit literal ATX SectionAnchor (level + heading)
 - replacement body, at least one optional revision precondition (RFC3339
   last-edited time and/or SHA-256 of exact full UTF-8 Markdown), and a unique
   idempotency key. Both supplied preconditions must match.
 
-Order: authorize physical ancestry -> reserve in durable ledger -> verify
+Order: reserve in durable ledger -> verify
 caller revision against complete authoritative content -> select exact unique
 section using #311 -> require unique nonempty old_str across entire page ->
-revalidate physical scope -> immediate authoritative preflight again ->
+immediate authoritative preflight again ->
 durably mark attempt UNCERTAIN -> one network PATCH -> fresh complete readback
-matching the planned full Markdown byte-for-byte -> scope revalidation ->
+matching the planned full Markdown byte-for-byte ->
 record VERIFIED durable receipt. Only VERIFIED receipts may be replayed.
 Timeouts, upstream conflicts after dispatch, malformed receipts and readback
 mismatches retain UNKNOWN status; explicit reconciliation is required. Do not

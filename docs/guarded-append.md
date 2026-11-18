@@ -2,13 +2,13 @@
 
 `notion_knowledge_core::append::append_once` implements the exact, opt-in,
 single-page append application workflow. It combines existing authoritative
-`NotionRead`/`NotionWrite`, the shared live `RootScopeGate`, the fresh
+`NotionRead`/`NotionWrite`, the trusted `LifecycleScope`, the fresh
 revision preflight, and the **durable**, separate `WriteIdempotencyStore`.
 
 ## Target and position
 
-- `page_id` is mandatory and names **one** existing Notion page. It is
-  checked against trusted physical ancestry before reading or writing.
+- `page_id` is mandatory and names **one** existing Notion page. No ancestry
+  walk or root gate runs on writes (owner decision, #691): Notion's own permission check for the token decides reach.
 - `markdown` is inserted at the **end** of the page by the provider's
   `insert_content` operation. The service does not replace, delete, or reorder
   earlier content, or choose a section based on textual matching. The caller
@@ -22,8 +22,7 @@ revision preflight, and the **durable**, separate `WriteIdempotencyStore`.
 
 ## Safety ordering
 
-1. Validate input and verify target's **fresh physical root ancestry**, using
-   the trusted integration/workspace root policy from #87.
+1. Validate input.
 2. Derive a durable idempotency claim scoped to the trusted workspace and
    bound to page ID, Markdown, revision preconditions and `end` position.
    First reservation is the only state that permits a future PATCH. A verified
@@ -31,8 +30,8 @@ revision preflight, and the **durable**, separate `WriteIdempotencyStore`.
    `OutcomeUnknown` and **never** repeats the operation.
 3. Read the authoritative source and check every supplied precondition.
    Re-read the exact full Markdown before mutation. Any archived page,
-   revision mismatch, source read error or scope change prevents PATCH.
-4. Revalidate ancestry, then **durably mark the reservation uncertain before
+   revision mismatch, or source read error prevents PATCH.
+4. **Durably mark the reservation uncertain before
    the first network mutation**. A crash, timeout or 5xx after this point never
    causes automatic retry. The Notion adapter uses a single PATCH.
 5. Re-read the complete page authoritatively. Only a readback with the original Markdown prefix
@@ -40,8 +39,7 @@ revision preflight, and the **durable**, separate `WriteIdempotencyStore`.
    optional final LF to account for Notion export formatting), an
    active matching page ID and a trusted Notion URL becomes a verified receipt.
    No unrelated original bytes may be changed.
-6. Acquire and revalidate fresh post-write physical scope (the write itself
-   changes the old evidence's page revision), and persist that verified receipt **before**
+6. Persist that verified receipt **before**
    returning success. If any post-PATCH verification or ledger write fails,
    return `OutcomeUnknown`. Reconciliation must be deliberate and based on
    authoritative evidence; never infer failure from a network timeout.

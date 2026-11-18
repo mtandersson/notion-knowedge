@@ -3,9 +3,9 @@
 The internal `append_once_and_refresh`, `update_section_once_and_refresh` and
 `NotionClient::create_scoped_page_once_and_refresh` workflows return a verified
 Notion receipt plus a separate `IndexStatus` and refresh key. They retain the
-guarded revision, physical ancestry and durable once-only ledger requirements.
-Create verifies complete authoritative Markdown, metadata and fresh child scope;
-append and section update reacquire scope after their own revision change.
+guarded revision and durable once-only ledger requirements.
+Create verifies complete authoritative Markdown and metadata; append and
+section update verify readback after their own revision change.
 Provider formatting differences or incomplete/ambiguous read-back fail closed.
 
 The durable write ledger is separate from disposable retrieval state. Verified

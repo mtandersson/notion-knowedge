@@ -84,7 +84,7 @@ fn fingerprint(request: &AppendRequest) -> String {
 /// receipt. A timed-out operation or crash leaves the ledger in a reconciliation
 /// state and MUST NOT cause a second network PATCH.
 ///
-/// Ordering: authorize -> durable reservation -> revision and exact preimage
+/// Ordering: durable reservation -> revision and exact preimage
 /// read -> durably mark uncertain -> single PATCH -> fresh
 /// full readback -> record verified receipt. This preflight is not atomic CAS:
 /// Notion may accept another edit between the final check and the PATCH.

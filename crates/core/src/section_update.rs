@@ -159,7 +159,7 @@ fn fingerprint(request: &SectionUpdateRequest) -> String {
     format!("{:x}", hash.finalize())
 }
 
-/// Authorize, reserve durably, verify full fresh revision and scope, then issue
+/// Reserve durably, verify full fresh revision, then issue
 /// exactly one provider-side targeted search-and-replace request. Empty section
 /// bodies and repeated source bodies are unsupported: upstream requires a
 /// nonempty, unambiguous old_str, and no guessed position is ever supplied.

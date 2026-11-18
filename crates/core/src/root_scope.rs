@@ -4,7 +4,7 @@
 //! search result disclosure and graph lookups from the page inventory the
 //! last tree walk recorded: it is synchronous and never calls Notion, and its
 //! staleness is bounded by reconciliation. [`RootScopeGate`] fetches fresh
-//! physical ancestry for writes and revalidates near a mutation. Neither keeps
+//! physical ancestry for request-bound reads. Neither keeps
 //! a positive authorization cache.
 
 use std::{collections::BTreeSet, sync::Arc};
