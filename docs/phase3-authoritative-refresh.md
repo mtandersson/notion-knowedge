@@ -49,7 +49,7 @@ re-embedding, and removed chunks are excluded from the complete snapshot.
 Finally `commit_page` serializes a real SQLite receipt and LanceDB mutation
 under the **cross-process directory-inode guard** from #254. The page is not
 read again under that guard (owner decision, option b): the guarded callback
-only records a durable plan's proposal and holds the current relation policy.
+only holds the current relation policy.
 The guard compares the pinned Lance table version and current SQLite fence; a
 conflict requires discarding the stale proposal and preparing again.
 
