@@ -332,7 +332,6 @@ impl ReconciliationJournal for SqliteSyncStateStore {
         self.journal_transaction(|db| {
             guard(db, lease, now)?;
             phase(db, lease, run, 1)?;
-            if db.query_row("SELECT EXISTS(SELECT 1 FROM reconciliation_plans WHERE run_id=?1)", [run], |r| r.get::<_,bool>(0)).map_err(sql)? { return Err(JournalError::InvalidTransition); }
             let current: Option<i64> = db
                 .query_row(
                     "SELECT status FROM reconciliation_inventory WHERE run_id=?1 AND page_id=?2",
@@ -373,7 +372,6 @@ impl ReconciliationJournal for SqliteSyncStateStore {
             return Err(JournalError::InvalidInput);
         }
         self.journal_transaction(|db| {guard(db,lease,now)?;
-            if db.query_row("SELECT EXISTS(SELECT 1 FROM reconciliation_plans WHERE run_id=?1)", [run], |r| r.get::<_,bool>(0)).map_err(sql)? { return Err(JournalError::InvalidTransition); }
             let count=db.execute("UPDATE reconciliation_runs SET failure=?1,next_deadline=?2 WHERE run_id=?3 AND fence=?4 AND phase<>2 AND abandoned=0",params![failure_number(failure),deadline,run,lease.fence]).map_err(sql)?;
             if count==1 {Ok(())}else{Err(JournalError::InvalidTransition)}
         })
@@ -391,7 +389,6 @@ impl ReconciliationJournal for SqliteSyncStateStore {
         self.journal_transaction(|db| {
             guard(db, lease, now)?;
             phase(db, lease, run, 1)?;
-            if db.query_row("SELECT EXISTS(SELECT 1 FROM reconciliation_plans WHERE run_id=?1)", [run], |r| r.get::<_,bool>(0)).map_err(sql)? { return Err(JournalError::InvalidTransition); }
             let remaining: i64 = db
                 .query_row(
                     "SELECT COUNT(*) FROM reconciliation_inventory WHERE run_id=?1 AND status<>1",

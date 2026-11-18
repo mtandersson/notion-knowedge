@@ -143,8 +143,7 @@ pub mod runtime {
         index_runtime::{IndexRuntime, OpenMode, PageDeadline, SyncMode},
         webhook_worker::{WorkerSettings, runtime::now_ms},
     };
-    use notion_knowledge_core::reconciliation::{JournalError, ReconciliationJournal, RunPhase};
-    use notion_knowledge_retrieval::durable_plan::DurableProgress;
+    use notion_knowledge_core::reconciliation::{JournalError, ReconciliationJournal};
     use std::{path::PathBuf, sync::Arc, time::Duration};
     use tokio_util::sync::CancellationToken;
 
@@ -490,29 +489,13 @@ pub mod runtime {
         }
         Output { json, exit: 0 }
     }
-    fn progress_json(p: &DurableProgress) -> serde_json::Value {
-        serde_json::json!({"scanned":p.scanned,"planned_refresh":p.planned_refresh,"planned_delete":p.planned_delete,
-            "changed":p.changed,"deleted":p.deleted,"unchanged":p.unchanged,"pending":p.pending.len(),
-            "errors":p.failed_pages()+p.run_failures.len(),"application_failures":p.failed,"planning_failures":p.planning_failures,"run_failures":p.run_failures})
-    }
     fn status(runtime: &IndexRuntime, run: &str, class: &'static str, exit: Option<u8>) -> Output {
         let current = match runtime.coordinator.state().run(run, &runtime.scope) {
             Ok(r) => r,
             Err(_) => return Output::error(class, exit.unwrap_or(3)),
         };
-        let progress = runtime.coordinator.reconciliation_progress(run);
-        let errors = progress
-            .as_ref()
-            .map(|p| p.failed_pages() + p.run_failures.len())
-            .unwrap_or(0)
-            + usize::from(current.failure.is_some());
-        let mut json = match progress {
-            Ok(p) => progress_json(&p),
-            Err(_) if current.phase == RunPhase::Inventory => {
-                serde_json::json!({"scanned":0,"changed":0,"deleted":0,"unchanged":0,"pending":0})
-            }
-            Err(_) => return Output::error("state_failure", 3),
-        };
+        let errors = usize::from(current.failure.is_some());
+        let mut json = serde_json::json!({});
         let failure_history = match runtime
             .coordinator
             .reconciliation_failure_evidence(run, 0, 1000)
