@@ -26,6 +26,7 @@ use crate::sync_state::SqliteSyncStateStore;
 mod alias_projection;
 mod cache_reset;
 pub use alias_projection::AliasProjection;
+pub use cache_reset::STARTUP_RESET_WAIT_SECONDS;
 pub(crate) mod projection;
 pub use projection::RelationProjection;
 
