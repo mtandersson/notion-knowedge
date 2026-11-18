@@ -16,7 +16,11 @@ use notion_knowledge_core::{
     discovery::{ExclusionRules, SkipReason, SkippedContent, SourceType, inaccessible},
     inventory::{InventoryEntry, InventoryParent},
     lifecycle::LifecycleScope,
-    logging::{SyncCount, SyncPhase, SyncProgressLog, sync_count, sync_task, sync_total_pages},
+    logging::{
+        SyncCount, SyncPhase, SyncProgressLog,
+        page_timings::{ApiPhase, PageTimings},
+        sync_count, sync_task, sync_total_pages,
+    },
 };
 use reqwest::{Method, header::AUTHORIZATION};
 use serde::Serialize;
@@ -56,6 +60,8 @@ pub struct WalkedPage {
     /// as their physical parent: the walk's own child test, so relation and
     /// link targets among them need no further authorization.
     pub children: BTreeSet<String>,
+    /// Content-free timings of this page's walk read and later phases (#662).
+    pub timings: PageTimings,
 }
 
 /// The result of one walk. `entries` holds every reached page once (sorted by
@@ -167,6 +173,7 @@ impl Visit {
             content: None,
             skip: Some(reason),
             children: BTreeSet::new(),
+            timings: PageTimings::default(),
         });
     }
 }
@@ -401,6 +408,7 @@ impl NotionClient {
             }),
             skip: None,
             children: listed_children,
+            timings: PageTimings::default(),
         });
         if pruned {
             return Ok(visit);
@@ -636,20 +644,27 @@ impl NotionClient {
         root: String,
     ) -> Result<Option<WalkedPage>, BackendError> {
         let rules = Self::rules(scope)?;
-        let visit = self
-            .visit_page(
-                hit.page_id.clone(),
-                parent,
-                root,
-                Some(hit.value.clone()),
-                &rules,
-                &SearchMetadata::new(),
+        let timings = PageTimings::default();
+        let visit = timings
+            .scope(
+                ApiPhase::Walk,
+                self.visit_page(
+                    hit.page_id.clone(),
+                    parent,
+                    root,
+                    Some(hit.value.clone()),
+                    &rules,
+                    &SearchMetadata::new(),
+                ),
             )
             .await?;
         if visit.rejected.is_some() {
             return Ok(None);
         }
-        Ok(visit.pages.into_iter().next())
+        Ok(visit.pages.into_iter().next().map(|mut page| {
+            page.timings = timings;
+            page
+        }))
     }
 
     fn rules(scope: &LifecycleScope) -> Result<ExclusionRules, BackendError> {
@@ -737,7 +752,20 @@ impl NotionClient {
                             parent,
                             root,
                             row,
-                        } => self.visit_page(id, parent, root, row, rules, search).await,
+                        } => {
+                            // The walk's own read of this page is attributed to it.
+                            let timings = PageTimings::default();
+                            let mut visit = timings
+                                .scope(
+                                    ApiPhase::Walk,
+                                    self.visit_page(id, parent, root, row, rules, search),
+                                )
+                                .await?;
+                            for page in &mut visit.pages {
+                                page.timings = timings.clone();
+                            }
+                            Ok(visit)
+                        }
                         Node::Database { id, owner, root } => {
                             self.visit_database(id, owner, root, rules).await
                         }

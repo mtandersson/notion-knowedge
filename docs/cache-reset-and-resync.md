@@ -70,6 +70,10 @@ happen once per page per sync. They are not estimates
 of unique indexed sources. The total stays null until traversal completes; no
 workspace-wide page count is guessed. Counts contain no titles, IDs, URLs or text.
 
+Each page the consumer settles also emits one `cache_sync` line with per-phase timings
+and the progress line carries their running totals; see
+[sync phase timings](sync-phase-timings.md).
+
 Individual requests retain a `worker` label such as `discovery-17` or `indexing-8`
 and `runtime_thread`. Counts and worker context follow owned commit threads as well
 as awaited async requests. Thread identity can change across awaits. Summary

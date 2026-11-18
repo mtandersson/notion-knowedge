@@ -2,6 +2,7 @@
 #![cfg(all(unix, feature = "webhook-worker"))]
 use crate::webhook_worker::{WorkerSettings, runtime::now_ms};
 use notion_knowledge_core::inventory::InventoryOutcome;
+use notion_knowledge_core::logging::page_timings::{self, ApiPhase, PageTimings};
 use notion_knowledge_core::{
     chunking::ChunkConfig,
     embedding::EmbeddingProvider,
@@ -10,7 +11,7 @@ use notion_knowledge_core::{
 };
 use notion_knowledge_notion::NotionClient;
 use notion_knowledge_retrieval::{
-    chunks::{GuardedChunkTable, lexical_binding::LexicalCachePlan},
+    chunks::{ChunkDiffMetrics, GuardedChunkTable, lexical_binding::LexicalCachePlan},
     commit::{CommitBinding, IndexCommitCoordinator},
     planner::production_scope,
     refresh::AuthoritativePageRefresh,
@@ -621,7 +622,7 @@ impl IndexRuntime {
         use notion_knowledge_core::{
             discovery::SkipReason,
             inventory::InventoryOutcome::{Failed, Skipped},
-            logging::{SyncCount, SyncPhase, SyncProgressLog, sync_count, sync_task},
+            logging::{PageEnd, SyncCount, SyncPhase, SyncProgressLog, sync_count, sync_task},
             reconciliation::FailureClass,
         };
         use notion_knowledge_retrieval::{commit::CommitOutcome, refresh::RefreshError};
@@ -692,7 +693,12 @@ impl IndexRuntime {
         // and keeps its measured share until the consumer finishes it, so
         // in-flight and queued pages share one budget.
         let budget = &self.prefetch_budget;
-        let (ready, mut prepared) = tokio::sync::mpsc::channel::<Prefetched>(PREFETCH_QUEUE);
+        // Each ready page carries its timings and the instant it was handed over,
+        // so the consumer can report how long it sat queued (#662).
+        let (ready, mut prepared) =
+            tokio::sync::mpsc::channel::<(std::time::Instant, PageTimings, Prefetched)>(
+                PREFETCH_QUEUE,
+            );
         let produce = async {
             let ready = ready;
             // Skipped pages are already settled by the walk itself.
@@ -706,12 +712,22 @@ impl IndexRuntime {
                 pages
                     .enumerate()
                     .map(|(index, page)| {
-                        Box::pin(self.prepare_walked_page(settings, budget, index + 1, page))
+                        let timings = page.timings.clone();
+                        Box::pin(async move {
+                            let item = self
+                                .prepare_walked_page(settings, budget, index + 1, page)
+                                .await;
+                            (timings, item)
+                        })
                     })
                     .buffered(PREFETCH_WORKERS)
             );
-            while let Some(item) = fetched.next().await {
-                if ready.send(item).await.is_err() {
+            while let Some((timings, item)) = fetched.next().await {
+                if ready
+                    .send((std::time::Instant::now(), timings, item))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -726,8 +742,11 @@ impl IndexRuntime {
             let mut unresolved: Vec<(String, Vec<String>)> = Vec::new();
             let state = self.coordinator.state();
             let ttl = settings.timeout_seconds as i64 + 30;
+            // The page's wall time starts when the consumer asks for it, so
+            // its waiting for a prepared page is part of that time.
+            let mut asked = std::time::Instant::now();
             loop {
-                let item = tokio::select! {
+                let (queued, timings, item) = tokio::select! {
                     item = prepared.recv() => match item { Some(item) => item, None => break },
                     _ = tokio::time::sleep(std::time::Duration::from_secs((ttl as u64 / 3).max(1))) => {
                         *lease = state.renew_lease(lease, now_ms()/1000, ttl).map_err(|_| "cache sync lease unavailable")?;
@@ -738,6 +757,9 @@ impl IndexRuntime {
                     .renew_lease(lease, now_ms() / 1000, ttl)
                     .map_err(|_| "cache sync lease unavailable")?;
                 processed += 1;
+                let consumer_wait = asked.elapsed();
+                let queue_wait = queued.elapsed();
+                let mut diff = ChunkDiffMetrics::default();
                 let (page, operation, work) = match item {
                     Prefetched::Fatal(error) => return Err(error.into()),
                     Prefetched::Ready { prefetched, bytes } => (
@@ -773,6 +795,7 @@ impl IndexRuntime {
                 let deadline = std::time::Duration::from_secs(settings.timeout_seconds);
                 let embedding = SyncEmbedding(self.provider.as_ref());
                 let pending_targets = std::sync::Mutex::new(Vec::new());
+                let end;
                 let result = match work {
                     PageWork::Failed(error) => Ok(Err(error)),
                     PageWork::TimedOut => Err(()),
@@ -782,20 +805,29 @@ impl IndexRuntime {
                                 PageWork::Commit(prefetched, bytes) => (*prefetched, bytes),
                                 // Too large to queue: prepared here from the same read.
                                 PageWork::Deferred(walked) => (
-                                    self.handler.prepare_walked(&walked, &operation).await?,
+                                    timings
+                                        .scope(
+                                            ApiPhase::Prepare,
+                                            self.handler.prepare_walked(&walked, &operation),
+                                        )
+                                        .await?,
                                     None,
                                 ),
                                 PageWork::Failed(_) | PageWork::TimedOut => unreachable!(),
                             };
                             *pending_targets.lock().expect("targets") =
                                 prefetched.unresolved_targets();
-                            let result = Box::pin(self.handler.refresh_prefetched(
-                                prefetched,
-                                &embedding,
-                                lease.clone(),
-                                clock,
-                            ))
-                            .await;
+                            let result = timings
+                                .scope(
+                                    ApiPhase::Commit,
+                                    Box::pin(self.handler.refresh_prefetched(
+                                        prefetched,
+                                        &embedding,
+                                        lease.clone(),
+                                        clock,
+                                    )),
+                                )
+                                .await;
                             drop(bytes);
                             result
                         };
@@ -816,6 +848,12 @@ impl IndexRuntime {
                 }
                 match result {
                     Ok(Ok(result)) => {
+                        diff = result.diff;
+                        end = if result.outcome == CommitOutcome::AlreadyApplied {
+                            PageEnd::Unchanged
+                        } else {
+                            PageEnd::Committed
+                        };
                         outcomes.push((page.0.clone(), indexed()));
                         let targets =
                             std::mem::take(&mut *pending_targets.lock().expect("targets"));
@@ -852,9 +890,14 @@ impl IndexRuntime {
                             }
                         }
                         sync_count(SyncCount::SkippedPage, 1);
-                        if error == RefreshError::EmbeddingInputLimit {
-                            progress.embedding_input_limit();
-                        }
+                        end = PageEnd::Skipped(match error {
+                            RefreshError::EmbeddingInputLimit => "embedding_input_limit",
+                            RefreshError::OutOfScope => "out_of_scope",
+                            RefreshError::PermanentSource => "permanent_source",
+                            RefreshError::Source => "source",
+                            // Excluded by the enclosing arm's pattern.
+                            _ => unreachable!("only page-local source failures are skipped"),
+                        });
                     }
                     Ok(Err(RefreshError::Unauthenticated)) => {
                         return Err(SyncError::new(
@@ -887,15 +930,27 @@ impl IndexRuntime {
                             outcomes.push((page.0.clone(), indexed()));
                             totals.indexed += 1;
                             sync_count(SyncCount::CommittedPage, 1);
+                            end = PageEnd::Committed;
                         } else {
                             outcomes.push((page.0.clone(), Failed(FailureClass::Unavailable)));
                             totals.failed += 1;
                             totals.timed_out += 1;
                             sync_count(SyncCount::SkippedPage, 1);
-                            progress.page_timeout();
+                            end = PageEnd::Skipped("page_timeout");
                         }
                     }
                 }
+                let fields = page_timings::page_fields(
+                    &timings.snapshot(),
+                    &page_timings::PageWait {
+                        wall: asked.elapsed(),
+                        consumer_wait,
+                        queue_wait,
+                        embedded_chunks: diff.added + diff.changed,
+                        skipped_chunks: diff.skipped,
+                    },
+                );
+                progress.page(end, &fields);
                 progress.report(
                     processed,
                     None,
@@ -903,6 +958,7 @@ impl IndexRuntime {
                     totals.failed as usize,
                     false,
                 );
+                asked = std::time::Instant::now();
             }
             progress.report(
                 processed,
@@ -1488,7 +1544,10 @@ impl IndexRuntime {
             sync_task(
                 SyncPhase::Indexing,
                 index,
-                Box::pin(self.handler.prepare_walked(&walked, &operation)),
+                walked.timings.scope(
+                    ApiPhase::Prepare,
+                    Box::pin(self.handler.prepare_walked(&walked, &operation)),
+                ),
             ),
         )
         .await;

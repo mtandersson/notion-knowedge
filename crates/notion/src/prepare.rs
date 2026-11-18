@@ -254,6 +254,7 @@ mod tests {
             }),
             skip: None,
             children: Default::default(),
+            timings: Default::default(),
         }
     }
     fn walked(body: &str, title: &str) -> WalkedPage {

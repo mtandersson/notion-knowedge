@@ -8,6 +8,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+pub mod page_timings;
 mod sync_progress;
 pub use sync_progress::{
     SyncContext, SyncCount, current_sync_progress, in_sync_context, sync_context, sync_count,
@@ -139,38 +140,62 @@ pub struct SyncProgressLog {
     phase: SyncPhase,
     started: Instant,
     last: Option<Instant>,
+    /// Running sums of the per-page figures, folded in by the consumer.
+    pages: u64,
+    totals: std::collections::BTreeMap<String, u64>,
+}
+
+/// How a page ended, as the fixed status and reason of its one log line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageEnd {
+    Committed,
+    Unchanged,
+    /// A fixed reason class, never an error string.
+    Skipped(&'static str),
+}
+
+/// The one per-page line. Only the fixed phase, status and reason plus numeric
+/// durations and counts: no page title, ID or content can be expressed here.
+pub fn page_line_json(
+    phase: SyncPhase,
+    end: PageEnd,
+    fields: &[(String, u64)],
+    progress: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut line = serde_json::json!({
+        "operation": "cache_sync", "phase": phase.label(),
+        "status": match end {
+            PageEnd::Committed => "page_committed",
+            PageEnd::Unchanged => "page_unchanged",
+            PageEnd::Skipped(_) => "page_skipped",
+        },
+        "sync_progress": progress,
+    });
+    if let PageEnd::Skipped(reason) = end {
+        line["reason"] = reason.into();
+    }
+    for (name, value) in fields {
+        line[name.as_str()] = (*value).into();
+    }
+    line
 }
 
 impl SyncProgressLog {
-    /// A fixed local admission reason, never model errors or source text.
-    pub fn embedding_input_limit(&self) {
+    /// Emit this page's one line and fold its figures into the running totals
+    /// that the periodic progress line reports.
+    pub fn page(&mut self, end: PageEnd, fields: &[(String, u64)]) {
+        self.pages += 1;
+        for (name, value) in fields {
+            let total = self.totals.entry(name.clone()).or_default();
+            *total = total.saturating_add(*value);
+        }
         if LOG_LEVEL.load(Ordering::Relaxed) < Level::Info as u8 {
             return;
         }
         let _ = writeln!(
             std::io::stderr().lock(),
             "{}",
-            serde_json::json!({
-                "operation": "cache_sync", "phase": self.phase.label(),
-                "status": "page_skipped", "reason": "embedding_input_limit",
-                "sync_progress": current_sync_progress(),
-            }),
-        );
-    }
-
-    /// Fixed per-page deadline class; never contains source identifiers or errors.
-    pub fn page_timeout(&self) {
-        if LOG_LEVEL.load(Ordering::Relaxed) < Level::Info as u8 {
-            return;
-        }
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "{}",
-            serde_json::json!({
-                "operation": "cache_sync", "phase": self.phase.label(),
-                "status": "page_skipped", "reason": "page_timeout",
-                "sync_progress": current_sync_progress(),
-            })
+            page_line_json(self.phase, end, fields, current_sync_progress()),
         );
     }
 
@@ -179,6 +204,8 @@ impl SyncProgressLog {
             phase,
             started: Instant::now(),
             last: None,
+            pages: 0,
+            totals: Default::default(),
         }
     }
 
@@ -205,20 +232,25 @@ impl SyncProgressLog {
         }
         let phase = self.phase.label();
         let memory = ResidentMemory::current();
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "{}",
-            serde_json::json!({
-                "operation": "cache_sync", "phase": phase,
-                "sync_progress": current_sync_progress(),
-                "status": if finished { "completed" } else { "running" },
-                "processed": processed, "total": total, "pages": pages,
-                "skipped": skipped, "elapsed_seconds": self.started.elapsed().as_secs(),
-            "runtime_thread": format!("{:?}", std::thread::current().id()),
-                // Resident-memory trend across long syncs (#656); null off Linux.
-                "rss_kib": memory.map(|m| m.rss_kib), "rss_peak_kib": memory.map(|m| m.peak_kib),
-            })
-        );
+        let mut line = serde_json::json!({
+            "operation": "cache_sync", "phase": phase,
+            "sync_progress": current_sync_progress(),
+            "status": if finished { "completed" } else { "running" },
+            "processed": processed, "total": total, "pages": pages,
+            "skipped": skipped, "elapsed_seconds": self.started.elapsed().as_secs(),
+        "runtime_thread": format!("{:?}", std::thread::current().id()),
+            // Resident-memory trend across long syncs (#656); null off Linux.
+            "rss_kib": memory.map(|m| m.rss_kib), "rss_peak_kib": memory.map(|m| m.peak_kib),
+        });
+        // Running sums of the per-page figures: divide by `pages` for averages.
+        if self.pages > 0 {
+            let mut totals = serde_json::json!({ "pages": self.pages });
+            for (name, value) in &self.totals {
+                totals[name.as_str()] = (*value).into();
+            }
+            line["page_totals"] = totals;
+        }
+        let _ = writeln!(std::io::stderr().lock(), "{line}");
     }
 }
 
@@ -436,6 +468,25 @@ mod tests {
         assert!(!line.contains("authorization"));
         assert!(!line.contains("token"));
         assert!(!line.contains("url"));
+    }
+
+    #[test]
+    fn page_lines_carry_only_fixed_words_and_numbers() {
+        let fields = vec![("wall_ms".to_owned(), 7), ("embedded_chunks".to_owned(), 2)];
+        let line = page_line_json(
+            SyncPhase::Indexing,
+            PageEnd::Skipped("page_timeout"),
+            &fields,
+            None,
+        );
+        assert_eq!(line["status"], "page_skipped");
+        assert_eq!(line["reason"], "page_timeout");
+        for (name, value) in line.as_object().unwrap() {
+            let fixed = ["operation", "phase", "status", "reason", "sync_progress"];
+            assert!(fixed.contains(&name.as_str()) || value.is_u64(), "{name}");
+        }
+        let committed = page_line_json(SyncPhase::Indexing, PageEnd::Committed, &fields, None);
+        assert!(committed.get("reason").is_none());
     }
 
     #[test]
