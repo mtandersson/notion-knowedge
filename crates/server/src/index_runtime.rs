@@ -423,11 +423,16 @@ impl IndexRuntime {
             let index = settings.index.clone();
             let state = state.to_path_buf();
             tokio::task::spawn_blocking(move || {
-                IndexCommitCoordinator::reset_cache(&index, &state, now_ms() / 1000)
+                IndexCommitCoordinator::reset_cache_waiting(
+                    &index,
+                    &state,
+                    &|| now_ms() / 1000,
+                    &|| std::thread::sleep(std::time::Duration::from_secs(1)),
+                )
             })
             .await
             .map_err(|_| "cache reset unavailable")?
-            .map_err(|_| "cache reset unavailable")?;
+            .map_err(reset_failure)?;
         }
         let runtime = Box::pin(Self::compose_cache(
             settings,
@@ -2182,5 +2187,17 @@ mod timeout_tests {
             .unwrap();
         // A page larger than its reservation is never retained in the queue.
         assert!(budget.retain(second, 3 * 1024 + 1).is_none());
+    }
+}
+
+/// Name the refusal class so a failed startup reset is diagnosable.
+fn reset_failure(error: notion_knowledge_retrieval::commit::CommitError) -> &'static str {
+    use notion_knowledge_retrieval::commit::CommitError;
+    match error {
+        CommitError::Conflict => "cache reset unavailable: lease or index lock still held",
+        CommitError::InvalidInput => "cache reset unavailable: invalid cache or state path",
+        CommitError::BindingMismatch => "cache reset unavailable: index binding mismatch",
+        CommitError::Unavailable => "cache reset unavailable: operational state unavailable",
+        _ => "cache reset unavailable: index operation failed",
     }
 }

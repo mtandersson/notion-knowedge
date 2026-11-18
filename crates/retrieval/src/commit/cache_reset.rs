@@ -12,7 +12,37 @@ fn legacy_journal_path(state: &Path) -> Result<PathBuf, CommitError> {
     Ok(state.with_file_name(name))
 }
 
+/// Lease lifetime taken by a startup cache reset.
+const RESET_LEASE_SECONDS: i64 = 330;
+/// Longest startup wait for a lease or index lock left by a stopped process.
+/// It covers the rebuild lease, so an ordinary restart mid-rebuild succeeds;
+/// a lease a live owner keeps renewing still fails startup after this bound.
+pub const STARTUP_RESET_WAIT_SECONDS: i64 = RESET_LEASE_SECONDS + 30;
+
 impl IndexCommitCoordinator {
+    /// Run [`Self::reset_cache`], retrying a `Conflict` (an unexpired lease or
+    /// a held index lock, typically left by the process this one replaced)
+    /// until `STARTUP_RESET_WAIT_SECONDS` have passed on `clock`. Other
+    /// refusals return at once.
+    pub fn reset_cache_waiting(
+        index: &Path,
+        state: &Path,
+        clock: &dyn Fn() -> i64,
+        pause: &dyn Fn(),
+    ) -> Result<(), CommitError> {
+        let start = clock();
+        loop {
+            match Self::reset_cache(index, state, clock()) {
+                Err(CommitError::Conflict)
+                    if clock().saturating_sub(start) < STARTUP_RESET_WAIT_SECONDS =>
+                {
+                    pause()
+                }
+                result => return result,
+            }
+        }
+    }
+
     /// An older installation with an unfinished handoff must rebuild its cache.
     pub fn has_legacy_cache_journal(state: &Path) -> Result<bool, CommitError> {
         legacy_journal_path(state)?.try_exists().map_err(io)
@@ -89,7 +119,7 @@ impl IndexCommitCoordinator {
             return Err(CommitError::InvalidInput);
         }
         let lease = store
-            .acquire_lease(now, 330)
+            .acquire_lease(now, RESET_LEASE_SECONDS)
             .map_err(|_| CommitError::Conflict)?;
         let result = (|| {
             // Commit the pending-sync flag before removing any rows/files, so a
@@ -156,6 +186,59 @@ mod tests {
         drop(coordinator);
         IndexCommitCoordinator::reset_cache(&index, &state, 1).unwrap();
         assert!(!IndexCommitCoordinator::has_legacy_cache_journal(&state).unwrap());
+    }
+
+    /// A process stopped mid-rebuild leaves the pending flag and an unexpired
+    /// lease (shutdown does not release it). The next start must still reset.
+    #[test]
+    fn restart_mid_rebuild_waits_out_the_stopped_process_lease() {
+        let root = tempfile::tempdir().unwrap();
+        let index = root.path().join("index");
+        let state = root.path().join("state.sqlite");
+        IndexCommitCoordinator::reset_cache(&index, &state, 1_000).unwrap();
+        let store = SqliteSyncStateStore::open(&state).unwrap();
+        // The stopped process's rebuild walk held this lease when it exited.
+        store.acquire_lease(1_000, RESET_LEASE_SECONDS).unwrap();
+        drop(store);
+        assert!(matches!(
+            IndexCommitCoordinator::reset_cache(&index, &state, 1_001),
+            Err(CommitError::Conflict)
+        ));
+        let now = std::cell::Cell::new(1_001);
+        let pauses = std::cell::Cell::new(0);
+        IndexCommitCoordinator::reset_cache_waiting(&index, &state, &|| now.get(), &|| {
+            pauses.set(pauses.get() + 1);
+            now.set(now.get() + 1);
+        })
+        .unwrap();
+        assert_eq!(now.get(), 1_000 + RESET_LEASE_SECONDS);
+        assert!(pauses.get() > 0);
+        assert!(
+            SqliteSyncStateStore::open(&state)
+                .unwrap()
+                .cache_rebuild_pending()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn startup_reset_gives_up_on_a_lease_that_never_expires() {
+        let root = tempfile::tempdir().unwrap();
+        let index = root.path().join("index");
+        let state = root.path().join("state.sqlite");
+        IndexCommitCoordinator::reset_cache(&index, &state, 1).unwrap();
+        SqliteSyncStateStore::open(&state)
+            .unwrap()
+            .acquire_lease(1, 3_600)
+            .unwrap();
+        let now = std::cell::Cell::new(1);
+        let result =
+            IndexCommitCoordinator::reset_cache_waiting(&index, &state, &|| now.get(), &|| {
+                now.set(now.get() + 10)
+            });
+        assert!(matches!(result, Err(CommitError::Conflict)));
+        let waited = now.get() - 1;
+        assert!((STARTUP_RESET_WAIT_SECONDS..STARTUP_RESET_WAIT_SECONDS + 20).contains(&waited));
     }
 
     #[test]
