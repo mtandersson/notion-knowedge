@@ -10,7 +10,7 @@ this same application without activating an installed MCP upload tool. This appl
 trusted composition, including the [installed MCP/server runtime](installed-file-ingestion.md).
 
 The composition supplies `FileIngestContext` from trusted authentication and
-operator operation policy, a fresh `RootScopeGate`, and a durable `AuditStore`.
+operator operation policy, the trusted `LifecycleScope`, and a durable `AuditStore`.
 It supplies the adapter's integration, exact source-host download policy,
 single-part plan limit and identical full physical root/exclusion policy.
 `permitted` must reflect the effective transport/operation permission and
@@ -19,19 +19,18 @@ authority. An integration token is never an MCP identity. Use `Server` or
 `Automation` when appropriate; `ApprovedUser` requires independently validated
 user authentication and must never be invented by the caller mapper.
 
-Example composition uses `Arc::new(client.clone())` for the gate's lifecycle
-provider and the same configured `client` for `NotionFileIngestAdapter::new`.
+Example composition passes the configured `client` to `NotionFileIngestAdapter::new`.
 Supply `SqliteAuditStore` from the retrieval adapter in a protected durable
 state directory, not a disposable index. Construct both from the same trusted
 `LifecycleScope`; the application refuses unequal policies before download.
 
-The sequence is durable intent admission, current physical target authorization,
-HTTPS download, bounded observed-media/name/size validation, another durable
-intent availability check, fresh scope revalidation, single create/send upload,
-fresh permit revalidation, native image/file append (which independently
-reauthorizes/revalidates), bounded block GET verification, and terminal audit.
-A moved/excluded/unverifiable target prevents the next effect. These checks
-cannot provide an atomic Notion transaction lock against concurrent moves.
+The sequence is durable intent admission, HTTPS download, bounded
+observed-media/name/size validation, another durable intent availability check,
+single create/send upload, native image/file append, bounded block GET
+verification, and terminal audit. Writes run no ancestry walk and no root gate:
+Notion's own permission check for the token decides whether the target is
+writable, and the request-bound grant check still stops the next effect when the
+grant is lost.
 
 Invalid target text is never returned as a stable reference; the target slot is
 absent until a canonical UUID has been validated. `FileIngestRequest` owns the

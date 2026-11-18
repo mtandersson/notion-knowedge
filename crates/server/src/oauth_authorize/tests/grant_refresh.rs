@@ -7,7 +7,6 @@ use notion_knowledge_core::{
     create::{CreateRequest, create_once_and_refresh},
     embedding::{EmbeddingError, EmbeddingFuture, EmbeddingMetadata, EmbeddingProvider},
     lifecycle::LifecycleScope,
-    root_scope::RootScopeGate,
     sync_state::SyncStateStore,
     write_refresh::{IndexStatus, MutationRefreshQueue, WriteCompletion},
 };
@@ -156,7 +155,7 @@ async fn create(
         .bind(auth)
         .unwrap()
         .source;
-    let gate = RootScopeGate::new(source.clone(), scope()).unwrap();
+    let policy = scope();
     let path = h._dir.path().join("source-write-ledger.sqlite");
     let ledger = if path.exists() {
         SqliteIdempotencyStore::open_existing(path).unwrap()
@@ -166,7 +165,7 @@ async fn create(
     let result = create_once_and_refresh(
         source.as_ref(),
         source.mutation_ports().unwrap(),
-        &gate,
+        &policy,
         &ledger,
         &queue,
         request(),

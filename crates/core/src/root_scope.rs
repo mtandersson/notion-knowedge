@@ -62,6 +62,15 @@ fn valid_scope(scope: &LifecycleScope) -> bool {
     distinct.len() == scope.roots.len()
 }
 
+/// Reject a malformed operator policy (IDs, root count, exclusions).
+pub fn validate_scope(scope: &LifecycleScope) -> Result<(), ScopeError> {
+    if valid_scope(scope) {
+        Ok(())
+    } else {
+        Err(ScopeError::InvalidConfiguration)
+    }
+}
+
 /// Immutable, trusted policy snapshot. Construct only from authenticated
 /// server-side workspace/root configuration, never from an MCP request.
 ///

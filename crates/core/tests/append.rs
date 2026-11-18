@@ -19,11 +19,7 @@ use notion_knowledge_core::{
     idempotency::{
         IdempotencyError, MutationClaim, Reservation, VerifiedReceipt, WriteIdempotencyStore,
     },
-    lifecycle::{
-        LifecycleEvidence, LifecycleKind, LifecycleNode, LifecycleScope, LifecycleStatus,
-        PageLifecycle, PhysicalParent,
-    },
-    root_scope::RootScopeGate,
+    lifecycle::LifecycleScope,
 };
 
 struct Queue {
@@ -58,7 +54,7 @@ async fn verified_append_survives_queue_failure_and_replay_repairs_admission_wit
     let result = append_once_and_refresh(
         source.as_ref(),
         source.as_ref(),
-        &gate(source.clone()),
+        &scope(),
         &ledger,
         &queue,
         request(),
@@ -73,7 +69,7 @@ async fn verified_append_survives_queue_failure_and_replay_repairs_admission_wit
     let replay = append_once_and_refresh(
         source.as_ref(),
         source.as_ref(),
-        &gate(source.clone()),
+        &scope(),
         &ledger,
         &queue,
         request(),
@@ -99,7 +95,7 @@ async fn unverified_append_never_admits_local_refresh_or_reports_completion() {
         notion_knowledge_core::append::append_once_and_refresh(
             source.as_ref(),
             source.as_ref(),
-            &gate(source.clone()),
+            &scope(),
             &ledger,
             &queue,
             request()
@@ -150,8 +146,6 @@ struct Fixture {
     writes: AtomicUsize,
     reads: AtomicUsize,
     mode: Mode,
-    deny_scope: AtomicBool,
-    deny_revalidation: AtomicBool,
 }
 impl Fixture {
     fn new(mode: Mode) -> Arc<Self> {
@@ -160,8 +154,6 @@ impl Fixture {
             writes: AtomicUsize::new(0),
             reads: AtomicUsize::new(0),
             mode,
-            deny_scope: AtomicBool::new(false),
-            deny_revalidation: AtomicBool::new(false),
         })
     }
 
@@ -238,61 +230,6 @@ impl NotionWrite for Fixture {
     }
 }
 
-impl PageLifecycle for Fixture {
-    fn lifecycle<'a>(
-        &'a self,
-        _: &'a PageId,
-        scope: &'a LifecycleScope,
-    ) -> BackendFuture<'a, LifecycleEvidence> {
-        Box::pin(async move {
-            if self.deny_scope.load(Ordering::SeqCst) {
-                return Err(error());
-            }
-            Ok(LifecycleEvidence {
-                scope: scope.clone(),
-                status: LifecycleStatus::Allowed {
-                    roots: vec![ROOT.into()],
-                },
-                ancestry: vec![
-                    LifecycleNode {
-                        kind: LifecycleKind::Page,
-                        id: PAGE.into(),
-                        revision: self.page().last_edited_time,
-                        inactive: false,
-                        parent: PhysicalParent::Object {
-                            kind: LifecycleKind::Page,
-                            id: ROOT.into(),
-                        },
-                    },
-                    LifecycleNode {
-                        kind: LifecycleKind::Page,
-                        id: ROOT.into(),
-                        revision: REVISION.into(),
-                        inactive: false,
-                        parent: PhysicalParent::Workspace,
-                    },
-                ],
-            })
-        })
-    }
-
-    fn revalidate_lifecycle<'a>(
-        &'a self,
-        evidence: &'a LifecycleEvidence,
-        _: &'a LifecycleScope,
-    ) -> BackendFuture<'a, ()> {
-        Box::pin(async move {
-            if self.deny_revalidation.load(Ordering::SeqCst)
-                || evidence.ancestry[0].revision != self.page().last_edited_time
-            {
-                Err(error())
-            } else {
-                Ok(())
-            }
-        })
-    }
-}
-
 type LedgerRecord = (String, u8, Option<VerifiedReceipt>);
 
 #[derive(Default)]
@@ -351,10 +288,6 @@ fn request() -> AppendRequest {
     }
 }
 
-fn gate(fixture: Arc<Fixture>) -> RootScopeGate {
-    RootScopeGate::new(fixture, scope()).unwrap()
-}
-
 #[tokio::test]
 async fn single_append_preserves_exact_original_and_replays_only_verified_receipt() {
     let source = Fixture::new(Mode::Normal);
@@ -362,7 +295,7 @@ async fn single_append_preserves_exact_original_and_replays_only_verified_receip
     let result = append_once(
         source.as_ref(),
         source.as_ref(),
-        &gate(source.clone()),
+        &scope(),
         &ledger,
         request(),
     )
@@ -381,7 +314,7 @@ async fn single_append_preserves_exact_original_and_replays_only_verified_receip
     let replay = append_once(
         source.as_ref(),
         source.as_ref(),
-        &gate(source.clone()),
+        &scope(),
         &ledger,
         request(),
     )
@@ -397,7 +330,7 @@ async fn single_append_preserves_exact_original_and_replays_only_verified_receip
         append_once(
             source.as_ref(),
             source.as_ref(),
-            &gate(source.clone()),
+            &scope(),
             &ledger,
             different
         )
@@ -408,35 +341,16 @@ async fn single_append_preserves_exact_original_and_replays_only_verified_receip
 }
 
 #[tokio::test]
-async fn invalid_and_out_of_scope_calls_cannot_reserve_or_write() {
+async fn invalid_calls_cannot_reserve_or_write() {
     let source = Fixture::new(Mode::Normal);
     let ledger = Ledger::default();
     let mut empty = request();
     empty.markdown = " ".into();
     assert_eq!(
-        append_once(
-            source.as_ref(),
-            source.as_ref(),
-            &gate(source.clone()),
-            &ledger,
-            empty
-        )
-        .await,
+        append_once(source.as_ref(), source.as_ref(), &scope(), &ledger, empty).await,
         Err(AppendError::InvalidInput)
     );
 
-    source.deny_scope.store(true, Ordering::SeqCst);
-    assert_eq!(
-        append_once(
-            source.as_ref(),
-            source.as_ref(),
-            &gate(source.clone()),
-            &ledger,
-            request()
-        )
-        .await,
-        Err(AppendError::NotAuthorized)
-    );
     assert_eq!(ledger.starts.load(Ordering::SeqCst), 0);
     assert_eq!(source.writes.load(Ordering::SeqCst), 0);
 }
@@ -451,7 +365,7 @@ async fn stale_revision_denies_without_mutating_and_does_not_replay() {
         append_once(
             source.as_ref(),
             source.as_ref(),
-            &gate(source.clone()),
+            &scope(),
             &ledger,
             wrong.clone()
         )
@@ -465,14 +379,7 @@ async fn stale_revision_denies_without_mutating_and_does_not_replay() {
     );
     assert_eq!(source.writes.load(Ordering::SeqCst), 0);
     assert_eq!(
-        append_once(
-            source.as_ref(),
-            source.as_ref(),
-            &gate(source.clone()),
-            &ledger,
-            wrong
-        )
-        .await,
+        append_once(source.as_ref(), source.as_ref(), &scope(), &ledger, wrong).await,
         Err(AppendError::OutcomeUnknown)
     );
 }
@@ -486,7 +393,7 @@ async fn timeout_after_commit_does_not_send_second_patch() {
             append_once(
                 source.as_ref(),
                 source.as_ref(),
-                &gate(source.clone()),
+                &scope(),
                 &ledger,
                 request()
             )
@@ -507,7 +414,7 @@ async fn readback_preserves_original_or_keeps_key_unknown() {
             append_once(
                 source.as_ref(),
                 source.as_ref(),
-                &gate(source.clone()),
+                &scope(),
                 &ledger,
                 request()
             )
@@ -518,7 +425,7 @@ async fn readback_preserves_original_or_keeps_key_unknown() {
             append_once(
                 source.as_ref(),
                 source.as_ref(),
-                &gate(source.clone()),
+                &scope(),
                 &ledger,
                 request()
             )
@@ -530,39 +437,13 @@ async fn readback_preserves_original_or_keeps_key_unknown() {
 }
 
 #[tokio::test]
-async fn scope_change_before_write_fails_without_patch() {
-    let source = Fixture::new(Mode::Normal);
-    source.deny_revalidation.store(true, Ordering::SeqCst);
-    let ledger = Ledger::default();
-    assert_eq!(
-        append_once(
-            source.as_ref(),
-            source.as_ref(),
-            &gate(source.clone()),
-            &ledger,
-            request()
-        )
-        .await,
-        Err(AppendError::NotAuthorized)
-    );
-    assert_eq!(source.writes.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
 async fn hash_precondition_must_match_exact_fresh_markdown() {
     let source = Fixture::new(Mode::Normal);
     let ledger = Ledger::default();
     let mut invalid = request();
     invalid.expected_markdown_sha256 = Some("e".repeat(64));
     assert_eq!(
-        append_once(
-            source.as_ref(),
-            source.as_ref(),
-            &gate(source.clone()),
-            &ledger,
-            invalid
-        )
-        .await,
+        append_once(source.as_ref(), source.as_ref(), &scope(), &ledger, invalid).await,
         Err(AppendError::RevisionConflict(
             notion_knowledge_core::revision::RevisionMetadata {
                 page_id: PageId(PAGE.into()),
@@ -584,7 +465,7 @@ async fn optional_preconditions_conflict_metadata_and_explicit_fresh_retry() {
     let error = append_once(
         source.as_ref(),
         source.as_ref(),
-        &gate(source.clone()),
+        &scope(),
         &ledger,
         stale.clone(),
     )
@@ -600,14 +481,7 @@ async fn optional_preconditions_conflict_metadata_and_explicit_fresh_retry() {
 
     // Even an uncommitted stale key may not be replayed automatically.
     assert_eq!(
-        append_once(
-            source.as_ref(),
-            source.as_ref(),
-            &gate(source.clone()),
-            &ledger,
-            stale
-        )
-        .await,
+        append_once(source.as_ref(), source.as_ref(), &scope(), &ledger, stale).await,
         Err(AppendError::OutcomeUnknown)
     );
     let fresh = source.read_content(&PageId(PAGE.into())).await.unwrap();
@@ -616,16 +490,10 @@ async fn optional_preconditions_conflict_metadata_and_explicit_fresh_retry() {
     retry.expected_markdown_sha256 = Some(markdown_sha256(&fresh.markdown));
     retry.idempotency_key = "fresh-user-intent-retry-append-0002".into();
     assert!(
-        !append_once(
-            source.as_ref(),
-            source.as_ref(),
-            &gate(source.clone()),
-            &ledger,
-            retry
-        )
-        .await
-        .unwrap()
-        .replayed
+        !append_once(source.as_ref(), source.as_ref(), &scope(), &ledger, retry)
+            .await
+            .unwrap()
+            .replayed
     );
     assert_eq!(source.writes.load(Ordering::SeqCst), 1);
 }
@@ -638,14 +506,7 @@ async fn missing_revision_is_rejected_before_ledger_or_mutation() {
     request.expected_last_edited_time = None;
     request.expected_markdown_sha256 = None;
     assert_eq!(
-        append_once(
-            source.as_ref(),
-            source.as_ref(),
-            &gate(source.clone()),
-            &ledger,
-            request
-        )
-        .await,
+        append_once(source.as_ref(), source.as_ref(), &scope(), &ledger, request).await,
         Err(AppendError::InvalidInput)
     );
     assert_eq!(ledger.starts.load(Ordering::SeqCst), 0);
@@ -659,7 +520,7 @@ async fn same_timestamp_human_edit_between_preflight_and_patch_denies_append() {
     let error = append_once(
         source.as_ref(),
         source.as_ref(),
-        &gate(source.clone()),
+        &scope(),
         &ledger,
         request(),
     )
@@ -682,7 +543,7 @@ async fn same_timestamp_human_edit_between_preflight_and_patch_denies_append() {
         append_once(
             source.as_ref(),
             source.as_ref(),
-            &gate(source.clone()),
+            &scope(),
             &ledger,
             request()
         )

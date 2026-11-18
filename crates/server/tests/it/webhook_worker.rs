@@ -564,7 +564,6 @@ impl EmbeddingProvider for UnavailableEmbedding {
 async fn mutation_refresh_preserves_verified_write_on_index_failure_and_retries_only_hash_diff() {
     use notion_knowledge_core::{
         append::{AppendRequest, append_once_and_refresh},
-        root_scope::RootScopeGate,
         write_refresh::{IndexStatus, MutationRefreshQueue, RefreshKey},
     };
     let mut runtime = TestRuntime::new().await;
@@ -585,16 +584,12 @@ async fn mutation_refresh_preserves_verified_write_on_index_failure_and_retries_
         .unwrap()
         .to_owned();
     let client = runtime.source.client();
-    let gate = RootScopeGate::new(
-        client.clone(),
-        LifecycleScope {
-            workspace_id: WORKSPACE.into(),
-            generation: 1,
-            roots: vec![PageId(ROOT.into())],
-            exclusions: ExclusionRules::default(),
-        },
-    )
-    .unwrap();
+    let policy = LifecycleScope {
+        workspace_id: WORKSPACE.into(),
+        generation: 1,
+        roots: vec![PageId(ROOT.into())],
+        exclusions: ExclusionRules::default(),
+    };
     let ledger = notion_knowledge_retrieval::idempotency::SqliteIdempotencyStore::initialize_new(
         runtime._dir.path().join("write-ledger.sqlite"),
     )
@@ -609,7 +604,7 @@ async fn mutation_refresh_preserves_verified_write_on_index_failure_and_retries_
     let result = append_once_and_refresh(
         client.as_ref(),
         client.as_ref(),
-        &gate,
+        &policy,
         &ledger,
         state.as_ref(),
         request.clone(),
@@ -642,7 +637,7 @@ async fn mutation_refresh_preserves_verified_write_on_index_failure_and_retries_
     let replay = append_once_and_refresh(
         client.as_ref(),
         client.as_ref(),
-        &gate,
+        &policy,
         &ledger,
         state.as_ref(),
         request,

@@ -30,12 +30,13 @@ workspace, actor, arbitrary HTTP operations or confirmation authority; unknown
 fields, including caller-supplied `confirmation_id`, are rejected.
 
 Creation uses the provider-neutral `core::create::create_once_and_refresh` over
-the existing read/write/lifecycle ports. Each source operation remains separately
+the existing read/write ports. Each source operation remains separately
 visible to a future request-bound adapter; wrapping an entire concrete workflow
 in one stale credential check is unnecessary. It reserves the durable intent,
-revalidates parent scope, marks the outcome uncertain before one create effect,
-reads complete exact title/Markdown, verifies fresh child scope and the exact
-direct parent, then records the verified receipt before refresh admission.
+marks the outcome uncertain before one create effect, reads complete exact
+title/Markdown, then records the verified receipt before refresh admission.
+Writes run no ancestry walk and no root gate: they rely on Notion's own
+permission check for the token.
 The older concrete Notion icon-capable helper remains a separate internal API;
 the semantic create schema does not accept icons or arbitrary properties.
 

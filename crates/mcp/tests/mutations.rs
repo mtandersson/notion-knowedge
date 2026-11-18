@@ -3,18 +3,14 @@
 use notion_knowledge_core::{
     audit::{AuditError, AuditEvent, AuditOutcome, AuditRetention, AuditStore},
     backend::{
-        AppendPageContent, BackendError, BackendErrorKind, BackendFuture, CreatePage, NotionRead,
-        NotionSectionWrite, NotionWrite, Page, PageContent, PageId, ReplacePageContent,
-        UpdateSectionContent,
+        AppendPageContent, BackendFuture, CreatePage, NotionRead, NotionSectionWrite, NotionWrite,
+        Page, PageContent, PageId, ReplacePageContent, UpdateSectionContent,
     },
     destructive::{
         ConfirmationDecision, ConfirmationFuture, ConfirmationProvider, ConfirmationRequest,
     },
     discovery::ExclusionRules,
-    lifecycle::{
-        LifecycleEvidence, LifecycleKind, LifecycleNode, LifecycleScope, LifecycleStatus,
-        PageLifecycle, PhysicalParent,
-    },
+    lifecycle::LifecycleScope,
     write_refresh::{IndexStatus, MutationRefreshQueue, RefreshKey, RefreshQueueError},
 };
 use notion_knowledge_mcp::{KnowledgeServer, mutations::MutationRuntime};
@@ -42,14 +38,6 @@ const CHILD: &str = "dddddddd-dddd-dddd-dddd-dddddddddddd";
 const OTHER: &str = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
 const REV: &str = "2026-10-10T12:00:00Z";
 const BODY: &str = "# Intro\n\nOriginal.\n\n## Target\n\nOld text.\n\n## Tail\n\nUntouched.\n";
-fn failure() -> BackendError {
-    BackendError {
-        kind: BackendErrorKind::Unavailable,
-        operation: "fixture",
-        retry_after: None,
-        committed_page_id: None,
-    }
-}
 fn scope() -> LifecycleScope {
     LifecycleScope {
         workspace_id: WORKSPACE.into(),
@@ -117,7 +105,6 @@ impl MutationRefreshQueue for Queue {
 }
 #[derive(Clone)]
 struct Document {
-    parent: Option<String>,
     title: String,
     body: String,
     revision: u32,
@@ -127,10 +114,8 @@ struct Source {
     effects: AtomicUsize,
     reads: AtomicUsize,
     audit: Arc<Audit>,
-    deny: AtomicBool,
     bad_readback: AtomicBool,
     omit_final_lf: AtomicBool,
-    wrong_parent: AtomicBool,
     pause: AtomicBool,
     entered: Notify,
     proceed: Notify,
@@ -215,11 +200,6 @@ impl NotionWrite for Source {
             self.pages.lock().unwrap().insert(
                 CHILD.into(),
                 Document {
-                    parent: Some(if self.wrong_parent.load(Ordering::SeqCst) {
-                        OTHER.into()
-                    } else {
-                        q.parent_page_id.0
-                    }),
                     title: q.title,
                     body,
                     revision: 1,
@@ -246,72 +226,6 @@ impl NotionSectionWrite for Source {
             }
             self.after_effect().await;
             Ok(())
-        })
-    }
-}
-impl PageLifecycle for Source {
-    fn lifecycle<'a>(
-        &'a self,
-        id: &'a PageId,
-        scope: &'a LifecycleScope,
-    ) -> BackendFuture<'a, LifecycleEvidence> {
-        Box::pin(async move {
-            self.reads.fetch_add(1, Ordering::SeqCst);
-            if self.deny.load(Ordering::SeqCst) {
-                return Err(failure());
-            }
-            let pages = self.pages.lock().unwrap();
-            let mut ancestry = vec![];
-            let mut current = id.0.clone();
-            loop {
-                let d = pages.get(&current).ok_or_else(failure)?;
-                ancestry.push(LifecycleNode {
-                    kind: LifecycleKind::Page,
-                    id: current.clone(),
-                    revision: format!("2026-10-10T12:00:{:02}Z", d.revision),
-                    inactive: false,
-                    parent: d
-                        .parent
-                        .as_ref()
-                        .map(|id| PhysicalParent::Object {
-                            kind: LifecycleKind::Page,
-                            id: id.clone(),
-                        })
-                        .unwrap_or(PhysicalParent::Workspace),
-                });
-                if let Some(parent) = &d.parent {
-                    current = parent.clone();
-                } else {
-                    break;
-                }
-            }
-            let roots = scope
-                .roots
-                .iter()
-                .filter(|root| ancestry.iter().any(|n| n.id == root.0))
-                .map(|id| id.0.clone())
-                .collect();
-            Ok(LifecycleEvidence {
-                scope: scope.clone(),
-                status: LifecycleStatus::Allowed { roots },
-                ancestry,
-            })
-        })
-    }
-    fn revalidate_lifecycle<'a>(
-        &'a self,
-        evidence: &'a LifecycleEvidence,
-        scope: &'a LifecycleScope,
-    ) -> BackendFuture<'a, ()> {
-        Box::pin(async move {
-            let fresh = self
-                .lifecycle(&PageId(evidence.ancestry[0].id.clone()), scope)
-                .await?;
-            if fresh == *evidence {
-                Ok(())
-            } else {
-                Err(failure())
-            }
         })
     }
 }
@@ -361,7 +275,6 @@ impl Fixture {
                 (
                     ROOT.into(),
                     Document {
-                        parent: None,
                         title: "Root".into(),
                         body: "".into(),
                         revision: 0,
@@ -370,7 +283,6 @@ impl Fixture {
                 (
                     PAGE.into(),
                     Document {
-                        parent: Some(ROOT.into()),
                         title: "Existing".into(),
                         body: BODY.into(),
                         revision: 0,
@@ -379,7 +291,6 @@ impl Fixture {
                 (
                     OTHER.into(),
                     Document {
-                        parent: Some(ROOT.into()),
                         title: "Other parent".into(),
                         body: "".into(),
                         revision: 0,
@@ -389,10 +300,8 @@ impl Fixture {
             effects: AtomicUsize::new(0),
             reads: AtomicUsize::new(0),
             audit: audit.clone(),
-            deny: AtomicBool::new(false),
             bad_readback: AtomicBool::new(false),
             omit_final_lf: AtomicBool::new(false),
-            wrong_parent: AtomicBool::new(false),
             pause: AtomicBool::new(false),
             entered: Notify::new(),
             proceed: Notify::new(),
@@ -712,16 +621,6 @@ async fn revision_conflict_and_authoritative_readback_failure_never_report_verif
         assert_eq!(f.source.effects.load(Ordering::SeqCst), 1);
         assert_eq!(f.queue.calls.load(Ordering::SeqCst), 0);
     }
-    let f = Fixture::new();
-    f.source.wrong_parent.store(true, Ordering::SeqCst);
-    let result = invoke(
-        f.server(false),
-        "knowledge_create_page",
-        create("create-wrong-parent-must-deny"),
-    )
-    .await;
-    assert_eq!(output(&result)["write"]["status"], "outcome_unknown");
-    assert_eq!(f.queue.calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -831,7 +730,7 @@ async fn concurrent_sessions_share_durable_claim_even_when_tool_capacity_allows_
 }
 
 #[tokio::test]
-async fn confirmation_wait_is_followed_by_fresh_scope_and_revision_preflight() {
+async fn confirmation_wait_is_followed_by_fresh_revision_preflight() {
     let f = Fixture::new();
     *f.confirmation.change.lock().unwrap() = Some(f.source.clone());
     let result = invoke(
@@ -840,7 +739,7 @@ async fn confirmation_wait_is_followed_by_fresh_scope_and_revision_preflight() {
         section("confirmation-changed-revision-key"),
     )
     .await;
-    assert_eq!(output(&result)["write"]["status"], "not_authorized");
+    assert_eq!(output(&result)["write"]["status"], "revision_conflict");
     assert_eq!(f.source.effects.load(Ordering::SeqCst), 0);
     let pages = f.source.pages.lock().unwrap();
     let body = &pages.get(PAGE).unwrap().body;

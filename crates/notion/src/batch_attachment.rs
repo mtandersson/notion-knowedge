@@ -3,10 +3,7 @@
 //! A batch is not a transaction: earlier verified blocks remain attached after
 //! later failures. No ambiguous write is ever replayed by this layer.
 use crate::{NotionClient, file_upload::UploadedFile};
-use notion_knowledge_core::{
-    backend::{BackendError, BackendErrorKind, PageId},
-    lifecycle::LifecycleScope,
-};
+use notion_knowledge_core::backend::{BackendError, BackendErrorKind, PageId};
 
 pub const HARD_MAX_ATTACHMENTS: usize = 16;
 
@@ -57,7 +54,7 @@ fn outcome(
 
 impl NotionClient {
     /// Attach valid upload receipts in request order. The operator controls
-    /// `maximum` and `scope`, never the ChatGPT file arguments. A per-file
+    /// `maximum`, never the ChatGPT file arguments. A per-file
     /// failure is recorded but does not prevent the next file from being
     /// attempted; the caller must reconcile any failed/ambiguous upload before
     /// manually retrying that item. No atomic rollback is promised.
@@ -66,7 +63,6 @@ impl NotionClient {
         target: &PageId,
         uploads: &[UploadedFile],
         captions: &[Option<String>],
-        scope: &LifecycleScope,
         maximum: usize,
     ) -> Result<Vec<BatchAttachmentOutcome>, BackendError> {
         validate_batch_count(uploads.len(), maximum)?;
@@ -79,11 +75,11 @@ impl NotionClient {
                 upload.mime_type.as_str(),
                 "image/png" | "image/jpeg" | "image/gif" | "image/webp"
             ) {
-                self.attach_uploaded_image(target, upload, text.as_deref(), scope)
+                self.attach_uploaded_image(target, upload, text.as_deref())
                     .await
                     .map(|value| value.block_id)
             } else {
-                self.attach_uploaded_file(target, upload, text.as_deref(), scope)
+                self.attach_uploaded_file(target, upload, text.as_deref())
                     .await
                     .map(|value| value.block_id)
             };

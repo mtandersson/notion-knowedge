@@ -7,9 +7,9 @@ use notion_knowledge_core::{
     create::{CreateError, CreateRequest, create_once_and_refresh},
     destructive::ConfirmationProvider,
     idempotency::WriteIdempotencyStore,
-    lifecycle::{LifecycleScope, PageLifecycle},
+    lifecycle::LifecycleScope,
     revision::RevisionMetadata,
-    root_scope::{RootScopeGate, ScopeError},
+    root_scope::{ScopeError, validate_scope},
     section_update::{
         SectionUpdateError, SectionUpdateRequest, update_section_confirmed_once_and_refresh,
     },
@@ -21,8 +21,8 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-pub trait MutationSource: NotionRead + NotionWrite + NotionSectionWrite + PageLifecycle {}
-impl<T: NotionRead + NotionWrite + NotionSectionWrite + PageLifecycle> MutationSource for T {}
+pub trait MutationSource: NotionRead + NotionWrite + NotionSectionWrite {}
+impl<T: NotionRead + NotionWrite + NotionSectionWrite> MutationSource for T {}
 
 /// Build only from trusted composition, never tool JSON. Supplying this does
 /// not disable the server's independent read-only/destructive/capability gates.
@@ -44,7 +44,7 @@ impl MutationRuntime {
         audit: Arc<dyn AuditStore>,
         actor: AuditActor,
     ) -> Result<Self, ScopeError> {
-        RootScopeGate::new(source.clone(), scope.clone())?;
+        validate_scope(&scope)?;
         Ok(Self {
             source,
             scope,
@@ -136,13 +136,11 @@ impl MutationRuntime {
         // Caller choice can only narrow trusted roots, never add authority.
         let mut scope = self.scope.clone();
         scope.roots = vec![PageId(input.root().to_owned())];
-        let gate =
-            RootScopeGate::new(self.source.clone(), scope.clone()).map_err(|_| Failure::Denied)?;
         match input {
             Input::Create(input) => create_once_and_refresh(
                 self.source.as_ref(),
                 self.source.as_ref(),
-                &gate,
+                &scope,
                 self.ledger.as_ref(),
                 self.queue.as_ref(),
                 CreateRequest {
@@ -157,7 +155,7 @@ impl MutationRuntime {
             Input::Append(input) => append_once_and_refresh(
                 self.source.as_ref(),
                 self.source.as_ref(),
-                &gate,
+                &scope,
                 self.ledger.as_ref(),
                 self.queue.as_ref(),
                 AppendRequest {
@@ -173,7 +171,7 @@ impl MutationRuntime {
             Input::Section(input) => update_section_confirmed_once_and_refresh(
                 self.source.as_ref(),
                 self.source.as_ref(),
-                &gate,
+                &scope,
                 self.ledger.as_ref(),
                 self.queue.as_ref(),
                 SectionUpdateRequest {

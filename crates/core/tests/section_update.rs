@@ -7,12 +7,8 @@ use notion_knowledge_core::{
     idempotency::{
         IdempotencyError, MutationClaim, Reservation, VerifiedReceipt, WriteIdempotencyStore,
     },
-    lifecycle::{
-        LifecycleEvidence, LifecycleKind, LifecycleNode, LifecycleScope, LifecycleStatus,
-        PageLifecycle, PhysicalParent,
-    },
+    lifecycle::LifecycleScope,
     revision::markdown_sha256,
-    root_scope::RootScopeGate,
     section_update::{SectionUpdateError, SectionUpdateRequest, update_section_once},
     sections::SectionAnchor,
 };
@@ -20,7 +16,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
 };
 const PAGE: &str = "11111111-1111-1111-1111-111111111111";
@@ -52,7 +48,6 @@ struct Fixture {
     markdown: Mutex<String>,
     writes: AtomicUsize,
     reads: AtomicUsize,
-    deny: AtomicBool,
     mode: Mode,
 }
 impl Fixture {
@@ -61,7 +56,6 @@ impl Fixture {
             markdown: Mutex::new(markdown.into()),
             writes: AtomicUsize::new(0),
             reads: AtomicUsize::new(0),
-            deny: AtomicBool::new(false),
             mode,
         })
     }
@@ -119,73 +113,13 @@ impl NotionSectionWrite for Fixture {
         })
     }
 }
-impl PageLifecycle for Fixture {
-    fn lifecycle<'a>(
-        &'a self,
-        _: &'a PageId,
-        scope: &'a LifecycleScope,
-    ) -> BackendFuture<'a, LifecycleEvidence> {
-        Box::pin(async move {
-            if self.deny.load(Ordering::SeqCst) {
-                return Err(err());
-            }
-            Ok(LifecycleEvidence {
-                scope: scope.clone(),
-                status: LifecycleStatus::Allowed {
-                    roots: vec![ROOT.into()],
-                },
-                ancestry: vec![
-                    LifecycleNode {
-                        kind: LifecycleKind::Page,
-                        id: PAGE.into(),
-                        revision: self.page().last_edited_time,
-                        inactive: false,
-                        parent: PhysicalParent::Object {
-                            kind: LifecycleKind::Page,
-                            id: ROOT.into(),
-                        },
-                    },
-                    LifecycleNode {
-                        kind: LifecycleKind::Page,
-                        id: ROOT.into(),
-                        revision: REV.into(),
-                        inactive: false,
-                        parent: PhysicalParent::Workspace,
-                    },
-                ],
-            })
-        })
+fn scope() -> LifecycleScope {
+    LifecycleScope {
+        workspace_id: WORKSPACE.into(),
+        generation: 1,
+        roots: vec![PageId(ROOT.into())],
+        exclusions: ExclusionRules::default(),
     }
-    fn revalidate_lifecycle<'a>(
-        &'a self,
-        evidence: &'a LifecycleEvidence,
-        _: &'a LifecycleScope,
-    ) -> BackendFuture<'a, ()> {
-        Box::pin(async move {
-            if self.deny.load(Ordering::SeqCst)
-                || evidence
-                    .ancestry
-                    .first()
-                    .is_none_or(|node| node.revision != self.page().last_edited_time)
-            {
-                Err(err())
-            } else {
-                Ok(())
-            }
-        })
-    }
-}
-fn gate(fixture: Arc<Fixture>) -> RootScopeGate {
-    RootScopeGate::new(
-        fixture,
-        LifecycleScope {
-            workspace_id: WORKSPACE.into(),
-            generation: 1,
-            roots: vec![PageId(ROOT.into())],
-            exclusions: ExclusionRules::default(),
-        },
-    )
-    .unwrap()
 }
 
 type LedgerRecord = (String, u8, Option<VerifiedReceipt>);
@@ -254,14 +188,7 @@ async fn run(
     ledger: &Ledger,
     req: SectionUpdateRequest,
 ) -> Result<notion_knowledge_core::section_update::SectionUpdateResult, SectionUpdateError> {
-    update_section_once(
-        source.as_ref(),
-        source.as_ref(),
-        &gate(source.clone()),
-        ledger,
-        req,
-    )
-    .await
+    update_section_once(source.as_ref(), source.as_ref(), &scope(), ledger, req).await
 }
 #[tokio::test]
 async fn one_targeted_patch_preserves_siblings_and_replay_never_writes() {
@@ -316,16 +243,8 @@ async fn all_invalid_selections_fail_before_any_patch() {
 }
 
 #[tokio::test]
-async fn stale_revision_scope_denial_and_concurrent_edit_do_not_patch() {
+async fn stale_revision_and_concurrent_edit_do_not_patch() {
     let src = Fixture::new(Mode::Normal, OLD);
-    let ledger = Ledger::default();
-    src.deny.store(true, Ordering::SeqCst);
-    assert_eq!(
-        run(&src, &ledger, request(OLD)).await,
-        Err(SectionUpdateError::NotAuthorized)
-    );
-    assert_eq!(ledger.starts.load(Ordering::SeqCst), 0);
-    src.deny.store(false, Ordering::SeqCst);
     let mut stale = request(OLD);
     stale.expected_markdown_sha256 = Some("0".repeat(64));
     assert_eq!(

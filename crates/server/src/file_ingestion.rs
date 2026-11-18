@@ -203,7 +203,7 @@ pub(crate) fn validate_audit_path(path: &Path) -> Result<(), ConfigError> {
 /// audit store, with request-owned one-shot batches and private temporary files.
 pub(crate) struct Runtime {
     adapter: notion_knowledge_notion::file_ingest::NotionFileIngestAdapter,
-    gate: notion_knowledge_core::root_scope::RootScopeGate,
+    scope: notion_knowledge_core::lifecycle::LifecycleScope,
     audit: notion_knowledge_retrieval::audit::SqliteAuditStore,
     policy: notion_knowledge_core::file_ingest::FileBatchPolicy,
     actor: notion_knowledge_core::audit::AuditActor,
@@ -229,6 +229,8 @@ impl Runtime {
         scope: &notion_knowledge_core::lifecycle::LifecycleScope,
         maximum_files: usize,
     ) -> Result<Self, &'static str> {
+        notion_knowledge_core::root_scope::validate_scope(scope)
+            .map_err(|_| "file ingestion scope unavailable")?;
         validate_audit_path(&settings.audit_file)
             .map_err(|_| "file ingestion audit path unavailable")?;
         let validation =
@@ -239,7 +241,7 @@ impl Runtime {
             )
             .map_err(|_| "file validation policy unavailable")?;
         let mut adapter = notion_knowledge_notion::file_ingest::NotionFileIngestAdapter::new(
-            client.clone(),
+            client,
             settings.download.clone(),
             validation,
             scope.clone(),
@@ -249,11 +251,7 @@ impl Runtime {
         }
         Ok(Self {
             adapter,
-            gate: notion_knowledge_core::root_scope::RootScopeGate::new(
-                std::sync::Arc::new(client),
-                scope.clone(),
-            )
-            .map_err(|_| "file ingestion scope unavailable")?,
+            scope: scope.clone(),
             audit: notion_knowledge_retrieval::audit::SqliteAuditStore::open(
                 &settings.audit_file,
                 settings.retention,
@@ -298,7 +296,7 @@ impl notion_knowledge_mcp::upload::FileIngestion for Runtime {
             let correlation = notion_knowledge_core::logging::CorrelationId::new();
             let correlation = correlation.as_str();
             let context = FileIngestContext {
-                gate: &self.gate,
+                scope: &self.scope,
                 audit: &self.audit,
                 actor: self.actor,
                 correlation_id: correlation,
@@ -591,26 +589,12 @@ impl notion_knowledge_mcp::upload::FileIngestion for OAuthService {
             )
             .await
             .map_err(|_| "file_refresh_denied")?;
-            let authority = crate::oauth_content::RequestGrantAuthority::acquire(
+            crate::oauth_content::RequestGrantAuthority::acquire(
                 &self.factory.runtime,
                 &self.authorization,
             )
             .await
             .map_err(|_| "file_refresh_denied")?;
-            let gate = notion_knowledge_core::root_scope::RootScopeGate::new(
-                std::sync::Arc::new(authority.client().map_err(|_| "file_refresh_denied")?),
-                self.scope.clone(),
-            )
-            .map_err(|_| "file_refresh_denied")?;
-            let permit = gate
-                .authorize(&notion_knowledge_core::backend::PageId(
-                    input.page_id.clone(),
-                ))
-                .await
-                .map_err(|_| "file_refresh_denied")?;
-            gate.revalidate(&permit, &self.scope)
-                .await
-                .map_err(|_| "file_refresh_denied")?;
             let key = RefreshKey {
                 workspace_id: self.scope.workspace_id.clone(),
                 page_id: input.page_id,

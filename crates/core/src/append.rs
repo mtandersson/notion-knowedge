@@ -13,10 +13,10 @@ use crate::{
         IdempotencyError, MutationClaim, MutationOperation, Reservation, VerifiedReceipt,
         WriteIdempotencyStore,
     },
+    lifecycle::LifecycleScope,
     revision::{
         ExpectedRevision, RevisionError, RevisionMetadata, check_revision, compare_content_snapshot,
     },
-    root_scope::RootScopeGate,
 };
 
 /// Exact end-of-page insertion, never whole-page replacement.
@@ -85,7 +85,7 @@ fn fingerprint(request: &AppendRequest) -> String {
 /// state and MUST NOT cause a second network PATCH.
 ///
 /// Ordering: authorize -> durable reservation -> revision and exact preimage
-/// read -> revalidate scope -> durably mark uncertain -> single PATCH -> fresh
+/// read -> durably mark uncertain -> single PATCH -> fresh
 /// full readback -> record verified receipt. This preflight is not atomic CAS:
 /// Notion may accept another edit between the final check and the PATCH.
 ///
@@ -95,7 +95,7 @@ fn fingerprint(request: &AppendRequest) -> String {
 pub async fn append_once(
     reader: &dyn NotionRead,
     writer: &dyn NotionWrite,
-    gate: &RootScopeGate,
+    scope: &LifecycleScope,
     ledger: &dyn WriteIdempotencyStore,
     request: AppendRequest,
 ) -> Result<AppendResult, AppendError> {
@@ -118,15 +118,10 @@ pub async fn append_once(
         return Err(AppendError::InvalidInput);
     }
 
-    let permit = gate
-        .authorize(&request.page_id)
-        .await
-        .map_err(|_| AppendError::NotAuthorized)?;
-
     // Bind a caller's key to the server-verified workspace, the exact target,
     // payload, source precondition, and the explicit END position.
     let claim = MutationClaim::new(
-        &gate.configured_scope().workspace_id,
+        &scope.workspace_id,
         &request.idempotency_key,
         MutationOperation::Append,
         &request.page_id.0,
@@ -185,10 +180,6 @@ pub async fn append_once(
         return Err(AppendError::RevisionConflict(before_meta));
     }
 
-    gate.revalidate(&permit, gate.configured_scope())
-        .await
-        .map_err(|_| AppendError::NotAuthorized)?;
-
     // Best-effort immediate fresh preflight. This cannot be atomic CAS.
     let fresh = reader
         .read_content(&request.page_id)
@@ -239,13 +230,6 @@ pub async fn append_once(
     {
         return Err(AppendError::OutcomeUnknown);
     }
-    let post_permit = gate
-        .authorize(&request.page_id)
-        .await
-        .map_err(|_| AppendError::OutcomeUnknown)?;
-    gate.revalidate(&post_permit, gate.configured_scope())
-        .await
-        .map_err(|_| AppendError::OutcomeUnknown)?;
 
     let receipt = VerifiedReceipt::from_readback(
         after.page.id.0,
@@ -267,24 +251,24 @@ pub async fn append_once(
 pub async fn append_once_and_refresh(
     reader: &dyn NotionRead,
     writer: &dyn NotionWrite,
-    gate: &RootScopeGate,
+    scope: &LifecycleScope,
     ledger: &dyn WriteIdempotencyStore,
     queue: &dyn crate::write_refresh::MutationRefreshQueue,
     request: AppendRequest,
 ) -> Result<crate::write_refresh::WriteCompletion, AppendError> {
     let claim = MutationClaim::new(
-        &gate.configured_scope().workspace_id,
+        &scope.workspace_id,
         &request.idempotency_key,
         MutationOperation::Append,
         &request.page_id.0,
         &fingerprint(&request),
     )
     .map_err(ledger_error)?;
-    let result = append_once(reader, writer, gate, ledger, request).await?;
+    let result = append_once(reader, writer, scope, ledger, request).await?;
     Ok(crate::write_refresh::admit_verified(
         queue,
         &crate::write_refresh::RefreshKey {
-            workspace_id: gate.configured_scope().workspace_id.clone(),
+            workspace_id: scope.workspace_id.clone(),
             mutation_digest: claim.key_digest().to_owned(),
             page_id: result.receipt.page_id.clone(),
         },

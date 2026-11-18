@@ -13,10 +13,10 @@ use crate::{
         IdempotencyError, MutationClaim, MutationOperation, Reservation, VerifiedReceipt,
         WriteIdempotencyStore,
     },
+    lifecycle::LifecycleScope,
     revision::{
         ExpectedRevision, RevisionError, RevisionMetadata, check_revision, compare_content_snapshot,
     },
-    root_scope::RootScopeGate,
     sections::{SectionAnchor, SectionError, plan_section},
 };
 
@@ -37,12 +37,12 @@ pub struct SectionUpdateRequest {
 pub async fn update_section_once_and_refresh(
     reader: &dyn NotionRead,
     writer: &dyn NotionSectionWrite,
-    gate: &RootScopeGate,
+    scope: &LifecycleScope,
     ledger: &dyn WriteIdempotencyStore,
     queue: &dyn crate::write_refresh::MutationRefreshQueue,
     request: SectionUpdateRequest,
 ) -> Result<crate::write_refresh::WriteCompletion, SectionUpdateError> {
-    update_section_and_refresh(reader, writer, gate, ledger, queue, request, None).await
+    update_section_and_refresh(reader, writer, scope, ledger, queue, request, None).await
 }
 
 /// An actual new effect requires trusted confirmation; a verified ledger replay
@@ -50,7 +50,7 @@ pub async fn update_section_once_and_refresh(
 pub async fn update_section_confirmed_once_and_refresh(
     reader: &dyn NotionRead,
     writer: &dyn NotionSectionWrite,
-    gate: &RootScopeGate,
+    scope: &LifecycleScope,
     ledger: &dyn WriteIdempotencyStore,
     queue: &dyn crate::write_refresh::MutationRefreshQueue,
     request: SectionUpdateRequest,
@@ -59,7 +59,7 @@ pub async fn update_section_confirmed_once_and_refresh(
     update_section_and_refresh(
         reader,
         writer,
-        gate,
+        scope,
         ledger,
         queue,
         request,
@@ -71,25 +71,25 @@ pub async fn update_section_confirmed_once_and_refresh(
 async fn update_section_and_refresh(
     reader: &dyn NotionRead,
     writer: &dyn NotionSectionWrite,
-    gate: &RootScopeGate,
+    scope: &LifecycleScope,
     ledger: &dyn WriteIdempotencyStore,
     queue: &dyn crate::write_refresh::MutationRefreshQueue,
     request: SectionUpdateRequest,
     confirmation: Option<&dyn ConfirmationProvider>,
 ) -> Result<crate::write_refresh::WriteCompletion, SectionUpdateError> {
     let claim = MutationClaim::new(
-        &gate.configured_scope().workspace_id,
+        &scope.workspace_id,
         &request.idempotency_key,
         MutationOperation::UpdateSection,
         &request.page_id.0,
         &fingerprint(&request),
     )
     .map_err(ledger_error)?;
-    let result = update_section_inner(reader, writer, gate, ledger, request, confirmation).await?;
+    let result = update_section_inner(reader, writer, scope, ledger, request, confirmation).await?;
     Ok(crate::write_refresh::admit_verified(
         queue,
         &crate::write_refresh::RefreshKey {
-            workspace_id: gate.configured_scope().workspace_id.clone(),
+            workspace_id: scope.workspace_id.clone(),
             mutation_digest: claim.key_digest().to_owned(),
             page_id: result.receipt.page_id.clone(),
         },
@@ -171,17 +171,17 @@ fn fingerprint(request: &SectionUpdateRequest) -> String {
 pub async fn update_section_once(
     reader: &dyn NotionRead,
     writer: &dyn NotionSectionWrite,
-    gate: &RootScopeGate,
+    scope: &LifecycleScope,
     ledger: &dyn WriteIdempotencyStore,
     request: SectionUpdateRequest,
 ) -> Result<SectionUpdateResult, SectionUpdateError> {
-    update_section_inner(reader, writer, gate, ledger, request, None).await
+    update_section_inner(reader, writer, scope, ledger, request, None).await
 }
 
 async fn update_section_inner(
     reader: &dyn NotionRead,
     writer: &dyn NotionSectionWrite,
-    gate: &RootScopeGate,
+    scope: &LifecycleScope,
     ledger: &dyn WriteIdempotencyStore,
     request: SectionUpdateRequest,
     confirmation: Option<&dyn ConfirmationProvider>,
@@ -210,12 +210,8 @@ async fn update_section_inner(
     {
         return Err(SectionUpdateError::SelectionRejected);
     }
-    let permit = gate
-        .authorize(&request.page_id)
-        .await
-        .map_err(|_| SectionUpdateError::NotAuthorized)?;
     let claim = MutationClaim::new(
-        &gate.configured_scope().workspace_id,
+        &scope.workspace_id,
         &request.idempotency_key,
         MutationOperation::UpdateSection,
         &request.page_id.0,
@@ -275,7 +271,6 @@ async fn update_section_inner(
     }
 
     if let Some(provider) = confirmation {
-        let scope = gate.configured_scope();
         let scope_identity = crate::destructive::confirmation_scope(scope)
             .map_err(|_| SectionUpdateError::InvalidInput)?;
         let intended = ConfirmationRequest::new(
@@ -304,10 +299,7 @@ async fn update_section_inner(
             .consume(&intended)
             .map_err(|_| SectionUpdateError::NotAuthorized)?;
     }
-    // Approval can await human input; recheck source and scope AFTER it.
-    gate.revalidate(&permit, gate.configured_scope())
-        .await
-        .map_err(|_| SectionUpdateError::NotAuthorized)?;
+    // Approval can await human input; re-read the source AFTER it.
     // Best-effort final immediate preflight. Not an atomic CAS.
     let fresh = reader
         .read_content(&request.page_id)
@@ -341,17 +333,6 @@ async fn update_section_inner(
     {
         return Err(SectionUpdateError::OutcomeUnknown);
     }
-    // The write itself changes the selected page's last-edited revision.
-    // Never revalidate the pre-write lifecycle evidence: Notion's lifecycle
-    // adapter compares the entire chain, including the old revision.
-    // Acquire fresh physical authorization and revalidate its new evidence.
-    let post_permit = gate
-        .authorize(&request.page_id)
-        .await
-        .map_err(|_| SectionUpdateError::OutcomeUnknown)?;
-    gate.revalidate(&post_permit, gate.configured_scope())
-        .await
-        .map_err(|_| SectionUpdateError::OutcomeUnknown)?;
 
     let receipt = VerifiedReceipt::from_readback(
         after.page.id.0,

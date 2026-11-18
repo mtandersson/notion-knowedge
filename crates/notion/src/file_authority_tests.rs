@@ -292,25 +292,13 @@ async fn write_permission_lost_during_admission_prevents_create_or_stream_send()
 #[tokio::test]
 async fn image_and_file_attachment_receipt_loss_keeps_known_blocks_but_never_verifies() {
     use crate::file_upload::{UploadStatus, UploadedFile};
-    use notion_knowledge_core::{backend::PageId, lifecycle::LifecycleScope};
+    use notion_knowledge_core::backend::PageId;
     const PAGE: &str = "22222222-2222-2222-2222-222222222222";
-    const ROOT: &str = "33333333-3333-3333-3333-333333333333";
     const BLOCK: &str = "44444444-4444-4444-4444-444444444444";
     for image in [false, true] {
-        for revoked in [None, Some(8), Some(9)] {
+        for revoked in [None, Some(0), Some(1)] {
             let authority = Authority::new();
-            let node = |id: &str, parent: Option<&str>| json!({"object":"page","id":id,"last_edited_time":"2026-10-11T09:00:00Z","in_trash":false,"parent":match parent {Some(p)=>json!({"type":"page_id","page_id":p}),None=>json!({"type":"workspace","workspace":true})}});
             let mut replies = Vec::new();
-            for _ in 0..2 {
-                for (id, parent) in [
-                    (PAGE, Some(ROOT)),
-                    (ROOT, None),
-                    (ROOT, None),
-                    (PAGE, Some(ROOT)),
-                ] {
-                    replies.push((format!("GET /v1/pages/{id} "), node(id, parent)));
-                }
-            }
             let kind = if image { "image" } else { "file" };
             let filename = if image { "proof.png" } else { "proof.pdf" };
             let body =
@@ -320,7 +308,7 @@ async fn image_and_file_attachment_receipt_loss_keeps_known_blocks_but_never_ver
                 format!("PATCH /v1/blocks/{PAGE}/children "),
                 json!({"object":"list","results":[block.clone()]}),
             ));
-            if revoked != Some(8) {
+            if revoked != Some(0) {
                 replies.push((format!("GET /v1/blocks/{BLOCK} "), block));
             }
             let steps = replies.len();
@@ -337,30 +325,14 @@ async fn image_and_file_attachment_receipt_loss_keeps_known_blocks_but_never_ver
                 .into(),
                 size_bytes: 16,
             };
-            let scope = LifecycleScope {
-                workspace_id: "55555555-5555-5555-5555-555555555555".into(),
-                generation: 1,
-                roots: vec![PageId(ROOT.into())],
-                exclusions: Default::default(),
-            };
             let result = if image {
-                bounded(client.attach_uploaded_image_detailed(
-                    &PageId(PAGE.into()),
-                    &upload,
-                    None,
-                    &scope,
-                ))
-                .await
-                .map(|value| value.verified)
+                bounded(client.attach_uploaded_image_detailed(&PageId(PAGE.into()), &upload, None))
+                    .await
+                    .map(|value| value.verified)
             } else {
-                bounded(client.attach_uploaded_file_detailed(
-                    &PageId(PAGE.into()),
-                    &upload,
-                    None,
-                    &scope,
-                ))
-                .await
-                .map(|value| value.verified)
+                bounded(client.attach_uploaded_file_detailed(&PageId(PAGE.into()), &upload, None))
+                    .await
+                    .map(|value| value.verified)
             };
             if revoked.is_some() {
                 let failure = result.unwrap_err();

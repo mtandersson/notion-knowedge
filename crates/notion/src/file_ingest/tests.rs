@@ -3,7 +3,6 @@ use notion_knowledge_core::{
     audit::{AuditActor, AuditError, AuditEvent, AuditRetention, AuditStore},
     discovery::ExclusionRules,
     file_ingest::{FileIngestContext, FileIngestRequest, IngestStatus, ingest_file},
-    root_scope::RootScopeGate,
 };
 use notion_knowledge_retrieval::audit::SqliteAuditStore;
 use serde_json::{Value, json};
@@ -83,15 +82,6 @@ fn scope() -> LifecycleScope {
         roots: vec![PageId(ROOT.into())],
         exclusions: ExclusionRules::default(),
     }
-}
-fn chain(parent: &str) -> Vec<Value> {
-    let node = |id: &str, parent: Option<&str>| json!({"object":"page","id":id,"last_edited_time":"2026-10-11T09:00:00Z","in_trash":false,"parent": parent.map(|v| json!({"type":"page_id","page_id":v})).unwrap_or(json!({"type":"workspace","workspace":true}))});
-    vec![
-        node(PAGE, Some(parent)),
-        node(parent, None),
-        node(parent, None),
-        node(PAGE, Some(parent)),
-    ]
 }
 fn block(image: bool, readback: bool) -> Value {
     let kind = if image { "image" } else { "file" };
@@ -274,8 +264,7 @@ fn request(image: bool) -> FileIngestRequest {
     }
 }
 fn full_steps(image: bool, readback_fails: bool, send_fails: bool) -> Vec<(u16, Value)> {
-    let mut steps: Vec<_> = chain(ROOT).into_iter().map(|v| (200, v)).collect();
-    steps.extend(chain(ROOT).into_iter().map(|v| (200, v)));
+    let mut steps: Vec<(u16, Value)> = Vec::new();
     steps.push((
         200,
         json!({"object":"file_upload","id":UPLOAD,"status":"pending"}),
@@ -285,11 +274,6 @@ fn full_steps(image: bool, readback_fails: bool, send_fails: bool) -> Vec<(u16, 
         json!({"object":"file_upload","id":UPLOAD,"status":"uploaded"}),
     ));
     if !send_fails {
-        // Application permit revalidation, then native attachment's independent
-        // authorize/revalidate: all are real authoritative page HTTP reads.
-        for _ in 0..3 {
-            steps.extend(chain(ROOT).into_iter().map(|v| (200, v)));
-        }
         steps.push((200, json!({"object":"list","results":[block(image,false)]})));
         for _ in 0..if readback_fails { 3 } else { 1 } {
             steps.push((if readback_fails { 404 } else { 200 }, block(image, true)));
@@ -322,9 +306,9 @@ fn audit(path: &std::path::Path, fail_at: Option<usize>) -> AuditFixture {
         calls: AtomicUsize::new(0),
     }
 }
-fn context<'a>(gate: &'a RootScopeGate, audit: &'a dyn AuditStore) -> FileIngestContext<'a> {
+fn context<'a>(scope: &'a LifecycleScope, audit: &'a dyn AuditStore) -> FileIngestContext<'a> {
     FileIngestContext {
-        gate,
+        scope,
         audit,
         actor: AuditActor::Server,
         correlation_id: "request_0123456789abcdef",
@@ -345,14 +329,14 @@ async fn native_image_and_document_are_verified_and_durably_audited_without_payl
         };
         let (download, count, source_task, paths) = source(bytes.clone(), 200, false).await;
         let (client, requests, notion_task) = notion(full_steps(image, false, false)).await;
-        let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+        let policy = scope();
         let adapter = NotionFileIngestAdapter::new(
             client,
             download,
             FileValidationPolicy::for_single_part(64).unwrap(),
             scope(),
         );
-        let result = ingest_file(&adapter, &context(&gate, &audit), request(image)).await;
+        let result = ingest_file(&adapter, &context(&policy, &audit), request(image)).await;
         assert_eq!(result.status, IngestStatus::Verified, "{result:?}");
         assert!(result.terminal_audited);
         assert_eq!(result.references.upload_id.as_deref(), Some(UPLOAD));
@@ -405,43 +389,28 @@ fn assert_clean(paths: &Arc<Mutex<Vec<std::path::PathBuf>>>) {
 }
 
 #[tokio::test]
-async fn scope_denial_and_mismatched_policies_precede_every_file_effect() {
-    for mismatched in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let audit = audit(&dir.path().join("audit"), None);
-        let (download, count, source_task, paths) = source(b"document".to_vec(), 200, false).await;
-        let (client, requests, notion_task) = notion(if mismatched {
-            vec![]
-        } else {
-            chain(OUTSIDE).into_iter().map(|v| (200, v)).collect()
-        })
-        .await;
-        let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
-        let mut adapter_scope = scope();
-        if mismatched {
-            adapter_scope.generation += 1;
-        }
-        let adapter = NotionFileIngestAdapter::new(
-            client,
-            download,
-            FileValidationPolicy::for_single_part(64).unwrap(),
-            adapter_scope,
-        );
-        let result = ingest_file(&adapter, &context(&gate, &audit), request(false)).await;
-        assert_eq!(result.status, IngestStatus::Denied);
-        assert!(result.terminal_audited);
-        assert_eq!(count.load(Ordering::SeqCst), 0);
-        assert!(paths.lock().unwrap().is_empty());
-        assert!(
-            requests
-                .lock()
-                .unwrap()
-                .iter()
-                .all(|(h, _)| h.starts_with("GET"))
-        );
-        source_task.abort();
-        notion_task.await.unwrap();
-    }
+async fn mismatched_adapter_policy_precedes_every_file_effect() {
+    let dir = tempfile::tempdir().unwrap();
+    let audit = audit(&dir.path().join("audit"), None);
+    let (download, count, source_task, paths) = source(b"document".to_vec(), 200, false).await;
+    let (client, requests, notion_task) = notion(Vec::new()).await;
+    let policy = scope();
+    let mut adapter_scope = scope();
+    adapter_scope.generation += 1;
+    let adapter = NotionFileIngestAdapter::new(
+        client,
+        download,
+        FileValidationPolicy::for_single_part(64).unwrap(),
+        adapter_scope,
+    );
+    let result = ingest_file(&adapter, &context(&policy, &audit), request(false)).await;
+    assert_eq!(result.status, IngestStatus::Denied);
+    assert!(result.terminal_audited);
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    assert!(paths.lock().unwrap().is_empty());
+    assert!(requests.lock().unwrap().is_empty());
+    source_task.abort();
+    notion_task.await.unwrap();
 }
 #[tokio::test]
 async fn mime_size_and_expired_sources_fail_before_notion_upload_and_clean_up() {
@@ -464,16 +433,15 @@ async fn mime_size_and_expired_sources_fail_before_notion_upload_and_clean_up() 
         let dir = tempfile::tempdir().unwrap();
         let audit = audit(&dir.path().join("audit"), None);
         let (download, _, source_task, paths) = source(bytes, status, false).await;
-        let (client, requests, notion_task) =
-            notion(chain(ROOT).into_iter().map(|v| (200, v)).collect()).await;
-        let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+        let (client, requests, notion_task) = notion(Vec::new()).await;
+        let policy = scope();
         let adapter = NotionFileIngestAdapter::new(
             client,
             download,
             FileValidationPolicy::for_single_part(limit).unwrap(),
             scope(),
         );
-        let result = ingest_file(&adapter, &context(&gate, &audit), request(true)).await;
+        let result = ingest_file(&adapter, &context(&policy, &audit), request(true)).await;
         assert_eq!(result.status, IngestStatus::Failed);
         assert_eq!(result.failure, Some(failure));
         assert!(result.terminal_audited);
@@ -498,14 +466,14 @@ async fn upstream_and_readback_ambiguity_keep_known_references_without_write_rep
             source(b"document fixture".to_vec(), 200, false).await;
         let (client, requests, notion_task) =
             notion(full_steps(false, !send_fails, send_fails)).await;
-        let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+        let policy = scope();
         let adapter = NotionFileIngestAdapter::new(
             client,
             download,
             FileValidationPolicy::for_single_part(64).unwrap(),
             scope(),
         );
-        let result = ingest_file(&adapter, &context(&gate, &audit), request(false)).await;
+        let result = ingest_file(&adapter, &context(&policy, &audit), request(false)).await;
         assert_eq!(result.status, IngestStatus::Indeterminate);
         assert_eq!(result.references.upload_id.as_deref(), Some(UPLOAD));
         assert_eq!(
@@ -542,18 +510,18 @@ async fn unavailable_audit_prevents_effects_or_preserves_verified_but_unaudited_
             source(b"document fixture".to_vec(), 200, false).await;
         let steps = match fail_at {
             1 => vec![],
-            2 => chain(ROOT).into_iter().map(|v| (200, v)).collect(),
+            2 => Vec::new(),
             _ => full_steps(false, false, false),
         };
         let (client, requests, notion_task) = notion(steps).await;
-        let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+        let policy = scope();
         let adapter = NotionFileIngestAdapter::new(
             client,
             download,
             FileValidationPolicy::for_single_part(64).unwrap(),
             scope(),
         );
-        let result = ingest_file(&adapter, &context(&gate, &audit), request(false)).await;
+        let result = ingest_file(&adapter, &context(&policy, &audit), request(false)).await;
         assert_eq!(result.failure, Some(IngestFailure::AuditUnavailable));
         if fail_at == 3 {
             assert_eq!(result.status, IngestStatus::VerifiedAuditFailed);
@@ -580,35 +548,6 @@ async fn unavailable_audit_prevents_effects_or_preserves_verified_but_unaudited_
     }
 }
 #[tokio::test]
-async fn changed_target_authority_after_download_prevents_upload() {
-    let dir = tempfile::tempdir().unwrap();
-    let audit = audit(&dir.path().join("audit"), None);
-    let (download, _, source_task, paths) = source(b"document fixture".to_vec(), 200, false).await;
-    let mut steps: Vec<_> = chain(ROOT).into_iter().map(|v| (200, v)).collect();
-    steps.extend(chain(OUTSIDE).into_iter().map(|v| (200, v)));
-    let (client, requests, notion_task) = notion(steps).await;
-    let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
-    let adapter = NotionFileIngestAdapter::new(
-        client,
-        download,
-        FileValidationPolicy::for_single_part(64).unwrap(),
-        scope(),
-    );
-    let result = ingest_file(&adapter, &context(&gate, &audit), request(false)).await;
-    assert_eq!(result.status, IngestStatus::Denied);
-    assert!(result.references.upload_id.is_none());
-    assert!(
-        requests
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|(h, _)| h.starts_with("GET"))
-    );
-    assert_clean(&paths);
-    source_task.await.unwrap();
-    notion_task.await.unwrap();
-}
-#[tokio::test]
 async fn cancelled_or_timed_out_download_removes_temporary_bytes_and_records_failed_attempt() {
     let _clock = crate::test_clock::TestClock::new().await;
     for cancel in [true, false] {
@@ -617,16 +556,15 @@ async fn cancelled_or_timed_out_download_removes_temporary_bytes_and_records_fai
         let audit = audit(&path, None);
         let (download, count, source_task, paths) =
             source(b"document fixture".to_vec(), 200, true).await;
-        let (client, _, notion_task) =
-            notion(chain(ROOT).into_iter().map(|v| (200, v)).collect()).await;
-        let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+        let (client, _, notion_task) = notion(Vec::new()).await;
+        let policy = scope();
         let adapter = NotionFileIngestAdapter::new(
             client,
             download,
             FileValidationPolicy::for_single_part(64).unwrap(),
             scope(),
         );
-        let ctx = context(&gate, &audit);
+        let ctx = context(&policy, &audit);
         let mut future = Box::pin(ingest_file(&adapter, &ctx, request(false)));
         tokio::select! {
             result = &mut future => panic!("download should still be pending: {result:?}"),
@@ -661,7 +599,7 @@ async fn omitted_file_hints_use_observed_type_and_safe_fallback_name() {
     let (download, _, source_task, paths) =
         source(b"\x89PNG\r\n\x1a\nfixture".to_vec(), 200, false).await;
     let (client, requests, notion_task) = notion(full_steps(true, false, false)).await;
-    let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+    let policy = scope();
     let adapter = NotionFileIngestAdapter::new(
         client,
         download,
@@ -671,7 +609,7 @@ async fn omitted_file_hints_use_observed_type_and_safe_fallback_name() {
     let mut req = request(true);
     req.filename = None;
     req.declared_mime = None;
-    let result = ingest_file(&adapter, &context(&gate, &audit), req).await;
+    let result = ingest_file(&adapter, &context(&policy, &audit), req).await;
     assert_eq!(result.status, IngestStatus::Verified);
     source_task.await.unwrap();
     notion_task.await.unwrap();
@@ -686,54 +624,22 @@ async fn omitted_file_hints_use_observed_type_and_safe_fallback_name() {
     assert_eq!(create["content_type"], "image/png");
 }
 #[tokio::test]
-async fn scope_change_after_upload_denies_attachment_and_keeps_upload_reference() {
-    let dir = tempfile::tempdir().unwrap();
-    let audit = audit(&dir.path().join("audit"), None);
-    let (download, _, source_task, paths) = source(b"document fixture".to_vec(), 200, false).await;
-    let mut steps = full_steps(false, false, true);
-    steps[9].0 = 200;
-    steps.extend(chain(OUTSIDE).into_iter().map(|v| (200, v)));
-    let (client, requests, notion_task) = notion(steps).await;
-    let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
-    let adapter = NotionFileIngestAdapter::new(
-        client,
-        download,
-        FileValidationPolicy::for_single_part(64).unwrap(),
-        scope(),
-    );
-    let result = ingest_file(&adapter, &context(&gate, &audit), request(false)).await;
-    assert_eq!(result.status, IngestStatus::Denied);
-    assert_eq!(result.references.upload_id.as_deref(), Some(UPLOAD));
-    assert!(result.references.block_id.is_none());
-    source_task.await.unwrap();
-    notion_task.await.unwrap();
-    assert_clean(&paths);
-    assert!(
-        requests
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|(h, _)| !h.starts_with("PATCH"))
-    );
-}
-
-#[tokio::test]
 async fn cancellation_during_upload_cleans_up_and_audits_indeterminate_without_replay() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("audit");
     let audit = audit(&path, None);
     let (download, _, source_task, paths) = source(b"document fixture".to_vec(), 200, false).await;
     let mut steps = full_steps(false, false, true);
-    steps[9].0 = 0;
+    steps[1].0 = 0;
     let (client, requests, notion_task) = notion(steps).await;
-    let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+    let policy = scope();
     let adapter = NotionFileIngestAdapter::new(
         client,
         download,
         FileValidationPolicy::for_single_part(64).unwrap(),
         scope(),
     );
-    let ctx = context(&gate, &audit);
+    let ctx = context(&policy, &audit);
     let mut future = Box::pin(ingest_file(&adapter, &ctx, request(false)));
     tokio::select! { _= &mut future => panic!("upload should still be pending"), _=requests.wait_for(|entries| entries.iter().any(|(h,_)|h.starts_with(&format!("POST /v1/file_uploads/{UPLOAD}/send"))))=>{} }
     drop(future);
@@ -765,14 +671,14 @@ async fn failed_terminal_audit_preserves_upstream_ambiguity_and_known_upload() {
     let audit = audit(&dir.path().join("audit"), Some(3));
     let (download, _, source_task, paths) = source(b"document fixture".to_vec(), 200, false).await;
     let (client, _, notion_task) = notion(full_steps(false, false, true)).await;
-    let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+    let policy = scope();
     let adapter = NotionFileIngestAdapter::new(
         client,
         download,
         FileValidationPolicy::for_single_part(64).unwrap(),
         scope(),
     );
-    let result = ingest_file(&adapter, &context(&gate, &audit), request(false)).await;
+    let result = ingest_file(&adapter, &context(&policy, &audit), request(false)).await;
     assert_eq!(result.status, IngestStatus::Indeterminate);
     assert_eq!(
         result.failure,
@@ -793,20 +699,16 @@ async fn invalid_targets_denied_operation_and_unsafe_caption_precede_file_effect
         let dir = tempfile::tempdir().unwrap();
         let audit = audit(&dir.path().join("audit"), None);
         let (download, count, source_task, paths) = source(b"document".to_vec(), 200, false).await;
-        let (client, requests, notion_task) = notion(if case == 2 {
-            chain(ROOT).into_iter().map(|v| (200, v)).collect()
-        } else {
-            vec![]
-        })
-        .await;
-        let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+        let (client, requests, notion_task) =
+            notion(if case == 2 { Vec::new() } else { vec![] }).await;
+        let policy = scope();
         let adapter = NotionFileIngestAdapter::new(
             client,
             download,
             FileValidationPolicy::for_single_part(64).unwrap(),
             scope(),
         );
-        let mut ctx = context(&gate, &audit);
+        let mut ctx = context(&policy, &audit);
         let mut req = request(false);
         match case {
             0 => req.target = PageId(SECRET_URL.into()),
@@ -905,14 +807,14 @@ async fn hosted_image_and_document_readback_match_append_resource_with_rotated_s
         };
         let (download, _, source_task, paths) = source(bytes, 200, false).await;
         let (client, requests, notion_task) = notion(hosted_steps(image, None, false)).await;
-        let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+        let policy = scope();
         let adapter = NotionFileIngestAdapter::new(
             client,
             download,
             FileValidationPolicy::for_single_part(64).unwrap(),
             scope(),
         );
-        let result = ingest_file(&adapter, &context(&gate, &audit), request(image)).await;
+        let result = ingest_file(&adapter, &context(&policy, &audit), request(image)).await;
         assert_eq!(result.status, IngestStatus::Verified, "{result:?}");
         assert!(result.terminal_audited);
         assert_eq!(result.references.block_id.as_deref(), Some(BLOCK));
@@ -967,14 +869,14 @@ async fn different_hosted_file_at_same_block_remains_indeterminate_with_known_re
             let (download, _, source_task, paths) = source(bytes, 200, false).await;
             let (client, requests, notion_task) =
                 notion(hosted_steps(image, Some(different), false)).await;
-            let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+            let policy = scope();
             let adapter = NotionFileIngestAdapter::new(
                 client,
                 download,
                 FileValidationPolicy::for_single_part(64).unwrap(),
                 scope(),
             );
-            let result = ingest_file(&adapter, &context(&gate, &audit), request(image)).await;
+            let result = ingest_file(&adapter, &context(&policy, &audit), request(image)).await;
             assert_eq!(result.status, IngestStatus::Indeterminate);
             assert!(result.terminal_audited);
             assert_eq!(result.references.upload_id.as_deref(), Some(UPLOAD));
@@ -1022,14 +924,14 @@ async fn hosted_readback_without_append_resource_anchor_is_honestly_unverified()
         };
         let (download, _, source_task, paths) = source(bytes, 200, false).await;
         let (client, requests, notion_task) = notion(hosted_steps(image, None, true)).await;
-        let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+        let policy = scope();
         let adapter = NotionFileIngestAdapter::new(
             client,
             download,
             FileValidationPolicy::for_single_part(64).unwrap(),
             scope(),
         );
-        let result = ingest_file(&adapter, &context(&gate, &audit), request(image)).await;
+        let result = ingest_file(&adapter, &context(&policy, &audit), request(image)).await;
         assert_eq!(result.status, IngestStatus::Indeterminate);
         assert_eq!(result.references.block_id.as_deref(), Some(BLOCK));
         assert!(result.terminal_audited);
@@ -1067,14 +969,14 @@ async fn hosted_receipt_followed_by_exact_upload_id_readback_verifies_the_same_n
             }
         }
         let (client, requests, notion_task) = notion(steps).await;
-        let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+        let policy = scope();
         let adapter = NotionFileIngestAdapter::new(
             client,
             download,
             FileValidationPolicy::for_single_part(64).unwrap(),
             scope(),
         );
-        let result = ingest_file(&adapter, &context(&gate, &audit), request(image)).await;
+        let result = ingest_file(&adapter, &context(&policy, &audit), request(image)).await;
         assert_eq!(result.status, IngestStatus::Verified);
         assert!(result.terminal_audited);
         assert_eq!(result.references.upload_id.as_deref(), Some(UPLOAD));
@@ -1109,7 +1011,7 @@ async fn joined_paid_plan_selects_exact_threshold_and_verifies_multipart_bytes_i
         if size > 20 * MIB {
             let receipt = |status: &str, sent| json!({"object":"file_upload","id":UPLOAD,"status":status,"number_of_parts":{"total":3,"sent":sent}});
             steps.splice(
-                8..10,
+                0..2,
                 vec![
                     (200, receipt("pending", 0)),
                     (200, receipt("pending", 1)),
@@ -1121,7 +1023,7 @@ async fn joined_paid_plan_selects_exact_threshold_and_verifies_multipart_bytes_i
             );
         }
         let (client, requests, notion_task) = notion(steps).await;
-        let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+        let policy = scope();
         let adapter = NotionFileIngestAdapter::new(
             client,
             download,
@@ -1129,7 +1031,7 @@ async fn joined_paid_plan_selects_exact_threshold_and_verifies_multipart_bytes_i
             scope(),
         )
         .with_multipart(MultipartPolicy::new(30 * MIB, 20 * MIB, 10 * MIB).unwrap());
-        let outcome = ingest_file(&adapter, &context(&gate, &audit), request(false)).await;
+        let outcome = ingest_file(&adapter, &context(&policy, &audit), request(false)).await;
         assert_eq!(outcome.status, IngestStatus::Verified, "{outcome:?}");
         assert!(outcome.terminal_audited);
         assert_clean(&paths);
@@ -1203,7 +1105,7 @@ async fn ordered_batch_reports_later_failure_and_preserves_verified_image_and_do
         64,
     )
     .await;
-    let mut steps: Vec<_> = chain(ROOT).into_iter().map(|v| (200, v)).collect();
+    let mut steps: Vec<(u16, Value)> = Vec::new();
     steps.extend(full_steps(true, false, false));
     const UPLOAD2: &str = "77777777-7777-7777-7777-777777777777";
     const BLOCK2: &str = "88888888-8888-8888-8888-888888888888";
@@ -1223,9 +1125,8 @@ async fn ordered_batch_reports_later_failure_and_preserves_verified_image_and_do
                 )
             }),
     );
-    steps.extend(chain(ROOT).into_iter().map(|v| (200, v)));
     let (client, requests, notion_task) = notion(steps).await;
-    let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+    let policy = scope();
     let adapter =
         NotionFileIngestAdapter::new(client, download, FileValidationPolicy::default(), scope());
     let mut batch = FileIngestBatch::new(
@@ -1234,7 +1135,7 @@ async fn ordered_batch_reports_later_failure_and_preserves_verified_image_and_do
     )
     .unwrap();
     batch
-        .execute(&adapter, &context(&gate, &audit))
+        .execute(&adapter, &context(&policy, &audit))
         .await
         .unwrap();
     assert_eq!(
@@ -1286,7 +1187,7 @@ async fn ordered_batch_reports_later_failure_and_preserves_verified_image_and_do
     assert_eq!(count.load(Ordering::SeqCst), 3);
     assert!(
         batch
-            .execute(&adapter, &context(&gate, &audit))
+            .execute(&adapter, &context(&policy, &audit))
             .await
             .is_err()
     );
@@ -1307,10 +1208,10 @@ async fn batch_terminal_audit_loss_stops_before_next_download_and_retains_receip
     let dir = tempfile::tempdir().unwrap();
     let audit = audit(&dir.path().join("audit"), Some(3));
     let (download, count, source_task, paths) = source(b"document".to_vec(), 200, false).await;
-    let mut steps: Vec<_> = chain(ROOT).into_iter().map(|v| (200, v)).collect();
+    let mut steps: Vec<(u16, Value)> = Vec::new();
     steps.extend(full_steps(false, false, false));
     let (client, _, notion_task) = notion(steps).await;
-    let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+    let policy = scope();
     let adapter =
         NotionFileIngestAdapter::new(client, download, FileValidationPolicy::default(), scope());
     let mut batch = FileIngestBatch::new(
@@ -1319,7 +1220,7 @@ async fn batch_terminal_audit_loss_stops_before_next_download_and_retains_receip
     )
     .unwrap();
     batch
-        .execute(&adapter, &context(&gate, &audit))
+        .execute(&adapter, &context(&policy, &audit))
         .await
         .unwrap();
     let first = batch.results()[0].outcome.as_ref().unwrap();
@@ -1346,13 +1247,13 @@ async fn canceled_later_readback_preserves_prior_success_and_current_known_refer
         64,
     )
     .await;
-    let mut steps: Vec<_> = chain(ROOT).into_iter().map(|v| (200, v)).collect();
+    let mut steps: Vec<(u16, Value)> = Vec::new();
     steps.extend(full_steps(false, false, false));
     let mut later = full_steps(false, false, false);
     later.last_mut().unwrap().0 = 0;
     steps.extend(later);
     let (client, requests, notion_task) = notion(steps).await;
-    let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+    let policy = scope();
     let adapter =
         NotionFileIngestAdapter::new(client, download, FileValidationPolicy::default(), scope());
     let mut batch = FileIngestBatch::new(
@@ -1360,7 +1261,7 @@ async fn canceled_later_readback_preserves_prior_success_and_current_known_refer
         FileBatchPolicy::default(),
     )
     .unwrap();
-    let ctx = context(&gate, &audit);
+    let ctx = context(&policy, &audit);
     let mut future = Box::pin(batch.execute(&adapter, &ctx));
     tokio::select! {
         result=&mut future => panic!("unexpected completion: {result:?}"),
@@ -1404,43 +1305,6 @@ async fn canceled_later_readback_preserves_prior_success_and_current_known_refer
 }
 
 #[tokio::test]
-async fn batch_scope_change_stops_after_prior_verified_attachment_before_next_source() {
-    use notion_knowledge_core::file_ingest::{FileBatchPolicy, FileIngestBatch};
-    let dir = tempfile::tempdir().unwrap();
-    let audit = audit(&dir.path().join("audit"), None);
-    let (download, count, source_task, paths) = source(b"document".to_vec(), 200, false).await;
-    let mut steps: Vec<_> = chain(ROOT).into_iter().map(|v| (200, v)).collect();
-    steps.extend(full_steps(false, false, false));
-    steps.extend(chain(OUTSIDE).into_iter().map(|v| (200, v)));
-    let (client, _, notion_task) = notion(steps).await;
-    let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
-    let adapter =
-        NotionFileIngestAdapter::new(client, download, FileValidationPolicy::default(), scope());
-    let mut batch = FileIngestBatch::new(
-        vec![request(false), request(false), request(false)],
-        FileBatchPolicy::default(),
-    )
-    .unwrap();
-    batch
-        .execute(&adapter, &context(&gate, &audit))
-        .await
-        .unwrap();
-    assert_eq!(
-        batch.results()[0].outcome.as_ref().unwrap().status,
-        IngestStatus::Verified
-    );
-    assert_eq!(
-        batch.results()[1].outcome.as_ref().unwrap().status,
-        IngestStatus::Denied
-    );
-    assert!(batch.results()[2].outcome.is_none());
-    source_task.await.unwrap();
-    notion_task.await.unwrap();
-    assert_clean(&paths);
-    assert_eq!(count.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
 async fn canceled_multipart_send_retains_created_upload_and_cleans_owned_source() {
     use notion_knowledge_core::file_ingest::{FileBatchPolicy, FileIngestBatch};
     const MIB: usize = 1024 * 1024;
@@ -1448,14 +1312,12 @@ async fn canceled_multipart_send_retains_created_upload_and_cleans_owned_source(
     let audit = audit(&dir.path().join("audit"), None);
     let (download, _, source_task, paths) =
         source_many(vec![(vec![b'x'; 5 * MIB + 1], 200, false)], 10 * MIB).await;
-    let mut steps: Vec<_> = chain(ROOT).into_iter().map(|v| (200, v)).collect();
-    for _ in 0..2 {
-        steps.extend(chain(ROOT).into_iter().map(|v| (200, v)));
-    }
+    let mut steps: Vec<(u16, Value)> = Vec::new();
+    for _ in 0..2 {}
     steps.push((200,json!({"object":"file_upload","id":UPLOAD,"status":"pending","number_of_parts":{"total":2,"sent":0}})));
     steps.push((0, json!({})));
     let (client, requests, notion_task) = notion(steps).await;
-    let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+    let policy = scope();
     let adapter =
         NotionFileIngestAdapter::new(client, download, FileValidationPolicy::default(), scope())
             .with_multipart(MultipartPolicy::new(10 * MIB, 5 * MIB, 5 * MIB).unwrap());
@@ -1464,7 +1326,7 @@ async fn canceled_multipart_send_retains_created_upload_and_cleans_owned_source(
         FileBatchPolicy::default(),
     )
     .unwrap();
-    let ctx = context(&gate, &audit);
+    let ctx = context(&policy, &audit);
     let mut future = Box::pin(batch.execute(&adapter, &ctx));
     tokio::select! {
         result=&mut future => panic!("unexpected completion: {result:?}"),
@@ -1510,11 +1372,7 @@ async fn joined_multipart_interruptions_and_completion_failures_retain_upload_wi
         let audit = audit(&dir.path().join("audit"), None);
         let (download, _, source_task, paths) =
             source_many(vec![(vec![b'x'; 5 * MIB + 1], 200, false)], 10 * MIB).await;
-        let mut steps: Vec<_> = chain(ROOT)
-            .into_iter()
-            .chain(chain(ROOT))
-            .map(|v| (200, v))
-            .collect();
+        let mut steps: Vec<(u16, Value)> = Vec::new();
         let receipt = |status: &str, sent| json!({"object":"file_upload","id":UPLOAD,"status":status,"number_of_parts":{"total":2,"sent":sent}});
         steps.push((200, receipt("pending", 0)));
         if failure_stage == 0 {
@@ -1538,7 +1396,7 @@ async fn joined_multipart_interruptions_and_completion_failures_retain_upload_wi
             }
         }
         let (client, requests, notion_task) = notion(steps).await;
-        let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+        let policy = scope();
         let adapter = NotionFileIngestAdapter::new(
             client,
             download,
@@ -1546,7 +1404,7 @@ async fn joined_multipart_interruptions_and_completion_failures_retain_upload_wi
             scope(),
         )
         .with_multipart(MultipartPolicy::new(10 * MIB, 5 * MIB, 5 * MIB).unwrap());
-        let result = ingest_file(&adapter, &context(&gate, &audit), request(false)).await;
+        let result = ingest_file(&adapter, &context(&policy, &audit), request(false)).await;
         assert_eq!(result.status, IngestStatus::Indeterminate, "{result:?}");
         assert!(result.terminal_audited);
         assert_eq!(result.references.upload_id.as_deref(), Some(UPLOAD));
@@ -1567,81 +1425,6 @@ async fn joined_multipart_interruptions_and_completion_failures_retain_upload_wi
 }
 
 #[tokio::test]
-async fn batch_inner_attachment_authority_loss_stops_remaining_effects_with_known_upload() {
-    use notion_knowledge_core::file_ingest::{FileBatchPolicy, FileIngestBatch};
-    for changed in [true, false] {
-        let dir = tempfile::tempdir().unwrap();
-        let audit = audit(&dir.path().join("audit"), None);
-        let (download, count, source_task, paths) = source_many(
-            vec![
-                (b"document".to_vec(), 200, false),
-                (b"later document".to_vec(), 200, false),
-            ],
-            64,
-        )
-        .await;
-        let mut steps: Vec<_> = chain(ROOT).into_iter().map(|v| (200, v)).collect();
-        steps.extend(full_steps(false, false, false));
-        let mut later = full_steps(false, false, false);
-        if changed {
-            // Inner attachment authorize succeeded; its revalidation now sees
-            // a changed authoritative edit receipt without leaving the root.
-            later.truncate(22);
-            for (_, value) in &mut later[18..22] {
-                value["last_edited_time"] = json!("2026-10-14T00:00:00Z");
-            }
-        } else {
-            // Inner attachment authorize itself becomes unverifiable. The
-            // fixture serves no further item, even if authority could recover.
-            later.truncate(15);
-            later[14] = (503, json!({}));
-        }
-        steps.extend(later);
-        let (client, requests, notion_task) = notion(steps).await;
-        let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
-        let adapter = NotionFileIngestAdapter::new(
-            client,
-            download,
-            FileValidationPolicy::default(),
-            scope(),
-        );
-        let mut batch = FileIngestBatch::new(
-            vec![request(false), request(false), request(false)],
-            FileBatchPolicy::default(),
-        )
-        .unwrap();
-        batch
-            .execute(&adapter, &context(&gate, &audit))
-            .await
-            .unwrap();
-        assert_eq!(
-            batch.results()[0].outcome.as_ref().unwrap().status,
-            IngestStatus::Verified
-        );
-        let lost = batch.results()[1].outcome.as_ref().unwrap();
-        assert_eq!(lost.status, IngestStatus::Denied, "{lost:?}");
-        assert_eq!(lost.failure, Some(IngestFailure::Denied));
-        assert_eq!(lost.references.upload_id.as_deref(), Some(UPLOAD));
-        assert!(lost.references.block_id.is_none());
-        assert!(batch.results()[2].outcome.is_none());
-        assert!(batch.partial_success());
-        source_task.await.unwrap();
-        notion_task.await.unwrap();
-        assert_clean(&paths);
-        assert_eq!(count.load(Ordering::SeqCst), 2);
-        assert_eq!(
-            requests
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|(h, _)| h.starts_with("PATCH"))
-                .count(),
-            1
-        );
-    }
-}
-
-#[tokio::test]
 async fn ordinary_upstream_failure_can_continue_to_next_verified_item_without_replay() {
     use notion_knowledge_core::file_ingest::{FileBatchPolicy, FileIngestBatch};
     let dir = tempfile::tempdir().unwrap();
@@ -1654,11 +1437,11 @@ async fn ordinary_upstream_failure_can_continue_to_next_verified_item_without_re
         64,
     )
     .await;
-    let mut steps: Vec<_> = chain(ROOT).into_iter().map(|v| (200, v)).collect();
+    let mut steps: Vec<(u16, Value)> = Vec::new();
     steps.extend(full_steps(false, false, true));
     steps.extend(full_steps(false, false, false));
     let (client, requests, notion_task) = notion(steps).await;
-    let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+    let policy = scope();
     let adapter =
         NotionFileIngestAdapter::new(client, download, FileValidationPolicy::default(), scope());
     let mut batch = FileIngestBatch::new(
@@ -1667,7 +1450,7 @@ async fn ordinary_upstream_failure_can_continue_to_next_verified_item_without_re
     )
     .unwrap();
     batch
-        .execute(&adapter, &context(&gate, &audit))
+        .execute(&adapter, &context(&policy, &audit))
         .await
         .unwrap();
     assert_eq!(
@@ -1739,14 +1522,14 @@ async fn request_grant_loss_after_second_upload_stops_batch_and_preserves_audit_
         64,
     )
     .await;
-    let mut steps: Vec<_> = chain(ROOT).into_iter().map(|v| (200, v)).collect();
+    let mut steps: Vec<(u16, Value)> = Vec::new();
     steps.extend(full_steps(false, false, false));
     let mut second = full_steps(false, false, false);
-    second.truncate(10);
+    second.truncate(2);
     steps.extend(second);
     let (client, requests, notion_task) = notion(steps).await;
     let client = client.with_request_authority(Arc::new(CurrentGrant(requests.clone())));
-    let gate = RootScopeGate::new(Arc::new(client.clone()), scope()).unwrap();
+    let policy = scope();
     let adapter =
         NotionFileIngestAdapter::new(client, download, FileValidationPolicy::default(), scope());
     let mut batch = FileIngestBatch::new(
@@ -1756,7 +1539,7 @@ async fn request_grant_loss_after_second_upload_stops_batch_and_preserves_audit_
     .unwrap();
     tokio::time::timeout(
         Duration::from_secs(10),
-        batch.execute(&adapter, &context(&gate, &audit)),
+        batch.execute(&adapter, &context(&policy, &audit)),
     )
     .await
     .unwrap()

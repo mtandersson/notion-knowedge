@@ -380,10 +380,7 @@ fn append_request() -> notion_knowledge_core::append::AppendRequest {
 }
 #[tokio::test]
 async fn ambiguous_oauth_effect_remains_durable_and_reauthorization_cannot_repeat_it() {
-    use notion_knowledge_core::{
-        append::{AppendError, append_once},
-        root_scope::RootScopeGate,
-    };
+    use notion_knowledge_core::append::{AppendError, append_once};
     use notion_knowledge_retrieval::idempotency::SqliteIdempotencyStore;
     let h = harness().await;
     let (token, _, adapters) = writable(&h).await;
@@ -391,11 +388,11 @@ async fn ambiguous_oauth_effect_remains_durable_and_reauthorization_cannot_repea
     let ledger = SqliteIdempotencyStore::initialize_new(&path).unwrap();
     let hold = h.mutation_gate.acquire().await.unwrap();
     let pending = tokio::spawn(async move {
-        let gate = RootScopeGate::new(adapters.source.clone(), scope()).unwrap();
+        let policy = scope();
         append_once(
             adapters.source.as_ref(),
             adapters.source.mutation_ports().unwrap(),
-            &gate,
+            &policy,
             &ledger,
             append_request(),
         )
@@ -409,12 +406,12 @@ async fn ambiguous_oauth_effect_remains_durable_and_reauthorization_cannot_repea
     assert_eq!(pending.await.unwrap(), Err(AppendError::OutcomeUnknown));
     let ledger = SqliteIdempotencyStore::open_existing(&path).unwrap();
     let (_, _, adapters) = writable(&h).await;
-    let gate = RootScopeGate::new(adapters.source.clone(), scope()).unwrap();
+    let policy = scope();
     assert_eq!(
         append_once(
             adapters.source.as_ref(),
             adapters.source.mutation_ports().unwrap(),
-            &gate,
+            &policy,
             &ledger,
             append_request()
         )
@@ -438,7 +435,6 @@ async fn revocation_after_full_preflight_is_rechecked_before_provider_effect() {
         idempotency::{
             IdempotencyError, MutationClaim, Reservation, VerifiedReceipt, WriteIdempotencyStore,
         },
-        root_scope::RootScopeGate,
     };
     use notion_knowledge_retrieval::idempotency::SqliteIdempotencyStore;
     struct RevokeAtEffect<'a> {
@@ -465,7 +461,7 @@ async fn revocation_after_full_preflight_is_rechecked_before_provider_effect() {
     }
     let h = harness().await;
     let (token, _, adapters) = writable(&h).await;
-    let gate = RootScopeGate::new(adapters.source.clone(), scope()).unwrap();
+    let policy = scope();
     let ledger = RevokeAtEffect {
         inner: SqliteIdempotencyStore::initialize_new(h._dir.path().join("preflight-ledger"))
             .unwrap(),
@@ -476,7 +472,7 @@ async fn revocation_after_full_preflight_is_rechecked_before_provider_effect() {
         append_once(
             adapters.source.as_ref(),
             adapters.source.mutation_ports().unwrap(),
-            &gate,
+            &policy,
             &ledger,
             append_request()
         )

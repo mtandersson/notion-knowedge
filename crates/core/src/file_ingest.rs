@@ -2,7 +2,7 @@
 use crate::{
     audit::{AuditActor, AuditEvent, AuditOutcome, AuditStore, AuditTool, FileKind, SafeFileFacts},
     backend::{BackendErrorKind, PageId},
-    root_scope::RootScopeGate,
+    lifecycle::LifecycleScope,
 };
 use std::future::Future;
 
@@ -123,7 +123,7 @@ pub trait FileIngestAdapter: Send + Sync {
 /// Construct from trusted transport authentication and operator policy only.
 /// No caller-provided identity or operation permission belongs in this context.
 pub struct FileIngestContext<'a> {
-    pub gate: &'a RootScopeGate,
+    pub scope: &'a LifecycleScope,
     pub audit: &'a dyn AuditStore,
     pub actor: AuditActor,
     pub correlation_id: &'a str,
@@ -236,14 +236,9 @@ async fn ingest_file_into<A: FileIngestAdapter>(
     }
     attempt.finished = false;
     let execution = async {
-        if !context.permitted || adapter.configured_scope() != context.gate.configured_scope() {
+        if !context.permitted || adapter.configured_scope() != context.scope {
             return Err(IngestFailure::Denied);
         }
-        let permit = context
-            .gate
-            .authorize(&request.target)
-            .await
-            .map_err(|_| IngestFailure::Denied)?;
         if request.caption.as_deref().is_some_and(|value| value.chars().count() > 2000 || value.chars().any(|ch| ch.is_control() || matches!(ch, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))) { return Err(IngestFailure::InvalidInput); }
         let file = adapter.download(&request.temporary_url).await?;
         let facts = adapter
@@ -258,11 +253,6 @@ async fn ingest_file_into<A: FileIngestAdapter>(
         if !attempt.record(AuditOutcome::Attempted) {
             return Err(IngestFailure::AuditUnavailable);
         }
-        context
-            .gate
-            .revalidate(&permit, context.gate.configured_scope())
-            .await
-            .map_err(|_| IngestFailure::Denied)?;
         attempt.effect = true;
         result.status = IngestStatus::Indeterminate;
         let uploaded = adapter
@@ -288,11 +278,6 @@ async fn ingest_file_into<A: FileIngestAdapter>(
                 }
             })?;
         result.references.upload_id = Some(adapter.upload_id(&uploaded).to_owned());
-        context
-            .gate
-            .revalidate(&permit, context.gate.configured_scope())
-            .await
-            .map_err(|_| IngestFailure::Denied)?;
         let block = adapter
             .attach_tracked(
                 &request.target,
@@ -419,10 +404,7 @@ impl FileIngestBatch {
     ) -> Result<(), IngestFailure> {
         let requests = self.requests.take().ok_or(IngestFailure::InvalidInput)?;
         // Common authority is checked before any item admission/download.
-        if !context.permitted
-            || adapter.configured_scope() != context.gate.configured_scope()
-            || context.gate.authorize(&requests[0].target).await.is_err()
-        {
+        if !context.permitted || adapter.configured_scope() != context.scope {
             return Err(IngestFailure::Denied);
         }
         for (index, request) in requests.into_iter().enumerate() {

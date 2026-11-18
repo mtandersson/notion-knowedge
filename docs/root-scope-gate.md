@@ -5,6 +5,11 @@ This change adds a **provider-independent, fail-closed policy gate**
 the existing `PageLifecycle` port and Notion's metadata-only physical
 ancestry resolver; it makes no Notion mutations.
 
+> Scope of this gate: since #691 the write path (create, append, section
+> update, native file/image attach and file refresh) no longer calls
+> `RootScopeGate`; writes rely on Notion's own permission check for the token.
+> The gate remains for request-bound (OAuth) reads and relation proposals.
+
 ## Authorization invariant
 
 A page UUID, indexed source reference, a search-result `root_page_id`, a
