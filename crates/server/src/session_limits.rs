@@ -39,7 +39,6 @@ struct Entry {
     _permit: OwnedSemaphorePermit,
     last_seen: Instant,
     active_streams: usize,
-    authorization: Option<notion_knowledge_mcp::HttpAuthorization>,
 }
 
 /// One allocation per SDK session. The semaphore owns the hard upper bound.
@@ -64,96 +63,6 @@ impl BoundedSessions {
             entries: Arc::new(Mutex::new(HashMap::new())),
             idle,
         }
-    }
-
-    /// Authorization uses the same bounded registry and lifetime as SDK workers.
-    pub(crate) fn authorize_session(
-        &self,
-        id: &SessionId,
-        auth: &notion_knowledge_mcp::HttpAuthorization,
-    ) -> bool {
-        auth.is_active()
-            && self.entries.lock().is_ok_and(|registry| {
-                registry
-                    .get(id)
-                    .and_then(|entry| entry.authorization.as_ref())
-                    .is_some_and(|bound| bound.same_session(auth))
-            })
-    }
-
-    pub(crate) fn bind_session(
-        &self,
-        id: &SessionId,
-        auth: &notion_knowledge_mcp::HttpAuthorization,
-    ) -> bool {
-        let Ok(mut registry) = self.entries.lock() else {
-            return false;
-        };
-        if !auth.is_active() {
-            return false;
-        }
-        let Some(entry) = registry.get_mut(id) else {
-            return false;
-        };
-        match &entry.authorization {
-            Some(bound) => bound.same_session(auth),
-            None => {
-                entry.authorization = Some(auth.clone());
-                true
-            }
-        }
-    }
-
-    pub(crate) fn has_token(&self, digest: &[u8; 32]) -> bool {
-        self.entries.lock().is_ok_and(|entries| {
-            entries.values().any(|entry| {
-                entry
-                    .authorization
-                    .as_ref()
-                    .is_some_and(|auth| auth.matches_token_digest(digest))
-            })
-        })
-    }
-
-    pub(crate) async fn close_token(&self, digest: &[u8; 32]) {
-        let ids = self
-            .entries
-            .lock()
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter(|(_, entry)| {
-                        entry
-                            .authorization
-                            .as_ref()
-                            .is_some_and(|auth| auth.matches_token_digest(digest))
-                    })
-                    .map(|(id, _)| id.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        for id in ids {
-            let _ = self.close_session(&id).await;
-        }
-    }
-
-    /// An initializer denied after allocation must clean up even if the HTTP
-    /// observer disconnects. The session permit bounds and owns this task.
-    pub(crate) async fn close_denied(self: &Arc<Self>, id: SessionId) {
-        let lease = self
-            .entries
-            .lock()
-            .ok()
-            .and_then(|mut entries| entries.remove(&id));
-        let Some(lease) = lease else {
-            return;
-        };
-        let manager = self.clone();
-        let cleanup = tokio::spawn(async move {
-            let _lease = lease;
-            let _ = manager.inner.close_session(&id).await;
-        });
-        let _ = cleanup.await;
     }
 
     pub(crate) fn has_capacity(&self) -> bool {
@@ -282,7 +191,6 @@ impl SessionManager for BoundedSessions {
                 _metric: Resource::Session.enter(1),
                 last_seen: Instant::now(),
                 active_streams: 0,
-                authorization: None,
             },
         );
         Ok((id, transport))
@@ -410,18 +318,7 @@ pub(crate) async fn limit_stream_responses(
         return overload();
     };
     let metric = Resource::Stream.enter(1);
-    let revoked = request
-        .extensions()
-        .get::<notion_knowledge_mcp::HttpAuthorization>()
-        .map(|auth| Box::pin(auth.cancellation().cancelled_owned()));
-    let deadline = request
-        .extensions()
-        .get::<notion_knowledge_mcp::HttpAuthorization>()
-        .map(|auth| auth.expires_at())
-        .map_or_else(
-            || Instant::now() + budget.max_age,
-            |expires| expires.min(Instant::now() + budget.max_age),
-        );
+    let deadline = Instant::now() + budget.max_age;
     let response = next.run(request).await;
     let streaming = response.headers().get(CONTENT_TYPE).is_some_and(|v| {
         v.to_str()
@@ -438,7 +335,6 @@ pub(crate) async fn limit_stream_responses(
             inner: body,
             permit: Some(permit),
             metric: Some(metric),
-            revoked,
             deadline: Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(
                 deadline,
             ))),
@@ -465,7 +361,6 @@ struct BoundedBody {
     inner: Body,
     permit: Option<OwnedSemaphorePermit>,
     metric: Option<ResourceLease>,
-    revoked: Option<Pin<Box<tokio_util::sync::WaitForCancellationFutureOwned>>>,
     deadline: Pin<Box<tokio::time::Sleep>>,
     finished: bool,
 }
@@ -479,11 +374,7 @@ impl HttpBody for BoundedBody {
         if self.finished {
             return Poll::Ready(None);
         }
-        let revoked = self
-            .revoked
-            .as_mut()
-            .is_some_and(|future| future.as_mut().poll(cx).is_ready());
-        if revoked || self.deadline.as_mut().poll(cx).is_ready() {
+        if self.deadline.as_mut().poll(cx).is_ready() {
             self.inner = Body::empty();
             self.metric.take();
             self.permit.take();
@@ -526,54 +417,6 @@ mod tests {
         assert_ne!(id, new_id);
         manager.close_session(&new_id).await.unwrap();
         assert!(manager.has_capacity());
-    }
-
-    #[tokio::test]
-    async fn delayed_dispatch_cannot_extend_authorized_sse_deadline() {
-        use axum::{Router, middleware, routing::get};
-        let budget = StreamBudget::new(1, Duration::from_secs(2));
-        let auth = notion_knowledge_mcp::HttpAuthorization::new(
-            [1; 32],
-            "grant".into(),
-            1,
-            "workspace".into(),
-            "owner".into(),
-            Instant::now() + Duration::from_millis(300),
-        );
-        let router = Router::new()
-            .route(
-                "/mcp",
-                get(|| async {
-                    tokio::time::sleep(Duration::from_millis(400)).await;
-                    (
-                        [(CONTENT_TYPE, "text/event-stream")],
-                        Body::from_stream(
-                            futures::stream::pending::<Result<Bytes, std::io::Error>>(),
-                        ),
-                    )
-                }),
-            )
-            .layer(middleware::from_fn_with_state(
-                budget,
-                limit_stream_responses,
-            ))
-            .layer(axum::Extension(auth));
-        let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = socket.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(socket, router).await.unwrap();
-        });
-        let response = reqwest::Client::new()
-            .get(format!("http://{addr}/mcp"))
-            .send()
-            .await
-            .unwrap();
-        let bytes = tokio::time::timeout(Duration::from_millis(100), response.bytes())
-            .await
-            .expect("dispatch must not add time to bearer lifetime")
-            .unwrap();
-        assert!(bytes.is_empty());
-        server.abort();
     }
 
     #[tokio::test]

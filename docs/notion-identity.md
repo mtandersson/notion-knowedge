@@ -12,7 +12,7 @@ The thin REST adapter sends a bearer token and explicit `Notion-Version:
 pinned for this stable user endpoint; data-source API work will evaluate newer
 versions separately. The official [retrieve your token's bot user reference](https://developers.notion.com/reference/get-self)
 documents the get-self endpoint and bot response. This verifies credentials,
-not access to specific pages, configured roots or approved OAuth grants.
+not access to specific pages or configured roots.
 
 TLS uses rustls with certificate verification, requests time out after 15 seconds,
 and redirects are refused so credentials cannot be forwarded to another host.

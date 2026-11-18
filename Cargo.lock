@@ -4789,7 +4789,6 @@ dependencies = [
 name = "notion-knowledge-mcp"
 version = "0.1.0"
 dependencies = [
- "http",
  "notion-knowledge-core",
  "notion-knowledge-notion",
  "notion-knowledge-retrieval",

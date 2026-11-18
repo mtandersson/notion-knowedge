@@ -8,7 +8,9 @@ ancestry resolver; it makes no Notion mutations.
 > Scope of this gate: since #691 the write path (create, append, section
 > update, native file/image attach and file refresh) no longer calls
 > `RootScopeGate`; writes rely on Notion's own permission check for the token.
-> The gate remains for request-bound (OAuth) reads and relation proposals.
+> Reads use the inventory `ReadScopeGate` (`ReadAuthority::Inventory`); the
+> request-bound OAuth read path was removed (#732). The gate remains only for
+> relation proposals.
 
 ## Authorization invariant
 

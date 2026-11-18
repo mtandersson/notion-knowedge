@@ -2213,18 +2213,9 @@ async fn read_activation_preserves_protected_storage_and_untrusted_http_cannot_r
     no_bearer.bearer_fallback = None;
     let mut public = retrieval_config(&runtime);
     public.http_bind = "192.0.2.1:3000".parse().unwrap();
-    let mut oauth = config;
-    oauth.oauth_discovery =
-        notion_knowledge_server::config::Config::from_lookup(|name| match name {
-            "NK_OAUTH_ISSUER" => Some("https://auth.example.test".into()),
-            "NK_OAUTH_RESOURCE" => Some("https://knowledge.example.test/mcp".into()),
-            _ => None,
-        })
-        .unwrap()
-        .oauth_discovery;
     let source_reads = runtime.source.attempts.load(Ordering::SeqCst);
     let embeddings = runtime.embeddings.load(Ordering::SeqCst);
-    for mut untrusted in [no_bearer, public, oauth] {
+    for mut untrusted in [no_bearer, public] {
         let index = runtime._dir.path().join("untrusted-missing-index");
         let state = runtime._dir.path().join("untrusted-missing.sqlite");
         untrusted.retrieval.as_mut().unwrap().index = index.clone();
@@ -2285,28 +2276,14 @@ fn storage_files(
 async fn unsuitable_http_startup_keeps_private_read_state_closed_and_never_creates_missing_storage()
 {
     let runtime = TestRuntime::with_scope_policy("webhook-v1").await;
-    for oauth in [false, true] {
+    {
         let mut config = retrieval_config(&runtime);
         config.bearer_fallback = None;
-        let absent = runtime._dir.path().join(if oauth {
-            "absent-oauth"
-        } else {
-            "absent-bootstrap"
-        });
+        let absent = runtime._dir.path().join("absent-bootstrap");
         config.webhook_state_file = Some(absent.join("state.sqlite"));
         config.retrieval.as_mut().unwrap().index = absent.join("index");
         config.graph_index = Some(absent.join("index"));
         config.retrieval.as_mut().unwrap().assets = absent.join("model");
-        if oauth {
-            config.oauth_discovery =
-                notion_knowledge_server::config::Config::from_lookup(|name| match name {
-                    "NK_OAUTH_ISSUER" => Some("https://auth.example.test".into()),
-                    "NK_OAUTH_RESOURCE" => Some("https://knowledge.example.test/mcp".into()),
-                    _ => None,
-                })
-                .unwrap()
-                .oauth_discovery;
-        }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         config.http_bind = listener.local_addr().unwrap();
         let address = config.http_bind;
@@ -2319,18 +2296,6 @@ async fn unsuitable_http_startup_keeps_private_read_state_closed_and_never_creat
             None,
             cancelled,
         ));
-        if oauth {
-            // An explicit content scope without a complete OAuth grant runtime
-            // must fail before binding HTTP or opening any private read state.
-            let result = tokio::time::timeout(Duration::from_secs(10), server)
-                .await
-                .unwrap()
-                .unwrap();
-            assert!(result.is_err());
-            assert!(tokio::net::TcpStream::connect(address).await.is_err());
-            assert!(!absent.exists());
-            continue;
-        }
         for _ in 0..100 {
             if tokio::net::TcpStream::connect(address).await.is_ok() {
                 break;

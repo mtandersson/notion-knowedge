@@ -51,9 +51,10 @@ pub mod runtime {
 
     pub async fn configured(command: Command, stop: CancellationToken) -> Output {
         let config = match Config::from_env() {
-            Ok(c) if c.validate_grant_store().is_ok() => c,
+            Ok(c) => c,
             _ => return output("configuration", 2),
         };
+        config.warn_ignored_settings();
         crate::shutdown::operator(
             "index",
             stop.clone(),

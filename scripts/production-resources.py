@@ -54,9 +54,9 @@ def render(data, environment, directory):
         'stop_signal': 'SIGINT', 'stop_grace_period': '30s',
     }
     (directory / 'compose.json').write_text(json.dumps({'services': {'knowledge': service}}, indent=2) + '\n')
-    # Reuse the reviewed OAuth authority/origin/routes contract; only add quotas.
+    # Reuse the reviewed authority/origin/route contract; only add quotas.
     root = Path(__file__).resolve().parent.parent
-    nginx = (root / 'docs/examples/oauth-nginx.conf').read_text()
+    nginx = (root / 'docs/examples/mcp-nginx.conf').read_text()
     prefix = f'''# Policy-generated limits; use a dedicated nginx process/listener.
 limit_conn_zone $binary_remote_addr zone=knowledge_clients:1m;
 limit_req_zone $binary_remote_addr zone=knowledge_rate:1m rate={data['requests_per_second']}r/s;

@@ -33,9 +33,8 @@ The Notion integration token stays on the server. None of these credentials
 belongs in ChatGPT's OAuth client fields. This deployment needs no MCP OAuth
 callback, public authorization endpoint, or inbound firewall opening.
 
-The implemented [OAuth connection](chatgpt-oauth-acceptance.md) remains a
-separate supported choice. Its person/grant/expiry guarantees do not apply to
-this shared, operator-scoped tunnel connection. Access instead depends on the
+The former OAuth connection was removed (#730); this tunnel is the only
+supported ChatGPT connection. Access depends on the
 tunnel's organization/workspace permissions, the local credential and the
 server's fixed Notion scope. Loopback alone does not exclude other local
 processes. This procedure starts read-only and does not authorize source writes,

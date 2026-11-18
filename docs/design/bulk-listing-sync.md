@@ -159,9 +159,8 @@ discovered by walking it:
   window:** a page moved out of the root, trashed, made unreadable or newly
   excluded in Notion stays readable, including by fresh get, until the next
   walk records it. A page newly placed under a root stays unreadable until
-  then too. Request-bound OAuth reads keep the live check with the caller's
-  grant, because no walk records an inventory for that grant. With no state
-  file configured, every operator read is denied.
+  then too. Every read uses the inventory; there is no live per-request
+  check. With no state file configured, every operator read is denied.
 
 ### 1b. Search as a change accelerator (incremental only)
 

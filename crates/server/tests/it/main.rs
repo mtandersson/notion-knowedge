@@ -10,8 +10,6 @@ mod index_dispatch;
 #[cfg(unix)]
 #[path = "support/listener_shutdown.rs"]
 mod listener_shutdown;
-mod oauth_discovery;
-mod oauth_forget;
 mod reconciliation_command;
 mod reconciliation_dispatch;
 mod session_bounds;

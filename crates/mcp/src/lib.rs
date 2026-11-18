@@ -13,12 +13,6 @@ use rmcp::{
 };
 use std::{io::Write, sync::Arc};
 
-mod request_scope;
-pub use request_scope::{RequestBoundSource, RequestScopeAdapters};
-
-mod http_authorization;
-pub use http_authorization::{HttpAuthorization, OAuthPermissions};
-
 mod tool_budget;
 use tool_budget::ToolBudget;
 
@@ -73,12 +67,6 @@ pub struct KnowledgeServer {
     file_ingestion: Option<Arc<dyn upload::FileIngestion>>,
     /// Deny mutation-capable tools unless the operator explicitly disables read-only mode.
     read_only: bool,
-    http_authorization_required: bool,
-    request_scope_required: bool,
-    request_graph_boost: Option<(
-        Arc<dyn notion_knowledge_core::graph::GraphEdgeStore>,
-        notion_knowledge_core::graph_boost::GraphBoostConfig,
-    )>,
     /// One capacity pool shared across cloned HTTP sessions and stdio calls.
     tool_budget: Arc<ToolBudget>,
     /// Additional opt-in gate for all destructive write operations.
@@ -99,9 +87,6 @@ impl Default for KnowledgeServer {
             max_upload_files: upload::DEFAULT_MAX_FILES,
             file_ingestion: None,
             read_only: true,
-            http_authorization_required: false,
-            request_scope_required: false,
-            request_graph_boost: None,
             tool_budget: Arc::new(ToolBudget::new(tool_budget::DEFAULT_CAPACITY)),
             destructive_writes_enabled: false,
             capability_policy: capabilities::CapabilityPolicy::default(),
@@ -136,65 +121,10 @@ impl KnowledgeServer {
         self.index_health.clone()
     }
 
-    /// Query ports may be shared; upstream authority must come from each request.
-    pub fn with_request_bound_content(mut self) -> Self {
-        self.root_gate = None;
-        self.fresh_source = None;
-        self.file_ingestion = None;
-        self.mutations = None;
-        self.read_only = true;
-        self.http_authorization_required = true;
-        self.request_scope_required = true;
-        self
-    }
-    pub fn requires_request_scope(&self) -> bool {
-        self.request_scope_required
-    }
-    pub fn and_request_graph(
-        mut self,
-        graph: Arc<dyn notion_knowledge_core::graph::GraphEdgeStore>,
-        boost: notion_knowledge_core::graph_boost::GraphBoostConfig,
-    ) -> Self {
-        self.related_graph = Some(graph.clone());
-        self.request_graph_boost = Some((graph, boost));
-        self
-    }
-
-    /// OAuth HTTP handlers require middleware evidence for every tool request.
-    /// Its single supported scope is read-only even if operator writes are on.
-    pub fn with_http_authorization_required(mut self) -> Self {
-        self.http_authorization_required = true;
-        self.read_only = true;
-        self.mutations = None;
-        self
-    }
-
-    fn authorize_context(
-        &self,
-        context: &rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> Result<(), rmcp::ErrorData> {
-        if !self.http_authorization_required {
-            return Ok(());
-        }
-        let auth = context
-            .extensions
-            .get::<http::request::Parts>()
-            .and_then(|parts| parts.extensions.get::<HttpAuthorization>());
-        if !auth.is_some_and(|auth| auth.is_active()) {
-            return Err(rmcp::ErrorData::invalid_request(
-                "MCP authorization required",
-                None,
-            ));
-        }
-        Ok(())
-    }
-
     /// Enforce the configured access mode before exposing or dispatching MCP tools.
     /// Only explicitly audited read tools are permitted in read-only mode.
     fn tool_permitted(&self, name: &str) -> bool {
-        // HTTP writes require the explicit request-bound factory; static
-        // capabilities and builder ordering never enable files or other writes.
-        (!self.http_authorization_required
+        (!self.read_only
             || matches!(
                 name,
                 "knowledge_search"
@@ -202,14 +132,6 @@ impl KnowledgeServer {
                     | "knowledge_sync_status"
                     | "knowledge_related"
             ))
-            && (!self.read_only
-                || matches!(
-                    name,
-                    "knowledge_search"
-                        | "knowledge_get"
-                        | "knowledge_sync_status"
-                        | "knowledge_related"
-                ))
             && (self.destructive_writes_enabled || !write_contract::is_destructive_write(name))
             && self.capability_policy.permits(name)
     }
@@ -285,7 +207,7 @@ impl KnowledgeServer {
 
     /// Inject trusted mutation capabilities without enabling writes. The
     /// independent read-only/destructive/allowlist gates remain mandatory.
-    /// Shipping server startup and request-bound OAuth do not install this.
+    /// Shipping read-only startup does not install this.
     pub fn and_mutations(mut self, runtime: Arc<mutations::MutationRuntime>) -> Self {
         self.mutations = Some(runtime);
         self
@@ -327,17 +249,6 @@ impl KnowledgeServer {
         self.install_root_gate(notion_knowledge_core::root_scope::ReadAuthority::Inventory(
             gate,
         ))
-    }
-
-    /// Request-bound reads check live ancestry with the caller's own grant.
-    fn and_live_authoritative_scope(
-        self,
-        source: Arc<dyn notion_knowledge_core::lifecycle::PageLifecycle>,
-        scope: notion_knowledge_core::lifecycle::LifecycleScope,
-    ) -> Result<Self, &'static str> {
-        let gate = notion_knowledge_core::root_scope::RootScopeGate::new(source, scope)
-            .map_err(|_| "invalid authoritative root scope")?;
-        self.install_root_gate(notion_knowledge_core::root_scope::ReadAuthority::Live(gate))
     }
 
     fn install_root_gate(
@@ -995,26 +906,11 @@ impl ServerHandler for KnowledgeServer {
     async fn list_tools(
         &self,
         _request: Option<rmcp::model::PaginatedRequestParams>,
-        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
-        self.authorize_context(&context)?;
         let _log = EventGuard::new(Operation::McpTool);
         Ok(rmcp::model::ListToolsResult {
-            tools: {
-                let mut tools = self.tool_catalog();
-                if self.request_scope_required {
-                    tools.retain(|tool| {
-                        matches!(
-                            tool.name.as_ref(),
-                            "knowledge_search"
-                                | "knowledge_get"
-                                | "knowledge_sync_status"
-                                | "knowledge_related"
-                        )
-                    });
-                }
-                tools
-            },
+            tools: self.tool_catalog(),
             ..Default::default()
         })
     }
@@ -1048,7 +944,6 @@ impl ServerHandler for KnowledgeServer {
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
-        self.authorize_context(&context)?;
         // Check before argument handling or invoking any adapter; the same
         // handler serves stdio and HTTP, so there is no transport bypass.
         if !self.tool_permitted(request.name.as_ref()) {
@@ -1069,70 +964,7 @@ impl ServerHandler for KnowledgeServer {
                 .into(),
             );
         };
-        if !self.request_scope_required {
-            let authorization = context
-                .extensions
-                .get::<http::request::Parts>()
-                .and_then(|parts| parts.extensions.get::<HttpAuthorization>())
-                .cloned();
-            let result = self.call_tool_authorized(request, context).await;
-            if authorization.is_some_and(|auth| !auth.is_active()) {
-                return Err(rmcp::ErrorData::invalid_request(
-                    "MCP authorization required",
-                    None,
-                ));
-            }
-            return result;
-        }
-        let parts = context
-            .extensions
-            .get::<http::request::Parts>()
-            .ok_or_else(|| rmcp::ErrorData::invalid_request("request scope unavailable", None))?;
-        let adapters = parts
-            .extensions
-            .get::<RequestScopeAdapters>()
-            .cloned()
-            .ok_or_else(|| rmcp::ErrorData::invalid_request("request scope unavailable", None))?;
-        let auth = parts
-            .extensions
-            .get::<HttpAuthorization>()
-            .ok_or_else(|| rmcp::ErrorData::invalid_request("request scope unavailable", None))?;
-        if !auth.same_session(&adapters.authorization)
-            || adapters.scope.workspace_id != auth.workspace_id()
-        {
-            return Err(rmcp::ErrorData::invalid_request(
-                "request scope unavailable",
-                None,
-            ));
-        }
-        adapters.source.validate().await.map_err(|_| {
-            rmcp::ErrorData::invalid_request("request authorization unavailable", None)
-        })?;
-        let mut scoped = self
-            .clone()
-            .and_live_authoritative_scope(adapters.source.clone(), adapters.scope.clone())
-            .map_err(|_| {
-                rmcp::ErrorData::invalid_request("request authorization unavailable", None)
-            })?
-            .and_fresh_source(adapters.source.clone());
-        if let Some((graph, boost)) = &self.request_graph_boost
-            && boost.enabled
-        {
-            scoped = scoped.and_graph_boost(graph.clone(), *boost).map_err(|_| {
-                rmcp::ErrorData::invalid_request("request authorization unavailable", None)
-            })?;
-        }
-        let result = scoped.call_tool_authorized(request, context).await;
-        if !adapters.authorization.is_active() {
-            return Err(rmcp::ErrorData::invalid_request(
-                "MCP authorization required",
-                None,
-            ));
-        }
-        adapters.source.validate().await.map_err(|_| {
-            rmcp::ErrorData::invalid_request("request authorization unavailable", None)
-        })?;
-        result
+        self.call_tool_authorized(request, context).await
     }
 
     fn get_info(&self) -> ServerConfig {

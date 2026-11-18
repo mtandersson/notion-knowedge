@@ -16,11 +16,8 @@ NK_RETRIEVAL=true target/debug/notion-knowledge-server
 
 Supply these immutable startup settings through the service environment:
 
-- For trusted operator stdio/local bearer: `NK_NOTION_AUTH=integration` and a
-  locally held `NOTION_TOKEN` for fresh physical ancestry authorization. For
-  production OAuth: `NK_NOTION_AUTH=none` and the complete
-  [OAuth configuration](oauth-production-setup.md); content uses the request-bound
-  approved grant. No Notion token is taken from MCP requests.
+- `NK_NOTION_AUTH=integration` and a locally held `NOTION_TOKEN` (stdio or
+  loopback bearer HTTP). No Notion token is taken from MCP requests.
 - `NK_NOTION_SCOPE_WORKSPACE_ID`, `NK_NOTION_SCOPE_ROOTS` and the existing scope
   generation and exclusions, exactly matching the operator's committed binding.
 - `NK_WEBHOOK_STATE_FILE`: existing protected operational SQLite database.
@@ -45,12 +42,10 @@ with a bounded error. `--check` validates settings only; actual transport startu
 also validates existing storage and loads the offline provider.
 
 Trusted operator stdio may activate directly. Local fallback HTTP requires
-`NK_HTTP_AUTH=bearer`, its configured token and a loopback listener. Production
-OAuth HTTP instead requires the full [OAuth setup](oauth-production-setup.md)
-and exact matching scope; its [request-bound source](oauth-content.md) authorizes
-each content disclosure. Anonymous and discovery-only HTTP leave retrieval
-unavailable without opening the private index, model or state, including lazy
-sync-status readers. OAuth content never installs webhook/reconciliation writers.
+`NK_HTTP_AUTH=bearer`, its configured token and a loopback listener; it is the
+only HTTP mode (the OAuth HTTP mode was removed in #730). Anonymous HTTP leaves
+retrieval unavailable without opening the private index, model or state,
+including lazy sync-status readers.
 The [production image](container.md) packages this feature; exact model assets
 and compatible index/state remain externally provisioned.
 

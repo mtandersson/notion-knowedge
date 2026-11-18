@@ -4,7 +4,7 @@
 //! search result disclosure and graph lookups from the page inventory the
 //! last tree walk recorded: it is synchronous and never calls Notion, and its
 //! staleness is bounded by reconciliation. [`RootScopeGate`] fetches fresh
-//! physical ancestry for request-bound reads. Neither keeps
+//! physical ancestry for relation proposals. Neither keeps
 //! a positive authorization cache.
 
 use std::{collections::BTreeSet, sync::Arc};
@@ -278,37 +278,24 @@ impl ScopePermit {
     }
 }
 
-/// How a read is authorized. Operator compositions read the page inventory
-/// their own walk records. Request-bound (OAuth) reads keep the live check
-/// with the caller's grant: no walk records an inventory for that grant.
+/// How a read is authorized: from the page inventory the operator's own
+/// walk records.
 #[derive(Clone)]
 pub enum ReadAuthority {
     Inventory(ReadScopeGate),
-    Live(RootScopeGate),
 }
 
 impl ReadAuthority {
     pub fn configured_scope(&self) -> &LifecycleScope {
         match self {
             Self::Inventory(gate) => gate.configured_scope(),
-            Self::Live(gate) => gate.configured_scope(),
         }
     }
 
-    /// Inventory reads never await; live reads fetch and revalidate ancestry.
+    /// Inventory reads never call Notion.
     pub async fn authorize(&self, page: &PageId) -> Result<ScopePermit, ScopeError> {
         match self {
             Self::Inventory(gate) => gate.authorize(page),
-            Self::Live(gate) => {
-                let permit = gate.authorize(page).await?;
-                gate.revalidate(&permit, gate.configured_scope()).await?;
-                let LifecycleStatus::Allowed { roots } = &permit.evidence.status else {
-                    return Err(ScopeError::Denied);
-                };
-                Ok(ScopePermit {
-                    roots: roots.clone(),
-                })
-            }
         }
     }
 }

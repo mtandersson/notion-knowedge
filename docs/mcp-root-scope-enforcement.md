@@ -9,9 +9,8 @@ not in one particular transport.
 
 ## Operator configuration
 
-For trusted operator integration mode (`NK_NOTION_AUTH=integration`,
-`NOTION_TOKEN` held in secret configuration), or complete request-bound
-[OAuth mode](oauth-production-setup.md) (`NK_NOTION_AUTH=none`), configure:
+For integration mode (`NK_NOTION_AUTH=integration`, `NOTION_TOKEN` held in
+secret configuration), configure:
 
 - `NK_NOTION_SCOPE_WORKSPACE_ID`: trusted canonical lowercase hyphenated UUID
   of the workspace associated with the integration credential
@@ -32,8 +31,6 @@ provisioned for that workspace. Notion's workspace parent object contains
 binding remains a prerequisite; a caller cannot supply or change this identity.
 
 Integration mode uses the shared `attach_root_scope` path for HTTP and stdio.
-OAuth HTTP uses [request-bound adapters](oauth-content.md) with the same policy
-checks and live grant evidence; it never substitutes the integration client.
 The normal bootstrap does not install retrieval by default. Explicit
 [`NK_RETRIEVAL=true` activation](installed-retrieval.md) installs the scoped
 semantic/lexical/hybrid adapters for trusted stdio or authenticated loopback

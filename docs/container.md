@@ -257,9 +257,8 @@ HTTP authority and `http://localhost:3000` at the listener port. With bind
 `0.0.0.0`, browser clients should use `http://localhost:3000` as their Origin;
 `http://127.0.0.1:3000` is not an allowed Origin in this configuration. Clients
 without Origin are accepted. If mapping a different host port, allowed Origins
-still use the *container listener port*. The stock Compose example is a loopback bootstrap. The integration indexer override and production
-[OAuth and public-host HTTPS setup](oauth-production-setup.md) require separate
-explicit roles below; the model assets remain externally provisioned. Keep the backend private behind the reviewed proxy.
+still use the *container listener port*. The stock Compose example is a loopback bootstrap. The integration indexer override requires a separate
+explicit role below; the model assets remain externally provisioned. Keep the backend private behind the reviewed proxy.
 
 ## Actual external data locations
 
@@ -352,13 +351,6 @@ The same feature-built executable supports distinct configurations:
 2. **Trusted local reader/operator:** stdio with `NK_RETRIEVAL=true`, matching
    integration scope/assets and compatible existing state. Local `--reconcile`
    and `--index` commands use the production authority as one-shot operators.
-3. **Public OAuth reader:** `--http`, complete [OAuth setup](oauth-production-setup.md),
-   matching scope and `NK_RETRIEVAL=true`. Content uses the approved request-bound
-   grant. This OAuth process does not accept the indexer's integration credential
-   or run an integration webhook/reconciliation writer. Keep grant key/state
-   private, persistent and separate from disposable retrieval storage; never share
-   the grant runtime across replicas. This topology does not claim installed
-   OAuth mutation/file ingestion (#441/#446).
 
 For an actual private indexer, put configuration in a local ignored `.env`,
 never image build arguments. Supply `NOTION_TOKEN`, the exact

@@ -26,10 +26,6 @@ impl Snapshot {
 pub(crate) struct IndexReadiness {
     snapshot: Arc<Snapshot>,
     observer: tokio::task::JoinHandle<()>,
-    #[cfg(test)]
-    table: GuardedChunkTable,
-    #[cfg(test)]
-    exact_id: bool,
 }
 
 impl Drop for IndexReadiness {
@@ -61,21 +57,12 @@ async fn refresh(snapshot: &Snapshot, table: &GuardedChunkTable, exact_id: bool)
     }
 }
 
-#[cfg(test)]
-impl IndexReadiness {
-    pub(crate) async fn check_now(&self) {
-        refresh(&self.snapshot, &self.table, self.exact_id).await;
-    }
-}
-
 pub(crate) fn observe(table: GuardedChunkTable, exact_id: bool) -> Arc<IndexReadiness> {
     // Composition has already opened and validated this exact index.
     let snapshot = Arc::new(Snapshot {
         latest: Mutex::new((DependencyState::Healthy, Instant::now())),
     });
     let latest = snapshot.clone();
-    #[cfg(test)]
-    let test_table = table.clone();
     let observer = tokio::spawn(async move {
         let mut interval = tokio::time::interval(INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -85,14 +72,7 @@ pub(crate) fn observe(table: GuardedChunkTable, exact_id: bool) -> Arc<IndexRead
             refresh(&latest, &table, exact_id).await;
         }
     });
-    Arc::new(IndexReadiness {
-        snapshot,
-        observer,
-        #[cfg(test)]
-        table: test_table,
-        #[cfg(test)]
-        exact_id,
-    })
+    Arc::new(IndexReadiness { snapshot, observer })
 }
 
 #[cfg(test)]

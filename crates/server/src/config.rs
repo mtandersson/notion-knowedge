@@ -2,6 +2,26 @@
 
 use std::{env, ffi::OsString, fmt, net::SocketAddr};
 
+/// Settings of removed multi-user/OAuth features (#730): present values are
+/// ignored with one startup warning, never fatal and never read.
+const REMOVED_SETTINGS: [&str; 15] = [
+    "NK_OAUTH_ISSUER",
+    "NK_OAUTH_RESOURCE",
+    "NK_OAUTH_CLIENT_ID",
+    "NK_OAUTH_CLIENT_REDIRECT_URI",
+    "NK_OAUTH_LOCAL_HTTP",
+    "NK_OAUTH_WRITES",
+    "NK_OAUTH_WRITE_LEDGER_FILE",
+    "NK_OAUTH_WRITE_AUDIT_FILE",
+    "NK_NOTION_OAUTH_CLIENT_ID",
+    "NK_NOTION_OAUTH_CLIENT_SECRET",
+    "NK_NOTION_OAUTH_REDIRECT_URI",
+    "NK_NOTION_GRANT_STATE_FILE",
+    "NK_NOTION_GRANT_KEY_FILE",
+    "NK_NOTION_ALLOWED_WORKSPACE_ID",
+    "NK_NOTION_ALLOWED_USER_ID",
+];
+
 #[derive(Debug)]
 pub struct Config {
     pub http_bind: SocketAddr,
@@ -29,20 +49,11 @@ pub struct Config {
     /// Explicit second gate for destructive operations; defaults disabled.
     pub destructive_writes_enabled: bool,
     pub capability_policy: notion_knowledge_mcp::capabilities::CapabilityPolicy,
-    /// Explicit developer/emergency HTTP-only bearer mode, never OAuth.
+    /// Loopback HTTP bearer; the only HTTP MCP authentication.
     pub bearer_fallback: Option<SecretToken>,
     /// Diagnostics authentication is independent from the MCP route.
     pub health_requires_bearer: bool,
-    /// Fixed public client registration for the staged browser entry point.
-    pub oauth_client: Option<crate::oauth_authorize::Settings>,
-    /// Opt-in discovery mode; all MCP calls are denied pending real OAuth.
-    pub oauth_discovery: Option<crate::oauth_discovery::OAuthDiscovery>,
-    /// Trusted Notion redirect config; an explicit MCP client can start consent.
-    pub notion_oauth_redirect: Option<crate::notion_oauth_redirect::NotionOAuthConfig>,
-    /// Confidential Notion code exchange config, never a live MCP auth grant.
-    pub notion_oauth_callback: Option<NotionCallbackSettings>,
-    /// Explicit opt-in sealed Notion grant state, never activated as MCP auth.
-    pub notion_grant_store: Option<GrantStoreSettings>,
+    ignored_settings: Vec<&'static str>,
     pub notion_auth: NotionAuth,
     /// Trusted process-level root policy; no MCP request can broaden it.
     pub notion_scope: Option<notion_knowledge_core::lifecycle::LifecycleScope>,
@@ -55,25 +66,6 @@ pub struct Config {
     pub graph_boost: notion_knowledge_core::graph_boost::GraphBoostConfig,
     pub retrieval: Option<crate::webhook_worker::WorkerSettings>,
     pub reconciliation_index: Option<crate::webhook_worker::WorkerSettings>,
-}
-
-/// Secrets are excluded from Debug; allowed identifiers are provisioned,
-/// never enrolled from a Notion token response.
-#[derive(Debug)]
-pub struct NotionCallbackSettings {
-    pub client_secret: SecretToken,
-    pub allowed: crate::notion_oauth_callback::NotionOwnerPolicy,
-}
-
-/// Paths refer to operator-managed secret key and private encrypted state.
-pub struct GrantStoreSettings {
-    pub(crate) key_file: std::path::PathBuf,
-    pub(crate) state_file: std::path::PathBuf,
-}
-impl fmt::Debug for GrantStoreSettings {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("GrantStoreSettings([REDACTED])")
-    }
 }
 
 #[derive(Debug)]
@@ -113,31 +105,36 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 impl Config {
-    /// Validate the encrypted state before serving any HTTP or stdio MCP.
-    /// Missing, corrupt, wrong-key, expired, and foreign grants are never
-    /// interpreted as an authenticated principal.
-    pub fn validate_grant_store(&self) -> Result<(), crate::notion_grant_store::StoreError> {
-        let Some(settings) = &self.notion_grant_store else {
-            return Ok(());
-        };
-        let callback = self
-            .notion_oauth_callback
-            .as_ref()
-            .ok_or(crate::notion_grant_store::StoreError::Configuration)?;
-        let registration = self
-            .notion_oauth_redirect
-            .as_ref()
-            .ok_or(crate::notion_grant_store::StoreError::Configuration)?;
-        let store = crate::notion_grant_store::GrantStore::open(
-            &settings.key_file,
-            &settings.state_file,
-            registration.client_id(),
-            callback.allowed.clone(),
-        )?;
-        // An expired access token is still a valid *sealed* grant which may
-        // be refreshed by #124. Never treat it as authorized or usable here.
-        let _ = store.load_for_refresh()?;
-        Ok(())
+    /// Removed settings that were present and ignored (#730).
+    pub fn ignored_settings(&self) -> &[&'static str] {
+        &self.ignored_settings
+    }
+
+    /// One startup warning naming (never echoing values of) ignored settings.
+    pub fn ignored_settings_warning(&self) -> Option<String> {
+        if self.ignored_settings.is_empty() {
+            return None;
+        }
+        let grant_files = self
+            .ignored_settings
+            .iter()
+            .any(|key| key.starts_with("NK_NOTION_GRANT_"));
+        Some(format!(
+            "Warning: ignoring removed settings {}; OAuth and per-user Notion grants are no longer supported (single-user integration token and loopback bearer only).{}",
+            self.ignored_settings.join(", "),
+            if grant_files {
+                " The Notion grant state and key files they name are never read and may be deleted."
+            } else {
+                ""
+            }
+        ))
+    }
+
+    /// Emit the ignored-settings warning to stderr; call once per process start.
+    pub fn warn_ignored_settings(&self) {
+        if let Some(warning) = self.ignored_settings_warning() {
+            eprintln!("{warning}");
+        }
     }
 
     pub fn from_env() -> Result<Self, ConfigError> {
@@ -188,24 +185,13 @@ impl Config {
         let mcp_max_streams = concurrency(&mut lookup, "NK_MCP_MAX_STREAMS", "16", 256)?;
         let mcp_stream_max_seconds =
             concurrency(&mut lookup, "NK_MCP_STREAM_MAX_SECONDS", "300", 3600)? as u64;
-        // Per-user OAuth writes were removed (#731); never silently ignore a
-        // setting that asked for them. The documented explicit opt-out
-        // NK_OAUTH_WRITES=false requested nothing and stays accepted.
-        for removed in [
-            "NK_OAUTH_WRITES",
-            "NK_OAUTH_WRITE_LEDGER_FILE",
-            "NK_OAUTH_WRITE_AUDIT_FILE",
-        ] {
-            let value = lookup(removed);
-            if value.is_some()
-                && !(removed == "NK_OAUTH_WRITES" && value.as_deref() == Some("false".as_ref()))
-            {
-                return Err(invalid(
-                    removed,
-                    "is no longer supported; OAuth writes were removed, use NK_INTEGRATION_WRITES",
-                ));
-            }
-        }
+        // Settings of removed multi-user/OAuth features are ignored, never
+        // fatal; startup warns once with their names (#730).
+        let ignored_settings: Vec<&'static str> = REMOVED_SETTINGS
+            .iter()
+            .copied()
+            .filter(|key| lookup(key).is_some())
+            .collect();
         let read_only = match optional(&mut lookup, "NK_READ_ONLY", "true")?.as_str() {
             "true" => true,
             "false" => false,
@@ -241,53 +227,7 @@ impl Config {
                 invalid("NK_TOOL_BLOCKLIST", "unknown or malformed capability")
             }
         })?;
-        let oauth_local_http = match optional(&mut lookup, "NK_OAUTH_LOCAL_HTTP", "false")?.as_str()
-        {
-            "true" => true,
-            "false" => false,
-            _ => return Err(invalid("NK_OAUTH_LOCAL_HTTP", "must be true or false")),
-        };
-        let oauth_issuer = lookup("NK_OAUTH_ISSUER")
-            .map(|value| text(value, "NK_OAUTH_ISSUER"))
-            .transpose()?;
-        let oauth_resource = lookup("NK_OAUTH_RESOURCE")
-            .map(|value| text(value, "NK_OAUTH_RESOURCE"))
-            .transpose()?;
-        let oauth_discovery = match (oauth_issuer, oauth_resource) {
-            (None, None) if !oauth_local_http => None,
-            (None, None) => {
-                return Err(invalid(
-                    "NK_OAUTH_ISSUER",
-                    "required for local OAuth testing",
-                ));
-            }
-            (Some(issuer), Some(resource)) => Some(
-                if oauth_local_http {
-                    crate::oauth_discovery::OAuthDiscovery::local_http(
-                        &issuer,
-                        &resource,
-                        SocketAddr::new(host, port),
-                    )
-                } else {
-                    crate::oauth_discovery::OAuthDiscovery::new(&issuer, &resource)
-                }
-                .map_err(|key| invalid(key, "invalid OAuth origin/resource or listener"))?,
-            ),
-            (None, Some(_)) => {
-                return Err(invalid(
-                    "NK_OAUTH_ISSUER",
-                    "required with NK_OAUTH_RESOURCE",
-                ));
-            }
-            (Some(_), None) => {
-                return Err(invalid(
-                    "NK_OAUTH_RESOURCE",
-                    "required with NK_OAUTH_ISSUER",
-                ));
-            }
-        };
-        // A static bearer is deliberately never a production default and
-        // cannot coexist with the fail-closed OAuth discovery endpoint.
+        // A static bearer is deliberately never a production default.
         let bearer_mode = optional(&mut lookup, "NK_HTTP_AUTH", "none")?;
         let bearer_value = lookup("NK_HTTP_BEARER_TOKEN");
         let bearer_fallback = match (bearer_mode.as_str(), bearer_value) {
@@ -299,12 +239,6 @@ impl Config {
                 ));
             }
             ("bearer", Some(value)) => {
-                if oauth_discovery.is_some() {
-                    return Err(invalid(
-                        "NK_HTTP_AUTH",
-                        "cannot coexist with OAuth discovery",
-                    ));
-                }
                 if !SocketAddr::new(host, port).ip().is_loopback() {
                     return Err(invalid(
                         "NK_HTTP_HOST",
@@ -341,156 +275,6 @@ impl Config {
                 }
                 _ => return Err(invalid("NK_HTTP_HEALTH_AUTH", "must be none or bearer")),
             };
-        let notion_oauth_client_id = lookup("NK_NOTION_OAUTH_CLIENT_ID")
-            .map(|value| text(value, "NK_NOTION_OAUTH_CLIENT_ID"))
-            .transpose()?;
-        let notion_oauth_redirect_uri = lookup("NK_NOTION_OAUTH_REDIRECT_URI")
-            .map(|value| text(value, "NK_NOTION_OAUTH_REDIRECT_URI"))
-            .transpose()?;
-        let notion_oauth_redirect = match (notion_oauth_client_id, notion_oauth_redirect_uri) {
-            (None, None) => None,
-            (Some(client_id), Some(redirect_uri)) => {
-                let issuer = oauth_discovery.as_ref().ok_or_else(|| {
-                    invalid("NK_OAUTH_ISSUER", "required before Notion OAuth redirect")
-                })?;
-                Some(
-                    crate::notion_oauth_redirect::NotionOAuthConfig::new(
-                        &client_id,
-                        &redirect_uri,
-                        issuer.issuer(),
-                    )
-                    .map_err(|setting| {
-                        invalid(setting, "invalid fixed Notion OAuth configuration")
-                    })?,
-                )
-            }
-            (None, Some(_)) => {
-                return Err(invalid(
-                    "NK_NOTION_OAUTH_CLIENT_ID",
-                    "required with NK_NOTION_OAUTH_REDIRECT_URI",
-                ));
-            }
-            (Some(_), None) => {
-                return Err(invalid(
-                    "NK_NOTION_OAUTH_REDIRECT_URI",
-                    "required with NK_NOTION_OAUTH_CLIENT_ID",
-                ));
-            }
-        };
-        let notion_secret = lookup("NK_NOTION_OAUTH_CLIENT_SECRET")
-            .map(|value| text(value, "NK_NOTION_OAUTH_CLIENT_SECRET"))
-            .transpose()?;
-        let allowed_workspace = lookup("NK_NOTION_ALLOWED_WORKSPACE_ID")
-            .map(|value| text(value, "NK_NOTION_ALLOWED_WORKSPACE_ID"))
-            .transpose()?;
-        let allowed_user = lookup("NK_NOTION_ALLOWED_USER_ID")
-            .map(|value| text(value, "NK_NOTION_ALLOWED_USER_ID"))
-            .transpose()?;
-        let notion_oauth_callback = match (notion_secret, allowed_workspace, allowed_user) {
-            (None, None, None) => None,
-            (Some(secret), Some(workspace), Some(user)) => {
-                if notion_oauth_redirect.is_none() {
-                    return Err(invalid(
-                        "NK_NOTION_OAUTH_CLIENT_ID",
-                        "Notion OAuth client and callback registration required",
-                    ));
-                }
-                // Validate secret without ever putting its value in errors.
-                if secret.is_empty()
-                    || secret.len() > 4096
-                    || !secret.is_ascii()
-                    || secret
-                        .bytes()
-                        .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
-                {
-                    return Err(invalid(
-                        "NK_NOTION_OAUTH_CLIENT_SECRET",
-                        "must be a nonempty server-only credential",
-                    ));
-                }
-                Some(NotionCallbackSettings {
-                    client_secret: SecretToken(secret),
-                    allowed: crate::notion_oauth_callback::NotionOwnerPolicy::new(
-                        &workspace, &user,
-                    )
-                    .map_err(|setting| {
-                        invalid(setting, "must be a canonical nonempty owner identifier")
-                    })?,
-                })
-            }
-            (None, _, _) => {
-                return Err(invalid(
-                    "NK_NOTION_OAUTH_CLIENT_SECRET",
-                    "required with Notion OAuth callback policy",
-                ));
-            }
-            (_, None, _) => {
-                return Err(invalid(
-                    "NK_NOTION_ALLOWED_WORKSPACE_ID",
-                    "required with Notion OAuth callback policy",
-                ));
-            }
-            (_, _, None) => {
-                return Err(invalid(
-                    "NK_NOTION_ALLOWED_USER_ID",
-                    "required with Notion OAuth callback policy",
-                ));
-            }
-        };
-        let state_file = lookup("NK_NOTION_GRANT_STATE_FILE")
-            .map(|value| text(value, "NK_NOTION_GRANT_STATE_FILE"))
-            .transpose()?;
-        let key_file = lookup("NK_NOTION_GRANT_KEY_FILE")
-            .map(|value| text(value, "NK_NOTION_GRANT_KEY_FILE"))
-            .transpose()?;
-        let notion_grant_store = match (state_file, key_file) {
-            (None, None) => None,
-            (Some(state), Some(key)) => {
-                if notion_oauth_callback.is_none() {
-                    return Err(invalid(
-                        "NK_NOTION_OAUTH_CLIENT_SECRET",
-                        "complete Notion OAuth callback configuration required for grant state",
-                    ));
-                }
-                let valid_path = |value: &str| {
-                    let path = std::path::Path::new(value);
-                    path.is_absolute()
-                        && path.file_name().is_some()
-                        && !path
-                            .components()
-                            .any(|part| matches!(part, std::path::Component::ParentDir))
-                        && !value.contains(char::is_control)
-                };
-                if !valid_path(&state) {
-                    return Err(invalid(
-                        "NK_NOTION_GRANT_STATE_FILE",
-                        "must be a safe absolute path",
-                    ));
-                }
-                if !valid_path(&key) || state == key {
-                    return Err(invalid(
-                        "NK_NOTION_GRANT_KEY_FILE",
-                        "must be a separate safe absolute path",
-                    ));
-                }
-                Some(GrantStoreSettings {
-                    state_file: state.into(),
-                    key_file: key.into(),
-                })
-            }
-            (None, Some(_)) => {
-                return Err(invalid(
-                    "NK_NOTION_GRANT_STATE_FILE",
-                    "required with grant key file",
-                ));
-            }
-            (Some(_), None) => {
-                return Err(invalid(
-                    "NK_NOTION_GRANT_KEY_FILE",
-                    "required with grant state file",
-                ));
-            }
-        };
         let notion_auth = match optional(&mut lookup, "NK_NOTION_AUTH", "none")?.as_str() {
             "none" => NotionAuth::None,
             "integration" => {
@@ -517,17 +301,7 @@ impl Config {
         let notion_scope = match (roots, workspace) {
             (None, None) => None,
             (Some(roots), Some(workspace)) => {
-                if oauth_discovery.is_some() {
-                    if !matches!(notion_auth, NotionAuth::None)
-                        || notion_oauth_callback.is_none()
-                        || notion_grant_store.is_none()
-                    {
-                        return Err(invalid(
-                            "NK_NOTION_AUTH",
-                            "OAuth scope requires complete OAuth grant configuration and no integration credentials",
-                        ));
-                    }
-                } else if !matches!(notion_auth, NotionAuth::Integration(_)) {
+                if !matches!(notion_auth, NotionAuth::Integration(_)) {
                     return Err(invalid(
                         "NK_NOTION_AUTH",
                         "integration required for authoritative scope",
@@ -545,16 +319,6 @@ impl Config {
                         "must be canonical page UUID",
                     )
                 })?;
-                if oauth_discovery.is_some()
-                    && notion_oauth_callback
-                        .as_ref()
-                        .is_none_or(|callback| callback.allowed.workspace_id() != workspace_id)
-                {
-                    return Err(invalid(
-                        "NK_NOTION_SCOPE_WORKSPACE_ID",
-                        "must match allowlisted OAuth workspace",
-                    ));
-                }
                 let root_ids: Option<Vec<_>> = roots
                     .split(',')
                     .map(|part| parse(part).map(notion_knowledge_core::backend::PageId))
@@ -867,64 +631,6 @@ impl Config {
             matches!(notion_auth, NotionAuth::Integration(_)),
             notion_scope.is_some(),
         )?;
-        let client_id = lookup("NK_OAUTH_CLIENT_ID")
-            .map(|v| text(v, "NK_OAUTH_CLIENT_ID"))
-            .transpose()?;
-        let client_redirect = lookup("NK_OAUTH_CLIENT_REDIRECT_URI")
-            .map(|v| text(v, "NK_OAUTH_CLIENT_REDIRECT_URI"))
-            .transpose()?;
-        let oauth_client = match (client_id, client_redirect) {
-            (None, None) => None,
-            (Some(id), Some(redirect)) => {
-                let discovery = oauth_discovery.as_ref().ok_or_else(|| {
-                    invalid("NK_OAUTH_ISSUER", "required for MCP client registration")
-                })?;
-                if notion_oauth_callback.is_none() {
-                    return Err(invalid(
-                        "NK_NOTION_ALLOWED_USER_ID",
-                        "complete Notion callback policy required before browser authorization",
-                    ));
-                }
-                Some(
-                    crate::oauth_authorize::Settings::for_discovery(&id, &redirect, discovery)
-                        .map_err(|_| {
-                            invalid(
-                                "NK_OAUTH_CLIENT_REDIRECT_URI",
-                                "invalid fixed MCP client registration",
-                            )
-                        })?,
-                )
-            }
-            (None, Some(_)) => {
-                return Err(invalid(
-                    "NK_OAUTH_CLIENT_ID",
-                    "required with NK_OAUTH_CLIENT_REDIRECT_URI",
-                ));
-            }
-            (Some(_), None) => {
-                return Err(invalid(
-                    "NK_OAUTH_CLIENT_REDIRECT_URI",
-                    "required with NK_OAUTH_CLIENT_ID",
-                ));
-            }
-        };
-        if oauth_discovery.is_some()
-            && notion_scope.is_some()
-            && (webhook_worker.is_some()
-                || reconciliation_schedule.is_some()
-                || file_ingestion.is_some())
-        {
-            return Err(invalid(
-                "NK_WEBHOOK_WORKER",
-                "OAuth content cannot enable integration writers",
-            ));
-        }
-        if oauth_discovery.is_some() && notion_scope.is_some() && oauth_client.is_none() {
-            return Err(invalid(
-                "NK_OAUTH_CLIENT_ID",
-                "registered client required for OAuth content",
-            ));
-        }
         let integration_writes =
             match optional(&mut lookup, "NK_INTEGRATION_WRITES", "false")?.as_str() {
                 "false" => false,
@@ -933,7 +639,6 @@ impl Config {
             };
         if integration_writes
             && (read_only
-                || oauth_discovery.is_some()
                 || !matches!(notion_auth, NotionAuth::Integration(_))
                 || notion_scope.is_none()
                 || bearer_fallback.is_none()
@@ -943,7 +648,7 @@ impl Config {
         {
             return Err(invalid(
                 "NK_INTEGRATION_WRITES",
-                "requires writable integration scope, loopback bearer, retrieval and the shared sync worker without OAuth discovery",
+                "requires writable integration scope, loopback bearer, retrieval and the shared sync worker",
             ));
         }
         let integration_write_stores = crate::write_stores::Settings::parse_keys(
@@ -954,8 +659,8 @@ impl Config {
             "NK_INTEGRATION_WRITE_AUDIT_FILE",
         )?;
         Ok(Self {
+            ignored_settings,
             shutdown_timeout_seconds,
-            oauth_client,
             mcp_max_in_flight,
             mcp_tool_capacity,
             mcp_max_sessions,
@@ -981,10 +686,6 @@ impl Config {
             capability_policy,
             bearer_fallback,
             health_requires_bearer,
-            oauth_discovery,
-            notion_oauth_redirect,
-            notion_oauth_callback,
-            notion_grant_store,
             notion_auth,
             notion_scope,
             webhook,
@@ -1024,66 +725,6 @@ mod tests {
                 .find(|(name, _)| *name == key)
                 .map(|(_, value)| OsString::from(value))
         })
-    }
-
-    #[test]
-    fn local_oauth_requires_explicit_mode_and_matching_loopback_endpoints() {
-        let settings = [
-            ("NK_OAUTH_LOCAL_HTTP", "true"),
-            ("NK_HTTP_PORT", "3300"),
-            ("NK_OAUTH_ISSUER", "http://localhost:3300"),
-            ("NK_OAUTH_RESOURCE", "http://localhost:3300/mcp"),
-        ];
-        assert!(
-            parse(&settings)
-                .unwrap()
-                .oauth_discovery
-                .unwrap()
-                .is_local_http()
-        );
-        for (key, value) in [
-            ("NK_OAUTH_LOCAL_HTTP", "false"),
-            ("NK_OAUTH_LOCAL_HTTP", "TRUE"),
-            ("NK_HTTP_HOST", "0.0.0.0"),
-            ("NK_HTTP_HOST", "192.0.2.1"),
-            ("NK_HTTP_PORT", "3301"),
-            ("NK_OAUTH_ISSUER", "http://localhost.evil:3300"),
-            ("NK_OAUTH_ISSUER", "http://127.0.0.1:3300"),
-            ("NK_OAUTH_ISSUER", "http://localhost:03300"),
-            ("NK_OAUTH_ISSUER", "http://localhost:3300?x=1"),
-            ("NK_OAUTH_RESOURCE", "http://localhost:3301/mcp"),
-            ("NK_OAUTH_RESOURCE", "https://other.example.com/mcp"),
-        ] {
-            let mut values = settings.to_vec();
-            values.retain(|(name, _)| *name != key);
-            values.push((key, value));
-            assert!(parse(&values).is_err(), "{key}={value}");
-        }
-        assert!(parse(&[("NK_OAUTH_LOCAL_HTTP", "true")]).is_err());
-        let discovery = crate::oauth_discovery::OAuthDiscovery::local_http(
-            "http://localhost:3300",
-            "http://localhost:3300/mcp",
-            "127.0.0.1:3300".parse().unwrap(),
-        )
-        .unwrap();
-        for callback in [
-            "https://example.com/callback",
-            "http://127.0.0.1:3301/callback",
-            "http://localhost:3301/callback?x=1",
-        ] {
-            assert!(
-                crate::oauth_authorize::Settings::for_discovery("local-test", callback, &discovery)
-                    .is_err()
-            );
-        }
-        assert!(
-            crate::oauth_authorize::Settings::for_discovery(
-                "local-test",
-                "http://localhost:3301/callback",
-                &discovery
-            )
-            .is_ok()
-        );
     }
 
     #[test]
@@ -1196,71 +837,63 @@ mod tests {
     }
 
     #[test]
-    fn oauth_scope_requires_complete_registration_and_exact_allowlisted_workspace() {
-        const WORKSPACE: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
-        let mut values = vec![
-            ("NK_OAUTH_ISSUER", "https://auth.example.com"),
-            ("NK_OAUTH_RESOURCE", "https://knowledge.example.com/mcp"),
-            ("NK_NOTION_OAUTH_CLIENT_ID", "notion-client"),
+    fn removed_oauth_and_grant_settings_are_ignored_with_one_warning() {
+        const TOKEN: &str = "abcdefghijklmnopqrstuvwxyz0123456789";
+        let single_user = vec![
+            ("NK_NOTION_AUTH", "integration"),
+            ("NOTION_TOKEN", "static-private-token"),
             (
-                "NK_NOTION_OAUTH_REDIRECT_URI",
-                "https://auth.example.com/oauth/notion/callback",
+                "NK_NOTION_SCOPE_WORKSPACE_ID",
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             ),
-            ("NK_NOTION_OAUTH_CLIENT_SECRET", "client-secret"),
-            ("NK_NOTION_ALLOWED_WORKSPACE_ID", WORKSPACE),
-            ("NK_NOTION_ALLOWED_USER_ID", "user-a"),
-            ("NK_NOTION_GRANT_KEY_FILE", "/run/notion/key"),
-            ("NK_NOTION_GRANT_STATE_FILE", "/var/lib/notion/grant"),
-            ("NK_OAUTH_CLIENT_ID", "chatgpt"),
-            (
-                "NK_OAUTH_CLIENT_REDIRECT_URI",
-                "https://chatgpt.example.com/callback",
-            ),
-            ("NK_NOTION_SCOPE_WORKSPACE_ID", WORKSPACE),
             (
                 "NK_NOTION_SCOPE_ROOTS",
                 "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
             ),
+            ("NK_HTTP_AUTH", "bearer"),
+            ("NK_HTTP_BEARER_TOKEN", TOKEN),
         ];
-        let configured = parse(&values).unwrap();
-        assert!(matches!(configured.notion_auth, NotionAuth::None));
-        assert_eq!(configured.notion_scope.unwrap().workspace_id, WORKSPACE);
-        for (removed, value) in [
-            ("NK_OAUTH_WRITES", "true"),
-            ("NK_OAUTH_WRITES", "TRUE"),
-            ("NK_OAUTH_WRITE_LEDGER_FILE", "/var/lib/notion/ledger"),
-            ("NK_OAUTH_WRITE_AUDIT_FILE", "/var/lib/notion/audit"),
-        ] {
-            let mut stale = values.clone();
-            stale.push((removed, value));
-            let error = parse(&stale).unwrap_err();
-            assert_eq!(error.setting, removed);
+        let baseline = parse(&single_user).unwrap();
+        assert!(baseline.ignored_settings().is_empty());
+        assert!(baseline.ignored_settings_warning().is_none());
+        for removed in REMOVED_SETTINGS {
+            // Any value, even a malformed one, is ignored rather than validated.
+            for value in [
+                "https://auth.example.com",
+                "/var/lib/notion/private",
+                "",
+                "TRUE",
+            ] {
+                let mut stale = single_user.clone();
+                stale.push((removed, value));
+                let config = parse(&stale).unwrap();
+                assert_eq!(config.ignored_settings(), [removed]);
+                assert!(config.bearer_fallback.is_some());
+                assert!(matches!(config.notion_auth, NotionAuth::Integration(_)));
+            }
         }
-        let mut opted_out = values.clone();
-        opted_out.push(("NK_OAUTH_WRITES", "false"));
-        assert!(parse(&opted_out).is_ok());
-        values[11].1 = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+        let mut all = single_user.clone();
+        all.extend(REMOVED_SETTINGS.map(|key| (key, "/var/lib/notion/private-value")));
+        let all = parse(&all).unwrap();
+        assert_eq!(all.ignored_settings(), REMOVED_SETTINGS);
         assert_eq!(
-            parse(&values).unwrap_err().setting,
-            "NK_NOTION_SCOPE_WORKSPACE_ID"
+            all.notion_scope.as_ref().unwrap().workspace_id,
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         );
-        values[11].1 = WORKSPACE;
-        let incomplete: Vec<_> = values
-            .iter()
-            .copied()
-            .filter(|(key, _)| {
-                !matches!(*key, "NK_OAUTH_CLIENT_ID" | "NK_OAUTH_CLIENT_REDIRECT_URI")
-            })
-            .collect();
-        assert_eq!(
-            parse(&incomplete).unwrap_err().setting,
-            "NK_OAUTH_CLIENT_ID"
+        let warning = all.ignored_settings_warning().unwrap();
+        assert_eq!(warning.lines().count(), 1);
+        for key in REMOVED_SETTINGS {
+            assert!(warning.contains(key), "{key}");
+        }
+        assert!(!warning.contains("private-value"));
+        assert!(warning.contains("may be deleted"));
+        let oauth_only = parse(&[("NK_OAUTH_ISSUER", "https://auth.example.com")]).unwrap();
+        assert!(
+            !oauth_only
+                .ignored_settings_warning()
+                .unwrap()
+                .contains("may be deleted")
         );
-        values.extend([
-            ("NK_NOTION_AUTH", "integration"),
-            ("NOTION_TOKEN", "static-private-token"),
-        ]);
-        assert_eq!(parse(&values).unwrap_err().setting, "NK_NOTION_AUTH");
     }
 
     #[test]
@@ -1386,17 +1019,6 @@ mod tests {
             .setting,
             "NK_HTTP_HOST"
         );
-        assert_eq!(
-            parse(&[
-                ("NK_HTTP_AUTH", "bearer"),
-                ("NK_HTTP_BEARER_TOKEN", TOKEN),
-                ("NK_OAUTH_ISSUER", "https://auth.example.com"),
-                ("NK_OAUTH_RESOURCE", "https://mcp.example.com/mcp"),
-            ])
-            .unwrap_err()
-            .setting,
-            "NK_HTTP_AUTH"
-        );
     }
 
     #[test]
@@ -1447,225 +1069,6 @@ mod tests {
         .unwrap();
         assert_eq!(custom.webhook_debounce.quiet_ms, 10);
         assert_eq!(custom.webhook_debounce.max_delay_ms, 20);
-    }
-
-    #[test]
-    fn browser_oauth_registration_requires_complete_fixed_provider_policy() {
-        let pair = [
-            ("NK_OAUTH_CLIENT_ID", "chatgpt"),
-            (
-                "NK_OAUTH_CLIENT_REDIRECT_URI",
-                "https://chatgpt.example.com/callback",
-            ),
-        ];
-        assert!(parse(&pair[..1]).is_err());
-        assert!(parse(&pair[1..]).is_err());
-        assert!(parse(&pair).is_err());
-        let mut settings = vec![
-            ("NK_OAUTH_ISSUER", "https://auth.example.com"),
-            ("NK_OAUTH_RESOURCE", "https://knowledge.example.com/mcp"),
-            ("NK_NOTION_OAUTH_CLIENT_ID", "notion-client"),
-            (
-                "NK_NOTION_OAUTH_REDIRECT_URI",
-                "https://auth.example.com/oauth/notion/callback",
-            ),
-            ("NK_NOTION_OAUTH_CLIENT_SECRET", "fixture-secret"),
-            ("NK_NOTION_ALLOWED_WORKSPACE_ID", "workspace-a"),
-            ("NK_NOTION_ALLOWED_USER_ID", "user-a"),
-        ];
-        settings.extend(pair);
-        assert!(parse(&settings).unwrap().oauth_client.is_some());
-        for missing in [
-            "NK_NOTION_ALLOWED_WORKSPACE_ID",
-            "NK_NOTION_ALLOWED_USER_ID",
-            "NK_NOTION_OAUTH_CLIENT_SECRET",
-        ] {
-            let partial: Vec<_> = settings
-                .iter()
-                .copied()
-                .filter(|(key, _)| *key != missing)
-                .collect();
-            assert!(parse(&partial).is_err());
-        }
-        settings.last_mut().unwrap().1 = "https://attacker.example.com/callback#fragment";
-        assert!(parse(&settings).is_err());
-    }
-
-    #[test]
-    fn oauth_discovery_requires_both_canonical_https_uris() {
-        let valid = [
-            ("NK_OAUTH_ISSUER", "https://auth.example.com"),
-            ("NK_OAUTH_RESOURCE", "https://mcp.example.com/mcp"),
-        ];
-        assert!(parse(&valid).unwrap().oauth_discovery.is_some());
-        assert!(parse(&[]).unwrap().oauth_discovery.is_none());
-        assert_eq!(parse(&valid[..1]).unwrap_err().setting, "NK_OAUTH_RESOURCE");
-        assert_eq!(parse(&valid[1..]).unwrap_err().setting, "NK_OAUTH_ISSUER");
-        for (index, value) in [
-            (0, "http://auth.example.com"),
-            (0, "https://user@auth.example.com"),
-            (1, "https://mcp.example.com/mcp?key=private"),
-            (1, "http://mcp.example.com/mcp"),
-        ] {
-            let mut bad = valid;
-            bad[index].1 = value;
-            let error = parse(&bad).unwrap_err();
-            assert_eq!(error.setting, valid[index].0);
-            assert!(!error.to_string().contains(value));
-        }
-    }
-
-    #[test]
-    fn notion_oauth_redirect_requires_paired_registration_and_canonical_issuer_callback() {
-        let base = [
-            ("NK_OAUTH_ISSUER", "https://auth.example.com"),
-            ("NK_OAUTH_RESOURCE", "https://mcp.example.com/mcp"),
-        ];
-        let client = ("NK_NOTION_OAUTH_CLIENT_ID", "client-id");
-        let callback = (
-            "NK_NOTION_OAUTH_REDIRECT_URI",
-            "https://auth.example.com/oauth/notion/callback",
-        );
-        assert!(
-            parse(&[base[0], base[1], client, callback])
-                .unwrap()
-                .notion_oauth_redirect
-                .is_some()
-        );
-        assert!(parse(&[]).unwrap().notion_oauth_redirect.is_none());
-        assert_eq!(
-            parse(&[base[0], base[1], client]).unwrap_err().setting,
-            callback.0
-        );
-        assert_eq!(
-            parse(&[base[0], base[1], callback]).unwrap_err().setting,
-            client.0
-        );
-        assert_eq!(
-            parse(&[client, callback]).unwrap_err().setting,
-            "NK_OAUTH_ISSUER"
-        );
-        for invalid_uri in [
-            "http://auth.example.com/oauth/notion/callback",
-            "https://evil.example.com/oauth/notion/callback",
-            "https://auth.example.com/oauth/notion/callback?next=evil",
-        ] {
-            let invalid = ("NK_NOTION_OAUTH_REDIRECT_URI", invalid_uri);
-            let error = parse(&[base[0], base[1], client, invalid]).unwrap_err();
-            assert_eq!(error.setting, invalid.0);
-            assert!(!error.to_string().contains(invalid_uri));
-        }
-    }
-
-    #[test]
-    fn notion_callback_credentials_and_immutable_owner_must_be_complete() {
-        let base = [
-            ("NK_OAUTH_ISSUER", "https://auth.example.com"),
-            ("NK_OAUTH_RESOURCE", "https://mcp.example.com/mcp"),
-            ("NK_NOTION_OAUTH_CLIENT_ID", "client-123"),
-            (
-                "NK_NOTION_OAUTH_REDIRECT_URI",
-                "https://auth.example.com/oauth/notion/callback",
-            ),
-        ];
-        let secret = ("NK_NOTION_OAUTH_CLIENT_SECRET", "private-credential");
-        let workspace = ("NK_NOTION_ALLOWED_WORKSPACE_ID", "workspace-123");
-        let owner = ("NK_NOTION_ALLOWED_USER_ID", "user-456");
-        assert!(parse(&base).unwrap().notion_oauth_callback.is_none());
-        let correct = [base[0], base[1], base[2], base[3], secret, workspace, owner];
-        assert!(parse(&correct).unwrap().notion_oauth_callback.is_some());
-        assert_eq!(
-            parse(&[base[0], base[1], base[2], base[3], secret, owner])
-                .unwrap_err()
-                .setting,
-            "NK_NOTION_ALLOWED_WORKSPACE_ID"
-        );
-        assert_eq!(
-            parse(&[base[0], base[1], base[2], base[3], secret, workspace])
-                .unwrap_err()
-                .setting,
-            "NK_NOTION_ALLOWED_USER_ID"
-        );
-        assert_eq!(
-            parse(&[base[0], base[1], base[2], base[3], workspace, owner])
-                .unwrap_err()
-                .setting,
-            "NK_NOTION_OAUTH_CLIENT_SECRET"
-        );
-        assert_eq!(
-            parse(&[secret, workspace, owner]).unwrap_err().setting,
-            "NK_NOTION_OAUTH_CLIENT_ID"
-        );
-        for bad in ["", "a secret", "one\nsecret"] {
-            let error = parse(&[
-                base[0],
-                base[1],
-                base[2],
-                base[3],
-                ("NK_NOTION_OAUTH_CLIENT_SECRET", bad),
-                workspace,
-                owner,
-            ])
-            .unwrap_err();
-            assert_eq!(error.setting, "NK_NOTION_OAUTH_CLIENT_SECRET");
-            if !bad.is_empty() {
-                assert!(!error.to_string().contains(bad));
-            }
-        }
-    }
-
-    #[test]
-    fn sealed_grant_configuration_requires_key_state_pair_and_callback() {
-        let core = [
-            ("NK_OAUTH_ISSUER", "https://auth.example.com"),
-            ("NK_OAUTH_RESOURCE", "https://mcp.example.com/mcp"),
-            ("NK_NOTION_OAUTH_CLIENT_ID", "client-id"),
-            (
-                "NK_NOTION_OAUTH_REDIRECT_URI",
-                "https://auth.example.com/oauth/notion/callback",
-            ),
-            ("NK_NOTION_OAUTH_CLIENT_SECRET", "private-secret"),
-            ("NK_NOTION_ALLOWED_WORKSPACE_ID", "workspace-123"),
-            ("NK_NOTION_ALLOWED_USER_ID", "user-456"),
-        ];
-        let key = ("NK_NOTION_GRANT_KEY_FILE", "/run/notion/key");
-        let state = ("NK_NOTION_GRANT_STATE_FILE", "/var/lib/notion/grant");
-        let valid = [
-            core[0], core[1], core[2], core[3], core[4], core[5], core[6], key, state,
-        ];
-        assert!(parse(&valid).unwrap().notion_grant_store.is_some());
-        assert!(parse(&core).unwrap().notion_grant_store.is_none());
-        assert_eq!(
-            parse(&[
-                core[0], core[1], core[2], core[3], core[4], core[5], core[6], key
-            ])
-            .unwrap_err()
-            .setting,
-            "NK_NOTION_GRANT_STATE_FILE"
-        );
-        assert_eq!(
-            parse(&[
-                core[0], core[1], core[2], core[3], core[4], core[5], core[6], state
-            ])
-            .unwrap_err()
-            .setting,
-            "NK_NOTION_GRANT_KEY_FILE"
-        );
-        assert_eq!(
-            parse(&[key, state]).unwrap_err().setting,
-            "NK_NOTION_OAUTH_CLIENT_SECRET"
-        );
-        for malformed in ["relative/grant", "/tmp/../grant", "/var/lib/\ngrant"] {
-            let bad = ("NK_NOTION_GRANT_STATE_FILE", malformed);
-            assert_eq!(
-                parse(&[
-                    core[0], core[1], core[2], core[3], core[4], core[5], core[6], key, bad
-                ])
-                .unwrap_err()
-                .setting,
-                "NK_NOTION_GRANT_STATE_FILE"
-            );
-        }
     }
 
     #[test]

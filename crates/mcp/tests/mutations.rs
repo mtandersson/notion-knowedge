@@ -474,7 +474,7 @@ async fn normalized_final_line_feed_preserves_verified_receipts_and_once_only_re
 }
 
 #[tokio::test]
-async fn defaults_oauth_guards_and_absent_confirmation_hide_or_reject_uninstalled_mutations() {
+async fn defaults_and_absent_confirmation_hide_or_reject_uninstalled_mutations() {
     let f = Fixture::new();
     assert!(
         f.server(false)
@@ -487,13 +487,6 @@ async fn defaults_oauth_guards_and_absent_confirmation_hide_or_reject_uninstalle
             notion_knowledge_mcp::capabilities::CapabilityPolicy::from_lists(None, Some("write"))
                 .unwrap(),
         ),
-        f.server(true)
-            .with_http_authorization_required()
-            .with_read_only(false),
-        KnowledgeServer::default()
-            .with_request_bound_content()
-            .and_mutations(f.runtime(true))
-            .with_read_only(false),
     ] {
         assert!(handler.get_tool("knowledge_create_page").is_none());
         assert!(handler.get_tool("knowledge_append").is_none());

@@ -120,6 +120,7 @@ async fn run() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    config.warn_ignored_settings();
     if all_args
         .iter()
         .any(|arg| arg.starts_with("--migrate-operational-state"))
@@ -137,16 +138,13 @@ async fn run() -> ExitCode {
     }
     if all_args
         .iter()
-        .any(|arg| arg.starts_with("--notion-oauth-forget"))
+        .any(|arg| arg.starts_with("--notion-oauth-"))
     {
-        if all_args != ["--notion-oauth-forget"] {
-            eprintln!("Notion OAuth forget accepts no other arguments.");
-            return ExitCode::from(2);
-        }
-        return match notion_knowledge_server::notion_oauth_runtime::NotionOAuthRuntime::forget_from_config(&config) {
-            Ok(()) => { println!("Stored Notion OAuth grant forgotten; fresh authorization required."); ExitCode::SUCCESS },
-            Err(_) => { eprintln!("Notion OAuth grant could not be forgotten; stop credential users and check private state."); ExitCode::FAILURE },
-        };
+        // Per-user Notion OAuth grants were removed (#730).
+        eprintln!(
+            "Notion OAuth grants are no longer supported; use NK_NOTION_AUTH=integration and --notion-identity."
+        );
+        return ExitCode::from(2);
     }
     if all_args
         .iter()
@@ -185,12 +183,6 @@ async fn run() -> ExitCode {
         };
     }
     notion_knowledge_core::logging::set_level(config.log_level);
-    // Never start HTTP, stdio, diagnostics or --check with a corrupt or
-    // foreign encrypted Notion grant. A missing state means unapproved.
-    if let Err(error) = config.validate_grant_store() {
-        eprintln!("Notion grant state error: {}", safe_error(&error));
-        return ExitCode::from(2);
-    }
     let args: Vec<_> = env::args().skip(1).collect();
     if let Some(position) = args.iter().position(|arg| arg == "--crawl-dry-run") {
         let (roots, rules) = match notion_knowledge_server::crawl_args::parse(&args[position + 1..])
@@ -257,34 +249,6 @@ async fn run() -> ExitCode {
             }
             Err(error) => {
                 eprintln!("{}", safe_error(&error));
-                ExitCode::FAILURE
-            }
-        };
-    }
-    // Explicit local operator probe: the real Notion identity request obtains
-    // an access token ONLY through the validated sealed-grant refresh path.
-    // This is not an OAuth callback, public HTTP route, or MCP auth grant.
-    if env::args()
-        .skip(1)
-        .any(|arg| arg == "--notion-oauth-identity")
-    {
-        let runtime =
-            match notion_knowledge_server::notion_oauth_runtime::NotionOAuthRuntime::from_config(
-                &config,
-            ) {
-                Ok(Some(runtime)) => runtime,
-                _ => {
-                    eprintln!("Notion OAuth credentials unavailable.");
-                    return ExitCode::FAILURE;
-                }
-            };
-        return match runtime.verify_bot_identity().await {
-            Ok(()) => {
-                println!("Notion OAuth integration identity verified.");
-                ExitCode::SUCCESS
-            }
-            Err(_) => {
-                eprintln!("Notion OAuth integration identity not verified.");
                 ExitCode::FAILURE
             }
         };

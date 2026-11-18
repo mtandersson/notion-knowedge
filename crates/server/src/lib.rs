@@ -20,29 +20,8 @@ pub mod webhook;
 
 pub mod webhook_recovery;
 
-/// HTTPS OAuth discovery; never enables MCP authorization by itself.
-pub mod oauth_discovery;
-
-/// Approved-grant-only OAuth authorization code and PKCE engine (#120).
-pub mod oauth_code;
-
-/// Notion OAuth consent redirect and independent single-use CSRF state (#121).
-pub mod notion_oauth_redirect;
-
-/// Notion OAuth callback and confidential code exchange; still not an exposed login.
-pub mod notion_oauth_callback;
-
-/// Encrypted versioned Notion grant store with immutable owner checks (#123).
-pub mod notion_grant_store;
-
-/// Server-only serialized Notion refresh and sealed credential rotation (#124).
-pub mod notion_oauth_refresh;
-
 /// Trusted Notion scope composition shared by HTTP and stdio.
 pub mod root_scope;
-
-/// Single shared HTTP-process Notion OAuth credential composition (#299).
-pub mod notion_oauth_runtime;
 
 pub mod webhook_worker;
 
@@ -65,14 +44,4 @@ mod index_readiness;
 #[cfg(all(unix, feature = "webhook-worker"))]
 pub mod graph_runtime;
 
-/// Browser entry point for staged Notion authorization.
-pub mod oauth_authorize;
-
-/// Installed OAuth MCP resource and exact-token session enforcement.
-mod oauth_mcp;
-
-mod oauth_content;
-
 mod inventory_membership;
-
-mod notion_grant_lease;

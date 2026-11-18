@@ -152,6 +152,7 @@ pub mod runtime {
             Ok(c) => c,
             Err(_) => return Output::error("configuration", 2),
         };
+        config.warn_ignored_settings();
         crate::shutdown::operator(
             "reconciliation",
             stop.clone(),
@@ -162,9 +163,6 @@ pub mod runtime {
     }
 
     async fn configured_inner(command: Command, stop: CancellationToken, config: Config) -> Output {
-        if config.validate_grant_store().is_err() {
-            return Output::error("configuration", 2);
-        }
         let Some(scope) = config.notion_scope else {
             return Output::error("configuration", 2);
         };
