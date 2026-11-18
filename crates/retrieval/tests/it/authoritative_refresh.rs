@@ -1302,6 +1302,880 @@ async fn receipt_authority_conflict_during_preparation_is_never_retried_as_a_sou
     assert!(index.guarded().page_chunks(OTHER).await.unwrap().is_empty());
 }
 
+/// Sync one page as the walk consumer does: one walk, then the page it reached
+/// is prepared from that single read and committed.
+async fn sync_walked(
+    index: &Fixture,
+    handler: &AuthoritativePageRefresh,
+    source: &HttpNotion,
+    page: &str,
+    operation: &str,
+    provider: &CountingProvider,
+) -> Result<notion_knowledge_retrieval::refresh::RefreshResult, RefreshError> {
+    let pages = walked_pages(source, &index.scope).await;
+    let walked = pages.get(page).expect("the walk reached the page");
+    let prepared = handler.prepare_walked(walked, operation).await?;
+    handler
+        .refresh_prefetched(prepared, provider, index.lease.clone(), clock())
+        .await
+}
+
+/// Whether a walk still reaches the page as a live, readable page.
+async fn walk_reaches_live_page(source: &HttpNotion, scope: &LifecycleScope) -> bool {
+    walked_pages(source, scope)
+        .await
+        .get(PAGE)
+        .is_some_and(|walked| walked.skip.is_none() && !walked.entry.in_trash)
+}
+
+fn relation_edges(index: &Fixture) -> Vec<notion_knowledge_core::graph::GraphEdge> {
+    use notion_knowledge_core::graph::GraphEdgeStore;
+    index
+        .coordinator
+        .state()
+        .edges_from(PAGE)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.relation_type().starts_with("relation:"))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn installed_relations_replace_only_their_family_and_repair_both_noop_paths() {
+    use notion_knowledge_core::graph::{GraphEdge, GraphEdgeStore, GraphTarget};
+    use notion_knowledge_retrieval::commit::{ReceiptStatus, RelationProjection};
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    source.change(|m| {
+        m.markdown = format!("[root](https://www.notion.so/{ROOT})");
+        m.relation_name = Some("Ingredients".into());
+        m.relation_targets = vec![OTHER.into(), FOREIGN.into()];
+    });
+    let handler = index.handler(source.client());
+    let provider = CountingProvider::new(index.embed.clone());
+    let page = PageId(PAGE.into());
+    let link = GraphEdge::new(
+        PAGE.into(),
+        GraphTarget::Page {
+            page_id: ROOT.into(),
+        },
+        "link:page".into(),
+        "markdown:0".into(),
+    )
+    .unwrap();
+    sync_walked(
+        &index,
+        &handler,
+        &source,
+        PAGE,
+        "relation-initial",
+        &provider,
+    )
+    .await
+    .unwrap();
+    let first = index
+        .coordinator
+        .receipt("relation-initial")
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.status, ReceiptStatus::Applied);
+    let edges = index.coordinator.state().edges_from(PAGE).unwrap();
+    assert!(edges.contains(&link));
+    let relations = relation_edges(&index);
+    assert_eq!(relations.len(), 2);
+    assert!(
+        relations
+            .iter()
+            .all(|e| e.display_name() == Some("Ingredients")
+                && e.provenance() == "property:related-stable")
+    );
+    // OTHER is placed by the inventory; FOREIGN is not, so it stays unresolved.
+    assert!(relations.iter().any(
+        |e| matches!(e.target(), GraphTarget::Unresolved { reference } if reference == FOREIGN)
+    ));
+    assert!(
+        relations
+            .iter()
+            .any(|e| matches!(e.target(), GraphTarget::Page { page_id } if page_id == OTHER))
+    );
+    assert!(index.guarded().page_chunks(OTHER).await.unwrap().is_empty());
+    assert!(
+        index
+            .guarded()
+            .page_chunks(FOREIGN)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let projection =
+        RelationProjection::new(index.coordinator.binding(), PAGE, false, relations).unwrap();
+    assert!(
+        index
+            .coordinator
+            .relation_projection_complete(&projection)
+            .unwrap()
+    );
+    let repeat = sync_walked(
+        &index,
+        &handler,
+        &source,
+        PAGE,
+        "relation-repeat",
+        &provider,
+    )
+    .await
+    .unwrap();
+    assert_eq!(repeat.outcome, CommitOutcome::AlreadyApplied);
+    assert!(
+        index
+            .coordinator
+            .receipt("relation-repeat")
+            .unwrap()
+            .is_none()
+    );
+    let embeds = provider.embeddings();
+    let sql = rusqlite::Connection::open(&index.db).unwrap();
+    // Missing graph rows despite a compatible marker repairs the unchanged shortcut.
+    sql.execute(
+        "DELETE FROM graph_edges WHERE source_page_id=?1 AND substr(relation_type,1,9)='relation:'",
+        [PAGE],
+    )
+    .unwrap();
+    let repaired = sync_walked(
+        &index,
+        &handler,
+        &source,
+        PAGE,
+        "relation-repair",
+        &provider,
+    )
+    .await
+    .unwrap();
+    assert_eq!(repaired.outcome, CommitOutcome::Applied);
+    assert!(
+        index
+            .coordinator
+            .relation_projection_complete(&projection)
+            .unwrap()
+    );
+    // An immutable applied receipt gets a NEW repair operation after explicit invalidation.
+    sql.execute(
+        "DELETE FROM page_relation_projections WHERE page_id=?1",
+        [PAGE],
+    )
+    .unwrap();
+    sync_walked(
+        &index,
+        &handler,
+        &source,
+        PAGE,
+        "relation-initial",
+        &provider,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        index
+            .coordinator
+            .receipt("relation-initial")
+            .unwrap()
+            .unwrap(),
+        first
+    );
+    assert!(
+        index
+            .coordinator
+            .relation_projection_complete(&projection)
+            .unwrap()
+    );
+    sql.execute("UPDATE graph_edges SET display_name='stale label' WHERE source_page_id=?1 AND substr(relation_type,1,9)='relation:'",[PAGE]).unwrap();
+    let (left, right) = tokio::join!(
+        sync_walked(
+            &index,
+            &handler,
+            &source,
+            PAGE,
+            "relation-initial",
+            &provider
+        ),
+        sync_walked(
+            &index,
+            &handler,
+            &source,
+            PAGE,
+            "relation-initial",
+            &provider
+        )
+    );
+    assert!(left.is_ok() || right.is_ok());
+    for result in [left, right] {
+        if let Err(error) = result {
+            assert_eq!(error, RefreshError::Conflict);
+        }
+    }
+    sync_walked(
+        &index,
+        &handler,
+        &source,
+        PAGE,
+        "relation-initial",
+        &provider,
+    )
+    .await
+    .unwrap();
+    assert!(
+        index
+            .coordinator
+            .relation_projection_complete(&projection)
+            .unwrap()
+    );
+    assert_eq!(
+        index
+            .coordinator
+            .receipt("relation-initial")
+            .unwrap()
+            .unwrap(),
+        first
+    );
+    assert_eq!(provider.embeddings(), embeds);
+    source.change(|m| m.relation_name = Some("Renamed ingredients".into()));
+    sync_walked(
+        &index,
+        &handler,
+        &source,
+        PAGE,
+        "relation-rename",
+        &provider,
+    )
+    .await
+    .unwrap();
+    assert!(
+        relation_edges(&index)
+            .iter()
+            .all(|e| e.display_name() == Some("Renamed ingredients"))
+    );
+    // A target the inventory no longer places in scope resolves to nothing.
+    index.place(OTHER, Some(ROOT), false);
+    sync_walked(
+        &index,
+        &handler,
+        &source,
+        PAGE,
+        "relation-inaccessible",
+        &provider,
+    )
+    .await
+    .unwrap();
+    assert!(
+        relation_edges(&index)
+            .iter()
+            .all(|e| matches!(e.target(), GraphTarget::Unresolved { .. }))
+    );
+    assert!(index.guarded().page_chunks(OTHER).await.unwrap().is_empty());
+    index.place(OTHER, Some(ROOT), true);
+    source.change(|m| m.relation_name = None);
+    sync_walked(
+        &index,
+        &handler,
+        &source,
+        PAGE,
+        "relation-remove",
+        &provider,
+    )
+    .await
+    .unwrap();
+    let zero = RelationProjection::new(index.coordinator.binding(), PAGE, false, vec![]).unwrap();
+    assert!(
+        index
+            .coordinator
+            .relation_projection_complete(&zero)
+            .unwrap()
+    );
+    assert_eq!(
+        index.coordinator.state().edges_from(PAGE).unwrap(),
+        vec![link.clone()]
+    );
+    let repeat = sync_walked(
+        &index,
+        &handler,
+        &source,
+        PAGE,
+        "valid-zero-repeat",
+        &provider,
+    )
+    .await
+    .unwrap();
+    assert_eq!(repeat.outcome, CommitOutcome::AlreadyApplied);
+    assert!(
+        index
+            .coordinator
+            .receipt("valid-zero-repeat")
+            .unwrap()
+            .is_none()
+    );
+    sql.execute(
+        "DELETE FROM page_relation_projections WHERE page_id=?1",
+        [PAGE],
+    )
+    .unwrap();
+    sync_walked(&index, &handler, &source, PAGE, "zero-repair", &provider)
+        .await
+        .unwrap();
+    assert!(
+        index
+            .coordinator
+            .relation_projection_complete(&zero)
+            .unwrap()
+    );
+    // A page the next walk no longer reaches (trashed, then moved out) is
+    // removed without being read, and takes its relations with it.
+    source.change(|m| m.archived = true);
+    assert!(!walk_reaches_live_page(&source, &index.scope).await);
+    handler
+        .remove_unreached(
+            &page,
+            "relation-delete",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    let tombstone =
+        RelationProjection::new(index.coordinator.binding(), PAGE, true, vec![]).unwrap();
+    assert!(
+        index
+            .coordinator
+            .relation_projection_complete(&tombstone)
+            .unwrap()
+    );
+    assert_eq!(index.coordinator.state().edges_from(PAGE).unwrap(), vec![]);
+    assert!(
+        index
+            .coordinator
+            .state()
+            .page_state(PAGE)
+            .unwrap()
+            .unwrap()
+            .is_tombstone()
+    );
+    source.change(|m| {
+        m.archived = false;
+        m.relation_name = Some("Restored".into());
+        m.relation_targets = vec![OTHER.into()];
+    });
+    sync_walked(
+        &index,
+        &handler,
+        &source,
+        PAGE,
+        "relation-restored",
+        &provider,
+    )
+    .await
+    .unwrap();
+    assert_eq!(relation_edges(&index).len(), 1);
+    source.change(|m| m.parent = FOREIGN.into());
+    assert!(!walk_reaches_live_page(&source, &index.scope).await);
+    handler
+        .remove_unreached(
+            &page,
+            "relation-scope-removal",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        index
+            .coordinator
+            .relation_projection_complete(&tombstone)
+            .unwrap()
+    );
+    assert!(
+        index
+            .coordinator
+            .state()
+            .edges_from(PAGE)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_applied_projection_is_recovered_with_a_durable_repair_receipt() {
+    use notion_knowledge_core::graph::GraphEdgeStore;
+    use notion_knowledge_retrieval::commit::ReceiptStatus;
+    let mut index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    source.change(|m| {
+        m.relation_name = Some("Recovered".into());
+        m.relation_targets = vec![OTHER.into()];
+    });
+    let provider = CountingProvider::new(index.embed.clone());
+    let original = "relation-recovery";
+    sync_walked(
+        &index,
+        &index.handler(source.client()),
+        &source,
+        PAGE,
+        original,
+        &provider,
+    )
+    .await
+    .unwrap();
+    let receipt = index.coordinator.receipt(original).unwrap().unwrap();
+    assert_eq!(receipt.status, ReceiptStatus::Applied);
+    let checkpoint = index.coordinator.state().page_state(PAGE).unwrap();
+    let sql = rusqlite::Connection::open(&index.db).unwrap();
+    sql.execute_batch("DELETE FROM page_relation_projections; DELETE FROM graph_edges; CREATE TRIGGER reject_graph BEFORE INSERT ON graph_edges BEGIN SELECT RAISE(ABORT,'repair graph failure'); END;").unwrap();
+    assert!(
+        sync_walked(
+            &index,
+            &index.handler(source.client()),
+            &source,
+            PAGE,
+            original,
+            &provider
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        index.coordinator.state().page_state(PAGE).unwrap(),
+        checkpoint
+    );
+    assert_eq!(
+        index.coordinator.receipt(original).unwrap().unwrap(),
+        receipt
+    );
+    let repair = index.coordinator.relation_repair_id(original).unwrap();
+    assert_ne!(repair, original);
+    assert_eq!(
+        index.coordinator.receipt(&repair).unwrap().unwrap().status,
+        ReceiptStatus::Pending
+    );
+    sql.execute_batch("DROP TRIGGER reject_graph").unwrap();
+    drop(sql);
+    index.coordinator =
+        IndexCommitCoordinator::open(&index.index, &index.db, index.coordinator.binding().clone())
+            .unwrap();
+    assert_eq!(
+        index.coordinator.relation_repair_id(original).unwrap(),
+        repair
+    );
+    sync_walked(
+        &index,
+        &index.handler(source.client()),
+        &source,
+        PAGE,
+        original,
+        &provider,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        index.coordinator.receipt(original).unwrap().unwrap(),
+        receipt
+    );
+    let repaired = index.coordinator.receipt(&repair).unwrap().unwrap();
+    assert_eq!(
+        (repaired.status, repaired.attempts),
+        (ReceiptStatus::Applied, 2)
+    );
+    assert!(
+        index
+            .coordinator
+            .current_relation_projection_complete(PAGE)
+            .unwrap()
+    );
+    assert_eq!(
+        index.coordinator.state().edges_from(PAGE).unwrap()[0].display_name(),
+        Some("Recovered")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn target_only_excluded_and_broken_ancestry_converge_without_source_changes() {
+    use notion_knowledge_core::graph::{GraphEdgeStore, GraphTarget};
+    let mut scope = authority();
+    scope.exclusions.descendants_of.insert(OTHER.into());
+    let index = Fixture::with_scope(scope);
+    index.create().await;
+    let source = HttpNotion::start().await;
+    source.change(|m| {
+        m.relation_name = Some("Related".into());
+        m.relation_targets = vec![FOREIGN.into()];
+    });
+    let handler = index.handler(source.client());
+    let provider = CountingProvider::new(index.embed.clone());
+    let page = PageId(PAGE.into());
+    let root = PageId(ROOT.into());
+    // The target is placed under the root by an earlier walk.
+    index.place(FOREIGN, Some(ROOT), true);
+    assert!(handler.any_resolvable(&[FOREIGN.into()]).await.unwrap());
+    sync_walked(&index, &handler, &source, PAGE, "target-seed", &provider)
+        .await
+        .unwrap();
+    let checkpoint = index.coordinator.state().page_state(PAGE).unwrap();
+    let chunks = index.guarded().page_chunks(PAGE).await.unwrap();
+    let edges = index.coordinator.state().edges_from(PAGE).unwrap();
+    assert!(matches!(edges[0].target(), GraphTarget::Page { .. }));
+    for (run, parent, resolved) in [
+        ("excluded-chain", OTHER, false),
+        ("reentry-exclusion", ROOT, true),
+        (
+            "broken-chain",
+            "99999999-9999-9999-9999-999999999999",
+            false,
+        ),
+        ("reentry-broken", ROOT, true),
+    ] {
+        // Only the target's placement changes: the page itself is untouched.
+        index.place(FOREIGN, Some(parent), true);
+        assert_eq!(
+            handler.any_resolvable(&[FOREIGN.into()]).await.unwrap(),
+            resolved
+        );
+        handler
+            .resolve_relations(
+                &page,
+                notion_knowledge_core::inventory::InventoryParent::Page(ROOT.into()),
+                &root,
+                run,
+                &provider,
+                index.lease.clone(),
+                clock(),
+            )
+            .await
+            .unwrap();
+        let edges = index.coordinator.state().edges_from(PAGE).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(
+            matches!(edges[0].target(), GraphTarget::Page { .. }),
+            resolved
+        );
+        assert_eq!(
+            index.coordinator.state().page_state(PAGE).unwrap(),
+            checkpoint
+        );
+        assert_eq!(index.guarded().page_chunks(PAGE).await.unwrap(), chunks);
+        assert!(
+            index
+                .guarded()
+                .page_chunks(FOREIGN)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(source.foreign_body_reads.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_body_links_follow_authorized_snapshot_cleanup_and_durable_repair() {
+    use notion_knowledge_core::{
+        aliases::{AliasSources, PageAliasStore},
+        graph::{GraphEdgeStore, GraphTarget},
+    };
+    use notion_knowledge_retrieval::commit::ReceiptStatus;
+    let aliases = AliasSources::new(true, vec![]).unwrap();
+    let index = Fixture::new();
+    index.create().await;
+    let source = HttpNotion::start().await;
+    source.change(|m| {
+        m.relation_name = Some("Related".into());
+        m.relation_targets = vec![OTHER.into()];
+        m.markdown = format!(
+            concat!(
+                "[page](https://www.notion.so/{0}) [duplicate](https://www.notion.so/{0})\n",
+                "<mention-page url=\"https://www.notion.so/{0}\"/>\n",
+                "[block](https://www.notion.so/{0}#22222222222222222222222222222222)\n",
+                "[denied](https://www.notion.so/{1})\n",
+                "[broken](https://www.notion.so/malformed?token=fixture-secret)\n",
+                "[external](https://example.org/{0}) [lookalike](https://notion.so.evil.org/{0})\n",
+                "`[code](https://www.notion.so/{2})`\n",
+                "```\n<page url=\"https://www.notion.so/{2}\"/>\n```\n",
+                "\\<page url=\"https://www.notion.so/{2}\"/>\n"
+            ),
+            OTHER, FOREIGN, ROOT
+        );
+    });
+    let provider = CountingProvider::new(index.embed.clone());
+    let page = PageId(PAGE.into());
+    let handler = index
+        .handler(source.client())
+        .with_alias_sources(aliases.clone());
+    sync_walked(&index, &handler, &source, PAGE, "links-first", &provider)
+        .await
+        .unwrap();
+    let first = index.coordinator.receipt("links-first").unwrap().unwrap();
+    let edges = index.coordinator.state().edges_from(PAGE).unwrap();
+    let links: Vec<_> = edges
+        .iter()
+        .filter(|edge| edge.relation_type().starts_with("link:"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        links.len(),
+        4,
+        "page duplicate/mention collapse, block, denied, invalid"
+    );
+    assert_eq!(
+        links
+            .iter()
+            .filter(
+                |edge| matches!(edge.target(), GraphTarget::Page { page_id } if page_id == OTHER)
+            )
+            .count(),
+        2
+    );
+    assert!(links.iter().any(|edge| matches!(edge.target(), GraphTarget::Unresolved { reference } if reference == FOREIGN)));
+    assert!(links.iter().any(|edge| matches!(edge.target(), GraphTarget::Unresolved { reference } if reference.starts_with("invalid-page-link:"))));
+    assert!(!format!("{links:?}").contains("fixture-secret"));
+    assert!(
+        links
+            .iter()
+            .all(|edge| edge.provenance().starts_with("markdown:"))
+    );
+    // Targets are placed from the inventory and never indexed through a link.
+    assert!(index.guarded().page_chunks(OTHER).await.unwrap().is_empty());
+    let sql = rusqlite::Connection::open(&index.db).unwrap();
+    sql.execute(
+        "DELETE FROM graph_edges WHERE source_page_id=?1 AND substr(relation_type,1,5)='link:'",
+        [PAGE],
+    )
+    .unwrap();
+    sql.execute_batch("CREATE TRIGGER reject_link BEFORE INSERT ON graph_edges WHEN substr(NEW.relation_type,1,5)='link:' BEGIN SELECT RAISE(ABORT,'link failure'); END;").unwrap();
+    assert!(
+        sync_walked(&index, &handler, &source, PAGE, "links-first", &provider)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        index.coordinator.receipt("links-first").unwrap().unwrap(),
+        first
+    );
+    assert!(!index.coordinator.current_body_links_complete(PAGE).unwrap());
+    let repair = index
+        .coordinator
+        .unfinished_alias_repair_id("links-first", PAGE)
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        index.coordinator.receipt(&repair).unwrap().unwrap().status,
+        ReceiptStatus::Applied
+    );
+    sql.execute_batch("DROP TRIGGER reject_link").unwrap();
+    let reopened =
+        IndexCommitCoordinator::open(&index.index, &index.db, index.coordinator.binding().clone())
+            .unwrap();
+    let restarted = AuthoritativePageRefresh::new(
+        source.client(),
+        GuardedChunkTable::bind(
+            &index.index,
+            "chunks",
+            index.embed.clone(),
+            reopened.clone(),
+        )
+        .unwrap(),
+        reopened.clone(),
+        authority(),
+        &index.journal_scope,
+        chunk_config(),
+    )
+    .unwrap()
+    .with_alias_sources(aliases);
+    sync_walked(&index, &restarted, &source, PAGE, "links-first", &provider)
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened.receipt(&repair).unwrap().unwrap().status,
+        ReceiptStatus::Applied
+    );
+    assert_eq!(reopened.state().edges_from(PAGE).unwrap(), edges);
+    // A target the inventory stops placing changes the link effect without
+    // indexing target content.
+    index.place(OTHER, Some(ROOT), false);
+    sync_walked(&index, &restarted, &source, PAGE, "links-denied", &provider)
+        .await
+        .unwrap();
+    assert!(
+        reopened
+            .state()
+            .edges_from(PAGE)
+            .unwrap()
+            .iter()
+            .all(|edge| matches!(edge.target(), GraphTarget::Unresolved { .. }))
+    );
+    index.place(OTHER, Some(ROOT), true);
+    source.change(|m| {
+        m.markdown = format!("<page url=\"https://www.notion.so/{OTHER}\"/>");
+    });
+    sync_walked(
+        &index,
+        &restarted,
+        &source,
+        PAGE,
+        "links-mention",
+        &provider,
+    )
+    .await
+    .unwrap();
+    assert_eq!(reopened.state().edges_from(PAGE).unwrap().len(), 2);
+    source.change(|m| m.markdown.clear());
+    sync_walked(&index, &restarted, &source, PAGE, "links-empty", &provider)
+        .await
+        .unwrap();
+    let remaining = reopened.state().edges_from(PAGE).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].relation_type(), "relation:related-stable");
+    assert_eq!(
+        reopened
+            .state()
+            .lookup_alias(WORKSPACE, ROOT, "First")
+            .unwrap(),
+        vec![PAGE.to_owned()]
+    );
+    source.change(|m| m.markdown = format!("[again](https://www.notion.so/{OTHER})"));
+    sync_walked(&index, &restarted, &source, PAGE, "links-again", &provider)
+        .await
+        .unwrap();
+    source.change(|m| m.archived = true);
+    assert!(!walk_reaches_live_page(&source, &index.scope).await);
+    restarted
+        .remove_unreached(
+            &page,
+            "links-tombstone",
+            &provider,
+            index.lease.clone(),
+            clock(),
+        )
+        .await
+        .unwrap();
+    assert!(reopened.state().edges_from(PAGE).unwrap().is_empty());
+    assert!(reopened.current_body_links_complete(PAGE).unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn walked_sync_commits_body_links_and_never_applies_with_missing_link_rows() {
+    use notion_knowledge_core::graph::{GraphEdgeStore, GraphTarget};
+    use notion_knowledge_retrieval::commit::ReceiptStatus;
+    let index = Fixture::new();
+    index.create().await;
+    index.place(FOREIGN, Some(ROOT), true);
+    let source = HttpNotion::start().await;
+    source.change(|m| {
+        m.markdown = format!("<mention-page url=\"https://www.notion.so/{FOREIGN}\"/>");
+        m.relation_name = Some("Related".into());
+        m.relation_targets = vec![OTHER.into()];
+    });
+    let handler = index.handler(source.client());
+    let provider = CountingProvider::new(index.embed.clone());
+    sync_walked(
+        &index,
+        &handler,
+        &source,
+        PAGE,
+        "body-link-inventory",
+        &provider,
+    )
+    .await
+    .unwrap();
+    let edges = index.coordinator.state().edges_from(PAGE).unwrap();
+    assert_eq!(edges.len(), 2);
+    assert!(edges.iter().any(|edge| edge.relation_type() == "link:page"
+        && matches!(edge.target(), GraphTarget::Page { page_id } if page_id == FOREIGN)));
+    // This target is referenced exclusively by the body: the unchanged page
+    // must still update the graph when the inventory stops placing it.
+    index.place(FOREIGN, Some(ROOT), false);
+    sync_walked(
+        &index,
+        &handler,
+        &source,
+        PAGE,
+        "body-only-target-denied",
+        &provider,
+    )
+    .await
+    .unwrap();
+    assert!(
+        index
+            .coordinator
+            .state()
+            .edges_from(PAGE)
+            .unwrap()
+            .iter()
+            .filter(|edge| edge.relation_type().starts_with("link:"))
+            .all(|edge| matches!(edge.target(), GraphTarget::Unresolved { .. }))
+    );
+    index.place(FOREIGN, Some(ROOT), true);
+    sync_walked(
+        &index,
+        &handler,
+        &source,
+        PAGE,
+        "body-only-target-restored",
+        &provider,
+    )
+    .await
+    .unwrap();
+    assert_eq!(index.coordinator.state().edges_from(PAGE).unwrap(), edges);
+    let sql = rusqlite::Connection::open(&index.db).unwrap();
+    sql.execute(
+        "DELETE FROM graph_edges WHERE source_page_id=?1 AND substr(relation_type,1,5)='link:'",
+        [PAGE],
+    )
+    .unwrap();
+    sql.execute_batch(&format!("CREATE TRIGGER fail_link BEFORE INSERT ON graph_edges WHEN substr(NEW.relation_type,1,5)='link:' AND NEW.source_page_id='{PAGE}' BEGIN SELECT RAISE(ABORT,'link persistence'); END;")).unwrap();
+    assert!(
+        sync_walked(
+            &index,
+            &handler,
+            &source,
+            PAGE,
+            "body-link-repair",
+            &provider
+        )
+        .await
+        .is_err()
+    );
+    assert!(!index.coordinator.current_body_links_complete(PAGE).unwrap());
+    assert!(
+        index
+            .coordinator
+            .receipt("body-link-repair")
+            .unwrap()
+            .is_none_or(|receipt| receipt.status != ReceiptStatus::Applied)
+    );
+    sql.execute_batch("DROP TRIGGER fail_link").unwrap();
+    sync_walked(
+        &index,
+        &handler,
+        &source,
+        PAGE,
+        "body-link-repair",
+        &provider,
+    )
+    .await
+    .unwrap();
+    assert!(index.coordinator.current_body_links_complete(PAGE).unwrap());
+    assert_eq!(index.coordinator.state().edges_from(PAGE).unwrap(), edges);
+    source.change(|m| {
+        m.markdown.clear();
+        m.revision = "2026-10-11T12:00:00Z".into();
+    });
+    sync_walked(&index, &handler, &source, PAGE, "body-link-edit", &provider)
+        .await
+        .unwrap();
+    let remaining = index.coordinator.state().edges_from(PAGE).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert!(remaining[0].relation_type().starts_with("relation:"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unchanged_owned_source_poll_releases_guard_after_cancelled_observer_and_lease_loss() {
     let index = Fixture::new();
