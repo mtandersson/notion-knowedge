@@ -43,7 +43,7 @@ pub async fn compose(
     {
         return Err("integration write transport unavailable");
     }
-    crate::oauth_writes::validate_stores(config, stores)?;
+    crate::write_stores::validate_stores(config, stores)?;
     let scope = config
         .notion_scope
         .clone()

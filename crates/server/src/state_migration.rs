@@ -33,7 +33,7 @@ pub fn run(config: &Config, args: &[String]) -> Result<(), &'static str> {
     if let Some(grant) = &config.notion_grant_store {
         protected.extend([grant.key_file.as_path(), grant.state_file.as_path()]);
     }
-    if let Some(stores) = &config.oauth_write_stores {
+    if let Some(stores) = &config.integration_write_stores {
         protected.extend([stores.ledger.as_path(), stores.audit.as_path()]);
     }
     if let Some(files) = &config.file_ingestion {

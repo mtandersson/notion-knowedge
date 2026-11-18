@@ -3,9 +3,7 @@
 use crate::notion_oauth_runtime::{CredentialError, NotionOAuthRuntime};
 use notion_knowledge_core::{
     backend::{
-        AppendPageContent, BackendError, BackendErrorKind, BackendFuture, CreatePage, NotionRead,
-        NotionSectionWrite, NotionWrite, Page, PageContent, PageId, ReplacePageContent,
-        UpdateSectionContent,
+        BackendError, BackendErrorKind, BackendFuture, NotionRead, Page, PageContent, PageId,
     },
     lifecycle::{LifecycleEvidence, LifecycleScope, PageLifecycle},
 };
@@ -84,20 +82,6 @@ impl BoundSource {
     }
 }
 impl RequestBoundSource for BoundSource {
-    fn mutation_source(
-        self: Arc<Self>,
-    ) -> Option<Arc<dyn notion_knowledge_mcp::mutations::MutationSource>> {
-        if self.authorization.permissions().can_write() {
-            Some(self)
-        } else {
-            None
-        }
-    }
-
-    fn mutation_ports(&self) -> Option<&dyn notion_knowledge_mcp::RequestBoundMutations> {
-        self.authorization.permissions().can_write().then_some(self)
-    }
-
     fn validate(&self) -> BackendFuture<'_, ()> {
         Box::pin(async move {
             RequestGrantAuthority::acquire(&self.runtime, &self.authorization)
@@ -195,7 +179,8 @@ impl RequestGrantAuthority {
 }
 impl RequestAuthority for RequestGrantAuthority {
     fn validate(&self, mutation: bool) -> Result<(), BackendError> {
-        if mutation && !self.authorization.permissions().can_write() {
+        // ChatGPT OAuth sessions are read-only; writes use the integration path.
+        if mutation {
             return Err(failure(BackendErrorKind::PermissionDenied));
         }
         if !self.authorization.is_active()
@@ -212,44 +197,5 @@ impl RequestAuthority for RequestGrantAuthority {
             return Err(failure(BackendErrorKind::Unauthenticated));
         }
         Ok(())
-    }
-}
-impl NotionWrite for BoundSource {
-    fn replace_content(&self, _request: ReplacePageContent) -> BackendFuture<'_, Page> {
-        // Whole-page replacement is not an implemented semantic capability.
-        Box::pin(async { Err(failure(BackendErrorKind::PermissionDenied)) })
-    }
-    fn append_content(&self, request: AppendPageContent) -> BackendFuture<'_, Page> {
-        Box::pin(async move {
-            if !self.authorization.permissions().can_write() {
-                return Err(failure(BackendErrorKind::PermissionDenied));
-            }
-            self.operation(move |client| async move {
-                NotionWrite::append_content(&client, request).await
-            })
-            .await
-        })
-    }
-    fn create_page(&self, request: CreatePage) -> BackendFuture<'_, Page> {
-        Box::pin(async move {
-            if !self.authorization.permissions().can_write() {
-                return Err(failure(BackendErrorKind::PermissionDenied));
-            }
-            self.operation(
-                move |client| async move { NotionWrite::create_page(&client, request).await },
-            )
-            .await
-        })
-    }
-}
-impl NotionSectionWrite for BoundSource {
-    fn update_section(&self, request: UpdateSectionContent) -> BackendFuture<'_, ()> {
-        Box::pin(async move {
-            if !self.authorization.permissions().can_write() {
-                return Err(failure(BackendErrorKind::PermissionDenied));
-            }
-            self.operation(move |client| async move { client.update_section(request).await })
-                .await
-        })
     }
 }

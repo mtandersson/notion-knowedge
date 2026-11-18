@@ -15,10 +15,6 @@ pub struct Settings {
     pub multipart: Option<MultipartPolicy>,
     pub audit_file: PathBuf,
     pub retention: AuditRetention,
-    #[cfg(test)]
-    pub source_clock: Option<std::sync::Arc<dyn Fn() -> i64 + Send + Sync>>,
-    #[cfg(test)]
-    pub request_completion: Option<std::sync::Arc<tokio::sync::Notify>>,
 }
 impl std::fmt::Debug for Settings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -139,10 +135,6 @@ impl Settings {
             multipart,
             audit_file,
             retention,
-            #[cfg(test)]
-            source_clock: None,
-            #[cfg(test)]
-            request_completion: None,
         }))
     }
 }
@@ -206,10 +198,6 @@ pub(crate) struct Runtime {
     scope: notion_knowledge_core::lifecycle::LifecycleScope,
     audit: notion_knowledge_retrieval::audit::SqliteAuditStore,
     policy: notion_knowledge_core::file_ingest::FileBatchPolicy,
-    actor: notion_knowledge_core::audit::AuditActor,
-    #[cfg(all(unix, feature = "webhook-worker"))]
-    intent: Option<std::sync::Arc<crate::file_refresh::AuthorizedFileIntent>>,
-    request_cancel: Option<tokio_util::sync::CancellationToken>,
 }
 impl Runtime {
     pub(crate) fn new(
@@ -257,10 +245,6 @@ impl Runtime {
                 settings.retention,
             )
             .map_err(|_| "file ingestion audit unavailable")?,
-            actor: notion_knowledge_core::audit::AuditActor::Server,
-            #[cfg(all(unix, feature = "webhook-worker"))]
-            intent: None,
-            request_cancel: None,
             policy: notion_knowledge_core::file_ingest::FileBatchPolicy::new(maximum_files)
                 .map_err(|_| "file batch policy unavailable")?,
         })
@@ -298,29 +282,14 @@ impl notion_knowledge_mcp::upload::FileIngestion for Runtime {
             let context = FileIngestContext {
                 scope: &self.scope,
                 audit: &self.audit,
-                actor: self.actor,
+                actor: notion_knowledge_core::audit::AuditActor::Server,
                 correlation_id: correlation,
                 permitted: true,
             };
             // Keep the request-owned batch OUTSIDE this cancellable execution
             // future, so receipts and earlier results survive cancellation.
-            let request_cancel = self.request_cancel.clone().unwrap_or_default();
-            let renew = async {
-                #[cfg(all(unix, feature = "webhook-worker"))]
-                if let Some(owner) = &self.intent {
-                    loop {
-                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                        if owner.renew(120).is_err() {
-                            return;
-                        }
-                    }
-                }
-                std::future::pending::<()>().await;
-            };
             let (failure, cancelled) = tokio::select! {
                 biased;
-                _ = request_cancel.cancelled() => (None, true),
-                _ = renew => (Some(IngestFailure::Denied), true),
                 _ = cancellation => (None, true),
                 result = batch.execute(&self.adapter, &context) => (result.err(), false),
             };
@@ -366,44 +335,6 @@ impl notion_knowledge_mcp::upload::FileIngestion for Runtime {
                     IngestStatus::Failed => "failed", IngestStatus::Denied => "denied", IngestStatus::Indeterminate => "indeterminate", IngestStatus::Verified => "verified", IngestStatus::VerifiedAuditFailed => "verified_audit_failed",
                 },"target":outcome.references.target.as_ref().map(|p| &p.0),"upload_id":outcome.references.upload_id,"block_id":outcome.references.block_id,"terminal_audited":outcome.terminal_audited,"failure":outcome.failure.map(failure_name)}),
             }).collect();
-            #[allow(unused_mut)]
-            let mut results = results;
-            #[cfg(all(unix, feature = "webhook-worker"))]
-            if let Some(owner) = &self.intent {
-                let possible = owner.mutation_attempted().unwrap_or(true);
-                let uncertain = cancelled
-                    || batch.results().iter().any(|item| {
-                        item.outcome
-                            .as_ref()
-                            .is_some_and(|outcome| outcome.status == IngestStatus::Indeterminate)
-                    });
-                // A canceled/ambiguous network operation does not prove remote
-                // quiescence. Keep its pre-admitted job held for reconciliation.
-                let settled = !uncertain && owner.settle(possible).is_ok();
-                let status = owner.status().unwrap_or_else(|_| serde_json::json!({"source_intent":"recovery_required","index_status":"unavailable"}));
-                for (item, output) in batch.results().iter().zip(&mut results) {
-                    let affected = item.outcome.as_ref().is_some_and(|result| {
-                        result.references.upload_id.is_some()
-                            || matches!(
-                                result.status,
-                                IngestStatus::Indeterminate
-                                    | IngestStatus::Verified
-                                    | IngestStatus::VerifiedAuditFailed
-                            )
-                    });
-                    output["index_status"] = if !affected && settled {
-                        serde_json::json!("not_needed")
-                    } else if status["source_intent"] == "held" {
-                        serde_json::json!("held")
-                    } else {
-                        status["index_status"].clone()
-                    };
-                    if affected || !settled {
-                        output["source_intent"] = status["source_intent"].clone();
-                        output["refresh"] = serde_json::json!({"workspace_id":owner.key().workspace_id,"page_id":owner.key().page_id,"mutation_digest":owner.key().mutation_digest});
-                    }
-                }
-            }
             Ok(
                 serde_json::json!({"files":results,"partial_success":batch.partial_success(),"failure":if cancelled {Some("cancelled")}else{failure.map(failure_name)},"cancelled":cancelled}),
             )
@@ -506,324 +437,5 @@ mod tests {
         assert!(validate_audit_path(&file).is_err());
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(validate_audit_path(&file).is_ok());
-    }
-}
-
-#[cfg(all(unix, feature = "webhook-worker"))]
-#[derive(Clone)]
-pub(crate) struct OAuthFactory {
-    pub runtime: crate::notion_oauth_runtime::NotionOAuthRuntime,
-    pub coordinator: std::sync::Arc<notion_knowledge_retrieval::commit::IndexCommitCoordinator>,
-    pub settings: Settings,
-    pub scope: notion_knowledge_core::lifecycle::LifecycleScope,
-    pub maximum_files: usize,
-}
-
-#[cfg(all(unix, feature = "webhook-worker"))]
-struct OAuthService {
-    factory: OAuthFactory,
-    authorization: notion_knowledge_mcp::HttpAuthorization,
-    scope: notion_knowledge_core::lifecycle::LifecycleScope,
-    cancellation: tokio_util::sync::CancellationToken,
-}
-#[cfg(all(unix, feature = "webhook-worker"))]
-impl notion_knowledge_mcp::upload::RequestFileIngestionFactory for OAuthFactory {
-    fn bind<'a>(
-        &'a self,
-        adapters: notion_knowledge_mcp::RequestScopeAdapters,
-        context: &'a rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<
-                        std::sync::Arc<dyn notion_knowledge_mcp::upload::FileIngestion>,
-                        rmcp::ErrorData,
-                    >,
-                > + Send
-                + 'a,
-        >,
-    > {
-        Box::pin(async move {
-            if adapters.scope != self.scope
-                || !adapters.authorization.permissions().can_write()
-                || context.ct.is_cancelled()
-            {
-                return Err(rmcp::ErrorData::invalid_request(
-                    "file authorization unavailable",
-                    None,
-                ));
-            }
-            adapters.source.validate().await.map_err(|_| {
-                rmcp::ErrorData::invalid_request("file authorization unavailable", None)
-            })?;
-            Ok(std::sync::Arc::new(OAuthService {
-                factory: self.clone(),
-                authorization: adapters.authorization,
-                scope: adapters.scope,
-                cancellation: context.ct.clone(),
-            })
-                as std::sync::Arc<
-                    dyn notion_knowledge_mcp::upload::FileIngestion,
-                >)
-        })
-    }
-}
-#[cfg(all(unix, feature = "webhook-worker"))]
-impl notion_knowledge_mcp::upload::FileIngestion for OAuthService {
-    fn refresh<'a>(
-        &'a self,
-        input: notion_knowledge_mcp::upload::FileRefreshRequest,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<serde_json::Value, &'static str>> + Send + 'a>,
-    > {
-        Box::pin(async move {
-            use notion_knowledge_core::write_refresh::RefreshKey;
-            if self.cancellation.is_cancelled() {
-                return Err("file_refresh_denied");
-            }
-            let queue = crate::grant_refresh::AuthorizedRefreshQueue::bind(
-                self.factory.coordinator.state().clone(),
-                &self.factory.runtime,
-                &self.authorization,
-                &self.scope,
-            )
-            .await
-            .map_err(|_| "file_refresh_denied")?;
-            crate::oauth_content::RequestGrantAuthority::acquire(
-                &self.factory.runtime,
-                &self.authorization,
-            )
-            .await
-            .map_err(|_| "file_refresh_denied")?;
-            let key = RefreshKey {
-                workspace_id: self.scope.workspace_id.clone(),
-                page_id: input.page_id,
-                mutation_digest: input.mutation_digest,
-            };
-            crate::file_refresh::status_value(
-                self.factory.coordinator.state(),
-                &key,
-                queue.authority(),
-            )
-            .map_err(|_| "file_refresh_denied")?;
-            if self.cancellation.is_cancelled() {
-                return Err("file_refresh_denied");
-            }
-            if input.retry {
-                queue.retry(&key).map_err(|_| "file_refresh_retry_denied")?;
-            }
-            crate::file_refresh::status_value(
-                self.factory.coordinator.state(),
-                &key,
-                queue.authority(),
-            )
-            .map_err(|_| "file_refresh_denied")
-        })
-    }
-    fn ingest<'a>(
-        &'a self,
-        input: notion_knowledge_mcp::upload::UploadFileRequest,
-        cancellation: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<serde_json::Value, &'static str>> + Send + 'a>,
-    > {
-        Box::pin(async move {
-            #[cfg(test)]
-            let _completion =
-                FileRequestCompletion(self.factory.settings.request_completion.clone());
-            use notion_knowledge_core::audit::{AuditActor, AuditOutcome};
-            input
-                .validate_with_limit(self.factory.maximum_files)
-                .map_err(|_| "file_upload_invalid_input")?;
-            let audit = notion_knowledge_retrieval::audit::SqliteAuditStore::open(
-                &self.factory.settings.audit_file,
-                self.factory.settings.retention,
-            )
-            .map_err(|_| "file_upload_audit_unavailable")?;
-            let correlation = notion_knowledge_core::logging::CorrelationId::new();
-            let record = |outcome| {
-                record_oauth_file_audit(
-                    &audit,
-                    &input.target,
-                    correlation.as_str(),
-                    outcome,
-                    || crate::webhook_worker::runtime::now_ms() / 1000,
-                )
-            };
-            record(AuditOutcome::Attempted)?;
-            let begin = async {
-                #[cfg(test)]
-                if let Some(clock) = &self.factory.settings.source_clock {
-                    return crate::file_refresh::AuthorizedFileIntent::begin_clocked(
-                        self.factory.coordinator.state().clone(),
-                        &self.factory.runtime,
-                        &self.authorization,
-                        &self.scope,
-                        &notion_knowledge_core::backend::PageId(input.target.clone()),
-                        self.cancellation.clone(),
-                        120,
-                        clock.clone(),
-                    )
-                    .await;
-                }
-                crate::file_refresh::AuthorizedFileIntent::begin(
-                    self.factory.coordinator.state().clone(),
-                    &self.factory.runtime,
-                    &self.authorization,
-                    &self.scope,
-                    &notion_knowledge_core::backend::PageId(input.target.clone()),
-                    self.cancellation.clone(),
-                    120,
-                )
-                .await
-            };
-            let owner = match begin.await {
-                Ok(owner) => owner,
-                Err(_) => {
-                    record(AuditOutcome::Denied)?;
-                    return Err("file_upload_denied");
-                }
-            };
-            let mut service = Runtime::scoped(
-                &self.factory.settings,
-                owner.client().map_err(|_| "file_upload_denied")?,
-                &self.scope,
-                self.factory.maximum_files,
-            )?;
-            service.actor = AuditActor::ApprovedUser;
-            service.intent = Some(owner);
-            service.request_cancel = Some(self.authorization.cancellation());
-            service.ingest(input, cancellation).await
-        })
-    }
-}
-
-/// Each record gets one fresh trusted instant, shared by event construction and
-/// store validation. In particular, a terminal denial after an await must never
-/// reuse the earlier attempted event's timestamp.
-#[cfg(all(unix, feature = "webhook-worker"))]
-fn record_oauth_file_audit(
-    audit: &dyn notion_knowledge_core::audit::AuditStore,
-    target: &str,
-    correlation: &str,
-    outcome: notion_knowledge_core::audit::AuditOutcome,
-    clock: impl FnOnce() -> i64,
-) -> Result<(), &'static str> {
-    use notion_knowledge_core::audit::{AuditActor, AuditEvent, AuditTool};
-    let at = clock();
-    let event = AuditEvent::new(
-        at,
-        AuditActor::ApprovedUser,
-        AuditTool::FileAttach,
-        Some(target.into()),
-        outcome,
-        correlation.into(),
-        None,
-    )
-    .map_err(|_| "file_upload_audit_unavailable")?;
-    audit
-        .record(&event, at)
-        .map_err(|_| "file_upload_audit_unavailable")
-}
-
-#[cfg(all(test, unix, feature = "webhook-worker"))]
-mod audit_clock_tests {
-    use super::record_oauth_file_audit;
-    use notion_knowledge_core::audit::{
-        AuditActor, AuditEvent, AuditOutcome, AuditRetention, AuditStore, AuditTool,
-    };
-    use notion_knowledge_retrieval::audit::SqliteAuditStore;
-    use std::sync::atomic::{AtomicI64, Ordering};
-    const TARGET: &str = "dddddddd-dddd-dddd-dddd-dddddddddddd";
-    const CORRELATION: &str = "server-audit-clock-boundary";
-
-    #[test]
-    fn attempted_and_later_denied_records_each_use_one_fresh_trusted_instant() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("audit.sqlite");
-        let audit = SqliteAuditStore::open(&path, AuditRetention::days(1).unwrap()).unwrap();
-        // The clock advances a whole second on every sample. Separate reads for
-        // event creation/store validation would deterministically disagree.
-        let clock = AtomicI64::new(100);
-        record_oauth_file_audit(&audit, TARGET, CORRELATION, AuditOutcome::Attempted, || {
-            clock.fetch_add(1, Ordering::SeqCst)
-        })
-        .unwrap();
-        assert_eq!(clock.load(Ordering::SeqCst), 101);
-        // Represents elapsed authorization work; no wall time or sleeps needed.
-        clock.store(107, Ordering::SeqCst);
-        record_oauth_file_audit(&audit, TARGET, CORRELATION, AuditOutcome::Denied, || {
-            clock.fetch_add(1, Ordering::SeqCst)
-        })
-        .unwrap();
-        assert_eq!(clock.load(Ordering::SeqCst), 108);
-        let db = rusqlite::Connection::open(&path).unwrap();
-        let mut statement = db
-            .prepare("SELECT occurred_at_unix,outcome FROM agent_audit_events ORDER BY id")
-            .unwrap();
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(
-            rows,
-            vec![(100, "attempted".into()), (107, "denied".into())]
-        );
-        // The real store's future-event rejection is deliberately unchanged.
-        let future = AuditEvent::new(
-            109,
-            AuditActor::ApprovedUser,
-            AuditTool::FileAttach,
-            Some(TARGET.into()),
-            AuditOutcome::Denied,
-            CORRELATION.into(),
-            None,
-        )
-        .unwrap();
-        assert!(audit.record(&future, 108).is_err());
-        assert_eq!(
-            db.query_row("SELECT count(*) FROM agent_audit_events", [], |row| row
-                .get::<_, i64>(0))
-                .unwrap(),
-            2
-        );
-    }
-    #[test]
-    fn invalid_clock_or_unavailable_audit_storage_still_fails_closed() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("audit.sqlite");
-        let audit = SqliteAuditStore::open(&path, AuditRetention::days(1).unwrap()).unwrap();
-        assert_eq!(
-            record_oauth_file_audit(&audit, TARGET, CORRELATION, AuditOutcome::Attempted, || -1),
-            Err("file_upload_audit_unavailable")
-        );
-        let db = rusqlite::Connection::open(&path).unwrap();
-        assert_eq!(
-            db.query_row("SELECT count(*) FROM agent_audit_events", [], |row| row
-                .get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-        db.execute_batch("DROP TABLE agent_audit_events").unwrap();
-        assert_eq!(
-            record_oauth_file_audit(&audit, TARGET, CORRELATION, AuditOutcome::Attempted, || 100),
-            Err("file_upload_audit_unavailable")
-        );
-    }
-}
-
-// Test-only lifetime observation, never a production wait or cleanup mechanism.
-// It fires when the actual request future completes or is dropped/cancelled.
-#[cfg(all(test, unix, feature = "webhook-worker"))]
-struct FileRequestCompletion(Option<std::sync::Arc<tokio::sync::Notify>>);
-#[cfg(all(test, unix, feature = "webhook-worker"))]
-impl Drop for FileRequestCompletion {
-    fn drop(&mut self) {
-        if let Some(completion) = &self.0 {
-            completion.notify_one();
-        }
     }
 }

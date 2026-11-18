@@ -21,7 +21,6 @@ pub struct OAuthDiscovery {
     issuer: String,
     resource: String,
     local_http: bool,
-    writes_enabled: bool,
 }
 
 impl OAuthDiscovery {
@@ -39,20 +38,11 @@ impl OAuthDiscovery {
             issuer: issuer.to_owned(),
             resource: resource.to_owned(),
             local_http: false,
-            writes_enabled: false,
         })
     }
 
-    pub(crate) fn with_write_policy(mut self, enabled: bool) -> Self {
-        self.writes_enabled = enabled;
-        self
-    }
     fn supported_scopes(&self) -> Vec<&'static str> {
-        if self.writes_enabled {
-            vec!["knowledge:read", "knowledge:write"]
-        } else {
-            vec!["knowledge:read"]
-        }
+        vec!["knowledge:read"]
     }
     /// Explicit local development only: no DNS aliases or non-loopback listener.
     pub(crate) fn local_http(
@@ -74,7 +64,6 @@ impl OAuthDiscovery {
             issuer: issuer.into(),
             resource: resource.into(),
             local_http: true,
-            writes_enabled: false,
         })
     }
 
@@ -283,14 +272,13 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn metadata_advertises_only_operator_supported_scope_tokens() {
-        for enabled in [false, true] {
+    async fn metadata_advertises_only_the_read_scope() {
+        {
             let discovery = OAuthDiscovery::new(
                 "https://auth.example.com",
                 "https://knowledge.example.com/mcp",
             )
-            .unwrap()
-            .with_write_policy(enabled);
+            .unwrap();
             for response in [
                 protected_resource(State(discovery.clone())).await,
                 authorization_server(State(discovery)).await,
@@ -299,14 +287,7 @@ mod tests {
                     .await
                     .unwrap();
                 let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-                assert_eq!(
-                    value["scopes_supported"],
-                    if enabled {
-                        json!(["knowledge:read", "knowledge:write"])
-                    } else {
-                        json!(["knowledge:read"])
-                    }
-                );
+                assert_eq!(value["scopes_supported"], json!(["knowledge:read"]));
             }
         }
     }

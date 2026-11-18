@@ -18,8 +18,6 @@ struct Harness {
     #[cfg(feature = "webhook-worker")]
     provider_port: u16,
     _dir: tempfile::TempDir,
-    #[cfg(feature = "webhook-worker")]
-    files: Arc<file_provider::Files>,
     login: Arc<Login>,
     store: Arc<GrantStore>,
     base: String,
@@ -28,10 +26,8 @@ struct Harness {
     available: Arc<AtomicBool>,
     #[cfg(feature = "webhook-worker")]
     document: Arc<std::sync::Mutex<Option<(String, u64)>>>,
-    mutation_status: Arc<AtomicUsize>,
+    #[cfg(feature = "webhook-worker")]
     mutations: Arc<AtomicUsize>,
-    mutation_gate: Arc<tokio::sync::Semaphore>,
-    mutation_started: Arc<tokio::sync::Notify>,
     page_status: Arc<AtomicUsize>,
     page_reads: Arc<AtomicUsize>,
     page_gate: Arc<tokio::sync::Semaphore>,
@@ -74,16 +70,6 @@ impl Harness {
         limits: Option<(usize, usize, usize)>,
         clock_age: std::time::Duration,
         content_scope: Option<notion_knowledge_core::lifecycle::LifecycleScope>,
-    ) -> Self {
-        Self::with_authority(body, status, limits, clock_age, content_scope, false).await
-    }
-    async fn with_authority(
-        body: serde_json::Value,
-        status: StatusCode,
-        limits: Option<(usize, usize, usize)>,
-        clock_age: std::time::Duration,
-        content_scope: Option<notion_knowledge_core::lifecycle::LifecycleScope>,
-        writes: bool,
     ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("key");
@@ -297,9 +283,6 @@ impl Harness {
                     axum::Json(serde_json::json!({"object":"page","id":"cccccccc-cccc-cccc-cccc-cccccccccccc","url":"https://www.notion.so/cccccccc-cccc-cccc-cccc-cccccccccccc"}))
                 }
             }));
-        let files = Arc::new(file_provider::Files::default());
-        let provider_router =
-            file_provider::routes(provider_router, files.clone(), document.clone());
         let provider = tokio::spawn(async move {
             axum::serve(provider_socket, provider_router).await.unwrap();
         });
@@ -328,7 +311,6 @@ impl Harness {
                 .unwrap(),
                 policy.authorization_identity(),
             )
-            .with_write_policy(writes)
             .with_clock(Arc::new(move || {
                 started + std::time::Duration::from_secs(elapsed.load(Ordering::SeqCst))
             })),
@@ -361,8 +343,7 @@ impl Harness {
             "https://auth.example.com",
             "https://knowledge.example.com/mcp",
         )
-        .unwrap()
-        .with_write_policy(writes);
+        .unwrap();
         let transport = if let Some((requests, sessions, streams)) = limits {
             let mut settings = Config::from_lookup(|_| None).unwrap();
             settings.http_bind = bind;
@@ -434,8 +415,6 @@ impl Harness {
         Self {
             #[cfg(feature = "webhook-worker")]
             provider_port,
-            #[cfg(feature = "webhook-worker")]
-            files,
             _dir: dir,
             login,
             store,
@@ -450,10 +429,8 @@ impl Harness {
             available,
             #[cfg(feature = "webhook-worker")]
             document,
-            mutation_status,
+            #[cfg(feature = "webhook-worker")]
             mutations,
-            mutation_gate,
-            mutation_started,
             page_status,
             page_reads,
             page_gate,
@@ -1375,29 +1352,7 @@ mod content_index;
 
 mod revocation;
 
-mod confirmation_http;
-#[path = "tests/write_authority.rs"]
-mod write_authority;
-
-#[cfg(all(unix, feature = "webhook-worker"))]
-#[path = "tests/grant_refresh.rs"]
-mod grant_refresh;
-
-#[cfg(all(unix, feature = "webhook-worker"))]
-#[path = "tests/installed_writes.rs"]
-mod installed_writes;
-
 #[cfg(all(unix, feature = "webhook-worker"))]
 mod installed_integration_writes;
-
-#[cfg(all(unix, feature = "webhook-worker"))]
-mod file_intents;
-
-mod file_provider;
-#[cfg(all(unix, feature = "webhook-worker"))]
-mod installed_files;
-
-#[cfg(all(unix, feature = "webhook-worker"))]
-mod file_configuration;
 
 mod local_http;

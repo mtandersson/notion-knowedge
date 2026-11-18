@@ -3,14 +3,13 @@
 pub mod allocator;
 pub mod config;
 pub mod diagnostics;
-pub mod file_recovery_command;
 pub mod http;
 #[cfg(all(unix, feature = "webhook-worker"))]
 pub mod integration_writes;
 pub mod lexical_expansion;
-pub mod oauth_writes;
 pub mod shutdown;
 pub mod state_migration;
+pub mod write_stores;
 
 /// Installed SDK session and SSE response lifetime budgets.
 pub mod session_limits;
@@ -77,10 +76,3 @@ mod oauth_content;
 mod inventory_membership;
 
 mod notion_grant_lease;
-
-/// Grant-bound durable refresh building blocks; shipping installation is separate.
-#[cfg(all(unix, feature = "webhook-worker"))]
-pub mod grant_refresh;
-
-#[cfg(all(unix, feature = "webhook-worker"))]
-pub mod file_refresh;

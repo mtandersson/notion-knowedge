@@ -222,8 +222,7 @@ impl Login {
             flow: AuthorizationFlow::new(
                 settings.client.clone(),
                 policy.allowed.authorization_identity(),
-            )
-            .with_write_policy(config.oauth_writes && !config.read_only),
+            ),
             redirect: NotionOAuthRedirect::new(registration.clone()),
             callback,
             sessions: std::sync::Mutex::new(None),

@@ -7,10 +7,9 @@ not a tool argument or shipping server setting. It does not disable read-only,
 destructive-operation or capability allowlist/blocklist gates.
 
 Default discovery stays read-only. Existing OAuth HTTP contexts reject these
-static capabilities regardless of builder order. Shipping OAuth write permission,
-grant-bound refresh, trusted production confirmation and installed server
-composition remain #448–#451; this component does not complete #441/#83/#10.
-The separate file/image workflow remains #446.
+static capabilities regardless of builder order; OAuth sessions are read-only
+(#730). The installed composition is the
+[guarded integration write path](integration-semantic-writes.md).
 
 With trusted capabilities and explicit writable mode, actual discovery includes
 `knowledge_create_page` and `knowledge_append`. Bounded

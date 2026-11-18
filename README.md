@@ -102,14 +102,10 @@ pending credentials or workspace setup do not block local product testing.
 Local success does not claim that a ChatGPT installation or primary-connector
 cutover has passed.
 
-### Optional production OAuth writes
+### Optional guarded writes
 
-[OAuth semantic writes](docs/oauth-semantic-writes.md) require explicit complete
-operator configuration and a durable mutation ledger. Read-only is the default;
-section updates additionally require trusted user confirmation. OAuth file/image
-installation remains separate.
-
-For a private integration-backed HTTP connection, [guarded integration writes](docs/integration-semantic-writes.md)
+ChatGPT OAuth sessions are read-only. For a private integration-backed HTTP
+connection, [guarded integration writes](docs/integration-semantic-writes.md)
 have a separate explicit activation and share the existing sync worker.
 
 ### Payload limits
@@ -150,9 +146,7 @@ separate registrations, exact callbacks, independently pinned Notion workspace
 and authorizing person, private bootstrap, HTTPS proxy and reauthentication.
 Complete configuration enables Authorization Code + PKCE S256, encrypted Notion
 credentials, request-bound read-only content and immediate local token logout.
-Explicit [OAuth write authority policy](docs/oauth-write-authority.md) can issue
-guarded write permissions; shipping OAuth mutation tools remain disabled pending
-their runtime and confirmation composition.
+OAuth tokens carry only the `knowledge:read` scope.
 Discovery settings alone authenticate nobody. A missing content scope or index
 never grants private data; the feature-built container still requires explicit
 [production role and external asset configuration](docs/container.md).
@@ -340,9 +334,6 @@ mutation workflows must enforce its failure policy. See the
 for current code, negative tests and remaining release gates.
 
 The [audited single-file ingestion application](docs/single-file-ingestion.md) joins secure request-scoped download, validation, native Notion attachment and durable audit behind a reusable core service. [Plan-aware multipart and ordered batches](docs/multipart-batch-ingestion.md) extend the same service with explicit trusted limits and per-file outcomes. The [installed ingestion runtime](docs/installed-file-ingestion.md) composes these services for trusted stdio and authenticated loopback bearer HTTP.
-[OAuth image and file ingestion](docs/oauth-file-ingestion.md) installs the
-request-bound workflow under the original approved grant, with separate source
-and index outcomes and [operator recovery](docs/file-recovery.md).
 
 ## ChatGPT file input
 
@@ -357,9 +348,8 @@ The [`knowledge_upload_file` input contract](docs/chatgpt-file-parameters.md)
 advertises `_meta["openai/fileParams"]` and accepts ChatGPT file references without
 Drive staging. It is hidden by default read-only mode; explicit `NK_READ_ONLY=false` exposes
 the schema for trusted transports. Configured `NK_FILE_INGESTION=true` installs
-the audited application. OAuth HTTP additionally requires the explicit
-[request-bound OAuth configuration](docs/oauth-file-ingestion.md); read-only
-tokens cannot discover or invoke uploads. Missing settings or an unsuitable
+the audited application. OAuth HTTP sessions are read-only and cannot discover
+or invoke uploads. Missing settings or an unsuitable
 HTTP transport returns `file_upload_unavailable` before effects.
 
 ## Continuous integration
@@ -435,9 +425,8 @@ file uploads cannot be invoked through the MCP handler; the access check runs
 before any tool adapter. Set `NK_READ_ONLY=false` **explicitly** only when an
 operator intends to permit implemented mutation tools. File ingestion additionally
 requires the validated operator settings and transport described in
-[installed ingestion](docs/installed-file-ingestion.md) or
-[OAuth file ingestion](docs/oauth-file-ingestion.md). OAuth semantic writes use
-their [separate explicit opt-in](docs/oauth-semantic-writes.md).
+[installed ingestion](docs/installed-file-ingestion.md). OAuth sessions never
+receive write tools.
 Invalid values fail startup instead of enabling writes. `--diagnostics` and
 `GET /health` expose the effective `access.read_only` boolean without
 revealing secrets. This setting controls MCP tool access, not the independent

@@ -464,21 +464,3 @@ pub fn is_semantic_mutation(name: &str) -> bool {
         "knowledge_create_page" | "knowledge_append" | "knowledge_update_section"
     )
 }
-
-/// Server-owned request composition. Implementations bind live source authority,
-/// durable stores and (for section updates) the actual invoking SDK peer.
-pub trait RequestMutationFactory: Send + Sync {
-    fn supports(&self, name: &str) -> bool;
-    fn bind<'a>(
-        &'a self,
-        adapters: crate::RequestScopeAdapters,
-        context: &'a rmcp::service::RequestContext<rmcp::RoleServer>,
-        name: &'a str,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<Arc<MutationRuntime>, rmcp::ErrorData>>
-                + Send
-                + 'a,
-        >,
-    >;
-}

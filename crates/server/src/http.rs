@@ -68,7 +68,7 @@ pub(crate) fn mcp_transport(
     };
     let handler = handler
         .with_tool_capacity(settings.mcp_tool_capacity)
-        .with_read_only(settings.read_only || (oauth.is_some() && !settings.oauth_writes))
+        .with_read_only(settings.read_only || oauth.is_some())
         .with_destructive_writes_enabled(settings.destructive_writes_enabled)
         .with_capability_policy(settings.capability_policy.clone());
     let bind = settings.http_bind;
@@ -208,8 +208,6 @@ pub async fn serve_installed(
         shutdown,
         notion_oauth,
         oauth_login,
-        #[cfg(all(unix, feature = "webhook-worker"))]
-        None,
     )
     .await
 }
@@ -225,40 +223,19 @@ pub(crate) async fn serve_with_oauth(
     shutdown: tokio_util::sync::CancellationToken,
     notion_oauth: Option<crate::notion_oauth_runtime::NotionOAuthRuntime>,
     oauth_login: Option<Arc<crate::oauth_authorize::Login>>,
-    #[cfg(all(unix, feature = "webhook-worker"))] provider: Option<
-        Arc<dyn notion_knowledge_core::embedding::EmbeddingProvider>,
-    >,
 ) -> io::Result<()> {
-    #[cfg(all(unix, feature = "webhook-worker"))]
-    let mut oauth_writes = None;
     let handler = if settings.oauth_discovery.is_some() && settings.notion_scope.is_some() {
         if notion_oauth.is_none() || oauth_login.is_none() {
             return Err(io::Error::other("OAuth content authorization unavailable"));
         }
         let handler = notion_knowledge_mcp::KnowledgeServer::default().with_request_bound_content();
         #[cfg(all(unix, feature = "webhook-worker"))]
-        let handler = if settings.oauth_writes {
-            let credentials = notion_oauth
-                .clone()
-                .ok_or_else(|| io::Error::other("OAuth runtime unavailable"))?;
-            let runtime = if let Some(provider) = provider {
-                crate::oauth_writes::compose(handler, &settings, credentials, provider).await
-            } else {
-                crate::oauth_writes::configured(handler, &settings, credentials).await
-            }
-            .map_err(io::Error::other)?;
-            let handler = runtime.handler.clone();
-            oauth_writes = Some(Arc::new(runtime));
-            handler
-        } else {
-            crate::retrieval_runtime::configured_oauth(
-                crate::graph_runtime::attach_request(handler, &settings)
-                    .map_err(io::Error::other)?,
-                &settings,
-            )
-            .await
-            .map_err(io::Error::other)?
-        };
+        let handler = crate::retrieval_runtime::configured_oauth(
+            crate::graph_runtime::attach_request(handler, &settings).map_err(io::Error::other)?,
+            &settings,
+        )
+        .await
+        .map_err(io::Error::other)?;
         handler
     } else {
         handler
@@ -358,18 +335,6 @@ pub(crate) async fn serve_with_oauth(
     #[cfg(all(unix, feature = "webhook-worker"))]
     let owned_coordinator = worker.as_ref().map(|worker| worker.coordinator.clone());
     #[cfg(all(unix, feature = "webhook-worker"))]
-    let oauth_coordinator = oauth_writes
-        .as_ref()
-        .map(|runtime| runtime.coordinator.clone());
-    #[cfg(all(unix, feature = "webhook-worker"))]
-    let oauth_task = oauth_writes.map(|runtime| {
-        let stop = cancellation.clone();
-        tokio::spawn(async move {
-            let _cancel_on_exit = stop.clone().drop_guard();
-            runtime.run(stop).await
-        })
-    });
-    #[cfg(all(unix, feature = "webhook-worker"))]
     let worker_task = worker.map(|worker| {
         let stop = cancellation.clone();
         tokio::spawn(async move {
@@ -390,7 +355,7 @@ pub(crate) async fn serve_with_oauth(
         {
             let mut failure = None;
             // Await every owned worker and native drain even if an earlier one failed.
-            for task in [worker_task, oauth_task].into_iter().flatten() {
+            for task in [worker_task].into_iter().flatten() {
                 match task.await {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => {
@@ -401,7 +366,7 @@ pub(crate) async fn serve_with_oauth(
                     }
                 }
             }
-            for coordinator in [owned_coordinator, oauth_coordinator].into_iter().flatten() {
+            for coordinator in [owned_coordinator].into_iter().flatten() {
                 if coordinator.drain_owned().await.is_err() {
                     failure.get_or_insert_with(|| io::Error::other("index drain failed"));
                 }
