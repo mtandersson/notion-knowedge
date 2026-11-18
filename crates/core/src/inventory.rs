@@ -166,6 +166,7 @@ impl SkipReason {
             Self::ExcludedPage => "excluded_page",
             Self::ExcludedDescendants => "excluded_descendants",
             Self::ExcludedSourceType => "excluded_source_type",
+            Self::UnreadableMetadata => "unreadable_metadata",
         }
     }
     pub fn parse(value: &str) -> Option<Self> {
@@ -177,6 +178,7 @@ impl SkipReason {
             Self::ExcludedPage,
             Self::ExcludedDescendants,
             Self::ExcludedSourceType,
+            Self::UnreadableMetadata,
         ]
         .into_iter()
         .find(|reason| reason.as_str() == value)

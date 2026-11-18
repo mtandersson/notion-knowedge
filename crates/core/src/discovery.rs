@@ -19,6 +19,9 @@ pub enum SkipReason {
     ExcludedPage,
     ExcludedDescendants,
     ExcludedSourceType,
+    /// The page was read but its metadata could not be understood (for
+    /// example an unknown property type), so it cannot be indexed.
+    UnreadableMetadata,
 }
 
 pub fn inaccessible(kind: BackendErrorKind) -> bool {
