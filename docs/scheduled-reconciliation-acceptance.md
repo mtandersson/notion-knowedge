@@ -36,7 +36,7 @@ real authenticated Notion client before writable composition.
 | Validated apply/dry-run/resume/status/explicit retry, sanitized summaries and exits | #349 `Command::parse`, `execute`; `actual_commands_apply_differences_only_and_keep_dry_run_and_status_read_only`, `failed_pages_require_explicit_retry_and_webhook_writer_busy_does_not_consume_work`, missing-path/authority rejection, timeout/cancel assertions. Schedule recovery extends the same boundary. |
 | Configured due interval; durable deadline; no overlap; bounded retries; visible failure | #350/#352 APIs plus scheduled deadline, contention, backoff/exhaustion and explicit failure-recovery fixtures above. |
 | Graceful cancellation/restart; invalid model/index/state fail before effects | Manual and scheduled cancellation/drain tests, persisted same-plan restart, read-only schema/WAL/missing-path rejection, missing offline model no-creation test. |
-| Full command/config/authority/resume/dry-run/recovery/count documentation | [Manual and periodic guide](manual-reconciliation.md), [runner contract](reconciliation-runner.md), [journal contract](reconciliation-journal.md). |
+| Full command/config/authority/resume/dry-run/recovery/count documentation | [Manual and periodic guide](manual-reconciliation.md), [retired runner note](reconciliation-runner.md), [journal contract](reconciliation-journal.md). |
 | Real-command and scheduled smoke; differences/orphans/restart/retry/unchanged/dry-run; no private CI assets | Combined real manual/scheduled integration file, actual HTTP serving, SQLite and Lance fixtures with counting provider. |
 | Every #58 criterion and children audited; packaging consumes actual lifecycle | #58 table and child table below; #145 is unchanged and remains independently gated. |
 

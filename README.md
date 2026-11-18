@@ -563,16 +563,12 @@ local model runtimes.
 The [durable reconciliation journal](docs/reconciliation-journal.md) supplies scoped, fenced, resumable operational storage for periodic reconciliation.
 
 The [manual authoritative reconciliation commands](docs/manual-reconciliation.md)
-provide apply, dry-run, resume, status and explicit failed-page retry through the
-same production composition as the webhook worker. Read-only commands inspect
-existing compatible state without initialization or migration. Opt-in periodic
-reconciliation runs in the same supervised HTTP lifecycle and persists deadlines,
-active runs and bounded retry history; the same guide documents configuration and
-explicit schedule recovery.
-
-The [read-only reconciliation planner](docs/reconciliation-planner.md) compares scoped
-SQLite/LanceDB ownership with fresh authoritative metadata and lifecycle evidence.
-Dry-run writes no acknowledgments. The [guarded durable reconciliation runner](docs/reconciliation-runner.md) applies differences through the shared lifecycle pipeline and resumes actual receipts; manual and periodic execution use the same production authority and runner.
+run the same production composition as the webhook worker. Manual, scheduled and
+cache-reset reconciliation all call `IndexRuntime::sync_from_walk`, which walks
+the root tree and applies differences through the shared lifecycle pipeline; see
+the [sync design](docs/design/bulk-listing-sync.md). The earlier planner and durable
+plan runner are retired ([planner](docs/reconciliation-planner.md),
+[runner](docs/reconciliation-runner.md)).
 
 The [installed canonical alias runtime](docs/canonical-aliases.md) maintains explicit title/property names through shared authoritative commits, safe operator rebuild and trusted scoped local lookup.
 
