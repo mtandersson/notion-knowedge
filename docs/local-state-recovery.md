@@ -32,7 +32,7 @@ what reset must discard and preserve. #578 removes obsolete recovery machinery;
 Operational SQLite currently mixes derived projections with admitted work.
 Do not delete that entire database to clear search. Corrupt security or external
 mutation state must surface an error, rather than silently becoming an empty
-ledger. See [grant-store recovery](notion-grant-store.md).
+ledger.
 
 ## Supported recovery contract
 

@@ -9,9 +9,10 @@ mounts with [container deployment](container.md).
 Use one dedicated Linux host proxy process and a private loopback application
 container. Never expose port 3000 remotely. OAuth reader and integration indexer
 are separate roles; apply a measured envelope to each. Health, metrics, receipts,
-recovery tools and indexing administration stay private. The proxy routes only
-the reviewed OAuth/MCP paths and preserves the Host/Origin boundary from
-[production OAuth setup](oauth-production-setup.md).
+recovery tools and indexing administration stay private. The proxy template
+([`docs/examples/mcp-nginx.conf`](examples/mcp-nginx.conf)) routes only `/mcp`
+and preserves the Host/Origin boundary; the backend still requires its loopback
+bearer.
 
 Copy `deploy/production/policy.example.json` to a private operator path. Every
 numeric zero is intentionally invalid: select values only after measuring model

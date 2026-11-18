@@ -1,11 +1,11 @@
 # Explicit development bearer authentication (issue #84)
 
-This is a **local development, diagnostics, or emergency fallback** for the
-Streamable HTTP `/mcp` resource. It is **not** the production ChatGPT OAuth
-flow described in [#117](https://github.com/mtandersson/notion-knowedge/issues/117)
-and [the OAuth trust model](oauth-trust-model.md). Static bearer credentials do
-not establish a Notion user/workspace, grant epoch, scopes or token revocation.
-Do not treat this mode as a substitute for those production controls.
+This is the only authentication for the Streamable HTTP `/mcp` resource in
+the single-user deployment (#730): a loopback listener plus one static bearer,
+reached by ChatGPT through the [private tunnel](private-chatgpt-tunnel.md). The
+former OAuth flow ([#117](https://github.com/mtandersson/notion-knowedge/issues/117))
+was removed. A static bearer does not establish a Notion user/workspace, scopes
+or token revocation; it only admits the local operator's clients.
 
 For the owner-selected [private tunnel deployment](private-chatgpt-tunnel.md),
 the same loopback bearer can protect the tunnel-to-server HTTP hop. ChatGPT

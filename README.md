@@ -139,43 +139,20 @@ using a configured read-only Notion backend after authorizing indexed references
 It distinguishes indexed and refreshed edit timestamps without updating the index.
 See [fresh-source verification](docs/fresh-source.md).
 
-### Production ChatGPT OAuth
+### Single-user access
 
-Follow [production OAuth setup](docs/oauth-production-setup.md) for the two
-separate registrations, exact callbacks, independently pinned Notion workspace
-and authorizing person, private bootstrap, HTTPS proxy and reauthentication.
-Complete configuration enables Authorization Code + PKCE S256, encrypted Notion
-credentials, request-bound read-only content and immediate local token logout.
-OAuth tokens carry only the `knowledge:read` scope.
-Discovery settings alone authenticate nobody. A missing content scope or index
-never grants private data; the feature-built container still requires explicit
-[production role and external asset configuration](docs/container.md).
-Use the [ChatGPT OAuth acceptance checklist](docs/chatgpt-oauth-acceptance.md)
-for live connection evidence and discovery/reconnect troubleshooting.
-See [OAuth end-to-end evidence](docs/oauth-e2e-tests.md) and perform a real
-operator-controlled deployed ChatGPT smoke before relying on the connection.
-
-The [encrypted Notion OAuth grant store](docs/notion-grant-store.md) is an
-opt-in, operator-controlled AES-256-GCM file with a separate 32-byte key file.
-Configure `NK_NOTION_GRANT_KEY_FILE` and `NK_NOTION_GRANT_STATE_FILE` as a
-pair alongside the full callback identity settings. Startup rejects corrupt or wrong-owner state rather than enabling login;
-expired credentials require refresh before use. Resource authorization combines
-the sealed grant with live Notion verification, the bound MCP token and the
-configured content scope. Sealed storage alone authenticates no caller.
-
-[Server-only Notion token refresh](docs/notion-oauth-refresh.md) now uses the
-same confidential Notion client, immutable owner/workspace check and the sealed
-grant store. Calls within a single refresh coordinator serialize renewal,
-atomically rotate both token values, and fail closed on provider or storage
-errors. Credential users hold an exclusive process lease; [local revocation and operator forget](docs/oauth-revocation.md) invalidate local access. See [production setup](docs/oauth-production-setup.md) for deployment and operator smoke.
+The server is single-user: ChatGPT reaches it as a raw MCP server on
+localhost (through the [private tunnel](docs/private-chatgpt-tunnel.md)) with
+the loopback HTTP bearer, or a local client uses stdio. Notion is read and
+written with one integration token. The former MCP OAuth authorization server,
+request-bound OAuth reads and per-user Notion grants were removed (#730);
+startup ignores their `NK_OAUTH_*`, `NK_NOTION_OAUTH_*`, `NK_NOTION_GRANT_*`
+and `NK_NOTION_ALLOWED_*` settings with one warning naming them. Old grant
+state/key files are never read and may be deleted.
 
 The HTTP listener validates Host against loopback names and the configured IP,
 and validates browser Origin against the configured HTTP authority or localhost
-at the configured port. Clients without Origin are accepted. For remote access,
-follow [production OAuth setup](docs/oauth-production-setup.md), including strict
-public Host/Origin validation before forwarding to the loopback backend. The
-[trust contract](docs/oauth-trust-model.md) explains the separate MCP/Notion
-boundaries and the single-process lifecycle limits.
+at the configured port. Clients without Origin are accepted.
 
 For MCP Inspector-style clients, build the binary with
 `cargo build -p notion-knowledge-server` and configure the stdio command as the
@@ -318,8 +295,8 @@ evidence that the current server is ready to replace the official connector.
 
 The official connector remains the default for write/file workflows and full
 cutover until their separate acceptance gates pass. The custom server supports
-explicit [read-only OAuth deployment](docs/oauth-production-setup.md) with
-configured retrieval; that does not establish full connector replacement.
+single-user loopback deployment with configured retrieval; that does not
+establish full connector replacement.
 Local file ingestion is separately operator-enabled.
 The playbook includes a documented **non-sensitive** operational smoke checklist
 and distinguishes pilot targets from demonstrated results.
