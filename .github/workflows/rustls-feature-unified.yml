@@ -38,11 +38,11 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      # Reuse the existing webhook-worker download/build cache read-only.
+      # Reuse the native webhook-worker build cache (test-native-build) read-only.
       - name: Restore pinned Cargo caches
         uses: ./.github/actions/cargo-cache-restore
         with:
-          job: test-webhook-worker
+          job: test-native-build
           profile: debug
 
       - name: Test the complete feature-unified workspace
