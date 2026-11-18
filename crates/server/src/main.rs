@@ -120,6 +120,13 @@ async fn run() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if !config.ignored_settings().is_empty() {
+        eprintln!(
+            "Warning: ignoring removed settings {}; OAuth writes are no longer supported (use NK_INTEGRATION_WRITES).",
+            config.ignored_settings().join(", ")
+        );
+    }
+
     if all_args
         .iter()
         .any(|arg| arg.starts_with("--migrate-operational-state"))

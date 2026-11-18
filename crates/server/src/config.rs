@@ -2,6 +2,13 @@
 
 use std::{env, ffi::OsString, fmt, net::SocketAddr};
 
+/// Settings of removed features (#731): ignored with one startup warning.
+const REMOVED_SETTINGS: [&str; 3] = [
+    "NK_OAUTH_WRITES",
+    "NK_OAUTH_WRITE_LEDGER_FILE",
+    "NK_OAUTH_WRITE_AUDIT_FILE",
+];
+
 #[derive(Debug)]
 pub struct Config {
     pub http_bind: SocketAddr,
@@ -24,6 +31,7 @@ pub struct Config {
     pub log_level: notion_knowledge_core::logging::Level,
     /// Fail-closed MCP access mode; enabled unless explicitly opted out.
     pub read_only: bool,
+    ignored_settings: Vec<&'static str>,
     /// Explicit guarded writes for the private integration-backed HTTP transport.
     pub integration_write_stores: Option<crate::write_stores::Settings>,
     /// Explicit second gate for destructive operations; defaults disabled.
@@ -145,6 +153,11 @@ impl Config {
     }
 
     /// Parse a trusted startup configuration source; never pass webhook hints.
+    /// Removed settings that were present and ignored; log them once at startup.
+    pub fn ignored_settings(&self) -> &[&'static str] {
+        &self.ignored_settings
+    }
+
     pub fn from_lookup(
         mut lookup: impl FnMut(&str) -> Option<OsString>,
     ) -> Result<Self, ConfigError> {
@@ -188,24 +201,13 @@ impl Config {
         let mcp_max_streams = concurrency(&mut lookup, "NK_MCP_MAX_STREAMS", "16", 256)?;
         let mcp_stream_max_seconds =
             concurrency(&mut lookup, "NK_MCP_STREAM_MAX_SECONDS", "300", 3600)? as u64;
-        // Per-user OAuth writes were removed (#731); never silently ignore a
-        // setting that asked for them. The documented explicit opt-out
-        // NK_OAUTH_WRITES=false requested nothing and stays accepted.
-        for removed in [
-            "NK_OAUTH_WRITES",
-            "NK_OAUTH_WRITE_LEDGER_FILE",
-            "NK_OAUTH_WRITE_AUDIT_FILE",
-        ] {
-            let value = lookup(removed);
-            if value.is_some()
-                && !(removed == "NK_OAUTH_WRITES" && value.as_deref() == Some("false".as_ref()))
-            {
-                return Err(invalid(
-                    removed,
-                    "is no longer supported; OAuth writes were removed, use NK_INTEGRATION_WRITES",
-                ));
-            }
-        }
+        // Settings of removed features are ignored, never fatal; startup warns
+        // once with their names (#730).
+        let ignored_settings: Vec<&'static str> = REMOVED_SETTINGS
+            .iter()
+            .copied()
+            .filter(|key| lookup(key).is_some())
+            .collect();
         let read_only = match optional(&mut lookup, "NK_READ_ONLY", "true")?.as_str() {
             "true" => true,
             "false" => false,
@@ -954,6 +956,7 @@ impl Config {
             "NK_INTEGRATION_WRITE_AUDIT_FILE",
         )?;
         Ok(Self {
+            ignored_settings,
             shutdown_timeout_seconds,
             oauth_client,
             mcp_max_in_flight,
@@ -1233,12 +1236,16 @@ mod tests {
         ] {
             let mut stale = values.clone();
             stale.push((removed, value));
-            let error = parse(&stale).unwrap_err();
-            assert_eq!(error.setting, removed);
+            assert_eq!(parse(&stale).unwrap().ignored_settings(), [removed]);
         }
-        let mut opted_out = values.clone();
-        opted_out.push(("NK_OAUTH_WRITES", "false"));
-        assert!(parse(&opted_out).is_ok());
+        assert!(parse(&values).unwrap().ignored_settings().is_empty());
+        let mut all = values.clone();
+        all.extend([
+            ("NK_OAUTH_WRITES", "true"),
+            ("NK_OAUTH_WRITE_LEDGER_FILE", "/var/lib/notion/ledger"),
+            ("NK_OAUTH_WRITE_AUDIT_FILE", "/var/lib/notion/audit"),
+        ]);
+        assert_eq!(parse(&all).unwrap().ignored_settings(), REMOVED_SETTINGS);
         values[11].1 = "cccccccc-cccc-cccc-cccc-cccccccccccc";
         assert_eq!(
             parse(&values).unwrap_err().setting,
