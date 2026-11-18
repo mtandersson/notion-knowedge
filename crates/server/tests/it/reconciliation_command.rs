@@ -2997,6 +2997,17 @@ async fn lost_or_incompatible_cache_resyncs_without_replaying_external_effects()
         }
         drop(db);
         drop(table);
+        // Coordinator-owned index threads can outlive the sync call. Join
+        // them (and require no typed failure) before reopening so the
+        // restart check observes a quiescent cache.
+        assert!(
+            recovered
+                .coordinator
+                .drain_owned_outcomes()
+                .await
+                .unwrap()
+                .is_empty()
+        );
         drop(recovered);
         let reads = http.body_reads.load(Ordering::SeqCst);
         let _reopened = IndexRuntime::recover(
@@ -3012,6 +3023,14 @@ async fn lost_or_incompatible_cache_resyncs_without_replaying_external_effects()
             http.body_reads.load(Ordering::SeqCst),
             reads,
             "healthy restart must reuse the cache"
+        );
+        assert!(
+            _reopened
+                .coordinator
+                .drain_owned_outcomes()
+                .await
+                .unwrap()
+                .is_empty()
         );
         drop(_reopened);
         if damage == "missing-index" {
