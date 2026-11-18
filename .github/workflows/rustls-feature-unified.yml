@@ -25,6 +25,9 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CARGO_TARGET_DIR: target
+      # Match ci.yml so the read-only cache key (which hashes these) is compatible.
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - name: Checkout
