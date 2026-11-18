@@ -54,6 +54,7 @@ pub mod runtime {
             Ok(c) if c.validate_grant_store().is_ok() => c,
             _ => return output("configuration", 2),
         };
+        config.warn_ignored_settings();
         crate::shutdown::operator(
             "index",
             stop.clone(),

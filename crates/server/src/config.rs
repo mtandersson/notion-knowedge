@@ -152,12 +152,29 @@ impl Config {
         Self::from_lookup(|key| env::var_os(key))
     }
 
-    /// Parse a trusted startup configuration source; never pass webhook hints.
-    /// Removed settings that were present and ignored; log them once at startup.
+    /// Removed settings that were present and ignored (#731).
     pub fn ignored_settings(&self) -> &[&'static str] {
         &self.ignored_settings
     }
 
+    /// One startup warning naming (never echoing values of) ignored settings.
+    pub fn ignored_settings_warning(&self) -> Option<String> {
+        (!self.ignored_settings.is_empty()).then(|| {
+            format!(
+                "Warning: ignoring removed settings {}; OAuth writes are no longer supported (use NK_INTEGRATION_WRITES).",
+                self.ignored_settings.join(", ")
+            )
+        })
+    }
+
+    /// Emit the ignored-settings warning to stderr; call once per process start.
+    pub fn warn_ignored_settings(&self) {
+        if let Some(warning) = self.ignored_settings_warning() {
+            eprintln!("{warning}");
+        }
+    }
+
+    /// Parse a trusted startup configuration source; never pass webhook hints.
     pub fn from_lookup(
         mut lookup: impl FnMut(&str) -> Option<OsString>,
     ) -> Result<Self, ConfigError> {
@@ -202,7 +219,7 @@ impl Config {
         let mcp_stream_max_seconds =
             concurrency(&mut lookup, "NK_MCP_STREAM_MAX_SECONDS", "300", 3600)? as u64;
         // Settings of removed features are ignored, never fatal; startup warns
-        // once with their names (#730).
+        // once with their names (#731).
         let ignored_settings: Vec<&'static str> = REMOVED_SETTINGS
             .iter()
             .copied()
@@ -1245,7 +1262,14 @@ mod tests {
             ("NK_OAUTH_WRITE_LEDGER_FILE", "/var/lib/notion/ledger"),
             ("NK_OAUTH_WRITE_AUDIT_FILE", "/var/lib/notion/audit"),
         ]);
-        assert_eq!(parse(&all).unwrap().ignored_settings(), REMOVED_SETTINGS);
+        let all = parse(&all).unwrap();
+        assert_eq!(all.ignored_settings(), REMOVED_SETTINGS);
+        let warning = all.ignored_settings_warning().unwrap();
+        for key in REMOVED_SETTINGS {
+            assert!(warning.contains(key));
+        }
+        assert!(!warning.contains("/var/lib/notion"));
+        assert!(parse(&values).unwrap().ignored_settings_warning().is_none());
         values[11].1 = "cccccccc-cccc-cccc-cccc-cccccccccccc";
         assert_eq!(
             parse(&values).unwrap_err().setting,

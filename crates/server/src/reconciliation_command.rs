@@ -152,6 +152,7 @@ pub mod runtime {
             Ok(c) => c,
             Err(_) => return Output::error("configuration", 2),
         };
+        config.warn_ignored_settings();
         crate::shutdown::operator(
             "reconciliation",
             stop.clone(),
