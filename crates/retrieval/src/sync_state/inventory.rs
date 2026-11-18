@@ -81,10 +81,9 @@ fn entry(db: &Connection, page_id: &str) -> Result<Option<InventoryEntry>, SyncS
     })
 }
 
-/// Upsert one entry and classify it against the previous row. Outcomes stay.
-fn upsert(
+/// Classify one entry against its stored row without writing it.
+fn classify(
     db: &Connection,
-    run_id: &str,
     next: &InventoryEntry,
     diff: &mut InventoryDiff,
 ) -> Result<(), SyncStateError> {
@@ -99,6 +98,17 @@ fn upsert(
         Some(previous) if previous != *next => diff.changed.push(id),
         Some(_) => diff.unchanged += 1,
     }
+    Ok(())
+}
+
+/// Upsert one entry and classify it against the previous row. Outcomes stay.
+fn upsert(
+    db: &Connection,
+    run_id: &str,
+    next: &InventoryEntry,
+    diff: &mut InventoryDiff,
+) -> Result<(), SyncStateError> {
+    classify(db, next, diff)?;
     let (kind, parent_id, database_id, owner) = parent_columns(&next.parent);
     db.execute(
         "INSERT INTO page_inventory (page_id, parent_kind, parent_id, database_id, root_id,
@@ -159,6 +169,48 @@ impl SqliteSyncStateStore {
         tx.execute("DELETE FROM page_inventory WHERE walk_run != ?1", [run_id])
             .map_err(map_sqlite_error)?;
         tx.commit().map_err(map_sqlite_error)?;
+        for ids in [
+            &mut diff.added,
+            &mut diff.changed,
+            &mut diff.moved,
+            &mut diff.removed,
+            &mut diff.trashed,
+        ] {
+            ids.sort();
+        }
+        Ok(diff)
+    }
+
+    /// What [`Self::record_walk`] would change, read without writing: a
+    /// complete walk also lists the stored entries it did not reach.
+    pub fn preview_walk(
+        &self,
+        entries: &[InventoryEntry],
+        complete: bool,
+    ) -> Result<InventoryDiff, SyncStateError> {
+        let db = self.lock_connection()?;
+        let mut diff = InventoryDiff::default();
+        let mut reached = BTreeSet::new();
+        for next in entries {
+            if !reached.insert(next.page_id.as_str()) {
+                return Err(SyncStateError::InvalidInput);
+            }
+            classify(&db, next, &mut diff)?;
+        }
+        if complete {
+            let mut statement = db
+                .prepare("SELECT page_id FROM page_inventory")
+                .map_err(map_sqlite_error)?;
+            let stored: Vec<String> = statement
+                .query_map([], |row| row.get(0))
+                .map_err(map_sqlite_error)?
+                .collect::<Result<_, _>>()
+                .map_err(map_sqlite_error)?;
+            diff.removed = stored
+                .into_iter()
+                .filter(|id| !reached.contains(id.as_str()))
+                .collect();
+        }
         for ids in [
             &mut diff.added,
             &mut diff.changed,

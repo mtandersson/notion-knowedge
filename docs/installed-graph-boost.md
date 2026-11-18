@@ -45,8 +45,8 @@ Keep boost off until the paired production-model quality gates and false-positiv
 review pass. An operator may explicitly opt into an experiment with
 `NK_GRAPH_BOOST=true`; no measurement automatically activates serving.
 For old/missing graph or alias projections, back up operational state and use the
-explicit owned `--reconcile rebuild-relations RUN` and
-`--reconcile rebuild-aliases RUN` workflows. These invalidate derived inventory
+explicit owned `--reconcile rebuild-relations` and
+`--reconcile rebuild-aliases` workflows. These invalidate derived inventory
 and repopulate through fresh authorized source reads; never delete SQLite or
 hand-edit edges to repair production. See [index commits](index-commits.md),
 [internal links](internal-page-graph-links.md) and [aliases](canonical-aliases.md).

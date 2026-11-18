@@ -2,9 +2,12 @@
 use notion_knowledge_notion::pages::page_id;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    Apply(String),
-    RebuildRelations(String),
-    RebuildAliases(String),
+    /// One full walk sync (`SyncMode::Full`).
+    Apply,
+    /// Invalidate derived relation projections, then a full walk sync.
+    RebuildRelations,
+    /// Invalidate derived alias projections, then a full walk sync.
+    RebuildAliases,
     DryRun,
     ScheduleStatus,
     ScheduleHistory(i64),
@@ -18,27 +21,11 @@ pub enum Command {
         seconds: i64,
         deadline: i64,
     },
-    Resume(String),
-    Status(String),
-    Retry {
-        run: String,
-        page: String,
-    },
+    /// One page through the parent map (`SyncMode::Page`).
+    Retry(String),
 }
 impl Command {
     pub fn parse(args: &[String]) -> Result<Self, &'static str> {
-        let run = |s: &str| -> Result<String, &'static str> {
-            if s.is_empty()
-                || s.len() > 128
-                || !s
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-            {
-                Err("invalid reconciliation run identifier")
-            } else {
-                Ok(s.into())
-            }
-        };
         match args
             .iter()
             .map(String::as_str)
@@ -116,26 +103,21 @@ impl Command {
                     Self::ScheduleAbandon(deadline)
                 })
             }
-            ["--reconcile", "apply", id] => Ok(Self::Apply(run(id)?)),
-            ["--reconcile", "rebuild-relations", id] => Ok(Self::RebuildRelations(run(id)?)),
-            ["--reconcile", "rebuild-aliases", id] => Ok(Self::RebuildAliases(run(id)?)),
-            ["--reconcile", "resume", id] => Ok(Self::Resume(run(id)?)),
-            ["--reconcile", "status", id] => Ok(Self::Status(run(id)?)),
-            ["--reconcile", "retry", id, page] => Ok(Self::Retry {
-                run: run(id)?,
-                page: page_id(page)
-                    .map_err(|_| "invalid failed-page identifier")?
-                    .0,
-            }),
+            ["--reconcile", "apply"] => Ok(Self::Apply),
+            ["--reconcile", "rebuild-relations"] => Ok(Self::RebuildRelations),
+            ["--reconcile", "rebuild-aliases"] => Ok(Self::RebuildAliases),
+            ["--reconcile", "retry", page] => Ok(Self::Retry(
+                page_id(page).map_err(|_| "invalid page identifier")?.0,
+            )),
             _ => Err(
-                "expected --reconcile apply RUN | rebuild-relations RUN | rebuild-aliases RUN | dry-run | resume RUN | status RUN | retry RUN PAGE",
+                "expected --reconcile apply | rebuild-relations | rebuild-aliases | dry-run | retry PAGE | schedule ...",
             ),
         }
     }
     pub fn read_only(&self) -> bool {
         matches!(
             self,
-            Self::DryRun | Self::Status(_) | Self::ScheduleStatus | Self::ScheduleHistory(_)
+            Self::DryRun | Self::ScheduleStatus | Self::ScheduleHistory(_)
         )
     }
 }
@@ -158,11 +140,11 @@ pub mod runtime {
     use super::*;
     use crate::{
         config::{Config, NotionAuth},
-        index_runtime::{IndexRuntime, OpenMode},
+        index_runtime::{IndexRuntime, OpenMode, PageDeadline, SyncMode},
         webhook_worker::{WorkerSettings, runtime::now_ms},
     };
     use notion_knowledge_core::reconciliation::{JournalError, ReconciliationJournal, RunPhase};
-    use notion_knowledge_retrieval::{durable_plan::DurableProgress, runner::RunnerError};
+    use notion_knowledge_retrieval::durable_plan::DurableProgress;
     use std::{path::PathBuf, sync::Arc, time::Duration};
     use tokio_util::sync::CancellationToken;
 
@@ -275,59 +257,18 @@ pub mod runtime {
             };
             return schedule_command(&runtime, command);
         }
-        if let Some(id) = match &command {
-            Command::DryRun
-            | Command::ScheduleStatus
-            | Command::ScheduleHistory(_)
-            | Command::ScheduleRetry(_)
-            | Command::ScheduleAbandon(_)
-            | Command::ScheduleInterval { .. }
-            | Command::ScheduleConfigure { .. } => None,
-            Command::Apply(s)
-            | Command::RebuildRelations(s)
-            | Command::RebuildAliases(s)
-            | Command::Resume(s)
-            | Command::Status(s) => Some(s),
-            Command::Retry { run, .. } => Some(run),
-        } {
-            let existing = inspected.coordinator.state().run(id, &inspected.scope);
-            let valid = match &command {
-                Command::Apply(_) | Command::RebuildRelations(_) | Command::RebuildAliases(_) => {
-                    matches!(existing, Err(JournalError::InvalidTransition))
-                }
-                Command::Retry { page, .. } => {
-                    existing.is_ok_and(|r| r.phase == RunPhase::Applying)
-                        && inspected
-                            .coordinator
-                            .reconciliation_progress(id)
-                            .is_ok_and(|p| p.failed.contains_key(page))
-                }
-                _ => existing.is_ok(),
-            };
-            if !valid {
-                return Output::error("run_configuration", 2);
-            }
-        }
-        if let Command::Status(id) = &command {
-            return status(&inspected, id, "inspected", None);
-        }
         if command == Command::DryRun {
             let result = tokio::select! { biased;
                 _ = stop.cancelled() => return Output::error("cancelled", 5),
                 _ = tokio::time::sleep(Duration::from_secs(settings.inventory_timeout_seconds)) => return Output::error("timeout", 3),
-                result = inspected.runner.dry_run() => result,
+                result = inspected.dry_run() => result,
             };
             return match result {
-                Ok(p) => {
-                    let errors = p.errors.len() + p.run_errors.len();
-                    Output {
-                        json: serde_json::json!({"operation":"reconciliation", "status":"dry_run", "scanned":p.scanned,
-                        "planned_refresh":p.planned_refresh(),"planned_delete":p.planned_delete(), "changed":0,"deleted":0,"unchanged":0,
-                        "errors":errors,"planning_failures":p.errors.iter().map(|(id,c)|(id, format!("{c:?}"))).collect::<std::collections::BTreeMap<_,_>>(),
-                        "run_failures":p.run_errors.iter().map(|c|format!("{c:?}")).collect::<Vec<_>>() }),
-                        exit: if errors == 0 { 0 } else { 3 },
-                    }
-                }
+                Ok(p) => Output {
+                    json: serde_json::json!({"operation":"reconciliation", "status":"dry_run",
+                        "scanned":p.inventory, "skipped":p.skipped, "complete":p.complete, "drift":p.drift}),
+                    exit: if p.complete { 0 } else { 3 },
+                },
                 Err(_) => Output::error("planning_failure", 3),
             };
         }
@@ -345,20 +286,6 @@ pub mod runtime {
             Ok(r) => r,
             Err(_) => return Output::error("index_state_configuration", 2),
         };
-        let fresh_run = matches!(
-            command,
-            Command::Apply(_) | Command::RebuildRelations(_) | Command::RebuildAliases(_)
-        );
-        let mut rebuild_aliases = matches!(command, Command::RebuildAliases(_));
-        let mut rebuild_relations = matches!(command, Command::RebuildRelations(_));
-        let (run, retry) = match command {
-            Command::Apply(id)
-            | Command::RebuildRelations(id)
-            | Command::RebuildAliases(id)
-            | Command::Resume(id) => (id, None),
-            Command::Retry { run, page } => (run, Some(page)),
-            _ => unreachable!(),
-        };
         let mut lease = match runtime
             .coordinator
             .state()
@@ -368,217 +295,100 @@ pub mod runtime {
             Err(JournalError::Busy) => return Output::error("busy", 4),
             Err(_) => return Output::error("state_failure", 3),
         };
-        if fresh_run
-            && !matches!(
-                runtime.coordinator.state().run(&run, &runtime.scope),
-                Err(JournalError::InvalidTransition)
-            )
-        {
-            let _ = runtime
-                .coordinator
-                .state()
-                .release_lease(&lease, now_ms() / 1000);
-            return Output::error("run_configuration", 2);
-        }
-        let mut retry = retry;
-        let mut retry_prepared = false;
-        let output = loop {
-            let preparing_retry = retry.is_some() && !retry_prepared;
-            let projection_prelude = rebuild_aliases || rebuild_relations;
-            let inventory = if projection_prelude {
-                false
-            } else if preparing_retry {
-                true
+        let attempt = stop.child_token();
+        let cancelled = attempt.clone();
+        let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || {
+            if cancelled.is_cancelled() {
+                i64::MAX
             } else {
-                match runtime.inventory_pending(&run) {
-                    Ok(inventory) => inventory,
-                    Err(_) => break Output::error("state_failure", 3),
-                }
-            };
-            let prepared = if inventory {
-                // Keep the existing run identity/status during planning, but
-                // release writer ownership before the long source read.
-                if runtime
-                    .coordinator
-                    .state()
-                    .start_or_resume(&lease, now_ms() / 1000, &run, &runtime.scope)
-                    .is_err()
-                {
-                    break Output::error("run_configuration", 2);
-                }
-                if runtime
-                    .coordinator
-                    .state()
-                    .release_lease(&lease, now_ms() / 1000)
-                    .is_err()
-                {
-                    break status(&runtime, &run, "lease_lost", Some(4));
-                }
-                let plan = tokio::select! { biased;
-                    _ = stop.cancelled() => break status(&runtime, &run, "cancelled", Some(5)),
-                    _ = tokio::time::sleep(Duration::from_secs(settings.inventory_timeout_seconds)) => break status(&runtime, &run, "timeout", Some(3)),
-                    result = runtime.runner.dry_run() => match result {
-                        Ok(plan) => plan,
-                        Err(_) => break status(&runtime, &run, "work_failure", Some(3)),
-                    },
+                now_ms() / 1000
+            }
+        });
+        let page = PageDeadline {
+            timeout_seconds: settings.timeout_seconds,
+        };
+        // A single-page sync never proves the whole walk complete.
+        let command_is_page = matches!(command, Command::Retry(_));
+        let result = {
+            let runtime = &runtime;
+            let lease = &mut lease;
+            let work = async move {
+                let rebuild = match &command {
+                    Command::RebuildRelations => Some(false),
+                    Command::RebuildAliases => Some(true),
+                    _ => None,
                 };
-                lease = match runtime
-                    .coordinator
-                    .state()
-                    .acquire_lease(now_ms() / 1000, settings.timeout_seconds as i64 + 30)
-                {
-                    Ok(lease) => lease,
-                    Err(JournalError::Busy) => break status(&runtime, &run, "busy", Some(4)),
-                    Err(_) => break Output::error("state_failure", 3),
-                };
-                Some(plan)
-            } else {
-                None
-            };
-            let timeout = Duration::from_secs(settings.timeout_seconds);
-            lease = match runtime.coordinator.state().renew_lease(
-                &lease,
-                now_ms() / 1000,
-                timeout.as_secs() as i64 + 30,
-            ) {
-                Ok(lease) => lease,
-                Err(_) => break status(&runtime, &run, "lease_lost", Some(4)),
-            };
-
-            let attempt = stop.child_token();
-            let cancelled = attempt.clone();
-            let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || {
-                if cancelled.is_cancelled() {
-                    i64::MAX
-                } else {
-                    now_ms() / 1000
-                }
-            });
-            let page = retry.as_ref();
-            let aliases = std::mem::take(&mut rebuild_aliases);
-            let rebuild = std::mem::take(&mut rebuild_relations);
-            let work = async {
-                if aliases {
+                if let Some(aliases) = rebuild {
                     runtime
-                        .runner
-                        .begin_alias_rebuild(&run, lease.clone(), clock.clone())
-                        .await?;
-                    return Ok(None);
-                }
-                if rebuild {
-                    runtime
-                        .runner
-                        .begin_relation_rebuild(&run, lease.clone(), clock.clone())
-                        .await?;
-                    return Ok(None);
-                }
-                let progress = if let Some(page) = page {
-                    if preparing_retry {
-                        runtime
-                            .runner
-                            .record_retry_plan(
-                                &run,
-                                page,
-                                prepared.as_ref().ok_or(RunnerError::InvalidConfiguration)?,
-                                lease.clone(),
-                                clock.clone(),
-                            )
-                            .await?;
-                        runtime.coordinator.reconciliation_progress(&run)?
-                    } else {
-                        runtime
-                            .runner
-                            .apply_prepared_retry_page(
-                                &run,
-                                page,
-                                lease.clone(),
-                                clock.clone(),
-                                runtime.provider.as_ref(),
-                            )
-                            .await?
-                    }
-                } else if let Some(plan) = prepared {
-                    runtime
-                        .runner
-                        .record_inventory_plan(&run, &plan, lease.clone(), clock.clone())
-                        .await?
-                } else {
-                    runtime
-                        .runner
-                        .apply_next(
-                            &run,
+                        .coordinator
+                        .begin_projection_rebuild(
+                            aliases,
+                            runtime.scope.clone(),
                             lease.clone(),
                             clock.clone(),
-                            runtime.provider.as_ref(),
                         )
-                        .await?
-                };
-                if progress.pending.is_empty()
-                    && progress.failed_pages() == 0
-                    && progress.run_failures.is_empty()
-                {
-                    crate::index_runtime::prepare_search_if_missing(
-                        &runtime.coordinator,
-                        &runtime.handler,
-                        lease.clone(),
-                        clock,
-                    )
-                    .await
-                    .map_err(|_| RunnerError::Journal(JournalError::Unavailable))?;
+                        .await
+                        .map_err(|_| "projection rebuild failed")?;
                 }
-                Ok(Some(progress))
-            };
-            let result = tokio::select! { biased;
-                _ = stop.cancelled() => { attempt.cancel(); None },
-                _ = tokio::time::sleep(timeout) => { attempt.cancel(); Some(Err(RunnerError::Journal(JournalError::LeaseLost))) },
-                result = work => Some(result),
-            };
-            if attempt.is_cancelled() {
-                // The observer has dropped; an already live mutation still owns
-                // its guard. Drain before releasing/renewing or exiting normally.
-                runtime.runner.discard_read_ahead();
-                let _ = runtime.coordinator.drain_owned().await;
-                break status(
-                    &runtime,
-                    &run,
-                    if stop.is_cancelled() {
-                        "cancelled"
-                    } else {
-                        "timeout"
-                    },
-                    Some(if stop.is_cancelled() { 5 } else { 3 }),
-                );
-            }
-            match result {
-                Some(Ok(None)) => {}
-                Some(Ok(Some(p))) if !p.pending.is_empty() => {
-                    if preparing_retry {
-                        retry_prepared = true;
-                    } else {
-                        retry = None;
+                let mode = match command {
+                    Command::Retry(page) => {
+                        SyncMode::Page(notion_knowledge_core::backend::PageId(page))
                     }
-                }
-                Some(Ok(_)) => break status(&runtime, &run, "finished", None),
-                Some(Err(
-                    RunnerError::Journal(
-                        JournalError::ScopeMismatch
-                        | JournalError::InvalidInput
-                        | JournalError::InvalidTransition,
-                    )
-                    | RunnerError::InvalidConfiguration,
-                )) => break Output::error("run_configuration", 2),
-                Some(Err(RunnerError::Journal(JournalError::LeaseLost | JournalError::Busy))) => {
-                    break status(&runtime, &run, "lease_lost", Some(4));
-                }
-                Some(Err(_)) => break status(&runtime, &run, "work_failure", Some(3)),
-                None => break status(&runtime, &run, "cancelled", Some(5)),
+                    _ => SyncMode::Full,
+                };
+                let totals = Box::pin(runtime.sync_from_walk(&page, lease, mode))
+                    .await
+                    .map_err(|e| e.reason)?;
+                crate::index_runtime::prepare_search_if_missing(
+                    &runtime.coordinator,
+                    &runtime.handler,
+                    lease.clone(),
+                    clock,
+                )
+                .await
+                .map_err(|_| "search preparation failed")?;
+                Ok::<_, &'static str>(totals)
+            };
+            tokio::select! { biased;
+                _ = stop.cancelled() => { attempt.cancel(); None },
+                _ = tokio::time::sleep(Duration::from_secs(settings.inventory_timeout_seconds)) => { attempt.cancel(); Some(Err("timeout")) },
+                result = work => Some(result),
             }
         };
+        if !matches!(result, Some(Ok(_))) {
+            // A submitted owned effect still holds its guard: drain it before
+            // releasing the lease or exiting.
+            let _ = runtime.coordinator.drain_owned().await;
+        }
         let _ = runtime
             .coordinator
             .state()
             .release_lease(&lease, now_ms() / 1000);
-        output
+        match result {
+            None => Output::error("cancelled", 5),
+            Some(Err("timeout")) => Output::error("timeout", 3),
+            Some(Err(_)) => Output::error("work_failure", 3),
+            Some(Ok(t)) => {
+                let errors = t.failed;
+                // A single-page sync never proves the walk complete, but a page the
+                // inventory could not place was not synced at all.
+                let clean = errors == 0
+                    && t.held == 0
+                    && if command_is_page {
+                        t.drift.unplaced == 0 && t.inventory > 0 || t.removed > 0
+                    } else {
+                        t.complete
+                    };
+                Output {
+                    json: serde_json::json!({"operation":"reconciliation", "status":"finished",
+                        "scanned":t.inventory, "changed":t.indexed, "deleted":t.removed,
+                        "unchanged":t.unchanged, "skipped":t.skipped, "errors":errors,
+                        "permanent":t.permanent, "held":t.held, "complete":t.complete,
+                        "drift":t.drift}),
+                    exit: if clean { 0 } else { 3 },
+                }
+            }
+        }
     }
     fn schedule_command(runtime: &IndexRuntime, command: Command) -> Output {
         use crate::scheduled_reconciliation::runtime::ID;

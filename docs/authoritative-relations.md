@@ -110,35 +110,29 @@ Parents #383 and #374 remain open for their own integrated acceptance audits.
 
 Keep the configured Notion scope, index/vector identity and SQLite binding.
 Back up local state using [the recovery runbook](local-state-recovery.md), then
-use the existing operator environment and a new run ID:
+use the existing operator environment:
 
 ```sh
 notion-knowledge-server --reconcile dry-run
-notion-knowledge-server --reconcile rebuild-relations relations-2026-10-15
-notion-knowledge-server --reconcile status relations-2026-10-15
-notion-knowledge-server --reconcile resume relations-2026-10-15
-notion-knowledge-server --reconcile retry relations-2026-10-15 PAGE_UUID
+notion-knowledge-server --reconcile rebuild-relations
+notion-knowledge-server --reconcile retry PAGE_UUID
 ```
 
-`rebuild-relations` requires an existing compatible index/state, configured
-Notion authority and a new run ID. It acquires the same global writer lease as
-ordinary reconciliation. The runner's `begin_relation_rebuild` uses coordinator
-owned maintenance to atomically create inventory and invalidate only the current
-generation's derived completeness markers under the directory lock and current
-SQLite binding/fence checks. Failure rolls back both changes. Existing graph
-rows, unrelated links, checkpoints, immutable receipts, queued webhooks,
-schedules and journal history survive. Neither SQLite nor Lance is deleted.
+`rebuild-relations` requires an existing compatible index/state and configured
+Notion authority. It acquires the same global writer lease as
+ordinary reconciliation. `CommitCoordinator::begin_projection_rebuild` uses
+coordinator-owned maintenance to invalidate only the current generation's
+derived completeness markers under the directory lock and current SQLite
+binding/fence checks. Existing graph rows, unrelated links, checkpoints,
+immutable receipts, queued webhooks and schedules survive. Neither SQLite nor
+Lance is deleted.
 
-The ordinary planner and durable runner then reconstruct each affected source
-through the full fenced refresh and graph-before-acknowledgment transaction.
-Valid zero-edge pages also receive repaired completeness. Content vectors are
-reused when unchanged. Source tombstones and physical scope removals receive
-empty tombstone projections. A graph failure retains the previous graph and
-checkpoint and leaves failed/pending work unsuccessful; resume recovers pending
-work, while explicit `retry` replans a failed page. A crash after invalidation
-reopens the committed inventory run and plans repairs; a crash before that
-transaction commits has made neither change. A completed run cannot be used to
-request another rebuild: use a new ID. Read-only status, dry-run and startup
+The command then runs one full `sync_from_walk`, which recommits each affected
+source through the full fenced refresh and graph-before-acknowledgment
+transaction. Valid zero-edge pages also receive repaired completeness. Content
+vectors are reused when unchanged. A graph failure retains the previous graph and
+checkpoint and counts the page as failed; rerun `rebuild-relations` (or
+`apply`) to recover, or `retry PAGE_UUID` for one page. Dry-run and startup
 never invalidate or repair. Model/vector incompatibility still requires the
 separate index recovery procedure; this command rebuilds derived relations only.
 

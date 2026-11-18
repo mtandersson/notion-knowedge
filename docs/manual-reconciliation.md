@@ -38,64 +38,57 @@ require the explicit rebuild/recovery procedure, never an implicit migration.
 
 ```sh
 notion-knowledge-server --reconcile dry-run
-notion-knowledge-server --reconcile apply operator-2026-10-12
-notion-knowledge-server --reconcile rebuild-relations relations-2026-10-15
-notion-knowledge-server --reconcile status operator-2026-10-12
-notion-knowledge-server --reconcile resume operator-2026-10-12
-notion-knowledge-server --reconcile retry operator-2026-10-12 PAGE_UUID
+notion-knowledge-server --reconcile apply
+notion-knowledge-server --reconcile rebuild-relations
+notion-knowledge-server --reconcile rebuild-aliases
+notion-knowledge-server --reconcile retry PAGE_UUID
 ```
 
-Run IDs are 1–128 ASCII letters, digits, `_` or `-`. `apply` and `rebuild-relations` require a new ID;
-`resume` and `status` require an existing run under the exact configured
-binding. `retry` requires a failed application page in an open run and replans
-that page explicitly. Unknown, extra or mixed transport/operator arguments fail
-before credentials or state are used. Successful pages cannot be retried, and
-resume never retries failed pages implicitly. Planning/access failures appear
-separately; use a new run after repairing discovery/permissions. Intentional
-non-traversal of copied synced references does not make physical inventory
-incomplete. Index the content Notion returns without resolving template originals.
-Unreadable pages remain in the existing error report while independent page work
-continues, including during cache startup/reset. Actual inaccessible physical
-subtrees still prevent orphan deletion. Index/storage and credential failures
-still prevent serving an unusable cache.
+`apply` is one full tree walk through `IndexRuntime::sync_from_walk`
+(`SyncMode::Full`), the same path as cache resync and the periodic walk. The
+walk reads each page once, commits changed pages, records the inventory and,
+only when the walk is complete, removes indexed pages it no longer reached.
+There are no run identifiers, durable plans, `status`, `resume` or
+per-run retry: a failed or interrupted sync leaves its committed pages in place
+and the next `apply` finishes the rest. `retry PAGE_UUID` syncs one page
+(`SyncMode::Page`) through the inventory's parent map; a page the inventory
+cannot place is counted as `unplaced` and left for the next walk. Unknown,
+extra or mixed transport/operator arguments (including a former run
+identifier) fail before credentials or state are used.
 
-`rebuild-relations` atomically starts inventory and invalidates only derived
-relation completeness through owned, fenced maintenance, then uses the same
-planner/runner as apply. It preserves graph rows until authoritative replacement,
-unrelated links, content vectors, immutable receipts and operational coordination.
-Resume/retry use the same run after interruption or graph failure. See the
+`rebuild-relations` and `rebuild-aliases` first invalidate only the derived
+projection completeness under the owned maintenance fence (graph rows, content
+vectors, receipts and coordination survive), then run the same full sync, which
+recommits every page whose projection was invalidated. See the
 [relation rebuild and recovery procedure](authoritative-relations.md#explicit-derived-relation-rebuild).
 
-Dry-run only reads local authority and fresh Notion metadata/lifecycle/discovery;
-it extracts no Markdown and embeds nothing. Status reads only local durable
-state. Both use a SQLite-enforced read-only connection, validate the complete
-current migration ledger, and perform no writer-lease, binding, metadata,
-journal, checkpoint, receipt, FTS repair or index creation writes.
+`dry-run` walks the tree and compares it with the stored inventory. It uses a
+SQLite-enforced read-only connection, validates the complete current migration
+ledger and performs no writer-lease, inventory, outcome, receipt, embedding or
+index writes. Its report is `scanned`, `skipped`, `complete` and `drift`
+(`added`, `changed`, `moved`, `removed`, `trashed`). `removed` lists every stored
+page the walk did not reach; a real sync may hold some one walk (`held`).
 
-Apply/resume/retry acquire the same global SQLite writer lease as webhooks.
-A busy writer returns promptly without planning or consuming work. Inventory
-and each page attempt are bounded by the configured timeout; the lease is
-renewed only between completed attempts. Once submitted, an operation keeps
-its original expiry and owns any live index effects even if its observer drops.
-Ctrl-C invalidates the active attempt, retains durable pending work, waits for
-an already live owned effect to finish, then releases the lease. Restart with
-`resume` and the same run ID to recover real receipts and finish pending work.
-A timeout similarly preserves pending work for explicit resume. Applied
-receipts remain immutable; a later new run handles newer source revisions.
+Apply and retry acquire the same global SQLite writer lease as webhooks. A busy
+writer returns promptly without reading. The whole command (walk plus indexing) is bounded by
+`NK_RECONCILIATION_INVENTORY_TIMEOUT_SECONDS`, each page by
+`NK_WEBHOOK_TIMEOUT_SECONDS`; pages committed before a timeout stay. Once submitted, an operation keeps its original
+expiry and owns any live index effects even if its observer drops. Ctrl-C
+invalidates the active attempt, waits for an already live owned effect to
+finish, then releases the lease.
 
-Each command prints one payload-free JSON report. Actual `changed`, `deleted`
-and `unchanged` counts derive from durable applied receipts; `scanned` counts
-distinct inspected pages. `planned_refresh`/`planned_delete` are proposals,
-not successful mutations. `errors` counts distinct failed pages plus run-level
-failures. `planning_failures`, `application_failures`, `run_failures` and
-`failure` expose sanitized classes and canonical page IDs for explicit retry.
-Reports omit content, titles, URLs, credentials, paths and user-supplied run IDs.
+Each command prints one payload-free JSON report. `apply` and `retry` report
+`scanned` (pages reached), `changed`, `deleted`, `unchanged`, `skipped`,
+`errors` (failed pages), `permanent`, `held`, `complete` and `drift`.
+Reports omit content, titles, URLs, credentials and paths.
 
-Exit codes: `0` successful execution/inspection, `2` invalid arguments or
-configuration/run identity, `3` work/planning failure or timeout, `4` busy writer
-or lost lease, `5` operator cancellation. Status preserves work-failure exit
-code when the inspected run contains failures; it never implies a failed run
-was repaired merely by inspecting it.
+Exit codes: `0` success (a complete walk with no failed or held pages), `2`
+invalid arguments or configuration, `3` work failure, timeout, failed or held
+pages or an incomplete walk, `4` busy writer or lost lease, `5` operator
+cancellation.
+
+**Breaking:** `status RUN`, `resume RUN` and the run identifier of `apply`,
+`rebuild-relations`, `rebuild-aliases` and `retry` were removed.
 
 Periodic scheduling is documented below; production packaging
 remains #145. This command is operational manual execution, not a scheduler.
@@ -135,7 +128,7 @@ Changing configuration never silently discards existing authority or work.
 
 The lease covers one returned runner operation and is renewed between operations.
 Busy manual/webhook/external owners defer work without spending a failure attempt.
-Restart claims the stored active run and resumes its existing plan and receipts.
+Restart claims the stored schedule and runs its next full walk.
 Cancellation stops admission, cancels source waits, drains submitted owned effects,
 checkpoints pending work without spending retry budget and releases the lease.
 Fatal scheduled-worker errors stop the HTTP service through its shared supervisor.
@@ -145,8 +138,6 @@ Inspect and recover existing compatible state through the real operator command:
 ```sh
 notion-knowledge-server --reconcile schedule status
 notion-knowledge-server --reconcile schedule status AFTER_SEQUENCE
-notion-knowledge-server --reconcile status RUN
-notion-knowledge-server --reconcile retry RUN PAGE
 notion-knowledge-server --reconcile schedule retry DEADLINE_UNIX_SECONDS
 notion-knowledge-server --reconcile schedule abandon DEADLINE_UNIX_SECONDS
 notion-knowledge-server --reconcile schedule interval SECONDS DEADLINE_UNIX_SECONDS
@@ -160,9 +151,7 @@ retry, until that retry records an outcome; otherwise `null`; in history the hol
 is a `Cancelled` event with failure `Source` that spends no attempt),
 classified bounded history and active-run scanned/changed/deleted/unchanged/error
 counts. History pages contain at most 1000 events; `history_next` supplies the next cursor.
-Run status also reports retained classified failure evidence after successful retry. Source titles, content, URLs,
-credentials and upstream error strings are excluded. Run status retains existing
-sanitized page-failure identifiers for targeted explicit retry.
+Source titles, content, URLs, credentials and upstream error strings are excluded.
 
 Retryable run-level failures retain the active run and use exponential capped
 backoff; exhaustion stops automatic admission. After independent page work drains,
@@ -173,7 +162,6 @@ the transient budget. Held or exhausted runs
 reserve no webhook admission; unrelated events continue while failure evidence
 remains available for explicit recovery. Checkpointed healthy pending runs reserve
 admission until resume or explicit abandonment, without consuming inbox attempts.
-Retry failed pages explicitly; `schedule retry` rejects unresolved failed work.
 Immutable planning/run failures require explicit `schedule abandon` followed by a
 fresh cycle. Abandon preserves historical plans, receipts and failures and consumes
 the lease; a new worker must acquire a new fence. Pending submitted receipts or an

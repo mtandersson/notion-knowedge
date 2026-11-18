@@ -267,10 +267,10 @@ impl IndexCommitCoordinator {
     /// Explicit operator invalidation of derived completeness only. The owned
     /// maintenance guard and current writer fence serialize it with all commits.
     /// Existing edges, immutable receipts and operational coordination survive.
+    /// The next sync recommits every page whose projection it invalidated.
     #[cfg(feature = "local-lancedb")]
-    pub(crate) fn begin_projection_rebuild(
+    pub fn begin_projection_rebuild(
         self: &Arc<Self>,
-        run: String,
         aliases: bool,
         scope: ReconciliationScope,
         lease: Lease,
@@ -278,7 +278,7 @@ impl IndexCommitCoordinator {
     ) -> impl Future<Output = Result<(), CommitError>> + Send + 'static {
         self.maintain(lease, clock, move |context| async move {
             context
-                .invalidate_projections(&run, &scope, aliases)
+                .invalidate_projections(&scope, aliases)
                 .map_err(|error| match error {
                     CommitError::LeaseLost
                     | CommitError::BindingMismatch
@@ -411,7 +411,6 @@ pub(crate) fn current_complete(
 impl CommitContext {
     fn invalidate_projections(
         &self,
-        run: &str,
         scope: &ReconciliationScope,
         aliases: bool,
     ) -> Result<(), CommitError> {
@@ -429,12 +428,6 @@ impl CommitContext {
             .validate_fence(&tx, &self.lease, (self.clock)())?;
         if scope.identity() != self.coordinator.binding.scope {
             return Err(CommitError::BindingMismatch);
-        }
-        let current =
-            crate::reconciliation::start_run(&tx, &self.lease, (self.clock)(), run, scope)
-                .map_err(|_| CommitError::Conflict)?;
-        if current.phase != notion_knowledge_core::reconciliation::RunPhase::Inventory {
-            return Err(CommitError::Conflict);
         }
         tx.execute(
             if aliases {

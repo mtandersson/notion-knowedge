@@ -233,15 +233,18 @@ impl Fixture {
     }
     /// Populate through the core refresh seam without production ANN completion,
     /// for fixtures that deliberately construct missing or foreign indexes.
-    async fn populate(&self, http: &HttpNotion, run: &str) {
+    async fn populate(&self, http: &HttpNotion, _run: &str) {
         let runtime = self.open(http, OpenMode::ExistingWrite).await;
         let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
-        let lease = runtime.coordinator.state().acquire_lease(now, 330).unwrap();
-        let clock: Arc<dyn Fn() -> i64 + Send + Sync> =
-            Arc::new(|| notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000);
+        let mut lease = runtime.coordinator.state().acquire_lease(now, 330).unwrap();
         runtime
-            .runner
-            .apply(run, lease.clone(), clock, self.provider.as_ref())
+            .sync_from_walk(
+                &notion_knowledge_server::index_runtime::PageDeadline {
+                    timeout_seconds: 60,
+                },
+                &mut lease,
+                notion_knowledge_server::index_runtime::SyncMode::Full,
+            )
             .await
             .unwrap();
         runtime
@@ -533,30 +536,17 @@ async fn actual_commands_apply_differences_only_and_keep_dry_run_and_status_read
     let before = f.snapshot();
     let dry = f.command(&http, &["--reconcile", "dry-run"]).await;
     assert_eq!(dry.exit, 0);
-    assert_eq!(dry.json["planned_refresh"], 3);
-    assert_eq!(dry.json["changed"], 0);
+    assert_eq!(dry.json["drift"]["added"], 3);
+    assert_eq!(dry.json["complete"], true);
     assert_eq!(http.body_reads.load(Ordering::SeqCst), 3); // The walk reads each of the 3 pages once.
     assert_eq!(f.provider.count.load(Ordering::SeqCst), 0);
     assert_eq!(before, f.snapshot());
-    let applied = f.command(&http, &["--reconcile", "apply", "first"]).await;
+    let applied = f.command(&http, &["--reconcile", "apply"]).await;
     counts(&applied, 3, 0, 0);
     assert_eq!(applied.json["scanned"], 3);
-    let before = f.snapshot();
     let bodies = http.body_reads.load(Ordering::SeqCst);
     let embeds = f.provider.count.load(Ordering::SeqCst);
-    counts(
-        &f.command(&http, &["--reconcile", "status", "first"]).await,
-        3,
-        0,
-        0,
-    );
-    assert_eq!(before, f.snapshot());
-    counts(
-        &f.command(&http, &["--reconcile", "apply", "second"]).await,
-        0,
-        0,
-        3,
-    );
+    counts(&f.command(&http, &["--reconcile", "apply"]).await, 0, 0, 3);
     assert!(http.body_reads.load(Ordering::SeqCst) > bodies);
     assert_eq!(f.provider.count.load(Ordering::SeqCst), embeds);
     http.change(|m| {
@@ -564,23 +554,13 @@ async fn actual_commands_apply_differences_only_and_keep_dry_run_and_status_read
         m.revision = "2026-10-11T12:00:00Z".into();
         m.markdown.push_str("Changed oregano.");
     });
-    counts(
-        &f.command(&http, &["--reconcile", "apply", "stale"]).await,
-        1,
-        0,
-        2,
-    );
+    counts(&f.command(&http, &["--reconcile", "apply"]).await, 1, 0, 2);
     http.change(|m| {
         m.hide_page = true;
         m.archived = true;
     });
     // Removing PAGE's child tag edits the root; OTHER keeps its identity.
-    counts(
-        &f.command(&http, &["--reconcile", "apply", "orphan"]).await,
-        1,
-        1,
-        1,
-    );
+    counts(&f.command(&http, &["--reconcile", "apply"]).await, 1, 1, 1);
     let runtime = f.open(&http, OpenMode::ReadOnly).await;
     assert!(runtime.coordinator.state().acquire_lease(10, 30).is_err());
     assert!(
@@ -593,22 +573,10 @@ async fn actual_commands_apply_differences_only_and_keep_dry_run_and_status_read
 }
 
 #[tokio::test]
-async fn unknown_runs_missing_paths_and_incompatible_authority_fail_before_mutation() {
+async fn missing_paths_and_incompatible_authority_fail_before_mutation() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
-    for args in [
-        ["--reconcile", "status", "missing"],
-        ["--reconcile", "resume", "missing"],
-    ] {
-        let before = f.snapshot();
-        let out = f.command(&http, &args).await;
-        assert_eq!(out.exit, 2);
-        assert_eq!(before, f.snapshot());
-    }
-    for args in [
-        &["--reconcile", "dry-run"][..],
-        &["--reconcile", "status", "missing"][..],
-    ] {
+    for args in [&["--reconcile", "dry-run"][..]] {
         let missing = f.dir.path().join("missing/state.sqlite");
         let out = execute(
             Command::parse(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap(),
@@ -627,7 +595,7 @@ async fn unknown_runs_missing_paths_and_incompatible_authority_fail_before_mutat
     let mut scope = authority();
     scope.exclusions.page_ids.insert(PAGE.into());
     let out = execute(
-        Command::Apply("different".into()),
+        Command::Apply,
         &f.settings,
         &f.state,
         scope,
@@ -666,14 +634,14 @@ async fn unknown_runs_missing_paths_and_incompatible_authority_fail_before_mutat
 }
 
 #[tokio::test]
-async fn failed_pages_require_explicit_retry_and_webhook_writer_busy_does_not_consume_work() {
+async fn index_failures_stop_the_sync_and_a_busy_writer_does_not_consume_work() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
     let runtime = f.open(&http, OpenMode::ExistingWrite).await;
     let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
     let lease = runtime.coordinator.state().acquire_lease(now, 60).unwrap();
     let before = f.snapshot();
-    let busy = f.command(&http, &["--reconcile", "apply", "busy"]).await;
+    let busy = f.command(&http, &["--reconcile", "apply"]).await;
     assert_eq!(busy.exit, 4);
     assert_eq!(before, f.snapshot());
     runtime
@@ -683,78 +651,61 @@ async fn failed_pages_require_explicit_retry_and_webhook_writer_busy_does_not_co
         .unwrap();
     drop(runtime);
     f.provider.fail.store(true, Ordering::SeqCst);
-    let failed = f.command(&http, &["--reconcile", "apply", "failed"]).await;
+    let failed = f.command(&http, &["--reconcile", "apply"]).await;
     assert_eq!(failed.exit, 3);
-    assert_eq!(failed.json["errors"], 3);
+    // An index failure stops the sync; nothing partial is acknowledged.
+    assert_eq!(failed.json["status"], "work_failure");
     let embeds = f.provider.count.load(Ordering::SeqCst);
     f.provider.fail.store(false, Ordering::SeqCst);
-    let resumed = f.command(&http, &["--reconcile", "resume", "failed"]).await;
-    assert_eq!(resumed.exit, 3);
-    assert_eq!(f.provider.count.load(Ordering::SeqCst), embeds);
     for page in [PAGE, ROOT, OTHER] {
-        let result = f
-            .command(&http, &["--reconcile", "retry", "failed", page])
-            .await;
+        let result = f.command(&http, &["--reconcile", "retry", page]).await;
         assert!(result.exit == 0 || result.exit == 3, "{:?}", result.json);
     }
-    counts(
-        &f.command(&http, &["--reconcile", "status", "failed"]).await,
-        3,
-        0,
-        0,
-    );
-    let before = f.snapshot();
+    // A page the inventory cannot place is not synced: that is not success.
+    let unknown = f
+        .command(
+            &http,
+            &[
+                "--reconcile",
+                "retry",
+                "99999999-9999-9999-9999-999999999999",
+            ],
+        )
+        .await;
+    assert_eq!(unknown.exit, 3, "{}", unknown.json);
+    // A normal full sync recovers every page the failed one left behind.
+    let done = f.command(&http, &["--reconcile", "apply"]).await;
+    assert_eq!(done.exit, 0, "{}", done.json);
     assert_eq!(
-        f.command(&http, &["--reconcile", "retry", "failed", PAGE])
-            .await
-            .exit,
-        2
+        done.json["changed"].as_u64().unwrap() + done.json["unchanged"].as_u64().unwrap(),
+        3
     );
-    assert_eq!(before, f.snapshot());
+    assert!(f.provider.count.load(Ordering::SeqCst) > embeds);
 }
 
 #[tokio::test]
-async fn cancellation_reopens_pending_work_and_permission_failure_never_deletes() {
+async fn cancellation_leaves_no_partial_state_and_a_vanished_page_is_removed_by_the_next_walk() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
     f.provider.pause.store(true, Ordering::SeqCst);
     let stop = CancellationToken::new();
-    let pending = f.command_cancel(&http, &["--reconcile", "apply", "cancel"], stop.clone());
+    let pending = f.command_cancel(&http, &["--reconcile", "apply"], stop.clone());
     let cancel = async {
         f.provider.entered.notified().await;
         stop.cancel();
     };
     let (out, _) = tokio::join!(pending, cancel);
     assert_eq!(out.exit, 5);
-    assert_eq!(out.json["phase"], "Applying");
     // Independent connections and runtime are rebuilt by each command invocation.
-    counts(
-        &f.command(&http, &["--reconcile", "resume", "cancel"]).await,
-        3,
-        0,
-        0,
-    );
+    counts(&f.command(&http, &["--reconcile", "apply"]).await, 3, 0, 0);
     http.change(|m| {
         m.hide_page = true;
         m.inaccessible_page = true;
     });
-    let before = f
-        .open(&http, OpenMode::ReadOnly)
-        .await
-        .coordinator
-        .owned_page_ids()
-        .unwrap();
-    let result = f.command(&http, &["--reconcile", "apply", "denied"]).await;
-    assert_eq!(result.exit, 3);
-    assert_eq!(result.json["deleted"], 0);
-    assert_eq!(
-        before,
-        f.open(&http, OpenMode::ReadOnly)
-            .await
-            .coordinator
-            .owned_page_ids()
-            .unwrap()
-    );
+    // The complete walk is the evidence: a page it no longer reaches is removed.
+    let result = f.command(&http, &["--reconcile", "apply"]).await;
+    assert_eq!(result.exit, 0, "{}", result.json);
+    assert_eq!(result.json["deleted"], 1, "{}", result.json);
     let report = result.json.to_string();
     assert!(!report.contains("fixture-credential"));
     assert!(!report.contains("Saffron"));
@@ -765,7 +716,7 @@ async fn timed_out_dry_run_leaves_state_unchanged_and_has_a_distinct_failure_exi
     let http = start_notion().await;
     let mut f = Fixture::new(&http).await;
     f.settings.inventory_timeout_seconds = 1;
-    http.pause.armed.store(true, Ordering::SeqCst);
+    http.discovery_pause.armed.store(true, Ordering::SeqCst);
     let before = f.snapshot();
     let result = f.command(&http, &["--reconcile", "dry-run"]).await;
     assert_eq!(result.exit, 3);
@@ -773,7 +724,7 @@ async fn timed_out_dry_run_leaves_state_unchanged_and_has_a_distinct_failure_exi
     assert_eq!(before, f.snapshot());
     // The walk may read Markdown before the paused metadata read; nothing is written.
     assert!(http.body_reads.load(Ordering::SeqCst) <= 3);
-    http.pause.proceed.notify_one();
+    http.discovery_pause.proceed.notify_one();
 }
 
 #[tokio::test]
@@ -798,10 +749,7 @@ async fn read_only_commands_reject_external_wal_before_creating_sqlite_auxiliari
     assert!(!wal.exists());
     assert!(!shm.exists());
     let before = f.snapshot();
-    for args in [
-        &["--reconcile", "dry-run"][..],
-        &["--reconcile", "status", "existing"][..],
-    ] {
+    for args in [&["--reconcile", "dry-run"][..]] {
         let out = f.command(&http, args).await;
         assert_eq!(out.exit, 2);
         assert_eq!(out.json["status"], "index_state_configuration");
@@ -838,10 +786,7 @@ async fn read_only_commands_reject_previous_schema_without_migration_or_auxiliar
     .unwrap();
     drop(db);
     let before = f.snapshot();
-    for args in [
-        ["--reconcile", "dry-run"].as_slice(),
-        ["--reconcile", "status", "unstarted"].as_slice(),
-    ] {
+    for args in [["--reconcile", "dry-run"].as_slice()] {
         let out = f.command(&http, args).await;
         assert_eq!(out.exit, 2);
         assert_eq!(before, f.snapshot());
@@ -1910,12 +1855,7 @@ async fn actual_scheduled_http_manual_periodic_and_webhook_contention_preserves_
         attempt_number: 1,
     };
     worker.state.receive(&event).unwrap();
-    assert_eq!(
-        f.command(&http, &["--reconcile", "apply", "manual-contender"])
-            .await
-            .exit,
-        4
-    );
+    assert_eq!(f.command(&http, &["--reconcile", "apply"]).await.exit, 4);
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let inbox = worker.state.event(&event.key()).unwrap().unwrap();
     assert_eq!(inbox.state, EventState::Pending);
@@ -1988,13 +1928,7 @@ async fn actual_scheduled_http_manual_periodic_and_webhook_contention_preserves_
         m.title = "Pomme".into();
     });
     // A label-only edit requires a relation projection refresh, despite unchanged content.
-    counts(
-        &f.command(&http, &["--reconcile", "apply", "manual-relations"])
-            .await,
-        1,
-        0,
-        2,
-    );
+    counts(&f.command(&http, &["--reconcile", "apply"]).await, 1, 0, 2);
     assert!(
         worker
             .coordinator
@@ -2037,7 +1971,7 @@ async fn fatal_scheduled_storage_failure_terminates_actual_http_and_both_serving
 }
 
 #[tokio::test]
-async fn explicit_relation_rebuild_uses_shared_runtime_and_preserves_operational_history() {
+async fn explicit_relation_rebuild_recommits_projections_and_preserves_checkpoints() {
     use notion_knowledge_core::{
         graph::{GraphEdge, GraphEdgeStore, GraphTarget},
         sync_state::SyncStateStore,
@@ -2049,21 +1983,8 @@ async fn explicit_relation_rebuild_uses_shared_runtime_and_preserves_operational
     });
     let f = Fixture::new(&http).await;
     f.seed_inventory(&http).await;
-    counts(
-        &f.command(&http, &["--reconcile", "apply", "seed"]).await,
-        3,
-        0,
-        0,
-    );
+    counts(&f.command(&http, &["--reconcile", "apply"]).await, 3, 0, 0);
     let runtime = f.open(&http, OpenMode::ExistingWrite).await;
-    let operation = runtime
-        .coordinator
-        .reconciliation_plan("seed")
-        .unwrap()
-        .pages[PAGE]
-        .operation_id
-        .clone();
-    let receipt = runtime.coordinator.receipt(&operation).unwrap().unwrap();
     let checkpoint = runtime.coordinator.state().page_state(PAGE).unwrap();
     let link = GraphEdge::new(
         PAGE.into(),
@@ -2083,11 +2004,8 @@ async fn explicit_relation_rebuild_uses_shared_runtime_and_preserves_operational
     drop(runtime);
     let embeddings = f.provider.count.load(Ordering::SeqCst);
     counts(
-        &f.command(
-            &http,
-            &["--reconcile", "rebuild-relations", "operator-rebuild"],
-        )
-        .await,
+        &f.command(&http, &["--reconcile", "rebuild-relations"])
+            .await,
         3,
         0,
         0,
@@ -2111,31 +2029,8 @@ async fn explicit_relation_rebuild_uses_shared_runtime_and_preserves_operational
         before
     );
     assert_eq!(
-        runtime.coordinator.receipt(&operation).unwrap().unwrap(),
-        receipt
-    );
-    assert_eq!(
         runtime.coordinator.state().page_state(PAGE).unwrap(),
         checkpoint
-    );
-    drop(runtime);
-    let before = f.snapshot();
-    assert_eq!(
-        f.command(
-            &http,
-            &["--reconcile", "rebuild-relations", "operator-rebuild"]
-        )
-        .await
-        .exit,
-        2
-    );
-    assert_eq!(f.snapshot(), before);
-    counts(
-        &f.command(&http, &["--reconcile", "resume", "operator-rebuild"])
-            .await,
-        3,
-        0,
-        0,
     );
 }
 
@@ -2159,9 +2054,7 @@ async fn installed_aliases_preserve_ambiguity_explicit_sources_rebuild_and_resta
     });
     let mut f = Fixture::new(&http).await;
     f.settings.alias_sources = AliasSources::new(true, vec!["names".into()]).unwrap();
-    let output = f
-        .command(&http, &["--reconcile", "apply", "alias-initial"])
-        .await;
+    let output = f.command(&http, &["--reconcile", "apply"]).await;
     assert_eq!(output.exit, 0, "{}", output.json);
     let runtime = f.open(&http, OpenMode::ExistingWrite).await;
     assert_eq!(
@@ -2186,12 +2079,7 @@ async fn installed_aliases_preserve_ambiguity_explicit_sources_rebuild_and_resta
     drop(runtime);
     // No content or edit-time change: explicit source fields still replace rows.
     http.change(|m| m.alias_names = vec!["Sundet".into()]);
-    assert_eq!(
-        f.command(&http, &["--reconcile", "apply", "alias-edit"])
-            .await
-            .exit,
-        0
-    );
+    assert_eq!(f.command(&http, &["--reconcile", "apply"]).await.exit, 0);
     let runtime = f.open(&http, OpenMode::ReadOnly).await;
     assert!(runtime.lookup_alias("Oresund").unwrap().is_empty());
     assert_eq!(runtime.lookup_alias("Sundet").unwrap(), vec![PAGE]);
@@ -2216,7 +2104,7 @@ async fn installed_aliases_preserve_ambiguity_explicit_sources_rebuild_and_resta
     assert_eq!(f.command(&http, &["--reconcile", "dry-run"]).await.exit, 0);
     assert_eq!(f.snapshot(), before);
     assert_eq!(
-        f.command(&http, &["--reconcile", "rebuild-aliases", "alias-rebuild"])
+        f.command(&http, &["--reconcile", "rebuild-aliases"])
             .await
             .exit,
         0
@@ -2232,12 +2120,7 @@ async fn installed_aliases_preserve_ambiguity_explicit_sources_rebuild_and_resta
     // Property removal and title opt-out remove stale names atomically.
     f.settings.alias_sources = AliasSources::new(false, vec!["names".into()]).unwrap();
     http.change(|m| m.alias_names.clear());
-    assert_eq!(
-        f.command(&http, &["--reconcile", "apply", "alias-empty"])
-            .await
-            .exit,
-        0
-    );
+    assert_eq!(f.command(&http, &["--reconcile", "apply"]).await.exit, 0);
     let runtime = f.open(&http, OpenMode::ReadOnly).await;
     assert!(runtime.lookup_alias("Sundet").unwrap().is_empty());
     assert!(runtime.lookup_alias("Öresund").unwrap().is_empty());
@@ -2245,12 +2128,7 @@ async fn installed_aliases_preserve_ambiguity_explicit_sources_rebuild_and_resta
     http.change(|m| {
         m.alias_names = vec!["Äpple".into(), "Apple".into()];
     });
-    assert_eq!(
-        f.command(&http, &["--reconcile", "apply", "alias-live"])
-            .await
-            .exit,
-        0
-    );
+    assert_eq!(f.command(&http, &["--reconcile", "apply"]).await.exit, 0);
     assert_eq!(
         f.open(&http, OpenMode::ReadOnly)
             .await
@@ -2263,12 +2141,7 @@ async fn installed_aliases_preserve_ambiguity_explicit_sources_rebuild_and_resta
         m.archived = true;
         m.hide_page = true;
     });
-    assert_eq!(
-        f.command(&http, &["--reconcile", "apply", "alias-archive"])
-            .await
-            .exit,
-        0
-    );
+    assert_eq!(f.command(&http, &["--reconcile", "apply"]).await.exit, 0);
     assert!(
         f.open(&http, OpenMode::ReadOnly)
             .await
@@ -2280,12 +2153,7 @@ async fn installed_aliases_preserve_ambiguity_explicit_sources_rebuild_and_resta
         m.archived = false;
         m.hide_page = false;
     });
-    assert_eq!(
-        f.command(&http, &["--reconcile", "apply", "alias-restore"])
-            .await
-            .exit,
-        0
-    );
+    assert_eq!(f.command(&http, &["--reconcile", "apply"]).await.exit, 0);
     assert_eq!(
         f.open(&http, OpenMode::ReadOnly)
             .await
@@ -2298,12 +2166,7 @@ async fn installed_aliases_preserve_ambiguity_explicit_sources_rebuild_and_resta
         m.parent = FOREIGN.into();
         m.hide_page = true;
     });
-    assert_eq!(
-        f.command(&http, &["--reconcile", "apply", "alias-remove"])
-            .await
-            .exit,
-        0
-    );
+    assert_eq!(f.command(&http, &["--reconcile", "apply"]).await.exit, 0);
     let runtime = f.open(&http, OpenMode::ReadOnly).await;
     assert!(runtime.lookup_alias("Apple").unwrap().is_empty());
     assert_eq!(
@@ -2329,8 +2192,9 @@ async fn installed_alias_persistence_failure_replays_durable_repair_without_muta
         let lease = runtime.coordinator.state().acquire_lease(now, 120).unwrap();
         let result = runtime
             .handler
-            .apply_lifecycle(
+            .refresh_page(
                 &PageId(PAGE.into()),
+                &PageId(ROOT.into()),
                 id,
                 runtime.provider.as_ref(),
                 lease.clone(),
@@ -2464,13 +2328,7 @@ async fn index_commands_provision_reuse_and_rebuild_search_without_changing_auth
     };
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
-    counts(
-        &f.command(&http, &["--reconcile", "apply", "seed-index"])
-            .await,
-        3,
-        0,
-        0,
-    );
+    counts(&f.command(&http, &["--reconcile", "apply"]).await, 3, 0, 0);
     let body_reads = http.body_reads.load(Ordering::SeqCst);
     let embeddings = f.provider.count.load(Ordering::SeqCst);
     let runtime = f.open(&http, OpenMode::ReadOnly).await;
@@ -2521,13 +2379,6 @@ async fn index_commands_provision_reuse_and_rebuild_search_without_changing_auth
     }
     assert_eq!(http.body_reads.load(Ordering::SeqCst), body_reads);
     assert_eq!(f.provider.count.load(Ordering::SeqCst), embeddings);
-    counts(
-        &f.command(&http, &["--reconcile", "status", "seed-index"])
-            .await,
-        3,
-        0,
-        0,
-    );
 }
 
 #[tokio::test]
@@ -2681,13 +2532,6 @@ async fn index_rebuild_refuses_foreign_vector_distance_without_replacing_it() {
             .unwrap(),
         4
     );
-    counts(
-        &f.command(&http, &["--reconcile", "status", "seed-distance"])
-            .await,
-        3,
-        0,
-        0,
-    );
 }
 
 #[tokio::test]
@@ -2703,12 +2547,7 @@ async fn ordinary_reconciliation_repairs_missing_rows_without_a_source_revision_
     for remove_all in [false, true] {
         let http = start_notion().await;
         let f = Fixture::new(&http).await;
-        counts(
-            &f.command(&http, &["--reconcile", "apply", "seed"]).await,
-            3,
-            0,
-            0,
-        );
+        counts(&f.command(&http, &["--reconcile", "apply"]).await, 3, 0, 0);
         let runtime = f.open(&http, OpenMode::ReadOnly).await;
         let checkpoint = runtime.coordinator.state().page_state(PAGE).unwrap();
         drop(runtime);
@@ -2746,14 +2585,9 @@ async fn ordinary_reconciliation_repairs_missing_rows_without_a_source_revision_
         let dry = f.command(&http, &["--reconcile", "dry-run"]).await;
         assert_eq!(dry.exit, 0, "{dry:?}");
         assert_eq!(dry.json["scanned"], 3);
-        assert_eq!(dry.json["planned_refresh"], 0);
-        assert_eq!(dry.json["planned_delete"], 0);
-        counts(
-            &f.command(&http, &["--reconcile", "apply", "repair"]).await,
-            1,
-            0,
-            2,
-        );
+        assert_eq!(dry.json["drift"]["changed"], 0);
+        assert_eq!(dry.json["drift"]["removed"], 0);
+        counts(&f.command(&http, &["--reconcile", "apply"]).await, 1, 0, 2);
         assert_eq!(
             f.provider.count.load(Ordering::SeqCst) - embeds,
             original.len() - retained.len(),
@@ -2811,13 +2645,7 @@ async fn ordinary_reconciliation_repairs_missing_rows_without_a_source_revision_
         drop(table);
         drop(runtime);
         let embeds = f.provider.count.load(Ordering::SeqCst);
-        counts(
-            &f.command(&http, &["--reconcile", "apply", "after-repair"])
-                .await,
-            0,
-            0,
-            3,
-        );
+        counts(&f.command(&http, &["--reconcile", "apply"]).await, 0, 0, 3);
         assert_eq!(f.provider.count.load(Ordering::SeqCst), embeds);
 
         let runtime = if remove_all {
@@ -2838,13 +2666,7 @@ async fn ordinary_reconciliation_repairs_missing_rows_without_a_source_revision_
                 m.archived = true;
             });
             // Removing PAGE's child tag edits the root; OTHER keeps its identity.
-            counts(
-                &f.command(&http, &["--reconcile", "apply", "after-deletion"])
-                    .await,
-                1,
-                1,
-                1,
-            );
+            counts(&f.command(&http, &["--reconcile", "apply"]).await, 1, 1, 1);
             f.open(&http, OpenMode::ReadOnly).await
         };
         let table = GuardedChunkTable::bind(
@@ -2887,13 +2709,7 @@ async fn lost_or_incompatible_cache_resyncs_without_replaying_external_effects()
         if damage == "missing-index" {
             f.populate(&http, "seed-cache").await;
         } else {
-            counts(
-                &f.command(&http, &["--reconcile", "apply", "seed-cache"])
-                    .await,
-                3,
-                0,
-                0,
-            );
+            counts(&f.command(&http, &["--reconcile", "apply"]).await, 3, 0, 0);
         }
         {
             let db = rusqlite::Connection::open(&f.state).unwrap();
@@ -3160,13 +2976,7 @@ async fn unreadable_page_does_not_block_embedded_search_and_next_sync_can_recove
     );
     drop(runtime);
     http.state.lock().unwrap().unsupported_page_content = false;
-    counts(
-        &f.command(&http, &["--reconcile", "apply", "next-cache-sync"])
-            .await,
-        1,
-        0,
-        2,
-    );
+    counts(&f.command(&http, &["--reconcile", "apply"]).await, 1, 0, 2);
 }
 
 #[tokio::test]
@@ -3269,13 +3079,7 @@ async fn failed_cache_resync_stays_pending_and_next_start_retries_from_notion() 
         .markdown
         .push_str("\nA subsequent incremental update.");
     http.state.lock().unwrap().revision = "2026-10-28T12:00:00Z".into();
-    counts(
-        &f.command(&http, &["--reconcile", "apply", "after-cache-resync"])
-            .await,
-        1,
-        0,
-        2,
-    );
+    counts(&f.command(&http, &["--reconcile", "apply"]).await, 1, 0, 2);
 }
 
 #[tokio::test]
@@ -3332,9 +3136,7 @@ async fn empty_authorized_content_completes_resync_and_search_returns_no_hits() 
         model.revision = "2026-10-28T12:00:00Z".into();
         model.root_revision = "2026-10-28T12:00:00Z".into();
     }
-    let update = f
-        .command(&http, &["--reconcile", "apply", "first-nonempty-content"])
-        .await;
+    let update = f.command(&http, &["--reconcile", "apply"]).await;
     assert_eq!(update.exit, 0, "{:?}", update.json);
     // The same reader can search the first incremental content without restart.
     let snapshot = table.search_snapshot().await.unwrap();
@@ -3365,13 +3167,16 @@ async fn manual_inventory_uses_its_budget_and_expires_without_source_mutations()
     let mut f = Fixture::new(&http).await;
     f.settings.timeout_seconds = 1;
     f.settings.inventory_timeout_seconds = 60;
-    http.pause.armed.store(true, Ordering::SeqCst);
+    http.discovery_pause.armed.store(true, Ordering::SeqCst);
     let release = async {
-        tokio::time::timeout(Duration::from_secs(10), http.pause.started.notified())
-            .await
-            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            http.discovery_pause.started.notified(),
+        )
+        .await
+        .unwrap();
         tokio::time::sleep(Duration::from_millis(1100)).await;
-        http.pause.proceed.notify_one();
+        http.discovery_pause.proceed.notify_one();
     };
     let (out, _) = tokio::join!(f.command(&http, &["--reconcile", "dry-run"]), release);
     assert_eq!(out.exit, 0, "{}", out.json);
@@ -3379,11 +3184,11 @@ async fn manual_inventory_uses_its_budget_and_expires_without_source_mutations()
 
     f.settings.inventory_timeout_seconds = 1;
     f.settings.timeout_seconds = 60;
-    http.pause.armed.store(true, Ordering::SeqCst);
+    http.discovery_pause.armed.store(true, Ordering::SeqCst);
     let out = f.command(&http, &["--reconcile", "dry-run"]).await;
     assert_eq!(out.exit, 3);
     assert_eq!(out.json["status"], "timeout");
-    http.pause.proceed.notify_one();
+    http.discovery_pause.proceed.notify_one();
     assert_eq!(f.provider.count.load(Ordering::SeqCst), 0);
 }
 
@@ -3473,13 +3278,7 @@ async fn streaming_initial_sync_separates_discovery_and_page_budgets() {
     drop(runtime);
     assert_writer_available_during_inventory(&f.state);
     // A later normal cycle can retry the timed-out readable page without source edits.
-    counts(
-        &f.command(&http, &["--reconcile", "apply", "after-page-timeout"])
-            .await,
-        1,
-        0,
-        2,
-    );
+    counts(&f.command(&http, &["--reconcile", "apply"]).await, 1, 0, 2);
 }
 
 #[tokio::test]
@@ -3577,47 +3376,6 @@ async fn periodic_sync_retries_unreadable_pages_on_the_next_normal_cycle() {
     );
 }
 
-#[tokio::test]
-async fn explicit_retry_replans_with_inventory_budget_then_keeps_the_page_deadline() {
-    use std::time::Duration;
-    let http = start_notion().await;
-    let mut f = Fixture::new(&http).await;
-    f.provider.fail.store(true, Ordering::SeqCst);
-    let seeded = f
-        .command(&http, &["--reconcile", "apply", "failed-retry-budget"])
-        .await;
-    assert_eq!(seeded.exit, 3);
-    f.provider.fail.store(false, Ordering::SeqCst);
-    f.settings.timeout_seconds = 1;
-    f.settings.inventory_timeout_seconds = 7200;
-    http.pause.armed.store(true, Ordering::SeqCst);
-    f.provider.pause.store(true, Ordering::SeqCst);
-    let release_inventory = async {
-        tokio::time::timeout(Duration::from_secs(10), http.pause.started.notified())
-            .await
-            .unwrap();
-        assert_writer_available_during_inventory(&f.state);
-        tokio::time::sleep(Duration::from_millis(1100)).await;
-        http.pause.proceed.notify_one();
-        tokio::time::timeout(Duration::from_secs(10), f.provider.entered.notified())
-            .await
-            .unwrap();
-    };
-    let (out, _) = tokio::time::timeout(Duration::from_secs(15), async {
-        tokio::join!(
-            f.command(
-                &http,
-                &["--reconcile", "retry", "failed-retry-budget", PAGE]
-            ),
-            release_inventory
-        )
-    })
-    .await
-    .unwrap();
-    assert_eq!(out.exit, 3);
-    assert_eq!(out.json["status"], "timeout");
-}
-
 fn assert_writer_available_during_inventory(path: &std::path::Path) {
     let state = notion_knowledge_retrieval::sync_state::SqliteSyncStateStore::open(path).unwrap();
     let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
@@ -3625,83 +3383,6 @@ fn assert_writer_available_during_inventory(path: &std::path::Path) {
         .acquire_lease(now, 30)
         .expect("read-only inventory must not retain writer ownership");
     state.release_lease(&lease, now).unwrap();
-}
-
-#[tokio::test]
-async fn new_and_resumed_manual_inventory_allow_short_writer_admission_while_reading() {
-    use std::time::Duration;
-    for (operation, run) in [
-        ("apply", "fresh-read-plan"),
-        ("resume", "resumed-read-plan"),
-    ] {
-        let http = start_notion().await;
-        let mut f = Fixture::new(&http).await;
-        f.settings.inventory_timeout_seconds = 7200;
-        if operation == "resume" {
-            let runtime = f.open(&http, OpenMode::ExistingWrite).await;
-            let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
-            let lease = runtime.coordinator.state().acquire_lease(now, 30).unwrap();
-            runtime
-                .coordinator
-                .state()
-                .start_or_resume(&lease, now, run, &runtime.scope)
-                .unwrap();
-            runtime
-                .coordinator
-                .state()
-                .release_lease(&lease, now)
-                .unwrap();
-        }
-        http.pause.armed.store(true, Ordering::SeqCst);
-        let release = async {
-            http.pause.started.notified().await;
-            assert_writer_available_during_inventory(&f.state);
-            http.pause.proceed.notify_one();
-        };
-        let arguments = ["--reconcile", operation, run];
-        let (out, _) = tokio::time::timeout(Duration::from_secs(15), async {
-            tokio::join!(f.command(&http, &arguments), release)
-        })
-        .await
-        .unwrap();
-        assert_eq!(out.exit, 0, "{}", out.json);
-    }
-}
-
-#[tokio::test]
-async fn inventory_recording_rejects_a_local_predecessor_changed_after_planning() {
-    use notion_knowledge_retrieval::{planner::PlanError, runner::RunnerError};
-    let http = start_notion().await;
-    let f = Fixture::new(&http).await;
-    let runtime = f.open(&http, OpenMode::ExistingWrite).await;
-    let plan = runtime.runner.dry_run().await.unwrap();
-    f.populate(&http, "newer-local-state").await;
-    let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
-    let lease = runtime.coordinator.state().acquire_lease(now, 30).unwrap();
-    let result = runtime
-        .runner
-        .record_inventory_plan(
-            "stale-read-plan",
-            &plan,
-            lease.clone(),
-            Arc::new(|| notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000),
-        )
-        .await;
-    assert!(matches!(
-        result,
-        Err(RunnerError::Planning(PlanError::Conflict))
-    ));
-    assert!(
-        runtime
-            .coordinator
-            .reconciliation_progress("stale-read-plan")
-            .is_err()
-    );
-    runtime
-        .coordinator
-        .state()
-        .release_lease(&lease, now)
-        .unwrap();
 }
 
 async fn await_cached_page(path: &std::path::Path, page: &str) {
@@ -4075,13 +3756,7 @@ async fn embedding_input_limits_remain_visible_while_siblings_commit_and_normal_
     drop(runtime);
     // Removing the local admission restriction requires no Notion source edit.
     f.provider.input_limit_bytes.store(0, Ordering::SeqCst);
-    counts(
-        &f.command(&http, &["--reconcile", "apply", "after-input-limit"])
-            .await,
-        1,
-        0,
-        2,
-    );
+    counts(&f.command(&http, &["--reconcile", "apply"]).await, 1, 0, 2);
 }
 
 #[tokio::test]
@@ -4113,11 +3788,9 @@ async fn embedding_input_limit_logs_contain_only_the_typed_reason_and_counts() {
 }
 
 #[tokio::test]
-async fn an_existing_coalesced_layout_requires_explicit_scoped_cache_rebuild() {
+async fn an_existing_coalesced_layout_is_recommitted_by_sync_and_by_cache_rebuild() {
     use notion_knowledge_core::chunking::ChunkConfig;
-    use notion_knowledge_retrieval::{
-        durable_plan::DurableFailure, refresh::AuthoritativePageRefresh,
-    };
+    use notion_knowledge_retrieval::refresh::AuthoritativePageRefresh;
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
     http.state.lock().unwrap().markdown = (0..30)
@@ -4164,21 +3837,9 @@ async fn an_existing_coalesced_layout_requires_explicit_scoped_cache_rebuild() {
     assert_eq!(runtime.chunks().page_chunks(PAGE).await.unwrap().len(), 1);
     drop(previous_layout);
     drop(runtime);
-    let result = f
-        .command(&http, &["--reconcile", "apply", "layout-upgrade"])
-        .await;
-    assert_eq!(result.exit, 3);
-    let runtime = f.open(&http, OpenMode::ReadOnly).await;
-    assert_eq!(
-        runtime
-            .coordinator
-            .reconciliation_progress("layout-upgrade")
-            .unwrap()
-            .failed
-            .get(PAGE),
-        Some(&DurableFailure::Conflict)
-    );
-    drop(runtime);
+    let result = f.command(&http, &["--reconcile", "apply"]).await;
+    // A walk sync recommits the page under the configured layout.
+    assert_eq!(result.exit, 0, "{}", result.json);
     let rebuilt = IndexRuntime::reset_and_resync(
         &f.settings,
         &f.state,
@@ -4217,12 +3878,6 @@ async fn target_projection_mode_changes_reconcile_without_reembedding_canonical_
         f.settings.projection_mode = mode;
         f.populate(&http, &format!("projection-mode-{n}")).await;
         let runtime = f.open(&http, OpenMode::ExistingWrite).await;
-        let progress = runtime
-            .coordinator
-            .reconciliation_progress(&format!("projection-mode-{n}"))
-            .unwrap();
-        assert!(progress.failed.is_empty());
-        assert!(progress.pending.is_empty());
         let edges = runtime.coordinator.state().edges_from(PAGE).unwrap();
         assert_eq!(edges.len(), 2);
         // Reads authorize from the walk's inventory, which this runner path does not record.
@@ -4335,17 +3990,6 @@ async fn await_body_reads(http: &HttpNotion, count: usize) {
     .unwrap();
 }
 
-/// Wait until markdown for at least `count` distinct pages has been read.
-async fn await_markdown_pages(http: &HttpNotion, count: usize) {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while http.markdown_pages.lock().unwrap().len() < count {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn initial_sync_fetches_next_page_while_one_embedding_is_paused() {
     let http = start_notion().await;
@@ -4446,65 +4090,6 @@ fn add_extra_pages(http: &HttpNotion, count: usize) {
     });
 }
 
-/// Hold the next embedding and return once it is held.
-async fn await_held_embedding(f: &Fixture) {
-    tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        f.provider.held.notified(),
-    )
-    .await
-    .unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn manual_apply_fetches_next_planned_page_while_one_embedding_is_paused() {
-    let http = start_notion().await;
-    let f = Fixture::new(&http).await;
-    http.reset_markdown_pages();
-    f.provider.hold.store(true, Ordering::SeqCst);
-    let observe = async {
-        await_held_embedding(&f).await;
-        // Page A's embedding is held; a later planned page's content is
-        // still downloaded by read-ahead during that pause.
-        await_markdown_pages(&http, 2).await;
-        assert_eq!(f.provider.active.load(Ordering::SeqCst), 1);
-        f.provider.hold_release.add_permits(1);
-    };
-    let (applied, ()) = tokio::join!(
-        f.command(&http, &["--reconcile", "apply", "manual"]),
-        observe
-    );
-    counts(&applied, 3, 0, 0);
-    assert_eq!(f.provider.max_active.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn manual_apply_read_ahead_is_bounded_while_embedding_is_paused() {
-    let http = start_notion().await;
-    add_extra_pages(&http, 12);
-    let f = Fixture::new(&http).await;
-    http.reset_markdown_pages();
-    f.provider.hold.store(true, Ordering::SeqCst);
-    let observe = async {
-        await_held_embedding(&f).await;
-        await_markdown_pages(&http, 2).await;
-        // Give unbounded read-ahead ample time to fetch all 15 pages.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let fetched = http.markdown_pages.lock().unwrap().len();
-        assert!(
-            fetched <= 3,
-            "held page and two read-ahead workers; got {fetched}"
-        );
-        f.provider.hold_release.add_permits(1);
-    };
-    let (applied, ()) = tokio::join!(
-        f.command(&http, &["--reconcile", "apply", "bounded"]),
-        observe
-    );
-    counts(&applied, 15, 0, 0);
-    assert_eq!(f.provider.max_active.load(Ordering::SeqCst), 1);
-}
-
 #[tokio::test]
 async fn initial_sync_records_inventory_totals_equal_outcomes() {
     let http = start_notion().await;
@@ -4602,11 +4187,7 @@ async fn cancelled_command_drains_its_submitted_owned_guard_before_releasing_the
     *f.provider.boundary_pause.lock().unwrap() = Some(commits.clone());
     pause_owned_commits(&f.settings.index, commits.clone());
     let stop = CancellationToken::new();
-    let pending = f.command_cancel(
-        &http,
-        &["--reconcile", "apply", "owned-cancel"],
-        stop.clone(),
-    );
+    let pending = f.command_cancel(&http, &["--reconcile", "apply"], stop.clone());
     let cancel = async {
         tokio::time::timeout(
             std::time::Duration::from_secs(30),
@@ -4623,19 +4204,11 @@ async fn cancelled_command_drains_its_submitted_owned_guard_before_releasing_the
     };
     let (out, _) = tokio::join!(pending, cancel);
     assert_eq!(out.exit, 5);
-    assert_eq!(out.json["pending"], 3);
-    assert_eq!(out.json["changed"], 0);
     let guard = std::fs::File::open(&f.settings.index).unwrap();
     guard.try_lock().unwrap();
     drop(guard);
     commits.proceed.notify_one();
-    counts(
-        &f.command(&http, &["--reconcile", "resume", "owned-cancel"])
-            .await,
-        3,
-        0,
-        0,
-    );
+    counts(&f.command(&http, &["--reconcile", "apply"]).await, 3, 0, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

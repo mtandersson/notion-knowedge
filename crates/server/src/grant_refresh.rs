@@ -318,7 +318,6 @@ impl GrantRefreshWorker {
             chunk_config: self.settings.chunk_config,
             alias_sources: self.settings.alias_sources.clone(),
             projection_mode: self.settings.projection_mode,
-            page_timeout_seconds: self.settings.timeout.as_secs(),
             lexical: None,
         }) else {
             return false;
