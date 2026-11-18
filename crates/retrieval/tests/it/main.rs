@@ -5,8 +5,6 @@ mod authoritative_refresh;
 mod ci_retrieval_quality;
 mod commit_memory;
 mod evaluation_dataset;
-mod file_refresh_intents;
-mod grant_refresh_recovery;
 mod graph;
 mod guarded_chunks;
 mod hosted_baseline;

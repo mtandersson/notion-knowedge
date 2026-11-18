@@ -122,21 +122,6 @@ async fn run() -> ExitCode {
     };
     if all_args
         .iter()
-        .any(|arg| arg.starts_with("--file-recovery"))
-    {
-        return match notion_knowledge_server::file_recovery_command::run(&config, &all_args).await {
-            Ok(report) => {
-                println!("{report}");
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprintln!("File recovery error: {}", safe_error(&error));
-                ExitCode::from(2)
-            }
-        };
-    }
-    if all_args
-        .iter()
         .any(|arg| arg.starts_with("--migrate-operational-state"))
     {
         return match notion_knowledge_server::state_migration::run(&config, &all_args) {
@@ -163,18 +148,22 @@ async fn run() -> ExitCode {
             Err(_) => { eprintln!("Notion OAuth grant could not be forgotten; stop credential users and check private state."); ExitCode::FAILURE },
         };
     }
-    let integration_ledger = all_args == ["--initialize-integration-write-ledger"];
-    if integration_ledger || all_args == ["--initialize-oauth-write-ledger"] {
-        let stores = if integration_ledger {
-            &config.integration_write_stores
-        } else {
-            &config.oauth_write_stores
-        };
-        let Some(settings) = stores else {
+    if all_args
+        .iter()
+        .any(|arg| arg.starts_with("--file-recovery") || arg == "--initialize-oauth-write-ledger")
+    {
+        // OAuth writes and their file-intent recovery were removed (#731).
+        eprintln!(
+            "OAuth write ledgers and file recovery are no longer supported; use --initialize-integration-write-ledger."
+        );
+        return ExitCode::from(2);
+    }
+    if all_args == ["--initialize-integration-write-ledger"] {
+        let Some(settings) = &config.integration_write_stores else {
             eprintln!("Mutation ledger initialization requires complete write configuration.");
             return ExitCode::from(2);
         };
-        if notion_knowledge_server::oauth_writes::validate_stores(&config, settings).is_err() {
+        if notion_knowledge_server::write_stores::validate_stores(&config, settings).is_err() {
             eprintln!(
                 "Mutation ledger initialization requires distinct protected durable storage."
             );

@@ -251,7 +251,6 @@ pub struct AuthorizationFlow {
     client: Client,
     allowed: AllowedNotionIdentity,
     records: Mutex<Records>,
-    writes_enabled: bool,
     clock: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
 impl AuthorizationFlow {
@@ -266,18 +265,12 @@ impl AuthorizationFlow {
             client,
             allowed,
             records: Mutex::new(Records::default()),
-            writes_enabled: false,
             clock: Arc::new(Instant::now),
         }
     }
 
-    pub(crate) fn with_write_policy(mut self, enabled: bool) -> Self {
-        self.writes_enabled = enabled;
-        self
-    }
     fn permissions(&self, scope: &str) -> Option<notion_knowledge_mcp::OAuthPermissions> {
-        let permissions = notion_knowledge_mcp::OAuthPermissions::parse(scope)?;
-        (!permissions.can_write() || self.writes_enabled).then_some(permissions)
+        notion_knowledge_mcp::OAuthPermissions::parse(scope)
     }
     #[cfg(test)]
     pub(crate) fn with_clock(mut self, clock: Arc<dyn Fn() -> Instant + Send + Sync>) -> Self {
@@ -686,82 +679,33 @@ mod tests {
     }
 
     #[test]
-    fn write_scope_requires_explicit_policy_and_preserves_read_tokens() {
-        use notion_knowledge_mcp::OAuthPermissions;
+    fn only_the_exact_read_scope_is_accepted() {
         for scope in [
             "",
             "knowledge:write",
-            "knowledge:read knowledge:write admin",
+            "knowledge:read knowledge:write",
+            "knowledge:write knowledge:read",
             "knowledge:read knowledge:read",
-            "knowledge:read  knowledge:write",
-            "knowledge:read\tknowledge:write",
             "knowledge:read ",
             &"x".repeat(4096),
         ] {
             assert!(
                 flow()
-                    .with_write_policy(true)
                     .begin(&AuthorizationRequest {
                         scope,
                         ..authorization()
                     })
-                    .is_err()
+                    .is_err(),
+                "{scope}"
             );
         }
-        assert!(
-            flow()
-                .begin(&AuthorizationRequest {
-                    scope: "knowledge:read knowledge:write",
-                    ..authorization()
-                })
-                .is_err()
-        );
-        // Opt-in never relaxes the exact registered client/resource boundary.
-        for invalid in [
-            AuthorizationRequest {
-                scope: "knowledge:read knowledge:write",
-                client_id: "foreign",
-                ..authorization()
-            },
-            AuthorizationRequest {
-                scope: "knowledge:read knowledge:write",
-                resource: "https://foreign.example.com/mcp",
-                ..authorization()
-            },
-        ] {
-            assert!(flow().with_write_policy(true).begin(&invalid).is_err());
-        }
-        let flow = flow().with_write_policy(true);
-        for (scope, expected) in [
-            ("knowledge:read", OAuthPermissions::Read),
-            (
-                "knowledge:write knowledge:read",
-                OAuthPermissions::ReadWrite,
-            ),
-        ] {
-            let pending = flow
-                .begin(&AuthorizationRequest {
-                    scope,
-                    ..authorization()
-                })
-                .unwrap();
-            let redirect = flow.approve(pending.expose(), &grant()).unwrap();
-            let token = flow
-                .redeem(&exchange(redirect.code.expose()), &grant())
-                .unwrap();
-            assert_eq!(token.scope, expected.scope());
-            let auth = flow
-                .authorize_resource(token.access_token.expose(), &grant())
-                .unwrap();
-            assert_eq!(auth.permissions(), expected);
-            assert!(flow.verify(token.access_token.expose(), &grant()));
-            let mut different_permission =
-                auth.clone().with_permissions(OAuthPermissions::ReadWrite);
-            if expected.can_write() {
-                different_permission = auth.clone().with_permissions(OAuthPermissions::Read);
-            }
-            assert!(!auth.same_session(&different_permission));
-        }
+        let flow = flow();
+        let pending = flow.begin(&authorization()).unwrap();
+        let redirect = flow.approve(pending.expose(), &grant()).unwrap();
+        let token = flow
+            .redeem(&exchange(redirect.code.expose()), &grant())
+            .unwrap();
+        assert_eq!(token.scope, "knowledge:read");
     }
 
     #[test]

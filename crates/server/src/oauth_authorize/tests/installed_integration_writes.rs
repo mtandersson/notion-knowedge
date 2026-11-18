@@ -1,5 +1,4 @@
 //! Real private HTTP composition; the shared local provider needs no OAuth login.
-use super::installed_writes::{call, connect, rpc};
 use super::*;
 use crate::{
     index_runtime::{IndexRuntime, OpenMode},
@@ -9,7 +8,7 @@ use notion_knowledge_core::{
     backend::PageId, lifecycle::LifecycleScope, reconciliation::ReconciliationJournal,
 };
 use notion_knowledge_retrieval::idempotency::SqliteIdempotencyStore;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{collections::BTreeMap, time::Duration};
 use tokio_util::sync::CancellationToken;
 
@@ -17,6 +16,57 @@ const WORKSPACE: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const ROOT: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 const PAGE: &str = "cccccccc-cccc-cccc-cccc-cccccccccccc";
 const TOKEN: &str = "private-integration-local-http-token";
+async fn rpc(
+    h: &Harness,
+    url: &str,
+    token: &str,
+    session: Option<&str>,
+    message: Value,
+) -> reqwest::Response {
+    let mut request = h
+        .client
+        .post(url)
+        .bearer_auth(token)
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-protocol-version", "2025-03-26")
+        .json(&message);
+    if let Some(session) = session {
+        request = request.header("mcp-session-id", session);
+    }
+    request.send().await.unwrap()
+}
+async fn connect(h: &Harness, url: &str, token: &str) -> String {
+    let response = rpc(h,url,token,None,json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{"elicitation":{"form":{}}},"clientInfo":{"name":"installed-oauth-fixture","version":"1"}}})).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let session = response.headers()["mcp-session-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(resource::reply(response).await["id"], 1);
+    assert!(
+        rpc(
+            h,
+            url,
+            token,
+            Some(&session),
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+        )
+        .await
+        .status()
+        .is_success()
+    );
+    session
+}
+async fn call(
+    h: &Harness,
+    url: &str,
+    token: &str,
+    session: &str,
+    name: &str,
+    args: Value,
+) -> Value {
+    resource::reply(rpc(h,url,token,Some(session),json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":name,"arguments":args}})).await).await
+}
 fn parse(values: &BTreeMap<String, String>) -> crate::config::Config {
     crate::config::Config::from_lookup(|key| values.get(key).map(Into::into)).unwrap()
 }

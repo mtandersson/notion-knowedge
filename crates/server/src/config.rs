@@ -24,10 +24,8 @@ pub struct Config {
     pub log_level: notion_knowledge_core::logging::Level,
     /// Fail-closed MCP access mode; enabled unless explicitly opted out.
     pub read_only: bool,
-    pub oauth_writes: bool,
-    pub oauth_write_stores: Option<crate::oauth_writes::Settings>,
     /// Explicit guarded writes for the private integration-backed HTTP transport.
-    pub integration_write_stores: Option<crate::oauth_writes::Settings>,
+    pub integration_write_stores: Option<crate::write_stores::Settings>,
     /// Explicit second gate for destructive operations; defaults disabled.
     pub destructive_writes_enabled: bool,
     pub capability_policy: notion_knowledge_mcp::capabilities::CapabilityPolicy,
@@ -190,11 +188,19 @@ impl Config {
         let mcp_max_streams = concurrency(&mut lookup, "NK_MCP_MAX_STREAMS", "16", 256)?;
         let mcp_stream_max_seconds =
             concurrency(&mut lookup, "NK_MCP_STREAM_MAX_SECONDS", "300", 3600)? as u64;
-        let oauth_writes = match optional(&mut lookup, "NK_OAUTH_WRITES", "false")?.as_str() {
-            "true" => true,
-            "false" => false,
-            _ => return Err(invalid("NK_OAUTH_WRITES", "must be true or false")),
-        };
+        // Per-user OAuth writes were removed (#731); never silently ignore them.
+        for removed in [
+            "NK_OAUTH_WRITES",
+            "NK_OAUTH_WRITE_LEDGER_FILE",
+            "NK_OAUTH_WRITE_AUDIT_FILE",
+        ] {
+            if lookup(removed).is_some() {
+                return Err(invalid(
+                    removed,
+                    "is no longer supported; OAuth writes were removed, use NK_INTEGRATION_WRITES",
+                ));
+            }
+        }
         let read_only = match optional(&mut lookup, "NK_READ_ONLY", "true")?.as_str() {
             "true" => true,
             "false" => false,
@@ -853,7 +859,7 @@ impl Config {
         let file_ingestion = crate::file_ingestion::Settings::parse(
             &mut lookup,
             read_only,
-            matches!(notion_auth, NotionAuth::Integration(_)) || oauth_writes,
+            matches!(notion_auth, NotionAuth::Integration(_)),
             notion_scope.is_some(),
         )?;
         let client_id = lookup("NK_OAUTH_CLIENT_ID")
@@ -901,7 +907,7 @@ impl Config {
             && notion_scope.is_some()
             && (webhook_worker.is_some()
                 || reconciliation_schedule.is_some()
-                || (file_ingestion.is_some() && !oauth_writes))
+                || file_ingestion.is_some())
         {
             return Err(invalid(
                 "NK_WEBHOOK_WORKER",
@@ -914,19 +920,6 @@ impl Config {
                 "registered client required for OAuth content",
             ));
         }
-        if oauth_writes
-            && (read_only
-                || oauth_client.is_none()
-                || notion_grant_store.is_none()
-                || notion_scope.is_none()
-                || !matches!(notion_auth, NotionAuth::None))
-        {
-            return Err(invalid(
-                "NK_OAUTH_WRITES",
-                "requires writable mode, complete OAuth registration, sealed grant storage and scope without integration credentials",
-            ));
-        }
-        let oauth_write_stores = crate::oauth_writes::Settings::parse(&mut lookup, oauth_writes)?;
         let integration_writes =
             match optional(&mut lookup, "NK_INTEGRATION_WRITES", "false")?.as_str() {
                 "false" => false,
@@ -948,21 +941,13 @@ impl Config {
                 "requires writable integration scope, loopback bearer, retrieval and the shared sync worker without OAuth discovery",
             ));
         }
-        let integration_write_stores = crate::oauth_writes::Settings::parse_keys(
+        let integration_write_stores = crate::write_stores::Settings::parse_keys(
             &mut lookup,
             integration_writes,
             "NK_INTEGRATION_WRITES",
             "NK_INTEGRATION_WRITE_LEDGER_FILE",
             "NK_INTEGRATION_WRITE_AUDIT_FILE",
         )?;
-        if oauth_writes && (retrieval.is_none() || webhook_state_file.is_none()) {
-            return Err(invalid(
-                "NK_OAUTH_WRITES",
-                "requires configured retrieval and durable index state",
-            ));
-        }
-        let oauth_discovery =
-            oauth_discovery.map(|discovery| discovery.with_write_policy(oauth_writes));
         Ok(Self {
             shutdown_timeout_seconds,
             oauth_client,
@@ -986,8 +971,6 @@ impl Config {
             http_bind: SocketAddr::new(host, port),
             log_level,
             read_only,
-            oauth_writes,
-            oauth_write_stores,
             integration_write_stores,
             destructive_writes_enabled,
             capability_policy,
@@ -1237,30 +1220,16 @@ mod tests {
         let configured = parse(&values).unwrap();
         assert!(matches!(configured.notion_auth, NotionAuth::None));
         assert_eq!(configured.notion_scope.unwrap().workspace_id, WORKSPACE);
-        assert!(!configured.oauth_writes);
-        let mut writable = values.clone();
-        writable.extend([("NK_OAUTH_WRITES", "true"), ("NK_READ_ONLY", "false")]);
-        // Scope issuance alone is insufficient: installed writes also require
-        // explicit durable mutation stores and compatible retrieval state.
-        assert!(parse(&writable).is_err());
-        for missing in [
-            "NK_READ_ONLY",
-            "NK_OAUTH_CLIENT_ID",
-            "NK_OAUTH_CLIENT_REDIRECT_URI",
-            "NK_NOTION_GRANT_KEY_FILE",
-            "NK_NOTION_GRANT_STATE_FILE",
-            "NK_NOTION_SCOPE_ROOTS",
-            "NK_NOTION_SCOPE_WORKSPACE_ID",
+        for (removed, value) in [
+            ("NK_OAUTH_WRITES", "false"),
+            ("NK_OAUTH_WRITE_LEDGER_FILE", "/var/lib/notion/ledger"),
+            ("NK_OAUTH_WRITE_AUDIT_FILE", "/var/lib/notion/audit"),
         ] {
-            let incomplete: Vec<_> = writable
-                .iter()
-                .copied()
-                .filter(|(key, _)| *key != missing)
-                .collect();
-            assert!(parse(&incomplete).is_err(), "missing {missing}");
+            let mut stale = values.clone();
+            stale.push((removed, value));
+            let error = parse(&stale).unwrap_err();
+            assert_eq!(error.setting, removed);
         }
-        assert!(parse(&[("NK_OAUTH_WRITES", "true")]).is_err());
-        assert!(parse(&[("NK_OAUTH_WRITES", "TRUE")]).is_err());
         values[11].1 = "cccccccc-cccc-cccc-cccc-cccccccccccc";
         assert_eq!(
             parse(&values).unwrap_err().setting,

@@ -4,31 +4,19 @@
 use std::{fmt, time::Instant};
 
 /// Immutable supported permission set minted by trusted OAuth authorization.
+/// OAuth sessions are read-only; writes use the integration path only.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OAuthPermissions {
     #[default]
     Read,
-    ReadWrite,
 }
 impl OAuthPermissions {
-    /// Bounded exact supported scope sets; no unknown, duplicate or empty scopes.
+    /// Bounded exact supported scope; no unknown, duplicate or empty scopes.
     pub fn parse(scope: &str) -> Option<Self> {
-        match scope {
-            "knowledge:read" => Some(Self::Read),
-            "knowledge:read knowledge:write" | "knowledge:write knowledge:read" => {
-                Some(Self::ReadWrite)
-            }
-            _ => None,
-        }
-    }
-    pub fn can_write(self) -> bool {
-        self == Self::ReadWrite
+        (scope == "knowledge:read").then_some(Self::Read)
     }
     pub fn scope(self) -> &'static str {
-        match self {
-            Self::Read => "knowledge:read",
-            Self::ReadWrite => "knowledge:read knowledge:write",
-        }
+        "knowledge:read"
     }
 }
 #[derive(Clone)]
