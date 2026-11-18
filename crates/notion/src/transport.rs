@@ -1,7 +1,7 @@
 //! Shared request admission and conservative replay policy. No payload diagnostics.
 use crate::NotionClient;
 use notion_knowledge_core::backend::{BackendError, BackendErrorKind};
-use notion_knowledge_core::logging::{self, Operation, Outcome};
+use notion_knowledge_core::logging::{self, Operation, Outcome, page_timings};
 use reqwest::{RequestBuilder, Response};
 use std::{
     sync::atomic::{AtomicU64, Ordering},
@@ -199,6 +199,9 @@ impl NotionClient {
         let result = self
             .send_inner(request, replay_safe, operation, mutation, effect_started)
             .await;
+        if let Some(timings) = page_timings::current() {
+            timings.record_api(started.elapsed());
+        }
         let (outcome, status) = match &result {
             Ok(response) if response.status().is_success() => {
                 (Outcome::Success, Some(response.status().as_u16()))
@@ -252,8 +255,11 @@ impl NotionClient {
         let replayable = request.try_clone().is_some();
         let mut request = Some(request);
         loop {
-            tokio::time::timeout(MAX_WAIT, self.transport.admit(operation))
-                .await
+            // The page's limiter wait is the time spent queued in `admit()`.
+            let _limiter = page_timings::timer(page_timings::Bucket::LimiterWait);
+            let admitted = tokio::time::timeout(MAX_WAIT, self.transport.admit(operation)).await;
+            drop(_limiter);
+            admitted
                 .map_err(|_| error(operation, BackendErrorKind::RateLimited, Some(MAX_WAIT)))??;
             let attempt = if replayable {
                 request.as_ref().and_then(|req| req.try_clone())

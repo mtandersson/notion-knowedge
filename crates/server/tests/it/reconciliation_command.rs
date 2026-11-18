@@ -3704,6 +3704,45 @@ async fn streaming_progress_reports_actual_commits_and_failed_pages() {
                 && event["status"] == "completed"
         })
         .unwrap();
+    // One line per consumed page, each with its own timings (#662).
+    let pages: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            event["phase"] == "indexing"
+                && event["status"]
+                    .as_str()
+                    .is_some_and(|s| s.starts_with("page_"))
+        })
+        .collect();
+    let status = |name: &str| pages.iter().filter(|e| e["status"] == name).count();
+    assert_eq!(
+        (
+            status("page_committed"),
+            status("page_skipped"),
+            pages.len()
+        ),
+        (2, 1, 3)
+    );
+    pages
+        .iter()
+        .for_each(|page| assert_page_line_is_content_free(page));
+    assert!(
+        pages
+            .iter()
+            .all(|page| page["walk_api_ops"].as_u64().unwrap() >= 1)
+    );
+    let finished = events
+        .iter()
+        .find(|e| e["phase"] == "indexing" && e["status"] == "completed")
+        .unwrap();
+    let totals = &finished["page_totals"];
+    assert_eq!(totals["pages"], 3);
+    let sum = |name: &str| pages.iter().map(|p| p[name].as_u64().unwrap()).sum::<u64>();
+    assert_eq!(totals["wall_ms"].as_u64().unwrap(), sum("wall_ms"));
+    assert_eq!(
+        totals["walk_api_ops"].as_u64().unwrap(),
+        sum("walk_api_ops")
+    );
     let counts = &ready["sync_progress"];
     assert_eq!(counts["discovered_pages"], 3);
     assert_eq!(counts["total_pages"], 3);
@@ -3811,7 +3850,73 @@ async fn embedding_input_limit_logs_contain_only_the_typed_reason_and_counts() {
         .unwrap();
     assert_eq!(event["operation"], "cache_sync");
     assert!(event["sync_progress"].is_object());
-    assert_eq!(event.as_object().unwrap().len(), 5);
+    assert_page_line_is_content_free(event);
+}
+
+/// A per-page line holds fixed words, the sync counts and numbers only; its
+/// numeric parts add up and none of the fixture's identifiers or text appear.
+fn assert_page_line_is_content_free(event: &serde_json::Value) {
+    const FIXED: [&str; 5] = ["operation", "phase", "reason", "status", "sync_progress"];
+    const NUMBERS: [&str; 18] = [
+        "wall_ms",
+        "consumer_wait_ms",
+        "embed_ms",
+        "lance_merge_ms",
+        "fts_optimize_ms",
+        "vector_optimize_ms",
+        "receipt_ms",
+        "other_ms",
+        "queue_wait_ms",
+        "walk_api_ops",
+        "walk_api_ms",
+        "prepare_api_ops",
+        "prepare_api_ms",
+        "commit_api_ops",
+        "commit_api_ms",
+        "limiter_wait_ms",
+        "embedded_chunks",
+        "skipped_chunks",
+    ];
+    let line = event.to_string();
+    for private in [
+        PAGE,
+        OTHER,
+        ROOT,
+        "First",
+        "Saffron",
+        "evergreen",
+        "fixture-credential",
+    ] {
+        assert!(!line.contains(private), "{private} leaked into {line}");
+    }
+    let fields = event.as_object().unwrap();
+    for (name, value) in fields {
+        if FIXED.contains(&name.as_str()) {
+            continue;
+        }
+        assert!(NUMBERS.contains(&name.as_str()), "unexpected field {name}");
+        assert!(value.is_u64(), "{name} is not a count or duration: {value}");
+    }
+    assert!(
+        NUMBERS.iter().all(|name| fields.contains_key(*name)),
+        "{line}"
+    );
+    let ms = |name: &str| event[name].as_u64().unwrap();
+    let parts: u64 = [
+        "consumer_wait_ms",
+        "embed_ms",
+        "lance_merge_ms",
+        "fts_optimize_ms",
+        "vector_optimize_ms",
+        "receipt_ms",
+        "other_ms",
+    ]
+    .iter()
+    .map(|name| ms(name))
+    .sum();
+    assert_eq!(parts, ms("wall_ms"), "{line}");
+    // The commit path never asks Notion for anything.
+    assert_eq!(ms("commit_api_ops"), 0, "{line}");
 }
 
 #[tokio::test]
@@ -3989,18 +4094,7 @@ async fn page_deadline_logs_expose_only_fixed_reason_and_aggregate_counts() {
         .collect();
     assert!(!skips.is_empty());
     for event in skips {
-        let keys: std::collections::BTreeSet<_> = event
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        assert_eq!(
-            keys,
-            ["operation", "phase", "reason", "status", "sync_progress"]
-                .into_iter()
-                .collect()
-        );
+        assert_page_line_is_content_free(event);
         assert_eq!(event["status"], "page_skipped");
         assert!(event["sync_progress"].is_object());
     }

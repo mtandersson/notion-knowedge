@@ -12,7 +12,10 @@ use std::{
 };
 
 use notion_knowledge_core::{
-    logging::{self, EventGuard, Operation, Outcome},
+    logging::{
+        self, EventGuard, Operation, Outcome,
+        page_timings::{self, Bucket},
+    },
     reconciliation::{FailureClass, Lease, ReconciliationScope, validate},
     sync_state::PageSyncState,
 };
@@ -1174,49 +1177,60 @@ impl IndexCommitCoordinator {
         let coordinator = self.clone();
         let correlation = logging::current_id();
         let sync_context = logging::sync_context();
+        let timings = page_timings::current();
         let (sender, receiver) = oneshot::channel();
         let spawned = std::thread::Builder::new()
             .name("nk-index-commit".into())
             .spawn(move || {
-                logging::with_sync_context(sync_context, || {
-                    let mut log = EventGuard::with_id(Operation::IndexCommit, correlation);
-                    let result = (|| {
-                        let _guard = coordinator.acquire_owned(&lease, &clock)?;
-                        coordinator.revalidate(&lease, clock())?;
-                        if !coordinator.begin(&operation, &lease, clock())? {
-                            return Ok(CommitOutcome::AlreadyApplied);
-                        }
-                        let runtime = tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                            .map_err(io)?;
-                        let context = CommitContext {
-                            coordinator: coordinator.clone(),
-                            lease: lease.clone(),
-                            clock: clock.clone(),
-                        };
-                        match runtime.block_on(effect(context)) {
-                            Ok(authority) => {
-                                let result = coordinator
-                                    .finish(&operation, &lease, clock())
-                                    .map(|()| CommitOutcome::Applied);
-                                drop(authority);
-                                result
+                // The owned thread reports this page's receipt, merge and any
+                // request time to the same accumulator as its caller.
+                page_timings::with_thread(timings, || {
+                    logging::with_sync_context(sync_context, || {
+                        let mut log = EventGuard::with_id(Operation::IndexCommit, correlation);
+                        let result = (|| {
+                            let _guard = coordinator.acquire_owned(&lease, &clock)?;
+                            coordinator.revalidate(&lease, clock())?;
+                            let begun = {
+                                let _receipt = page_timings::timer(Bucket::Receipt);
+                                coordinator.begin(&operation, &lease, clock())?
+                            };
+                            if !begun {
+                                return Ok(CommitOutcome::AlreadyApplied);
                             }
-                            Err(failure) => {
-                                coordinator.fail(&operation, failure.clone())?;
-                                Err(CommitError::Operation(failure))
+                            let runtime = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .map_err(io)?;
+                            let context = CommitContext {
+                                coordinator: coordinator.clone(),
+                                lease: lease.clone(),
+                                clock: clock.clone(),
+                            };
+                            match runtime.block_on(effect(context)) {
+                                Ok(authority) => {
+                                    let receipt = page_timings::timer(Bucket::Receipt);
+                                    let result = coordinator
+                                        .finish(&operation, &lease, clock())
+                                        .map(|()| CommitOutcome::Applied);
+                                    drop(receipt);
+                                    drop(authority);
+                                    result
+                                }
+                                Err(failure) => {
+                                    coordinator.fail(&operation, failure.clone())?;
+                                    Err(CommitError::Operation(failure))
+                                }
                             }
-                        }
-                    })();
-                    log.finish(if result.is_ok() {
-                        Outcome::Success
-                    } else {
-                        Outcome::Failed
-                    });
-                    let failure = result.as_ref().err().cloned();
-                    let _ = sender.send(result);
-                    failure
+                        })();
+                        log.finish(if result.is_ok() {
+                            Outcome::Success
+                        } else {
+                            Outcome::Failed
+                        });
+                        let failure = result.as_ref().err().cloned();
+                        let _ = sender.send(result);
+                        failure
+                    })
                 })
             });
         let tracked = spawned
@@ -1242,29 +1256,32 @@ impl IndexCommitCoordinator {
         Fut: Future<Output = Result<(), FailureClass>> + Send + 'static,
     {
         let coordinator = self.clone();
+        let timings = page_timings::current();
         let (sender, receiver) = oneshot::channel();
         let spawned = std::thread::Builder::new()
             .name("nk-index-maintenance".into())
             .spawn(move || {
-                let result = (|| {
-                    let _guard = coordinator.acquire_owned(&lease, &clock)?;
-                    coordinator.revalidate(&lease, clock())?;
-                    let runtime = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .map_err(io)?;
-                    let context = CommitContext {
-                        coordinator,
-                        lease,
-                        clock,
-                    };
-                    runtime
-                        .block_on(effect(context))
-                        .map_err(CommitError::Operation)
-                })();
-                let failure = result.as_ref().err().cloned();
-                let _ = sender.send(result);
-                failure
+                page_timings::with_thread(timings, || {
+                    let result = (|| {
+                        let _guard = coordinator.acquire_owned(&lease, &clock)?;
+                        coordinator.revalidate(&lease, clock())?;
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .map_err(io)?;
+                        let context = CommitContext {
+                            coordinator,
+                            lease,
+                            clock,
+                        };
+                        runtime
+                            .block_on(effect(context))
+                            .map_err(CommitError::Operation)
+                    })();
+                    let failure = result.as_ref().err().cloned();
+                    let _ = sender.send(result);
+                    failure
+                })
             });
         let tracked = spawned
             .map_err(io)

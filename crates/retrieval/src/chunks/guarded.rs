@@ -16,6 +16,7 @@ use super::*;
 use crate::commit::{
     CommitError, CommitOutcome, IndexCommitCoordinator, PageAction, PageOperation,
 };
+use notion_knowledge_core::logging::page_timings::{self, Bucket};
 
 use notion_knowledge_core::{
     embedding::{self, EmbeddingMetadata, EmbeddingProvider},
@@ -818,8 +819,12 @@ impl GuardedChunkTable {
         // all embedding before preparing any mutation. Production Qwen already
         // uses one-text inference batches, retaining the same accepted vectors.
         let mut vectors = Vec::with_capacity(embed_inputs.len());
-        for input in &embed_inputs {
-            vectors.extend(embedding::embed_batch(provider, std::slice::from_ref(input)).await?);
+        {
+            let _embed = page_timings::timer(Bucket::Embed);
+            for input in &embed_inputs {
+                vectors
+                    .extend(embedding::embed_batch(provider, std::slice::from_ref(input)).await?);
+            }
         }
         let mut generated = embed_positions
             .into_iter()
@@ -953,6 +958,7 @@ impl GuardedChunkTable {
                     "page_id = {}",
                     sql_string(prepared.operation.checkpoint().page_id())
                 );
+                let _merge = page_timings::timer(Bucket::LanceMerge);
                 if prepared.rows.is_empty() {
                     current
                         .table
@@ -975,6 +981,7 @@ impl GuardedChunkTable {
                         .await
                         .map_err(|_| FailureClass::Index)?;
                 }
+                drop(_merge);
                 Ok(authority)
             },
         );
@@ -1059,6 +1066,7 @@ impl GuardedChunkTable {
                     .map_err(failure)?;
                 context.revalidate().map_err(fence_failure)?;
                 lexical_binding::verify(&directory, &lexical).map_err(failure)?;
+                let fts = page_timings::timer(Bucket::FtsOptimize);
                 current
                     .ensure_fts_index(&if lexical.is_some() {
                         FtsIndexConfig::lexical_expansion_v1()
@@ -1075,6 +1083,8 @@ impl GuardedChunkTable {
                 compact(&current, &storage, false).await?;
                 context.revalidate().map_err(fence_failure)?;
                 current.optimize_fts_index().await.map_err(failure)?;
+                drop(fts);
+                let _vector = page_timings::timer(Bucket::VectorOptimize);
                 let indices = current
                     .table
                     .list_indices()
@@ -1098,6 +1108,7 @@ impl GuardedChunkTable {
                         .await
                         .map_err(|_| FailureClass::Index)?;
                 }
+                drop(_vector);
                 context.revalidate().map_err(fence_failure)?;
                 maintain_storage(&current, &storage, &context).await
             });
