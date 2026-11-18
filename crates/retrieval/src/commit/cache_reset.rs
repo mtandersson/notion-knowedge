@@ -15,7 +15,8 @@ fn legacy_journal_path(state: &Path) -> Result<PathBuf, CommitError> {
 /// Lease lifetime taken by a startup cache reset.
 const RESET_LEASE_SECONDS: i64 = 330;
 /// Longest startup wait for a lease or index lock left by a stopped process.
-/// It covers the rebuild lease, so an ordinary restart mid-rebuild succeeds;
+/// It covers the rebuild lease and the longest worker lease (the 300 s
+/// webhook timeout cap plus 30 s), so an ordinary restart mid-rebuild succeeds;
 /// a lease a live owner keeps renewing still fails startup after this bound.
 pub const STARTUP_RESET_WAIT_SECONDS: i64 = RESET_LEASE_SECONDS + 30;
 

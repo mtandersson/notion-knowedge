@@ -423,11 +423,20 @@ impl IndexRuntime {
             let index = settings.index.clone();
             let state = state.to_path_buf();
             tokio::task::spawn_blocking(move || {
+                let waiting = std::sync::atomic::AtomicBool::new(false);
                 IndexCommitCoordinator::reset_cache_waiting(
                     &index,
                     &state,
                     &|| now_ms() / 1000,
-                    &|| std::thread::sleep(std::time::Duration::from_secs(1)),
+                    &|| {
+                        if !waiting.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            eprintln!(
+                                "cache reset waiting up to {}s for a held index lease or lock",
+                                notion_knowledge_retrieval::commit::STARTUP_RESET_WAIT_SECONDS
+                            );
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(1))
+                    },
                 )
             })
             .await
