@@ -43,7 +43,11 @@ operator-controlled migration path. Read-only opens do not migrate or repair.
 Back up durable operational state and the separate write ledger before upgrades.
 
 These are internal application/adapter capabilities. Default MCP discovery stays
-read-only. Installed semantic tool dispatch and operator configuration are the
+read-only. Since #731 every queued row uses `authority='integration'`. Rows left by the
+removed OAuth write path (any other authority, or a held file intent) are never
+claimed; they need no action and do not affect integration refresh.
+
+Installed semantic tool dispatch and operator configuration are the
 [guarded integration writes](integration-semantic-writes.md); OAuth sessions are read-only.
 This child does not close parent #83/#10 or establish production ChatGPT writes.
 
