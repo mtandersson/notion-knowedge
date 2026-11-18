@@ -4,7 +4,7 @@
 //! search result disclosure and graph lookups from the page inventory the
 //! last tree walk recorded: it is synchronous and never calls Notion, and its
 //! staleness is bounded by reconciliation. [`RootScopeGate`] fetches fresh
-//! physical ancestry for writes and revalidates near a mutation. Neither keeps
+//! physical ancestry for request-bound reads. Neither keeps
 //! a positive authorization cache.
 
 use std::{collections::BTreeSet, sync::Arc};
@@ -60,6 +60,15 @@ fn valid_scope(scope: &LifecycleScope) -> bool {
     }
     let distinct: BTreeSet<_> = scope.roots.iter().map(|root| &root.0).collect();
     distinct.len() == scope.roots.len()
+}
+
+/// Reject a malformed operator policy (IDs, root count, exclusions).
+pub fn validate_scope(scope: &LifecycleScope) -> Result<(), ScopeError> {
+    if valid_scope(scope) {
+        Ok(())
+    } else {
+        Err(ScopeError::InvalidConfiguration)
+    }
 }
 
 /// Immutable, trusted policy snapshot. Construct only from authenticated

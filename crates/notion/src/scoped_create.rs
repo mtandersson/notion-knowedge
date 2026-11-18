@@ -7,12 +7,11 @@ use notion_knowledge_core::{
         MutationClaim, MutationOperation, Reservation, VerifiedReceipt, WriteIdempotencyStore,
     },
     lifecycle::LifecycleScope,
-    root_scope::{RootScopeGate, ScopeError},
     write_refresh::{MutationRefreshQueue, RefreshKey, WriteCompletion, admit_verified},
 };
 use reqwest::header::AUTHORIZATION;
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 const CREATE: &str = "notion.page.scoped_create";
 const VERIFY: &str = "notion.page.scoped_create.verify";
@@ -42,17 +41,6 @@ fn err(op: &'static str, kind: BackendErrorKind) -> BackendError {
         retry_after: None,
         committed_page_id: None,
     }
-}
-fn scope_error(e: ScopeError) -> BackendError {
-    err(
-        CREATE,
-        match e {
-            ScopeError::Denied => BackendErrorKind::PermissionDenied,
-            ScopeError::Changed => BackendErrorKind::Conflict,
-            ScopeError::Unverifiable => BackendErrorKind::Unavailable,
-            ScopeError::InvalidConfiguration => BackendErrorKind::InvalidInput,
-        },
-    )
 }
 fn safe_text(s: &str) -> bool {
     !s.chars().any(|ch| {
@@ -116,11 +104,6 @@ impl NotionClient {
         if !valid(request) {
             return Err(err(CREATE, BackendErrorKind::InvalidInput));
         }
-        let gate =
-            RootScopeGate::new(Arc::new(self.clone()), scope.clone()).map_err(scope_error)?;
-        gate.authorize(&request.parent_page_id)
-            .await
-            .map_err(scope_error)?;
         let payload = serde_json::to_vec(
             &json!({"title":request.title,"markdown":request.markdown,"icon":request.icon_emoji}),
         )
@@ -137,20 +120,13 @@ impl NotionClient {
             .begin(&claim)
             .map_err(|_| err(CREATE, BackendErrorKind::Conflict))?
         {
-            Reservation::Replay(receipt) => {
-                let post = gate
-                    .authorize(&PageId(receipt.page_id.clone()))
-                    .await
-                    .map_err(scope_error)?;
-                gate.revalidate(&post, scope).await.map_err(scope_error)?;
-                (receipt, true)
-            }
+            Reservation::Replay(receipt) => (receipt, true),
             Reservation::Reconcile => return Err(err(CREATE, BackendErrorKind::Conflict)),
             Reservation::ExecuteOnce => {
                 ledger
                     .mark_uncertain(&claim)
                     .map_err(|_| err(CREATE, BackendErrorKind::Unavailable))?;
-                let created = self.create_scoped_page(request, scope).await?;
+                let created = self.create_scoped_page(request).await?;
                 let receipt = VerifiedReceipt::from_readback(
                     created.page_id.0,
                     created.url,
@@ -174,24 +150,15 @@ impl NotionClient {
             replayed,
         ))
     }
-    /// Only trusted server-owned `scope` may authorize the explicit parent.
-    /// The physical parent ancestry is fetched and revalidated before POST.
+    /// Notion's own permission check for the token authorizes the parent.
     /// No uncertain POST is replayed, even if readback never materializes.
     pub async fn create_scoped_page(
         &self,
         request: &ScopedPageCreateInput,
-        scope: &LifecycleScope,
     ) -> Result<ScopedPageCreated, BackendError> {
         if !valid(request) {
             return Err(err(CREATE, BackendErrorKind::InvalidInput));
         }
-        let gate =
-            RootScopeGate::new(Arc::new(self.clone()), scope.clone()).map_err(scope_error)?;
-        let permit = gate
-            .authorize(&request.parent_page_id)
-            .await
-            .map_err(scope_error)?;
-        gate.revalidate(&permit, scope).await.map_err(scope_error)?;
         let mut body = json!({
             "parent":{"type":"page_id","page_id":request.parent_page_id.0},
             "properties":{"title":{"type":"title","title":[{"type":"text","text":{"content":request.title}}]}},
@@ -255,10 +222,6 @@ impl NotionClient {
                         {
                             return Err(err(VERIFY, BackendErrorKind::Conflict));
                         }
-                        // The mutation changed the new page's revision. Fresh
-                        // physical authorization, not the parent's pre-write permit.
-                        let post = gate.authorize(&id).await.map_err(scope_error)?;
-                        gate.revalidate(&post, scope).await.map_err(scope_error)?;
                         return Ok(ScopedPageCreated {
                             page_id: id,
                             parent_page_id: request.parent_page_id.clone(),
@@ -309,33 +272,6 @@ mod tests {
         page["properties"] =
             json!({"title":{"id":"title","type":"title","title":[{"plain_text":"A new page"}]}});
         page
-    }
-    fn child_chain() -> Vec<(String, u16, Value)> {
-        const ROOT: &str = "33333333-3333-3333-3333-333333333333";
-        vec![
-            (
-                format!("GET /v1/pages/{CHILD}"),
-                200,
-                node(CHILD, Some(PARENT)),
-            ),
-            (
-                format!("GET /v1/pages/{PARENT}"),
-                200,
-                node(PARENT, Some(ROOT)),
-            ),
-            (format!("GET /v1/pages/{ROOT}"), 200, node(ROOT, None)),
-            (format!("GET /v1/pages/{ROOT}"), 200, node(ROOT, None)),
-            (
-                format!("GET /v1/pages/{PARENT}"),
-                200,
-                node(PARENT, Some(ROOT)),
-            ),
-            (
-                format!("GET /v1/pages/{CHILD}"),
-                200,
-                node(CHILD, Some(PARENT)),
-            ),
-        ]
     }
     #[test]
     fn input_rejects_bad_parent_content_and_icons() {
@@ -398,23 +334,6 @@ mod tests {
             exclusions: ExclusionRules::default(),
         }
     }
-    fn node(id: &str, parent: Option<&str>) -> Value {
-        json!({"object":"page","id":id,"last_edited_time":"2026-10-11T10:00:00Z",
-        "in_trash":false,"parent":match parent {
-            Some(parent)=>json!({"type":"page_id","page_id":parent}),
-            None=>json!({"type":"workspace","workspace":true})
-        }})
-    }
-    fn chain(parent: &str) -> Vec<(String, u16, Value)> {
-        let page = node(PARENT, Some(parent));
-        let root = node(parent, None);
-        vec![
-            (format!("GET /v1/pages/{PARENT}"), 200, page.clone()),
-            (format!("GET /v1/pages/{parent}"), 200, root.clone()),
-            (format!("GET /v1/pages/{parent}"), 200, root),
-            (format!("GET /v1/pages/{PARENT}"), 200, page),
-        ]
-    }
     async fn fixture(
         expected: Vec<(String, u16, Value)>,
     ) -> (NotionClient, tokio::task::JoinHandle<Vec<(String, Value)>>) {
@@ -473,30 +392,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scoped_create_verifies_complete_body_and_fresh_child_scope_after_mutation() {
-        const ROOT: &str = "33333333-3333-3333-3333-333333333333";
-        let mut steps = chain(ROOT);
-        steps.extend(chain(ROOT));
-        steps.push(("POST /v1/pages".into(), 200, receipt()));
+    async fn scoped_create_verifies_complete_body_after_mutation() {
+        let mut steps = vec![("POST /v1/pages".into(), 200, receipt())];
         steps.push((format!("GET /v1/pages/{CHILD}"), 200, complete_read()));
         steps.push((format!("GET /v1/pages/{CHILD}"), 200, complete_read()));
         steps.push((format!("GET /v1/pages/{CHILD}/markdown"),200,json!({"object":"page_markdown","id":CHILD,"markdown":"Body","truncated":false,"unknown_block_ids":[]})));
-        steps.extend(child_chain());
-        steps.extend(child_chain());
         let (client, task) = fixture(steps).await;
-        let created = client.create_scoped_page(&input(), &scope()).await.unwrap();
+        let created = client.create_scoped_page(&input()).await.unwrap();
         assert!(created.verified);
         assert_eq!(created.page_id.0, CHILD);
         assert_eq!(created.parent_page_id.0, PARENT);
         let calls = task.await.unwrap();
-        assert_eq!(calls.len(), 24);
-        assert_eq!(calls[8].1["icon"]["emoji"], "📄");
-        assert_eq!(calls[8].1["markdown"], "Body");
+        assert_eq!(calls.len(), 4);
+        assert_eq!(calls[0].1["icon"]["emoji"], "📄");
+        assert_eq!(calls[0].1["markdown"], "Body");
     }
 
     #[tokio::test]
     async fn created_metadata_cannot_hide_mismatched_or_incomplete_authoritative_content() {
-        const ROOT: &str = "33333333-3333-3333-3333-333333333333";
         for (markdown, truncated, unknown, kind) in [
             ("Different", false, vec![], BackendErrorKind::Conflict),
             ("Body", true, vec![], BackendErrorKind::UnsupportedContent),
@@ -507,19 +420,14 @@ mod tests {
                 BackendErrorKind::UnsupportedContent,
             ),
         ] {
-            let mut steps = chain(ROOT);
-            steps.extend(chain(ROOT));
+            let mut steps = Vec::new();
             steps.push(("POST /v1/pages".into(), 200, receipt()));
             steps.push((format!("GET /v1/pages/{CHILD}"), 200, complete_read()));
             steps.push((format!("GET /v1/pages/{CHILD}"), 200, complete_read()));
             steps.push((format!("GET /v1/pages/{CHILD}/markdown"),200,json!({"object":"page_markdown","id":CHILD,"markdown":markdown,"truncated":truncated,"unknown_block_ids":unknown})));
             let (client, task) = fixture(steps).await;
             assert_eq!(
-                client
-                    .create_scoped_page(&input(), &scope())
-                    .await
-                    .unwrap_err()
-                    .kind,
+                client.create_scoped_page(&input()).await.unwrap_err().kind,
                 kind
             );
             assert_eq!(
@@ -536,19 +444,11 @@ mod tests {
     #[tokio::test]
     async fn once_only_create_admits_refresh_and_replays_without_another_post() {
         use notion_knowledge_core::write_refresh::IndexStatus;
-        const ROOT: &str = "33333333-3333-3333-3333-333333333333";
-        let mut steps = chain(ROOT); // outer trusted workflow authorization
-        steps.extend(chain(ROOT));
-        steps.extend(chain(ROOT));
+        let mut steps = Vec::new();
         steps.push(("POST /v1/pages".into(), 200, receipt()));
         steps.push((format!("GET /v1/pages/{CHILD}"), 200, complete_read()));
         steps.push((format!("GET /v1/pages/{CHILD}"), 200, complete_read()));
         steps.push((format!("GET /v1/pages/{CHILD}/markdown"),200,json!({"object":"page_markdown","id":CHILD,"markdown":"Body","truncated":false,"unknown_block_ids":[]})));
-        steps.extend(child_chain());
-        steps.extend(child_chain());
-        steps.extend(chain(ROOT)); // replay still authorizes both parent and child
-        steps.extend(child_chain());
-        steps.extend(child_chain());
         let (client, task) = fixture(steps).await;
         let dir = tempfile::tempdir().unwrap();
         let ledger =
@@ -596,27 +496,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_parent_scope_never_calls_post() {
-        const OUTSIDE: &str = "55555555-5555-5555-5555-555555555555";
-        let (client, task) = fixture(chain(OUTSIDE)).await;
-        assert_eq!(
-            client
-                .create_scoped_page(&input(), &scope())
-                .await
-                .unwrap_err()
-                .kind,
-            BackendErrorKind::PermissionDenied
-        );
-        let calls = task.await.unwrap();
-        assert_eq!(calls.len(), 4);
-        assert!(calls.iter().all(|(path, _)| path.starts_with("GET")));
-    }
-
-    #[tokio::test]
     async fn missing_created_page_retries_reads_but_never_replays_post() {
-        const ROOT: &str = "33333333-3333-3333-3333-333333333333";
-        let mut steps = chain(ROOT);
-        steps.extend(chain(ROOT));
+        let mut steps = Vec::new();
         steps.push(("POST /v1/pages".into(), 200, receipt()));
         for _ in 0..3 {
             steps.push((
@@ -626,10 +507,7 @@ mod tests {
             ));
         }
         let (client, task) = fixture(steps).await;
-        let err = client
-            .create_scoped_page(&input(), &scope())
-            .await
-            .unwrap_err();
+        let err = client.create_scoped_page(&input()).await.unwrap_err();
         assert_eq!(err.kind, BackendErrorKind::Conflict);
         let calls = task.await.unwrap();
         assert_eq!(
@@ -639,6 +517,6 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(calls.len(), 12);
+        assert_eq!(calls.len(), 4);
     }
 }

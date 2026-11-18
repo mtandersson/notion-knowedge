@@ -8,12 +8,12 @@ Only PDF (`.pdf`, `application/pdf`), UTF-8 plain text (`.txt`, `text/plain`), M
 
 ## Authorization and mutation
 
-- The explicit target is a canonical **page** UUID (not arbitrary block/database IDs). A trusted server-owned `LifecycleScope` supplies workspace/root authorization. Its `RootScopeGate` resolves live physical Notion ancestry, checks root/exclusions and **revalidates** current physical ancestry before every append. No user-provided root label can expand authorization.
+- The explicit target is a canonical **page** UUID (not arbitrary block/database IDs). Writes run no ancestry walk and no root gate: Notion's own permission check for the token decides whether the page is writable (owner decision, single-user deployment covering the whole reachable workspace). The request-bound grant check still stops the next effect when the grant is lost.
 - `PATCH /v1/blocks/{page}/children` appends exactly one native `file` block containing `file.type=file_upload`, `file.file_upload.id={upload_id}`, a human-readable sanitized `name`, and optional `caption`.
 - A valid returned list of exactly one native block with matching parent is required. A separate `GET /v1/blocks/{block_id}` must confirm its native file type, parent, canonical filename and caption. Both a native file-upload reference to the expected ID and a Notion-resolved HTTPS file URL are supported for the API's post-upload representations. HTTPS URLs are **not** emitted.
 - Only confirmed readback returns `AttachedFile {page_id, block_id, upload_id, verified:true}`. Missing/invalid readback fails; never advertise a successful attachment based on the append receipt alone.
 
-Like #71's image primitive, the operation does not retry ambiguous writes. If append succeeded but the reply or readback failed, manual/reconciliation readback is needed to avoid duplicate attachments. The physical revalidation limits, but cannot eliminate, TOCTOU races. Future #74 handles generalized bounded eventual-consistency readback and failure reconciliation.
+Like #71's image primitive, the operation does not retry ambiguous writes. If append succeeded but the reply or readback failed, manual/reconciliation readback is needed to avoid duplicate attachments. Future #74 handles generalized bounded eventual-consistency readback and failure reconciliation.
 
 ## Tests
 

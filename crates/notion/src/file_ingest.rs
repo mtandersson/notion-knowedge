@@ -179,24 +179,12 @@ impl FileIngestAdapter for NotionFileIngestAdapter {
         match kind {
             FileKind::Image => self
                 .client
-                .attach_uploaded_image_tracked(
-                    target,
-                    upload,
-                    caption,
-                    &self.scope,
-                    &mut references.block_id,
-                )
+                .attach_uploaded_image_tracked(target, upload, caption, &mut references.block_id)
                 .await
                 .map(|value| value.block_id),
             FileKind::Other => self
                 .client
-                .attach_uploaded_file_tracked(
-                    target,
-                    upload,
-                    caption,
-                    &self.scope,
-                    &mut references.block_id,
-                )
+                .attach_uploaded_file_tracked(target, upload, caption, &mut references.block_id)
                 .await
                 .map(|value| value.block_id),
         }

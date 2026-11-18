@@ -23,20 +23,10 @@ use tokio_rustls::{
 type Requests = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 const PAGE: &str = "11111111-1111-1111-1111-111111111111";
 const ROOT: &str = "22222222-2222-2222-2222-222222222222";
-const OUTSIDE: &str = "33333333-3333-3333-3333-333333333333";
 const WORKSPACE: &str = "44444444-4444-4444-4444-444444444444";
 const UPLOAD: &str = "55555555-5555-5555-5555-555555555555";
 const BLOCK: &str = "66666666-6666-6666-6666-666666666666";
 const SECRET_URL: &str = "https://fixture.example/file?token=signed-secret";
-fn chain(parent: &str) -> Vec<Value> {
-    let node = |id: &str, parent: Option<&str>| json!({"object":"page","id":id,"last_edited_time":"2026-10-11T09:00:00Z","in_trash":false,"parent": parent.map(|v| json!({"type":"page_id","page_id":v})).unwrap_or(json!({"type":"workspace","workspace":true}))});
-    vec![
-        node(PAGE, Some(parent)),
-        node(parent, None),
-        node(parent, None),
-        node(PAGE, Some(parent)),
-    ]
-}
 fn block(image: bool, readback: bool) -> Value {
     let kind = if image { "image" } else { "file" };
     let mut value = json!({"object":"block","id":BLOCK,"type":kind,"in_trash":false,"parent":{"type":"page_id","page_id":PAGE}});
@@ -230,8 +220,7 @@ async fn notion(steps: Vec<(u16, Value)>) -> (NotionClient, Requests, tokio::tas
     (client, requests, handle)
 }
 fn full_steps(image: bool, readback_fails: bool, send_fails: bool) -> Vec<(u16, Value)> {
-    let mut steps: Vec<_> = chain(ROOT).into_iter().map(|v| (200, v)).collect();
-    steps.extend(chain(ROOT).into_iter().map(|v| (200, v)));
+    let mut steps: Vec<(u16, Value)> = Vec::new();
     steps.push((
         200,
         json!({"object":"file_upload","id":UPLOAD,"status":"pending"}),
@@ -241,11 +230,6 @@ fn full_steps(image: bool, readback_fails: bool, send_fails: bool) -> Vec<(u16, 
         json!({"object":"file_upload","id":UPLOAD,"status":"uploaded"}),
     ));
     if !send_fails {
-        // Application permit revalidation, then native attachment's independent
-        // authorize/revalidate: all are real authoritative page HTTP reads.
-        for _ in 0..3 {
-            steps.extend(chain(ROOT).into_iter().map(|v| (200, v)));
-        }
         steps.push((200, json!({"object":"list","results":[block(image,false)]})));
         for _ in 0..if readback_fails { 3 } else { 1 } {
             steps.push((if readback_fails { 404 } else { 200 }, block(image, true)));
@@ -305,7 +289,7 @@ async fn fixture(
     };
     let (download, _, source, paths) = source(bytes, 200, false).await;
     config.file_ingestion.as_mut().unwrap().download = download;
-    let mut steps: Vec<_> = chain(ROOT).into_iter().map(|v| (200, v)).collect();
+    let mut steps: Vec<(u16, Value)> = Vec::new();
     steps.extend(full_steps(image, false, false));
     let (client, requests, notion) = notion(steps).await;
     let handler = root_scope::attach_client(
@@ -616,9 +600,8 @@ async fn installed_transports_ordered_batch_keeps_success_and_reports_source_fai
         )
         .await;
         cfg.file_ingestion.as_mut().unwrap().download = download;
-        let mut steps: Vec<_> = chain(ROOT).into_iter().map(|v| (200, v)).collect();
+        let mut steps: Vec<(u16, Value)> = Vec::new();
         steps.extend(full_steps(false, false, false));
-        steps.extend(chain(ROOT).into_iter().map(|v| (200, v)));
         let (client, requests, notion) = notion(steps).await;
         let handler = root_scope::attach_client(
             notion_knowledge_mcp::KnowledgeServer::default().with_read_only(false),
@@ -721,7 +704,7 @@ async fn installed_transports_select_single_and_multipart_from_observed_bytes() 
         if size > 5 * MIB {
             let receipt = |status: &str, sent| json!({"object":"file_upload","id":UPLOAD,"status":status,"number_of_parts":{"total":2,"sent":sent}});
             execution.splice(
-                8..10,
+                0..2,
                 vec![
                     (200, receipt("pending", 0)),
                     (200, receipt("pending", 1)),
@@ -731,7 +714,7 @@ async fn installed_transports_select_single_and_multipart_from_observed_bytes() 
                 ],
             );
         }
-        let mut steps: Vec<_> = chain(ROOT).into_iter().map(|v| (200, v)).collect();
+        let mut steps: Vec<(u16, Value)> = Vec::new();
         steps.extend(execution);
         let (client, requests, notion) = notion(steps).await;
         let handler = root_scope::attach_client(
@@ -829,32 +812,11 @@ async fn installed_transports_select_single_and_multipart_from_observed_bytes() 
     }
 }
 #[tokio::test]
-async fn installed_transport_scope_and_effective_policy_deny_before_source_or_writes() {
-    for mode in [
-        "scope",
-        "excluded",
-        "read_only",
-        "blocked",
-        "unauthenticated_http",
-    ] {
+async fn installed_transport_effective_policy_deny_before_source_or_writes() {
+    for mode in ["read_only", "blocked", "unauthenticated_http"] {
         let dir = private_dir();
-        let mut cfg = config(&dir.path().join("audit.sqlite"), false);
-        if mode == "excluded" {
-            cfg.notion_scope
-                .as_mut()
-                .unwrap()
-                .exclusions
-                .page_ids
-                .insert(PAGE.into());
-        }
-        let steps = if mode == "excluded" {
-            chain(ROOT).into_iter().map(|v| (200, v)).collect()
-        } else if mode == "scope" {
-            chain(OUTSIDE).into_iter().map(|v| (200, v)).collect()
-        } else {
-            vec![]
-        };
-        let (client, requests, notion) = notion(steps).await;
+        let cfg = config(&dir.path().join("audit.sqlite"), false);
+        let (client, requests, notion) = notion(vec![]).await;
         let handler = root_scope::attach_client(
             notion_knowledge_mcp::KnowledgeServer::default().with_read_only(mode == "read_only"),
             &cfg,
@@ -879,9 +841,6 @@ async fn installed_transport_scope_and_effective_policy_deny_before_source_or_wr
         );
         let result = stdio_call(handler, upload(false)).await;
         match mode {
-            "scope" | "excluded" => {
-                assert_eq!(result["result"]["structuredContent"]["failure"], "denied")
-            }
             "read_only" | "blocked" => assert_eq!(result["error"]["code"], -32602),
             _ => assert!(
                 result["result"]["content"][0]["text"]
@@ -927,11 +886,8 @@ async fn installed_stdio_cancellation_during_multipart_send_or_readback_cleans_a
                 .unwrap(),
             );
         }
-        let mut steps: Vec<_> = chain(ROOT).into_iter().map(|v| (200, v)).collect();
+        let mut steps: Vec<(u16, Value)> = Vec::new();
         if during_send {
-            for _ in 0..2 {
-                steps.extend(chain(ROOT).into_iter().map(|v| (200, v)));
-            }
             steps.push((200,json!({"object":"file_upload","id":UPLOAD,"status":"pending","number_of_parts":{"total":2,"sent":0}})));
             steps.push((0, json!({})));
         } else {
@@ -1197,9 +1153,7 @@ async fn installed_transports_reject_mismatched_observed_type_before_upload() {
         let (download, count, source, paths) =
             source(b"document fixture".to_vec(), 200, false).await;
         cfg.file_ingestion.as_mut().unwrap().download = download;
-        let mut steps: Vec<_> = chain(ROOT).into_iter().map(|v| (200, v)).collect();
-        steps.extend(chain(ROOT).into_iter().map(|v| (200, v)));
-        let (client, requests, notion) = notion(steps).await;
+        let (client, requests, notion) = notion(Vec::new()).await;
         let handler = root_scope::attach_client(
             notion_knowledge_mcp::KnowledgeServer::default().with_read_only(false),
             &cfg,

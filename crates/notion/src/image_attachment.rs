@@ -2,19 +2,13 @@
 //!
 //! No MCP tool is activated here. A confirmed upload ID is not authorization to
 //! mutate an arbitrary page. The caller must provide trusted root policy.
-use std::sync::Arc;
-
 use crate::{
     NotionClient,
     attachment_readback::AttachmentSource,
     file_upload::{UploadStatus, UploadedFile},
     pages,
 };
-use notion_knowledge_core::{
-    backend::{BackendError, BackendErrorKind, PageId},
-    lifecycle::LifecycleScope,
-    root_scope::{RootScopeGate, ScopeError},
-};
+use notion_knowledge_core::backend::{BackendError, BackendErrorKind, PageId};
 use serde_json::{Value, json};
 
 const ATTACH: &str = "notion.image.attach";
@@ -36,18 +30,6 @@ fn error(operation: &'static str, kind: BackendErrorKind) -> BackendError {
         retry_after: None,
         committed_page_id: None,
     }
-}
-
-fn scope_error(value: ScopeError) -> BackendError {
-    error(
-        ATTACH,
-        match value {
-            ScopeError::Denied => BackendErrorKind::PermissionDenied,
-            ScopeError::Changed => BackendErrorKind::Conflict,
-            ScopeError::Unverifiable => BackendErrorKind::Unavailable,
-            ScopeError::InvalidConfiguration => BackendErrorKind::InvalidInput,
-        },
-    )
 }
 
 fn caption(value: Option<&str>) -> Result<Vec<Value>, BackendError> {
@@ -115,18 +97,16 @@ fn readback_ok(
 impl NotionClient {
     /// Append one native image to an explicit page and confirm it with a block GET.
     ///
-    /// Only server-owned `scope` is permitted; never derive it from user input.
+    /// Notion's own permission check for the token authorizes the target.
     /// Target is a PAGE UUID, not an arbitrary block, database or uploaded URL.
-    /// The physical ancestry is checked twice immediately before the mutation.
     /// No mutation replay is attempted after a transport error or ambiguous reply.
     pub async fn attach_uploaded_image(
         &self,
         target: &PageId,
         upload: &UploadedFile,
         text: Option<&str>,
-        scope: &LifecycleScope,
     ) -> Result<AttachedImage, BackendError> {
-        self.attach_uploaded_image_detailed(target, upload, text, scope)
+        self.attach_uploaded_image_detailed(target, upload, text)
             .await
             .map_err(|failure| error(failure.operation, failure.kind))
     }
@@ -136,10 +116,9 @@ impl NotionClient {
         target: &PageId,
         upload: &UploadedFile,
         text: Option<&str>,
-        scope: &LifecycleScope,
     ) -> Result<AttachedImage, notion_knowledge_core::file_ingest::FileEffectFailure> {
         let mut known_block = None;
-        self.attach_uploaded_image_tracked(target, upload, text, scope, &mut known_block)
+        self.attach_uploaded_image_tracked(target, upload, text, &mut known_block)
             .await
     }
 
@@ -148,33 +127,15 @@ impl NotionClient {
         target: &PageId,
         upload: &UploadedFile,
         text: Option<&str>,
-        scope: &LifecycleScope,
         known_block: &mut Option<String>,
     ) -> Result<AttachedImage, notion_knowledge_core::file_ingest::FileEffectFailure> {
         let mut effect_possible = false;
-        let mut authority_lost = false;
         let result: Result<AttachedImage, BackendError> = async {
             if pages::uuid(&target.0).as_deref() != Some(target.0.as_str()) || !valid_upload(upload)
             {
                 return Err(error(ATTACH, BackendErrorKind::InvalidInput));
             }
             let caption = caption(text)?;
-            let gate =
-                RootScopeGate::new(Arc::new(self.clone()), scope.clone()).map_err(|failure| {
-                    authority_lost = true;
-                    scope_error(failure)
-                })?;
-            let permit = gate.authorize(target).await.map_err(|failure| {
-                authority_lost = true;
-                scope_error(failure)
-            })?;
-            // Pre-mutation revalidation deliberately repeats fresh parent/source
-            // ancestry; a stale index root or forged target cannot authorize it.
-            gate.revalidate(&permit, scope).await.map_err(|failure| {
-                authority_lost = true;
-                scope_error(failure)
-            })?;
-
             let added = self
                 .write_tracked(
                     reqwest::Method::PATCH,
@@ -224,7 +185,7 @@ impl NotionClient {
                 upload_id: Some(upload.id.clone()),
                 block_id: known_block.clone(),
                 effect_possible,
-                authority_lost: authority_lost || self.validate_request_authority(true).is_err(),
+                authority_lost: self.validate_request_authority(true).is_err(),
             },
         )
     }
@@ -233,24 +194,13 @@ impl NotionClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notion_knowledge_core::discovery::ExclusionRules;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     const PAGE: &str = "11111111-1111-1111-1111-111111111111";
-    const ROOT: &str = "22222222-2222-2222-2222-222222222222";
     const OUTSIDE: &str = "33333333-3333-3333-3333-333333333333";
-    const WORKSPACE: &str = "44444444-4444-4444-4444-444444444444";
     const UPLOAD: &str = "55555555-5555-5555-5555-555555555555";
     const BLOCK: &str = "66666666-6666-6666-6666-666666666666";
 
-    fn policy() -> LifecycleScope {
-        LifecycleScope {
-            workspace_id: WORKSPACE.into(),
-            generation: 1,
-            roots: vec![PageId(ROOT.into())],
-            exclusions: ExclusionRules::default(),
-        }
-    }
     fn upload(mime: &str) -> UploadedFile {
         UploadedFile {
             id: UPLOAD.into(),
@@ -259,24 +209,6 @@ mod tests {
             mime_type: mime.into(),
             size_bytes: 16,
         }
-    }
-    fn node(id: &str, parent: Option<&str>) -> Value {
-        json!({"object":"page", "id":id, "last_edited_time":"2026-10-11T09:00:00Z",
-        "in_trash":false,
-        "parent":match parent {
-            Some(id) => json!({"type":"page_id","page_id":id}),
-            None => json!({"type":"workspace","workspace":true})
-        }})
-    }
-    fn chain(parent: &str) -> Vec<(String, u16, Value)> {
-        let page = node(PAGE, Some(parent));
-        let root = node(parent, None);
-        vec![
-            (format!("GET /v1/pages/{PAGE}"), 200, page.clone()),
-            (format!("GET /v1/pages/{parent}"), 200, root.clone()),
-            (format!("GET /v1/pages/{parent}"), 200, root),
-            (format!("GET /v1/pages/{PAGE}"), 200, page),
-        ]
     }
     fn block(kind: &str, parent: &str, body: Value) -> Value {
         json!({"object":"block","id":BLOCK,"type":kind,"in_trash":false,
@@ -362,9 +294,7 @@ mod tests {
 
     #[tokio::test]
     async fn authorized_native_image_append_and_block_readback() {
-        let mut steps = chain(ROOT);
-        steps.extend(chain(ROOT));
-        steps.push(append());
+        let mut steps = vec![append()];
         steps.push(readback(PAGE));
         let (client, server) = fixture(steps).await;
         let result = client
@@ -372,7 +302,6 @@ mod tests {
                 &PageId(PAGE.into()),
                 &upload("image/png"),
                 Some(" Hans visar upp sina fjädrar "),
-                &policy(),
             )
             .await
             .unwrap();
@@ -381,27 +310,16 @@ mod tests {
         assert_eq!(result.upload_id, UPLOAD);
         assert!(result.verified);
         let requests = server.await.unwrap();
-        assert_eq!(requests.len(), 10);
+        assert_eq!(requests.len(), 2);
         assert_eq!(
-            requests[8].1,
+            requests[0].1,
             json!({"children":[{
                 "object":"block","type":"image",
                 "image":{"type":"file_upload","file_upload":{"id":UPLOAD},
                     "caption":[{"type":"text","text":{"content":"Hans visar upp sina fjädrar"}}]}
             }]})
         );
-        assert_eq!(requests[9].0, format!("GET /v1/blocks/{BLOCK}"));
-    }
-
-    #[tokio::test]
-    async fn outside_root_never_attaches() {
-        let (client, server) = fixture(chain(OUTSIDE)).await;
-        let err = client
-            .attach_uploaded_image(&PageId(PAGE.into()), &upload("image/png"), None, &policy())
-            .await
-            .unwrap_err();
-        assert_eq!(err.kind, BackendErrorKind::PermissionDenied);
-        assert_eq!(server.await.unwrap().len(), 4);
+        assert_eq!(requests[1].0, format!("GET /v1/blocks/{BLOCK}"));
     }
 
     #[tokio::test]
@@ -417,7 +335,7 @@ mod tests {
             ),
         ] {
             let err = client
-                .attach_uploaded_image(&target, &uploaded, text, &policy())
+                .attach_uploaded_image(&target, &uploaded, text)
                 .await
                 .unwrap_err();
             assert_eq!(err.kind, BackendErrorKind::InvalidInput);
@@ -425,29 +343,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_lifecycle_denies_append() {
-        let mut steps = chain(ROOT);
-        let mut changed = chain(ROOT);
-        changed[0].2["last_edited_time"] = json!("2026-10-11T10:00:00Z");
-        changed[3].2["last_edited_time"] = json!("2026-10-11T10:00:00Z");
-        steps.extend(changed);
-        let (client, server) = fixture(steps).await;
-        assert_eq!(
-            client
-                .attach_uploaded_image(&PageId(PAGE.into()), &upload("image/png"), None, &policy())
-                .await
-                .unwrap_err()
-                .kind,
-            BackendErrorKind::Conflict
-        );
-        assert_eq!(server.await.unwrap().len(), 8);
-    }
-
-    #[tokio::test]
     async fn bad_receipt_or_missing_readback_never_claims_attachment() {
         for bad_receipt in [true, false] {
-            let mut steps = chain(ROOT);
-            steps.extend(chain(ROOT));
+            let mut steps = Vec::new();
             if bad_receipt {
                 steps.push((
                     append().0,
@@ -467,7 +365,6 @@ mod tests {
                     &PageId(PAGE.into()),
                     &upload("image/png"),
                     Some("Hans visar upp sina fjädrar"),
-                    &policy(),
                 )
                 .await
                 .unwrap_err();
@@ -478,9 +375,7 @@ mod tests {
     }
     #[tokio::test]
     async fn empty_caption_and_exact_upload_readback_are_supported() {
-        let mut steps = chain(ROOT);
-        steps.extend(chain(ROOT));
-        steps.push(append());
+        let mut steps = vec![append()];
         steps.push((
             format!("GET /v1/blocks/{BLOCK}"),
             200,
@@ -496,12 +391,12 @@ mod tests {
         ));
         let (client, server) = fixture(steps).await;
         let attached = client
-            .attach_uploaded_image(&PageId(PAGE.into()), &upload("image/webp"), None, &policy())
+            .attach_uploaded_image(&PageId(PAGE.into()), &upload("image/webp"), None)
             .await
             .unwrap();
         assert!(attached.verified);
         let requests = server.await.unwrap();
-        assert_eq!(requests[8].1["children"][0]["image"]["caption"], json!([]));
+        assert_eq!(requests[0].1["children"][0]["image"]["caption"], json!([]));
     }
 
     #[test]
@@ -530,9 +425,7 @@ mod tests {
     }
     #[tokio::test]
     async fn image_block_eventually_appears_after_initial_not_found() {
-        let mut steps = chain(ROOT);
-        steps.extend(chain(ROOT));
-        steps.push(append());
+        let mut steps = vec![append()];
         steps.push((
             format!("GET /v1/blocks/{BLOCK}"),
             404,
@@ -545,19 +438,16 @@ mod tests {
                 &PageId(PAGE.into()),
                 &upload("image/png"),
                 Some("Hans visar upp sina fjädrar"),
-                &policy(),
             )
             .await
             .unwrap();
         assert!(attached.verified);
-        assert_eq!(server.await.unwrap().len(), 11);
+        assert_eq!(server.await.unwrap().len(), 3);
     }
 
     #[tokio::test]
     async fn image_block_never_appears_returns_error_without_second_append() {
-        let mut steps = chain(ROOT);
-        steps.extend(chain(ROOT));
-        steps.push(append());
+        let mut steps = vec![append()];
         for _ in 0..3 {
             steps.push((
                 format!("GET /v1/blocks/{BLOCK}"),
@@ -567,13 +457,13 @@ mod tests {
         }
         let (client, server) = fixture(steps).await;
         let failure = client
-            .attach_uploaded_image(&PageId(PAGE.into()), &upload("image/png"), None, &policy())
+            .attach_uploaded_image(&PageId(PAGE.into()), &upload("image/png"), None)
             .await
             .unwrap_err();
         assert_eq!(failure.kind, BackendErrorKind::Conflict);
         assert_eq!(failure.operation, VERIFY);
         let requests = server.await.unwrap();
-        assert_eq!(requests.len(), 12);
+        assert_eq!(requests.len(), 4);
         assert_eq!(
             requests
                 .iter()

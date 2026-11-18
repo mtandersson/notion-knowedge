@@ -348,7 +348,7 @@ async fn accepted_original_grant_is_never_adopted_by_replacement_or_revoked_requ
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn admission_requires_write_grant_exact_workspace_and_physical_root_before_any_journal() {
+async fn admission_requires_write_grant_and_exact_workspace_before_any_journal() {
     let h = harness().await;
     let seed = content_index::seed(h._dir.path(), &scope(), PAGE).await;
     let (coordinator, _) = open(&seed);
@@ -397,21 +397,6 @@ async fn admission_requires_write_grant_exact_workspace_and_physical_root_before
             &scope(),
             &PageId(PAGE.into()),
             cancelled,
-            10
-        )
-        .await
-        .is_err()
-    );
-    let mut excluded = scope();
-    excluded.exclusions.page_ids.insert(PAGE.into());
-    assert!(
-        AuthorizedFileIntent::begin(
-            coordinator.state().clone(),
-            runtime,
-            &auth,
-            &excluded,
-            &PageId(PAGE.into()),
-            CancellationToken::new(),
             10
         )
         .await

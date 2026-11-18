@@ -6,9 +6,9 @@ optional expected `last_edited_time` (valid RFC3339 instant) and/or expected
 bytes**). At least one is mandatory, and all supplied conditions must match.
 Hash-only, time-only and combined conditions work for both workflows.
 
-Flow: validate caller input -> authorize page ancestry -> reserve durable
+Flow: validate caller input -> reserve durable
 unique intent/key -> fresh authoritative revision read -> full Markdown read
-(and unique section selection if applicable) -> revalidate root scope ->
+(and unique section selection if applicable) ->
 fresh immediate full-content revision comparison -> persist **uncertain** ->
 single non-retried provider PATCH -> authoritative read-back -> verified
 receipt or unknown. The final pre-PATCH read also compares the original

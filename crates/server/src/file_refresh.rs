@@ -5,7 +5,6 @@ use crate::{notion_oauth_runtime::NotionOAuthRuntime, oauth_content::RequestGran
 use notion_knowledge_core::{
     backend::{BackendError, BackendErrorKind, PageId},
     lifecycle::LifecycleScope,
-    root_scope::RootScopeGate,
     write_refresh::{GrantRefreshAuthority, RefreshKey},
 };
 use notion_knowledge_mcp::HttpAuthorization;
@@ -105,12 +104,6 @@ impl AuthorizedFileIntent {
         }
         let request = RequestGrantAuthority::acquire(runtime, auth).await?;
         let client = request.client()?;
-        let gate =
-            RootScopeGate::new(Arc::new(client.clone()), scope.clone()).map_err(|_| denied())?;
-        let permit = gate.authorize(page).await.map_err(|_| denied())?;
-        gate.revalidate(&permit, scope)
-            .await
-            .map_err(|_| denied())?;
         let policy = production_scope(scope).map_err(|_| denied())?;
         let authority = GrantRefreshAuthority::new(
             scope.workspace_id.clone(),
@@ -287,15 +280,6 @@ pub(crate) async fn reconcile_clocked(
         policy.identity().into(),
     )
     .map_err(|_| denied())?;
-    let gate =
-        RootScopeGate::new(Arc::new(request.client()?), scope.clone()).map_err(|_| denied())?;
-    let permit = gate
-        .authorize(&PageId(key.page_id.clone()))
-        .await
-        .map_err(|_| denied())?;
-    gate.revalidate(&permit, scope)
-        .await
-        .map_err(|_| denied())?;
     request.validate(true)?;
     state
         .reconcile_quiescent_file_intent(key, &authority, at)
@@ -353,14 +337,6 @@ async fn operator_authority(
         CancellationToken::new(),
     )
     .await?;
-    let gate = RootScopeGate::new(Arc::new(read.client()?), scope.clone()).map_err(|_| denied())?;
-    let permit = gate
-        .authorize(&PageId(key.page_id.clone()))
-        .await
-        .map_err(|_| denied())?;
-    gate.revalidate(&permit, scope)
-        .await
-        .map_err(|_| denied())?;
     Ok(read)
 }
 pub(crate) async fn operator_status(

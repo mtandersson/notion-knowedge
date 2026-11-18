@@ -532,12 +532,6 @@ async fn installed_file_authority_and_url_denials_never_download_or_mutate() {
             "{result}"
         );
     }
-    let outside=call(&h,&installed.url,&token,&session,"knowledge_upload_file",json!({"target":"dddddddd-dddd-dddd-dddd-dddddddddddd","file":input("outside.txt","text/plain")})).await;
-    assert!(
-        outside["result"]["isError"] == true
-            && outside["result"]["content"][0]["text"] == "file_upload_denied",
-        "{outside}"
-    );
     h.login.flow.revoke("chatgpt", &token).unwrap();
     let denied=rpc(&h,&installed.url,&token,Some(&session),json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"knowledge_upload_file","arguments":{"target":PAGE,"file":input("revoked.txt","text/plain")}}})).await;
     assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);

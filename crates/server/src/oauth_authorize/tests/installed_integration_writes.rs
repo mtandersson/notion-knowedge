@@ -16,7 +16,6 @@ use tokio_util::sync::CancellationToken;
 const WORKSPACE: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const ROOT: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 const PAGE: &str = "cccccccc-cccc-cccc-cccc-cccccccccccc";
-const FOREIGN: &str = "dddddddd-dddd-dddd-dddd-dddddddddddd";
 const TOKEN: &str = "private-integration-local-http-token";
 fn parse(values: &BTreeMap<String, String>) -> crate::config::Config {
     crate::config::Config::from_lookup(|key| values.get(key).map(Into::into)).unwrap()
@@ -220,11 +219,6 @@ async fn private_integration_http_guards_writes_and_refreshes_once_without_oauth
     );
     assert!(!names.contains(&"knowledge_update_section"));
     assert!(names.contains(&"knowledge_related"), "{listing}");
-    let rejected=call(&h,&endpoint,TOKEN,&session,"knowledge_append",json!({"root_page_id":ROOT,"page_id":FOREIGN,"markdown":"denied","expected_last_edited_time":"2026-10-17T00:00:00Z","idempotency_key":"integration-denied-append"})).await;
-    assert_eq!(
-        rejected["result"]["structuredContent"]["write"]["status"], "not_authorized",
-        "{rejected}"
-    );
     assert_eq!(h.mutations.load(Ordering::SeqCst), 0);
     let create = json!({"root_page_id":ROOT,"parent_page_id":ROOT,"title":"Saffron private evidence","markdown":"Saffron integration created content","idempotency_key":"integration-create-once"});
     let created = call(
