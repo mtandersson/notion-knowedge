@@ -231,9 +231,6 @@ request context; detached index commit threads capture the ID before spawn.
 Stdio MCP tool calls also have their own operation IDs. `completed` on a
 tool event means the handler returned, not that a tool's business outcome
 succeeded. Response/status failures remain visible on HTTP and Notion events.
-Notion OAuth allowlist rejections have fixed `notion_oauth_workspace` and
-`notion_oauth_user` operations, correlated with the enclosing HTTP request.
-They include no supplied/configured identity or credential values.
 Server logs are sensitive operational metadata; apply normal access controls,
 retention and log-shipping redaction policies.
 
@@ -431,13 +428,11 @@ sanitized failure class, and exits without starting an MCP transport.
 | `NK_HTTP_PORT` | `3000` | An integer from 1 to 65535. |
 | `NK_NOTION_AUTH` | `none` | `none` or `integration`. This selects upstream Notion credentials, not MCP client authentication. |
 | `NOTION_TOKEN` | Unset | Required when `NK_NOTION_AUTH=integration`; must be nonempty and contain no whitespace or control characters. Ignored when authentication is `none`. |
-| `NK_OAUTH_ISSUER` | Unset | Paired with `NK_OAUTH_RESOURCE`: canonical HTTPS root issuer, e.g. `https://auth.example.com`. Enables **discovery only**. |
-| `NK_OAUTH_RESOURCE` | Unset | Paired with `NK_OAUTH_ISSUER`: canonical HTTPS MCP resource, e.g. `https://knowledge.example.com/mcp`. |
 
 
 An explicitly empty optional setting is invalid; defaults apply only when a
-variable is unset. OAuth configuration will be introduced with the OAuth
-implementation.
+variable is unset. Removed OAuth and Notion grant settings are ignored with one
+startup warning (see [single-user access](#single-user-access)).
 
 See [`.env.example`](.env.example) for a sample. The server does not load `.env`
 files automatically: export variables in your shell or configure your service

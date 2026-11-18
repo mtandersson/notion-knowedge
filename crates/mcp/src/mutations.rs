@@ -1,5 +1,5 @@
-//! Trusted semantic mutation capabilities. Production OAuth composition supplies
-//! live per-request authority, durable stores and explicit operator activation.
+//! Trusted semantic mutation capabilities. The integration composition supplies
+//! durable stores and explicit operator activation.
 use notion_knowledge_core::{
     append::{AppendError, AppendRequest, append_once_and_refresh},
     audit::{AuditActor, AuditEvent, AuditOutcome, AuditStore, AuditTool},
@@ -456,7 +456,7 @@ pub(crate) fn tool(name: &str) -> rmcp::model::Tool {
     tool
 }
 
-/// The installed OAuth write surface is deliberately narrower than all mutation
+/// The installed write surface is deliberately narrower than all mutation
 /// schemas: file upload, archive and whole-page replacement are separate work.
 pub fn is_semantic_mutation(name: &str) -> bool {
     matches!(
