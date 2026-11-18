@@ -10,7 +10,7 @@ use notion_knowledge_core::{
         LifecycleEvidence, LifecycleKind, LifecycleNode, LifecycleScope, LifecycleStatus,
         PageLifecycle, PhysicalParent,
     },
-    root_scope::{RootScopeGate, ScopeError},
+    root_scope::{ReadAuthority, RootScopeGate, ScopeError},
 };
 
 const PAGE: &str = "11111111-1111-1111-1111-111111111111";
@@ -443,4 +443,57 @@ mod read_gate {
             Err(ScopeError::Denied)
         );
     }
+}
+
+#[tokio::test]
+async fn live_read_authority_fetches_and_revalidates_ancestry_with_the_callers_source() {
+    let current = scope();
+    let backend = Arc::new(FakeLifecycle::new(valid_evidence(&current)));
+    let authority =
+        ReadAuthority::Live(RootScopeGate::new(backend.clone(), current.clone()).unwrap());
+    assert_eq!(authority.configured_scope(), &current);
+
+    let permit = authority.authorize(&PageId(PAGE.into())).await.unwrap();
+    assert!(permit.belongs_to_any(&[ROOT.into()]));
+    assert!(!permit.belongs_to_any(&[OTHER.into()]));
+    // One live inspection and one revalidation per authorization, no cache.
+    assert_eq!(backend.inspections.load(Ordering::SeqCst), 1);
+    assert_eq!(backend.rechecks.load(Ordering::SeqCst), 1);
+    authority.authorize(&PageId(PAGE.into())).await.unwrap();
+    assert_eq!(backend.inspections.load(Ordering::SeqCst), 2);
+    assert_eq!(backend.rechecks.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn live_read_authority_denies_when_ancestry_is_outside_unreadable_or_changes() {
+    let current = scope();
+
+    // Ancestry that does not reach a configured root.
+    let mut foreign = valid_evidence(&current);
+    foreign.ancestry[0].parent = PhysicalParent::Workspace;
+    foreign.ancestry.truncate(1);
+    let backend = Arc::new(FakeLifecycle::new(foreign));
+    let authority = ReadAuthority::Live(RootScopeGate::new(backend, current.clone()).unwrap());
+    assert_eq!(
+        authority.authorize(&PageId(PAGE.into())).await.err(),
+        Some(ScopeError::Denied)
+    );
+
+    // A page the caller's grant cannot read.
+    let backend = Arc::new(FakeLifecycle::new(valid_evidence(&current)));
+    *backend.evidence.lock().unwrap() = None;
+    let authority = ReadAuthority::Live(RootScopeGate::new(backend, current.clone()).unwrap());
+    assert_eq!(
+        authority.authorize(&PageId(PAGE.into())).await.err(),
+        Some(ScopeError::Unverifiable)
+    );
+
+    // Ancestry that moves between the fetch and the revalidation.
+    let backend = Arc::new(FakeLifecycle::new(valid_evidence(&current)));
+    backend.allow_revalidation.store(false, Ordering::SeqCst);
+    let authority = ReadAuthority::Live(RootScopeGate::new(backend, current).unwrap());
+    assert_eq!(
+        authority.authorize(&PageId(PAGE.into())).await.err(),
+        Some(ScopeError::Changed)
+    );
 }

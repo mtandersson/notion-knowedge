@@ -245,6 +245,33 @@ async fn installed_boost_holds_one_committed_read_fence_and_fails_closed_on_pend
     assert!(!output[1].to_string().contains("ANKARE"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reads_cannot_start_without_the_shared_sync_state_file() {
+    let runtime = fixture().await;
+    let mut config = config(&runtime, false);
+    config.webhook_state_file = None;
+    const REFUSED: &str = "read authorization needs the shared sync state file";
+    assert_eq!(
+        installed_retrieval(&runtime, &config, Transport::Stdio)
+            .await
+            .err(),
+        Some(REFUSED)
+    );
+    // The scope-only composition (no retrieval index) refuses it too, rather
+    // than serving reads that deny everything.
+    config.retrieval = None;
+    config.graph_index = None;
+    assert_eq!(
+        notion_knowledge_server::root_scope::attach_root_scope(
+            notion_knowledge_mcp::KnowledgeServer::default(),
+            &config,
+            Transport::Stdio
+        )
+        .err(),
+        Some(REFUSED)
+    );
+}
+
 async fn http_calls(
     runtime: &TestRuntime,
     mut config: notion_knowledge_server::config::Config,
