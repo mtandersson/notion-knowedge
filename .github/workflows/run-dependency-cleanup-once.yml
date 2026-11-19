@@ -58,7 +58,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/prune-issue-dependencies.py --batch B --apply --delay 0.5
 
-      - name: Re-verify both cleaned batches and the intact OAuth dependency
+      - name: Re-verify both cleaned batches
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -66,11 +66,3 @@ jobs:
           set -euo pipefail
           python3 scripts/prune-issue-dependencies.py --batch A
           python3 scripts/prune-issue-dependencies.py --batch B
-          # #123 remains the genuine predecessor to #124. All unrelated
-          # file-ingestion phase blockers should be gone after successful B.
-          actual="$(gh api /repos/mtandersson/notion-knowedge/issues/124/dependencies/blocked_by --jq '[.[].number] | sort | join(",")')"
-          if [[ "$actual" != "123" ]]; then
-            echo "::error::Unexpected #124 blocker graph after cleanup (actual: $actual)"
-            exit 1
-          fi
-          echo "Verified #124 still depends on #123; unrelated #9 edge removed"

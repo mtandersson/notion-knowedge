@@ -38,9 +38,7 @@ embedding, lexical-storage and plan identities. Integration-owned recovery uses
 [cache reset and authoritative resync](cache-reset-and-resync.md). Incompatible
 derived state is rebuilt from authorized Notion content; credentials, external
 write/idempotency/audit records and admitted refresh work are preserved. Readers
-refuse content while rebuilding. Read-only OAuth composition requires compatible
-existing state; it does not acquire a global credential or initialize source
-data outside its established authorization boundary.
+refuse content while rebuilding.
 
 Workers, manual/scheduled maintenance, index commands and status inspection use
 the configured binding. Missing/corrupt assets, resource limits, deadlines or

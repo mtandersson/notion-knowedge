@@ -22,8 +22,8 @@ commit message must contain the exact title. Its run is serialized with the
 existing manual workflow, runs credential-free tests first, then read-only
 preflight checks, then applies each bounded batch using
 `scripts/prune-issue-dependencies.py`. After each batch it validates
-critical OAuth and LanceDB dependencies; the last step explicitly verifies
-that #124 still depends on #123 but not #9.
+the guarded dependencies described below, then re-runs both
+batches read-only to confirm no removed edge remains.
 
 This is a single approved operational migration: it does **not** mutate
 #257/#254/#255, and it leaves the preexisting manual dry-run workflow
@@ -75,8 +75,8 @@ re-reads the issue to verify the edge disappeared. It does not fetch a
 personal access token itself, echo credentials or accept arbitrary
 repository names or issue ID lists.
 
-It validates that critical OAuth relationships (#122→#123→#124 and later
-grant binding/revocation) and the **#257 LanceDB dependencies** still
+It validates that the historical relationships of the since-removed OAuth
+issues (#122→#123→#124 and later grant binding/revocation) and the **#257 LanceDB dependencies** still
 exist before and after applying changes. It **never** edits issue #257,
 #254, #255 or their branches. If a safety invariant or GitHub API request
 fails, it exits non-zero without continuing. The migration is idempotent:

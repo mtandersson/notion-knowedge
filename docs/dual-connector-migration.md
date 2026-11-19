@@ -12,10 +12,9 @@ demonstrate retrieval; it is not a private-production ChatGPT integration
 ([experiment](semantic-mcp-spike.md), [integrated retrieval smoke](retrieval-smoke.md)).
 
 **Current security gate:** do not expose private Notion data through the
-development/no-auth HTTP endpoint or interpret OAuth discovery metadata as
-working login. The discovery-only mode deliberately rejects MCP requests.
-A production private-data cutover requires OAuth, single-identity authorization,
-scope enforcement and end-to-end verification (#117, #109, #129, #130).
+development/no-auth HTTP endpoint. A production private-data cutover requires
+the [private tunnel](private-chatgpt-tunnel.md) with loopback bearer HTTP (or
+stdio), the fixed integration scope and end-to-end verification (#109).
 Until then, use the official connector for private ChatGPT work and limit custom
 MCP trials to a disposable, non-sensitive test root with approved access.
 
@@ -61,7 +60,7 @@ or expanding the allowed roots.
   only when explicitly evaluating migration, not on each user request.
 - Include the chosen connector, source ID/URL, indexed versus authoritative
   timestamp (when returned), and the failure class in operator notes.
-  Never log page contents, signed URLs, raw OAuth tokens or uploaded files.
+  Never log page contents, signed URLs, bearer/integration tokens or uploaded files.
   Notion page links are evidence, not authentication.
 - When two reads conflict, authoritative Notion wins. Flag any stale/missing
   custom result for reconciliation; do not merge text from conflicting versions
@@ -75,8 +74,8 @@ or expanding the allowed roots.
    and authorized/out-of-scope targets. Record the current successful route.
 2. **Isolated trial:** test custom `knowledge_search` and `knowledge_get`
    on a disposable non-sensitive root, then verify citations against Notion.
-   The experimental spike is not evidence that the production connection,
-   OAuth or file/write routing works.
+   The experimental spike is not evidence that the production connection
+   or file/write routing works.
 3. **Supervised read pilot:** only after actual supported ChatGPT connection,
    authorized scoped production transport and index freshness checks exist,
    use custom retrieval for selected authorized **read-only** tasks. Keep

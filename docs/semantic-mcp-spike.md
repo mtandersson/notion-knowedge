@@ -35,7 +35,7 @@ A client initializes MCP, sends `notifications/initialized`, discovers
 HTTP uses `POST /mcp`, Accept `application/json, text/event-stream` and the
 returned `Mcp-Session-Id` after initialization. Stdio stdout contains only
 protocol frames; model timing and sanitized diagnostics use stderr. The
-configured HTTP Host/Origin policy still applies. No OAuth or public deployment
+configured HTTP Host/Origin policy still applies. No public deployment
 claim is made.
 
 ## Adapter behavior and limitations

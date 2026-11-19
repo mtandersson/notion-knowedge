@@ -37,7 +37,7 @@ crates/
     ports/traits
 
   notion/
-    Notion REST/OAuth adapter
+    Notion REST adapter
     implements core Notion ports
 
   retrieval/
@@ -56,7 +56,7 @@ crates/
     configuration
     stdio transport
     Streamable HTTP transport
-    HTTP auth/OAuth plumbing
+    HTTP bearer auth plumbing
     lifecycle/health
 ```
 
@@ -125,8 +125,8 @@ ChatGPT -- MCP-scoped credential --> notion-knowledge
 notion-knowledge -- Notion credential --> Notion API
 ```
 
-The Notion adapter may support an internal integration token for bootstrap and
-headless use plus Notion OAuth for interactive/default operation. A Notion
+The Notion adapter uses one server-side internal integration token
+(`NK_NOTION_AUTH=integration`) for all reads and writes. A Notion
 credential is never accepted as the MCP bearer credential and is never exposed
 through MCP results or logs.
 
@@ -183,7 +183,7 @@ boundary deliberately keeps this option open.
 
 ### Tradeoffs
 
-- Notion integration uses a thin typed Rust REST/OAuth adapter rather than the
+- Notion integration uses a thin typed Rust REST adapter rather than the
   official JavaScript SDK
 - Rust can carry a higher implementation cost than TypeScript
 - LanceDB remains a technology choice to validate through later retrieval

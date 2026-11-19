@@ -17,9 +17,9 @@ byte/timeout/plan/part/retention settings are shared by discovery and execution.
 Stdio is a trusted local operator transport. HTTP additionally needs explicit
 `NK_HTTP_AUTH=bearer`, a strong locally supplied `NK_HTTP_BEARER_TOKEN`, and a
 loopback listener. The existing middleware authenticates every session request;
-knowing a session ID does not authorize another call. Unauthenticated HTTP and
-OAuth discovery do not install ingestion, even with write mode enabled.
-The actor is `server`, representing operator policy, never an invented OAuth
+knowing a session ID does not authorize another call. Unauthenticated HTTP does
+not install ingestion, even with write mode enabled.
+The actor is `server`, representing operator policy, never an invented
 user. Default read-only and operation allow/block policy reject calls before
 any adapter. Missing ingestion settings return `file_upload_unavailable`.
 
@@ -84,6 +84,5 @@ rejected on the actual HTTP wire. Existing subprocess tests retain missing
 configuration, read-only and invalid startup checks.
 
 These fixtures verify local stdio and loopback bearer operation. A private real
-ChatGPT connection, OAuth authorization (#117), a live allowed root and native
-Notion UI/readback remain separate operational gates. No production ChatGPT
-OAuth readiness is claimed and no private API credentials are needed by CI.
+ChatGPT connection, a live allowed root and native Notion UI/readback remain
+separate operational gates. No production ChatGPT readiness is claimed and no private API credentials are needed by CI.

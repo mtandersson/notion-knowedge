@@ -150,7 +150,7 @@ pub fn observe_event(operation: Operation, outcome: Outcome, elapsed: Duration) 
                     .store(now, Ordering::Relaxed);
             }
         }
-        Operation::McpTool | Operation::NotionOAuthWorkspace | Operation::NotionOAuthUser => {}
+        Operation::McpTool => {}
     }
 }
 

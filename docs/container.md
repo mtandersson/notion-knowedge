@@ -8,7 +8,7 @@ advertise the read-only tools
 and authoritative scope are unconfigured: search/get report unavailable, and
 status reports null local-state fields. Explicit configured roles below load
 external assets and operate real persistent state. Building the feature does not automatically download weights, grant
-content access or initialize an OAuth reader index. There is no separate
+content access or initialize a reader index. There is no separate
 indexing worker executable.
 
 ## Build and update
@@ -217,7 +217,7 @@ For an MCP client's stdio configuration, use `docker` as the command and
 `["run", "--rm", "-i", "--read-only", "--network=none", "notion-knowledge:local"]`
 as its arguments. The bootstrap requires no Notion token. `--network=none`
 is appropriate for unconfigured diagnostics. Configured authoritative reads,
-indexing and OAuth need controlled Notion connectivity; model loading/inference
+indexing and writes need controlled Notion connectivity; model loading/inference
 itself remains offline.
 
 One-shot configuration validation:
@@ -319,7 +319,7 @@ and fresh source get. It checks real native loading, missing/tampered assets,
 private storage ownership, read-only retrieval bytes and reader replacement.
 Its destructive rebuild operates only on isolated, quiescent fixture volumes
 with no accepted writes; the independent authoritative source stays intact.
-It never touches an existing Compose project, OAuth grant or production state.
+It never touches an existing Compose project or production state.
 
 Lance requires writable scratch even when its durable index is external.
 Configured runtime invocations therefore need a private, bounded disposable
@@ -389,12 +389,12 @@ over the same compatible paths; read activation never populates or repairs
 state. Trusted stdio uses `docker run -i`, the external mounts/scope above,
 `NK_RETRIEVAL=true`, private scratch and controlled Notion connectivity, with no
 HTTP argument and no enabled webhook worker. Verify [source-filtered search/get](installed-retrieval.md).
-Local static bearer mode on a non-loopback container listener cannot substitute
-for production OAuth.
+Static bearer mode requires a loopback listener; reach it remotely only through
+the [private ChatGPT tunnel](private-chatgpt-tunnel.md).
 
 ## Updates and safe recovery
 
-Stop writers and back up operational SQLite, private OAuth grant/key state and
+Stop writers and back up operational SQLite and
 configuration before image replacement. Build with canonical VERSION and the new
 commit REVISION, run both final-image smokes and inspect model/vector identity
 compatibility. Recreate the container while retaining correctly owned mounts.
@@ -412,8 +412,7 @@ identity; use a separately supported, audited re-embedding/recovery procedure
 before that migration. A same-dimensional revision is still an identity change.
 
 Production state can include accepted-write idempotency/audit records and pending
-durable mutation-refresh work, and configured OAuth grants have their own private
-persistent paths. These are not disposable retrieval caches. Preserve them and
+durable mutation-refresh work. These are not disposable retrieval caches. Preserve them and
 resolve/drain pending work during recovery. `docker compose down -v` is not an
 update or general rebuild procedure. The automated fixture discards only its
 isolated, completed derived index/checkpoint volumes with no accepted writes;

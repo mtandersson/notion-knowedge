@@ -1,6 +1,5 @@
 # Optional real in-process indexing role. Combine with compose.yaml through
 # scripts/compose-dev.sh -f compose.indexer.yaml. Keep credentials in ignored .env.
-# This private integration worker does not install public OAuth content handling.
 services:
   notion-knowledge:
     environment:

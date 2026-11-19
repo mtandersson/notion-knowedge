@@ -1,7 +1,7 @@
 //! Notion backend adapter.
 //!
 //! This crate implements (as concrete adapters are added) the authoritative Notion read/write ports defined
-//! by `notion-knowledge-core`. Notion SDK/REST/OAuth types stay inside this
+//! by `notion-knowledge-core`. Notion SDK/REST types stay inside this
 //! adapter boundary.
 
 /// Stable component identifier used by the bootstrap composition smoke check.

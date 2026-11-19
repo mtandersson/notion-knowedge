@@ -20,8 +20,7 @@ secret configuration), configure:
   Increment and restart the process when changing scope policy.
 
 Roots and workspace must be set together. Invalid or partial settings abort
-startup; a configured scope requires either integration credentials or the complete
-OAuth client/callback/store composition with exactly matching allowlisted workspace. Absent scope
+startup; a configured scope requires integration credentials. Absent scope
 keeps the handler in the **no data access** state. Credentials and raw Notion
 API errors are never included in public denial responses.
 
@@ -34,7 +33,7 @@ Integration mode uses the shared `attach_root_scope` path for HTTP and stdio.
 The normal bootstrap does not install retrieval by default. Explicit
 [`NK_RETRIEVAL=true` activation](installed-retrieval.md) installs the scoped
 semantic/lexical/hybrid adapters for trusted stdio or authenticated loopback
-bearer HTTP, or fully configured OAuth HTTP. The common handler denies data
+bearer HTTP. The common handler denies data
 without the physical gate.
 The optional [`knowledge_related` graph](knowledge-related.md) also
 authorizes each discovered page using fresh physical ancestry rather than
@@ -68,8 +67,7 @@ configured roots/exclusions, admitted HTTPS source hosts and protected durable
 audit storage, it installs a real native Notion attachment workflow; not merely
 a schema preview. Stdio is treated as a trusted local operator transport.
 HTTP additionally requires `NK_HTTP_AUTH=bearer`, a configured strong bearer
-token and a loopback listener. Anonymous HTTP and discovery-only OAuth do not
-install private ingestion. Tool allow/block policy still applies *before*
+token and a loopback listener. Anonymous HTTP does not install private ingestion. Tool allow/block policy still applies *before*
 adapter execution.
 
 The server-owned target and its physical ancestry/exclusions are checked

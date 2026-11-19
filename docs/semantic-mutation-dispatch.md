@@ -6,9 +6,7 @@ audit store and server-owned actor. It is an application composition capability,
 not a tool argument or shipping server setting. It does not disable read-only,
 destructive-operation or capability allowlist/blocklist gates.
 
-Default discovery stays read-only. Existing OAuth HTTP contexts reject these
-static capabilities regardless of builder order; OAuth sessions are read-only
-(#730). The installed composition is the
+Default discovery stays read-only. The installed composition is the
 [guarded integration write path](integration-semantic-writes.md).
 
 With trusted capabilities and explicit writable mode, actual discovery includes
@@ -92,7 +90,7 @@ cargo clippy -p notion-knowledge-core -p notion-knowledge-mcp --all-targets --lo
 
 The twelve real MCP transport fixtures use production SQLite ledger/audit/queue
 adapters and local authoritative source doubles. They cover all three mutations,
-strict parsing/default/OAuth/capability boundaries, exact read-back/direct
+strict parsing/default/capability boundaries, exact read-back/direct
 parent, confirmation changes/replay, durable reopen/privacy, source uncertainty,
 index/audit failure, competing sessions and disconnect after effect. They do not
-establish installed production OAuth mutation support.
+establish production ChatGPT mutation support.

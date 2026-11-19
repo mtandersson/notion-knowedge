@@ -44,7 +44,7 @@ backlog work driven by production feedback, not a prerequisite for first use.
 
 | Gate | Pass criterion | Evidence to retain (sanitized) | Failure disposition |
 | --- | --- | --- | --- |
-| 0. Authorized connection | Verify the selected installation boundary: private tunnel workspace/transport access with fixed integration/root scope, or OAuth/PKCE with the configured person/workspace grant. Deny calls through a disabled tunnel route, or invalid state and expired/replayed OAuth tokens, as applicable; out-of-scope reads/writes expose zero data in either mode. HTTP must retain the selected transport protection; tunnel access does not establish per-person OAuth identity. | Release SHA, configuration fingerprint without secrets, selected-boundary positive and negative end-to-end test IDs and outcomes | BLOCK; keep official connector |
+| 0. Authorized connection | Verify the selected installation boundary: private tunnel workspace/transport access with fixed integration/root scope over loopback bearer HTTP or stdio. Deny calls through a disabled tunnel route or with a missing/invalid bearer; out-of-scope reads/writes expose zero data. HTTP must retain bearer transport protection; tunnel access does not establish per-person identity. | Release SHA, configuration fingerprint without secrets, selected-boundary positive and negative end-to-end test IDs and outcomes | BLOCK; keep official connector |
 | 1. Usable retrieval | The actual configured adapter completes the unchanged evaluation corpus and a representative authorized English/Swedish search/read smoke. Verify relevant allowed sources, exact lookups, stable citations, and explicit empty/unavailable outcomes. Record known ranking limitations; aggregate Recall/MRR/nDCG and lengthy quality pilots are advisory after launch. | Corpus/model/index identities, complete measured reports and private functional smoke outcomes | BLOCK on broken functionality, unsafe attribution/scope, or missing real smoke; ranking-score shortfalls become post-launch work |
 | 2. Authoritative reads and safe writes | On a disposable authorized Notion root, fresh read matches exact Notion content and timestamp; 10 distinct authorized create/append/update operations succeed with authoritative read-back, expected scoped index refresh and no duplicate effects on induced retries; rejected root and user operations cause **zero** writes. Report partial/index failure explicitly, never claim that an unverified write failed. | Per-operation test IDs, source-side before/after checks, sanitized outcome, index state and retry checks; no page bodies/tokens | BLOCK; do not substitute index state for authoritative proof |
 | 3. Native image/file workflow | Through ChatGPT → **custom MCP → native Notion file/image blocks**, at least 10 image and 10 other-file/PDF trials succeed without Google Drive, Agent Handover, manual upload or the official connector. Check file bytes/size/hash where supported, MIME, attached block, independent authoritative read-back, and scoped authorization; reject bad source URL, wrong root, oversize and expired credentials without internal fetch or partial disclosure. | Test artifact hashes/sizes (not private bytes), Notion block IDs in restricted evidence, fail/deny results and proof of direct route | BLOCK if any required supported type needs a workaround |
@@ -70,8 +70,7 @@ permits deletion. A read failure is not a successful removal.
 The service is a single process; cache recovery does not transfer authority to
 another process or retain a prior index generation. Stop and drain the service
 before the trusted `--index reset` command. It requires integration-backed
-source configuration; read-only OAuth composition refuses incompatible cache
-instead of acquiring a global credential to repair it. Client routing restoration
+source configuration. Client routing restoration
 means reconnecting the independently authorized official connector, not restoring
 historical cache contents. Follow the [supported recovery contract](cache-reset-and-resync.md).
 
@@ -104,7 +103,7 @@ rollback, regardless of favorable aggregate scores.
 Date / operator:
 Git SHA / image digest / custom MCP version:
 Configured authorized workspace/root (redacted fingerprint):
-Notion integration and OAuth setup version:
+Notion integration and bearer/tunnel setup version:
 Indexer / embedding model / tokenizer / FTS schema revisions:
 Host CPU/RAM/disk, dataset size, backup size:
 Offline dataset IDs + checksums; FTS and hybrid metric report paths:
@@ -135,7 +134,7 @@ changes, or a materially changed source scope.
 As of this document's creation, **none of the gates above has been certified
 for a private production cutover**. The default production server's adapters
 are not fully composed; the local retrieval spike and contract fixtures are
-not a full ChatGPT OAuth + search/write/file deployment. The ongoing OAuth,
+not a full ChatGPT search/write/file deployment. The ongoing connection,
 webhook/indexing, reconciliation, native file and write tickets must ship
 independently and pass their own tests before the operator can exercise
 these acceptance gates. Do not mark #115 as implementation of those features.
