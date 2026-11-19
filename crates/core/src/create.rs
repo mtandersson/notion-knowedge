@@ -1,6 +1,5 @@
 //! Provider-neutral, once-only page creation for semantic mutation dispatch.
-//! Each preflight/read/effect uses an injected authoritative port, permitting
-//! request-bound adapters to recheck authority at every upstream boundary.
+//! Each preflight/read/effect uses an injected authoritative port.
 use crate::{
     backend::{CreatePage, NotionRead, NotionWrite, PageId},
     idempotency::{
