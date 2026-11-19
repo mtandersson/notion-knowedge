@@ -84,7 +84,7 @@ pub mod revision;
 /// Durable mutation claims and verified once-only receipts.
 pub mod idempotency;
 
-/// Fresh physical-ancestry authorization gate shared by future MCP tools.
+/// Read authorization from the walked page inventory.
 pub mod root_scope;
 
 /// Opt-in, scope-checked, durable once-only Notion append application workflow.

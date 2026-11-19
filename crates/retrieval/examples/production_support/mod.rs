@@ -9,12 +9,9 @@ use notion_knowledge_core::{
         IndexedChunk, IndexedMetadata, LinkTarget, PropertyValue, SchemaVersion, SourceMetadata,
     },
     inventory::{InventoryEntry, InventoryParent},
-    lifecycle::{
-        LifecycleEvidence, LifecycleKind, LifecycleNode, LifecycleScope, LifecycleStatus,
-        PageLifecycle, PhysicalParent,
-    },
+    lifecycle::LifecycleScope,
     reconciliation::ReconciliationJournal,
-    root_scope::{ReadAuthority, ReadScopeGate, RootScopeGate},
+    root_scope::{ReadAuthority, ReadScopeGate},
     search::{HybridSearch, LexicalQuery, LexicalSearch, SemanticQuery, SemanticSearch},
     source::{SourceExpandQuery, SourceExpansion, StableSourceRef},
     sync_state::PageSyncState,
@@ -212,74 +209,6 @@ fn scope() -> LifecycleScope {
     }
 }
 
-/// Independent fixed authoritative fixture; indexed labels never authorize a page.
-struct Authority(BTreeMap<String, String>);
-impl Authority {
-    fn evidence(
-        &self,
-        page: &PageId,
-        scope: &LifecycleScope,
-    ) -> Result<LifecycleEvidence, BackendError> {
-        let revision = self.0.get(&page.0).ok_or(BackendError {
-            kind: BackendErrorKind::NotFound,
-            operation: "fixture.lifecycle",
-            retry_after: None,
-            committed_page_id: None,
-        })?;
-        Ok(LifecycleEvidence {
-            scope: scope.clone(),
-            status: LifecycleStatus::Allowed {
-                roots: vec![ROOT.into()],
-            },
-            ancestry: vec![
-                LifecycleNode {
-                    kind: LifecycleKind::Page,
-                    id: page.0.clone(),
-                    revision: revision.clone(),
-                    inactive: false,
-                    parent: PhysicalParent::Object {
-                        kind: LifecycleKind::Page,
-                        id: ROOT.into(),
-                    },
-                },
-                LifecycleNode {
-                    kind: LifecycleKind::Page,
-                    id: ROOT.into(),
-                    revision: "2026-03-02T00:00:00Z".into(),
-                    inactive: false,
-                    parent: PhysicalParent::Workspace,
-                },
-            ],
-        })
-    }
-}
-impl PageLifecycle for Authority {
-    fn lifecycle<'a>(
-        &'a self,
-        page: &'a PageId,
-        scope: &'a LifecycleScope,
-    ) -> BackendFuture<'a, LifecycleEvidence> {
-        Box::pin(async move { self.evidence(page, scope) })
-    }
-    fn revalidate_lifecycle<'a>(
-        &'a self,
-        evidence: &'a LifecycleEvidence,
-        scope: &'a LifecycleScope,
-    ) -> BackendFuture<'a, ()> {
-        Box::pin(async move {
-            if self.evidence(&PageId(evidence.ancestry[0].id.clone()), scope)? != *evidence {
-                return Err(BackendError {
-                    kind: BackendErrorKind::Conflict,
-                    operation: "fixture.revalidate",
-                    retry_after: None,
-                    committed_page_id: None,
-                });
-            }
-            Ok(())
-        })
-    }
-}
-
 pub async fn run(
     provider: Arc<dyn EmbeddingProvider>,
     directory: &Path,
@@ -299,15 +228,6 @@ pub async fn run_with_lexical(
         return Err("lexical evaluation requires graph OFF".into());
     }
     let scope = scope();
-    let gate = RootScopeGate::new(
-        Arc::new(Authority(
-            r.pages
-                .iter()
-                .map(|p| (page_id(&p.id), revision(p)))
-                .collect(),
-        )),
-        scope.clone(),
-    )?;
     // Reads authorize from the walk's inventory: every page sits under ROOT.
     let walked = |id: String, parent, edited: String| {
         (
@@ -418,7 +338,7 @@ pub async fn run_with_lexical(
         }
         for page in &r.pages {
             let id = page_id(&page.id);
-            let permit = gate.authorize(&PageId(id.clone())).await?;
+            read_gate.authorize(&PageId(id.clone()))?;
             let chunks: Vec<_> = page
                 .chunks
                 .iter()
@@ -492,13 +412,13 @@ pub async fn run_with_lexical(
             let prepared = table
                 .prepare_page(provider.as_ref(), operation, &chunks)
                 .await?;
-            let commit_gate = gate.clone();
-            let commit_scope = scope.clone();
+            let commit_gate = read_gate.clone();
+            let commit_page = PageId(id.clone());
             let outcome = table
                 .commit_page(prepared, lease.clone(), clock.clone(), move || async move {
                     commit_gate
-                        .revalidate(&permit, &commit_scope)
-                        .await
+                        .authorize(&commit_page)
+                        .map(|_| ())
                         .map_err(|_| notion_knowledge_core::reconciliation::FailureClass::Conflict)
                 })
                 .await?;

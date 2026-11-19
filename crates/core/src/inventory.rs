@@ -51,45 +51,6 @@ pub struct InventoryEntry {
     pub in_trash: bool,
 }
 
-impl InventoryParent {
-    /// The walk's parent for a page whose physical chain a lifecycle read
-    /// verified: the nearest page or data source above it, or `Root` for a
-    /// configured root. Single-page callers use it so their metadata matches
-    /// what the walk records for the same page.
-    pub fn from_evidence(evidence: &crate::lifecycle::LifecycleEvidence) -> Option<Self> {
-        use crate::lifecycle::LifecycleKind;
-        let page = evidence.ancestry.first()?;
-        if evidence.scope.roots.iter().any(|root| root.0 == page.id) {
-            return Some(Self::Root);
-        }
-        let (mut source, mut database) = (None, None);
-        for node in &evidence.ancestry[1..] {
-            match node.kind {
-                // The nearest container wins, as in the walk.
-                LifecycleKind::DataSource => {
-                    source.get_or_insert_with(|| node.id.clone());
-                }
-                LifecycleKind::Database => {
-                    database.get_or_insert_with(|| node.id.clone());
-                }
-                LifecycleKind::Block => {}
-                LifecycleKind::Page => {
-                    return Some(match (source, database) {
-                        (Some(data_source_id), Some(database_id)) => Self::DataSource {
-                            data_source_id,
-                            database_id,
-                            owner_page_id: node.id.clone(),
-                        },
-                        (None, None) => Self::Page(node.id.clone()),
-                        _ => return None,
-                    });
-                }
-            }
-        }
-        None
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InventoryOutcome {
     Indexed { revision: String },
@@ -198,71 +159,5 @@ impl FailureClass {
         [Self::Source, Self::Index, Self::Conflict, Self::Unavailable]
             .into_iter()
             .find(|class| class.as_str() == value)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        backend::PageId,
-        lifecycle::{
-            LifecycleEvidence, LifecycleKind, LifecycleNode, LifecycleScope, LifecycleStatus,
-            PhysicalParent,
-        },
-    };
-
-    fn evidence(chain: &[(LifecycleKind, &str)]) -> LifecycleEvidence {
-        LifecycleEvidence {
-            scope: LifecycleScope {
-                workspace_id: "w".into(),
-                generation: 1,
-                roots: vec![PageId("root".into())],
-                exclusions: Default::default(),
-            },
-            status: LifecycleStatus::Allowed {
-                roots: vec!["root".into()],
-            },
-            ancestry: chain
-                .iter()
-                .map(|(kind, id)| LifecycleNode {
-                    kind: *kind,
-                    id: (*id).into(),
-                    revision: String::new(),
-                    inactive: false,
-                    parent: PhysicalParent::Workspace,
-                })
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn evidence_maps_to_the_parent_the_walk_records() {
-        use LifecycleKind::*;
-        assert_eq!(
-            InventoryParent::from_evidence(&evidence(&[(Page, "root")])),
-            Some(InventoryParent::Root)
-        );
-        assert_eq!(
-            InventoryParent::from_evidence(&evidence(&[(Page, "p"), (Block, "b"), (Page, "root")])),
-            Some(InventoryParent::Page("root".into()))
-        );
-        assert_eq!(
-            InventoryParent::from_evidence(&evidence(&[
-                (Page, "row"),
-                (DataSource, "ds"),
-                (Database, "db"),
-                (Page, "root"),
-            ])),
-            Some(InventoryParent::DataSource {
-                data_source_id: "ds".into(),
-                database_id: "db".into(),
-                owner_page_id: "root".into(),
-            })
-        );
-        assert_eq!(
-            InventoryParent::from_evidence(&evidence(&[(Page, "p")])),
-            None
-        );
     }
 }
