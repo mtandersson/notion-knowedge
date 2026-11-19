@@ -1,5 +1,9 @@
 # MCP authoritative root policy (#307)
 
+> Superseded (#692): the live `RootScopeGate` ancestry check described here
+> was removed. Reads and relation targets are authorized from the walked page
+> inventory; see [root-scope-gate.md](root-scope-gate.md).
+
 All content-bearing MCP retrieval must use the same physical Notion ancestry
 policy, independent of whether the client speaks stdio or Streamable HTTP.
 Without a trusted policy, `knowledge_search` and `knowledge_get` **fail closed**.

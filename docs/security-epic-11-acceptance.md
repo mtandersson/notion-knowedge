@@ -1,5 +1,9 @@
 # Epic #11: security acceptance evidence
 
+> Superseded (#692): the live `RootScopeGate` ancestry check described here
+> was removed. Reads and relation targets are authorized from the walked page
+> inventory; see [root-scope-gate.md](root-scope-gate.md).
+
 Read-only source/test review for [security epic #11](https://github.com/mtandersson/notion-knowedge/issues/11) and documentation follow-up [#395](https://github.com/mtandersson/notion-knowedge/issues/395).
 Snapshot: 2026-10-15 `main` at `5308b7f74a77616c53a2498a2429c81b9e2ee8df`.
 At that commit [CI run 38779397816](https://github.com/mtandersson/notion-knowedge/actions/runs/38779397816) completed successfully. **This PR must pass its own CI**; this historical run alone cannot validate these documentation edits.

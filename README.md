@@ -499,10 +499,6 @@ and append semantics.
 The [tree walk](docs/notion-discovery.md) documents read-only discovery from the
 root, the page inventory and the `--crawl-dry-run` command.
 
-The [authoritative lifecycle evidence](docs/notion-lifecycle.md) resolves current
-physical ancestry and supplies source/scope revalidation before downstream
-index mutations.
-
 The [exact page metadata read](docs/notion-pages.md) documents IDs, links,
 normalized properties and response completeness.
 

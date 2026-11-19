@@ -853,7 +853,7 @@ mod tests {
         backend::PageId,
         discovery::{ExclusionRules, SkipReason, SkippedContent},
         inventory::InventoryParent,
-        lifecycle::{LifecycleScope, LifecycleStatus},
+        lifecycle::LifecycleScope,
     };
     use serde_json::{Value, json};
     use std::{
@@ -1393,22 +1393,6 @@ mod tests {
             error.kind,
             notion_knowledge_core::backend::BackendErrorKind::NotFound
         );
-    }
-
-    #[tokio::test]
-    async fn walk_matches_old_lifecycle_membership_on_fixture_tree() {
-        let (client, _) = serve(nested_tree()).await;
-        let scope = scope(ExclusionRules::default());
-        let walk = client.walk_tree(&scope, None).await.unwrap();
-        let mut allowed = Vec::new();
-        for id in [ROOT, P, ROW1, ROW2, A, O] {
-            if let Ok(evidence) = client.resolve_lifecycle(&PageId(id.into()), &scope).await
-                && matches!(evidence.status, LifecycleStatus::Allowed { .. })
-            {
-                allowed.push(id);
-            }
-        }
-        assert_eq!(ids(&walk), allowed);
     }
 
     /// Root -> pages A, P, Q (all tagged in the root's Markdown).

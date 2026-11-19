@@ -7,15 +7,15 @@ use crate::{
     walk::WalkedPage,
 };
 use notion_knowledge_core::{
-    backend::{BackendError, BackendErrorKind, Page, PageContent, PageId},
+    backend::{BackendError, BackendErrorKind, PageContent, PageId},
     chunking::ChunkConfig,
     discovery::SourceType,
     graph::GraphEdge,
-    indexed::{IndexedChunk, IndexedMetadata, PropertyValue, SourceMetadata},
+    indexed::{IndexedChunk, IndexedMetadata, PropertyValue},
     inventory::{InventoryParent, InventoryPlacement},
-    lifecycle::{LifecycleEvidence, LifecycleScope},
+    lifecycle::LifecycleScope,
     relations::relation_edges_with_names,
-    root_scope::{RootScopeGate, ScopeError},
+    root_scope::{ScopeError, validate_scope},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -35,7 +35,7 @@ fn conflict() -> BackendError {
     }
 }
 
-/// Operator-owned optional target enrichment. Source authorization is always fresh.
+/// Operator-owned optional target enrichment. Source scope comes from the walk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProjectionMode {
     #[default]
@@ -78,7 +78,7 @@ impl RelationProposal {
     pub fn retained_bytes(&self) -> usize {
         self.snapshot.retained_bytes() + (self.edges.len() + self.links.len()) * 512
     }
-    /// Per-candidate physical authorization outcomes; failures remain unresolved.
+    /// Per-candidate inventory authorization outcomes; failures remain unresolved.
     pub fn targets(&self) -> &TargetOutcomes {
         &self.targets
     }
@@ -93,7 +93,7 @@ pub struct RelationAuthority {
 
 impl RelationProposalAdapter {
     pub fn new(client: NotionClient, policy: LifecycleScope) -> Result<Self, ScopeError> {
-        RootScopeGate::new(Arc::new(client.clone()), policy.clone())?;
+        validate_scope(&policy)?;
         Ok(Self {
             client,
             mode: ProjectionMode::default(),
@@ -183,7 +183,7 @@ impl RelationProposalAdapter {
     /// Serialize current operator policy replacement with in-flight commit authority.
     /// Generation must increase, even if the operator later restores old settings.
     pub async fn replace_policy(&self, next: LifecycleScope) -> Result<(), ScopeError> {
-        RootScopeGate::new(Arc::new(self.client.clone()), next.clone())?;
+        validate_scope(&next)?;
         let mut current = self.policy.write().await;
         if next.generation <= current.generation {
             return Err(ScopeError::Changed);
@@ -253,56 +253,6 @@ impl RelationProposalAdapter {
             );
         }
         Ok((edges, outcomes))
-    }
-    /// Read-only metadata proposal for reconciliation planning. It never fetches
-    /// Markdown or confers commit authority; apply must prepare and revalidate.
-    pub async fn inspect_metadata(
-        &self,
-        page: &Page,
-        evidence: &LifecycleEvidence,
-    ) -> Result<Vec<GraphEdge>, BackendError> {
-        let scope = self.policy.read().await.clone();
-        if scope != evidence.scope
-            || evidence
-                .ancestry
-                .first()
-                .is_none_or(|node| node.id != page.id.0)
-            || page.archived
-        {
-            return Err(conflict());
-        }
-        let root = match &evidence.status {
-            notion_knowledge_core::lifecycle::LifecycleStatus::Allowed { roots } => {
-                roots.first().ok_or_else(conflict)?
-            }
-            _ => return Err(conflict()),
-        };
-        let metadata = IndexedMetadata {
-            page_id: page.id.0.clone(),
-            block_id: None,
-            url: page.url.clone(),
-            title: page.title.clone(),
-            heading_path: vec![],
-            last_edited_time: page.last_edited_time.clone(),
-            source: SourceMetadata {
-                workspace_id: scope.workspace_id.clone(),
-                root_page_id: root.clone(),
-                database_id: None,
-                data_source_id: None,
-            },
-            properties: page.properties.clone(),
-        };
-        let (edges, _) = self.targets(
-            &metadata,
-            &page.relation_names,
-            None,
-            &scope,
-            &BTreeSet::new(),
-        )?;
-        if *self.policy.read().await != scope {
-            return Err(conflict());
-        }
-        Ok(edges)
     }
     /// Propose a page from the walk's single read. No request is made:
     /// targets are authorized from the walk's children and inventory.
@@ -381,24 +331,6 @@ impl RelationProposalAdapter {
             mode: self.mode,
         })
     }
-    /// Retain the same current policy owner for an authoritative removal.
-    /// The caller's lifecycle read is not repeated.
-    pub async fn revalidate_removal(
-        &self,
-        evidence: &LifecycleEvidence,
-    ) -> Result<RelationAuthority, BackendError> {
-        let scope = self.policy.clone().read_owned().await;
-        if *scope != evidence.scope
-            || matches!(
-                evidence.status,
-                notion_knowledge_core::lifecycle::LifecycleStatus::Allowed { .. }
-            )
-        {
-            return Err(conflict());
-        }
-        Ok(RelationAuthority { _policy: scope })
-    }
-
     /// Hold the current policy for a removal a complete walk decided.
     pub async fn removal_authority(
         &self,

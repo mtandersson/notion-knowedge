@@ -1,5 +1,9 @@
 # Bounded knowledge_related MCP navigation (#63)
 
+> Superseded (#692): the live `RootScopeGate` ancestry check described here
+> was removed. Reads and relation targets are authorized from the walked page
+> inventory; see [root-scope-gate.md](root-scope-gate.md).
+
 The read-only `knowledge_related` tool follows the **derived local graph** of
 canonical Notion page IDs (not wiki titles or embedding chunk IDs). Both stdio
 and HTTP use the shared MCP handler. It does not fetch live Notion content,

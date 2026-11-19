@@ -1,5 +1,9 @@
 # Phase 3: authority-verified page preparation (#314)
 
+> Superseded (#692): the live `RootScopeGate` ancestry check described here
+> was removed. Reads and relation targets are authorized from the walked page
+> inventory; see [root-scope-gate.md](root-scope-gate.md).
+
 This independently reusable adapter prepares the real canonical Notion side
 of the production refresh pipeline. It implements the first child of #255
 without lying about completing guarded incremental indexing. #315 must consume
