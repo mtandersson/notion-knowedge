@@ -139,7 +139,6 @@ impl NotionClient {
             *known_upload = created["id"].as_str().and_then(pages::uuid);
             let id = upload_id(&created, "pending", CREATE)?;
             *known_upload = Some(id.clone());
-            self.validate_request_authority(true)?;
 
             // Reopen independently: a previous validator or concurrent reader must
             // not share the transfer's file offset. The body is streamed, not buffered.
@@ -179,7 +178,6 @@ impl NotionClient {
                 }
                 receipt.extend_from_slice(&chunk);
             }
-            self.validate_request_authority(true)?;
             let result: Value = serde_json::from_slice(&receipt)
                 .map_err(|_| error(SEND, BackendErrorKind::Internal))?;
             if upload_id(&result, "uploaded", SEND)? != id {
@@ -206,7 +204,6 @@ impl NotionClient {
                 upload_id: known_upload.clone(),
                 block_id: None,
                 effect_possible,
-                authority_lost: self.validate_request_authority(true).is_err(),
             },
         )
     }

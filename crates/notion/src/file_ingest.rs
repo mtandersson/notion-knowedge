@@ -51,9 +51,6 @@ impl FileIngestAdapter for NotionFileIngestAdapter {
     type LocalFile = DownloadedFile;
     type Upload = UploadedFile;
     async fn download(&self, url: &str) -> Result<DownloadedFile, IngestFailure> {
-        self.client
-            .validate_request_authority(true)
-            .map_err(|_| IngestFailure::Denied)?;
         let file = self
             .download
             .download(url)
@@ -68,9 +65,6 @@ impl FileIngestAdapter for NotionFileIngestAdapter {
                 | DownloadError::RedirectDenied => IngestFailure::InvalidInput,
                 _ => IngestFailure::DownloadUnavailable,
             })?;
-        self.client
-            .validate_request_authority(true)
-            .map_err(|_| IngestFailure::Denied)?;
         Ok(file)
     }
     async fn validate(
@@ -79,13 +73,7 @@ impl FileIngestAdapter for NotionFileIngestAdapter {
         name: Option<&str>,
         mime: Option<&str>,
     ) -> Result<SafeFileFacts, IngestFailure> {
-        self.client
-            .validate_request_authority(true)
-            .map_err(|_| IngestFailure::Denied)?;
         let valid = self.validated(file, name, mime).await?;
-        self.client
-            .validate_request_authority(true)
-            .map_err(|_| IngestFailure::Denied)?;
         Ok(SafeFileFacts::new(
             if valid.mime_type.starts_with("image/") {
                 FileKind::Image
@@ -124,7 +112,6 @@ impl FileIngestAdapter for NotionFileIngestAdapter {
                 upload_id: None,
                 block_id: None,
                 effect_possible: false,
-                authority_lost: false,
             })?;
         if let Some(policy) = self.multipart
             && file.size_bytes() > policy.threshold_bytes()

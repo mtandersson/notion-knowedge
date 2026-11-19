@@ -88,11 +88,6 @@ pub enum SyncMode {
     Incremental,
     /// One page retrieve placed through the parent map (callbacks).
     Page(notion_knowledge_core::backend::PageId),
-    /// As `Page`, but read with one principal's own (OAuth) authority. That
-    /// principal not seeing the page proves nothing about everyone else, so
-    /// an inaccessible read removes nothing: the page stays indexed until an
-    /// integration-authority read or the next walk confirms it is gone.
-    UserPage(notion_knowledge_core::backend::PageId),
 }
 
 /// Pages a search or single retrieve found, settled against the inventory.
@@ -597,20 +592,6 @@ impl IndexRuntime {
             .await
     }
 
-    /// [`Self::sync_page`] for a runtime built around a per-user OAuth
-    /// client: reads and commits the page, but never removes it when the
-    /// user cannot read it (see [`SyncMode::UserPage`]).
-    pub async fn sync_page_as_user(
-        &self,
-        settings: &PageDeadline,
-        lease: &mut notion_knowledge_core::reconciliation::Lease,
-        page: notion_knowledge_core::backend::PageId,
-        claim: Clock,
-    ) -> Result<SyncTotals, SyncError> {
-        self.sync(settings, lease, SyncMode::UserPage(page), claim)
-            .await
-    }
-
     /// Erases the large sync future once, so callers' layout and auto-trait
     /// queries stay bounded (see [`Self::resync_cache`]).
     fn sync<'a>(
@@ -650,7 +631,6 @@ impl IndexRuntime {
                 .map_err(|_| "cache inventory state unavailable")?,
             _ => None,
         };
-        let user_scoped = matches!(mode, SyncMode::UserPage(_));
         let full = mode == SyncMode::Full || (mode == SyncMode::Incremental && since.is_none());
         let (send, receive) = tokio::sync::mpsc::channel(8);
         let walk = async move {
@@ -664,18 +644,9 @@ impl IndexRuntime {
                     .map_err(|e| SyncError::source(&e));
             }
             let (hits, complete) = match mode {
-                SyncMode::Page(page) | SyncMode::UserPage(page) => {
+                SyncMode::Page(page) => {
                     match self.source.page_hit(&page).await {
                         Ok(hit) => (hit.into_iter().collect(), true),
-                        // One user's own authority cannot confirm the page is gone
-                        // for everyone: hold it until an integration read or the
-                        // next walk decides.
-                        Err(e)
-                            if user_scoped
-                                && notion_knowledge_core::discovery::inaccessible(e.kind) =>
-                        {
-                            return Ok(Discovered::Hits(HitSync::default()));
-                        }
                         // The integration callback's own retrieve confirms the page
                         // is gone or revoked: remove it if indexed. Without this, a
                         // setup that never walks would keep it searchable.
@@ -1824,7 +1795,7 @@ impl IndexRuntime {
 
     /// Compose a runtime over an opened index and one source client. Startup
     /// recovery uses it after binding the cache; callers holding their own
-    /// client (an OAuth grant, a fixture) use it to sync through that client.
+    /// client (a fixture) use it to sync through that client.
     pub fn from_parts(parts: RuntimeParts) -> Result<Self, &'static str> {
         let RuntimeParts {
             source,

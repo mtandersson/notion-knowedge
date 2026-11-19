@@ -28,9 +28,8 @@ The sequence is durable intent admission, HTTPS download, bounded
 observed-media/name/size validation, another durable intent availability check,
 single create/send upload, native image/file append, bounded block GET
 verification, and terminal audit. Writes run no ancestry walk and no root gate:
-Notion's own permission check for the token decides whether the target is
-writable, and the request-bound grant check still stops the next effect when the
-grant is lost.
+Notion's own permission check for the integration token decides whether the
+target is writable.
 
 Invalid target text is never returned as a stable reference; the target slot is
 absent until a canonical UUID has been validated. `FileIngestRequest` owns the

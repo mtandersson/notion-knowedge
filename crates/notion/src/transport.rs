@@ -9,22 +9,6 @@ use std::{
 };
 use tokio::{sync::Mutex, time::Instant};
 
-/// Server-owned non-secret authority. Validation must consult current grant and
-/// request lifetime synchronously, without yielding between validation and send.
-/// Mutation attempts are explicitly classified by adapter methods, never HTTP verb.
-pub trait RequestAuthority: Send + Sync {
-    fn validate(&self, mutation: bool) -> Result<(), BackendError>;
-    /// Optional locally-live attempt ownership, retained through response-body
-    /// consumption. Default authorities need only the existing validation.
-    fn start_attempt(
-        &self,
-        mutation: bool,
-    ) -> Result<Option<std::sync::Arc<dyn Send + Sync>>, BackendError> {
-        self.validate(mutation)?;
-        Ok(None)
-    }
-}
-
 const INTERVAL: Duration = Duration::from_millis(334);
 const MAX_WAIT: Duration = Duration::from_secs(30);
 const MAX_RETRIES: u64 = 3;
@@ -183,7 +167,7 @@ impl NotionClient {
         replay_safe: bool,
         operation: &'static str,
     ) -> Result<Response, BackendError> {
-        self.send_logged(request, replay_safe, operation, false, None)
+        self.send_logged(request, replay_safe, operation, None)
             .await
     }
     async fn send_logged(
@@ -191,13 +175,12 @@ impl NotionClient {
         request: RequestBuilder,
         replay_safe: bool,
         operation: &'static str,
-        mutation: bool,
         effect_started: Option<&mut bool>,
     ) -> Result<Response, BackendError> {
         let id = logging::current_id();
         let started = StdInstant::now();
         let result = self
-            .send_inner(request, replay_safe, operation, mutation, effect_started)
+            .send_inner(request, replay_safe, operation, effect_started)
             .await;
         if let Some(timings) = page_timings::current() {
             timings.record_api(started.elapsed());
@@ -230,15 +213,8 @@ impl NotionClient {
         operation: &'static str,
         effect_started: &mut bool,
     ) -> Result<Response, BackendError> {
-        self.send_logged(request, false, operation, true, Some(effect_started))
+        self.send_logged(request, false, operation, Some(effect_started))
             .await
-    }
-
-    pub(crate) fn validate_request_authority(&self, mutation: bool) -> Result<(), BackendError> {
-        match &self.request_authority {
-            Some(authority) => authority.validate(mutation),
-            None => Ok(()),
-        }
     }
 
     async fn send_inner(
@@ -246,7 +222,6 @@ impl NotionClient {
         request: RequestBuilder,
         replay_safe: bool,
         operation: &'static str,
-        mutation: bool,
         mut effect_started: Option<&mut bool>,
     ) -> Result<Response, BackendError> {
         let mut retry = 0;
@@ -267,10 +242,6 @@ impl NotionClient {
                 request.take()
             }
             .ok_or_else(|| error(operation, BackendErrorKind::Internal, None))?;
-            let attempt_guard = match &self.request_authority {
-                Some(authority) => authority.start_attempt(mutation)?,
-                None => None,
-            };
             self.transport.attempts.fetch_add(1, Ordering::Relaxed);
             notion_knowledge_core::metrics::notion_attempt();
             if retry > 0 {
@@ -285,19 +256,6 @@ impl NotionClient {
                 *started = true;
             }
             let mut result = attempt.send().await;
-            if let Some(authority) = &self.request_authority {
-                authority.validate(mutation).map_err(|mut error| {
-                    if mutation {
-                        error.operation = "notion.oauth.mutation.unknown";
-                    }
-                    error
-                })?;
-            }
-            if let Ok(response) = &mut result
-                && let Some(guard) = attempt_guard
-            {
-                response.extensions_mut().insert(guard);
-            }
             #[cfg(test)]
             if let Some(clock) = &self.transport.waits {
                 let _ = clock.send(crate::test_clock::ClockEvent::ResponseReady);
@@ -663,82 +621,6 @@ mod tests {
             })
             .await;
     }
-    struct RevocableAuthority {
-        active: std::sync::atomic::AtomicBool,
-        checks: std::sync::atomic::AtomicUsize,
-        reject_on: usize,
-    }
-    impl RequestAuthority for RevocableAuthority {
-        fn validate(&self, mutation: bool) -> Result<(), BackendError> {
-            assert!(mutation);
-            let check = self.checks.fetch_add(1, Ordering::SeqCst) + 1;
-            if !self.active.load(Ordering::SeqCst) || check >= self.reject_on {
-                return Err(error(
-                    "fixture.authority",
-                    BackendErrorKind::Unauthenticated,
-                    None,
-                ));
-            }
-            Ok(())
-        }
-    }
-    #[tokio::test]
-    async fn mutation_authority_is_rechecked_after_admission_wait_before_any_send() {
-        let mut clock = TestClock::new().await;
-        let tracker = clock.handle();
-        clock
-            .run(async {
-                let (client, server) = mock(&tracker, vec![(200, "")]).await;
-                send(&client, true).await.unwrap();
-                server.await.unwrap();
-                let authority = std::sync::Arc::new(RevocableAuthority {
-                    active: true.into(),
-                    checks: 0.into(),
-                    reject_on: usize::MAX,
-                });
-                let client = client.with_request_authority(authority.clone());
-                let request = client.http.patch(&client.api_root);
-                let mut effect_started = false;
-                let pending = TestClock::park(client.send_effect_tracked(
-                    request,
-                    "notion.test",
-                    &mut effect_started,
-                ))
-                .await;
-                assert_eq!(authority.checks.load(Ordering::SeqCst), 0);
-                authority.active.store(false, Ordering::SeqCst);
-                assert_eq!(
-                    pending.await.unwrap_err().kind,
-                    BackendErrorKind::Unauthenticated
-                );
-                assert!(!effect_started);
-                assert_eq!(client.request_metrics().attempts, 1);
-            })
-            .await;
-    }
-    #[tokio::test]
-    async fn mutation_retry_revalidates_authority_and_never_sends_after_rejection() {
-        let mut clock = TestClock::new().await;
-        let (client, server) = mock(&clock.handle(), vec![(429, "Retry-After: 1\r\n")]).await;
-        let authority = std::sync::Arc::new(RevocableAuthority {
-            active: true.into(),
-            checks: 0.into(),
-            reject_on: 3,
-        });
-        let client = client.with_request_authority(authority.clone());
-        let request = client.http.patch(&client.api_root);
-        let mut effect_started = false;
-        let result = clock
-            .run(client.send_effect_tracked(request, "notion.test", &mut effect_started))
-            .await;
-        assert_eq!(result.unwrap_err().kind, BackendErrorKind::Unauthenticated);
-        assert!(effect_started);
-        assert_eq!(authority.checks.load(Ordering::SeqCst), 3);
-        assert_eq!(server.await.unwrap().len(), 1);
-        assert_eq!(client.request_metrics().attempts, 1);
-        assert_eq!(client.request_metrics().retries, 0);
-    }
-
     #[test]
     fn exponential_backoff_has_nonzero_bounded_jitter() {
         let transport = Transport::default();
@@ -753,91 +635,6 @@ mod tests {
                     .all(|&n| n >= u128::from(bound / 2) && n <= u128::from(bound))
             );
             assert!(values.windows(2).any(|p| p[0] != p[1]));
-        }
-    }
-    struct LiveAttempt(std::sync::Arc<std::sync::atomic::AtomicUsize>);
-    impl Drop for LiveAttempt {
-        fn drop(&mut self) {
-            self.0.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-    struct AttemptAuthority(std::sync::Arc<std::sync::atomic::AtomicUsize>);
-    impl RequestAuthority for AttemptAuthority {
-        fn validate(&self, _: bool) -> Result<(), BackendError> {
-            Ok(())
-        }
-        fn start_attempt(
-            &self,
-            _: bool,
-        ) -> Result<Option<std::sync::Arc<dyn Send + Sync>>, BackendError> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(Some(std::sync::Arc::new(LiveAttempt(self.0.clone()))))
-        }
-    }
-    #[tokio::test]
-    async fn locally_live_attempt_ownership_survives_headers_until_receipt_body_drop() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        for cancel in [false, true] {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = listener.local_addr().unwrap();
-            let (release, finish) = tokio::sync::oneshot::channel();
-            let server = tokio::spawn(async move {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut headers = Vec::new();
-                loop {
-                    let mut bytes = [0; 4096];
-                    let n = stream.read(&mut bytes).await.unwrap();
-                    assert!(n > 0);
-                    headers.extend_from_slice(&bytes[..n]);
-                    if headers.windows(4).any(|v| v == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                stream
-                    .write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nh",
-                    )
-                    .await
-                    .unwrap();
-                finish.await.unwrap();
-                let _ = stream.write_all(b"ello").await;
-            });
-            let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let client = NotionClient::integration("local-fixture-only")
-                .unwrap()
-                .with_fast_fixture_transport()
-                .with_request_authority(std::sync::Arc::new(AttemptAuthority(count.clone())));
-            let mut response = client
-                .send(
-                    client.http.get(format!("http://{address}")),
-                    true,
-                    "fixture.receipt",
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                count.load(Ordering::SeqCst),
-                1,
-                "HTTP headers do not finish the source operation"
-            );
-            assert_eq!(response.chunk().await.unwrap().unwrap().as_ref(), b"h");
-            assert_eq!(count.load(Ordering::SeqCst), 1);
-            if cancel {
-                drop(response);
-                assert_eq!(count.load(Ordering::SeqCst), 0);
-                release.send(()).unwrap();
-            } else {
-                release.send(()).unwrap();
-                let mut rest = Vec::new();
-                while let Some(bytes) = response.chunk().await.unwrap() {
-                    rest.extend_from_slice(&bytes);
-                }
-                assert_eq!(rest, b"ello");
-                assert_eq!(count.load(Ordering::SeqCst), 1);
-                drop(response);
-                assert_eq!(count.load(Ordering::SeqCst), 0);
-            }
-            server.await.unwrap();
         }
     }
 }
