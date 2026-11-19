@@ -17,7 +17,7 @@ Like #71's image primitive, the operation does not retry ambiguous writes. If ap
 
 ## Tests
 
-Credential-free mocked Notion HTTP tests cover PDF and Markdown attachment, optional caption, exact API request and stable receipt, forbidden root, changed ancestry, image-MIME and invalid filenames, malformed block receipt, incorrect block parent and mismatch between upload identity/readback. No live credentials or real Notion documents are used.
+Credential-free mocked Notion HTTP tests cover PDF and Markdown attachment, optional caption, exact API request and stable receipt, image-MIME and invalid filenames, malformed block receipt, incorrect block parent and mismatch between upload identity/readback. No live credentials or real Notion documents are used.
 
 ```bash
 cargo test -p notion-knowledge-notion --locked

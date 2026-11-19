@@ -286,9 +286,9 @@ Lance schemas remain unchanged. Duplicate targets collapse per property; distinc
 properties retain their own `property:<ID>` provenance and labels. Empty or removed
 properties yield a complete zero-edge proposal.
 
-Only candidate relation IDs receive fresh physical metadata authorization through
-`RootScopeGate`. Every target retains its exact lifecycle observation or sanitized backend failure
-class, including denied chains. Denied or unverifiable targets remain unresolved
+Only candidate relation IDs are authorized, from the walked page inventory's
+parent map (no Notion request). Every target retains its outcome or sanitized
+failure class, including denied chains. Denied or unverifiable targets remain unresolved
 with per-ID `ScopeError` diagnostics. A denied-to-denied move or changed failure
 class also invalidates the proposal.
 The adapter never crawls, searches, reads target Markdown or indexes a target.

@@ -1,5 +1,9 @@
 # Bounded graph-neighborhood boost (#65)
 
+> Superseded (#692): the live `RootScopeGate` ancestry check described here
+> was removed. Reads and relation targets are authorized from the walked page
+> inventory; see [root-scope-gate.md](root-scope-gate.md).
+
 Graph boost is an **explicit, off-by-default** decorator on the existing hybrid
 reciprocal-rank fusion port. It is NOT a new search data source and does not
 enable graph-only query hits or introduce new MCP tools.
