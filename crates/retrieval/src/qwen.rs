@@ -8,7 +8,7 @@ use notion_knowledge_core::embedding::{
 use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Weak},
 };
 use tokio::sync::Semaphore;
 
@@ -98,15 +98,42 @@ impl BatchRuntime for Runtime {
 /// One active batch per instance. Concurrent calls fail with ResourceExhausted
 /// rather than creating an unbounded blocking queue. Drop cancels awaiting the
 /// result; already-started CPU work continues holding its permit until done.
-type SharedRuntime = Mutex<Box<dyn BatchRuntime>>;
+/// Fair, so a waiting provider gets the model when the current pass ends
+/// rather than racing the sync worker's next pass; never poisoned, so one
+/// failed pass cannot disable the other provider.
+type SharedRuntime = parking_lot::FairMutex<Box<dyn BatchRuntime>>;
+type Registry = tokio::sync::Mutex<Vec<(PathBuf, Weak<SharedRuntime>)>>;
 
 /// Models already loaded in this process, by canonical asset directory. A
 /// server that composes both the sync worker and MCP retrieval would
 /// otherwise hold two identical copies of the F32 weights (about 2.3 GiB
 /// each, #739). Entries are weak, so the weights are freed with the last
 /// provider. Held across a load so concurrent loads of one directory share.
-static LOADED: tokio::sync::Mutex<Vec<(PathBuf, Weak<SharedRuntime>)>> =
-    tokio::sync::Mutex::const_new(Vec::new());
+static LOADED: Registry = tokio::sync::Mutex::const_new(Vec::new());
+
+/// The live model loaded from `key`, or a new one from `load`.
+async fn shared<F, Fut>(
+    registry: &Registry,
+    key: PathBuf,
+    load: F,
+) -> Result<Arc<SharedRuntime>, EmbeddingError>
+where
+    F: FnOnce(PathBuf) -> Fut,
+    Fut: std::future::Future<Output = Result<Arc<SharedRuntime>, EmbeddingError>>,
+{
+    let mut loaded = registry.lock().await;
+    loaded.retain(|(_, runtime)| runtime.strong_count() > 0);
+    if let Some(runtime) = loaded
+        .iter()
+        .find(|(path, _)| *path == key)
+        .and_then(|(_, runtime)| runtime.upgrade())
+    {
+        return Ok(runtime);
+    }
+    let runtime = load(key.clone()).await?;
+    loaded.push((key, Arc::downgrade(&runtime)));
+    Ok(runtime)
+}
 
 pub struct QwenProvider {
     runtime: Arc<SharedRuntime>,
@@ -235,21 +262,7 @@ impl QwenProvider {
     pub async fn load(config: QwenConfig) -> Result<Self, EmbeddingError> {
         config.validate()?;
         let key = std::fs::canonicalize(&config.assets).map_err(|_| EmbeddingError::Unavailable)?;
-        let mut loaded = LOADED.lock().await;
-        loaded.retain(|(_, runtime)| runtime.strong_count() > 0);
-        let runtime = match loaded
-            .iter()
-            .find(|(path, _)| *path == key)
-            .and_then(|(_, runtime)| runtime.upgrade())
-        {
-            Some(runtime) => runtime,
-            None => {
-                let runtime = Self::load_runtime(key.clone()).await?;
-                loaded.push((key, Arc::downgrade(&runtime)));
-                runtime
-            }
-        };
-        drop(loaded);
+        let runtime = shared(&LOADED, key, Self::load_runtime).await?;
         Ok(Self {
             runtime,
             admission: Arc::new(Semaphore::new(1)),
@@ -291,7 +304,7 @@ impl QwenProvider {
         })
         .await
         .map_err(|_| EmbeddingError::Unavailable)??;
-        Ok(Arc::new(Mutex::new(Box::new(runtime))))
+        Ok(Arc::new(SharedRuntime::new(Box::new(runtime))))
     }
     /// Create a sidecar once. Never overwrite an existing identity silently.
     /// Storage adapters must also persist/compare this record with index state.
@@ -356,8 +369,8 @@ impl EmbeddingProvider for QwenProvider {
             let config = self.config.clone();
             tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                let lock = || runtime.lock().map_err(|_| EmbeddingError::Unavailable);
-                let counter = lock()?;
+                let lock = || runtime.lock();
+                let counter = lock();
                 // Validate all inputs before any forward pass, without truncation.
                 let lengths: Vec<_> = inputs
                     .iter()
@@ -380,7 +393,7 @@ impl EmbeddingProvider for QwenProvider {
                 for batch in inputs.chunks(config.batch_size) {
                     // Lock per forward pass so another provider sharing the
                     // model waits for at most one pass, not a whole request.
-                    let vectors = lock()?.embed(batch)?;
+                    let vectors = lock().embed(batch)?;
                     if vectors.len() != batch.len()
                         || vectors
                             .iter()
@@ -401,6 +414,7 @@ impl EmbeddingProvider for QwenProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     #[test]
     fn invalid_limits_and_unsupported_devices_fail_explicitly() {
         for n in [0, 9, usize::MAX] {
@@ -602,7 +616,7 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         (
             QwenProvider {
-                runtime: Arc::new(Mutex::new(Box::new(Fake {
+                runtime: Arc::new(SharedRuntime::new(Box::new(Fake {
                     calls: calls.clone(),
                     malformed,
                 }))),
@@ -707,10 +721,46 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn one_live_model_is_shared_per_asset_directory() {
+        let registry = Registry::const_new(Vec::new());
+        let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let load = |_: PathBuf| {
+            let loads = loads.clone();
+            async move {
+                loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let runtime: Box<dyn BatchRuntime> = Box::new(Fake {
+                    calls: Arc::default(),
+                    malformed: false,
+                });
+                Ok(Arc::new(SharedRuntime::new(runtime)))
+            }
+        };
+        let count = || loads.load(std::sync::atomic::Ordering::SeqCst);
+        let a = shared(&registry, "/assets/a".into(), load).await.unwrap();
+        let again = shared(&registry, "/assets/a".into(), load).await.unwrap();
+        assert!(Arc::ptr_eq(&a, &again));
+        assert_eq!(count(), 1);
+        let b = shared(&registry, "/assets/b".into(), load).await.unwrap();
+        assert!(!Arc::ptr_eq(&a, &b));
+        assert_eq!(count(), 2);
+        // The registry never keeps a model alive on its own.
+        drop((a, again));
+        let reloaded = shared(&registry, "/assets/a".into(), load).await.unwrap();
+        assert_eq!(count(), 3);
+        assert_eq!(registry.lock().await.len(), 2);
+        drop((reloaded, b));
+        let failing = |_: PathBuf| async { Err(EmbeddingError::UnsupportedModel) };
+        assert_eq!(
+            shared(&registry, "/assets/a".into(), failing).await.err(),
+            Some(EmbeddingError::UnsupportedModel)
+        );
+        assert!(registry.lock().await.is_empty());
+    }
+    #[tokio::test]
     async fn providers_sharing_a_model_admit_independently_and_take_turns() {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let runtime: Arc<SharedRuntime> = Arc::new(Mutex::new(Box::new(Blocking {
+        let runtime: Arc<SharedRuntime> = Arc::new(SharedRuntime::new(Box::new(Blocking {
             started: Mutex::new(Some(started_tx)),
             release: Mutex::new(release_rx),
         })));
@@ -744,7 +794,7 @@ mod tests {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let p = Arc::new(QwenProvider {
-            runtime: Arc::new(Mutex::new(Box::new(Blocking {
+            runtime: Arc::new(SharedRuntime::new(Box::new(Blocking {
                 started: Mutex::new(Some(started_tx)),
                 release: Mutex::new(release_rx),
             }))),

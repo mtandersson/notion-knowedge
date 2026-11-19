@@ -126,7 +126,7 @@ fn prose(seed: usize, chars: usize) -> String {
     let mut i = seed;
     while out.len() < chars {
         out.push_str(WORDS[i % WORDS.len()]);
-        out.push(if i % 11 == 0 { '.' } else { ' ' });
+        out.push(if i.is_multiple_of(11) { '.' } else { ' ' });
         i = i.wrapping_mul(31).wrapping_add(7);
     }
     out

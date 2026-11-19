@@ -13,7 +13,7 @@ default = []
 test-fixtures = []
 # Opt-in comparison example only; never selected by shipping provider configuration.
 eval-e5 = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
-local-qwen = ["dep:candle-core", "dep:candle-nn", "dep:fastembed", "dep:tokenizers"]
+local-qwen = ["dep:candle-core", "dep:candle-nn", "dep:fastembed", "dep:parking_lot", "dep:tokenizers"]
 local-lancedb = ["dep:arrow-array", "dep:arrow-schema", "dep:futures", "dep:lancedb", "dep:lance", "dep:object_store", "dep:notion-knowledge-notion"]
 
 [dependencies]
@@ -34,6 +34,7 @@ candle-transformers = { version = "=0.11.0", default-features = false, optional 
 candle-core = { version = "=0.11.1", optional = true }
 candle-nn = { version = "=0.11.1", optional = true }
 fastembed = { version = "=7.1.0", default-features = false, features = ["qwen3", "ort-load-dynamic"], optional = true }
+parking_lot = { version = "0.12", optional = true }
 tokenizers = { version = "=0.23.2", default-features = false, features = ["onig"], optional = true }
 libc = "0.2"
 tempfile = "3"
