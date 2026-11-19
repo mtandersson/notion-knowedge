@@ -13,6 +13,10 @@ Configure `NK_NOTION_AUTH=integration`, secret `NOTION_TOKEN`,
 `NK_NOTION_SCOPE_EXCLUDED_PAGES`, `NK_NOTION_SCOPE_EXCLUDED_DESCENDANTS` and `NK_NOTION_SCOPE_GENERATION` (default 1). Use the same absolute
 `NK_WEBHOOK_INDEX_DIR`, `NK_WEBHOOK_STATE_FILE`, `NK_WEBHOOK_QWEN_ASSETS` and
 `NK_WEBHOOK_TIMEOUT_SECONDS` (1–300, default 60) as the serving worker.
+`NK_PREFETCH_WORKERS` (0–8, default 2) bounds how many walked pages are prepared
+ahead of the single embedding/commit consumer, within the shared 64 MiB prefetch
+budget. `0` disables read-ahead: each page is prepared inline only when the
+consumer asks for it.
 Whole-scope inventory uses `NK_RECONCILIATION_INVENTORY_TIMEOUT_SECONDS`
 (1..86400, default 900). This includes dry-run and the walk performed by each sync. Ordinary page attempts keep
 `NK_WEBHOOK_TIMEOUT_SECONDS`; individual upstream HTTP deadlines are unchanged.
