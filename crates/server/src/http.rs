@@ -838,6 +838,10 @@ pub(crate) async fn guard_diagnostics(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use notion_knowledge_core::health::{DependencyState, HealthProbe};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     #[tokio::test]
     async fn unfinished_request_head_is_closed_at_the_deadline_while_others_are_served() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -866,6 +870,16 @@ mod tests {
                     break;
                 }
             }
+            // The server, not some other write failure, ended the connection.
+            let mut rest = Vec::new();
+            match slow.read_to_end(&mut rest).await {
+                Ok(_) => assert!(
+                    rest.is_empty() || rest.starts_with(b"HTTP/1.1 408"),
+                    "{}",
+                    String::from_utf8_lossy(&rest)
+                ),
+                Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset),
+            }
         };
         let served = async {
             let mut ok = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -891,10 +905,6 @@ mod tests {
         stop.cancel();
         server.await.unwrap().unwrap();
     }
-
-    use super::*;
-    use notion_knowledge_core::health::{DependencyState, HealthProbe};
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     struct Probe(AtomicBool);
     impl HealthProbe for Probe {
