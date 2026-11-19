@@ -21,8 +21,10 @@ pub(crate) fn trusted_transport(config: &Config, transport: Transport) -> bool {
 /// Startup notice for HTTP serving that cannot carry content-bearing tools.
 /// A bearer already requires a loopback bind, so only its absence is reported.
 pub(crate) fn untrusted_http_warning(config: &Config) -> Option<&'static str> {
-    (!trusted_transport(config, Transport::Http))
-        .then_some("HTTP MCP runs without a bearer; content tools are disabled.")
+    (!trusted_transport(config, Transport::Http)).then(|| {
+        debug_assert!(config.bearer_fallback.is_none(), "bearer requires loopback");
+        "HTTP MCP runs without a bearer; content tools are disabled."
+    })
 }
 
 /// Shared installed composition for both trusted transports.

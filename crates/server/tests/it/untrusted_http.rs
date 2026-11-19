@@ -28,7 +28,9 @@ async fn frame(response: reqwest::Response) -> Value {
 }
 
 /// Starts the real binary with every content source configured and returns
-/// its startup stderr and the served tool catalog.
+/// its startup stderr, the served tool catalog and each content call's result.
+/// The bearer-on-loopback counterpart that does serve content is
+/// `webhook_worker::authenticated_http_serves_committed_hybrid_and_graph_and_denies_untrusted_session_requests`.
 async fn exercise(host: &str) -> (String, Vec<Value>) {
     let directory = tempfile::tempdir().unwrap();
     #[cfg(unix)]
@@ -140,15 +142,9 @@ async fn untrusted_http_serves_no_content_tool_and_says_so_at_startup() {
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
         // Search, get and upload stay advertised as unbacked placeholders;
-        // graph reads and integration mutations are not offered at all.
-        for absent in [
-            "knowledge_related",
-            "knowledge_create_page",
-            "knowledge_append",
-            "knowledge_update_section",
-            "knowledge_archive_page",
-            "knowledge_file_refresh",
-        ] {
+        // graph reads are not offered. Integration writes cannot be enabled
+        // here at all: configuration refuses them without a bearer.
+        for absent in ["knowledge_related", "knowledge_file_refresh"] {
             assert!(!names.contains(&absent), "{host}: {absent} in {names:?}");
         }
         for (response, unavailable) in responses[1..].iter().zip([
