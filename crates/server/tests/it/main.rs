@@ -17,5 +17,8 @@ mod shutdown;
 mod startup;
 mod stdio;
 mod sync_status;
+// Content reads need the shared sync state, which only this build can configure.
+#[cfg(all(unix, feature = "webhook-worker"))]
+mod untrusted_http;
 mod webhook_recovery;
 mod webhook_worker;

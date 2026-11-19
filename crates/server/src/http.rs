@@ -150,6 +150,7 @@ pub async fn serve_installed(
     shutdown: tokio_util::sync::CancellationToken,
 ) -> io::Result<()> {
     logging::set_level(settings.log_level);
+    let untrusted = crate::root_scope::untrusted_http_warning(&settings);
     let bind = settings.http_bind;
     let shutdown_timeout = Duration::from_secs(settings.shutdown_timeout_seconds);
     let mut diagnostics = crate::diagnostics::bootstrap(&settings);
@@ -233,6 +234,9 @@ pub async fn serve_installed(
             reject_during_shutdown,
         ))
         .layer(middleware::from_fn(correlate_request));
+    if let Some(warning) = untrusted {
+        eprintln!("{warning}");
+    }
     eprintln!("Serving MCP over Streamable HTTP at http://{bind}/mcp.");
     #[cfg(all(unix, feature = "webhook-worker"))]
     let owned_coordinator = worker.as_ref().map(|worker| worker.coordinator.clone());
