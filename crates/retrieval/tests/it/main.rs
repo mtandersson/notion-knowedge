@@ -11,6 +11,7 @@ mod hosted_baseline;
 mod idempotency;
 mod index_commits;
 mod link_graph;
+mod memory_phases;
 mod mutation_refresh;
 mod reconciliation;
 mod relations;

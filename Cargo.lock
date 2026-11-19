@@ -4843,6 +4843,7 @@ dependencies = [
  "notion-knowledge-notion",
  "notion-knowledge-retrieval",
  "object_store 0.14.2",
+ "parking_lot",
  "quick-xml",
  "rusqlite",
  "serde",
