@@ -4867,6 +4867,8 @@ dependencies = [
  "futures",
  "hmac",
  "http-body",
+ "hyper",
+ "hyper-util",
  "libc",
  "notion-fake",
  "notion-knowledge-core",

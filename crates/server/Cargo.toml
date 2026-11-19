@@ -23,6 +23,8 @@ tokio = { workspace = true, features = ["net", "signal", "sync", "time"] }
 tokio-util = "0.7"
 futures = "0.3"
 http-body = "1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 
 serde = { version = "1", features = ["derive"] }
 hmac = "0.12"

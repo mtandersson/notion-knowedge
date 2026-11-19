@@ -253,9 +253,7 @@ pub async fn serve_installed(
     });
     let stopped = cancellation.clone();
     crate::shutdown::supervise(cancellation, shutdown_timeout, async move {
-        let result = axum::serve(listener, router)
-            .with_graceful_shutdown(stopped.clone().cancelled_owned())
-            .await;
+        let result = serve_router(listener, router, stopped.clone(), HEADER_READ_TIMEOUT).await;
         stopped.cancel();
         #[cfg(all(unix, feature = "webhook-worker"))]
         {
@@ -284,6 +282,60 @@ pub async fn serve_installed(
         result
     })
     .await
+}
+
+/// A client must finish its request head within this deadline, matching the
+/// body deadline in `validate_json`, so a stalled header block (slowloris)
+/// cannot hold a connection open indefinitely.
+pub(crate) const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Serve HTTP/1 connections like `axum::serve` with graceful shutdown, but with
+/// a hyper timer so the header-read deadline is enforced. `axum::serve` does not
+/// install a timer, so hyper never applies its header-read timeout there.
+pub(crate) async fn serve_router(
+    mut listener: tokio::net::TcpListener,
+    router: axum::Router,
+    stop: tokio_util::sync::CancellationToken,
+    header_read_timeout: Duration,
+) -> io::Result<()> {
+    use hyper_util::{
+        rt::{TokioIo, TokioTimer},
+        service::TowerToHyperService,
+    };
+
+    let (close_tx, close_rx) = tokio::sync::watch::channel(());
+    loop {
+        let (stream, _remote) = tokio::select! {
+            accepted = axum::serve::Listener::accept(&mut listener) => accepted,
+            () = stop.cancelled() => break,
+        };
+        // axum routers accept hyper's request body directly.
+        let service = TowerToHyperService::new(router.clone());
+        let stop = stop.clone();
+        let close_rx = close_rx.clone();
+        tokio::spawn(async move {
+            let mut builder = hyper::server::conn::http1::Builder::new();
+            builder
+                .timer(TokioTimer::new())
+                .header_read_timeout(header_read_timeout);
+            let conn = builder
+                .serve_connection(TokioIo::new(stream), service)
+                .with_upgrades();
+            let mut conn = std::pin::pin!(conn);
+            tokio::select! {
+                _ = conn.as_mut() => {}
+                () = stop.cancelled() => {
+                    conn.as_mut().graceful_shutdown();
+                    let _ = conn.await;
+                }
+            }
+            drop(close_rx);
+        });
+    }
+    drop(close_rx);
+    drop(listener);
+    close_tx.closed().await;
+    Ok(())
 }
 
 async fn reject_during_shutdown(
@@ -789,6 +841,70 @@ mod tests {
     use super::*;
     use notion_knowledge_core::health::{DependencyState, HealthProbe};
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn unfinished_request_head_is_closed_at_the_deadline_while_others_are_served() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stop = tokio_util::sync::CancellationToken::new();
+        let router = axum::Router::new().route("/ok", get(|| async { "ok" }));
+        let deadline = Duration::from_millis(300);
+        let server = tokio::spawn(super::serve_router(
+            listener,
+            router,
+            stop.clone(),
+            deadline,
+        ));
+
+        let mut slow = tokio::net::TcpStream::connect(addr).await.unwrap();
+        slow.write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\n")
+            .await
+            .unwrap();
+        let started = Instant::now();
+        let trickle = async {
+            // Keep sending header bytes without ever ending the head.
+            loop {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                if slow.write_all(b"X").await.is_err() {
+                    break;
+                }
+            }
+            // The server, not some other write failure, ended the connection.
+            let mut rest = Vec::new();
+            match slow.read_to_end(&mut rest).await {
+                Ok(_) => assert!(
+                    rest.is_empty() || rest.starts_with(b"HTTP/1.1 408"),
+                    "{}",
+                    String::from_utf8_lossy(&rest)
+                ),
+                Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset),
+            }
+        };
+        let served = async {
+            let mut ok = tokio::net::TcpStream::connect(addr).await.unwrap();
+            ok.write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            let mut response = String::new();
+            ok.read_to_string(&mut response).await.unwrap();
+            response
+        };
+        let (response, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(served, trickle)
+        })
+        .await
+        .expect("stalled header block was not closed");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= deadline && elapsed < Duration::from_secs(3),
+            "{elapsed:?}"
+        );
+
+        stop.cancel();
+        server.await.unwrap().unwrap();
+    }
 
     struct Probe(AtomicBool);
     impl HealthProbe for Probe {
