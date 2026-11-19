@@ -182,7 +182,6 @@ impl NotionClient {
             let block = block_id(&results[0], target)
                 .ok_or_else(|| error(ATTACH, BackendErrorKind::Conflict))?;
             *known_block = Some(block.clone());
-            self.validate_request_authority(true)?;
             let source = AttachmentSource::from_receipt(&upload.id, &results[0]["file"]);
 
             self.verify_attached_block(&block, VERIFY, |value| {
@@ -204,7 +203,6 @@ impl NotionClient {
                 upload_id: Some(upload.id.clone()),
                 block_id: known_block.clone(),
                 effect_possible,
-                authority_lost: self.validate_request_authority(true).is_err(),
             },
         )
     }

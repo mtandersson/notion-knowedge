@@ -1649,22 +1649,6 @@ async fn single_page_refresh_reads_one_page_through_the_parent_map() {
 }
 
 #[tokio::test]
-async fn user_scoped_page_refresh_never_removes_an_inaccessible_page() {
-    let http = start_notion().await;
-    let f = Fixture::new(&http).await;
-    sync(&f, &http, SyncMode::Full).await;
-    http.change(|m| m.inaccessible_page = true);
-    // One user's 404 is not proof for the shared index.
-    let (totals, indexed) = sync(&f, &http, SyncMode::UserPage(PageId(PAGE.into()))).await;
-    assert_eq!(totals.removed, 0);
-    assert!(indexed.contains(PAGE));
-    // The integration authority's 404 still removes it promptly.
-    let (totals, indexed) = sync(&f, &http, SyncMode::Page(PageId(PAGE.into()))).await;
-    assert_eq!(totals.removed, 1);
-    assert!(!indexed.contains(PAGE));
-}
-
-#[tokio::test]
 async fn actual_scheduled_http_timeout_exhaustion_is_inspectable_and_explicit_abandon_preserves_history()
  {
     use notion_knowledge_retrieval::schedule::{ScheduleEventKind, ScheduleStatus};

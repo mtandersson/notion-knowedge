@@ -192,7 +192,6 @@ impl NotionClient {
                 return Err(err(CREATE, BackendErrorKind::Conflict));
             }
 
-            self.validate_request_authority(true)?;
             for index in 0..parts {
                 let offset = index * policy.part_bytes;
                 let count = (size - offset).min(policy.part_bytes);
@@ -226,7 +225,6 @@ impl NotionClient {
                     .send_effect_tracked(request, SEND, &mut effect_possible)
                     .await?;
                 let sent = receipt(response, SEND).await?;
-                self.validate_request_authority(true)?;
                 if !check_upload(&sent, &id, "pending", parts)
                     || sent["number_of_parts"]["sent"]
                         .as_u64()
@@ -245,7 +243,6 @@ impl NotionClient {
                     &mut effect_possible,
                 )
                 .await?;
-            self.validate_request_authority(true)?;
             if !check_upload(&completed, &id, "uploaded", parts) {
                 return Err(err(COMPLETE, BackendErrorKind::Conflict));
             }
@@ -255,7 +252,6 @@ impl NotionClient {
                 .header(AUTHORIZATION, self.authorization.clone())
                 .header("Notion-Version", MARKDOWN_VERSION);
             let returned = receipt(self.send(request, true, VERIFY).await?, VERIFY).await?;
-            self.validate_request_authority(true)?;
             if !check_upload(&returned, &id, "uploaded", parts) {
                 return Err(err(VERIFY, BackendErrorKind::Conflict));
             }
@@ -275,7 +271,6 @@ impl NotionClient {
                 upload_id: known_upload.clone(),
                 block_id: None,
                 effect_possible,
-                authority_lost: self.validate_request_authority(true).is_err(),
             },
         )
     }

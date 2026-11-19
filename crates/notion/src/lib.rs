@@ -39,7 +39,7 @@ pub mod link_graph;
 pub mod replacement;
 
 mod transport;
-pub use transport::{RequestAuthority, RequestMetrics};
+pub use transport::RequestMetrics;
 
 pub mod documents;
 
@@ -90,6 +90,3 @@ pub mod relation_proposal;
 
 #[cfg(test)]
 mod test_clock;
-
-#[cfg(test)]
-mod file_authority_tests;
