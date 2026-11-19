@@ -2,9 +2,8 @@
 
 Reviewed baseline: 2026-10-02, main `04c638f`, for
 [#91](https://github.com/mtandersson/notion-knowedge/issues/91).
-OAuth discovery implementation reviewed 2026-10-09 for [#119](https://github.com/mtandersson/notion-knowedge/issues/119);
-see production OAuth setup (removed in #730). OAuth trust-boundary addendum reviewed 2026-10-09 for [#118](https://github.com/mtandersson/notion-knowedge/issues/118);
-see OAuth trust and single-identity binding (removed in #730).
+Single-user access model updated 2026-11-18 for
+[#730](https://github.com/mtandersson/notion-knowedge/issues/730).
 Security documentation reconciliation: 2026-10-15, main
 `5308b7f74a77616c53a2498a2429c81b9e2ee8df`, tracked in
 [#395](https://github.com/mtandersson/notion-knowedge/issues/395).
@@ -26,13 +25,12 @@ this model; adding it requires a new review. Notion is authoritative. Derived
 local content is disposable but remains confidential, including embeddings,
 page titles, graph edges, checkpoints and backups.
 
-Explicit HTTPS OAuth configuration (removed in #730) installs separate
-MCP/Notion authorization, PKCE S256, encrypted allowlisted grants, live request-bound
-content checks and exact-token logout. Discovery alone does not enable login.
-A controlled proxy must validate public Host/Origin before backend rewriting;
-keep the backend private. Joined tests (removed in #730) use credential-free
-fixtures; an actual deployed ChatGPT smoke remains an operator responsibility.
-
+MCP clients connect through trusted stdio or a loopback HTTP listener
+protected by a local bearer (`NK_HTTP_AUTH=bearer`); remote ChatGPT reaches
+that listener through a Secure MCP Tunnel. The server reads and writes Notion
+with one server-side integration token (`NK_NOTION_AUTH=integration`); there is
+no per-user Notion grant. Keep the listener private; an actual deployed
+ChatGPT smoke remains an operator responsibility.
 
 The default bootstrap serves stdio/HTTP and the MCP tool catalog; retrieval
 calls remain unavailable until adapter composition is explicitly enabled.
@@ -43,7 +41,7 @@ graph is installed, [`knowledge_related`](knowledge-related.md) traverses
 only freshly authorized physical pages; `knowledge_sync_status` returns
 bounded operational metadata without raw private bodies. Default startup does
 not open these protected resources or load a model. These read paths are not
-an OAuth-authenticated public private-knowledge service.
+a public private-knowledge service.
 
 The opt-in [webhook endpoint](notion-webhooks.md) implements setup candidate
 capture, authenticated delivery validation and durable minimized SQLite receipt
@@ -51,7 +49,7 @@ with scoped identity deduplication. Verified deliveries are acknowledged after
 commit; admission failure returns 503. Worker processing and authoritative
 refresh have separate explicit activation and durable-state constraints; do not
 infer automatic processing from an enabled webhook endpoint. Application MCP
-authorization, OAuth and other release requirements below are not implied
+authorization and other release requirements below are not implied
 by the existence of adapter implementations or this document.
 
 The [owned commit coordinator](index-commits.md) now supplies cooperative
@@ -98,11 +96,11 @@ Implemented protections and their limits:
 
 Protect confidentiality of page content and file bytes; credentials and signed
 URLs; local index/state/models and backups; tool results, diagnostics and audit
-metadata. Protect integrity of Notion mutations, grant identity, scope,
+metadata. Protect integrity of Notion mutations, integration identity, scope,
 provenance and sync state, plus availability of the service and local machine.
 
-Assume malicious internet callers and websites, an otherwise valid but
-unapproved Notion OAuth user, and adversarial page/file content (including
+Assume malicious internet callers and websites, other Notion users and
+integrations, and adversarial page/file content (including
 content placed by a collaborator). The authorized agent can make mistakes or
 follow injected instructions. Dependency/model publishers and the embedding
 service are additional supply-chain/data-processing principals. The operator,
@@ -112,9 +110,9 @@ host compromise remains outside the application's containment guarantee.
 ```text
 Untrusted caller/browser -- HTTPS + MCP token --> trusted proxy/server boundary
 Trusted local MCP client -- process stdin/stdout --> server (stdio boundary)
-Server -- separate Notion grant --> Notion API (external authority)
+Server -- integration token --> Notion API (external authority)
 Notion -- authenticated webhook --> event queue --> scoped source refresh
-Server <--> derived LanceDB / SQLite state / protected grant store (host storage)
+Server <--> derived LanceDB / SQLite state (host storage)
 Server -- validated temporary HTTPS URL --> file source --> Notion upload
 Server -- document chunks --> local model OR explicit remote embedding provider
 Server -- minimized tool results --> MCP client / ChatGPT (external recipient)
@@ -141,9 +139,8 @@ the system.
 
 | Boundary / attack path | Required mitigation and backlog | Verification needed before enablement |
 | --- | --- | --- |
-| Remote caller initializes a session or replays a stolen token to read/mutate knowledge; HTTPS proxy is mistaken for authorization | Production OAuth under [#117](https://github.com/mtandersson/notion-knowedge/issues/117): separate MCP and Notion credentials, server-scoped access tokens, strict issuer/origin and redirects, PKCE S256, short-lived single-use codes, random expiring state. [#118](https://github.com/mtandersson/notion-knowedge/issues/118) defines the separate MCP/Notion trust and grant binding contract (removed in #730); [#119](https://github.com/mtandersson/notion-knowedge/issues/119)–[#122](https://github.com/mtandersson/notion-knowedge/issues/122) implement discovery and both flows. Static bearer ([#84](https://github.com/mtandersson/notion-knowedge/issues/84)) is development/fallback only, not the production design. | Reject unauthenticated calls on every operation and session/SSE path; reject bad redirects/state/verifiers and expired/replayed codes; verify the deployed HTTPS proxy and discovery configuration with [#129](https://github.com/mtandersson/notion-knowedge/issues/129), [#130](https://github.com/mtandersson/notion-knowedge/issues/130) and [#109](https://github.com/mtandersson/notion-knowedge/issues/109). |
-| An unapproved user completes valid Notion OAuth, or a replaced grant leaves an old MCP token usable | Stable `workspace_id` and `owner.user.id` must match explicit configuration, with missing/mismatched identity failing closed ([#125](https://github.com/mtandersson/notion-knowedge/issues/125), [#126](https://github.com/mtandersson/notion-knowedge/issues/126)). Bind every token/session to that approved grant ([#127](https://github.com/mtandersson/notion-knowedge/issues/127)); rotation must be atomic and revalidate identity ([#124](https://github.com/mtandersson/notion-knowedge/issues/124)); revocation/re-authentication must invalidate incompatible access ([#128](https://github.com/mtandersson/notion-knowedge/issues/128)). | End-to-end denied user/workspace, absent identifiers, concurrent rotation, replaced grant, revoked token and documented bounded revocation-cache tests. Successful OAuth alone must never authorize a caller. |
-| Notion token, refresh token or signed URL leaks through storage, logs, errors or tool output | Tokens remain server-side and never enter LanceDB or MCP results (ADR 0001). [#22](https://github.com/mtandersson/notion-knowedge/issues/22) verifies integration credentials; [#123](https://github.com/mtandersson/notion-knowedge/issues/123) requires encrypted grant storage or a secure secret store. Configuration and central structured secret/URL redaction are shipped ([#89](https://github.com/mtandersson/notion-knowedge/issues/89)); sanitize only as defense-in-depth, never log private bodies as input. Minimize logging/audits with [#90](https://github.com/mtandersson/notion-knowedge/issues/90), [#106](https://github.com/mtandersson/notion-knowedge/issues/106), [#107](https://github.com/mtandersson/notion-knowedge/issues/107). | Inspect success/failure/retry logs, tool results, DB records and backups for representative tokens, URL query parameters and private bodies; corrupt/missing grant storage must fail safely. Revoke exposed credentials; deleting a log/commit is insufficient. |
+| Remote caller initializes a session or replays a stolen token to read/mutate knowledge; HTTPS proxy or tunnel is mistaken for authorization | Trusted stdio or a loopback-only listener requiring the local bearer on every request ([#84](https://github.com/mtandersson/notion-knowedge/issues/84)); remote access only through the operator's Secure MCP Tunnel ([#730](https://github.com/mtandersson/notion-knowedge/issues/730)). Notion credentials are separate from the MCP bearer and stay server-side. | Reject unauthenticated calls on every operation and session/SSE path; verify the listener is not bound beyond loopback and the deployed tunnel configuration with [#129](https://github.com/mtandersson/notion-knowedge/issues/129), [#130](https://github.com/mtandersson/notion-knowedge/issues/130) and [#109](https://github.com/mtandersson/notion-knowedge/issues/109). |
+| Notion token, MCP bearer or signed URL leaks through storage, logs, errors or tool output | Tokens remain server-side and never enter LanceDB or MCP results (ADR 0001). [#22](https://github.com/mtandersson/notion-knowedge/issues/22) verifies integration credentials. Configuration and central structured secret/URL redaction are shipped ([#89](https://github.com/mtandersson/notion-knowedge/issues/89)); sanitize only as defense-in-depth, never log private bodies as input. Minimize logging/audits with [#90](https://github.com/mtandersson/notion-knowedge/issues/90), [#106](https://github.com/mtandersson/notion-knowedge/issues/106), [#107](https://github.com/mtandersson/notion-knowedge/issues/107). | Inspect success/failure/retry logs, tool results, DB records and backups for representative tokens, URL query parameters and private bodies. Revoke exposed credentials; deleting a log/commit is insufficient. |
 | Injected page text tells the agent to export secrets, attach a private file elsewhere or overwrite a page; direct page ID bypasses root checks | Treat retrieved text as untrusted and preserve provenance ([#49](https://github.com/mtandersson/notion-knowedge/issues/49)); enforce root scope across reads, search expansion, writes and files at the application boundary ([#87](https://github.com/mtandersson/notion-knowedge/issues/87), [#50](https://github.com/mtandersson/notion-knowedge/issues/50)). Read-only and operation policy are server-enforced ([#85](https://github.com/mtandersson/notion-knowedge/issues/85), [#86](https://github.com/mtandersson/notion-knowedge/issues/86)), not tool annotations. Explicit targets/replacement semantics are [#26](https://github.com/mtandersson/notion-knowedge/issues/26), [#27](https://github.com/mtandersson/notion-knowedge/issues/27), [#71](https://github.com/mtandersson/notion-knowedge/issues/71), [#72](https://github.com/mtandersson/notion-knowedge/issues/72). | Deny out-of-scope direct IDs and stale/unverifiable ancestry; exercise malicious document instructions and disabled tools through both transports, proving no backend mutation. Agent-side confirmation is useful but cannot replace these controls or prevent all authorized-client exfiltration. |
 | An authorized agent overwrites a concurrent edit, repeats a timed-out mutation or treats an unverified write as success | Narrow semantic writes ([#76](https://github.com/mtandersson/notion-knowedge/issues/76)), conflict detection against expected source metadata ([#80](https://github.com/mtandersson/notion-knowedge/issues/80)), payload-bound idempotency keys with explicit TTL ([#81](https://github.com/mtandersson/notion-knowedge/issues/81)), separately disabled/confirmed destructive actions that fail closed when confirmation is unavailable ([#82](https://github.com/mtandersson/notion-knowedge/issues/82)). Source read-back precedes final success; reindex outcome is reported separately ([#83](https://github.com/mtandersson/notion-knowedge/issues/83), file read-back [#74](https://github.com/mtandersson/notion-knowedge/issues/74)). | Concurrent edit returns conflict; timeout/retry does not duplicate append/upload; reused key with different payload is rejected; declined confirmation is never auto-retried. Test source-write success with index failure and unverified attachment failure without hiding either outcome. |
 | A signed file URL is replayed, logged, redirected to metadata/internal services or resolves to a private address; large/malicious content exhausts resources | Request-only URL handling and bounded streaming ([#67](https://github.com/mtandersson/notion-knowedge/issues/67)); expected HTTPS sources, DNS destination checks, private/link-local/loopback blocking and rejection of redirects ([#88](https://github.com/mtandersson/notion-knowedge/issues/88)); MIME/content, size and filename checks ([#68](https://github.com/mtandersson/notion-knowedge/issues/68)). Do not forward Notion/MCP authorization headers to file hosts; signed URLs are temporary capabilities, not stable provenance. Temporary bytes must be cleaned on success/failure and only safe metadata retained ([#75](https://github.com/mtandersson/notion-knowedge/issues/75)). | SSRF tests at each resolved connection/redirect, including IPv4/IPv6 and changing DNS; timeout/oversize/truncated input tests; no credential forwarding or URL persistence. Ingestion is disabled by default but can be enabled with explicit trusted stdio/loopback bearer, scope, file-source and audit settings; fixture transport tests do not replace a live remote ChatGPT smoke. |
@@ -152,97 +149,12 @@ the system.
 | Session/SSE floods, tool expansion, file bursts or webhook queues exhaust CPU, memory, disk or upstream quota | Comprehensive payload/result limits ([#93](https://github.com/mtandersson/notion-knowedge/issues/93)), bounded file counts ([#73](https://github.com/mtandersson/notion-knowedge/issues/73)), backend retry/rate control ([#23](https://github.com/mtandersson/notion-knowedge/issues/23)), queue retries and shutdown ([#57](https://github.com/mtandersson/notion-knowedge/issues/57), [#112](https://github.com/mtandersson/notion-knowedge/issues/112)). Installed request/session/stream and weighted tool budgets complement payload limits; deployment must also bound TCP connections, CPU/memory, filesystem growth and proxy write time. | Load/failure tests with finite queues, deadlines, connections and resource quotas; confirm shutdown preserves acknowledged work. [Installed load/cancellation gates](security-resource-acceptance.md) cover application admission under #396. Production OS/proxy quotas and their deployed recovery evidence remain [#416](https://github.com/mtandersson/notion-knowedge/issues/416). |
 | Dependency/model compromise executes code; remote embedding sends private chunks outside the host | Shipped [#92](https://github.com/mtandersson/notion-knowedge/issues/92) scans and pinned builds reduce known supply-chain risk. [#38](https://github.com/mtandersson/notion-knowedge/issues/38), [#39](https://github.com/mtandersson/notion-knowedge/issues/39), [#145](https://github.com/mtandersson/notion-knowedge/issues/145) must review model provenance/loading, external assets and runtime permissions. ADR 0001 allows remote providers; enabling one requires explicit operator data-sharing approval and a refreshed model. | Validate actual model assets/runtime in the final image, least filesystem/egress privileges and dependency exceptions. Do not load untrusted executable model code or assume embeddings are anonymous. Document recipient, retention and transmitted fields before any remote provider use. |
 
-## OAuth trust-binding addendum (2026-10-09, #118)
+## Historical OAuth reviews (#118–#124)
 
-The OAuth trust contract (removed in #730) is implemented in the supported
-single-process read-only envelope described by production setup (removed in #730).
-Tokens are resource/client/scope/expiry bound and reference the exact approved
-Notion grant. The joined acceptance matrix (removed in #730) covers denied
-identities, PKCE/state/code failures, sessions, refresh, replacement and logout.
-A real ChatGPT/Notion deployment smoke and host-specific containment remain
-operator responsibilities. Local files are not rollback-resistant external
-storage; protecting state/backups is part of that deployment envelope.
-
-> Historical incremental assessments below describe their dated PR snapshots,
-> including routes that were then unimplemented. They do not override the
-> installed combined boundary above.
-
-## OAuth discovery boundary review (2026-10-09, #119)
-
-The new OAuth discovery router (removed in #730) activates only when the
-operator supplies **both** canonical HTTPS origins. It publishes fixed metadata
-and a 401 Bearer resource-metadata challenge on every MCP request instead of
-mounting the protocol service. Authorization, token and revocation endpoints
-are explicitly not implemented (503), so this does not make the deployment
-OAuth-capable. Invalid/ambiguous origins fail startup; `Host` and `Origin`
-spoofing are denied for the new routes. This code has no Notion credentials,
-no grant storage, no issued tokens and no access to protected MCP tools.
-Integration tests exercise real HTTP discovery and deny paths. Remaining
-risk: callers may discover an unavailable AS; reverse-proxy HTTPS and the
-actual OAuth authorization implementation remain future work, not a security
-waiver. Record changed routing and testing with #119 and keep #117 open.
-
-## Notion upstream OAuth redirect boundary (2026-10-09, #121)
-
-The Notion redirect component (removed in #730) is currently only a
-server-side helper. It binds the fixed Notion `owner=user` authorization URL
-to a separate 256-bit random, short-lived, single-use state and a separately
-validated MCP PKCE pending transaction. The redirect URL does not expose the
-MCP transaction, confidential Notion client secret or any bearer token.
-The exact registered HTTPS callback must match the canonical MCP issuer;
-no browser-driven callback/Host/Forwarded override is permitted.
-Notion's integration permissions are configured out of band, and users select
-shared content at consent; there is no request-scoped elevation of permissions.
-The redirect helper cannot establish the real authorizing Notion identity.
-Until #122 supplies the provider callback, authoritative token exchange,
-allowlisted owner/workspace validation and #123–#129 bind live durable grant
-and MCP sessions, the public auth/token endpoints stay 503 and MCP stays 401.
-Treat callback state and query strings as secrets in future proxy logging.
-
-## Confidential Notion OAuth callback review (2026-10-09, #122)
-
-Notion callback verification (removed in #730) consumes the
-independent expiring, single-use state **before any outbound token exchange**.
-Only the confidential server can send the Notion client secret in Basic auth
-to a fixed HTTPS endpoint, with redirects disabled, 12-second timeouts and
-bounded response bodies. Parsed grants require `owner.type=user` and exact
-operator-pinned workspace/user IDs before returning a still **unapproved**
-MCP transaction. Typed secrets have redacted diagnostics; provider errors and
-callback query values are never logged or returned. Testing uses a local
-fake Notion provider and negative-path cases; it does not expose a live HTTP
-callback. A successfully exchanged upstream token does not create an MCP
-authorization until #123/#127 store and enforce durable grant/epoch and
-revocation. This component is **not** permission to expose private MCP tools.
-
-## Encrypted OAuth grant state boundary (2026-10-09, #123)
-
-The Notion grant store (removed in #730) encrypts both token material
-and identifying metadata using AES-256-GCM with a separately mounted private
-32-byte key. The versioned format binds its application namespace through
-AEAD associated data. Grant replacement uses a fresh random nonce/ID,
-strict file modes and an atomic fsync+rename; callback owner/workspace and
-client binding are rechecked at save and load. Wrong key, corruption,
-symlinks, permissive files and missing credential dependencies fail startup
-without rendering sensitive values in errors. A missing state file is never
-first-login approval. This store does **not** issue any MCP token, enable
-a public callback or establish durable revocation. Process-local write
-serialization alone is not a multi-pod or rollback/revocation guarantee:
-#124/#127 must implement distributed fencing and live epoch/revocation
-checks. Remote private MCP access remains blocked.
-
-## Notion OAuth refresh concurrency boundary (2026-10-09, #124)
-
-Server-only Notion refresh (removed in #730) performs confidential
-Basic-auth token exchange, rechecks the complete immutable
-user/workspace/bot binding, and atomically replaces the sealed access/refresh
-pair using a stale-write compare-and-swap guard. Calls sharing one coordinator
-serialize their external refresh and sealed commit, avoiding concurrent use
-of the same single-use upstream refresh token **inside one process**.
-Expired or uncertain-lifetime grants are not usable without refresh.
-Unknown/changed identity, missing refresh-token rotation, upstream failure or
-storage failure return sanitized errors without exposing old tokens.
-A separate multi-process lock, anti-rollback revocation store and every-MCP-
-request authorization are **not** present: #127/#128 remain deployment gates.
+Dated 2026-10-09 reviews covered MCP OAuth discovery, Notion OAuth redirect and
+callback, encrypted grant state and refresh. Those OAuth boundaries were removed
+in [#730](https://github.com/mtandersson/notion-knowedge/issues/730); legacy
+grant state/key files are left on disk; the server never reads them, and the operator may remove them.
 
 ## Bounded residual risks and release decision
 
@@ -270,7 +182,7 @@ and unknown supply-chain flaws remain residual risks. Before production, the
 operator must record the actual configuration, enabled capabilities, evidence,
 remaining risks, owner and review/expiry date in the release issue. Only the
 operator can accept that deployment's risks; this document grants no waiver.
-Rotate/revoke exposed MCP and Notion grants and review local copies/backups
+Rotate/revoke exposed MCP bearer and Notion integration tokens and review local copies/backups
 when responding to disclosure.
 
 ## Architecture change review
@@ -278,14 +190,12 @@ when responding to disclosure.
 The author of a boundary-changing PR owns updating this model and its mitigation
 links; an independent reviewer checks it before merge. The deployment operator
 owns release evidence and any explicit residual-risk acceptance. Review is
-required when adding a semantic tool, changing OAuth/grant/session handling,
-root scope, webhook/file ingestion, database/grant storage, embedding/model
+required when adding a semantic tool, changing authentication/session handling,
+root scope, webhook/file ingestion, database storage, embedding/model
 provider, logs/telemetry, proxy/network exposure or container/worker topology.
 Also review after an incident, new relevant advisory or changed upstream protocol.
-[#118](https://github.com/mtandersson/notion-knowedge/issues/118) adds the
-documented OAuth trust model (removed in #730) and the dated review above.
-Subsequent #119–#130 implementations must revisit this baseline and record
-negative-path evidence before production enablement.
+Implementations must revisit this baseline and record negative-path evidence
+before production enablement.
 
 Every affected PR must identify changed assets/actors/flows; update current
 versus planned controls; link mitigation issues and negative-path evidence;
@@ -311,11 +221,11 @@ state loses pending hints even though authoritative Notion content survives.
 Explicit validated ingestion settings compose native file uploads for trusted
 stdio and authenticated loopback bearer HTTP. The server actor represents
 operator execution, never an authenticated Notion/ChatGPT user. Anonymous HTTP
-and OAuth discovery do not install ingestion. Effective read-only and operation
+does not install ingestion. Effective read-only and operation
 policy are enforced before adapters; full physical roots/exclusions are freshly
 checked before effects. Private durable audit storage must open successfully.
 MCP request cancellation drops active ingestion and records possible effects
 truthfully while removing owned temporary files. There is no background signed
 URL retry or blind mutation replay. See [installed runtime and integrated
 acceptance evidence](installed-file-ingestion.md). This local boundary does not
-complete private ChatGPT OAuth (#117) or the live-root operational smoke.
+replace the live-root operational smoke.

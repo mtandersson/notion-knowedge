@@ -30,11 +30,10 @@ ChatGPT (No authentication) → Secure MCP Tunnel → loopback MCP
 The tunnel authenticates to OpenAI using its runtime credential. A separate
 local bearer protects the HTTP hop from the tunnel client to the MCP server.
 The Notion integration token stays on the server. None of these credentials
-belongs in ChatGPT's OAuth client fields. This deployment needs no MCP OAuth
+is entered in ChatGPT. This deployment needs no authorization
 callback, public authorization endpoint, or inbound firewall opening.
 
-The former OAuth connection was removed (#730); this tunnel is the only
-supported ChatGPT connection. Access depends on the
+This tunnel is the only supported ChatGPT connection. Access depends on the
 tunnel's organization/workspace permissions, the local credential and the
 server's fixed Notion scope. Loopback alone does not exclude other local
 processes. This procedure starts read-only and does not authorize source writes,
@@ -50,15 +49,13 @@ enable `NK_RETRIEVAL=true` only with compatible assets and index state.
 For HTTP, set `NK_HTTP_HOST=127.0.0.1`, a free local `NK_HTTP_PORT`,
 `NK_HTTP_AUTH=bearer`, and a randomly generated `NK_HTTP_BEARER_TOKEN` in a
 private runtime environment file. Keep `NK_READ_ONLY=true`
-and file ingestion off. Omit OAuth discovery/login/grant
-settings from this separate environment. The server rejects simultaneous
-bearer and OAuth discovery configuration. See [bearer configuration](development-bearer-auth.md)
+and file ingestion off. See [bearer configuration](development-bearer-auth.md)
 for token syntax and request-level checks.
 
 Use the same measured resource envelope as the actual retrieval workload;
 validate model load, readiness and recovery under those limits. A configuration
 `--check` does not load the model or establish usable retrieval. Keep durable
-source-effect records and existing OAuth grant state intact.
+source-effect records intact.
 
 Bound connections before they consume application descriptors. The application
 body/session budgets run after HTTP connection admission; they cannot protect
@@ -76,7 +73,7 @@ actual target ChatGPT workspace association and Read + Use access, and keep
 runtime keys private. A successful local doctor check does not prove cloud
 credential validity or workspace association.
 
-Select the client's plain HTTP/no-OAuth profile and point its main MCP channel
+Select the client's plain HTTP profile without authorization and point its main MCP channel
 at the loopback `/mcp` endpoint. Configure `mcp.extra_headers.Authorization`
 and `mcp.discovery_extra_headers.Authorization` as private `env:` or `file:`
 references containing the complete `Bearer …` header value. Never embed the
@@ -87,7 +84,7 @@ transport, but does not use the HTTP bearer settings above.
 With the inspected client v0.0.19, static MCP headers are scoped to the configured
 server origin/path; discovery requests receive the discovery header map too.
 Forwarded connector headers take precedence over static headers. An existing
-OAuth connection can therefore replace the local `Authorization` header:
+authenticated connection can therefore replace the local `Authorization` header:
 verify **No authentication** on the actual selected connection. Keep
 `log.http_raw_unsafe` / `LOG_HTTP_RAW_UNSAFE` disabled; raw HTTP dumps can include
 the final credential and source bodies. Treat client logs as private.
@@ -101,7 +98,7 @@ restarting the daemon cannot repair it. Do not stop or modify unrelated tunnels.
 
 In ChatGPT's custom MCP connection UI, select **Tunnel**, the verified tunnel,
 and **No authentication**. These are separate selections; tunnel transport does
-not automatically change an existing OAuth connection's authentication choice.
+not automatically change an existing connection's authentication choice.
 See [custom MCP connections](https://developers.openai.com/api/docs/guides/custom-mcp-server).
 
 Keep the local URL and its authority unchanged while testing. The server's
@@ -118,7 +115,7 @@ Record the deployed revision, date, selected connection and sanitized outcomes:
 | Scope | Caller input cannot widen configured roots; out-of-scope content is denied without disclosure. |
 | Refresh | Refresh the connection's discovered tools, open a new conversation, and repeat the real reads using the refreshed schema. |
 | Restart | Restart only the owned endpoint/tunnel, then verify recovery and a new successful tool call. |
-| Disable | Disable the selected connection or stop its owned tunnel; new calls through that route fail. Restore it and verify recovery. This is transport denial, not OAuth token revocation. |
+| Disable | Disable the selected connection or stop its owned tunnel; new calls through that route fail. Restore it and verify recovery. This is transport denial, not credential revocation. |
 
 Keep raw logs, source IDs, page bodies, signed media URLs and credentials local.
 Store only sanitized observations in the repository. Mark missing evidence

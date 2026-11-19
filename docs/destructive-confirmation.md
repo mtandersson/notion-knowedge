@@ -22,7 +22,7 @@ The preview schemas request `confirmation_id` for both section replacement and p
 
 ## Security limits and integration requirements
 
-This policy is not Notion root authorization, OAuth, a fresh revision precondition, durable idempotency, or a replacement for authoritative readback. Future live implementations must integrate those independent controls from #77–#81/#83 before any mutation. A changed operation, target, revision, payload, or scope needs a fresh approval.
+This policy is not Notion root authorization, a fresh revision precondition, durable idempotency, or a replacement for authoritative readback. Future live implementations must integrate those independent controls from #77–#81/#83 before any mutation. A changed operation, target, revision, payload, or scope needs a fresh approval.
 
 No cross-process durable confirmation store or revocation of in-flight writes is claimed; those belong to the later server-owned confirmation adapter. Never log raw confirmation tokens, private body content, or credentials.
 

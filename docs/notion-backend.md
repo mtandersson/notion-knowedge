@@ -60,7 +60,7 @@ request validation and receipt checks (#27). The core mock contract tests
 verify capability separation without coupling applications to HTTP.
 
 This completes the backend adapter objective, not the later semantic MCP tools,
-OAuth, scoped agent-write policies or real-account production smoke in their
+scoped agent-write policies or real-account production smoke in their
 own epics. No unperformed live-account verification is implied.
 
 The metadata-only `PageLifecycle` companion port supplies

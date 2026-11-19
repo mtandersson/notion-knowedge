@@ -50,8 +50,7 @@ credentials are present, or use `--env-file` with a tracked secret file.
 
 `NK_NOTION_AUTH=integration` enables the configured Notion backend credential;
 it is **not** MCP client authentication. This local Compose stack does not
-configure the staged OAuth callback, grant state or remote access. Set up those
-features separately when the full auth flow has landed.
+configure remote access; see the [private ChatGPT tunnel](private-chatgpt-tunnel.md).
 
 ## Persistence and health
 

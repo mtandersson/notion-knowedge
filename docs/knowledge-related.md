@@ -86,8 +86,8 @@ Trusted operator stdio may activate directly. HTTP additionally requires
 `NK_HTTP_AUTH=bearer` and `NK_HTTP_BEARER_TOKEN` on a loopback listener.
 The ordinary middleware authenticates every request, including continued
 sessions and SSE. Physical Notion root scope is data authorization, not caller
-authentication. Bootstrap and OAuth-discovery-only HTTP do not install or open
-private graph/index/model adapters. Remote ChatGPT OAuth remains unavailable.
+authentication. Bootstrap HTTP does not install or open
+private graph/index/model adapters.
 
 Reads use the production coordinator's storage identity, binding and pending
 commit fence. One bounded navigation holds the read fence across incoming/outgoing

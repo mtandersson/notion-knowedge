@@ -3,7 +3,7 @@
 The [private ChatGPT tunnel](https://github.com/mtandersson/notion-knowedge/issues/559)
 can use the existing guarded create/append runtime through the loopback HTTP
 bearer transport. This mode uses the configured Notion integration and fixed
-workspace/root policy; it does not claim an OAuth person's identity or grant.
+workspace/root policy; it does not claim a person's identity.
 
 Activation is explicit and off by default. Use a Unix `webhook-worker` binary,
 configure trusted integration credentials/scope, `NK_HTTP_AUTH=bearer` with a
@@ -11,7 +11,7 @@ private local value, `NK_RETRIEVAL=true`, and either the existing verified
 webhook worker or periodic reconciliation. Set `NK_READ_ONLY=false` and
 `NK_INTEGRATION_WRITES=true`, then supply absolute, private durable paths in
 `NK_INTEGRATION_WRITE_LEDGER_FILE` and `NK_INTEGRATION_WRITE_AUDIT_FILE`.
-Do not combine this mode with OAuth discovery. Ordinary stdio startup does not
+Ordinary stdio startup does not
 install this HTTP worker composition.
 
 Initialize the new ledger once using `--initialize-integration-write-ledger`
@@ -24,7 +24,7 @@ of an indeterminate source effect.
 The server installs `knowledge_create_page` and `knowledge_append` only through
 the trusted composition. Existing read-only/capability/root gates, raw source
 revision/hash checks, verified readback, idempotency and audit still apply.
-Audit records use the automation actor, not an OAuth-approved-user claim.
+Audit records use the automation actor, not an approved-user claim.
 Section replacement is not installed by this composition. File ingestion has
 its separate explicit activation and audit configuration.
 

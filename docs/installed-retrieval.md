@@ -43,7 +43,7 @@ also validates existing storage and loads the offline provider.
 
 Trusted operator stdio may activate directly. Local fallback HTTP requires
 `NK_HTTP_AUTH=bearer`, its configured token and a loopback listener; it is the
-only HTTP mode (the OAuth HTTP mode was removed in #730). Anonymous HTTP leaves
+only authenticated HTTP mode. Anonymous HTTP leaves
 retrieval unavailable without opening the private index, model or state,
 including lazy sync-status readers.
 The [production image](container.md) packages this feature; exact model assets
@@ -68,8 +68,8 @@ Neither command changes canonical chunks, source text, ownership, page receipts
 or Notion content. Neither calls Notion or embeds source text. The configured
 offline Qwen assets are validated and loaded before storage access, so an
 incompatible model identity cannot be attached to existing vectors. No model
-download or provider fallback occurs. Preserve the normal integration or complete
-OAuth configuration required for the configured scope; those credentials remain
+download or provider fallback occurs. Preserve the normal integration configuration
+required for the configured scope; that credential remains
 unused by this local operation. Configuration validation is unchanged.
 
 Both commands require an existing compatible populated table and current SQLite
@@ -99,8 +99,7 @@ nix develop .#spike --command cargo test -p notion-knowledge-server --features w
 Trusted installed readers also bind guarded indexed source expansion and the
 same configured authoritative client for `knowledge_get` with `freshness: "fresh"`.
 Fresh mode retains its indexed anchor and root checks; moved/out-of-root pages
-are rejected before Markdown is read. OAuth uses its separate request-bound
-source composition rather than this static integration client.
+are rejected before Markdown is read.
 
 Search modes use the existing Lance semantic adapter, BM25 lexical adapter and
 weighted reciprocal-rank fusion (100 candidates per path, rank constant 60,

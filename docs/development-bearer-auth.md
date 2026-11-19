@@ -2,16 +2,13 @@
 
 This is the only authentication for the Streamable HTTP `/mcp` resource in
 the single-user deployment (#730): a loopback listener plus one static bearer,
-reached by ChatGPT through the [private tunnel](private-chatgpt-tunnel.md). The
-former OAuth flow ([#117](https://github.com/mtandersson/notion-knowedge/issues/117))
-was removed. A static bearer does not establish a Notion user/workspace, scopes
+reached by ChatGPT through the [private tunnel](private-chatgpt-tunnel.md). A static bearer does not establish a Notion user/workspace, scopes
 or token revocation; it only admits the local operator's clients.
 
 For the owner-selected [private tunnel deployment](private-chatgpt-tunnel.md),
 the same loopback bearer can protect the tunnel-to-server HTTP hop. ChatGPT
 uses **No authentication** for that connection; the tunnel client supplies
-the local credential. This does not establish a per-person OAuth identity or
-grant lifecycle. The tunnel/workspace access policy and fixed server-side
+the local credential. This does not establish a per-person identity. The tunnel/workspace access policy and fixed server-side
 Notion integration/root scope form that deployment's access boundary.
 
 ## Configuration
@@ -31,8 +28,7 @@ cargo run -p notion-knowledge-server -- --http
 be generated randomly rather than memorized. Store it in an operator-managed
 secret store or private process environment; do not commit, print or place it
 in a URL. The server rejects a provided token without `NK_HTTP_AUTH=bearer`,
-a missing/invalid token in bearer mode, a non-loopback bind in that mode,
-and simultaneous OAuth discovery settings. The token has no bearing on the
+a missing/invalid token in bearer mode, and a non-loopback bind in that mode. The token has no bearing on the
 separate upstream `NOTION_TOKEN` used for Notion API reads.
 
 Every HTTP `/mcp` operation, including initialize, POST tools, GET/SSE,
@@ -54,8 +50,8 @@ This option listens only on a **loopback address**. For an emergency client
 on another machine, terminate HTTPS and network authorization at a trusted
 local reverse proxy; never expose plaintext bearer traffic on the internet.
 Rotating the configured credential requires restarting the server. No
-per-session revocation, user identity, authorization scopes, or OAuth refresh
-is provided.
+per-session revocation, user identity, or authorization scopes
+are provided.
 
 ## Independent health exposure
 

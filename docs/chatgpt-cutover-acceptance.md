@@ -24,7 +24,7 @@ ChatGPT access or cutover, not failure of independently verified local behavior.
 As of this issue, the ordinary server still has an unavailable retrieval
 bootstrap, and authenticated private HTTP access, production full sync,
 file ingestion and verified write tools are not all integrated. A local spike,
-mock test or OAuth *discovery* response does not meet a production gate.
+mock test or unauthenticated development endpoint does not meet a production gate.
 Any `not runnable`, unknown denominator, unavailable feature, unreviewed
 security finding or missing evidence below means **no cutover**.
 
@@ -65,7 +65,7 @@ unit tests alone. Run the checks after deployment, not solely on localhost.
 
 | ID | Required result | Minimum evidence |
 | --- | --- | --- |
-| G0 — Security and availability | Applicable authorization negatives deny access *before* data retrieval or mutation; **zero** successful unauthorized scope expansion or access through a disabled route. ChatGPT discovers only real supported tools. No unresolved critical/high security defects. | Verify the selected access boundary: [private tunnel](private-chatgpt-tunnel.md) workspace/transport controls and fixed integration scope, or production OAuth/PKCE and person/grant binding (#117, #127–#129). Actual ChatGPT connection smoke (#109) and route review remain required. A development tunnel test alone is insufficient. |
+| G0 — Security and availability | Applicable authorization negatives deny access *before* data retrieval or mutation; **zero** successful unauthorized scope expansion or access through a disabled route. ChatGPT discovers only real supported tools. No unresolved critical/high security defects. | Verify the selected access boundary: [private tunnel](private-chatgpt-tunnel.md) workspace/transport controls and fixed integration scope, with loopback bearer HTTP or stdio. Actual ChatGPT connection smoke (#109) and route review remain required. A development tunnel test alone is insufficient. |
 | G1 — Usable retrieval | The real adapter returns valid results for every unchanged corpus query and passes representative authorized English/Swedish search/read and exact-lookup smoke checks. Citations identify actual allowed content; empty/unavailable outcomes stay explicit. Record ranking limitations without an aggregate numeric release floor. | Complete production-backed corpus results, model/index identity, exact-lookup regression evidence and actual functional smoke; no synthetic stub substituted for production |
 | G1b — Post-launch improvement | Observe real usage and fix ranking problems when they affect the owner. The former 30-day/50-query and 95% quality targets are optional improvement goals, not a launch waiting period. Source attribution and authorization remain correctness requirements. | Private production feedback and sanitized issue reports; retain denominators when publishing metrics |
 | G2 — Direct files | At least **5 image and 5 non-image** supported file cases, including small and near-configured-limit sizes, succeed directly from ChatGPT to the **intended Notion page** with native block, content/type and read-back verification; **100%** pass. Unsupported/oversize cases fail safely and do not leave an attached partial file. **Zero** Drive staging or Agent Handover invocations. | Real ChatGPT file-parameter tests (#66–#75), durable per-case target/block references and safe metadata; do not use an upload stub or an official-connector fallback to count a pass. |
@@ -111,7 +111,7 @@ retrieval where applicable. If the custom tool is absent, mark **not runnable**.
 | S1 | English and Swedish exact title/ID plus paraphrased search | Correct allowed source, stable citation and relevant chunk; no invented source |
 | S2 | `knowledge_get` indexed vs fresh after an edit | Fresh authoritative content/timestamp; indexed view clearly marked stale or refuses; no silent mutation |
 | S3 | Unknown page, unauthorized root and removed permission | Fail closed without leaking indexed text, identifiers beyond allowed diagnostics or redirecting to another identity |
-| S4 | Exercise the chosen access boundary: tunnel/workspace access and restart/disable, or OAuth person/workspace, expired/revoked grant and restart | Only the configured connection authority can use the intended scope; every denial has safe correlation. Do not claim per-person OAuth guarantees for an integration-backed tunnel. |
+| S4 | Exercise the chosen access boundary: tunnel/workspace access, missing/invalid bearer, and restart/disable | Only the configured connection authority can use the intended scope; every denial has safe correlation. The integration-backed tunnel makes no per-person identity claim. |
 | F1 | ChatGPT-supplied image to allowed page | Native image block visible in read-back, correct bytes/type, no staging service |
 | F2 | PDF/other non-image file | Native file block and downloadable matching test attachment verified |
 | F3 | Retry/interrupted upload | No duplicate native blocks or false success; safe temporary cleanup |

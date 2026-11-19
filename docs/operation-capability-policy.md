@@ -37,8 +37,8 @@ A tool may be used only when (1) it is a known canonical operation,
 mode, (3) permitted by independent destructive-operation policy, (4) selected
 by the operator allowlist when present, and (5) **not** selected by the
 blocklist. A blocklist category overrides an allowlist exact name and vice
-versa. These settings cannot enable writes, experimental previews, OAuth
-authorization, or administrator capabilities which do not already exist.
+versa. These settings cannot enable writes, experimental previews, or
+administrator capabilities which do not already exist.
 
 ## Examples
 

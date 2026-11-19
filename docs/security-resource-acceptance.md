@@ -1,8 +1,8 @@
 # Installed resource security acceptance (#396 / #400)
 
-These controls bound admitted application work per process. Public ChatGPT
-OAuth remains separately gated by #117; successful local load tests confer
-no remote authorization.
+These controls bound admitted application work per process. Successful local
+load tests confer no remote authorization; remote ChatGPT access uses the
+loopback bearer listener through a Secure MCP Tunnel.
 
 ## Inventory and ownership
 
@@ -90,7 +90,7 @@ For an initial local fixture deployment, CPU 2, memory 4 GiB, 256 PIDs,
 1024 file descriptors and a 64 MiB temporary mount are reasonable starting
 ceilings **without a loaded model**; they are not validated production sizing.
 Production Qwen/index workloads need measured larger limits. Keep the development
-Compose loopback-only; resource quotas alone do not make OAuth available.
+Compose loopback-only; resource quotas alone do not authorize remote access.
 
 Operational SQLite metric snapshots have a separate process-wide capacity of
 one, with no queue. Their owned permit stays inside the blocking query after

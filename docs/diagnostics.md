@@ -49,7 +49,7 @@ or unconfigured local index returns HTTP 503 with `status: "not_ready"`:
 ```
 
 An installed HTTP retrieval runtime uses a probe of its actual serving index,
-including OAuth read/write mode. It begins with the successful startup validation
+including its read/write mode. It begins with the successful startup validation
 and checks the same guarded index every 30 seconds, with a five-second check
 deadline. A failed check reports unavailable; an observation older than 90 seconds
 reports unknown. Diagnostic requests read only this bounded snapshot and never

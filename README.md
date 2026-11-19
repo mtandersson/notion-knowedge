@@ -89,8 +89,8 @@ continuation and SSE. This mode is opt-in and restricted to a loopback listener.
 The owner-selected [private ChatGPT tunnel deployment](docs/private-chatgpt-tunnel.md)
 uses this credential between the tunnel client and server, with **No authentication**
 selected in ChatGPT and fixed server-side Notion integration/root scope. Verify
-tunnel/workspace access separately; the local bearer provides no per-person OAuth
-identity or grant lifecycle. Health endpoints retain
+tunnel/workspace access separately; the local bearer provides no per-person identity.
+Health endpoints retain
 an independent policy via `NK_HTTP_HEALTH_AUTH=none|bearer`.
 See [development bearer authentication](docs/development-bearer-auth.md)
 for configuration, security limits and tests.
@@ -104,8 +104,7 @@ cutover has passed.
 
 ### Optional guarded writes
 
-ChatGPT OAuth sessions are read-only. For a private integration-backed HTTP
-connection, [guarded integration writes](docs/integration-semantic-writes.md)
+For a private integration-backed connection, [guarded integration writes](docs/integration-semantic-writes.md)
 have a separate explicit activation and share the existing sync worker.
 
 ### Payload limits
@@ -129,7 +128,7 @@ tool responses. The `knowledge_upload_file` schema is hidden by the default
 read-only mode; an explicitly enabled [audited ingestion runtime](docs/installed-file-ingestion.md)
 can attach files through trusted stdio or authenticated loopback bearer HTTP.
 Ingestion has separate operator-owned file-count, size and time limits, plus
-bounded structured outcomes; it does not make remote ChatGPT OAuth available.
+bounded structured outcomes.
 [Installed resource budgets and load acceptance](docs/security-resource-acceptance.md)
 cover process-local session, stream and tool admission; deployed host/proxy
 containment remains [#416](https://github.com/mtandersson/notion-knowedge/issues/416).
@@ -144,9 +143,8 @@ See [fresh-source verification](docs/fresh-source.md).
 The server is single-user: ChatGPT reaches it as a raw MCP server on
 localhost (through the [private tunnel](docs/private-chatgpt-tunnel.md)) with
 the loopback HTTP bearer, or a local client uses stdio. Notion is read and
-written with one integration token. The former MCP OAuth authorization server,
-request-bound OAuth reads and per-user Notion grants were removed (#730);
-startup ignores their `NK_OAUTH_*`, `NK_NOTION_OAUTH_*`, `NK_NOTION_GRANT_*`
+written with one integration token. All OAuth support was removed in #730;
+startup ignores the former `NK_OAUTH_*`, `NK_NOTION_OAUTH_*`, `NK_NOTION_GRANT_*`
 and `NK_NOTION_ALLOWED_*` settings with one warning naming them. Old grant
 state/key files are never read and may be deleted.
 
@@ -322,8 +320,7 @@ The [`knowledge_upload_file` input contract](docs/chatgpt-file-parameters.md)
 advertises `_meta["openai/fileParams"]` and accepts ChatGPT file references without
 Drive staging. It is hidden by default read-only mode; explicit `NK_READ_ONLY=false` exposes
 the schema for trusted transports. Configured `NK_FILE_INGESTION=true` installs
-the audited application. OAuth HTTP sessions are read-only and cannot discover
-or invoke uploads. Missing settings or an unsuitable
+the audited application. Missing settings or an unsuitable
 HTTP transport returns `file_upload_unavailable` before effects.
 
 ## Continuous integration
@@ -399,8 +396,7 @@ file uploads cannot be invoked through the MCP handler; the access check runs
 before any tool adapter. Set `NK_READ_ONLY=false` **explicitly** only when an
 operator intends to permit implemented mutation tools. File ingestion additionally
 requires the validated operator settings and transport described in
-[installed ingestion](docs/installed-file-ingestion.md). OAuth sessions never
-receive write tools.
+[installed ingestion](docs/installed-file-ingestion.md).
 Invalid values fail startup instead of enabling writes. `--diagnostics` and
 `GET /health` expose the effective `access.read_only` boolean without
 revealing secrets. This setting controls MCP tool access, not the independent
@@ -431,7 +427,7 @@ sanitized failure class, and exits without starting an MCP transport.
 
 
 An explicitly empty optional setting is invalid; defaults apply only when a
-variable is unset. Removed OAuth and Notion grant settings are ignored with one
+variable is unset. Removed (#730) authorization and Notion grant settings are ignored with one
 startup warning (see [single-user access](#single-user-access)).
 
 See [`.env.example`](.env.example) for a sample. The server does not load `.env`

@@ -27,7 +27,7 @@ Keep those credentials local. The upstream Notion integration token is unrelated
 and must never be supplied to ChatGPT or the tunnel. Persisted-index search
 requires no Notion requests or credentials. Do not assume custom static headers
 are supported. Development anonymous access is limited to this explicitly
-non-sensitive, read-only biography corpus; production OAuth remains #117/#109.
+non-sensitive, read-only biography corpus; private access uses the [tunnel runbook](private-chatgpt-tunnel.md).
 No public endpoint may be started before account capability is established.
 
 ## Local server and private tunnel
@@ -242,7 +242,7 @@ unproven.
 | #43 | Strict identity incompatibility checks | Operator fail/rebuild policy, versioning and migration runbook |
 | #45 | Core search port and shared MCP composition | Production provider integration, bounded concurrency and fixed-corpus tests |
 | #49 | Canonical citation mapping | Query-aware configurable snippets, timestamps/rank evidence and signed-URL checks |
-| #109 | Supported connection runbook and actual real tool evidence | Interactive OAuth, workspace/user restriction, revocation and metadata refresh |
+| #109 | Supported connection runbook and actual real tool evidence | Workspace/user restriction, revocation and metadata refresh |
 | #110 | Real selected-page read/index/search/manual refresh | Isolated safe writes/uploads and explicit cleanup; require separate authorization |
 | #145 | Matched native toolchain and external asset/index layout | Real production indexing lifecycle, non-root image, mounts and container recovery smoke |
 

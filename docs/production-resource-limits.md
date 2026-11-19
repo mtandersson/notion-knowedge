@@ -7,7 +7,7 @@ Compose file is deliberately unchanged. Coordinate the production image and
 mounts with [container deployment](container.md).
 
 Use one dedicated Linux host proxy process and a private loopback application
-container. Never expose port 3000 remotely. OAuth reader and integration indexer
+container. Never expose port 3000 remotely. Reader and integration indexer
 are separate roles; apply a measured envelope to each. Health, metrics, receipts,
 recovery tools and indexing administration stay private. The proxy template
 ([`docs/examples/mcp-nginx.conf`](examples/mcp-nginx.conf)) routes only `/mcp`
@@ -32,7 +32,7 @@ The policy fields control:
   state/index disk use; measure its growth and rebuild reserve, and monitor the
   actual paths with private warning/critical alerts.
 - `log_bytes`, `log_files`: bounded Docker local log rotation. Proxy access logs
-  are disabled to avoid recording OAuth codes and private requests.
+  are disabled to avoid recording credentials and private requests.
 - `proxy_connections`: one NGINX worker's total connection slots, including
   upstream sockets; `per_client_connections`, `requests_per_second` and
   `request_burst`: rejection-based per-IP limits, without an upstream waiting
@@ -57,7 +57,7 @@ service. Before starting, add reviewed read-only model/secrets mounts and
 role-appropriate private index/state mounts to this generated deployment; the
 renderer deliberately does not invent credentials, volumes or worker identity.
 Keep UID/GID 65532 ownership and private modes required by the server. For a
-read-only OAuth reader, do not add integration writer settings. Validate with
+read-only reader, do not add integration writer settings. Validate with
 `docker compose -f /private/generated/compose.json config --quiet`.
 
 The complete `nginx.conf` targets a dedicated proxy. Replace its example public
@@ -82,7 +82,7 @@ actual cgroup v2 `cpu.max`, `memory.max`, `memory.swap.max`, `pids.max`, process
 `/proc/<pid>/limits`, mount ceiling and throttling/OOM counters on the host. Save
 sanitized `nginx -T` output or a reviewed configuration hash and effective service
 limits. Keep all deployment evidence private; never dump service environments,
-requests, provider credentials or OAuth callbacks.
+requests, or provider credentials.
 
 Before accepting #455, exercise CPU/memory/PID/FD/tmp pressure, header/body
 oversize, slow headers/body/readers, per-client and total connection saturation,
