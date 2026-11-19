@@ -172,6 +172,7 @@ impl Fixture {
             poll_ms: 1000,
             timeout_seconds: 60,
             inventory_timeout_seconds: 900,
+            prefetch_workers: 2,
         };
         fs::create_dir(&settings.index).unwrap();
         let state = dir.path().join("state.sqlite");
@@ -4235,6 +4236,33 @@ fn out_of_sync(
     runtime: &IndexRuntime,
 ) -> Vec<(String, notion_knowledge_core::inventory::InventoryOutcome)> {
     runtime.coordinator.state().out_of_sync_pages(100).unwrap()
+}
+
+/// `NK_PREFETCH_WORKERS=0` prepares each page inline on demand; the sync
+/// still settles and commits every walked page.
+#[tokio::test]
+async fn full_sync_without_prefetch_workers_commits_every_page() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    add_extra_pages(&http, 4);
+    let mut settings = f.settings.clone();
+    settings.prefetch_workers = 0;
+    let runtime = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        IndexRuntime::reset_and_resync(
+            &settings,
+            &f.state,
+            authority(),
+            http.client(),
+            f.provider.clone(),
+        ),
+    )
+    .await
+    .expect("inline preparation must not stall the sync")
+    .unwrap();
+    let counts = runtime.coordinator.state().inventory_counts().unwrap();
+    assert!(counts.total > 4, "{counts:?}");
+    assert_eq!(counts.indexed, counts.total, "{counts:?}");
 }
 
 #[tokio::test]

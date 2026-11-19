@@ -37,7 +37,7 @@ parts of it and **sum to `wall_ms` exactly**:
 
 | Field | Meaning |
 | --- | --- |
-| `consumer_wait_ms` | The consumer waited for a prefetched page (the walk or preparation is the bottleneck). |
+| `consumer_wait_ms` | The consumer waited for a prefetched page (the walk or preparation is the bottleneck). With `NK_PREFETCH_WORKERS=0` the page is prepared only after the consumer asks, so this includes its whole preparation. |
 | `embed_ms` | Embedding the changed chunks (sequential single-text provider calls). |
 | `lance_merge_ms` | The Lance `merge_insert` (or delete) for the page. |
 | `fts_optimize_ms` | FTS index ensure, compaction and `optimize_fts_index`. |

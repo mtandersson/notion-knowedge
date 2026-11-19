@@ -12,6 +12,9 @@ pub struct WorkerSettings {
     pub poll_ms: u64,
     pub timeout_seconds: u64,
     pub inventory_timeout_seconds: u64,
+    /// Concurrent page preparations ahead of the embedding consumer; zero
+    /// prepares each page inline.
+    pub prefetch_workers: usize,
 }
 impl WorkerSettings {
     pub(crate) fn parse(
@@ -110,6 +113,7 @@ impl WorkerSettings {
                 1,
                 86_400,
             )?,
+            prefetch_workers: number("NK_PREFETCH_WORKERS", 2, 0, 8)? as usize,
         })
     }
 }
@@ -580,7 +584,15 @@ mod tests {
         let worker = config.webhook_worker.unwrap();
         assert_eq!(worker.poll_ms, 1000);
         assert_eq!(worker.timeout_seconds, 60);
+        assert_eq!(worker.prefetch_workers, 2);
+        for (value, workers) in [("0", 0), ("8", 8)] {
+            let config = parse(&[("NK_PREFETCH_WORKERS", value)]).unwrap();
+            assert_eq!(config.webhook_worker.unwrap().prefetch_workers, workers);
+        }
         for (setting, value) in [
+            ("NK_PREFETCH_WORKERS", "9"),
+            ("NK_PREFETCH_WORKERS", "-1"),
+            ("NK_PREFETCH_WORKERS", "two"),
             ("NK_WEBHOOK_INDEX_DIR", "relative"),
             ("NK_WEBHOOK_QWEN_ASSETS", ""),
             ("NK_WEBHOOK_POLL_MS", "0"),

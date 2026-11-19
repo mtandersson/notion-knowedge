@@ -18,7 +18,9 @@ use notion_knowledge_retrieval::{
 };
 use std::{path::Path, sync::Arc};
 
-/// Concurrent read-only page preparations ahead of the embedding consumer.
+/// Default concurrent read-only page preparations ahead of the embedding
+/// consumer (`NK_PREFETCH_WORKERS`). Zero prepares each page inline, only
+/// once the consumer asks for it.
 pub(crate) const PREFETCH_WORKERS: usize = 2;
 /// Completed preparations queued for the consumer beyond those in flight.
 const PREFETCH_QUEUE: usize = 1;
@@ -240,6 +242,8 @@ pub struct IndexRuntime {
     source_scope: LifecycleScope,
     /// One retained-byte budget for initial streaming and reconciliation read-ahead.
     prefetch_budget: PrefetchBudget,
+    /// Concurrent page preparations; zero prepares inline on demand.
+    prefetch_workers: usize,
 }
 impl IndexRuntime {
     /// Production startup for a disposable cache. Compatibility errors reset
@@ -684,6 +688,11 @@ impl IndexRuntime {
             tokio::sync::mpsc::channel::<(std::time::Instant, PageTimings, Prefetched)>(
                 PREFETCH_QUEUE,
             );
+        // Inline mode (zero workers): each preparation waits for a credit the
+        // consumer grants when it asks for its next page, so no page is
+        // prepared ahead of, or concurrently with, the consumer's work.
+        let inline = (self.prefetch_workers == 0).then(|| tokio::sync::Semaphore::new(0));
+        let inline = inline.as_ref();
         let produce = async {
             let ready = ready;
             // Skipped pages are already settled by the walk itself.
@@ -699,13 +708,19 @@ impl IndexRuntime {
                     .map(|(index, page)| {
                         let timings = page.timings.clone();
                         Box::pin(async move {
+                            if let Some(credits) = inline {
+                                // The semaphore is never closed while the producer runs.
+                                if let Ok(credit) = credits.acquire().await {
+                                    credit.forget();
+                                }
+                            }
                             let item = self
                                 .prepare_walked_page(settings, budget, index + 1, page)
                                 .await;
                             (timings, item)
                         })
                     })
-                    .buffered(PREFETCH_WORKERS)
+                    .buffered(self.prefetch_workers.max(1))
             );
             while let Some((timings, item)) = fetched.next().await {
                 if ready
@@ -730,6 +745,9 @@ impl IndexRuntime {
             // The page's wall time starts when the consumer asks for it, so
             // its waiting for a prepared page is part of that time.
             let mut asked = std::time::Instant::now();
+            if let Some(credits) = inline {
+                credits.add_permits(1);
+            }
             loop {
                 let (queued, timings, item) = tokio::select! {
                     item = prepared.recv() => match item { Some(item) => item, None => break },
@@ -944,6 +962,9 @@ impl IndexRuntime {
                     false,
                 );
                 asked = std::time::Instant::now();
+                if let Some(credits) = inline {
+                    credits.add_permits(1);
+                }
             }
             progress.report(
                 processed,
@@ -1791,6 +1812,13 @@ impl IndexRuntime {
             projection_mode: settings.projection_mode,
             lexical,
         })
+        .map(|runtime| runtime.with_prefetch_workers(settings.prefetch_workers))
+    }
+
+    /// Concurrent page preparations ahead of the consumer; zero prepares inline.
+    pub fn with_prefetch_workers(mut self, workers: usize) -> Self {
+        self.prefetch_workers = workers;
+        self
     }
 
     /// Compose a runtime over an opened index and one source client. Startup
@@ -1835,6 +1863,7 @@ impl IndexRuntime {
             source,
             source_scope: scope,
             prefetch_budget,
+            prefetch_workers: PREFETCH_WORKERS,
         })
     }
 }
@@ -1989,6 +2018,7 @@ mod timeout_tests {
             poll_ms: 10,
             timeout_seconds: 1,
             inventory_timeout_seconds: 60,
+            prefetch_workers: 2,
         };
         std::fs::create_dir(&settings.index).unwrap();
         let scope = LifecycleScope {
