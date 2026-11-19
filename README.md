@@ -427,8 +427,8 @@ sanitized failure class, and exits without starting an MCP transport.
 
 
 An explicitly empty optional setting is invalid; defaults apply only when a
-variable is unset. Removed (#730) authorization and Notion grant settings are ignored with one
-startup warning (see [single-user access](#single-user-access)).
+variable is unset. Removed authorization and Notion grant settings (#730) are
+ignored with one startup warning (see [single-user access](#single-user-access)).
 
 See [`.env.example`](.env.example) for a sample. The server does not load `.env`
 files automatically: export variables in your shell or configure your service

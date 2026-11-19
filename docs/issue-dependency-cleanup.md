@@ -22,7 +22,7 @@ commit message must contain the exact title. Its run is serialized with the
 existing manual workflow, runs credential-free tests first, then read-only
 preflight checks, then applies each bounded batch using
 `scripts/prune-issue-dependencies.py`. After each batch it validates
-the guarded historical issue and LanceDB dependencies, then re-runs both
+the guarded dependencies described below, then re-runs both
 batches read-only to confirm no removed edge remains.
 
 This is a single approved operational migration: it does **not** mutate
