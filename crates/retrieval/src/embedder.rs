@@ -13,7 +13,8 @@ use notion_knowledge_core::embedding::{EmbeddingError, EmbeddingMetadata, Embedd
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmbedderConfig {
     /// Offline Qwen3 on CPU from pinned local assets.
-    LocalQwen { assets: PathBuf },
+    /// `batch_size` is texts per forward pass; it does not change vectors.
+    LocalQwen { assets: PathBuf, batch_size: usize },
 }
 
 /// Load the configured provider. When `expected` is given, a provider with a
@@ -30,9 +31,11 @@ async fn load_backend(
 ) -> Result<Arc<dyn EmbeddingProvider>, EmbeddingError> {
     match config {
         #[cfg(feature = "local-qwen")]
-        EmbedderConfig::LocalQwen { assets } => Ok(Arc::new(
-            crate::qwen::QwenProvider::load(crate::qwen::QwenConfig::cpu(assets)).await?,
-        )),
+        EmbedderConfig::LocalQwen { assets, batch_size } => {
+            let mut qwen = crate::qwen::QwenConfig::cpu(assets);
+            qwen.batch_size = *batch_size;
+            Ok(Arc::new(crate::qwen::QwenProvider::load(qwen).await?))
+        }
         #[cfg(not(feature = "local-qwen"))]
         EmbedderConfig::LocalQwen { .. } => Err(EmbeddingError::UnsupportedModel),
     }
@@ -82,6 +85,7 @@ mod tests {
     fn config() -> EmbedderConfig {
         EmbedderConfig::LocalQwen {
             assets: PathBuf::from("/unused"),
+            batch_size: 1,
         }
     }
 

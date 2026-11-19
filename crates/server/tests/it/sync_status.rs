@@ -284,6 +284,7 @@ async fn installed_status_validates_real_index_metadata_without_model_assets_or_
             alias_sources: notion_knowledge_core::aliases::AliasSources::new(true, vec![]).unwrap(),
             index: index.clone(),
             assets: dir.path().join("no-model-assets"),
+            embed_batch_size: 1,
             poll_ms: 10,
             timeout_seconds: 1,
             inventory_timeout_seconds: 900,

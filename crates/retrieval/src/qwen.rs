@@ -59,7 +59,7 @@ impl QwenConfig {
         if self.device != QwenDevice::Cpu {
             return Err(EmbeddingError::UnsupportedModel);
         }
-        if !(1..=8).contains(&self.batch_size) || !(1..=4096).contains(&self.max_tokens) {
+        if !(1..=16).contains(&self.batch_size) || !(1..=4096).contains(&self.max_tokens) {
             return Err(EmbeddingError::InvalidInput);
         }
         Ok(())
@@ -278,6 +278,33 @@ fn persist_metadata(identity: &EmbeddingMetadata, path: &Path) -> Result<(), Emb
         .and_then(|()| file.sync_all())
         .map_err(|_| EmbeddingError::Unavailable)
 }
+/// Padded tokens one forward pass may hold (longest input times batch length).
+const PASS_TOKEN_BUDGET: usize = 4096;
+
+/// Split inputs, in order, into forward passes of at most `batch_size` texts
+/// whose padded size stays within `PASS_TOKEN_BUDGET`. Every input fits
+/// alone because `max_tokens` is at most the budget.
+fn forward_passes(lengths: &[usize], batch_size: usize) -> Vec<std::ops::Range<usize>> {
+    let mut passes = Vec::new();
+    let mut start = 0;
+    let mut longest = 0;
+    for (index, &tokens) in lengths.iter().enumerate() {
+        let next_longest = longest.max(tokens);
+        let count = index - start + 1;
+        if index > start && (count > batch_size || next_longest * count > PASS_TOKEN_BUDGET) {
+            passes.push(start..index);
+            start = index;
+            longest = tokens;
+        } else {
+            longest = next_longest;
+        }
+    }
+    if start < lengths.len() {
+        passes.push(start..lengths.len());
+    }
+    passes
+}
+
 fn validate_inputs(inputs: &[String]) -> Result<(), EmbeddingError> {
     // Bound cloning/tokenization before admission. Caller can split large jobs.
     if inputs.len() > 32
@@ -335,14 +362,9 @@ impl EmbeddingProvider for QwenProvider {
                 if lengths.iter().any(|&n| n > config.max_tokens) {
                     return Err(EmbeddingError::InputLimit);
                 }
-                if lengths
-                    .chunks(config.batch_size)
-                    .any(|tokens| tokens.iter().max().copied().unwrap_or(0) * tokens.len() > 4096)
-                {
-                    return Err(EmbeddingError::InputLimit);
-                }
                 let mut output = Vec::with_capacity(inputs.len());
-                for batch in inputs.chunks(config.batch_size) {
+                for range in forward_passes(&lengths, config.batch_size) {
+                    let batch = &inputs[range];
                     let vectors = runtime.embed(batch)?;
                     if vectors.len() != batch.len()
                         || vectors
@@ -624,7 +646,7 @@ mod tests {
         assert_eq!(calls.lock().unwrap().len(), 2);
     }
     #[tokio::test]
-    async fn overlong_or_oversized_padded_batch_never_runs_inference() {
+    async fn overlong_input_never_runs_inference() {
         let mut c = QwenConfig::cpu("unused");
         c.batch_size = 2;
         c.max_tokens = 4096;
@@ -633,11 +655,27 @@ mod tests {
             p.embed_batch(&["1".into(), "4097".into()]).await,
             Err(EmbeddingError::InputLimit)
         );
-        assert_eq!(
-            p.embed_batch(&["1".into(), "3000".into()]).await,
-            Err(EmbeddingError::InputLimit)
-        );
         assert!(calls.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn passes_split_to_keep_padded_tokens_within_budget() {
+        let mut c = QwenConfig::cpu("unused");
+        c.batch_size = 16;
+        c.max_tokens = 4096;
+        let (p, calls) = fake(c, false);
+        let texts = ["1", "3000", "1000", "1000", "1000", "1000", "10"].map(str::to_string);
+        let output = p.embed_batch(&texts).await.unwrap();
+        assert_eq!(output.len(), texts.len());
+        // Longest-times-count never exceeds 4096 padded tokens per pass.
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                texts[..1].to_vec(),
+                texts[1..2].to_vec(),
+                texts[2..6].to_vec(),
+                texts[6..].to_vec()
+            ]
+        );
     }
     #[tokio::test]
     async fn concurrent_admission_is_bounded_and_invalid_vectors_are_rejected() {

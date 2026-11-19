@@ -179,6 +179,46 @@ impl PreparedPageMutation {
     }
 }
 
+/// Texts per embedding request and their total bytes, within the provider
+/// boundary limits; the provider splits each request into forward passes.
+const EMBED_REQUEST_TEXTS: usize = 32;
+const EMBED_REQUEST_BYTES: usize = 262_144;
+
+/// Split texts, in order, into requests within the embedding request limits.
+fn embed_requests(inputs: &[String]) -> Vec<&[String]> {
+    let mut requests = Vec::new();
+    let (mut start, mut bytes) = (0, 0);
+    for (index, input) in inputs.iter().enumerate() {
+        if index > start
+            && (index - start == EMBED_REQUEST_TEXTS || bytes + input.len() > EMBED_REQUEST_BYTES)
+        {
+            requests.push(&inputs[start..index]);
+            (start, bytes) = (index, 0);
+        }
+        bytes += input.len();
+    }
+    if start < inputs.len() {
+        requests.push(&inputs[start..]);
+    }
+    requests
+}
+
+#[cfg(test)]
+mod embed_request_tests {
+    use super::*;
+    #[test]
+    fn requests_keep_order_and_stay_within_limits() {
+        let texts: Vec<String> = (0..70).map(|i| i.to_string()).collect();
+        let sizes: Vec<usize> = embed_requests(&texts).iter().map(|r| r.len()).collect();
+        assert_eq!(sizes, vec![32, 32, 6]);
+        assert_eq!(embed_requests(&texts).concat(), texts);
+        let large = vec!["x".repeat(100_000); 5];
+        let sizes: Vec<usize> = embed_requests(&large).iter().map(|r| r.len()).collect();
+        assert_eq!(sizes, vec![2, 2, 1]);
+        assert!(embed_requests(&[]).is_empty());
+    }
+}
+
 fn failure(error: ChunkTableError) -> FailureClass {
     match error {
         ChunkTableError::Storage
@@ -815,15 +855,13 @@ impl GuardedChunkTable {
             }
         }
         // The page is the atomic storage snapshot, not a provider call budget.
-        // Keep each request bounded independently of page chunk count; finish
-        // all embedding before preparing any mutation. Production Qwen already
-        // uses one-text inference batches, retaining the same accepted vectors.
+        // Send the page's texts in bounded requests so the provider can batch
+        // its forward passes; finish all embedding before preparing any mutation.
         let mut vectors = Vec::with_capacity(embed_inputs.len());
         {
             let _embed = page_timings::timer(Bucket::Embed);
-            for input in &embed_inputs {
-                vectors
-                    .extend(embedding::embed_batch(provider, std::slice::from_ref(input)).await?);
+            for request in embed_requests(&embed_inputs) {
+                vectors.extend(embedding::embed_batch(provider, request).await?);
             }
         }
         let mut generated = embed_positions

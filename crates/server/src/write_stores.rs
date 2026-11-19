@@ -175,6 +175,7 @@ mod tests {
             lexical: None,
             index: alias,
             assets: dir.path().join("assets"),
+            embed_batch_size: 1,
             poll_ms: 100,
             timeout_seconds: 20,
             inventory_timeout_seconds: 900,

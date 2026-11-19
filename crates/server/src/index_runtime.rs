@@ -2015,6 +2015,7 @@ mod timeout_tests {
             alias_sources: AliasSources::new(true, vec![]).unwrap(),
             index: dir.path().join("index"),
             assets: dir.path().join("assets"),
+            embed_batch_size: 1,
             poll_ms: 10,
             timeout_seconds: 1,
             inventory_timeout_seconds: 60,

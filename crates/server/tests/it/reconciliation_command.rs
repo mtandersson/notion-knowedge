@@ -169,6 +169,7 @@ impl Fixture {
             alias_sources: notion_knowledge_core::aliases::AliasSources::new(true, vec![]).unwrap(),
             index: dir.path().join("index"),
             assets: dir.path().join("assets"),
+            embed_batch_size: 1,
             poll_ms: 1000,
             timeout_seconds: 60,
             inventory_timeout_seconds: 900,

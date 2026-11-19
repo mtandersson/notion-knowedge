@@ -2,6 +2,9 @@
 use crate::{config::ConfigError, webhook::WebhookConfig};
 use std::{ffi::OsString, path::PathBuf};
 
+/// Default texts per Qwen forward pass; see docs/local-qwen.md for measurements.
+pub const DEFAULT_EMBED_BATCH_SIZE: u64 = 1;
+
 #[derive(Debug, Clone)]
 pub struct WorkerSettings {
     pub projection_mode: notion_knowledge_notion::relation_proposal::ProjectionMode,
@@ -9,6 +12,8 @@ pub struct WorkerSettings {
     pub alias_sources: notion_knowledge_core::aliases::AliasSources,
     pub index: PathBuf,
     pub assets: PathBuf,
+    /// Texts per Qwen forward pass (`NK_EMBED_BATCH_SIZE`); vectors do not depend on it.
+    pub embed_batch_size: usize,
     pub poll_ms: u64,
     pub timeout_seconds: u64,
     pub inventory_timeout_seconds: u64,
@@ -102,6 +107,8 @@ impl WorkerSettings {
             alias_sources,
             index,
             assets,
+            embed_batch_size: number("NK_EMBED_BATCH_SIZE", DEFAULT_EMBED_BATCH_SIZE, 1, 16)?
+                as usize,
             poll_ms: number("NK_WEBHOOK_POLL_MS", 1000, 10, 60000)?,
             timeout_seconds: number("NK_WEBHOOK_TIMEOUT_SECONDS", 60, 1, 300)?,
             inventory_timeout_seconds: number(
@@ -239,6 +246,7 @@ pub mod runtime {
         let provider = notion_knowledge_retrieval::embedder::load_configured_embedder(
             &notion_knowledge_retrieval::embedder::EmbedderConfig::LocalQwen {
                 assets: settings.assets.clone(),
+                batch_size: settings.embed_batch_size,
             },
             None,
         )

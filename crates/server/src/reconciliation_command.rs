@@ -191,6 +191,7 @@ pub mod runtime {
         let provider = match notion_knowledge_retrieval::embedder::load_configured_embedder(
             &notion_knowledge_retrieval::embedder::EmbedderConfig::LocalQwen {
                 assets: settings.assets.clone(),
+                batch_size: settings.embed_batch_size,
             },
             None,
         )
