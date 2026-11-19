@@ -1,5 +1,5 @@
 use notion_knowledge_core::{
-    backend::{BackendError, BackendErrorKind, BackendFuture, PageId},
+    backend::PageId,
     discovery::ExclusionRules,
     embedding::EmbeddingProvider,
     graph::{GraphEdge, GraphTarget},

@@ -1,60 +1,31 @@
-# Root-scope authorization gate (#306 / parent #87)
+# Root-scope authorization (#306 / parent #87, #692)
 
-This change adds a **provider-independent, fail-closed policy gate**
-(`RootScopeGate`) that all future MCP operations can reuse. It is backed by
-the existing `PageLifecycle` port and Notion's metadata-only physical
-ancestry resolver; it makes no Notion mutations.
+Reads, search result disclosure and graph lookups are authorized by
+`ReadScopeGate` (`ReadAuthority::Inventory`) in
+`crates/core/src/root_scope.rs`, from the page inventory the last tree walk
+recorded. It is synchronous, never calls Notion and keeps no positive
+authorization cache. Staleness is bounded by reconciliation: moves and
+exclusions in Notion take effect at the next walk.
 
-> Scope of this gate: since #691 the write path (create, append, section
-> update, native file/image attach and file refresh) no longer calls
-> `RootScopeGate`; writes rely on Notion's own permission check for the token.
-> Reads use the inventory `ReadScopeGate` (`ReadAuthority::Inventory`). The
-> gate remains only for
-> relation proposals.
+Relation and link targets are resolved the same way, through the inventory's
+parent map (`InventoryPlacement`). Writes run no root gate; they rely on
+Notion's own permission check for the token (#691).
+
+The live physical-ancestry gate (`RootScopeGate`, `PageLifecycle`,
+`resolve_lifecycle`) was removed in #692: this is a single-user deployment
+and the walked inventory is the authority.
 
 ## Authorization invariant
 
 A page UUID, indexed source reference, a search-result `root_page_id`, a
 Notion relation or a user-supplied root claim **never confer authority**.
-The trusted server composition must provide a canonical workspace UUID,
-canonical allowed root-page UUIDs, exclusions and a monotonically updated
-configuration generation.
+The trusted server composition provides a canonical workspace UUID,
+canonical root-page UUIDs, exclusions and a configuration generation;
+`validate_scope` rejects a malformed policy.
 
-For each requested page, `authorize` asks `PageLifecycle` for **fresh**
-authoritative ancestry. The gate confirms:
+A page is readable only when its recorded chain reaches a currently
+configured root through pages and data sources none of which is trashed,
+unreadable or excluded. A page absent from the inventory is denied. Errors
+contain no page content, page ID, parent chain, credential or backend body.
 
-- Returned policy matches the trusted configuration and selected page ID.
-- Every parent edge is a contiguous physical page/block/database/data-source
-  ancestry step that reaches the workspace; no missing, repeated, or forged
-  root is accepted.
-- At least one approved root is actually an ancestor (or the selected page),
-  and the evidence's allowed roots match exactly those physically observed.
-- The selected page and its ancestors are active; page/descendant/source-type
-  exclusions are enforced on the entire chain.
-- Unknown or inconsistent ancestry, unavailable metadata, or policy mismatch
-  returns a sanitized denial; nothing is emitted from partially validated data.
-
-The gate **does not cache positive access decisions**; each operation needs
-a new `authorize`. This means moved pages cannot retain authority through an
-old ancestry cache. The `AuthorizedPage` permit has private fields and can
-only be created by the gate. Before a mutation or sensitive fresh read,
-`revalidate` compares a **newly loaded current trusted policy** with the
-permit's policy and asks the backend to recheck source evidence. It rejects
-root/exclusion/generation changes and any changed ancestry. This is
-defense-in-depth, not a Notion atomic authorization transaction; edits or
-moves may occur between final check and external call.
-
-Errors contain no page content, selected page ID, parent chain, credential,
-or backend error body.
-
-## Rollout
-
-The production MCP tools are **not** yet wired to this new port. That is
-tracked in child [#307](https://github.com/mtandersson/notion-knowedge/issues/307)
-and is required before parent #87 may be closed or write workflows #78/#79
-enabled. In particular, existing indexed-result root filtering alone is not
-a substitute for fresh ancestry verification. The read-only default and
-planned-write schema-preview behavior remain unchanged by this PR.
-
-Run `cargo test -p notion-knowledge-core --test root_scope --locked`,
-the existing Notion lifecycle tests, workspace Clippy/format, and full CI.
+Run `cargo test -p notion-knowledge-core --test root_scope --locked`.
