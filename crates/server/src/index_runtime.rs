@@ -1956,7 +1956,8 @@ async fn prepare_table_search(
 }
 
 /// Roll back a hot rollback journal left by a crash before any read-only
-/// open, logging the cause when recovery fails.
+/// open, logging the cause when recovery fails. A journal beside a WAL
+/// file is left alone; the read-only open then refuses WAL as before.
 fn recover_hot_journal(state: &Path) -> Result<(), &'static str> {
     use notion_knowledge_retrieval::sync_state::SqliteSyncStateStore;
     match SqliteSyncStateStore::recover_hot_journal(state) {
@@ -1966,7 +1967,7 @@ fn recover_hot_journal(state: &Path) -> Result<(), &'static str> {
                 "{}",
                 serde_json::json!({
                     "operation": "operational_state_recovery",
-                    "outcome": "hot_journal_recovered",
+                    "outcome": "journal_rollback_attempted",
                 })
             );
             Ok(())
