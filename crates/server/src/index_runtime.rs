@@ -368,9 +368,13 @@ impl IndexRuntime {
         let pending = if state_exists {
             recover_hot_journal(state)?;
             SqliteSyncStateStore::open_read_only(state)
-                .and_then(|store| store.cache_rebuild_pending())
                 .map_err(|error| {
                     log_state_error("open_read_only", &format!("{error:?}"));
+                    "operational state unavailable"
+                })?
+                .cache_rebuild_pending()
+                .map_err(|error| {
+                    log_state_error("cache_rebuild_pending", &format!("{error:?}"));
                     "operational state unavailable"
                 })?
         } else {
@@ -1948,44 +1952,23 @@ async fn prepare_table_search(
 }
 
 /// Roll back a hot rollback journal left by a crash before any read-only
-/// open: a read-only SQLite connection cannot roll it back, so every read
-/// would fail until a writer opens the database. A brief read-write open
-/// does exactly that recovery and nothing else; a missing or empty journal
-/// (no crash) opens nothing.
+/// open, logging the cause when recovery fails.
 fn recover_hot_journal(state: &Path) -> Result<(), &'static str> {
-    let mut journal = state.as_os_str().to_owned();
-    journal.push("-journal");
-    match std::fs::metadata(&journal) {
-        Ok(meta) if meta.len() > 0 => {}
-        Ok(_) => return Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            log_state_error("hot_journal_probe", &error.to_string());
-            return Err("operational state unavailable");
-        }
-    }
-    let recovered =
-        rusqlite::Connection::open_with_flags(state, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
-            .and_then(|connection| {
-                connection.busy_timeout(std::time::Duration::from_secs(5))?;
-                // The first read takes a shared lock, which rolls back a hot journal.
-                connection.query_row("SELECT count(*) FROM sqlite_master", [], |row| {
-                    row.get::<_, i64>(0)
-                })
-            });
-    match recovered {
-        Ok(_) => {
+    use notion_knowledge_retrieval::sync_state::SqliteSyncStateStore;
+    match SqliteSyncStateStore::recover_hot_journal(state) {
+        Ok(false) => Ok(()),
+        Ok(true) => {
             eprintln!(
                 "{}",
                 serde_json::json!({
                     "operation": "operational_state_recovery",
-                    "outcome": "hot_journal_checked",
+                    "outcome": "hot_journal_recovered",
                 })
             );
             Ok(())
         }
         Err(error) => {
-            log_state_error("hot_journal_recovery", &error.to_string());
+            log_state_error("hot_journal_recovery", &error);
             Err("operational state unavailable")
         }
     }
