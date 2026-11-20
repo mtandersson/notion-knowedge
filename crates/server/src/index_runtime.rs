@@ -366,10 +366,13 @@ impl IndexRuntime {
         let exists = |p: &Path| p.try_exists().map_err(|_| "cache path unavailable");
         let state_exists = exists(state)?;
         let pending = if state_exists {
+            recover_hot_journal(state)?;
             SqliteSyncStateStore::open_read_only(state)
-                .map_err(|_| "operational state unavailable")?
-                .cache_rebuild_pending()
-                .map_err(|_| "operational state unavailable")?
+                .and_then(|store| store.cache_rebuild_pending())
+                .map_err(|error| {
+                    log_state_error("open_read_only", &format!("{error:?}"));
+                    "operational state unavailable"
+                })?
         } else {
             false
         };
@@ -1942,6 +1945,63 @@ async fn prepare_table_search(
         .await
         .map_err(|_| "search unavailable after preparation")?;
     Ok(())
+}
+
+/// Roll back a hot rollback journal left by a crash before any read-only
+/// open: a read-only SQLite connection cannot roll it back, so every read
+/// would fail until a writer opens the database. A brief read-write open
+/// does exactly that recovery and nothing else; a missing or empty journal
+/// (no crash) opens nothing.
+fn recover_hot_journal(state: &Path) -> Result<(), &'static str> {
+    let mut journal = state.as_os_str().to_owned();
+    journal.push("-journal");
+    match std::fs::metadata(&journal) {
+        Ok(meta) if meta.len() > 0 => {}
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            log_state_error("hot_journal_probe", &error.to_string());
+            return Err("operational state unavailable");
+        }
+    }
+    let recovered =
+        rusqlite::Connection::open_with_flags(state, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .and_then(|connection| {
+                connection.busy_timeout(std::time::Duration::from_secs(5))?;
+                // The first read takes a shared lock, which rolls back a hot journal.
+                connection.query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+            });
+    match recovered {
+        Ok(_) => {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "operation": "operational_state_recovery",
+                    "outcome": "hot_journal_checked",
+                })
+            );
+            Ok(())
+        }
+        Err(error) => {
+            log_state_error("hot_journal_recovery", &error.to_string());
+            Err("operational state unavailable")
+        }
+    }
+}
+
+/// Keep the startup error generic but log the underlying cause.
+fn log_state_error(stage: &str, error: &str) {
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "operation": "operational_state_open",
+            "stage": stage,
+            "outcome": "failed",
+            "error": error,
+        })
+    );
 }
 
 struct RecoveryOptions {
