@@ -226,6 +226,18 @@ impl SqliteSyncStateStore {
             .map_err(|error| error.to_string())?;
         Ok(true)
     }
+    /// The underlying SQLite error a read-only open of `path` hits, if any,
+    /// for diagnostics: [`SyncStateError`] keeps only its class.
+    pub fn read_only_open_error(path: impl AsRef<Path>) -> Option<String> {
+        Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .and_then(|connection| {
+                connection.query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+            })
+            .err()
+            .map(|error| error.to_string())
+    }
     /// Open an existing current-schema writer without creation or migration.
     pub fn open_existing(path: impl AsRef<Path>) -> Result<Self, SyncStateError> {
         Self::open_current(path.as_ref(), false)

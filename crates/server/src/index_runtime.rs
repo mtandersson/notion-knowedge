@@ -369,7 +369,11 @@ impl IndexRuntime {
             recover_hot_journal(state)?;
             SqliteSyncStateStore::open_read_only(state)
                 .map_err(|error| {
-                    log_state_error("open_read_only", &format!("{error:?}"));
+                    let cause = SqliteSyncStateStore::read_only_open_error(state).map_or_else(
+                        || format!("{error:?}"),
+                        |sqlite| format!("{error:?}: {sqlite}"),
+                    );
+                    log_state_error("open_read_only", &cause);
                     "operational state unavailable"
                 })?
                 .cache_rebuild_pending()
