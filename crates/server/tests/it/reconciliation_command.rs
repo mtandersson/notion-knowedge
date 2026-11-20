@@ -776,6 +776,59 @@ async fn read_only_commands_reject_external_wal_before_creating_sqlite_auxiliari
     assert_eq!(f.provider.count.load(Ordering::SeqCst), 0);
 }
 
+/// After a crash mid-transaction the state file holds uncommitted pages and a
+/// hot rollback journal. Read-only startup must roll it back, not fail forever.
+#[tokio::test]
+async fn read_only_startup_rolls_back_a_hot_journal_left_by_a_crash() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    counts(&f.command(&http, &["--reconcile", "apply"]).await, 3, 0, 0);
+    let journal = std::path::PathBuf::from(format!("{}-journal", f.state.display()));
+    let crashed = f.state.with_extension("crashed");
+    let crashed_journal = f.state.with_extension("crashed-journal");
+    {
+        let db = rusqlite::Connection::open(&f.state).unwrap();
+        // A tiny cache spills uncommitted pages into the database file.
+        db.execute_batch(
+            "PRAGMA cache_size=1; BEGIN;
+             CREATE TABLE uncommitted_crash(x);
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<200)
+             INSERT INTO uncommitted_crash SELECT randomblob(4000) FROM n;",
+        )
+        .unwrap();
+        assert!(fs::metadata(&journal).unwrap().len() > 0);
+        // Capture the files as a crash would leave them.
+        fs::copy(&f.state, &crashed).unwrap();
+        fs::copy(&journal, &crashed_journal).unwrap();
+    }
+    fs::rename(&crashed, &f.state).unwrap();
+    fs::rename(&crashed_journal, &journal).unwrap();
+    let runtime = IndexRuntime::recover_for_reads(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    )
+    .await
+    .expect("read-only startup recovers a hot journal");
+    assert_eq!(runtime.coordinator.owned_page_ids().unwrap().len(), 3);
+    assert!(!journal.exists());
+    let db = rusqlite::Connection::open(&f.state).unwrap();
+    let leftover: i64 = db
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name='uncommitted_crash'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(leftover, 0, "the crashed transaction is rolled back");
+    let check: String = db
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(check, "ok");
+}
+
 #[tokio::test]
 async fn read_only_commands_reject_previous_schema_without_migration_or_auxiliary_creation() {
     let http = start_notion().await;

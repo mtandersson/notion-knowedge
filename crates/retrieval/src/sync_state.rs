@@ -197,6 +197,60 @@ impl SqliteSyncStateStore {
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, SyncStateError> {
         Self::open_current(path.as_ref(), true)
     }
+    /// Roll back a hot rollback journal a crash left beside `path`. A
+    /// read-only connection cannot do this, so it would fail on every open
+    /// until a writer opened the database. A brief read-write open whose
+    /// first read takes a shared lock performs exactly that recovery. With
+    /// no journal or an empty one (no crash) nothing is opened. Returns
+    /// whether a journal was present, or the underlying error text.
+    pub fn recover_hot_journal(path: impl AsRef<Path>) -> Result<bool, String> {
+        let path = path.as_ref();
+        let mut journal = path.as_os_str().to_owned();
+        journal.push("-journal");
+        match fs::metadata(&journal) {
+            Ok(meta) if meta.len() > 0 => {}
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(format!("journal probe: {error}")),
+        }
+        // Never open a WAL (or non-SQLite) file: that could create WAL/SHM
+        // auxiliaries, and a stray journal beside it is not hot anyway.
+        if !rollback_journal_mode(path).map_err(|error| format!("header probe: {error}"))? {
+            return Ok(false);
+        }
+        let connection =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+                .map_err(|error| error.to_string())?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(|error| error.to_string())?;
+        connection
+            .query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(true)
+    }
+    /// The underlying SQLite error a read-only open of `path` hits, if any,
+    /// for diagnostics: [`SyncStateError`] keeps only its class.
+    /// Like [`Self::open_read_only`], a WAL (or unreadable) file is never
+    /// opened, so no auxiliary file is created.
+    pub fn read_only_open_error(path: impl AsRef<Path>) -> Option<String> {
+        let path = path.as_ref();
+        match rollback_journal_mode(path) {
+            Err(error) => return Some(error.to_string()),
+            Ok(false) => return None,
+            Ok(true) => {}
+        }
+        Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .and_then(|connection| {
+                connection.query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+            })
+            .err()
+            .map(|error| error.to_string())
+    }
     /// Open an existing current-schema writer without creation or migration.
     pub fn open_existing(path: impl AsRef<Path>) -> Result<Self, SyncStateError> {
         Self::open_current(path.as_ref(), false)
@@ -541,6 +595,15 @@ fn apply_migrations(transaction: &rusqlite::Transaction<'_>) -> Result<(), SyncS
         .map_err(map_sqlite_error)?;
 
     Ok(())
+}
+
+/// Whether `path` is a SQLite database in rollback-journal (not WAL) mode,
+/// read from its header without opening SQLite.
+fn rollback_journal_mode(path: &Path) -> std::io::Result<bool> {
+    use std::io::Read;
+    let mut header = [0u8; 20];
+    fs::File::open(path)?.read_exact(&mut header)?;
+    Ok(&header[..16] == b"SQLite format 3\0" && header[18] == 1 && header[19] == 1)
 }
 
 fn map_sqlite_error(_: rusqlite::Error) -> SyncStateError {

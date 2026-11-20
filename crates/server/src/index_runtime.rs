@@ -366,10 +366,21 @@ impl IndexRuntime {
         let exists = |p: &Path| p.try_exists().map_err(|_| "cache path unavailable");
         let state_exists = exists(state)?;
         let pending = if state_exists {
+            recover_hot_journal(state)?;
             SqliteSyncStateStore::open_read_only(state)
-                .map_err(|_| "operational state unavailable")?
+                .map_err(|error| {
+                    let cause = SqliteSyncStateStore::read_only_open_error(state).map_or_else(
+                        || format!("{error:?}"),
+                        |sqlite| format!("{error:?}: {sqlite}"),
+                    );
+                    log_state_error("open_read_only", &cause);
+                    "operational state unavailable"
+                })?
                 .cache_rebuild_pending()
-                .map_err(|_| "operational state unavailable")?
+                .map_err(|error| {
+                    log_state_error("cache_rebuild_pending", &format!("{error:?}"));
+                    "operational state unavailable"
+                })?
         } else {
             false
         };
@@ -1942,6 +1953,43 @@ async fn prepare_table_search(
         .await
         .map_err(|_| "search unavailable after preparation")?;
     Ok(())
+}
+
+/// Roll back a hot rollback journal left by a crash before any read-only
+/// open, logging the cause when recovery fails. A journal beside a WAL
+/// file is left alone; the read-only open then refuses WAL as before.
+fn recover_hot_journal(state: &Path) -> Result<(), &'static str> {
+    use notion_knowledge_retrieval::sync_state::SqliteSyncStateStore;
+    match SqliteSyncStateStore::recover_hot_journal(state) {
+        Ok(false) => Ok(()),
+        Ok(true) => {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "operation": "operational_state_recovery",
+                    "outcome": "journal_rollback_attempted",
+                })
+            );
+            Ok(())
+        }
+        Err(error) => {
+            log_state_error("hot_journal_recovery", &error);
+            Err("operational state unavailable")
+        }
+    }
+}
+
+/// Keep the startup error generic but log the underlying cause.
+fn log_state_error(stage: &str, error: &str) {
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "operation": "operational_state_open",
+            "stage": stage,
+            "outcome": "failed",
+            "error": error,
+        })
+    );
 }
 
 struct RecoveryOptions {
