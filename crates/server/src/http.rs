@@ -105,6 +105,8 @@ pub async fn serve_with_handler(
     })
     .await
     .map(Installed::into_parts)?;
+    #[cfg(not(all(unix, feature = "webhook-worker")))]
+    let () = worker;
     serve_installed_on(
         listener,
         settings,
@@ -154,6 +156,8 @@ pub async fn serve_starting(
         }
         () = shutdown.cancelled() => return Ok(()),
     };
+    #[cfg(not(all(unix, feature = "webhook-worker")))]
+    let () = worker;
     serve_installed_on(
         listener,
         settings,
@@ -267,6 +271,8 @@ pub async fn serve_composed(
         installed = starting => installed.map(Installed::into_parts)?,
         () = shutdown.cancelled() => return Ok(()),
     };
+    #[cfg(not(all(unix, feature = "webhook-worker")))]
+    let () = worker;
     serve_installed_on(
         listener,
         settings,
