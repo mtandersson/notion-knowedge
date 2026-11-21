@@ -22,7 +22,8 @@ across cache rebuilds. A service restart or cache loss never authorizes replay
 of an indeterminate source effect.
 
 The server installs `knowledge_create_page` and `knowledge_append` only through
-the trusted composition. Existing read-only/capability/root gates, raw source
+the trusted composition. The local tool policy and configured root claim
+checks apply along with the Notion integration's source permissions. Raw source
 revision/hash checks, verified readback, idempotency and audit still apply.
 Audit records use the automation actor, not an approved-user claim.
 Section replacement is not installed by this composition. File ingestion has

@@ -180,6 +180,9 @@ impl NotionWrite for Source {
             {
                 let mut pages = self.pages.lock().unwrap();
                 let d = pages.get_mut(&q.page_id.0).unwrap();
+                if !d.body.is_empty() && !d.body.ends_with('\n') {
+                    d.body.push('\n');
+                }
                 d.body.push_str(&q.markdown);
                 if self.omit_final_lf.load(Ordering::SeqCst) && d.body.ends_with('\n') {
                     d.body.pop();
@@ -471,6 +474,28 @@ async fn normalized_final_line_feed_preserves_verified_receipts_and_once_only_re
         let events = f.audit.events.lock().unwrap();
         assert_eq!(events[1].outcome(), AuditOutcome::Succeeded);
     }
+}
+
+#[tokio::test]
+async fn append_verifies_the_provider_separator_and_replays_without_adding_another_paragraph() {
+    let f = Fixture::new();
+    f.source.pages.lock().unwrap().get_mut(PAGE).unwrap().body = "Original paragraph.".into();
+    let handler = f.server(false);
+    let mut args = append("append-with-provider-separator");
+    args["markdown"] = json!("New paragraph.");
+    let response = invoke(handler.clone(), "knowledge_append", args.clone()).await;
+    assert_eq!(
+        output(&response)["write"]["status"],
+        "verified",
+        "{response}"
+    );
+    let replay = invoke(handler, "knowledge_append", args).await;
+    assert_eq!(output(&replay)["write"]["replayed"], true);
+    assert_eq!(f.source.effects.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        f.source.pages.lock().unwrap().get(PAGE).unwrap().body,
+        "Original paragraph.\nNew paragraph."
+    );
 }
 
 #[tokio::test]
