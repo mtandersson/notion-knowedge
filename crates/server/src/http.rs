@@ -249,7 +249,7 @@ pub async fn serve_composed(
     shutdown: tokio_util::sync::CancellationToken,
 ) -> io::Result<()> {
     let mut listener = tokio::net::TcpListener::bind(settings.http_bind).await?;
-    let (handler, worker) = while_starting(&mut listener, &settings, async {
+    let starting = while_starting(&mut listener, &settings, async {
         let handler = compose_handler(
             handler,
             &settings,
@@ -262,9 +262,11 @@ pub async fn serve_composed(
             #[cfg(all(unix, feature = "webhook-worker"))]
             worker,
         })
-    })
-    .await
-    .map(Installed::into_parts)?;
+    });
+    let (handler, worker) = tokio::select! {
+        installed = starting => installed.map(Installed::into_parts)?,
+        () = shutdown.cancelled() => return Ok(()),
+    };
     serve_installed_on(
         listener,
         settings,
