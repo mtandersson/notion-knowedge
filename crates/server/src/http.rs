@@ -138,18 +138,22 @@ impl Installed {
     }
 }
 
-/// Typed seam: bind first, then run `startup` (index recovery, possibly a full
+/// Typed test seam (not an operator entry point): bind first, then run `startup` (index recovery, possibly a full
 /// cache rebuild) while the listener answers `/livez` and reports startup on
 /// `/readyz`. Production uses the same phase through `serve_with_handler`.
+#[doc(hidden)]
 pub async fn serve_starting(
     settings: crate::config::Config,
     startup: impl std::future::Future<Output = Result<Installed, &'static str>>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> io::Result<()> {
     let mut listener = tokio::net::TcpListener::bind(settings.http_bind).await?;
-    let (handler, worker) = while_starting(&mut listener, &settings, startup)
-        .await
-        .map(Installed::into_parts)?;
+    let (handler, worker) = tokio::select! {
+        installed = while_starting(&mut listener, &settings, startup) => {
+            installed.map(Installed::into_parts)?
+        }
+        () = shutdown.cancelled() => return Ok(()),
+    };
     serve_installed_on(
         listener,
         settings,
@@ -437,17 +441,18 @@ pub(crate) const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// a hyper timer so the header-read deadline is enforced. `axum::serve` does not
 /// install a timer, so hyper never applies its header-read timeout there.
 pub(crate) async fn serve_router(
-    mut listener: tokio::net::TcpListener,
+    listener: tokio::net::TcpListener,
     router: axum::Router,
     stop: tokio_util::sync::CancellationToken,
     header_read_timeout: Duration,
 ) -> io::Result<()> {
-    serve_router_on(&mut listener, router, stop, header_read_timeout).await
+    serve_router_on(listener, router, stop, header_read_timeout).await
 }
 
-/// `serve_router` on a borrowed listener, which stays bound after `stop`.
+/// `serve_router` on an owned listener, closed before draining, or a borrowed
+/// one, which stays bound after `stop` for the next router.
 async fn serve_router_on(
-    listener: &mut tokio::net::TcpListener,
+    mut listener: impl std::borrow::BorrowMut<tokio::net::TcpListener>,
     router: axum::Router,
     stop: tokio_util::sync::CancellationToken,
     header_read_timeout: Duration,
@@ -460,7 +465,7 @@ async fn serve_router_on(
     let (close_tx, close_rx) = tokio::sync::watch::channel(());
     loop {
         let (stream, _remote) = tokio::select! {
-            accepted = axum::serve::Listener::accept(listener) => accepted,
+            accepted = axum::serve::Listener::accept(listener.borrow_mut()) => accepted,
             () = stop.cancelled() => break,
         };
         // axum routers accept hyper's request body directly.
@@ -487,6 +492,8 @@ async fn serve_router_on(
         });
     }
     drop(close_rx);
+    // An owned listener closes here, before waiting for open connections.
+    drop(listener);
     close_tx.closed().await;
     Ok(())
 }
