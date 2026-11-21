@@ -4537,3 +4537,113 @@ async fn a_page_deadline_is_counted_as_a_timeout_not_only_a_failure() {
     assert_eq!((totals.failed, totals.timed_out), (1, 1), "{totals:?}");
     assert_eq!(totals.permanent, 0);
 }
+
+#[tokio::test]
+async fn http_answers_liveness_and_reports_startup_while_the_cache_rebuild_runs() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    // A failed rebuild leaves the durable rebuild flag pending for the next start.
+    fs::remove_dir_all(&f.settings.index).unwrap();
+    f.provider.fail.store(true, Ordering::SeqCst);
+    assert!(
+        IndexRuntime::recover(
+            &f.settings,
+            &f.state,
+            authority(),
+            http.client(),
+            f.provider.clone()
+        )
+        .await
+        .is_err()
+    );
+    f.provider.fail.store(false, Ordering::SeqCst);
+    // Without a search listing the walk reads PAGE's metadata, where it pauses.
+    http.change(|m| m.search_unavailable = true);
+    http.pause.armed.store(true, Ordering::SeqCst);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let mut config = notion_knowledge_server::config::Config::from_lookup(|_| None).unwrap();
+    config.http_bind = address;
+    config.webhook_state_file = Some(f.state.clone());
+    let stop = CancellationToken::new();
+    let shutdown = stop.clone();
+    let (settings, state, provider, source) = (
+        f.settings.clone(),
+        f.state.clone(),
+        f.provider.clone(),
+        http.client(),
+    );
+    let server = tokio::spawn(async move {
+        notion_knowledge_server::http::serve_starting(
+            config,
+            async move {
+                IndexRuntime::recover(&settings, &state, authority(), source, provider).await?;
+                Ok(notion_knowledge_server::http::Installed {
+                    handler: notion_knowledge_mcp::KnowledgeServer::default(),
+                    worker: None,
+                })
+            },
+            shutdown,
+        )
+        .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        http.pause.started.notified(),
+    )
+    .await
+    .expect("the rebuild reaches its authoritative read");
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let live = client
+        .get(format!("http://{address}/livez"))
+        .send()
+        .await
+        .expect("the listener answers during the rebuild");
+    assert_eq!(live.status(), reqwest::StatusCode::OK);
+    let ready = client
+        .get(format!("http://{address}/readyz"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ready.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = ready.json().await.unwrap();
+    assert_eq!(body["status"], "starting");
+    assert_eq!(body["startup"], "cache_rebuild");
+    let mcp = client
+        .post(format!("http://{address}/mcp"))
+        .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mcp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = mcp.json().await.unwrap();
+    assert_eq!(body["startup"], "cache_rebuild");
+    http.pause.proceed.notify_one();
+    // After the rebuild the full router replaces the startup phase.
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let body: serde_json::Value = client
+                .get(format!("http://{address}/readyz"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if body["status"] != "starting" {
+                assert!(body.get("startup").is_none());
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("startup completes after the rebuild");
+    let state =
+        notion_knowledge_retrieval::sync_state::SqliteSyncStateStore::open_existing(&f.state)
+            .unwrap();
+    assert!(!state.cache_rebuild_pending().unwrap());
+    stop.cancel();
+    server.await.unwrap().unwrap();
+}

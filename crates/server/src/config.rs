@@ -75,6 +75,7 @@ pub enum NotionAuth {
 }
 
 /// A credential whose debug representation never contains its value.
+#[derive(Clone)]
 pub struct SecretToken(String);
 
 impl SecretToken {

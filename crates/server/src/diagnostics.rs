@@ -24,6 +24,8 @@ pub struct Diagnostics {
     index: Arc<dyn HealthProbe>,
     operational_store: Option<Arc<notion_knowledge_retrieval::sync_state::SqliteSyncStateStore>>,
     read_only: bool,
+    /// Set while startup recovery runs before the full router is installed.
+    startup: Option<&'static str>,
 }
 
 impl Diagnostics {
@@ -33,6 +35,7 @@ impl Diagnostics {
             index,
             operational_store: None,
             read_only: true,
+            startup: None,
         }
     }
 
@@ -58,6 +61,15 @@ impl Diagnostics {
     pub fn with_index_probe(mut self, index: Arc<dyn HealthProbe>) -> Self {
         self.index = index;
         self
+    }
+
+    pub fn with_startup(mut self, phase: &'static str) -> Self {
+        self.startup = Some(phase);
+        self
+    }
+
+    pub fn startup(&self) -> Option<&'static str> {
+        self.startup
     }
 
     pub fn read_only(&self) -> bool {
