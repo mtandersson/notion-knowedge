@@ -133,6 +133,26 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Publish tested runtime image to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          TESTED_IMAGE_ID: ${{ steps.runtime-image.outputs.imageid }}
+        shell: bash
+        run: |
+          repository="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tag="$repository:sha-$GITHUB_SHA"
+          test "$(docker image inspect --format '{{.Id}}' notion-knowledge:smoke)" = "$TESTED_IMAGE_ID"
+          docker image tag "$TESTED_IMAGE_ID" "$tag"
+          docker image push --platform linux/amd64 "$tag"
+
+          digest="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' |
+            jq -er '.digest | select(test("^sha256:[a-f0-9]{64}$"))')"
+          reference="$repository@$digest"
+          published_id="$(docker buildx imagetools inspect --raw "$reference" | jq -er '.config.digest')"
+          test "$published_id" = "$TESTED_IMAGE_ID"
+          printf '### Published runtime image\n\n- Commit tag %s\n- Deployment reference %s\n' \
+            "$tag" "$reference" >> "$GITHUB_STEP_SUMMARY"
+
       # Keep an independent, pinned compiler cache manifest in GHCR: previous
       # hosted evidence showed that lazy final-image exports can lose builder
       # results. PR jobs have packages:read and cannot publish cache tags.
@@ -169,7 +189,7 @@ jobs:
           {
             echo '### Optional GHCR BuildKit cache publication'
             echo 'The verified builder and final-image GHCR registry cache exports were attempted.'
-            echo 'BuildKit may ignore registry upload failures (`ignore-error=true`); check both export logs for pushed manifests or warnings.'
+            echo 'BuildKit may ignore registry upload failures when ignore-error=true. Check both export logs for pushed manifests or warnings.'
             echo 'A successful Container smoke run validates the image and smoke tests, **not** GHCR cache publication.'
           } >> "$GITHUB_STEP_SUMMARY"
 

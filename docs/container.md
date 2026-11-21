@@ -67,6 +67,15 @@ files, keys, model weights, derived indexes, Git metadata and build outputs are
 excluded. When adding other required source assets, review the allowlist rather
 than broadening it to local runtime data.
 
+## Pull the tested runtime image
+
+After Container smoke passes on a push to `main`, CI publishes the tested
+Linux amd64 image as `ghcr.io/mtandersson/notion-knowedge:sha-<full-commit-sha>`.
+The job checks that the registry manifest refers to the tested image and
+records the immutable `ghcr.io/mtandersson/notion-knowedge@sha256:<digest>`
+deployment reference in its summary. Pin the digest on the host for upgrades
+and rollbacks. Registry access follows the package's visibility policy.
+
 ## Download the tested server binary
 
 A successful **Container smoke** job also publishes
