@@ -149,7 +149,13 @@ jobs:
             jq -er '.digest | select(test("^sha256:[a-f0-9]{64}$"))')"
           reference="$repository@$digest"
           published_id="$(docker buildx imagetools inspect --raw "$reference" | jq -er '.config.digest')"
-          test "$published_id" = "$TESTED_IMAGE_ID"
+          # Docker can use either the manifest digest (containerd store) or
+          # the config digest (classic store) as the local image ID.
+          if [[ "$TESTED_IMAGE_ID" != "$digest" && "$TESTED_IMAGE_ID" != "$published_id" ]]; then
+            printf 'Registry manifest %s and config %s do not match tested image %s\n' \
+              "$digest" "$published_id" "$TESTED_IMAGE_ID" >&2
+            exit 1
+          fi
           printf '### Published runtime image\n\n- Commit tag %s\n- Deployment reference %s\n' \
             "$tag" "$reference" >> "$GITHUB_STEP_SUMMARY"
 
