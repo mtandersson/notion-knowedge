@@ -90,7 +90,8 @@ fn fingerprint(request: &AppendRequest) -> String {
 /// Notion may accept another edit between the final check and the PATCH.
 ///
 /// Strict readback requires the complete original Markdown byte prefix
-/// *unchanged* followed by the new Markdown, allowing one optional final LF.
+/// *unchanged* followed by the new Markdown. When the original ends mid-line,
+/// Notion can add one separating LF. One final LF can also vary.
 /// Other formatting changes or ambiguous readback remain unknown.
 pub async fn append_once(
     reader: &dyn NotionRead,
@@ -224,10 +225,19 @@ pub async fn append_once(
     }
     let after_comparison = reader.comparison_markdown(&after.markdown);
     let inserted = reader.comparison_markdown(&request.markdown);
-    if !after_comparison
+    let may_insert_separator = !before_comparison.is_empty()
+        && !before_comparison.ends_with('\n')
+        && !inserted.starts_with('\n');
+    let matches_append = after_comparison
         .strip_prefix(before_comparison.as_ref())
-        .is_some_and(|suffix| crate::revision::written_markdown_matches(&inserted, suffix))
-    {
+        .is_some_and(|suffix| {
+            crate::revision::written_markdown_matches(&inserted, suffix)
+                || (may_insert_separator
+                    && suffix.strip_prefix('\n').is_some_and(|after_separator| {
+                        crate::revision::written_markdown_matches(&inserted, after_separator)
+                    }))
+        });
+    if !matches_append {
         return Err(AppendError::OutcomeUnknown);
     }
 
