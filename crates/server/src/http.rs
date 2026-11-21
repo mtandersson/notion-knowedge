@@ -82,19 +82,155 @@ pub async fn serve_with_handler(
     settings: crate::config::Config,
     handler: notion_knowledge_mcp::KnowledgeServer,
 ) -> io::Result<()> {
-    #[cfg(all(unix, feature = "webhook-worker"))]
-    let worker = crate::webhook_worker::runtime::configured(&settings)
-        .await
-        .map_err(io::Error::other)?;
     let shutdown = tokio_util::sync::CancellationToken::new();
-    serve_composed(
+    let mut listener = tokio::net::TcpListener::bind(settings.http_bind).await?;
+    // Worker recovery can run a full cache rebuild; answer probes meanwhile.
+    let (handler, worker) = while_starting(&mut listener, &settings, async {
+        #[cfg(all(unix, feature = "webhook-worker"))]
+        let worker = crate::webhook_worker::runtime::configured(&settings)
+            .await?
+            .map(Arc::new);
+        let handler = compose_handler(
+            handler,
+            &settings,
+            #[cfg(all(unix, feature = "webhook-worker"))]
+            worker.as_deref(),
+        )
+        .await?;
+        Ok(Installed {
+            handler,
+            #[cfg(all(unix, feature = "webhook-worker"))]
+            worker,
+        })
+    })
+    .await
+    .map(Installed::into_parts)?;
+    serve_installed_on(
+        listener,
         settings,
         handler,
         #[cfg(all(unix, feature = "webhook-worker"))]
-        worker.map(Arc::new),
+        worker,
         shutdown,
     )
     .await
+}
+
+/// A handler and its optional sync worker, produced by startup composition.
+pub struct Installed {
+    pub handler: notion_knowledge_mcp::KnowledgeServer,
+    #[cfg(all(unix, feature = "webhook-worker"))]
+    pub worker: Option<Arc<crate::webhook_worker::runtime::Worker>>,
+}
+impl Installed {
+    #[cfg(all(unix, feature = "webhook-worker"))]
+    fn into_parts(
+        self,
+    ) -> (
+        notion_knowledge_mcp::KnowledgeServer,
+        Option<Arc<crate::webhook_worker::runtime::Worker>>,
+    ) {
+        (self.handler, self.worker)
+    }
+    #[cfg(not(all(unix, feature = "webhook-worker")))]
+    fn into_parts(self) -> (notion_knowledge_mcp::KnowledgeServer, ()) {
+        (self.handler, ())
+    }
+}
+
+/// Typed seam: bind first, then run `startup` (index recovery, possibly a full
+/// cache rebuild) while the listener answers `/livez` and reports startup on
+/// `/readyz`. Production uses the same phase through `serve_with_handler`.
+pub async fn serve_starting(
+    settings: crate::config::Config,
+    startup: impl std::future::Future<Output = Result<Installed, &'static str>>,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> io::Result<()> {
+    let mut listener = tokio::net::TcpListener::bind(settings.http_bind).await?;
+    let (handler, worker) = while_starting(&mut listener, &settings, startup)
+        .await
+        .map(Installed::into_parts)?;
+    serve_installed_on(
+        listener,
+        settings,
+        handler,
+        #[cfg(all(unix, feature = "webhook-worker"))]
+        worker,
+        shutdown,
+    )
+    .await
+}
+
+/// Serve only liveness, a startup readiness report and 503 for everything else
+/// until `startup` finishes, then release the listener for full serving.
+async fn while_starting(
+    listener: &mut tokio::net::TcpListener,
+    settings: &crate::config::Config,
+    startup: impl std::future::Future<Output = Result<Installed, &'static str>>,
+) -> io::Result<Installed> {
+    let phase = startup_phase(settings).await;
+    let diagnostics = crate::diagnostics::bootstrap(settings).with_startup(phase);
+    let router = diagnostics_routes(settings, diagnostics)
+        .fallback(move || async move { starting_response(phase) })
+        .layer(middleware::from_fn(correlate_request));
+    let stop = tokio_util::sync::CancellationToken::new();
+    let serving = serve_router_on(listener, router, stop.clone(), HEADER_READ_TIMEOUT);
+    let startup = async {
+        let result = startup.await;
+        stop.cancel();
+        result
+    };
+    let (served, installed) = tokio::join!(serving, startup);
+    let installed = installed.map_err(io::Error::other)?;
+    served?;
+    Ok(installed)
+}
+
+/// `cache_rebuild` when the operational state records a pending rebuild.
+async fn startup_phase(settings: &crate::config::Config) -> &'static str {
+    let Some(path) = settings.webhook_state_file.clone() else {
+        return "starting";
+    };
+    let pending = tokio::task::spawn_blocking(move || {
+        path.try_exists().ok()?.then_some(())?;
+        notion_knowledge_retrieval::sync_state::SqliteSyncStateStore::open_read_only(path)
+            .ok()?
+            .cache_rebuild_pending()
+            .ok()
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(false);
+    if pending { "cache_rebuild" } else { "starting" }
+}
+
+fn starting_response(phase: &'static str) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [("cache-control", "no-store"), ("retry-after", "30")],
+        axum::Json(json!({"error": "starting", "startup": phase})),
+    )
+        .into_response()
+}
+
+async fn compose_handler(
+    handler: notion_knowledge_mcp::KnowledgeServer,
+    settings: &crate::config::Config,
+    #[cfg(all(unix, feature = "webhook-worker"))] worker: Option<
+        &crate::webhook_worker::runtime::Worker,
+    >,
+) -> Result<notion_knowledge_mcp::KnowledgeServer, &'static str> {
+    #[cfg(all(unix, feature = "webhook-worker"))]
+    if settings.integration_write_stores.is_some() {
+        return crate::integration_writes::configured(
+            handler,
+            settings,
+            worker.ok_or("integration write worker unavailable")?,
+        )
+        .await;
+    }
+    crate::root_scope::compose(handler, settings, crate::root_scope::Transport::Http).await
 }
 
 /// Trusted composition seam for normal production serving and credential-free
@@ -108,28 +244,25 @@ pub async fn serve_composed(
     >,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> io::Result<()> {
-    #[cfg(all(unix, feature = "webhook-worker"))]
-    let handler = if settings.integration_write_stores.is_some() {
-        crate::integration_writes::configured(
+    let mut listener = tokio::net::TcpListener::bind(settings.http_bind).await?;
+    let (handler, worker) = while_starting(&mut listener, &settings, async {
+        let handler = compose_handler(
             handler,
             &settings,
-            worker
-                .as_deref()
-                .ok_or_else(|| io::Error::other("integration write worker unavailable"))?,
+            #[cfg(all(unix, feature = "webhook-worker"))]
+            worker.as_deref(),
         )
-        .await
-        .map_err(io::Error::other)?
-    } else {
-        crate::root_scope::compose(handler, &settings, crate::root_scope::Transport::Http)
-            .await
-            .map_err(io::Error::other)?
-    };
-    #[cfg(not(all(unix, feature = "webhook-worker")))]
-    let handler =
-        crate::root_scope::compose(handler, &settings, crate::root_scope::Transport::Http)
-            .await
-            .map_err(io::Error::other)?;
-    serve_installed(
+        .await?;
+        Ok(Installed {
+            handler,
+            #[cfg(all(unix, feature = "webhook-worker"))]
+            worker,
+        })
+    })
+    .await
+    .map(Installed::into_parts)?;
+    serve_installed_on(
+        listener,
         settings,
         handler,
         #[cfg(all(unix, feature = "webhook-worker"))]
@@ -149,6 +282,27 @@ pub async fn serve_installed(
     >,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> io::Result<()> {
+    let listener = tokio::net::TcpListener::bind(settings.http_bind).await?;
+    serve_installed_on(
+        listener,
+        settings,
+        handler,
+        #[cfg(all(unix, feature = "webhook-worker"))]
+        worker,
+        shutdown,
+    )
+    .await
+}
+
+async fn serve_installed_on(
+    listener: tokio::net::TcpListener,
+    settings: crate::config::Config,
+    handler: notion_knowledge_mcp::KnowledgeServer,
+    #[cfg(all(unix, feature = "webhook-worker"))] worker: Option<
+        Arc<crate::webhook_worker::runtime::Worker>,
+    >,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> io::Result<()> {
     logging::set_level(settings.log_level);
     let untrusted = crate::root_scope::untrusted_http_warning(&settings);
     let bind = settings.http_bind;
@@ -157,7 +311,6 @@ pub async fn serve_installed(
     if let Some(probe) = handler.index_health_probe() {
         diagnostics = diagnostics.with_index_probe(probe);
     }
-    let listener = tokio::net::TcpListener::bind(bind).await?;
     let cancellation = shutdown;
     let session_manager = Arc::new(crate::session_limits::BoundedSessions::new(
         settings.mcp_max_sessions,
@@ -181,10 +334,10 @@ pub async fn serve_installed(
         session_manager.clone(),
         cancellation.clone(),
     );
-    let bearer = settings.bearer_fallback.map(Arc::new);
+    let bearer = settings.bearer_fallback.clone().map(Arc::new);
     // Operational state supplied for read activation is not webhook admission.
     // Only explicitly verified webhook mode can create or migrate its inbox.
-    let admission = match (&settings.webhook, settings.webhook_state_file) {
+    let admission = match (&settings.webhook, settings.webhook_state_file.clone()) {
         (crate::webhook::WebhookConfig::Verified { .. }, Some(path)) => {
             let store = tokio::task::spawn_blocking(move || {
                 notion_knowledge_retrieval::sync_state::SqliteSyncStateStore::open(path)
@@ -202,16 +355,7 @@ pub async fn serve_installed(
         }
         _ => None,
     };
-    let diagnostics = diagnostics_router(bind, diagnostics);
-    let diagnostics = if settings.health_requires_bearer {
-        // The health policy is independent of the MCP auth policy.
-        diagnostics.layer(middleware::from_fn_with_state(
-            bearer.clone().expect("validated health authentication"),
-            require_development_bearer,
-        ))
-    } else {
-        diagnostics
-    };
+    let diagnostics = diagnostics_routes(&settings, diagnostics);
     let webhooks = crate::webhook::router_with_limit(
         settings.webhook,
         admission,
@@ -298,6 +442,16 @@ pub(crate) async fn serve_router(
     stop: tokio_util::sync::CancellationToken,
     header_read_timeout: Duration,
 ) -> io::Result<()> {
+    serve_router_on(&mut listener, router, stop, header_read_timeout).await
+}
+
+/// `serve_router` on a borrowed listener, which stays bound after `stop`.
+async fn serve_router_on(
+    listener: &mut tokio::net::TcpListener,
+    router: axum::Router,
+    stop: tokio_util::sync::CancellationToken,
+    header_read_timeout: Duration,
+) -> io::Result<()> {
     use hyper_util::{
         rt::{TokioIo, TokioTimer},
         service::TowerToHyperService,
@@ -306,7 +460,7 @@ pub(crate) async fn serve_router(
     let (close_tx, close_rx) = tokio::sync::watch::channel(());
     loop {
         let (stream, _remote) = tokio::select! {
-            accepted = axum::serve::Listener::accept(&mut listener) => accepted,
+            accepted = axum::serve::Listener::accept(listener) => accepted,
             () = stop.cancelled() => break,
         };
         // axum routers accept hyper's request body directly.
@@ -333,7 +487,6 @@ pub(crate) async fn serve_router(
         });
     }
     drop(close_rx);
-    drop(listener);
     close_tx.closed().await;
     Ok(())
 }
@@ -652,6 +805,27 @@ fn protocol_error(id: Value, code: i32, message: &str) -> Response {
         .into_response()
 }
 
+/// Diagnostics with the configured health authentication policy, which is
+/// independent of the MCP auth policy.
+fn diagnostics_routes(
+    settings: &crate::config::Config,
+    diagnostics: crate::diagnostics::Diagnostics,
+) -> axum::Router {
+    let router = diagnostics_router(settings.http_bind, diagnostics);
+    match settings.bearer_fallback.clone() {
+        Some(token) if settings.health_requires_bearer => router.layer(
+            middleware::from_fn_with_state(Arc::new(token), require_development_bearer),
+        ),
+        _ => {
+            assert!(
+                !settings.health_requires_bearer,
+                "validated health authentication"
+            );
+            router
+        }
+    }
+}
+
 /// Dependency health, not liveness. A degraded dependency yields 503 while
 /// retaining its individual state in the JSON body.
 fn diagnostics_router(
@@ -687,7 +861,21 @@ async fn readiness_response(
     State(diagnostics): State<crate::diagnostics::Diagnostics>,
 ) -> Response {
     let health = diagnostics.health();
-    let ready = health.index == notion_knowledge_core::health::DependencyState::Healthy;
+    let startup = diagnostics.startup();
+    let ready = startup.is_none()
+        && health.index == notion_knowledge_core::health::DependencyState::Healthy;
+    let mut body = json!({
+        "server": {
+            "name": notion_knowledge_core::SERVER_NAME,
+            "version": notion_knowledge_core::VERSION
+        },
+        "transport": "http",
+        "status": if ready { "ready" } else if startup.is_some() { "starting" } else { "not_ready" },
+        "dependencies": {"index": health.index.as_str()}
+    });
+    if let Some(phase) = startup {
+        body["startup"] = json!(phase);
+    }
     (
         if ready {
             StatusCode::OK
@@ -695,15 +883,7 @@ async fn readiness_response(
             StatusCode::SERVICE_UNAVAILABLE
         },
         [("cache-control", "no-store")],
-        axum::Json(json!({
-            "server": {
-                "name": notion_knowledge_core::SERVER_NAME,
-                "version": notion_knowledge_core::VERSION
-            },
-            "transport": "http",
-            "status": if ready { "ready" } else { "not_ready" },
-            "dependencies": {"index": health.index.as_str()}
-        })),
+        axum::Json(body),
     )
         .into_response()
 }
