@@ -57,6 +57,13 @@ call Notion, load another model, or repair the cache. The observer stops when th
 serving handler and diagnostics are dropped. The unconfigured bootstrap still
 returns 503. Upstream Notion health remains independent of local readiness.
 
+While startup recovery runs (including a pending cache rebuild), the listener
+already answers `/livez`, and `/readyz` returns 503 with `status: "starting"`
+and a `startup` phase; `/health` and `/metrics` also answer. Every other path, including `/webhooks/notion`, returns
+503 with `Retry-After: 30`; Notion retries webhook deliveries, so callbacks
+are not admitted until startup finishes. Clients that must deliver a webhook
+should wait until `/readyz` no longer reports `startup`.
+
 ### Dependency diagnostics: `GET /health`
 
 `/health` remains the full dependency snapshot for operators and diagnostics.

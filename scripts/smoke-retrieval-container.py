@@ -173,6 +173,8 @@ class Stack:
             stdout=subprocess.DEVNULL)
         self.wait(lambda: self.helper("health", network=True, check=False).returncode == 0,
                   "Actual in-process indexing worker did not start", name)
+        self.wait(lambda: self.helper("started", network=True, check=False).returncode == 0,
+                  "Indexing worker did not finish startup recovery", name)
         event = str(uuid.uuid4())
         self.helper("admit", "--event", event, network=True)
         self.wait(lambda: self.helper("page", check=False).returncode == 0,

@@ -72,7 +72,7 @@ class Notion(http.server.BaseHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["serve", "page", "snapshot", "health", "admit", "permissions", "ledgers", "disposable"])
+    parser.add_argument("action", choices=["serve", "page", "snapshot", "health", "started", "admit", "permissions", "ledgers", "disposable"])
     parser.add_argument("--event")
     args = parser.parse_args()
     if args.action == "serve":
@@ -81,6 +81,16 @@ def main():
         context.load_cert_chain("/fixture/server.pem", "/fixture/server.key")
         server.socket = context.wrap_socket(server.socket, server_side=True)
         server.serve_forever()
+    elif args.action == "started":
+        # Startup recovery answers every non-diagnostic path with 503 +
+        # Retry-After; webhooks are admitted only once /readyz drops "startup".
+        connection = http.client.HTTPConnection("indexer", 3000, timeout=5)
+        connection.request("GET", "/readyz", headers={"Host": "localhost:3000"})
+        response = connection.getresponse()
+        report = json.loads(response.read())
+        connection.close()
+        if "startup" in report:
+            raise SystemExit(f"indexer still starting: {report['startup']}")
     elif args.action in ("health", "admit"):
         connection = http.client.HTTPConnection("indexer", 3000, timeout=5)
         if args.action == "health":
