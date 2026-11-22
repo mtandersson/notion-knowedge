@@ -1193,6 +1193,169 @@ async fn installed_transports_reject_mismatched_observed_type_before_upload() {
 }
 
 #[tokio::test]
+async fn installed_file_ingestion_logs_redacted_failure_diagnostics() {
+    const CHILD: &str = "NK_TEST_FILE_INGEST_FAILURE_LOG_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let child = tokio::time::timeout(
+            Duration::from_secs(45),
+            tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "http::ingestion_tests::installed_file_ingestion_logs_redacted_failure_diagnostics",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            child.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+        let stderr = String::from_utf8(child.stderr).unwrap();
+        let stdout = String::from_utf8(child.stdout).unwrap();
+        let audit_correlation = stdout
+            .lines()
+            .find_map(|line| line.split_once("audit_correlation=").map(|(_, id)| id))
+            .expect("child did not report its audit correlation ID");
+        for private in [
+            "fixture.example",
+            "blocked.example",
+            "signed-secret",
+            "fixture-secret",
+            "opaque-id",
+            "private-file.png",
+            "Safe caption",
+            "document fixture",
+            PAGE,
+            UPLOAD,
+            BLOCK,
+        ] {
+            assert!(
+                !stderr.contains(private),
+                "private upload data appeared in stderr"
+            );
+        }
+        let events: Vec<Value> = stderr
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .filter(|event: &Value| event["operation"] == "file_ingest")
+            .collect();
+        let expected = [
+            ("source_download", "source_host_denied", "invalid_input"),
+            ("source_download", "file_too_large", "invalid_input"),
+            ("file_validation", "content_type_mismatch", "invalid_input"),
+            ("source_download", "source_expired", "source_expired"),
+            (
+                "notion_attachment",
+                "notion.image.attach",
+                "upstream_invalid_input",
+            ),
+        ];
+        assert_eq!(events.len(), expected.len(), "{stderr}");
+        for (index, (event, (phase, reason, failure))) in events.iter().zip(expected).enumerate() {
+            assert_eq!(event["file_index"], index);
+            assert_eq!(event["phase"], phase);
+            assert_eq!(event["reason"], reason);
+            assert_eq!(event["failure"], failure);
+            assert_eq!(event["terminal_audited"], true);
+            let uploaded = phase == "notion_attachment";
+            assert_eq!(event["effect_possible"], uploaded);
+            assert_eq!(
+                event["outcome"],
+                if uploaded { "failed" } else { "rejected" }
+            );
+            assert_eq!(event["level"], if uploaded { "error" } else { "warn" });
+            assert!(event["duration_ms"].is_u64());
+            assert!(
+                event["correlation_id"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty())
+            );
+            assert_eq!(event["correlation_id"], audit_correlation);
+        }
+        return;
+    }
+
+    let dir = private_dir();
+    let audit = dir.path().join("audit.sqlite");
+    let mut cfg = config(&audit, true);
+    cfg.max_upload_files = 5;
+    let (download, count, source, paths) = source_many(
+        vec![
+            (vec![0; 65], 200, false),
+            (b"document fixture".to_vec(), 200, false),
+            (b"expired".to_vec(), 403, false),
+            (b"\x89PNG\r\n\x1a\nimage fixture".to_vec(), 200, false),
+        ],
+        64,
+    )
+    .await;
+    cfg.file_ingestion.as_mut().unwrap().download = download;
+    let mut steps = full_steps(true, false, false);
+    steps.truncate(2);
+    steps.push((
+        400,
+        json!({"object":"error","status":400,"code":"validation_error"}),
+    ));
+    let (client, requests, notion) = notion(steps).await;
+    let handler = root_scope::attach_client(
+        notion_knowledge_mcp::KnowledgeServer::default().with_read_only(false),
+        &cfg,
+        Transport::Http,
+        client,
+    )
+    .unwrap();
+    let mut request = upload(true);
+    let args = request["params"]["arguments"].as_object_mut().unwrap();
+    let mut file = args.remove("file").unwrap();
+    file["file_name"] = json!("private-file.png");
+    let mut denied = file.clone();
+    denied["download_url"] = json!("https://blocked.example/file?token=signed-secret");
+    args.insert("files".into(), json!([denied, file, file, file, file]));
+    let response = http_call(cfg, handler, request).await;
+    let result = &response["result"]["structuredContent"];
+    assert_eq!(result["failure"], Value::Null);
+    let files = result["files"].as_array().unwrap();
+    assert_eq!(files.len(), 5);
+    for (file, failure) in files[..4].iter().zip([
+        "invalid_input",
+        "invalid_input",
+        "invalid_input",
+        "source_expired",
+    ]) {
+        assert_eq!(file["status"], "failed");
+        assert_eq!(file["failure"], failure);
+        assert_eq!(file["upload_id"], Value::Null);
+        assert_eq!(file["block_id"], Value::Null);
+    }
+    source.await.unwrap();
+    notion.await.unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 4);
+    assert_eq!(requests.lock().unwrap().len(), 3);
+    assert_eq!(files[4]["status"], "indeterminate");
+    assert_eq!(files[4]["failure"], "upstream_invalid_input");
+    assert_eq!(files[4]["upload_id"], UPLOAD);
+    assert_eq!(files[4]["block_id"], Value::Null);
+    assert!(paths.lock().unwrap().iter().all(|p| !p.exists()));
+    let db = rusqlite::Connection::open(audit).unwrap();
+    let (audit_count, correlation): (i64, String) = db
+        .query_row(
+            "SELECT (SELECT COUNT(DISTINCT correlation_id) FROM agent_audit_events), correlation_id FROM agent_audit_events LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(audit_count, 1);
+    println!("audit_correlation={correlation}");
+}
+
+#[tokio::test]
 async fn tls_fixture_delivers_large_body_and_clean_close_under_backpressure() {
     use tokio_rustls::{
         TlsConnector,

@@ -3,8 +3,9 @@ use crate::{
     audit::{AuditActor, AuditEvent, AuditOutcome, AuditStore, AuditTool, FileKind, SafeFileFacts},
     backend::{BackendErrorKind, PageId},
     lifecycle::LifecycleScope,
+    logging::{self, CorrelationId, FileIngestDiagnostic, FileIngestPhase, Outcome},
 };
-use std::future::Future;
+use std::{future::Future, time::Instant};
 
 /// Incoming metadata confers no authority. Never persist or debug this request.
 pub struct FileIngestRequest {
@@ -23,6 +24,37 @@ pub enum IngestFailure {
     DownloadUnavailable,
     Upstream(BackendErrorKind),
     AuditUnavailable,
+}
+
+impl IngestFailure {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Denied => "denied",
+            Self::InvalidInput => "invalid_input",
+            Self::SourceExpired => "source_expired",
+            Self::DownloadUnavailable => "download_unavailable",
+            Self::AuditUnavailable => "audit_unavailable",
+            Self::Upstream(kind) => match kind {
+                BackendErrorKind::Unauthenticated => "upstream_unauthenticated",
+                BackendErrorKind::PermissionDenied => "upstream_permission_denied",
+                BackendErrorKind::NotFound => "upstream_not_found",
+                BackendErrorKind::InvalidInput => "upstream_invalid_input",
+                BackendErrorKind::UnsupportedContent => "upstream_unsupported_content",
+                BackendErrorKind::Conflict => "upstream_conflict",
+                BackendErrorKind::RateLimited => "upstream_rate_limited",
+                BackendErrorKind::Unavailable => "upstream_unavailable",
+                BackendErrorKind::Internal => "upstream_internal",
+            },
+        }
+    }
+}
+
+/// A caller-facing failure with an operator classification from the adapter.
+#[derive(Debug)]
+pub struct FileInputFailure {
+    pub failure: IngestFailure,
+    /// Fixed code selected from known errors. Never include source values.
+    pub reason: &'static str,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,13 +100,13 @@ pub trait FileIngestAdapter: Send + Sync {
     fn download(
         &self,
         url: &str,
-    ) -> impl Future<Output = Result<Self::LocalFile, IngestFailure>> + Send;
+    ) -> impl Future<Output = Result<Self::LocalFile, FileInputFailure>> + Send;
     fn validate(
         &self,
         file: &Self::LocalFile,
         name: Option<&str>,
         mime: Option<&str>,
-    ) -> impl Future<Output = Result<SafeFileFacts, IngestFailure>> + Send;
+    ) -> impl Future<Output = Result<SafeFileFacts, FileInputFailure>> + Send;
     fn upload(
         &self,
         file: &Self::LocalFile,
@@ -124,7 +156,7 @@ pub struct FileIngestContext<'a> {
     pub scope: &'a LifecycleScope,
     pub audit: &'a dyn AuditStore,
     pub actor: AuditActor,
-    pub correlation_id: &'a str,
+    pub correlation_id: CorrelationId,
     pub permitted: bool,
 }
 
@@ -151,7 +183,7 @@ impl AuditAttempt<'_> {
             AuditTool::FileAttach,
             Some(self.target.0.clone()),
             outcome,
-            self.context.correlation_id.to_owned(),
+            self.context.correlation_id.as_str().to_owned(),
             self.facts,
         )
         .is_ok_and(|event| self.context.audit.record(&event, time).is_ok())
@@ -194,7 +226,7 @@ pub async fn ingest_file<A: FileIngestAdapter>(
     request: FileIngestRequest,
 ) -> FileIngestResult {
     let mut result = empty_result(&request.target);
-    ingest_file_into(adapter, context, request, &mut result).await;
+    ingest_file_into(adapter, context, request, 0, &mut result).await;
     result
 }
 fn empty_result(target: &PageId) -> FileIngestResult {
@@ -213,11 +245,47 @@ async fn ingest_file_into<A: FileIngestAdapter>(
     adapter: &A,
     context: &FileIngestContext<'_>,
     request: FileIngestRequest,
+    index: usize,
     result: &mut FileIngestResult,
 ) {
+    let started = Instant::now();
+    let log_failure = |result: &FileIngestResult, phase, reason| {
+        if let Some(failure) = result.failure {
+            let outcome = match failure {
+                IngestFailure::Denied
+                | IngestFailure::InvalidInput
+                | IngestFailure::SourceExpired
+                    if result.terminal_audited =>
+                {
+                    Outcome::Rejected
+                }
+                _ => Outcome::Failed,
+            };
+            logging::emit_file_ingest_failure(
+                &context.correlation_id,
+                outcome,
+                started.elapsed(),
+                FileIngestDiagnostic {
+                    file_index: index,
+                    phase,
+                    reason,
+                    failure: failure.code(),
+                    terminal_audited: result.terminal_audited,
+                    effect_possible: result.references.upload_id.is_some()
+                        || result.references.block_id.is_some()
+                        || matches!(
+                            result.status,
+                            IngestStatus::Indeterminate | IngestStatus::VerifiedAuditFailed
+                        ),
+                },
+            );
+        }
+    };
+
     let canonical_target = canonical_target(&request.target);
     if !canonical_target {
         result.failure = Some(IngestFailure::InvalidInput);
+        log_failure(result, FileIngestPhase::Admission, "invalid_target");
         return;
     }
     let mut attempt = AuditAttempt {
@@ -230,26 +298,45 @@ async fn ingest_file_into<A: FileIngestAdapter>(
     // Validate metadata needed for durable admission before any adapter effect.
     if !attempt.record(AuditOutcome::Attempted) {
         result.failure = Some(IngestFailure::AuditUnavailable);
+        log_failure(result, FileIngestPhase::Audit, "attempt_not_recorded");
         return;
     }
     attempt.finished = false;
     let execution = async {
         if !context.permitted || adapter.configured_scope() != context.scope {
-            return Err(IngestFailure::Denied);
+            return Err((
+                FileIngestPhase::Admission,
+                IngestFailure::Denied,
+                "scope_denied",
+            ));
         }
-        if request.caption.as_deref().is_some_and(|value| value.chars().count() > 2000 || value.chars().any(|ch| ch.is_control() || matches!(ch, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))) { return Err(IngestFailure::InvalidInput); }
-        let file = adapter.download(&request.temporary_url).await?;
+        if !valid_caption(request.caption.as_deref()) {
+            return Err((
+                FileIngestPhase::Admission,
+                IngestFailure::InvalidInput,
+                "invalid_caption",
+            ));
+        }
+        let file = adapter
+            .download(&request.temporary_url)
+            .await
+            .map_err(|error| (FileIngestPhase::SourceDownload, error.failure, error.reason))?;
         let facts = adapter
             .validate(
                 &file,
                 request.filename.as_deref(),
                 request.declared_mime.as_deref(),
             )
-            .await?;
+            .await
+            .map_err(|error| (FileIngestPhase::FileValidation, error.failure, error.reason))?;
         attempt.facts = Some(facts);
         // Audit availability is checked again immediately before Notion upload.
         if !attempt.record(AuditOutcome::Attempted) {
-            return Err(IngestFailure::AuditUnavailable);
+            return Err((
+                FileIngestPhase::Audit,
+                IngestFailure::AuditUnavailable,
+                "upload_attempt_not_recorded",
+            ));
         }
         attempt.effect = true;
         result.status = IngestStatus::Indeterminate;
@@ -269,7 +356,8 @@ async fn ingest_file_into<A: FileIngestAdapter>(
                 } else {
                     IngestStatus::Failed
                 };
-                IngestFailure::Upstream(failure.kind)
+                let error = IngestFailure::Upstream(failure.kind);
+                (FileIngestPhase::NotionUpload, error, failure.operation)
             })?;
         result.references.upload_id = Some(adapter.upload_id(&uploaded).to_owned());
         let block = adapter
@@ -288,20 +376,32 @@ async fn ingest_file_into<A: FileIngestAdapter>(
                 } else {
                     IngestStatus::Failed
                 };
-                IngestFailure::Upstream(failure.kind)
+                let error = IngestFailure::Upstream(failure.kind);
+                (FileIngestPhase::NotionAttachment, error, failure.operation)
             })?;
         result.references.block_id = Some(block);
         result.status = IngestStatus::Verified;
         Ok(())
     };
     let execution = execution.await;
-    if let Err(failure) = execution {
-        if failure == IngestFailure::Denied {
+    if let Err((_, failure, _)) = &execution {
+        if *failure == IngestFailure::Denied {
             result.status = IngestStatus::Denied;
         }
-        result.failure = Some(failure);
+        result.failure = Some(*failure);
     }
     attempt.finish(result);
+    match execution {
+        Err((phase, _, reason)) => log_failure(result, phase, reason),
+        Ok(()) if !result.terminal_audited => {
+            log_failure(
+                result,
+                FileIngestPhase::Audit,
+                "terminal_outcome_not_recorded",
+            );
+        }
+        Ok(()) => {}
+    }
 }
 
 /// Trusted server-owned request count; callers cannot construct an unchecked cap.
@@ -403,7 +503,7 @@ impl FileIngestBatch {
                 .outcome
                 .as_mut()
                 .expect("initialized item");
-            ingest_file_into(adapter, context, request, outcome).await;
+            ingest_file_into(adapter, context, request, index, outcome).await;
             let stop = !outcome.terminal_audited
                 || matches!(
                     outcome.failure,

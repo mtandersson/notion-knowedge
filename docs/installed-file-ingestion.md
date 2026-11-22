@@ -48,6 +48,24 @@ failed or indeterminate audit according to whether an effect might have occurred
 A canceled caller may receive no response. Inspect authoritative Notion and the
 audit before manually supplying fresh input; no replay or recovery queue is run.
 
+## Diagnosing file failures
+
+Filter the server's JSON stderr for `operation=file_ingest`. Each completed
+file failure reports its zero-based `file_index`, the failed `phase`, a specific
+`reason` such as `source_host_denied` or `mime_extension_mismatch`, and the MCP
+`failure` code. The server-generated `correlation_id` links the entries for one
+batch to its private audit records. `terminal_audited` records whether the terminal
+audit write succeeded. `effect_possible` flags a known or possible Notion upload
+or attachment. These events contain no file or page identifiers, file names,
+captions, source hosts, URLs or file contents.
+
+On Astra, filter the production journal with:
+
+```sh
+journalctl -u podman-notion-knowledge --since '-30 min' -o cat |
+  jq -Rc 'fromjson? | select(.operation == "file_ingest")'
+```
+
 ## Integrated acceptance evidence
 
 Credential-free tests live in `crates/server/src/http/ingestion_tests.rs`. They

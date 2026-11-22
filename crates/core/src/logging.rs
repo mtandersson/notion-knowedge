@@ -288,6 +288,7 @@ pub enum Operation {
     HttpRequest,
     McpTool,
     NotionApi,
+    FileIngest,
     WebhookAdmission,
     IndexCommit,
 }
@@ -298,6 +299,7 @@ impl Operation {
             Self::HttpRequest => "http_request",
             Self::McpTool => "mcp_tool",
             Self::NotionApi => "notion_api",
+            Self::FileIngest => "file_ingest",
             Self::WebhookAdmission => "webhook_admission",
             Self::IndexCommit => "index_commit",
         }
@@ -340,6 +342,17 @@ pub fn event_json(
     status: Option<u16>,
     level: Level,
 ) -> String {
+    event_value(id, operation, outcome, elapsed, status, level).to_string()
+}
+
+fn event_value(
+    id: &CorrelationId,
+    operation: Operation,
+    outcome: Outcome,
+    elapsed: Duration,
+    status: Option<u16>,
+    level: Level,
+) -> serde_json::Value {
     let timestamp_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -358,7 +371,16 @@ pub fn event_json(
     if let Some(progress) = current_sync_progress() {
         event["sync_progress"] = progress;
     }
-    event.to_string()
+    event
+}
+
+fn enabled(level: Level) -> bool {
+    level != Level::Off && level as u8 <= LOG_LEVEL.load(Ordering::Relaxed)
+}
+
+fn write_event(event: impl std::fmt::Display) {
+    // A closed stderr must never abort request processing.
+    let _ = writeln!(std::io::stderr().lock(), "{event}");
 }
 
 pub fn emit(
@@ -370,15 +392,48 @@ pub fn emit(
     level: Level,
 ) {
     crate::metrics::observe_event(operation, outcome, elapsed);
-    if level != Level::Off && level as u8 <= LOG_LEVEL.load(Ordering::Relaxed) {
-        // Logging must never abort request processing if a supervisor closes
-        // stderr (or a test stops consuming its pipe).
-        let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(
-            stderr,
-            "{}",
-            event_json(id, operation, outcome, elapsed, status, level)
-        );
+    if enabled(level) {
+        write_event(event_value(id, operation, outcome, elapsed, status, level));
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FileIngestPhase {
+    Admission,
+    SourceDownload,
+    FileValidation,
+    NotionUpload,
+    NotionAttachment,
+    Audit,
+}
+
+pub(crate) struct FileIngestDiagnostic {
+    pub file_index: usize,
+    pub phase: FileIngestPhase,
+    /// Fixed error classification, never a user value or upstream error string.
+    pub reason: &'static str,
+    pub failure: &'static str,
+    pub terminal_audited: bool,
+    pub effect_possible: bool,
+}
+
+pub(crate) fn emit_file_ingest_failure(
+    id: &CorrelationId,
+    outcome: Outcome,
+    elapsed: Duration,
+    diagnostic: FileIngestDiagnostic,
+) {
+    let level = outcome.level();
+    if enabled(level) {
+        let mut event = event_value(id, Operation::FileIngest, outcome, elapsed, None, level);
+        event["file_index"] = diagnostic.file_index.into();
+        event["phase"] = serde_json::json!(diagnostic.phase);
+        event["reason"] = diagnostic.reason.into();
+        event["failure"] = diagnostic.failure.into();
+        event["terminal_audited"] = diagnostic.terminal_audited.into();
+        event["effect_possible"] = diagnostic.effect_possible.into();
+        write_event(event);
     }
 }
 

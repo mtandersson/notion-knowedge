@@ -277,13 +277,11 @@ impl notion_knowledge_mcp::upload::FileIngestion for Runtime {
                 .collect();
             let mut batch = FileIngestBatch::new(requests, self.policy)
                 .map_err(|_| "file_upload_invalid_input")?;
-            let correlation = notion_knowledge_core::logging::CorrelationId::new();
-            let correlation = correlation.as_str();
             let context = FileIngestContext {
                 scope: &self.scope,
                 audit: &self.audit,
                 actor: notion_knowledge_core::audit::AuditActor::Server,
-                correlation_id: correlation,
+                correlation_id: notion_knowledge_core::logging::current_id(),
                 permitted: true,
             };
             // Keep the request-owned batch OUTSIDE this cancellable execution
@@ -293,50 +291,14 @@ impl notion_knowledge_mcp::upload::FileIngestion for Runtime {
                 _ = cancellation => (None, true),
                 result = batch.execute(&self.adapter, &context) => (result.err(), false),
             };
-            let failure_name = |failure: IngestFailure| match failure {
-                IngestFailure::Denied => "denied",
-                IngestFailure::InvalidInput => "invalid_input",
-                IngestFailure::SourceExpired => "source_expired",
-                IngestFailure::DownloadUnavailable => "download_unavailable",
-                IngestFailure::AuditUnavailable => "audit_unavailable",
-                IngestFailure::Upstream(kind) => match kind {
-                    notion_knowledge_core::backend::BackendErrorKind::Unauthenticated => {
-                        "upstream_unauthenticated"
-                    }
-                    notion_knowledge_core::backend::BackendErrorKind::PermissionDenied => {
-                        "upstream_permission_denied"
-                    }
-                    notion_knowledge_core::backend::BackendErrorKind::NotFound => {
-                        "upstream_not_found"
-                    }
-                    notion_knowledge_core::backend::BackendErrorKind::InvalidInput => {
-                        "upstream_invalid_input"
-                    }
-                    notion_knowledge_core::backend::BackendErrorKind::UnsupportedContent => {
-                        "upstream_unsupported_content"
-                    }
-                    notion_knowledge_core::backend::BackendErrorKind::Conflict => {
-                        "upstream_conflict"
-                    }
-                    notion_knowledge_core::backend::BackendErrorKind::RateLimited => {
-                        "upstream_rate_limited"
-                    }
-                    notion_knowledge_core::backend::BackendErrorKind::Unavailable => {
-                        "upstream_unavailable"
-                    }
-                    notion_knowledge_core::backend::BackendErrorKind::Internal => {
-                        "upstream_internal"
-                    }
-                },
-            };
             let results: Vec<_> = batch.results().iter().map(|item| match &item.outcome {
                 None => serde_json::json!({"index":item.index,"status":"unattempted","terminal_audited":false}),
                 Some(outcome) => serde_json::json!({"index":item.index,"status":match outcome.status {
                     IngestStatus::Failed => "failed", IngestStatus::Denied => "denied", IngestStatus::Indeterminate => "indeterminate", IngestStatus::Verified => "verified", IngestStatus::VerifiedAuditFailed => "verified_audit_failed",
-                },"target":outcome.references.target.as_ref().map(|p| &p.0),"upload_id":outcome.references.upload_id,"block_id":outcome.references.block_id,"terminal_audited":outcome.terminal_audited,"failure":outcome.failure.map(failure_name)}),
+                },"target":outcome.references.target.as_ref().map(|p| &p.0),"upload_id":outcome.references.upload_id,"block_id":outcome.references.block_id,"terminal_audited":outcome.terminal_audited,"failure":outcome.failure.map(IngestFailure::code)}),
             }).collect();
             Ok(
-                serde_json::json!({"files":results,"partial_success":batch.partial_success(),"failure":if cancelled {Some("cancelled")}else{failure.map(failure_name)},"cancelled":cancelled}),
+                serde_json::json!({"files":results,"partial_success":batch.partial_success(),"failure":if cancelled {Some("cancelled")}else{failure.map(IngestFailure::code)},"cancelled":cancelled}),
             )
         })
     }

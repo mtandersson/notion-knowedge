@@ -3,12 +3,14 @@ use crate::file_multipart::MultipartPolicy;
 use crate::{
     NotionClient, UploadedFile,
     file_download::{DownloadError, DownloadPolicy, DownloadedFile},
-    file_validation::FileValidationPolicy,
+    file_validation::{FileValidationError, FileValidationPolicy},
 };
 use notion_knowledge_core::{
     audit::{FileKind, SafeFileFacts},
     backend::PageId,
-    file_ingest::{FileEffectFailure, FileIngestAdapter, FileReferences, IngestFailure},
+    file_ingest::{
+        FileEffectFailure, FileIngestAdapter, FileInputFailure, FileReferences, IngestFailure,
+    },
     lifecycle::LifecycleScope,
 };
 
@@ -50,30 +52,67 @@ impl FileIngestAdapter for NotionFileIngestAdapter {
     }
     type LocalFile = DownloadedFile;
     type Upload = UploadedFile;
-    async fn download(&self, url: &str) -> Result<DownloadedFile, IngestFailure> {
-        let file = self
-            .download
-            .download(url)
-            .await
-            .map_err(|error| match error {
-                DownloadError::SourceExpired => IngestFailure::SourceExpired,
-                DownloadError::InvalidUrl
-                | DownloadError::AddressDenied
-                | DownloadError::TooLarge
-                | DownloadError::EmptyFile
-                | DownloadError::SourceRejected
-                | DownloadError::RedirectDenied => IngestFailure::InvalidInput,
-                _ => IngestFailure::DownloadUnavailable,
-            })?;
-        Ok(file)
+    async fn download(&self, url: &str) -> Result<DownloadedFile, FileInputFailure> {
+        self.download.download(url).await.map_err(|error| {
+            let (failure, reason) = match error {
+                DownloadError::InvalidUrl => (IngestFailure::InvalidInput, "invalid_source_url"),
+                DownloadError::HostDenied => (IngestFailure::InvalidInput, "source_host_denied"),
+                DownloadError::AddressDenied => {
+                    (IngestFailure::InvalidInput, "source_address_denied")
+                }
+                DownloadError::TooLarge => (IngestFailure::InvalidInput, "file_too_large"),
+                DownloadError::EmptyFile => (IngestFailure::InvalidInput, "empty_file"),
+                DownloadError::PartialResponse => {
+                    (IngestFailure::InvalidInput, "source_partial_response")
+                }
+                DownloadError::UnsupportedEncoding => {
+                    (IngestFailure::InvalidInput, "source_unsupported_encoding")
+                }
+                DownloadError::UnexpectedStatus => {
+                    (IngestFailure::InvalidInput, "source_unexpected_status")
+                }
+                DownloadError::RedirectDenied => {
+                    (IngestFailure::InvalidInput, "source_redirect_denied")
+                }
+                DownloadError::SourceExpired => (IngestFailure::SourceExpired, "source_expired"),
+                DownloadError::SourceUnavailable => {
+                    (IngestFailure::DownloadUnavailable, "source_unavailable")
+                }
+                DownloadError::Timeout => (IngestFailure::DownloadUnavailable, "source_timeout"),
+                DownloadError::StorageUnavailable => (
+                    IngestFailure::DownloadUnavailable,
+                    "temporary_storage_unavailable",
+                ),
+                DownloadError::InvalidPolicy => (
+                    IngestFailure::DownloadUnavailable,
+                    "invalid_download_policy",
+                ),
+            };
+            FileInputFailure { failure, reason }
+        })
     }
     async fn validate(
         &self,
         file: &DownloadedFile,
         name: Option<&str>,
         mime: Option<&str>,
-    ) -> Result<SafeFileFacts, IngestFailure> {
-        let valid = self.validated(file, name, mime).await?;
+    ) -> Result<SafeFileFacts, FileInputFailure> {
+        let valid = self.validated(file, name, mime).await.map_err(|error| {
+            let reason = match error {
+                FileValidationError::InvalidLimit => "invalid_validation_limit",
+                FileValidationError::EmptyFile => "empty_file",
+                FileValidationError::FileTooLarge => "file_too_large",
+                FileValidationError::InvalidFilename => "invalid_filename",
+                FileValidationError::UnsupportedExtension => "unsupported_extension",
+                FileValidationError::UnsupportedMime => "unsupported_mime",
+                FileValidationError::MimeExtensionMismatch => "mime_extension_mismatch",
+                FileValidationError::ContentTypeMismatch => "content_type_mismatch",
+            };
+            FileInputFailure {
+                failure: IngestFailure::InvalidInput,
+                reason,
+            }
+        })?;
         Ok(SafeFileFacts::new(
             if valid.mime_type.starts_with("image/") {
                 FileKind::Image
@@ -184,7 +223,7 @@ impl NotionFileIngestAdapter {
         file: &DownloadedFile,
         name: Option<&str>,
         mime: Option<&str>,
-    ) -> Result<crate::ValidatedFile, IngestFailure> {
+    ) -> Result<crate::ValidatedFile, FileValidationError> {
         crate::file_validation::validate_downloaded(
             file,
             self.multipart
@@ -193,7 +232,6 @@ impl NotionFileIngestAdapter {
             mime,
         )
         .await
-        .map_err(|_| IngestFailure::InvalidInput)
     }
 }
 
