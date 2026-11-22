@@ -57,6 +57,9 @@ impl FileIngestAdapter for NotionFileIngestAdapter {
             let (failure, reason) = match error {
                 DownloadError::InvalidUrl => (IngestFailure::InvalidInput, "invalid_source_url"),
                 DownloadError::HostDenied => (IngestFailure::InvalidInput, "source_host_denied"),
+                DownloadError::DomainBlocked => {
+                    (IngestFailure::InvalidInput, "source_domain_blocked")
+                }
                 DownloadError::AddressDenied => {
                     (IngestFailure::InvalidInput, "source_address_denied")
                 }

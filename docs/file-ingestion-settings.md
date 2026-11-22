@@ -21,7 +21,9 @@ Settings below without explicit ingestion opt-in fail startup.
 
 | Setting | Contract |
 | --- | --- |
-| `NK_FILE_SOURCE_HOSTS` | Required, comma-separated 1–32 exact DNS names for HTTPS sources; no URL, wildcard, port or IP |
+| `NK_FILE_SOURCE_POLICY` | `allowlist` (default) or `public_https` for rotating file providers |
+| `NK_FILE_SOURCE_HOSTS` | Required in `allowlist` mode and unset in `public_https` mode. Accepts 1–32 comma-separated exact DNS hostnames. |
+| `NK_FILE_SOURCE_BLOCKED_DOMAINS` | Optional 1–32 comma-separated DNS domains. Each entry blocks the domain and its subdomains before DNS lookup. |
 | `NK_FILE_TIMEOUT_SECONDS` | 1–120; default 30 |
 | `NK_FILE_PLAN` | `free` (default) or explicit `paid` |
 | `NK_FILE_MAX_BYTES` | Positive; default 5 MiB; free capped at 5 MiB, paid at 100 MiB |
@@ -29,6 +31,10 @@ Settings below without explicit ingestion opt-in fail startup.
 | `NK_FILE_PART_BYTES` | 5–20 MiB and no larger than threshold; existing adapter enforces at most 1,000 parts |
 | `NK_FILE_AUDIT_FILE` | Required absolute durable file path, existing private owner directory, no symlink ancestors; existing file must be owner-controlled and private |
 | `NK_FILE_AUDIT_RETENTION_DAYS` | 1–3,650; default 30 |
+
+Both source policies require HTTPS on port 443 and check every resolved address
+before connecting. Blocked domains take precedence over hostname allowlisting.
+The downloader pins the validated DNS results and rejects redirects.
 
 Paid limits through 20 MiB may use single-part upload; higher limits require
 multipart settings. The maximum 100 MiB and minimum 5 MiB part size imply at most

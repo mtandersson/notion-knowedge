@@ -33,8 +33,10 @@ impl Settings {
             "false" => false,
             _ => return Err(invalid("NK_FILE_INGESTION", "must be true or false")),
         };
-        const KEYS: [&str; 8] = [
+        const KEYS: [&str; 10] = [
+            "NK_FILE_SOURCE_POLICY",
             "NK_FILE_SOURCE_HOSTS",
+            "NK_FILE_SOURCE_BLOCKED_DOMAINS",
             "NK_FILE_TIMEOUT_SECONDS",
             "NK_FILE_PLAN",
             "NK_FILE_MAX_BYTES",
@@ -76,18 +78,47 @@ impl Settings {
             if paid { 104857600 } else { 5242880 },
         )?;
         let timeout = number(lookup, "NK_FILE_TIMEOUT_SECONDS", "30", 120)?;
-        let hosts = lookup("NK_FILE_SOURCE_HOSTS")
-            .ok_or_else(|| invalid("NK_FILE_SOURCE_HOSTS", "required for file ingestion"))?;
-        let hosts = text(hosts, "NK_FILE_SOURCE_HOSTS")?;
-        let hosts: Vec<_> = hosts.split(',').collect();
-        let download =
-            DownloadPolicy::new(&hosts, maximum_bytes, Duration::from_secs(timeout as u64))
-                .map_err(|_| {
+        let deadline = Duration::from_secs(timeout as u64);
+        let mut download = match optional(lookup, "NK_FILE_SOURCE_POLICY", "allowlist")?.as_str() {
+            "allowlist" => {
+                let hosts = lookup("NK_FILE_SOURCE_HOSTS")
+                    .ok_or_else(|| invalid("NK_FILE_SOURCE_HOSTS", "required in allowlist mode"))?;
+                let hosts = text(hosts, "NK_FILE_SOURCE_HOSTS")?;
+                let hosts: Vec<_> = hosts.split(',').collect();
+                DownloadPolicy::new(&hosts, maximum_bytes, deadline).map_err(|_| {
                     invalid(
                         "NK_FILE_SOURCE_HOSTS",
                         "must contain 1 to 32 exact HTTPS DNS hostnames",
                     )
-                })?;
+                })?
+            }
+            "public_https" => {
+                if lookup("NK_FILE_SOURCE_HOSTS").is_some() {
+                    return Err(invalid(
+                        "NK_FILE_SOURCE_HOSTS",
+                        "unset when NK_FILE_SOURCE_POLICY is public_https",
+                    ));
+                }
+                DownloadPolicy::public_https(maximum_bytes, deadline)
+                    .map_err(|_| invalid("NK_FILE_SOURCE_POLICY", "invalid download bounds"))?
+            }
+            _ => {
+                return Err(invalid(
+                    "NK_FILE_SOURCE_POLICY",
+                    "must be allowlist or public_https",
+                ));
+            }
+        };
+        if let Some(domains) = lookup("NK_FILE_SOURCE_BLOCKED_DOMAINS") {
+            let domains = text(domains, "NK_FILE_SOURCE_BLOCKED_DOMAINS")?;
+            let domains: Vec<_> = domains.split(',').collect();
+            download = download.with_blocked_domains(&domains).map_err(|_| {
+                invalid(
+                    "NK_FILE_SOURCE_BLOCKED_DOMAINS",
+                    "must contain 1 to 32 DNS domains",
+                )
+            })?;
+        }
         let threshold = lookup("NK_FILE_MULTIPART_THRESHOLD_BYTES");
         let part = lookup("NK_FILE_PART_BYTES");
         let multipart = match (threshold, part) {

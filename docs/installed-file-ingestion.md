@@ -7,7 +7,7 @@ appends a native image/file block, verifies readback, and records durable
 payload-free audit. There is no Drive staging or background signed-URL retry.
 
 Enable `NK_READ_ONLY=false` and `NK_FILE_INGESTION=true` with the integration,
-full physical scope, exact source hosts and protected audit settings described
+full physical scope, a source policy and protected audit settings described
 in [startup settings](file-ingestion-settings.md). Use a private operator-owned
 directory (mode 0700) and a separate audit SQLite path. Startup opens the audit
 store privately and fails if it cannot be used. `--check` validates configuration
@@ -52,7 +52,7 @@ audit before manually supplying fresh input; no replay or recovery queue is run.
 
 Filter the server's JSON stderr for `operation=file_ingest`. Each completed
 file failure reports its zero-based `file_index`, the failed `phase`, a specific
-`reason` such as `source_host_denied` or `mime_extension_mismatch`, and the MCP
+`reason` such as `source_domain_blocked` or `mime_extension_mismatch`, and the MCP
 `failure` code. The server-generated `correlation_id` links the entries for one
 batch to its private audit records. `terminal_audited` records whether the terminal
 audit write succeeded. `effect_possible` flags a known or possible Notion upload

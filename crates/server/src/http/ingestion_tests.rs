@@ -239,16 +239,23 @@ fn full_steps(image: bool, readback_fails: bool, send_fails: bool) -> Vec<(u16, 
 }
 const BEARER: &str = "local-fixture-bearer-with-32-characters";
 fn config(path: &std::path::Path, bearer: bool) -> Config {
-    let values = std::collections::HashMap::from([
+    config_with_file_sources(path, bearer, &[("NK_FILE_SOURCE_HOSTS", "fixture.example")])
+}
+fn config_with_file_sources(
+    path: &std::path::Path,
+    bearer: bool,
+    sources: &[(&str, &str)],
+) -> Config {
+    let mut values = std::collections::HashMap::from([
         ("NK_FILE_INGESTION", "true".to_owned()),
         ("NK_READ_ONLY", "false".into()),
         ("NK_NOTION_AUTH", "integration".into()),
         ("NOTION_TOKEN", "fixture-secret".into()),
         ("NK_NOTION_SCOPE_ROOTS", ROOT.into()),
         ("NK_NOTION_SCOPE_WORKSPACE_ID", WORKSPACE.into()),
-        ("NK_FILE_SOURCE_HOSTS", "fixture.example".into()),
         ("NK_FILE_AUDIT_FILE", path.display().to_string()),
     ]);
+    values.extend(sources.iter().map(|&(key, value)| (key, value.to_owned())));
     let mut config = Config::from_lookup(|key| {
         if bearer && key == "NK_HTTP_BEARER_TOKEN" {
             return Some(BEARER.into());
@@ -1190,6 +1197,59 @@ async fn installed_transports_reject_mismatched_observed_type_before_upload() {
         );
         assert!(paths.lock().unwrap().iter().all(|p| !p.exists()));
     }
+}
+
+#[tokio::test]
+async fn installed_public_https_ingestion_rejects_blocked_domains_and_private_addresses() {
+    let dir = private_dir();
+    let cfg = config_with_file_sources(
+        &dir.path().join("audit.sqlite"),
+        true,
+        &[
+            ("NK_FILE_SOURCE_POLICY", "public_https"),
+            ("NK_FILE_SOURCE_BLOCKED_DOMAINS", "internal.example"),
+        ],
+    );
+    let (client, requests, notion) = notion(Vec::new()).await;
+    let handler = root_scope::attach_client(
+        notion_knowledge_mcp::KnowledgeServer::default().with_read_only(false),
+        &cfg,
+        Transport::Http,
+        client,
+    )
+    .unwrap();
+    let mut request = upload(true);
+    let args = request["params"]["arguments"].as_object_mut().unwrap();
+    let file = args.remove("file").unwrap();
+    let files: Vec<_> = [
+        "https://internal.example/file",
+        "https://Sub.Internal.Example./file",
+        "https://localhost/file",
+        "https://10.0.0.1/file",
+    ]
+    .into_iter()
+    .map(|url| {
+        let mut file = file.clone();
+        file["download_url"] = json!(url);
+        file
+    })
+    .collect();
+    args.insert("files".into(), json!(files));
+    let response = http_call(cfg, handler, request).await;
+    let result = &response["result"]["structuredContent"];
+    assert_eq!(result["failure"], Value::Null);
+    let outcomes = result["files"].as_array().unwrap();
+    assert_eq!(outcomes.len(), 4);
+    for (index, file) in outcomes.iter().enumerate() {
+        assert_eq!(file["index"], index);
+        assert_eq!(file["status"], "failed");
+        assert_eq!(file["failure"], "invalid_input");
+        assert_eq!(file["terminal_audited"], true);
+        assert_eq!(file["upload_id"], Value::Null);
+        assert_eq!(file["block_id"], Value::Null);
+    }
+    notion.await.unwrap();
+    assert!(requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
