@@ -35,8 +35,9 @@ visible to a future request-bound adapter; wrapping an entire concrete workflow
 in one stale credential check is unnecessary. It reserves the durable intent,
 marks the outcome uncertain before one create effect, reads complete exact
 title/Markdown, then records the verified receipt before refresh admission.
-Writes run no ancestry walk and no root gate: they rely on Notion's own
-permission check for the token.
+MCP validates the configured root selection before dispatch. Notion checks
+whether the integration token may write to the destination. This path performs
+no ancestry walk.
 The older concrete Notion icon-capable helper remains a separate internal API;
 the semantic create schema does not accept icons or arbitrary properties.
 
@@ -95,9 +96,9 @@ cargo test -p notion-knowledge-core -p notion-knowledge-mcp --locked
 cargo clippy -p notion-knowledge-core -p notion-knowledge-mcp --all-targets --locked -- -D warnings
 ```
 
-The twelve real MCP transport fixtures use production SQLite ledger/audit/queue
+The MCP transport fixtures use production SQLite ledger/audit/queue
 adapters and local authoritative source doubles. They cover all three mutations,
-strict parsing/default/capability boundaries, exact read-back/direct
+root selection, strict parsing/default/capability boundaries, exact read-back/direct
 parent, confirmation changes/replay, durable reopen/privacy, source uncertainty,
 index/audit failure, competing sessions and disconnect after effect. They do not
 establish production ChatGPT mutation support.
