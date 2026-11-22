@@ -1,5 +1,6 @@
 use notion_knowledge_core::{
-    chunking::{ChunkConfig, chunk_document},
+    chunking::{ChunkConfig, chunk_document, table_section_boundaries},
+    embedding::{EmbeddingError, partition_at_boundaries},
     indexed::{IndexedDocument, IndexedMetadata, SchemaVersion, SourceMetadata},
 };
 use std::collections::BTreeMap;
@@ -49,6 +50,57 @@ fn short_sections_preserve_heading_hierarchy_and_exact_source() {
     for c in chunks {
         assert_eq!(c.text, doc.text[c.source_bytes]);
         assert_eq!(c.metadata.page_id, "page");
+    }
+}
+#[test]
+fn table_partitions_keep_complete_rows_links_and_surrounding_source() {
+    let rows = [
+        format!("<tr><td>åäö {}</td></tr>", "first cell ".repeat(16)),
+        format!("<tr><td>日本語 {}</td></tr>", "next cell ".repeat(16)),
+    ];
+    let link = "[linked markdown](https://example.invalid/path/to/document)";
+    let markdown = format!(
+        "<table>\n{}\n{}\n</table>\n- {link}\n- Follow-up prose.\n",
+        rows[0], rows[1]
+    );
+    let points = table_section_boundaries(&markdown);
+    let validate = |text: &str| {
+        if text.len() <= 240 {
+            Ok(())
+        } else {
+            Err(EmbeddingError::InputLimit)
+        }
+    };
+    let cuts = partition_at_boundaries(&markdown, &points, validate).unwrap();
+    let pieces: Vec<_> = std::iter::once(0)
+        .chain(cuts.iter().copied())
+        .zip(cuts.iter().copied().chain(std::iter::once(markdown.len())))
+        .map(|(start, end)| &markdown[start..end])
+        .collect();
+    assert!(pieces.iter().all(|piece| validate(piece).is_ok()));
+    for unit in rows.iter().map(String::as_str).chain([link]) {
+        assert!(pieces.iter().any(|piece| piece.contains(unit)));
+    }
+    assert_eq!(pieces.concat(), markdown);
+    assert!(
+        partition_at_boundaries(&markdown, &points, |_| Ok(()))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        partition_at_boundaries(&markdown, &points, |_| Err(EmbeddingError::InputLimit)),
+        Err(EmbeddingError::InputLimit)
+    );
+}
+
+#[test]
+fn literal_nested_and_unclosed_tables_do_not_supply_row_breakpoints() {
+    for text in [
+        "```html\n<table>\n<tr><td>one</td></tr>\n<tr><td>two</td></tr>\n</table>\n```\n",
+        "<details>\n<table>\n<tr><td>one</td></tr>\n<tr><td>two</td></tr>\n</table>\n</details>\n",
+        "<table>\n<tr><td>one</td></tr>\n<tr><td>two</td></tr>\n",
+    ] {
+        assert!(table_section_boundaries(text).is_empty());
     }
 }
 #[test]

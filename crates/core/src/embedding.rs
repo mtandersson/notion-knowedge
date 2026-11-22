@@ -152,6 +152,13 @@ pub fn partition_at_boundaries(
     mut validate: impl FnMut(&str) -> Result<(), EmbeddingError>,
 ) -> Result<Vec<usize>, EmbeddingError> {
     const MAX_SPLITS: usize = 127;
+    if boundaries.windows(2).any(|pair| pair[0] >= pair[1])
+        || boundaries.iter().any(|&position| {
+            position == 0 || position >= input.len() || !input.is_char_boundary(position)
+        })
+    {
+        return Err(EmbeddingError::InvalidInput);
+    }
     let mut pending = vec![(0, input.len(), boundaries)];
     let mut cuts = Vec::new();
     while let Some((start, end, boundaries)) = pending.pop() {
