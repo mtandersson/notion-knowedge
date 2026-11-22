@@ -394,6 +394,7 @@ impl SqliteSyncStateStore {
         tx.commit().map_err(map_sqlite_error)
     }
 
+    #[cfg(any(test, all(unix, feature = "local-lancedb")))]
     pub(crate) fn set_source_document_publication(
         &self,
         workspace: &str,
@@ -423,6 +424,7 @@ impl SqliteSyncStateStore {
     /// Decide freshness from one SQLite read snapshot across inventory and
     /// accepted source signals. A failed vector publication does not invalidate
     /// an independently published source document.
+    #[cfg(any(test, all(unix, feature = "local-lancedb")))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn source_document_is_current(
         &self,
@@ -818,5 +820,85 @@ impl notion_knowledge_core::root_scope::Membership for SqliteSyncStateStore {
     ) -> Result<Option<Vec<InventoryEntry>>, notion_knowledge_core::root_scope::ScopeError> {
         self.inventory_lineage(page)
             .map_err(|_| notion_knowledge_core::root_scope::ScopeError::Unverifiable)
+    }
+}
+
+#[cfg(test)]
+mod document_freshness {
+    use super::*;
+    use notion_knowledge_core::webhook::{WebhookEvent, WebhookInbox};
+
+    const ROOT: &str = "11111111-1111-1111-1111-111111111111";
+    const PAGE: &str = "22222222-2222-2222-2222-222222222222";
+    const WORKSPACE: &str = "33333333-3333-3333-3333-333333333333";
+    const REVISION: &str = "2026-11-22T21:00:00Z";
+
+    #[test]
+    fn a_same_minute_ancestor_move_requires_a_later_inventory_walk() {
+        let state = SqliteSyncStateStore::open_in_memory().unwrap();
+        let parent = InventoryParent::Page(ROOT.into());
+        let parent_json = serde_json::to_string(&parent).unwrap();
+        let entry = |id: &str, parent| InventoryEntry {
+            page_id: id.into(),
+            parent,
+            root_id: ROOT.into(),
+            last_edited_time: REVISION.into(),
+            in_trash: false,
+        };
+        state
+            .record_walk(
+                "walk",
+                &[entry(ROOT, InventoryParent::Root), entry(PAGE, parent)],
+                true,
+            )
+            .unwrap();
+        state
+            .set_source_document_publication(WORKSPACE, "scope", PAGE, Some("first"))
+            .unwrap();
+        let current = |watermark, publication| {
+            state
+                .source_document_is_current(
+                    WORKSPACE,
+                    "scope",
+                    PAGE,
+                    ROOT,
+                    &parent_json,
+                    REVISION,
+                    watermark,
+                    publication,
+                )
+                .unwrap()
+        };
+        let start = state.source_signal_watermark().unwrap();
+        assert!(current(start, "first"));
+
+        let event = WebhookEvent {
+            id: "44444444-4444-4444-4444-444444444444".into(),
+            workspace_id: WORKSPACE.into(),
+            subscription_id: "55555555-5555-5555-5555-555555555555".into(),
+            integration_id: "66666666-6666-6666-6666-666666666666".into(),
+            timestamp: REVISION.into(),
+            event_type: "page.moved".into(),
+            entity_id: ROOT.into(),
+            entity_type: "page".into(),
+            attempt_number: 1,
+        };
+        state.receive(&event).unwrap();
+        let after_event = state.source_signal_watermark().unwrap();
+        assert!(after_event > start);
+        assert!(!current(start, "first"));
+        assert!(!current(after_event, "first"));
+        state
+            .record_source_inventory_watermark(WORKSPACE, "scope", after_event)
+            .unwrap();
+        assert!(current(start, "first"));
+
+        // A replacement from the same source timestamp changes the published
+        // content proof, so a reader holding the old body cannot claim it.
+        state
+            .set_source_document_publication(WORKSPACE, "scope", PAGE, Some("second"))
+            .unwrap();
+        assert!(!current(after_event, "first"));
+        assert!(current(after_event, "second"));
     }
 }
