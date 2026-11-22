@@ -17,8 +17,11 @@ replacement are not implemented, advertised or dispatched by this runtime, even
 when the old development schema-preview flag is also set.
 
 Inputs require canonical page/root UUIDs and an idempotency key. `root_page_id`
-can only narrow the trusted operator roots; it cannot add authority. Create takes
-`parent_page_id`, title and Markdown. Append/section take `page_id` and at least
+selects a configured root. Use `sources[].provenance.root_page_id` from
+`knowledge_get` on the destination if it is indexed, or on an indexed page
+under the intended root. The create destination is `parent_page_id`, and
+append/section use `page_id`. Create also takes title and Markdown.
+Append/section require at least
 one authoritative `expected_last_edited_time` or exact
 `expected_markdown_sha256`. Section uses `section_anchor: {level, heading}`,
 selects one exact literal heading and preserves all unrelated bytes. Empty
@@ -71,7 +74,11 @@ Results separate three states:
 
 Index `queued`/`running`/`completed`/`failed`/`unavailable` is independent of
 verified source success; `not_attempted` means this call did not reach admission,
-not that no prior queued work exists. Revision conflicts return only page ID and
+not that no prior queued work exists. A root that does not match the configured
+scope returns `write.status: not_authorized` with
+`write.reason: root_not_configured` and a fixed guidance message before any
+provider call or idempotency reservation. The caller can correct the root and
+reuse the same key for the same intended mutation. Revision conflicts return only page ID and
 current edit time, never source text. `outcome_unknown` requires authoritative
 reconciliation and the original durable key. Index or audit repair must never use
 a new mutation key to repeat the source write. A terminal audit failure retains

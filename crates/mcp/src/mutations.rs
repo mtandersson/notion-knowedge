@@ -21,6 +21,8 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+const ROOT_GUIDANCE: &str = "Use sources[].provenance.root_page_id from knowledge_get on an indexed page under the intended root. Use the destination page for that lookup when it is indexed. Supply the destination separately as parent_page_id for create or page_id for append or section updates.";
+
 pub trait MutationSource: NotionRead + NotionWrite + NotionSectionWrite {}
 impl<T: NotionRead + NotionWrite + NotionSectionWrite> MutationSource for T {}
 
@@ -82,7 +84,7 @@ impl MutationRuntime {
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
         let input = Input::parse(name, args)?;
         if cancel.is_cancelled() {
-            return Ok(failure("cancelled", false));
+            return Ok(failure_result(json!({"status":"cancelled"}), false));
         }
         let mut audit =
             AuditAttempt::begin(self, input.audit_tool(), input.target()).map_err(|_| {
@@ -98,7 +100,7 @@ impl MutationRuntime {
         };
         let audit_outcome = match &outcome {
             Ok(_) => AuditOutcome::Succeeded,
-            Err(Failure::Denied) => AuditOutcome::Denied,
+            Err(Failure::Denied | Failure::RootNotConfigured) => AuditOutcome::Denied,
             Err(Failure::Unknown) => AuditOutcome::Indeterminate,
             Err(_) => AuditOutcome::Failed,
         };
@@ -120,18 +122,12 @@ impl MutationRuntime {
                 response.is_error = Some(!audited);
                 response
             }
-            Err(error) => {
-                let metadata = match &error {
-                    Failure::Conflict(meta) => Some(meta),
-                    _ => None,
-                };
-                failure_with_metadata(error.code(), audited, metadata)
-            }
+            Err(error) => failure_result(error.write_result(), audited),
         })
     }
     async fn execute(&self, input: Input) -> Result<WriteCompletion, Failure> {
         if !self.scope.roots.iter().any(|root| root.0 == input.root()) {
-            return Err(Failure::Denied);
+            return Err(Failure::RootNotConfigured);
         }
         // Caller choice can only narrow trusted roots, never add authority.
         let mut scope = self.scope.clone();
@@ -288,6 +284,7 @@ impl Input {
 enum Failure {
     Invalid,
     Denied,
+    RootNotConfigured,
     Conflict(RevisionMetadata),
     Idempotency,
     Unavailable,
@@ -297,12 +294,28 @@ impl Failure {
     fn code(&self) -> &'static str {
         match self {
             Self::Invalid => "invalid_input",
-            Self::Denied => "not_authorized",
+            Self::Denied | Self::RootNotConfigured => "not_authorized",
             Self::Conflict(_) => "revision_conflict",
             Self::Idempotency => "idempotency_conflict",
             Self::Unavailable => "unavailable",
             Self::Unknown => "outcome_unknown",
         }
+    }
+
+    fn write_result(&self) -> Value {
+        let mut write = json!({"status":self.code()});
+        match self {
+            Self::RootNotConfigured => {
+                write["reason"] = json!("root_not_configured");
+                write["message"] = json!(ROOT_GUIDANCE);
+            }
+            Self::Conflict(meta) => {
+                write["page_id"] = json!(meta.page_id.0);
+                write["current_last_edited_time"] = json!(meta.last_edited_time);
+            }
+            _ => {}
+        }
+        write
     }
 }
 impl From<CreateError> for Failure {
@@ -342,19 +355,7 @@ impl From<SectionUpdateError> for Failure {
         }
     }
 }
-fn failure(code: &str, audited: bool) -> rmcp::model::CallToolResult {
-    failure_with_metadata(code, audited, None)
-}
-fn failure_with_metadata(
-    code: &str,
-    audited: bool,
-    metadata: Option<&RevisionMetadata>,
-) -> rmcp::model::CallToolResult {
-    let mut write = json!({"status":code});
-    if let Some(meta) = metadata {
-        write["page_id"] = json!(meta.page_id.0);
-        write["current_last_edited_time"] = json!(meta.last_edited_time);
-    }
+fn failure_result(write: Value, audited: bool) -> rmcp::model::CallToolResult {
     let mut output = rmcp::model::CallToolResult::structured(
         json!({"write":write,"index":{"status":"not_attempted"},"audit":{"status":if audited {"recorded"} else {"unavailable"}}}),
     );
@@ -420,14 +421,31 @@ impl Drop for AuditAttempt<'_> {
 
 pub(crate) fn tool(name: &str) -> rmcp::model::Tool {
     let mut tool = crate::write_contract::tool(name).expect("implemented semantic mutation");
-    tool.description=Some(match name {"knowledge_create_page"=>"Create one page under an explicitly authorized parent with once-only idempotency, authoritative read-back and separate local refresh status.","knowledge_append"=>"Append exact Markdown at the end of one authorized page with fresh revision guards, once-only idempotency and separate local refresh status.",_=>"Update one exact heading's body with fresh revision guards, trusted server confirmation, once-only idempotency and separate local refresh status."}.into());
+    tool.description = Some(match name {
+        "knowledge_create_page" => "Create one page under an explicitly authorized parent with once-only idempotency, authoritative read-back and separate local refresh status.",
+        "knowledge_append" => "Append exact Markdown at the end of one authorized page with fresh revision guards, once-only idempotency and separate local refresh status.",
+        _ => "Update one exact heading's body with fresh revision guards, trusted server confirmation, once-only idempotency and separate local refresh status.",
+    }.into());
+    let mut schema = tool.input_schema.as_ref().clone();
+    let properties = schema
+        .get_mut("properties")
+        .unwrap()
+        .as_object_mut()
+        .unwrap();
+    properties.get_mut("root_page_id").expect("root argument")["description"] =
+        json!(ROOT_GUIDANCE);
+    let (destination, description) = if name == "knowledge_create_page" {
+        (
+            "parent_page_id",
+            "Page UUID where the new page will be created.",
+        )
+    } else {
+        ("page_id", "Page UUID to update.")
+    };
+    properties
+        .get_mut(destination)
+        .expect("destination argument")["description"] = json!(description);
     if name == "knowledge_update_section" {
-        let mut schema = tool.input_schema.as_ref().clone();
-        let properties = schema
-            .get_mut("properties")
-            .unwrap()
-            .as_object_mut()
-            .unwrap();
         properties.remove("confirmation_id");
         properties.insert("section_anchor".into(),json!({"type":"object","additionalProperties":false,"required":["level","heading"],"properties":{"level":{"type":"integer","minimum":1,"maximum":6},"heading":{"type":"string","minLength":1,"maxLength":200}}}));
         properties.insert(
@@ -437,14 +455,16 @@ pub(crate) fn tool(name: &str) -> rmcp::model::Tool {
         if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
             required.retain(|v| v != "confirmation_id");
         }
-        tool.input_schema = Arc::new(schema);
     }
+    tool.input_schema = Arc::new(schema);
     tool.output_schema=Some(Arc::new(json!({
         "type":"object","required":["write","index","audit"],"additionalProperties":false,
         "properties":{
             "write":{"type":"object","required":["status"],"additionalProperties":false,"properties":{
                 "status":{"enum":["verified","cancelled","invalid_input","not_authorized","revision_conflict","idempotency_conflict","unavailable","outcome_unknown"]},
-                "page_id":{"type":"string"},"url":{"type":"string"},"last_edited_time":{"type":"string"},"current_last_edited_time":{"type":"string"},"replayed":{"type":"boolean"}
+                "page_id":{"type":"string"},"url":{"type":"string"},"last_edited_time":{"type":"string"},"current_last_edited_time":{"type":"string"},"replayed":{"type":"boolean"},
+                "reason":{"enum":["root_not_configured"]},
+                "message":{"type":"string"}
             }},
             "index":{"type":"object","required":["status"],"additionalProperties":false,"properties":{
                 "status":{"enum":["queued","running","completed","failed","unavailable","not_attempted"]},
