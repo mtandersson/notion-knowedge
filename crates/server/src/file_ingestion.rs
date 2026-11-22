@@ -229,6 +229,7 @@ pub(crate) struct Runtime {
     scope: notion_knowledge_core::lifecycle::LifecycleScope,
     audit: notion_knowledge_retrieval::audit::SqliteAuditStore,
     policy: notion_knowledge_core::file_ingest::FileBatchPolicy,
+    source_state: Option<PathBuf>,
 }
 impl Runtime {
     pub(crate) fn new(
@@ -240,7 +241,9 @@ impl Runtime {
             .notion_scope
             .as_ref()
             .ok_or("file ingestion scope unavailable")?;
-        Self::scoped(settings, client, scope, config.max_upload_files)
+        let mut runtime = Self::scoped(settings, client, scope, config.max_upload_files)?;
+        runtime.source_state = config.webhook_state_file.clone();
+        Ok(runtime)
     }
     fn scoped(
         settings: &Settings,
@@ -270,6 +273,7 @@ impl Runtime {
         }
         Ok(Self {
             adapter,
+            source_state: None,
             scope: scope.clone(),
             audit: notion_knowledge_retrieval::audit::SqliteAuditStore::open(
                 &settings.audit_file,
@@ -322,6 +326,30 @@ impl notion_knowledge_mcp::upload::FileIngestion for Runtime {
                 _ = cancellation => (None, true),
                 result = batch.execute(&self.adapter, &context) => (result.err(), false),
             };
+            if let Some(path) = &self.source_state
+                && batch
+                    .results()
+                    .iter()
+                    .filter_map(|item| item.outcome.as_ref())
+                    .any(|outcome| {
+                        matches!(
+                            outcome.status,
+                            IngestStatus::Verified
+                                | IngestStatus::VerifiedAuditFailed
+                                | IngestStatus::Indeterminate
+                        )
+                    })
+                && notion_knowledge_retrieval::sync_state::SqliteSyncStateStore::open_existing(path)
+                    .and_then(|state| {
+                        state.invalidate_source_page(&self.scope.workspace_id, &input.target, false)
+                    })
+                    .is_err()
+            {
+                // The external result remains authoritative if the local
+                // source cache refuses its notification. Webhook or reconciliation
+                // can still observe the change.
+                eprintln!("file ingestion source cache invalidation unavailable");
+            }
             let results: Vec<_> = batch.results().iter().map(|item| match &item.outcome {
                 None => serde_json::json!({"index":item.index,"status":"unattempted","terminal_audited":false}),
                 Some(outcome) => serde_json::json!({"index":item.index,"status":match outcome.status {

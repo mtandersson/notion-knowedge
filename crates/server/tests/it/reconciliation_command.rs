@@ -3934,6 +3934,15 @@ async fn embedding_input_limits_remain_visible_while_siblings_commit_and_normal_
     let inventory = runtime.coordinator.state().inventory_counts().unwrap();
     assert_eq!((inventory.indexed, inventory.pending), (2, 0));
     assert!(runtime.chunks().page_chunks(PAGE).await.unwrap().is_empty());
+    use notion_knowledge_core::source::FreshPageCache;
+    let cache =
+        notion_knowledge_retrieval::page_documents::PageDocuments::new(runtime.coordinator.clone());
+    let cached = cache
+        .lookup(&PageId(PAGE.into()))
+        .await
+        .expect("source remains current despite the embedding limit");
+    assert!(cached.content.markdown.contains("private atomic source"));
+    assert!(cache.is_current(&cached.stamp));
     assert!(
         !runtime
             .chunks()

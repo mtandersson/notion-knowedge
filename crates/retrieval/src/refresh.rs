@@ -371,6 +371,28 @@ impl AuthoritativePageRefresh {
         .await
     }
 
+    /// The verified canonical source can be published before embedding. The
+    /// source watermark was captured before discovery started.
+    pub async fn publish_prefetched_document(
+        &self,
+        prefetched: &PrefetchedPage,
+        watermark: i64,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Result<(), RefreshError> {
+        let snapshot = prefetched.proposal.snapshot();
+        crate::page_documents::PageDocuments::new(self.coordinator.clone())
+            .publish(
+                snapshot.document.clone(),
+                &snapshot.parent,
+                watermark,
+                lease,
+                clock,
+            )
+            .await
+            .map_err(Into::into)
+    }
+
     /// Embed and durably commit a page prepared by [`Self::prepare_walked`].
     /// The guarded mutation plan (pinned index version, receipt and projection
     /// state) is built here from current local state, never from prefetch time.

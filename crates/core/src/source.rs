@@ -118,3 +118,28 @@ pub async fn read_verified_page(
     }
     Ok(content)
 }
+
+/// A local page's published source identity and the change signals it covers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FreshPageStamp {
+    pub page_id: crate::backend::PageId,
+    pub root_page_id: String,
+    pub revision: String,
+    pub parent: String,
+    pub watermark: i64,
+    pub publication: String,
+}
+
+pub struct CachedPage {
+    pub content: crate::backend::PageContent,
+    pub stamp: FreshPageStamp,
+}
+
+pub type CachedPageFuture<'a> = Pin<Box<dyn Future<Output = Option<CachedPage>> + Send + 'a>>;
+
+/// Local, read-only whole-page source cache. A missing, stale or unverifiable
+/// row is a miss. Eligibility does not depend on the embedding projection.
+pub trait FreshPageCache: Send + Sync {
+    fn lookup<'a>(&'a self, page: &'a crate::backend::PageId) -> CachedPageFuture<'a>;
+    fn is_current(&self, stamp: &FreshPageStamp) -> bool;
+}

@@ -38,6 +38,8 @@ impl SqliteSyncStateStore {
             DELETE FROM index_commit_generations;
             DELETE FROM page_sync_state;
             DELETE FROM crawl_checkpoints;
+            DELETE FROM source_document_publications;
+            DELETE FROM source_inventory_watermarks;
             DELETE FROM page_inventory;
             DELETE FROM inventory_walk;
             DELETE FROM index_versions;

@@ -2482,9 +2482,16 @@ async fn installed_graph_suppresses_explicitly_excluded_producer_targets() {
 mod joined_graph;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn installed_trusted_fresh_get_uses_authoritative_source_without_reading_out_of_root_content()
-{
+async fn installed_fresh_get_prefers_current_cache_and_defers_live_permissions_to_notion() {
     let runtime = TestRuntime::with_scope_policy("webhook-v1").await;
+    runtime.source.change(|model| {
+        model.markdown.push_str(
+            "\n![document](https://prod-files-secure.s3.us-west-2.amazonaws.com/\
+         aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/document.png?\
+         X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=fixture&X-Amz-Date=20261007T000000Z&\
+         X-Amz-Expires=300&X-Amz-SignedHeaders=host&X-Amz-Signature=synthetic-capability)\n",
+        )
+    });
     commit_search_fixture(&runtime).await;
     let config = retrieval_config(&runtime);
     let handler = installed_retrieval(
@@ -2494,16 +2501,32 @@ async fn installed_trusted_fresh_get_uses_authoritative_source_without_reading_o
     )
     .await
     .unwrap();
-    let before = std::fs::read(&runtime.db).unwrap();
-    let body_reads = runtime.source.body_reads.load(Ordering::SeqCst);
-    runtime.source.change(|model| {
-        model.markdown = "# Updated\n\nFresh cardamom from the authoritative source.\n".into();
-        model.revision = "2026-10-11T12:00:00Z".into();
-    });
+
     let request = |id, freshness| {
         json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{
         "name":"knowledge_get","arguments":{"refs":[{"kind":"page","id":PAGE}],"max_chars":2000,"freshness":freshness}}})
     };
+    let body_reads = runtime.source.body_reads.load(Ordering::SeqCst);
+    let output = wire_stdio(handler.clone(), vec![request(2, "fresh")]).await;
+    let cached = &output[1]["result"]["structuredContent"]["sources"][0];
+    assert_eq!(cached["read_from"], "cache");
+    assert!(cached["text"].as_str().unwrap().contains("Saffron"));
+    let canonical = cached["text"].as_str().unwrap();
+    assert!(canonical.contains("/document.png"));
+    assert!(!canonical.contains("X-Amz-Signature"));
+    assert_eq!(runtime.source.body_reads.load(Ordering::SeqCst), body_reads);
+
+    // The persisted acceptance signal dirties the page immediately, before
+    // queue processing and even though Notion's edit timestamp is unchanged.
+    runtime.source.change(|model| {
+        model.markdown = "# Updated\n\nFresh cardamom from the authoritative source.\n".into();
+    });
+    runtime
+        .worker
+        .state
+        .receive(&event(PAGE, "page.content_updated"))
+        .unwrap();
+    let before = std::fs::read(&runtime.db).unwrap();
     let output = wire_stdio(
         handler.clone(),
         vec![request(2, "indexed"), request(3, "fresh")],
@@ -2516,28 +2539,41 @@ async fn installed_trusted_fresh_get_uses_authoritative_source_without_reading_o
             .contains("Saffron")
     );
     let fresh = &output[2]["result"]["structuredContent"]["sources"][0];
+    assert_eq!(fresh["read_from"], "notion");
     assert_eq!(fresh["content_scope"], "page");
     assert!(fresh["text"].as_str().unwrap().contains("Fresh cardamom"));
-    assert_eq!(fresh["provenance"]["page_id"], PAGE);
-    assert_eq!(fresh["provenance"]["index_stale"], true);
     assert_eq!(
         runtime.source.body_reads.load(Ordering::SeqCst),
         body_reads + 1
     );
     assert_eq!(std::fs::read(&runtime.db).unwrap(), before);
+
     runtime.source.change(|model| model.parent = FOREIGN.into());
     runtime.rewalk().await;
     let before = std::fs::read(&runtime.db).unwrap();
     let reads = runtime.source.body_reads.load(Ordering::SeqCst);
-    let output = wire_stdio(handler, vec![request(4, "fresh")]).await;
+    let output = wire_stdio(
+        handler.clone(),
+        vec![request(2, "indexed"), request(3, "fresh")],
+    )
+    .await;
     assert_eq!(output[1]["result"]["isError"], true);
-    assert!(!output[1].to_string().contains("Fresh cardamom"));
-    assert_eq!(
-        runtime.source.body_reads.load(Ordering::SeqCst),
-        reads,
-        "out-of-root source must not reach authoritative Markdown reads"
+    let shared = &output[2]["result"]["structuredContent"]["sources"][0];
+    assert_eq!(shared["read_from"], "notion");
+    assert!(shared["text"].as_str().unwrap().contains("Fresh cardamom"));
+    assert!(shared["provenance"].get("root_page_id").is_none());
+    assert!(
+        shared["provenance"]
+            .get("indexed_last_edited_time")
+            .is_none()
     );
+    assert_eq!(runtime.source.body_reads.load(Ordering::SeqCst), reads + 1);
     assert_eq!(std::fs::read(&runtime.db).unwrap(), before);
+
+    runtime.source.change(|model| model.archived = true);
+    let output = wire_stdio(handler, vec![request(2, "fresh")]).await;
+    assert_eq!(output[1]["result"]["isError"], true);
+    assert!(output[1]["result"]["structuredContent"].is_null());
 }
 
 struct PauseSourceProvider {

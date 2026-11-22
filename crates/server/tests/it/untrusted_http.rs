@@ -149,7 +149,7 @@ async fn untrusted_http_serves_no_content_tool_and_says_so_at_startup() {
         }
         for (response, unavailable) in responses[1..].iter().zip([
             "retrieval_unavailable:",
-            "root_scope_unavailable:",
+            "notion_unavailable:",
             "root_scope_unavailable:",
             "file_upload_unavailable:",
         ]) {

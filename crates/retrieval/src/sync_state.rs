@@ -16,7 +16,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 mod cache_reset;
 mod inventory;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 22;
+pub const LATEST_SCHEMA_VERSION: i64 = 23;
 
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     // Entries below stay append-only and ordered.
@@ -129,6 +129,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         22,
         "drop_reconciliation_plan",
         include_str!("../migrations/0022_drop_reconciliation_plan.sql"),
+    ),
+    (
+        23,
+        "source_change_signals",
+        include_str!("../migrations/0023_source_change_signals.sql"),
     ),
 ];
 

@@ -73,6 +73,7 @@ pub struct KnowledgeServer {
     destructive_writes_enabled: bool,
     capability_policy: capabilities::CapabilityPolicy,
     fresh_source: Option<Arc<dyn notion_knowledge_core::backend::NotionRead>>,
+    fresh_page_cache: Option<Arc<dyn notion_knowledge_core::source::FreshPageCache>>,
     write_design_preview: bool,
     mutations: Option<Arc<mutations::MutationRuntime>>,
     sync_status: Option<Arc<dyn notion_knowledge_core::sync_status::SyncStatusSource>>,
@@ -91,6 +92,7 @@ impl Default for KnowledgeServer {
             destructive_writes_enabled: false,
             capability_policy: capabilities::CapabilityPolicy::default(),
             fresh_source: None,
+            fresh_page_cache: None,
             write_design_preview: false,
             mutations: None,
             sync_status: None,
@@ -274,6 +276,15 @@ impl KnowledgeServer {
         backend: Arc<dyn notion_knowledge_core::backend::NotionRead>,
     ) -> Self {
         self.fresh_source = Some(backend);
+        self
+    }
+
+    /// Configure local whole-page freshness evidence and snapshots.
+    pub fn and_fresh_page_cache(
+        mut self,
+        cache: Arc<dyn notion_knowledge_core::source::FreshPageCache>,
+    ) -> Self {
+        self.fresh_page_cache = Some(cache);
         self
     }
 

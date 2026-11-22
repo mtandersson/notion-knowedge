@@ -645,6 +645,34 @@ impl IndexCommitCoordinator {
     /// pending. It cannot authorize serving content to a request.
     #[cfg(feature = "local-lancedb")]
     pub(crate) fn index_read_guard(&self) -> Result<File, CommitError> {
+        let guard = self.bound_read_guard()?;
+        let db = self
+            .state
+            .lock_connection()
+            .map_err(|_| CommitError::Unavailable)?;
+        let unfinished: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM index_commit_receipts WHERE generation=?1 AND status IN(0,2))",
+            [&self.binding.generation], |row| row.get(0)).map_err(sql)?;
+        if unfinished {
+            return Err(CommitError::Conflict);
+        }
+        Ok(guard)
+    }
+    #[cfg(feature = "local-lancedb")]
+    pub(crate) fn document_read_guard(&self) -> Result<File, CommitError> {
+        let guard = self.bound_read_guard()?;
+        if self
+            .state
+            .cache_rebuild_pending()
+            .map_err(|_| CommitError::Unavailable)?
+        {
+            return Err(CommitError::Conflict);
+        }
+        Ok(guard)
+    }
+
+    #[cfg(feature = "local-lancedb")]
+    fn bound_read_guard(&self) -> Result<File, CommitError> {
         // Readers may nest (graph + vector/FTS) while sharing one committed
         // revision. Writers still use exclusive try_acquire/acquire locks.
         let guard = File::open(&self.index_path).map_err(io)?;
@@ -662,12 +690,6 @@ impl IndexCommitCoordinator {
             .lock_connection()
             .map_err(|_| CommitError::Unavailable)?;
         self.validate_binding(&db)?;
-        let unfinished: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM index_commit_receipts WHERE generation=?1 AND status IN(0,2))",
-            [&self.binding.generation], |row| row.get(0)).map_err(sql)?;
-        if unfinished {
-            return Err(CommitError::Conflict);
-        }
         Ok(guard)
     }
     fn acquire(&self) -> Result<File, CommitError> {
