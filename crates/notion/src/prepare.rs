@@ -4,12 +4,13 @@
 use crate::{NotionClient, links::extract_relationships, media_identity::canonical_content};
 use notion_knowledge_core::{
     backend::{BackendError, BackendErrorKind, PageContent, PageId},
-    chunking::{ChunkConfig, chunk_document},
+    chunking::{ChunkConfig, ChunkDraft, chunk_document},
     fingerprint::{content_hash, identify_chunks},
     indexed::{IndexedChunk, IndexedDocument, IndexedMetadata, SchemaVersion, SourceMetadata},
     inventory::InventoryParent,
     lifecycle::LifecycleScope,
 };
+use std::collections::BTreeMap;
 
 use crate::walk::WalkedPage;
 
@@ -60,6 +61,49 @@ impl ScopedPageSnapshot {
     /// The content this snapshot was prepared from.
     pub fn source(&self) -> &PageContent {
         &self.source
+    }
+
+    /// Finalize a partition of individual draft inputs before any embedding
+    /// or commit. Regenerate the drafts only for a page requiring extra cuts,
+    /// so every piece retains its exact source range and citation metadata.
+    pub fn split_chunks(
+        &mut self,
+        cuts: BTreeMap<usize, Vec<usize>>,
+        previous: &[IndexedChunk],
+        config: ChunkConfig,
+    ) -> Result<(), BackendError> {
+        if cuts.is_empty() {
+            return Ok(());
+        }
+        let drafts = chunk_document(&self.document, config)
+            .map_err(|_| failure(BackendErrorKind::InvalidInput))?;
+        let mut split = Vec::with_capacity(drafts.len());
+        for (index, draft) in drafts.into_iter().enumerate() {
+            let Some(points) = cuts.get(&index) else {
+                split.push(draft);
+                continue;
+            };
+            let mut start = 0;
+            for end in points
+                .iter()
+                .copied()
+                .chain(std::iter::once(draft.text.len()))
+            {
+                let text = draft
+                    .text
+                    .get(start..end)
+                    .filter(|text| !text.trim().is_empty())
+                    .ok_or_else(|| failure(BackendErrorKind::InvalidInput))?;
+                split.push(ChunkDraft {
+                    metadata: draft.metadata.clone(),
+                    text: text.to_owned(),
+                    source_bytes: draft.source_bytes.start + start..draft.source_bytes.start + end,
+                });
+                start = end;
+            }
+        }
+        self.chunks = identify_content_chunks(split, previous, &self.source)?;
+        Ok(())
     }
 }
 
@@ -139,6 +183,21 @@ pub(crate) fn prepare_content(
     };
     let drafts =
         chunk_document(&document, config).map_err(|_| failure(BackendErrorKind::InvalidInput))?;
+    let chunks = identify_content_chunks(drafts, previous, &source)?;
+    Ok(ScopedPageSnapshot {
+        document,
+        chunks,
+        parent,
+        relation_names: source.page.relation_names.clone(),
+        source,
+    })
+}
+
+fn identify_content_chunks(
+    drafts: Vec<ChunkDraft>,
+    previous: &[IndexedChunk],
+    source: &PageContent,
+) -> Result<Vec<IndexedChunk>, BackendError> {
     let mut chunks =
         identify_chunks(drafts, previous).map_err(|_| failure(BackendErrorKind::Conflict))?;
     for chunk in &mut chunks {
@@ -148,13 +207,7 @@ pub(crate) fn prepare_content(
         })
         .links;
     }
-    Ok(ScopedPageSnapshot {
-        document,
-        chunks,
-        parent,
-        relation_names: source.page.relation_names.clone(),
-        source,
-    })
+    Ok(chunks)
 }
 
 impl NotionClient {

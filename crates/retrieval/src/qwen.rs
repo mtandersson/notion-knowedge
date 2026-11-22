@@ -3,7 +3,8 @@ use candle_core::{DType, Device};
 use candle_nn::VarBuilder;
 use fastembed::{Qwen3Config, Qwen3Model, Qwen3TextEmbedding};
 use notion_knowledge_core::embedding::{
-    EmbeddingError, EmbeddingFuture, EmbeddingMetadata, EmbeddingProvider,
+    EmbeddingError, EmbeddingFuture, EmbeddingMetadata, EmbeddingPartitionFuture,
+    EmbeddingProvider, partition_at_boundaries,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -326,13 +327,16 @@ fn persist_metadata(identity: &EmbeddingMetadata, path: &Path) -> Result<(), Emb
 }
 fn validate_inputs(inputs: &[String]) -> Result<(), EmbeddingError> {
     // Bound cloning/tokenization before admission. Caller can split large jobs.
-    if inputs.len() > 32
-        || inputs.iter().any(|s| s.len() > 32768)
-        || inputs.iter().map(String::len).sum::<usize>() > 262144
-    {
+    if inputs.len() > 32 || inputs.iter().map(String::len).sum::<usize>() > 262144 {
         return Err(EmbeddingError::InputLimit);
     }
-    if inputs.iter().any(|s| s.trim().is_empty()) {
+    inputs.iter().try_for_each(|input| validate_text(input))
+}
+fn validate_text(input: &str) -> Result<(), EmbeddingError> {
+    if input.len() > 32768 {
+        return Err(EmbeddingError::InputLimit);
+    }
+    if input.trim().is_empty() {
         return Err(EmbeddingError::InvalidInput);
     }
     Ok(())
@@ -352,6 +356,38 @@ impl EmbeddingProvider for QwenProvider {
     }
     fn metadata(&self) -> &EmbeddingMetadata {
         &self.metadata
+    }
+    fn partition_input<'a>(
+        &'a self,
+        input: &'a str,
+        boundaries: Vec<usize>,
+    ) -> EmbeddingPartitionFuture<'a> {
+        Box::pin(async move {
+            let permit = self
+                .admission
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| EmbeddingError::ResourceExhausted)?;
+            let input = input.to_owned();
+            let runtime = self.runtime.clone();
+            let max_tokens = self.config.max_tokens;
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                partition_at_boundaries(&input, &boundaries, |part| {
+                    validate_text(part)?;
+                    let tokens = runtime.lock().token_count(part)?;
+                    if tokens == 0 {
+                        return Err(EmbeddingError::InvalidInput);
+                    }
+                    if tokens > max_tokens {
+                        return Err(EmbeddingError::InputLimit);
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .map_err(|_| EmbeddingError::Unavailable)?
+        })
     }
     fn embed_batch<'a>(&'a self, inputs: &'a [String]) -> EmbeddingFuture<'a> {
         Box::pin(async move {

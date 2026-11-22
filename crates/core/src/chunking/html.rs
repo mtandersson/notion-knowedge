@@ -7,6 +7,14 @@ pub(super) struct HtmlSpans {
     pending: Option<Markup>,
     spans: Vec<Range<usize>>,
     boundaries: Vec<Range<usize>>,
+    tables: Option<Tables>,
+}
+
+/// Completed top-level tables and their direct row ends.
+#[derive(Default)]
+pub(super) struct Tables {
+    active_rows: Vec<usize>,
+    completed: Vec<(Range<usize>, Vec<usize>)>,
 }
 
 struct Markup {
@@ -17,6 +25,13 @@ struct Markup {
 }
 
 impl HtmlSpans {
+    pub(super) fn tracking_tables() -> Self {
+        Self {
+            tables: Some(Tables::default()),
+            ..Self::default()
+        }
+    }
+
     pub(super) fn observe(&mut self, fragment: &str, offset: usize, standalone: bool) {
         for (index, ch) in fragment.char_indices() {
             let raw_text = self.open.last().is_some_and(|(tag, _, _)| {
@@ -98,6 +113,26 @@ impl HtmlSpans {
         if closing {
             if self.open.last().is_some_and(|(tag, _, _)| tag == &name) {
                 let (_, start, standalone) = self.open.pop().expect("matching open element");
+                if let Some(tables) = &mut self.tables {
+                    match self.open.as_slice() {
+                        [] if name == "table" && standalone => {
+                            tables
+                                .completed
+                                .push((start..end, std::mem::take(&mut tables.active_rows)));
+                        }
+                        [(table, _, true)] if name == "tr" && table == "table" => {
+                            tables.active_rows.push(end);
+                        }
+                        [(table, _, true), (group, _, _)]
+                            if name == "tr"
+                                && table == "table"
+                                && matches!(group.as_str(), "thead" | "tbody" | "tfoot") =>
+                        {
+                            tables.active_rows.push(end);
+                        }
+                        _ => {}
+                    }
+                }
                 self.spans.push(start..end);
                 if standalone {
                     self.boundaries.push(start..end);
@@ -122,5 +157,16 @@ impl HtmlSpans {
             self.spans.push(markup.start..source_end);
         }
         (self.spans, self.boundaries)
+    }
+
+    pub(super) fn finish_tables(mut self, source_end: usize) -> (Vec<Range<usize>>, Tables) {
+        let tables = self.tables.take().expect("table tracking enabled");
+        (self.finish(source_end).0, tables)
+    }
+}
+
+impl Tables {
+    pub(super) fn into_completed(self) -> impl Iterator<Item = (Range<usize>, Vec<usize>)> {
+        self.completed.into_iter()
     }
 }

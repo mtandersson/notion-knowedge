@@ -215,6 +215,13 @@ impl EmbeddingProvider for SyncEmbedding<'_> {
     fn metadata(&self) -> &notion_knowledge_core::embedding::EmbeddingMetadata {
         self.0.metadata()
     }
+    fn partition_input<'a>(
+        &'a self,
+        input: &'a str,
+        boundaries: Vec<usize>,
+    ) -> notion_knowledge_core::embedding::EmbeddingPartitionFuture<'a> {
+        self.0.partition_input(input, boundaries)
+    }
     fn embed_batch<'a>(
         &'a self,
         texts: &'a [String],

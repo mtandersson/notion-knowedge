@@ -494,7 +494,7 @@ impl AuthoritativePageRefresh {
         lease: Lease,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Result<RefreshResult, RefreshError> {
-        let proposal = relation_proposal.snapshot().clone();
+        let mut proposal = relation_proposal.snapshot().clone();
         let projection = RelationProjection::new(
             self.coordinator.binding(),
             &page.0,
@@ -518,6 +518,73 @@ impl AuthoritativePageRefresh {
         let alias_unfinished = self.unfinished_alias_repair(operation_id, &page.0)?;
         let complete =
             alias_complete && self.coordinator.relation_projection_complete(&projection)?;
+        if complete
+            && !alias_unfinished
+            && self
+                .coordinator
+                .unfinished_relation_repair_id(operation_id)?
+                .is_none()
+            && self
+                .coordinator
+                .receipt(operation_id)?
+                .is_some_and(|r| r.status == ReceiptStatus::Applied)
+        {
+            let handler = self.clone();
+            self.check_owned_snapshot(lease, clock, move |context| async move {
+                let _authority = handler
+                    .relations
+                    .revalidate(&relation_proposal)
+                    .await
+                    .map_err(|_| FailureClass::Conflict)?;
+                context.revalidate().map_err(|_| FailureClass::Conflict)?;
+                if !handler
+                    .aliases_complete(&aliases)
+                    .map_err(|_| FailureClass::Index)?
+                    || !handler
+                        .coordinator
+                        .relation_projection_complete(&projection)
+                        .map_err(|_| FailureClass::Index)?
+                {
+                    return Err(FailureClass::Conflict);
+                }
+                Ok(())
+            })
+            .await?;
+            return Ok(RefreshResult {
+                outcome: CommitOutcome::AlreadyApplied,
+                diff: ChunkDiffMetrics {
+                    skipped: proposal.chunks.len(),
+                    ..Default::default()
+                },
+            });
+        }
+
+        // Keep known-good inputs and their existing vectors. For a new input,
+        // only a provider's exact admission check can decide to split it.
+        let previous_texts = previous
+            .iter()
+            .map(|chunk| chunk.text.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let mut cuts = std::collections::BTreeMap::new();
+        for (position, chunk) in proposal.chunks.iter().enumerate() {
+            if previous_texts.contains(chunk.text.as_str()) {
+                continue;
+            }
+            let boundaries = notion_knowledge_core::chunking::table_section_boundaries(&chunk.text);
+            if boundaries.is_empty() {
+                continue;
+            }
+            let partition = provider
+                .partition_input(&chunk.text, boundaries)
+                .await
+                .map_err(ChunkTableError::from)?;
+            if !partition.is_empty() {
+                cuts.insert(position, partition);
+            }
+        }
+        proposal
+            .split_chunks(cuts, &previous, self.chunk_config)
+            .map_err(|error| source_failure(error.kind))?;
         let document = proposal.document;
         let chunks = proposal.chunks;
         let metadata_page = notion_knowledge_core::backend::Page {
@@ -625,47 +692,6 @@ impl AuthoritativePageRefresh {
                     },
                 });
             }
-        }
-
-        if complete
-            && !alias_unfinished
-            && self
-                .coordinator
-                .unfinished_relation_repair_id(operation_id)?
-                .is_none()
-            && self
-                .coordinator
-                .receipt(operation_id)?
-                .is_some_and(|r| r.status == ReceiptStatus::Applied)
-        {
-            let handler = self.clone();
-            self.check_owned_snapshot(lease, clock, move |context| async move {
-                let _authority = handler
-                    .relations
-                    .revalidate(&relation_proposal)
-                    .await
-                    .map_err(|_| FailureClass::Conflict)?;
-                context.revalidate().map_err(|_| FailureClass::Conflict)?;
-                if !handler
-                    .aliases_complete(&aliases)
-                    .map_err(|_| FailureClass::Index)?
-                    || !handler
-                        .coordinator
-                        .relation_projection_complete(&projection)
-                        .map_err(|_| FailureClass::Index)?
-                {
-                    return Err(FailureClass::Conflict);
-                }
-                Ok(())
-            })
-            .await?;
-            return Ok(RefreshResult {
-                outcome: CommitOutcome::AlreadyApplied,
-                diff: ChunkDiffMetrics {
-                    skipped: chunks.len(),
-                    ..Default::default()
-                },
-            });
         }
 
         // Revision includes canonical metadata and content, not just body text.

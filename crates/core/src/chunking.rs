@@ -6,6 +6,9 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use crate::indexed::{IndexedDocument, IndexedMetadata};
 
 mod html;
+mod table_splits;
+
+pub use table_splits::table_section_boundaries;
 
 /// Sizes count Unicode scalar values, not bytes or model-specific tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
