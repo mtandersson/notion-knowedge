@@ -118,6 +118,9 @@ pub type EmbeddingFuture<'a> =
 pub type EmbeddingIdleFuture<'a> =
     Pin<Box<dyn Future<Output = Result<(), EmbeddingError>> + Send + 'a>>;
 
+pub type EmbeddingPartitionFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<usize>, EmbeddingError>> + Send + 'a>>;
+
 pub trait EmbeddingProvider: Send + Sync {
     /// Wait for work retained after a cancelled embedding observer. Providers
     /// with cancellation-safe futures need no additional drain. Blocking adapters
@@ -127,6 +130,61 @@ pub trait EmbeddingProvider: Send + Sync {
     }
     fn metadata(&self) -> &EmbeddingMetadata;
     fn embed_batch<'a>(&'a self, inputs: &'a [String]) -> EmbeddingFuture<'a>;
+    /// Return the subset of ordered UTF-8 byte boundaries needed to fit one
+    /// indexing input. An empty result preserves the original input. Adapters
+    /// without a partitioner leave admission to `embed_batch`.
+    fn partition_input<'a>(
+        &'a self,
+        _input: &'a str,
+        _boundaries: Vec<usize>,
+    ) -> EmbeddingPartitionFuture<'a> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+}
+
+/// Try an unchanged input first. On an input limit, bisect only at the
+/// supplied structural boundaries and check the actual input of each piece.
+/// The split budget limits work on pathological Markdown, and an indivisible
+/// input retains the original typed failure.
+pub fn partition_at_boundaries(
+    input: &str,
+    boundaries: &[usize],
+    mut validate: impl FnMut(&str) -> Result<(), EmbeddingError>,
+) -> Result<Vec<usize>, EmbeddingError> {
+    const MAX_SPLITS: usize = 127;
+    if boundaries.windows(2).any(|pair| pair[0] >= pair[1])
+        || boundaries.iter().any(|&position| {
+            position == 0 || position >= input.len() || !input.is_char_boundary(position)
+        })
+    {
+        return Err(EmbeddingError::InvalidInput);
+    }
+    let mut pending = vec![(0, input.len(), boundaries)];
+    let mut cuts = Vec::new();
+    while let Some((start, end, boundaries)) = pending.pop() {
+        match validate(&input[start..end]) {
+            Ok(()) => continue,
+            Err(EmbeddingError::InputLimit) => {}
+            Err(error) => return Err(error),
+        }
+        if cuts.len() == MAX_SPLITS {
+            return Err(EmbeddingError::InputLimit);
+        }
+        let middle = start + (end - start) / 2;
+        let after = boundaries.partition_point(|&position| position < middle);
+        let position = match (after.checked_sub(1), boundaries.get(after)) {
+            (Some(before), Some(&right)) if middle - boundaries[before] < right - middle => before,
+            (_, Some(_)) => after,
+            (Some(before), None) => before,
+            (None, None) => return Err(EmbeddingError::InputLimit),
+        };
+        let cut = boundaries[position];
+        pending.push((cut, end, &boundaries[position + 1..]));
+        pending.push((start, cut, &boundaries[..position]));
+        cuts.push(cut);
+    }
+    cuts.sort_unstable();
+    Ok(cuts)
 }
 
 /// Shared application boundary validates adapter output before index insertion.

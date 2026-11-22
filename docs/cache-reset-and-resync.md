@@ -92,10 +92,13 @@ The embedding model/vector identity does not change for this boundary correction
 Each guarded page prepares its embeddings with sequential single-text provider
 requests, then commits the complete page atomically. A page with many valid
 chunks therefore does not exceed the provider's per-request text-count bound.
-An actually oversized atomic input records `EmbeddingInputLimit` in reconciliation
-status and emits the fixed `embedding_input_limit` skip reason; independent pages
-can still become searchable. Input is never partially indexed or claimed complete.
-Normal later sync can retry after a permitted input/configuration correction.
+When a chunk containing a complete HTML table exceeds the model's input limit,
+the worker checks smaller, contiguous source slices at table rows and surrounding
+Markdown boundaries before finalizing chunk identities. Accepted chunks keep
+their existing layout. Every slice must fit before the complete page can commit.
+An indivisible oversized input records `EmbeddingInputLimit` in reconciliation
+status and emits the fixed `embedding_input_limit` skip reason. Independent pages
+can still become searchable. Normal later sync can retry the failed page.
 Model availability, malformed outputs, concurrency/resource exhaustion and index,
 ownership or authentication failures retain their failure handling.
 

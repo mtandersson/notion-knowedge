@@ -95,6 +95,22 @@ impl EmbeddingProvider for Provider {
     fn metadata(&self) -> &EmbeddingMetadata {
         &self.metadata
     }
+    fn partition_input<'a>(
+        &'a self,
+        text: &'a str,
+        boundaries: Vec<usize>,
+    ) -> notion_knowledge_core::embedding::EmbeddingPartitionFuture<'a> {
+        let input_limit = self.input_limit_bytes.load(Ordering::SeqCst);
+        Box::pin(async move {
+            notion_knowledge_core::embedding::partition_at_boundaries(text, &boundaries, |part| {
+                if input_limit > 0 && part.len() > input_limit {
+                    Err(EmbeddingError::InputLimit)
+                } else {
+                    Ok(())
+                }
+            })
+        })
+    }
     fn embed_batch<'a>(&'a self, texts: &'a [String]) -> EmbeddingFuture<'a> {
         self.count.fetch_add(texts.len(), Ordering::SeqCst);
         if let Some(pause) = self.boundary_pause.lock().unwrap().take() {
@@ -3814,6 +3830,76 @@ async fn readable_html_siblings_and_many_chunk_pages_use_bounded_embedding_reque
         assert_eq!(runtime.coordinator.state().inventory_counts().unwrap().indexed, 3);
         assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
     }
+}
+
+#[tokio::test]
+async fn oversized_table_sections_commit_losslessly_and_retry_as_unchanged() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    let rows: Vec<_> = (0..4)
+        .map(|n| {
+            format!(
+                "<tr><td>Row {n}</td><td>{}</td></tr>",
+                "test values ".repeat(55)
+            )
+        })
+        .collect();
+    let bullets: Vec<_> = (0..5)
+        .map(|n| {
+            format!(
+                "- [Related entry {n}](https://example.invalid/entry/{n}) {}",
+                "context ".repeat(24)
+            )
+        })
+        .collect();
+    let markdown = format!(
+        "# Investigation\n\n<table>\n{}\n</table>\n{}\n",
+        rows.join("\n"),
+        bullets.join("\n")
+    );
+    http.change(|m| m.markdown = markdown.clone());
+    f.provider.input_limit_bytes.store(1024, Ordering::SeqCst);
+    let result = f.command(&http, &["--reconcile", "apply"]).await;
+    assert_eq!(result.exit, 0, "{:?}", result.json);
+    let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+    let mut original = runtime.chunks().page_chunks(PAGE).await.unwrap();
+    assert!(original.len() > 4);
+    let mut source_order: Vec<_> = original
+        .iter()
+        .map(|chunk| (markdown.find(&chunk.text).unwrap(), chunk.text.as_str()))
+        .collect();
+    source_order.sort_unstable();
+    assert_eq!(
+        source_order
+            .into_iter()
+            .map(|(_, text)| text)
+            .collect::<String>(),
+        markdown
+    );
+    assert!(original.iter().all(|chunk| chunk.text.len() <= 1024
+        && chunk.metadata.page_id == PAGE
+        && chunk.metadata.source.root_page_id == ROOT
+        && chunk.metadata.heading_path == ["Investigation"]));
+    for row in rows {
+        assert!(original.iter().any(|chunk| chunk.text.contains(&row)));
+    }
+    for n in 0..bullets.len() {
+        let link = format!("[Related entry {n}](https://example.invalid/entry/{n})");
+        assert!(original.iter().any(|chunk| chunk.text.contains(&link)));
+    }
+    assert!(out_of_sync(&runtime).is_empty());
+    drop(runtime);
+
+    let embeddings = f.provider.count.load(Ordering::SeqCst);
+    let retry = f.command(&http, &["--reconcile", "retry", PAGE]).await;
+    assert_eq!(retry.exit, 0, "{:?}", retry.json);
+    assert_eq!(retry.json["unchanged"], 1);
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), embeddings);
+    let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+    let mut current = runtime.chunks().page_chunks(PAGE).await.unwrap();
+    original.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
+    current.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
+    assert_eq!(current, original);
 }
 
 #[tokio::test]

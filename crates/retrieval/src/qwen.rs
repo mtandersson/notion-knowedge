@@ -3,7 +3,8 @@ use candle_core::{DType, Device};
 use candle_nn::VarBuilder;
 use fastembed::{Qwen3Config, Qwen3Model, Qwen3TextEmbedding};
 use notion_knowledge_core::embedding::{
-    EmbeddingError, EmbeddingFuture, EmbeddingMetadata, EmbeddingProvider,
+    EmbeddingError, EmbeddingFuture, EmbeddingMetadata, EmbeddingPartitionFuture,
+    EmbeddingProvider, partition_at_boundaries,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -324,15 +325,17 @@ fn persist_metadata(identity: &EmbeddingMetadata, path: &Path) -> Result<(), Emb
         .and_then(|()| file.sync_all())
         .map_err(|_| EmbeddingError::Unavailable)
 }
+const MAX_TEXT_BYTES: usize = 32768;
+
 fn validate_inputs(inputs: &[String]) -> Result<(), EmbeddingError> {
     // Bound cloning/tokenization before admission. Caller can split large jobs.
     if inputs.len() > 32
-        || inputs.iter().any(|s| s.len() > 32768)
+        || inputs.iter().any(|input| input.len() > MAX_TEXT_BYTES)
         || inputs.iter().map(String::len).sum::<usize>() > 262144
     {
         return Err(EmbeddingError::InputLimit);
     }
-    if inputs.iter().any(|s| s.trim().is_empty()) {
+    if inputs.iter().any(|input| input.trim().is_empty()) {
         return Err(EmbeddingError::InvalidInput);
     }
     Ok(())
@@ -352,6 +355,44 @@ impl EmbeddingProvider for QwenProvider {
     }
     fn metadata(&self) -> &EmbeddingMetadata {
         &self.metadata
+    }
+    fn partition_input<'a>(
+        &'a self,
+        input: &'a str,
+        boundaries: Vec<usize>,
+    ) -> EmbeddingPartitionFuture<'a> {
+        Box::pin(async move {
+            let permit = self
+                .admission
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| EmbeddingError::Unavailable)?;
+            let input = input.to_owned();
+            let runtime = self.runtime.clone();
+            let max_tokens = self.config.max_tokens;
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                partition_at_boundaries(&input, &boundaries, |part| {
+                    if part.len() > MAX_TEXT_BYTES {
+                        return Err(EmbeddingError::InputLimit);
+                    }
+                    if part.trim().is_empty() {
+                        return Err(EmbeddingError::InvalidInput);
+                    }
+                    let tokens = runtime.lock().token_count(part)?;
+                    if tokens == 0 {
+                        return Err(EmbeddingError::InvalidInput);
+                    }
+                    if tokens > max_tokens {
+                        return Err(EmbeddingError::InputLimit);
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .map_err(|_| EmbeddingError::Unavailable)?
+        })
     }
     fn embed_batch<'a>(&'a self, inputs: &'a [String]) -> EmbeddingFuture<'a> {
         Box::pin(async move {
@@ -653,6 +694,35 @@ mod tests {
             Err(EmbeddingError::InputLimit)
         );
         assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn indexing_partitions_use_the_same_admission_as_inference() {
+        let (provider, calls) = fake(QwenConfig::cpu("unused"), false);
+        let query_admission = provider.admission.clone().acquire_owned().await.unwrap();
+        let partition = provider.partition_input("600500", vec![3]);
+        tokio::pin!(partition);
+        tokio::select! {
+            biased;
+            result = &mut partition => panic!("partition should wait for admission: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        drop(query_admission);
+        assert_eq!(partition.await.unwrap(), [3]);
+        assert!(
+            provider
+                .partition_input("1024", vec![2])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            provider.partition_input("32000", vec![4]).await,
+            Err(EmbeddingError::InputLimit)
+        );
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(provider.embed_batch(&["600".into()]).await.is_ok());
+        assert!(provider.embed_batch(&["500".into()]).await.is_ok());
     }
 
     #[tokio::test]
