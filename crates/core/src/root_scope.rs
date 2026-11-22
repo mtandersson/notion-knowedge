@@ -31,7 +31,8 @@ impl std::fmt::Display for ScopeError {
 }
 impl std::error::Error for ScopeError {}
 
-fn canonical_id(value: &str) -> bool {
+/// Check the lowercase hyphenated UUID form used by persisted Notion identities.
+pub fn canonical_id(value: &str) -> bool {
     value.len() == 36
         && value.bytes().enumerate().all(|(index, byte)| match index {
             8 | 13 | 18 | 23 => byte == b'-',
