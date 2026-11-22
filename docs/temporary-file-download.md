@@ -5,14 +5,14 @@ download boundary for ChatGPT file references. It does not enable the upload
 tool, grant Notion scope, or call an upload API. Authenticated ingestion must
 invoke this boundary before #68 validation and #69–#75 attachment.
 
-Construct the policy from **operator-controlled exact source hostnames**, a
-positive byte limit and a whole-request deadline (up to 120 seconds). Do not
-derive allowed hosts or limits from the tool request. Confirm intended file
-providers before setting the allowlist; there is no wildcard or arbitrary-URL
-fallback. Example policy: 5 MiB and 30 seconds for a verified source host.
+Construct the policy with operator-owned byte and time limits. The default
+source policy requires exact DNS hostnames. Operators can instead select
+`public_https` for providers that rotate their HTTPS source names. Either
+policy accepts a blocked-domain list that applies to whole domains and their
+subdomains before DNS lookup.
 
 `download(&temporary_url)` accepts HTTPS on port 443 only, with no userinfo,
-fragment, whitespace or control characters. It resolves the allowed hostname
+fragment, whitespace or control characters. It resolves the hostname
 fresh for the active request, rejects mixed public/private DNS answers, and
 pins all admitted addresses into a new request-local client. TLS still
 authenticates the original hostname. IP literals, loopback, private, link-local,
@@ -60,6 +60,6 @@ No real signed URL, private Notion data, credentials or provider request is used
 
 ## SSRF defense-in-depth verification (#88)
 
-All A and AAAA records returned by the request-local DNS lookup must pass the same public-address gate; any mixed public/private answer rejects the **entire** request. The request-local pinned resolver then prevents fresh DNS rebinding during the HTTPS connection. Redirects are **never followed**, including cross-host 302/307 redirects to private, loopback or link-local destinations; this is deliberately stricter than redirect target revalidation. URL source allowlist, HTTPS-only port 443, per-connect timeout and bounded full-body deadline remain mandatory. No proxy, source credential propagation, Referer, or automatic retries are enabled.
+All A and AAAA records returned by the request-local DNS lookup must pass the same public-address gate; any mixed public/private answer rejects the **entire** request. The request-local pinned resolver then prevents fresh DNS rebinding during the HTTPS connection. Redirects are **never followed**, including cross-host 302/307 redirects to private, loopback or link-local destinations; this is deliberately stricter than redirect target revalidation. The configured blocked domains, HTTPS-only port 443, per-connect timeout and bounded full-body deadline apply to both source policies. No proxy, source credential propagation, Referer, or automatic retries are enabled.
 
 Security tests explicitly exercise mixed A/AAAA public-private answers, empty RRsets, redacted error messages, redirect targets into cloud metadata addresses, private-IP/IPv6-mapped ranges, truncated responses and streaming/read timeout/cancellation. URLs containing temporary signature/query parameters never appear in safe errors.

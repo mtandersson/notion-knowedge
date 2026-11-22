@@ -12,6 +12,7 @@ pub enum DownloadError {
     InvalidPolicy,
     InvalidUrl,
     HostDenied,
+    DomainBlocked,
     AddressDenied,
     TooLarge,
     EmptyFile,
@@ -38,6 +39,7 @@ impl std::fmt::Display for DownloadError {
             Self::InvalidPolicy => "invalid temporary file download policy",
             Self::InvalidUrl => "temporary file URL is not allowed",
             Self::HostDenied => "temporary file source hostname is not allowed",
+            Self::DomainBlocked => "temporary file source domain is blocked",
             Self::AddressDenied => "temporary file source address is not public",
             Self::TooLarge => "temporary file exceeds the download limit",
             Self::EmptyFile => "temporary file is empty",
@@ -66,11 +68,12 @@ struct TlsFixture {
     paths: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
 }
 
-/// Operator-owned exact hostname allowlist, never derived from tool arguments.
+/// Operator-owned source policy, independent of tool arguments.
 /// This policy authorizes a network destination, not a Notion mutation or root.
 #[derive(Debug, Clone)]
 pub struct DownloadPolicy {
-    hosts: BTreeSet<String>,
+    hosts: Option<BTreeSet<String>>,
+    blocked_domains: BTreeSet<String>,
     max_bytes: usize,
     deadline: Duration,
     #[cfg(any(test, feature = "test-fixtures"))]
@@ -83,42 +86,31 @@ impl DownloadPolicy {
         max_bytes: usize,
         deadline: Duration,
     ) -> Result<Self, DownloadError> {
-        if hosts.is_empty()
-            || hosts.len() > 32
-            || max_bytes == 0
-            || deadline.is_zero()
-            || deadline > Duration::from_secs(120)
-        {
+        let mut policy = Self::public_https(max_bytes, deadline)?;
+        policy.hosts = Some(dns_names(hosts)?);
+        Ok(policy)
+    }
+
+    /// Accept public DNS names without an exact hostname list. Every resolved
+    /// address still has to pass the public-address gate before a connection.
+    pub fn public_https(max_bytes: usize, deadline: Duration) -> Result<Self, DownloadError> {
+        if max_bytes == 0 || deadline.is_zero() || deadline > Duration::from_secs(120) {
             return Err(DownloadError::InvalidPolicy);
         }
-        let mut allowed = BTreeSet::new();
-        for host in hosts {
-            let host = host.to_ascii_lowercase();
-            if host.len() > 253
-                || !host.contains('.')
-                || host.ends_with('.')
-                || host.parse::<IpAddr>().is_ok()
-                || !host.split('.').all(|label| {
-                    !label.is_empty()
-                        && label.len() <= 63
-                        && !label.starts_with('-')
-                        && !label.ends_with('-')
-                        && label
-                            .bytes()
-                            .all(|ch| ch.is_ascii_alphanumeric() || ch == b'-')
-                })
-            {
-                return Err(DownloadError::InvalidPolicy);
-            }
-            allowed.insert(host);
-        }
         Ok(Self {
-            hosts: allowed,
+            hosts: None,
+            blocked_domains: BTreeSet::new(),
             max_bytes,
             deadline,
             #[cfg(any(test, feature = "test-fixtures"))]
             fixture: None,
         })
+    }
+
+    /// Block each exact DNS domain and all of its subdomains before DNS lookup.
+    pub fn with_blocked_domains(mut self, domains: &[&str]) -> Result<Self, DownloadError> {
+        self.blocked_domains = dns_names(domains)?;
+        Ok(self)
     }
 
     #[cfg(any(test, feature = "test-fixtures"))]
@@ -155,8 +147,24 @@ impl DownloadPolicy {
             return Err(DownloadError::InvalidUrl);
         }
         let host = url.host_str().ok_or(DownloadError::InvalidUrl)?;
-        if !self.hosts.contains(host) {
+        let domain = host.trim_end_matches('.');
+        if self.blocked_domains.iter().any(|blocked| {
+            domain == blocked
+                || domain
+                    .strip_suffix(blocked.as_str())
+                    .is_some_and(|prefix| prefix.ends_with('.'))
+        }) {
+            return Err(DownloadError::DomainBlocked);
+        }
+        if self
+            .hosts
+            .as_ref()
+            .is_some_and(|hosts| !hosts.contains(host))
+        {
             return Err(DownloadError::HostDenied);
+        }
+        if url.domain().is_none() {
+            return Err(DownloadError::AddressDenied);
         }
         Ok(url)
     }
@@ -193,7 +201,10 @@ impl DownloadPolicy {
             // RRsets. This also handles fresh DNS rebinding at request time.
             let addresses = validated_addresses(addresses)?;
             let client = client_builder(self.deadline)
-                .resolve_to_addrs(host, &addresses)
+                .dns_resolver(std::sync::Arc::new(PinnedSource {
+                    host: host.to_owned(),
+                    addresses,
+                }))
                 .build()
                 .map_err(|_| DownloadError::SourceUnavailable)?;
             let temporary =
@@ -203,6 +214,52 @@ impl DownloadPolicy {
         .await
         .map_err(|_| DownloadError::Timeout)?
     }
+}
+
+/// Resolve only the hostname and addresses admitted for this request. A
+/// hostname mismatch fails closed instead of falling back to system DNS.
+struct PinnedSource {
+    host: String,
+    addresses: Vec<SocketAddr>,
+}
+
+impl reqwest::dns::Resolve for PinnedSource {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let addresses = (name.as_str() == self.host).then(|| self.addresses.clone());
+        Box::pin(async move {
+            let addresses =
+                addresses.ok_or_else(|| std::io::Error::other("source DNS mismatch"))?;
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+fn dns_names(hosts: &[&str]) -> Result<BTreeSet<String>, DownloadError> {
+    if !(1..=32).contains(&hosts.len()) {
+        return Err(DownloadError::InvalidPolicy);
+    }
+    let mut normalized = BTreeSet::new();
+    for host in hosts {
+        let host = host.to_ascii_lowercase();
+        if host.len() > 253
+            || !host.contains('.')
+            || host.ends_with('.')
+            || host.parse::<IpAddr>().is_ok()
+            || !host.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label
+                        .bytes()
+                        .all(|ch| ch.is_ascii_alphanumeric() || ch == b'-')
+            })
+        {
+            return Err(DownloadError::InvalidPolicy);
+        }
+        normalized.insert(host);
+    }
+    Ok(normalized)
 }
 
 /// Owns a random private tempfile, unlinked on success-consumer drop, failure or
@@ -430,6 +487,58 @@ mod tests {
             assert!(!error.retryable());
             assert!(!format!("{error:?} {error}").contains("private-sentinel"));
         }
+    }
+
+    #[test]
+    fn public_https_accepts_rotating_dns_names_and_blocks_domain_boundaries() {
+        let policy = DownloadPolicy::public_https(8, Duration::from_secs(1))
+            .unwrap()
+            .with_blocked_domains(&["Internal.Example"])
+            .unwrap();
+        for url in [
+            "https://region-one.storage.example/file",
+            "https://region-two.storage.example/file",
+            "https://notinternal.example/file",
+            "https://internal.example.public.example/file",
+        ] {
+            assert!(policy.url(url).is_ok(), "{url}");
+        }
+        for url in [
+            "https://internal.example/file",
+            "https://Sub.INTERNAL.example./file",
+            "https://nested.sub.internal.example/file",
+        ] {
+            assert_eq!(policy.url(url), Err(DownloadError::DomainBlocked));
+        }
+        for url in ["https://127.0.0.1/file", "https://[::1]/file"] {
+            assert_eq!(policy.url(url), Err(DownloadError::AddressDenied));
+        }
+        assert_eq!(
+            policy.url("http://region-one.storage.example/file"),
+            Err(DownloadError::InvalidUrl)
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_resolution_has_no_fallback_for_other_hosts() {
+        use reqwest::dns::Resolve;
+
+        let address = "1.1.1.1:443".parse().unwrap();
+        let resolver = PinnedSource {
+            host: "files.example.test".into(),
+            addresses: vec![address],
+        };
+        let pinned = resolver
+            .resolve("files.example.test".parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(pinned.collect::<Vec<_>>(), [address]);
+        assert!(
+            resolver
+                .resolve("other.example.test".parse().unwrap())
+                .await
+                .is_err()
+        );
     }
 
     #[test]
