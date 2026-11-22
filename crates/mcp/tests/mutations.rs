@@ -358,6 +358,10 @@ impl Drop for Task {
     }
 }
 async fn invoke(handler: KnowledgeServer, name: &str, args: Value) -> Value {
+    request(handler, "tools/call", json!({"name":name,"arguments":args})).await
+}
+
+async fn request(handler: KnowledgeServer, method: &str, params: Value) -> Value {
     let (client, server) = tokio::io::duplex(65536);
     let _task = Task(tokio::spawn(async move {
         let _ = handler.serve(server).await.unwrap().waiting().await;
@@ -366,7 +370,7 @@ async fn invoke(handler: KnowledgeServer, name: &str, args: Value) -> Value {
     let mut reader = BufReader::new(reader);
     for message in [
         json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"mutation-fixture","version":"1"}}}),
-        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":name,"arguments":args}}),
+        json!({"jsonrpc":"2.0","id":2,"method":method,"params":params}),
     ] {
         writer
             .write_all(format!("{message}\n").as_bytes())
@@ -450,6 +454,78 @@ async fn create_append_and_section_dispatch_verify_source_and_return_separate_in
         assert_eq!(events.first().unwrap().outcome(), AuditOutcome::Attempted);
         assert_eq!(events.last().unwrap().outcome(), AuditOutcome::Succeeded);
         assert_eq!(events[1].target_page_id(), Some(target));
+    }
+}
+
+#[tokio::test]
+async fn installed_writes_explain_root_selection_and_allow_retry_without_consuming_the_key() {
+    let discovery = Fixture::new();
+    let catalog = request(discovery.server(false), "tools/list", json!({})).await;
+    let tools = catalog["result"]["tools"].as_array().unwrap();
+    for (name, destination, args) in [
+        (
+            "knowledge_create_page",
+            "parent_page_id",
+            create("correct-root-create-fixture"),
+        ),
+        (
+            "knowledge_append",
+            "page_id",
+            append("correct-root-append-fixture"),
+        ),
+    ] {
+        let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
+        let fields = &tool["inputSchema"]["properties"];
+        let root_description = fields["root_page_id"]["description"].as_str().unwrap();
+        assert!(root_description.contains("knowledge_get"));
+        assert!(root_description.contains("sources[].provenance.root_page_id"));
+        assert!(
+            fields[destination]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Page UUID")
+        );
+        let response_properties = &tool["outputSchema"]["properties"]["write"]["properties"];
+        assert_eq!(
+            response_properties["reason"]["enum"],
+            json!(["root_not_configured"])
+        );
+        assert_eq!(response_properties["message"]["type"], "string");
+        assert!(!tool.to_string().contains(ROOT));
+
+        let f = Fixture::new();
+        let handler = f.server(false);
+        let mut wrong_root = args.clone();
+        wrong_root["root_page_id"] = args[destination].clone();
+        let rejected = invoke(handler.clone(), name, wrong_root).await;
+        assert_eq!(rejected["result"]["isError"], true);
+        let out = output(&rejected);
+        assert_eq!(out["write"]["status"], "not_authorized");
+        assert_eq!(out["write"]["reason"], "root_not_configured");
+        assert_eq!(out["write"]["message"], root_description);
+        assert_eq!(out["index"]["status"], "not_attempted");
+        assert_eq!(out["audit"]["status"], "recorded");
+        assert!(!rejected.to_string().contains(ROOT));
+        assert!(!rejected.to_string().contains(PAGE));
+        assert_eq!(f.source.effects.load(Ordering::SeqCst), 0);
+        assert_eq!(f.source.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(f.queue.calls.load(Ordering::SeqCst), 0);
+        let outcomes = f
+            .audit
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(AuditEvent::outcome)
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes, [AuditOutcome::Attempted, AuditOutcome::Denied]);
+
+        let retried = invoke(handler, name, args).await;
+        let out = output(&retried);
+        assert_eq!(out["write"]["status"], "verified");
+        assert_eq!(out["write"]["replayed"], false);
+        assert!(out["write"].get("reason").is_none());
+        assert_eq!(f.source.effects.load(Ordering::SeqCst), 1);
     }
 }
 
@@ -590,7 +666,9 @@ async fn trusted_confirmation_is_required_and_binds_the_complete_section_intent(
     changed["idempotency_key"] = json!("declined-section-intent-02");
     for args in [first, changed] {
         let result = invoke(f.server(true), "knowledge_update_section", args).await;
-        assert_eq!(output(&result)["write"]["status"], "not_authorized");
+        let write = &output(&result)["write"];
+        assert_eq!(write["status"], "not_authorized");
+        assert!(write.get("reason").is_none());
     }
     let requests = f.confirmation.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);

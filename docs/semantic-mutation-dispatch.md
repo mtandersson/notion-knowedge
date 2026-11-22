@@ -17,8 +17,11 @@ replacement are not implemented, advertised or dispatched by this runtime, even
 when the old development schema-preview flag is also set.
 
 Inputs require canonical page/root UUIDs and an idempotency key. `root_page_id`
-can only narrow the trusted operator roots; it cannot add authority. Create takes
-`parent_page_id`, title and Markdown. Append/section take `page_id` and at least
+selects a configured root. Use `sources[].provenance.root_page_id` from
+`knowledge_get` on the destination if it is indexed, or on an indexed page
+under the intended root. The create destination is `parent_page_id`, and
+append/section use `page_id`. Create also takes title and Markdown.
+Append/section require at least
 one authoritative `expected_last_edited_time` or exact
 `expected_markdown_sha256`. Section uses `section_anchor: {level, heading}`,
 selects one exact literal heading and preserves all unrelated bytes. Empty
@@ -32,8 +35,9 @@ visible to a future request-bound adapter; wrapping an entire concrete workflow
 in one stale credential check is unnecessary. It reserves the durable intent,
 marks the outcome uncertain before one create effect, reads complete exact
 title/Markdown, then records the verified receipt before refresh admission.
-Writes run no ancestry walk and no root gate: they rely on Notion's own
-permission check for the token.
+MCP validates the configured root selection before dispatch. Notion checks
+whether the integration token may write to the destination. This path performs
+no ancestry walk.
 The older concrete Notion icon-capable helper remains a separate internal API;
 the semantic create schema does not accept icons or arbitrary properties.
 
@@ -71,7 +75,11 @@ Results separate three states:
 
 Index `queued`/`running`/`completed`/`failed`/`unavailable` is independent of
 verified source success; `not_attempted` means this call did not reach admission,
-not that no prior queued work exists. Revision conflicts return only page ID and
+not that no prior queued work exists. A root that does not match the configured
+scope returns `write.status: not_authorized` with
+`write.reason: root_not_configured` and a fixed guidance message before any
+provider call or idempotency reservation. The caller can correct the root and
+reuse the same key for the same intended mutation. Revision conflicts return only page ID and
 current edit time, never source text. `outcome_unknown` requires authoritative
 reconciliation and the original durable key. Index or audit repair must never use
 a new mutation key to repeat the source write. A terminal audit failure retains
@@ -88,9 +96,9 @@ cargo test -p notion-knowledge-core -p notion-knowledge-mcp --locked
 cargo clippy -p notion-knowledge-core -p notion-knowledge-mcp --all-targets --locked -- -D warnings
 ```
 
-The twelve real MCP transport fixtures use production SQLite ledger/audit/queue
+The MCP transport fixtures use production SQLite ledger/audit/queue
 adapters and local authoritative source doubles. They cover all three mutations,
-strict parsing/default/capability boundaries, exact read-back/direct
+root selection, strict parsing/default/capability boundaries, exact read-back/direct
 parent, confirmation changes/replay, durable reopen/privacy, source uncertainty,
 index/audit failure, competing sessions and disconnect after effect. They do not
 establish production ChatGPT mutation support.
