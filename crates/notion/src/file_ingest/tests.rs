@@ -311,7 +311,7 @@ fn context<'a>(scope: &'a LifecycleScope, audit: &'a dyn AuditStore) -> FileInge
         scope,
         audit,
         actor: AuditActor::Server,
-        correlation_id: "request_0123456789abcdef",
+        correlation_id: notion_knowledge_core::logging::CorrelationId::new(),
         permitted: true,
     }
 }
@@ -769,7 +769,7 @@ async fn optional_hints_preserve_supported_text_extensions_without_overriding_bi
     let binary = DownloadedFile::test_fixture(b"\x89PNG\r\n\x1a\nfixture");
     assert_eq!(
         adapter.validated(&binary, Some("notes.md"), None).await,
-        Err(IngestFailure::InvalidInput)
+        Err(FileValidationError::MimeExtensionMismatch)
     );
 }
 

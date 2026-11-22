@@ -11,12 +11,15 @@ use tokio::io::AsyncWriteExt;
 pub enum DownloadError {
     InvalidPolicy,
     InvalidUrl,
+    HostDenied,
     AddressDenied,
     TooLarge,
     EmptyFile,
     RedirectDenied,
     SourceExpired,
-    SourceRejected,
+    PartialResponse,
+    UnsupportedEncoding,
+    UnexpectedStatus,
     SourceUnavailable,
     Timeout,
     StorageUnavailable,
@@ -34,6 +37,7 @@ impl std::fmt::Display for DownloadError {
         f.write_str(match self {
             Self::InvalidPolicy => "invalid temporary file download policy",
             Self::InvalidUrl => "temporary file URL is not allowed",
+            Self::HostDenied => "temporary file source hostname is not allowed",
             Self::AddressDenied => "temporary file source address is not public",
             Self::TooLarge => "temporary file exceeds the download limit",
             Self::EmptyFile => "temporary file is empty",
@@ -41,7 +45,9 @@ impl std::fmt::Display for DownloadError {
             Self::SourceExpired => {
                 "temporary file reference expired; supply a fresh file reference"
             }
-            Self::SourceRejected => "temporary file source rejected the request",
+            Self::PartialResponse => "temporary file source returned a partial response",
+            Self::UnsupportedEncoding => "temporary file source returned unsupported encoding",
+            Self::UnexpectedStatus => "temporary file source returned an unexpected HTTP status",
             Self::SourceUnavailable => {
                 "temporary file source unavailable; retry the active request"
             }
@@ -145,9 +151,12 @@ impl DownloadPolicy {
             || url.password().is_some()
             || url.fragment().is_some()
             || url.port_or_known_default() != Some(443)
-            || !url.host_str().is_some_and(|host| self.hosts.contains(host))
         {
             return Err(DownloadError::InvalidUrl);
+        }
+        let host = url.host_str().ok_or(DownloadError::InvalidUrl)?;
+        if !self.hosts.contains(host) {
+            return Err(DownloadError::HostDenied);
         }
         Ok(url)
     }
@@ -283,8 +292,11 @@ async fn stream_file(
         return Err(DownloadError::SourceUnavailable);
     }
     // Partial responses must never be mistaken for a complete input file.
-    if status != StatusCode::OK || response.headers().contains_key("content-range") {
-        return Err(DownloadError::SourceRejected);
+    if status == StatusCode::PARTIAL_CONTENT || response.headers().contains_key("content-range") {
+        return Err(DownloadError::PartialResponse);
+    }
+    if status != StatusCode::OK {
+        return Err(DownloadError::UnexpectedStatus);
     }
     if response
         .headers()
@@ -292,7 +304,7 @@ async fn stream_file(
         .iter()
         .any(|value| value.as_bytes() != b"identity")
     {
-        return Err(DownloadError::SourceRejected);
+        return Err(DownloadError::UnsupportedEncoding);
     }
     if response
         .content_length()
@@ -386,12 +398,9 @@ mod tests {
         for url in [
             "http://files.example.test/file",
             "https://files.example.test:8443/file",
-            "https://files.example.test.evil.test/file",
             "https://files.example.test@evil.test/file",
             "https://user:pass@files.example.test/file",
             "https://files.example.test/file#fragment",
-            "https://127.0.0.1/file",
-            "https://files.example.test./file",
             "https://files.example.test/\nfile",
         ] {
             assert_eq!(policy().url(url), Err(DownloadError::InvalidUrl));
@@ -407,6 +416,20 @@ mod tests {
         }
         assert!(DownloadPolicy::new(&["files.example.test"], 0, Duration::from_secs(1)).is_err());
         assert!(DownloadPolicy::new(&["files.example.test"], 8, Duration::ZERO).is_err());
+    }
+
+    #[tokio::test]
+    async fn source_outside_the_exact_allowlist_is_rejected_before_download() {
+        for url in [
+            "https://files.example.test.evil.test/file?signature=private-sentinel",
+            "https://files.example.test./file?signature=private-sentinel",
+            "https://127.0.0.1/file?signature=private-sentinel",
+        ] {
+            let error = policy().download(url).await.unwrap_err();
+            assert_eq!(error, DownloadError::HostDenied);
+            assert!(!error.retryable());
+            assert!(!format!("{error:?} {error}").contains("private-sentinel"));
+        }
     }
 
     #[test]
@@ -560,10 +583,11 @@ mod tests {
             (&b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\n123456789"[..], DownloadError::TooLarge),
             (&b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n9\r\n123456789\r\n0\r\n\r\n"[..], DownloadError::TooLarge),
             (&b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"[..], DownloadError::EmptyFile),
-            (&b"HTTP/1.1 206 Partial Content\r\nContent-Length: 1\r\n\r\nx"[..], DownloadError::SourceRejected),
-            (&b"HTTP/1.1 200 OK\r\nContent-Range: bytes 0-0/10\r\nContent-Length: 1\r\n\r\nx"[..], DownloadError::SourceRejected),
-            (&b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 1\r\n\r\nx"[..], DownloadError::SourceRejected),
-            (&b"HTTP/1.1 200 OK\r\nContent-Encoding: identity\r\nContent-Encoding: gzip\r\nContent-Length: 1\r\n\r\nx"[..], DownloadError::SourceRejected),
+            (&b"HTTP/1.1 206 Partial Content\r\nContent-Length: 1\r\n\r\nx"[..], DownloadError::PartialResponse),
+            (&b"HTTP/1.1 200 OK\r\nContent-Range: bytes 0-0/10\r\nContent-Length: 1\r\n\r\nx"[..], DownloadError::PartialResponse),
+            (&b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 1\r\n\r\nx"[..], DownloadError::UnsupportedEncoding),
+            (&b"HTTP/1.1 200 OK\r\nContent-Encoding: identity\r\nContent-Encoding: gzip\r\nContent-Length: 1\r\n\r\nx"[..], DownloadError::UnsupportedEncoding),
+            (&b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"[..], DownloadError::UnexpectedStatus),
             (&b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n"[..], DownloadError::SourceExpired),
             (&b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n"[..], DownloadError::SourceUnavailable),
             (&b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"[..], DownloadError::SourceUnavailable),
