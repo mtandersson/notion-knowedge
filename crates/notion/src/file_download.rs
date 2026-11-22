@@ -176,6 +176,12 @@ impl DownloadPolicy {
         let url = self.url(temporary_url)?;
         tokio::time::timeout(self.deadline, async {
             let host = url.host_str().ok_or(DownloadError::InvalidUrl)?;
+            let pinned = |addresses| {
+                std::sync::Arc::new(PinnedSource {
+                    host: host.to_owned(),
+                    addresses,
+                })
+            };
             #[cfg(any(test, feature = "test-fixtures"))]
             if let Some(TlsFixture {
                 address,
@@ -184,7 +190,7 @@ impl DownloadPolicy {
             }) = &self.fixture
             {
                 let client = client_builder(self.deadline)
-                    .resolve_to_addrs(host, &[*address])
+                    .dns_resolver(pinned(vec![*address]))
                     .add_root_certificate(certificate.clone())
                     .build()
                     .map_err(|_| DownloadError::SourceUnavailable)?;
@@ -201,10 +207,7 @@ impl DownloadPolicy {
             // RRsets. This also handles fresh DNS rebinding at request time.
             let addresses = validated_addresses(addresses)?;
             let client = client_builder(self.deadline)
-                .dns_resolver(std::sync::Arc::new(PinnedSource {
-                    host: host.to_owned(),
-                    addresses,
-                }))
+                .dns_resolver(pinned(addresses))
                 .build()
                 .map_err(|_| DownloadError::SourceUnavailable)?;
             let temporary =
