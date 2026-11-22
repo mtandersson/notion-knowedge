@@ -39,6 +39,14 @@ fn parent_columns(parent: &InventoryParent) -> ParentColumns<'_> {
     }
 }
 
+#[cfg(any(test, all(unix, feature = "local-lancedb")))]
+pub(crate) fn source_parent_key(parent: &InventoryParent) -> String {
+    // Use the same explicit placement fields as the inventory database.
+    // InventoryParent::Page is an internally tagged newtype and does not
+    // itself support serialization of its string payload.
+    serde_json::json!(parent_columns(parent)).to_string()
+}
+
 fn read_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<InventoryEntry>> {
     let kind: String = row.get(1)?;
     let parent_id: Option<String> = row.get(2)?;
@@ -458,8 +466,7 @@ impl SqliteSyncStateStore {
         };
         if first.root_id != root
             || first.last_edited_time != revision
-            || serde_json::to_string(&first.parent).map_err(|_| SyncStateError::CorruptState)?
-                != parent
+            || source_parent_key(&first.parent) != parent
             || chain.last().is_none_or(|entry| entry.page_id != root)
         {
             return Ok(false);
@@ -837,7 +844,7 @@ mod document_freshness {
     fn a_same_minute_ancestor_move_requires_a_later_inventory_walk() {
         let state = SqliteSyncStateStore::open_in_memory().unwrap();
         let parent = InventoryParent::Page(ROOT.into());
-        let parent_json = serde_json::to_string(&parent).unwrap();
+        let parent_json = source_parent_key(&parent);
         let entry = |id: &str, parent| InventoryEntry {
             page_id: id.into(),
             parent,

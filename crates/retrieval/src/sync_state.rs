@@ -15,6 +15,8 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 mod cache_reset;
 mod inventory;
+#[cfg(all(unix, feature = "local-lancedb"))]
+pub(crate) use inventory::source_parent_key;
 
 pub const LATEST_SCHEMA_VERSION: i64 = 23;
 

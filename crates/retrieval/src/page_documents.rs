@@ -59,7 +59,7 @@ impl PageDocuments {
         {
             return Err(CommitError::InvalidInput);
         }
-        let parent = serde_json::to_string(parent).map_err(|_| CommitError::InvalidInput)?;
+        let parent = crate::sync_state::source_parent_key(parent);
         let store = self.clone();
         self.0
             .maintain(lease, clock, move |context| async move {
