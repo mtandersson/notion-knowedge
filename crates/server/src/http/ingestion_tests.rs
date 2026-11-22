@@ -1233,6 +1233,8 @@ async fn installed_file_ingestion_logs_redacted_failure_diagnostics() {
             "Safe caption",
             "document fixture",
             PAGE,
+            UPLOAD,
+            BLOCK,
         ] {
             assert!(
                 !stderr.contains(private),
@@ -1249,6 +1251,11 @@ async fn installed_file_ingestion_logs_redacted_failure_diagnostics() {
             ("source_download", "file_too_large", "invalid_input"),
             ("file_validation", "content_type_mismatch", "invalid_input"),
             ("source_download", "source_expired", "source_expired"),
+            (
+                "notion_attachment",
+                "notion.image.attach",
+                "upstream_invalid_input",
+            ),
         ];
         assert_eq!(events.len(), expected.len(), "{stderr}");
         for (index, (event, (phase, reason, failure))) in events.iter().zip(expected).enumerate() {
@@ -1257,9 +1264,13 @@ async fn installed_file_ingestion_logs_redacted_failure_diagnostics() {
             assert_eq!(event["reason"], reason);
             assert_eq!(event["failure"], failure);
             assert_eq!(event["terminal_audited"], true);
-            assert_eq!(event["effect_possible"], false);
-            assert_eq!(event["outcome"], "rejected");
-            assert_eq!(event["level"], "warn");
+            let uploaded = phase == "notion_attachment";
+            assert_eq!(event["effect_possible"], uploaded);
+            assert_eq!(
+                event["outcome"],
+                if uploaded { "failed" } else { "rejected" }
+            );
+            assert_eq!(event["level"], if uploaded { "error" } else { "warn" });
             assert!(event["duration_ms"].is_u64());
             assert!(
                 event["correlation_id"]
@@ -1274,17 +1285,25 @@ async fn installed_file_ingestion_logs_redacted_failure_diagnostics() {
     let dir = private_dir();
     let audit = dir.path().join("audit.sqlite");
     let mut cfg = config(&audit, true);
+    cfg.max_upload_files = 5;
     let (download, count, source, paths) = source_many(
         vec![
             (vec![0; 65], 200, false),
             (b"document fixture".to_vec(), 200, false),
             (b"expired".to_vec(), 403, false),
+            (b"\x89PNG\r\n\x1a\nimage fixture".to_vec(), 200, false),
         ],
         64,
     )
     .await;
     cfg.file_ingestion.as_mut().unwrap().download = download;
-    let (client, requests, notion) = notion(Vec::new()).await;
+    let mut steps = full_steps(true, false, false);
+    steps.truncate(2);
+    steps.push((
+        400,
+        json!({"object":"error","status":400,"code":"validation_error"}),
+    ));
+    let (client, requests, notion) = notion(steps).await;
     let handler = root_scope::attach_client(
         notion_knowledge_mcp::KnowledgeServer::default().with_read_only(false),
         &cfg,
@@ -1298,13 +1317,13 @@ async fn installed_file_ingestion_logs_redacted_failure_diagnostics() {
     file["file_name"] = json!("private-file.png");
     let mut denied = file.clone();
     denied["download_url"] = json!("https://blocked.example/file?token=signed-secret");
-    args.insert("files".into(), json!([denied, file, file, file]));
+    args.insert("files".into(), json!([denied, file, file, file, file]));
     let response = http_call(cfg, handler, request).await;
     let result = &response["result"]["structuredContent"];
     assert_eq!(result["failure"], Value::Null);
     let files = result["files"].as_array().unwrap();
-    assert_eq!(files.len(), 4);
-    for (file, failure) in files.iter().zip([
+    assert_eq!(files.len(), 5);
+    for (file, failure) in files[..4].iter().zip([
         "invalid_input",
         "invalid_input",
         "invalid_input",
@@ -1317,8 +1336,12 @@ async fn installed_file_ingestion_logs_redacted_failure_diagnostics() {
     }
     source.await.unwrap();
     notion.await.unwrap();
-    assert_eq!(count.load(Ordering::SeqCst), 3);
-    assert!(requests.lock().unwrap().is_empty());
+    assert_eq!(count.load(Ordering::SeqCst), 4);
+    assert_eq!(requests.lock().unwrap().len(), 3);
+    assert_eq!(files[4]["status"], "indeterminate");
+    assert_eq!(files[4]["failure"], "upstream_invalid_input");
+    assert_eq!(files[4]["upload_id"], UPLOAD);
+    assert_eq!(files[4]["block_id"], Value::Null);
     assert!(paths.lock().unwrap().iter().all(|p| !p.exists()));
     let db = rusqlite::Connection::open(audit).unwrap();
     let (audit_count, correlation): (i64, String) = db

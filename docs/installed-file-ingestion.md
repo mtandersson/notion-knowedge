@@ -50,14 +50,14 @@ audit before manually supplying fresh input; no replay or recovery queue is run.
 
 ## Diagnosing file failures
 
-Filter the server's JSON stderr for `operation=file_ingest`. Each failed file
-reports its zero-based `file_index`, the failed `phase`, a specific `reason`
-such as `source_host_denied` or `mime_extension_mismatch`, and the MCP
-`failure` code. The server-generated `correlation_id` links the entries for
-one batch to its private audit records. `terminal_audited` records whether the
-terminal audit write succeeded, and `effect_possible` flags when the item may
-already have written to Notion. These events contain no file or page identifiers, file
-names, captions, source hosts, URLs or file contents.
+Filter the server's JSON stderr for `operation=file_ingest`. Each completed
+file failure reports its zero-based `file_index`, the failed `phase`, a specific
+`reason` such as `source_host_denied` or `mime_extension_mismatch`, and the MCP
+`failure` code. The server-generated `correlation_id` links the entries for one
+batch to its private audit records. `terminal_audited` records whether the terminal
+audit write succeeded. `effect_possible` flags a known or possible Notion upload
+or attachment. These events contain no file or page identifiers, file names,
+captions, source hosts, URLs or file contents.
 
 On Astra, filter the production journal with:
 

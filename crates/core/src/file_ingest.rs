@@ -271,10 +271,12 @@ async fn ingest_file_into<A: FileIngestAdapter>(
                     reason,
                     failure: failure.code(),
                     terminal_audited: result.terminal_audited,
-                    effect_possible: matches!(
-                        result.status,
-                        IngestStatus::Indeterminate | IngestStatus::VerifiedAuditFailed
-                    ),
+                    effect_possible: result.references.upload_id.is_some()
+                        || result.references.block_id.is_some()
+                        || matches!(
+                            result.status,
+                            IngestStatus::Indeterminate | IngestStatus::VerifiedAuditFailed
+                        ),
                 },
             );
         }
