@@ -42,7 +42,7 @@ impl HealthProbe for IndexReadiness {
 
 async fn refresh(snapshot: &Snapshot, table: &GuardedChunkTable, exact_id: bool) {
     let check = async {
-        table.search_snapshot().await?;
+        table.verify_text_search_indexes().await?;
         if exact_id {
             table.probe_lexical_cache().await?;
         }

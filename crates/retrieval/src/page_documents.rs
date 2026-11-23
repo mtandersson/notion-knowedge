@@ -146,6 +146,23 @@ impl PageDocuments {
             .await
     }
 
+    /// Size of the bound source cache, including pages awaiting reconciliation.
+    pub async fn count(&self) -> Result<u64, FailureClass> {
+        let _guard = self
+            .0
+            .document_read_guard()
+            .map_err(|_| FailureClass::Conflict)?;
+        let Some(table) = self.open(false).await? else {
+            return Ok(0);
+        };
+        let binding = self.binding_identity()?;
+        table
+            .count_rows(Some(format!("binding = '{binding}'")))
+            .await
+            .map(|count| count as u64)
+            .map_err(|_| FailureClass::Index)
+    }
+
     /// Includes source-only pages that have no published embedding checkpoint.
     pub async fn page_ids(&self) -> Result<Vec<String>, FailureClass> {
         let Some(table) = self.open(false).await? else {

@@ -52,8 +52,6 @@ pub enum RefreshError {
     Index,
     Conflict,
     Unavailable,
-    /// A readable atomic input exceeds the local model's configured budget.
-    EmbeddingInputLimit,
 }
 impl std::fmt::Display for RefreshError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -63,13 +61,8 @@ impl std::fmt::Display for RefreshError {
 impl std::error::Error for RefreshError {}
 
 impl From<ChunkTableError> for RefreshError {
-    fn from(error: ChunkTableError) -> Self {
-        match error {
-            ChunkTableError::Embedding(
-                notion_knowledge_core::embedding::EmbeddingError::InputLimit,
-            ) => Self::EmbeddingInputLimit,
-            _ => Self::Index,
-        }
+    fn from(_: ChunkTableError) -> Self {
+        Self::Index
     }
 }
 impl From<CommitError> for RefreshError {
@@ -346,6 +339,23 @@ impl AuthoritativePageRefresh {
     /// unchanged chunks are neither embedded nor rewritten, only the page's
     /// relation projection changes.
     #[allow(clippy::too_many_arguments)]
+    pub async fn publish_relation_refresh(
+        &self,
+        page: &PageId,
+        parent: InventoryParent,
+        root: &PageId,
+        operation_id: &str,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Result<RefreshResult, RefreshError> {
+        let PrefetchedPage {
+            previous, proposal, ..
+        } = Box::pin(self.prepare_source_with(page, parent, root, operation_id)).await?;
+        Box::pin(self.commit_text(page, operation_id, previous, proposal, lease, clock)).await
+    }
+
+    /// Explicit two-phase refresh for local callers that need both outputs.
+    #[allow(clippy::too_many_arguments)]
     pub async fn resolve_relations(
         &self,
         page: &PageId,
@@ -356,19 +366,20 @@ impl AuthoritativePageRefresh {
         lease: Lease,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Result<RefreshResult, RefreshError> {
-        let PrefetchedPage {
-            previous, proposal, ..
-        } = Box::pin(self.prepare_source_with(page, parent, root, operation_id)).await?;
-        Box::pin(self.embed_and_commit(
-            page,
-            operation_id,
-            previous,
-            proposal,
-            provider,
-            lease,
-            clock,
-        ))
-        .await
+        let result = self
+            .publish_relation_refresh(
+                page,
+                parent,
+                root,
+                operation_id,
+                lease.clone(),
+                clock.clone(),
+            )
+            .await?;
+        self.guard
+            .retry_semantic(&page.0, provider, lease, clock)
+            .await?;
+        Ok(result)
     }
 
     /// The verified canonical source can be published before embedding. The
@@ -393,15 +404,14 @@ impl AuthoritativePageRefresh {
             .map_err(Into::into)
     }
 
-    /// Embed and durably commit a page prepared by [`Self::prepare_walked`].
+    /// Publish source text prepared by [`Self::prepare_walked`] without inference.
     /// The guarded mutation plan (pinned index version, receipt and projection
     /// state) is built here from current local state, never from prefetch time.
     /// When this page's own indexed chunks changed while it waited, its chunk
     /// identities are prepared again from the same read, without a request.
-    pub async fn refresh_prefetched(
+    pub async fn publish_prefetched(
         &self,
         prefetched: PrefetchedPage,
-        provider: &dyn EmbeddingProvider,
         lease: Lease,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Result<RefreshResult, RefreshError> {
@@ -430,10 +440,25 @@ impl AuthoritativePageRefresh {
                 .await
                 .map_err(|e| source_failure(e.kind))?
         };
-        Box::pin(
-            self.embed_and_commit(&page, &operation, current, proposal, provider, lease, clock),
-        )
-        .await
+        Box::pin(self.commit_text(&page, &operation, current, proposal, lease, clock)).await
+    }
+
+    /// Explicit two-phase refresh for local callers that need both outputs.
+    pub async fn refresh_prefetched(
+        &self,
+        prefetched: PrefetchedPage,
+        provider: &dyn EmbeddingProvider,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Result<RefreshResult, RefreshError> {
+        let page = prefetched.page.clone();
+        let result = self
+            .publish_prefetched(prefetched, lease.clone(), clock.clone())
+            .await?;
+        self.guard
+            .retry_semantic(&page.0, provider, lease, clock)
+            .await?;
+        Ok(result)
     }
 
     /// Remove a page a complete walk no longer reached (moved out, trashed,
@@ -442,7 +467,7 @@ impl AuthoritativePageRefresh {
         &self,
         page: &PageId,
         operation_id: &str,
-        provider: &dyn EmbeddingProvider,
+        _provider: &dyn EmbeddingProvider,
         lease: Lease,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Result<RefreshResult, RefreshError> {
@@ -479,44 +504,49 @@ impl AuthoritativePageRefresh {
         .map_err(RefreshError::from)?
         .with_relation_projection(projection)?;
         let operation = self.attach_aliases(operation, aliases)?;
-        let prepared = self.guard.prepare_page(provider, operation, &[]).await?;
-        let diff = prepared.metrics();
+        let previous = self.guard.page_chunks(&page.0).await?;
         let handler = self.clone();
         let (owned_clock, expires_at) = (clock.clone(), lease.expires_at);
-        let outcome = self
+        let (outcome, diff) = self
             .guard
-            .commit_page_with_authority(prepared, lease, clock, move || async move {
-                owned_revalidation(
-                    handler.guard.index_directory().to_path_buf(),
-                    async {
-                        handler
-                            .relations
-                            .removal_authority(&handler.scope)
-                            .await
-                            .map_err(|_| FailureClass::Conflict)
-                    },
-                    owned_clock,
-                    expires_at,
-                )
-                .await
-            })
+            .commit_text_with_authority(
+                operation,
+                previous,
+                Vec::new(),
+                lease,
+                clock,
+                move || async move {
+                    owned_revalidation(
+                        handler.guard.index_directory().to_path_buf(),
+                        async {
+                            handler
+                                .relations
+                                .removal_authority(&handler.scope)
+                                .await
+                                .map_err(|_| FailureClass::Conflict)
+                        },
+                        owned_clock,
+                        expires_at,
+                    )
+                    .await
+                },
+            )
             .await
             .map_err(RefreshError::from)?;
         Ok(RefreshResult { outcome, diff })
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn embed_and_commit(
+    async fn commit_text(
         &self,
         page: &PageId,
         operation_id: &str,
         previous: Vec<notion_knowledge_core::indexed::IndexedChunk>,
         relation_proposal: notion_knowledge_notion::relation_proposal::RelationProposal,
-        provider: &dyn EmbeddingProvider,
         lease: Lease,
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Result<RefreshResult, RefreshError> {
-        let mut proposal = relation_proposal.snapshot().clone();
+        let proposal = relation_proposal.snapshot().clone();
         let projection = RelationProjection::new(
             self.coordinator.binding(),
             &page.0,
@@ -581,34 +611,8 @@ impl AuthoritativePageRefresh {
             });
         }
 
-        // Keep known-good inputs and their existing vectors. For a new input,
-        // only a provider's exact admission check can decide to split it.
-        let previous_texts = previous
-            .iter()
-            .map(|chunk| chunk.text.as_str())
-            .collect::<std::collections::HashSet<_>>();
-        let mut cuts = std::collections::BTreeMap::new();
-        for (position, chunk) in proposal.chunks.iter().enumerate() {
-            if previous_texts.contains(chunk.text.as_str()) {
-                continue;
-            }
-            let boundaries = notion_knowledge_core::chunking::table_section_boundaries(&chunk.text);
-            if boundaries.is_empty() {
-                continue;
-            }
-            let partition = provider
-                .partition_input(&chunk.text, boundaries)
-                .await
-                .map_err(ChunkTableError::from)?;
-            if !partition.is_empty() {
-                cuts.insert(position, partition);
-            }
-        }
-        proposal
-            .split_chunks(cuts, &previous, self.chunk_config)
-            .map_err(|error| source_failure(error.kind))?;
         let document = proposal.document;
-        let chunks = proposal.chunks;
+        let mut chunks = proposal.chunks;
         let metadata_page = notion_knowledge_core::backend::Page {
             relation_names: Default::default(),
             id: page.clone(),
@@ -625,6 +629,21 @@ impl AuthoritativePageRefresh {
             Some(document.metadata.last_edited_time.clone()),
         )
         .map_err(|_| RefreshError::InvalidConfiguration)?;
+        let same_revision = self
+            .coordinator
+            .state()
+            .page_state(&page.0)
+            .map_err(|_| RefreshError::Unavailable)?
+            .as_ref()
+            == Some(&checkpoint)
+            && self.coordinator.metadata_identity(&page.0)?.as_ref() == Some(&metadata_identity)
+            && (!previous.is_empty() || chunks.is_empty());
+        // The compatible v1 copy may contain previously partitioned HTML
+        // tables. Preserve parents, split boundaries and citations while
+        // the canonical source revision remains identical.
+        if same_revision {
+            chunks.clone_from(&previous);
+        }
         // Every existing receipt must pass guarded identity/generation checks.
         // Pending/failed work completes even if another event indexed the
         // snapshot; terminal receipts cannot bypass scope checks via a no-op.
@@ -635,85 +654,65 @@ impl AuthoritativePageRefresh {
             .is_some();
         // A genuinely unchanged page is a no-op, including durable state.
         // Metadata/links are compared too, so citations are still refreshed.
-        if complete
-            && !has_receipt
-            && self
-                .coordinator
-                .metadata_identity(&page.0)
-                .map_err(RefreshError::from)?
-                .as_ref()
-                == Some(&metadata_identity)
-            && self
-                .coordinator
-                .state()
-                .page_state(&page.0)
-                .map_err(|_| RefreshError::Unavailable)?
-                .as_ref()
-                == Some(&checkpoint)
-        {
-            let mut old = previous;
-            let mut new = chunks.clone();
-            old.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
-            new.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
-            if old == new {
-                let handler = self.clone();
-                let expected_projection = projection.clone();
-                let expected_aliases = aliases.clone();
-                let proposal = relation_proposal;
-                let expected_checkpoint = checkpoint.clone();
-                let expected_metadata = metadata_identity.clone();
-                let expected_chunks = new.clone();
-                self.check_owned_snapshot(lease, clock, move |context| async move {
-                    let _authority = handler
-                        .relations
-                        .revalidate(&proposal)
-                        .await
-                        .map_err(|_| FailureClass::Conflict)?;
-                    context.revalidate().map_err(|_| FailureClass::Conflict)?;
-                    let mut current = handler
-                        .guard
-                        .page_chunks(expected_projection.page_id())
-                        .await
-                        .map_err(|_| FailureClass::Index)?;
-                    current.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
-                    if current != expected_chunks
-                        || handler
-                            .coordinator
-                            .state()
-                            .page_state(expected_projection.page_id())
-                            .map_err(|_| FailureClass::Index)?
-                            .as_ref()
-                            != Some(&expected_checkpoint)
-                        || handler
-                            .coordinator
-                            .metadata_identity(expected_projection.page_id())
-                            .map_err(|_| FailureClass::Index)?
-                            .as_ref()
-                            != Some(&expected_metadata)
-                    {
-                        return Err(FailureClass::Conflict);
-                    }
-                    if !handler
-                        .aliases_complete(&expected_aliases)
+        if complete && !has_receipt && same_revision {
+            let handler = self.clone();
+            let expected_projection = projection.clone();
+            let expected_aliases = aliases.clone();
+            let proposal = relation_proposal;
+            let expected_checkpoint = checkpoint.clone();
+            let expected_metadata = metadata_identity.clone();
+            let unchanged_chunks = previous.len();
+            let expected_chunks = previous;
+            self.check_owned_snapshot(lease, clock, move |context| async move {
+                let _authority = handler
+                    .relations
+                    .revalidate(&proposal)
+                    .await
+                    .map_err(|_| FailureClass::Conflict)?;
+                context.revalidate().map_err(|_| FailureClass::Conflict)?;
+                let mut current = handler
+                    .guard
+                    .page_chunks(expected_projection.page_id())
+                    .await
+                    .map_err(|_| FailureClass::Index)?;
+                current.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
+                if current != expected_chunks
+                    || handler
+                        .coordinator
+                        .state()
+                        .page_state(expected_projection.page_id())
                         .map_err(|_| FailureClass::Index)?
-                        || !handler
-                            .coordinator
-                            .relation_projection_complete(&expected_projection)
-                            .map_err(|_| FailureClass::Index)?
-                    {
-                        return Err(FailureClass::Conflict);
-                    }
-                    Ok(())
-                })
-                .await?;
-                return Ok(RefreshResult {
-                    outcome: CommitOutcome::AlreadyApplied,
-                    diff: ChunkDiffMetrics {
-                        skipped: new.len(),
-                        ..ChunkDiffMetrics::default()
-                    },
-                });
-            }
+                        .as_ref()
+                        != Some(&expected_checkpoint)
+                    || handler
+                        .coordinator
+                        .metadata_identity(expected_projection.page_id())
+                        .map_err(|_| FailureClass::Index)?
+                        .as_ref()
+                        != Some(&expected_metadata)
+                {
+                    return Err(FailureClass::Conflict);
+                }
+                if !handler
+                    .aliases_complete(&expected_aliases)
+                    .map_err(|_| FailureClass::Index)?
+                    || !handler
+                        .coordinator
+                        .relation_projection_complete(&expected_projection)
+                        .map_err(|_| FailureClass::Index)?
+                {
+                    return Err(FailureClass::Conflict);
+                }
+                Ok(())
+            })
+            .await?;
+            return Ok(RefreshResult {
+                outcome: CommitOutcome::AlreadyApplied,
+                diff: ChunkDiffMetrics {
+                    skipped: unchanged_chunks,
+                    ..ChunkDiffMetrics::default()
+                },
+            });
         }
 
         // Revision includes canonical metadata and content, not just body text.
@@ -758,11 +757,6 @@ impl AuthoritativePageRefresh {
             .with_relation_projection(projection)
             .map_err(RefreshError::from)?;
         let operation = self.attach_aliases(operation, aliases)?;
-        let prepared = self
-            .guard
-            .prepare_page(provider, operation, &chunks)
-            .await?;
-        let diff = prepared.metrics();
 
         // The commit's callback runs inside the operation-owned runtime, after
         // its cross-process Lance directory guard and SQLite fencing. It makes
@@ -770,29 +764,33 @@ impl AuthoritativePageRefresh {
         let owned_clock = clock.clone();
         let expires_at = lease.expires_at;
         let handler = self.clone();
-        let result = self
+        let (outcome, diff) = self
             .guard
-            .commit_page_with_authority(prepared, lease, clock, move || async move {
-                owned_revalidation(
-                    handler.guard.index_directory().to_path_buf(),
-                    async {
-                        handler
-                            .relations
-                            .revalidate(&relation_proposal)
-                            .await
-                            .map_err(|_| FailureClass::Conflict)
-                    },
-                    owned_clock.clone(),
-                    expires_at,
-                )
-                .await
-            })
+            .commit_text_with_authority(
+                operation,
+                previous,
+                chunks,
+                lease,
+                clock,
+                move || async move {
+                    owned_revalidation(
+                        handler.guard.index_directory().to_path_buf(),
+                        async {
+                            handler
+                                .relations
+                                .revalidate(&relation_proposal)
+                                .await
+                                .map_err(|_| FailureClass::Conflict)
+                        },
+                        owned_clock.clone(),
+                        expires_at,
+                    )
+                    .await
+                },
+            )
             .await
             .map_err(RefreshError::from)?;
-        Ok(RefreshResult {
-            outcome: result,
-            diff,
-        })
+        Ok(RefreshResult { outcome, diff })
     }
     /// A no-op still owns its validation after observer cancellation. Poll its
     /// lease while source I/O is pending so losing ownership releases the guard.
@@ -840,34 +838,6 @@ async fn owned_revalidation<Authority>(
         tokio::select! {
             result = &mut source => return result,
             _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {},
-        }
-    }
-}
-
-#[cfg(test)]
-mod error_tests {
-    use super::*;
-    use notion_knowledge_core::embedding::EmbeddingError;
-
-    #[test]
-    fn only_deterministic_embedding_input_limits_are_page_failures() {
-        assert_eq!(
-            RefreshError::from(ChunkTableError::Embedding(EmbeddingError::InputLimit)),
-            RefreshError::EmbeddingInputLimit
-        );
-        for error in [
-            EmbeddingError::InvalidInput,
-            EmbeddingError::InvalidOutput,
-            EmbeddingError::Unavailable,
-            EmbeddingError::ResourceExhausted,
-            EmbeddingError::UnsupportedModel,
-            EmbeddingError::InvalidMetadata,
-            EmbeddingError::IncompatibleIndex,
-        ] {
-            assert_eq!(
-                RefreshError::from(ChunkTableError::Embedding(error)),
-                RefreshError::Index
-            );
         }
     }
 }

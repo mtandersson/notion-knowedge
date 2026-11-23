@@ -380,6 +380,15 @@ impl TestRuntime {
         Self::with_joined_sources(policy, exclusions, false).await
     }
     async fn with_joined_sources(policy: &str, exclusions: ExclusionRules, joined: bool) -> Self {
+        Self::with_provider(policy, exclusions, joined, None).await
+    }
+
+    async fn with_provider(
+        policy: &str,
+        exclusions: ExclusionRules,
+        joined: bool,
+        provider: Option<Arc<dyn EmbeddingProvider>>,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let index = dir.path().join("index");
         std::fs::create_dir(&index).unwrap();
@@ -403,8 +412,15 @@ impl TestRuntime {
             std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         let state = coordinator.state().clone();
-        let metadata =
-            EmbeddingMetadata::new("fixture".into(), "fixture".into(), "1".into(), 3).unwrap();
+        let embeddings = Arc::new(AtomicUsize::new(0));
+        let provider = provider.unwrap_or_else(|| {
+            Arc::new(Provider {
+                metadata: EmbeddingMetadata::new("fixture".into(), "fixture".into(), "1".into(), 3)
+                    .unwrap(),
+                count: embeddings.clone(),
+            })
+        });
+        let metadata = provider.metadata().clone();
         let guard =
             GuardedChunkTable::bind(&index, "chunks", metadata.clone(), coordinator.clone())
                 .unwrap();
@@ -418,17 +434,13 @@ impl TestRuntime {
         if joined {
             source.change(|m| m.joined = true);
         }
-        let embeddings = Arc::new(AtomicUsize::new(0));
         let runtime_index = index_runtime(
             source.client(),
             guard,
             coordinator.clone(),
             scope.clone(),
             journal,
-            Arc::new(Provider {
-                metadata,
-                count: embeddings.clone(),
-            }),
+            provider,
             joined.then(|| {
                 notion_knowledge_core::aliases::AliasSources::new(true, vec!["alias".into()])
                     .unwrap()
@@ -475,17 +487,26 @@ impl TestRuntime {
             .unwrap();
     }
     async fn searchable(&self, text: &str) -> usize {
-        LanceChunkTable::open(
-            &self.index,
-            "chunks",
-            self.worker.index.provider.metadata().clone(),
-        )
-        .await
-        .unwrap()
-        .fts_query("text", text, 10)
-        .await
-        .unwrap()
-        .len()
+        use notion_knowledge_core::search::{LexicalQuery, LexicalSearch, SearchUnavailable};
+        self.worker
+            .index
+            .chunks()
+            .search_with_snapshot(false, |table| async move {
+                LexicalSearch::search(
+                    &table,
+                    LexicalQuery {
+                        query: text.into(),
+                        limit: 10,
+                        page_ids: None,
+                        root_page_ids: None,
+                        metadata: Default::default(),
+                    },
+                )
+                .await
+            })
+            .await
+            .map(|hits| hits.len())
+            .unwrap_or_else(|_: SearchUnavailable| 0)
     }
 }
 
@@ -792,6 +813,9 @@ async fn tick(worker: &Worker, page_first: bool) {
         .tick(CancellationToken::new(), page_first)
         .await
         .unwrap();
+    // Fixtures that inspect completed vector results advance the separate
+    // model loop after the source callback.
+    let _ = worker.semantic_step().await;
 }
 fn inspect(worker: &Worker, event: &WebhookEvent) -> notion_knowledge_core::webhook::InboxEvent {
     worker.state.event(&event.key()).unwrap().unwrap()
@@ -2926,4 +2950,89 @@ async fn installed_graph_denies_reads_after_interrupted_owned_producer_commit() 
     let output = wire_stdio(handler, vec![related_request(2, json!({"page_id":PAGE}))]).await;
     assert_eq!(output[1]["result"]["isError"], true, "{:?}", output);
     assert!(output[1]["result"]["structuredContent"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn installed_missing_qwen_assets_leave_fresh_and_lexical_available() {
+    use notion_knowledge_retrieval::embedder::{EmbedderConfig, deferred_configured_embedder};
+    use notion_knowledge_server::root_scope::Transport;
+
+    let empty = tempfile::tempdir().unwrap();
+    let provider = deferred_configured_embedder(EmbedderConfig::LocalQwen {
+        assets: empty.path().join("absent"),
+    });
+    let runtime = TestRuntime::with_provider(
+        "webhook-v1",
+        ExclusionRules::default(),
+        false,
+        Some(provider),
+    )
+    .await;
+    let callback = event(PAGE, "page.content_updated");
+    runtime.worker.state.receive(&callback).unwrap();
+    assert!(
+        runtime
+            .worker
+            .tick(CancellationToken::new(), false)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        inspect(&runtime.worker, &callback).state,
+        EventState::Succeeded
+    );
+    assert_eq!(
+        runtime
+            .worker
+            .index
+            .chunks()
+            .semantic_status()
+            .await
+            .unwrap()
+            .1
+            .queued,
+        1
+    );
+
+    let source_reads = runtime.source.body_reads.load(Ordering::SeqCst);
+    assert!(runtime.worker.semantic_step().await.unwrap());
+    let (vectors, backlog) = runtime
+        .worker
+        .index
+        .chunks()
+        .semantic_status()
+        .await
+        .unwrap();
+    assert_eq!((vectors, backlog.model_unavailable), (0, 1));
+    let handler = installed_retrieval(&runtime, &retrieval_config(&runtime), Transport::Stdio)
+        .await
+        .unwrap();
+    let scoped = json!({"page_ids":[PAGE]});
+    let output = wire_stdio(handler, vec![
+        search_request(2, "lexical", scoped.clone()),
+        search_request(3, "hybrid", scoped.clone()),
+        search_request(4, "semantic", scoped),
+        json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{
+            "name":"knowledge_get","arguments":{"refs":[{"kind":"page","id":PAGE}],"freshness":"fresh"}}}),
+    ]).await;
+    let lexical = &output[1]["result"]["structuredContent"];
+    assert_eq!(
+        lexical["results"][0]["source"]["page_id"], PAGE,
+        "{output:?}"
+    );
+    let hybrid = &output[2]["result"]["structuredContent"];
+    assert_eq!(hybrid["semantic_status"], "unavailable");
+    assert_eq!(hybrid["results"], lexical["results"]);
+    assert!(
+        output[3].to_string().contains("semantic_unavailable"),
+        "{output:?}"
+    );
+    assert_eq!(
+        output[4]["result"]["structuredContent"]["sources"][0]["read_from"],
+        "cache"
+    );
+    assert_eq!(
+        runtime.source.body_reads.load(Ordering::SeqCst),
+        source_reads
+    );
 }

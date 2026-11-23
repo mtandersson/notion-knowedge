@@ -182,8 +182,7 @@ pub struct SyncTotals {
     /// Settled by the walk itself (excluded, archived, unreadable).
     pub skipped: u64,
     pub failed: u64,
-    /// Of `failed`, pages a retry cannot fix (unsupported source content,
-    /// an embedding input over the limit).
+    /// Of `failed`, pages with a permanent source failure.
     pub permanent: u64,
     /// Of `failed`, pages that hit the per-page deadline: a slow dependency,
     /// not a source failure.
@@ -827,7 +826,6 @@ impl IndexRuntime {
                     }
                 });
                 let deadline = std::time::Duration::from_secs(settings.timeout_seconds);
-                let embedding = SyncEmbedding(self.provider.as_ref());
                 let pending_targets = std::sync::Mutex::new(Vec::new());
                 let source_published = std::sync::atomic::AtomicBool::new(false);
                 let end;
@@ -864,9 +862,8 @@ impl IndexRuntime {
                             let result = timings
                                 .scope(
                                     ApiPhase::Commit,
-                                    Box::pin(self.handler.refresh_prefetched(
+                                    Box::pin(self.handler.publish_prefetched(
                                         prefetched,
-                                        &embedding,
                                         lease.clone(),
                                         clock,
                                     )),
@@ -917,7 +914,6 @@ impl IndexRuntime {
                     Ok(Err(
                         error @ (RefreshError::Source
                         | RefreshError::PermanentSource
-                        | RefreshError::EmbeddingInputLimit
                         | RefreshError::OutOfScope),
                     )) => {
                         outcomes.push((
@@ -938,7 +934,6 @@ impl IndexRuntime {
                         }
                         sync_count(SyncCount::SkippedPage, 1);
                         end = PageEnd::Skipped(match error {
-                            RefreshError::EmbeddingInputLimit => "embedding_input_limit",
                             RefreshError::OutOfScope => "out_of_scope",
                             RefreshError::PermanentSource => "permanent_source",
                             RefreshError::Source => "source",
@@ -1464,15 +1459,13 @@ impl IndexRuntime {
                     claim()
                 }
             });
-            let embedding = SyncEmbedding(self.provider.as_ref());
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(settings.timeout_seconds),
-                Box::pin(self.handler.resolve_relations(
+                Box::pin(self.handler.publish_relation_refresh(
                     &notion_knowledge_core::backend::PageId(page.clone()),
                     entry.parent.clone(),
                     &notion_knowledge_core::backend::PageId(entry.root_id.clone()),
                     &operation,
-                    &embedding,
                     lease.clone(),
                     clock,
                 )),
@@ -1854,34 +1847,42 @@ impl IndexRuntime {
                 .map_err(|_| "index writer busy")?;
             let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| now_ms() / 1000);
             let result: Result<GuardedChunkTable, &'static str> = async {
-                if let Some(plan) = &lexical
+                let guard = if let Some(plan) = &lexical
                     && !settings.index.join("chunks.lance").exists()
                 {
-                    return Box::pin(GuardedChunkTable::create_fresh_lexical(
+                    Box::pin(GuardedChunkTable::create_fresh_lexical(
                         &settings.index,
                         "chunks",
                         provider.metadata().clone(),
                         coordinator.clone(),
                         plan.identity(),
                         lease.clone(),
-                        clock,
+                        clock.clone(),
                     ))
                     .await
-                    .map_err(|_| "fresh lexical cache unavailable");
-                }
-                let guard = bind_cache(
-                    &settings.index,
-                    provider.metadata().clone(),
-                    coordinator.clone(),
-                    lexical.as_ref(),
-                )
-                .map_err(|_| "index binding incompatible")?;
-                let result = if settings.index.join("chunks.lance").exists() {
-                    guard.ensure_startup_indexes(lease.clone(), clock).await
+                    .map_err(|_| "fresh lexical cache unavailable")?
                 } else {
-                    guard.create_empty(lease.clone(), clock).await
+                    let guard = bind_cache(
+                        &settings.index,
+                        provider.metadata().clone(),
+                        coordinator.clone(),
+                        lexical.as_ref(),
+                    )
+                    .map_err(|_| "index binding incompatible")?;
+                    let result = if settings.index.join("chunks.lance").exists() {
+                        guard
+                            .ensure_startup_indexes(lease.clone(), clock.clone())
+                            .await
+                    } else {
+                        guard.create_empty(lease.clone(), clock.clone()).await
+                    };
+                    result.map_err(|_| "index unavailable or incompatible")?;
+                    guard
                 };
-                result.map_err(|_| "index unavailable or incompatible")?;
+                guard
+                    .ensure_text_projection(lease.clone(), clock)
+                    .await
+                    .map_err(|_| "text projection unavailable or incompatible")?;
                 Ok(guard)
             }
             .await;

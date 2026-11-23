@@ -7,8 +7,8 @@ use notion_knowledge_core::{
     embedding::EmbeddingProvider,
     hybrid::{HybridFusion, ReciprocalRankFusion},
     search::{
-        HybridSearch, LexicalQuery, LexicalSearch, SearchFuture, SearchUnavailable, SemanticQuery,
-        SemanticSearch,
+        HybridSearch, LexicalQuery, LexicalSearch, SearchFuture, SearchFutureWithFailure,
+        SearchUnavailable, SemanticQuery, SemanticSearch,
     },
 };
 use notion_knowledge_mcp::KnowledgeServer;
@@ -242,7 +242,7 @@ pub(crate) async fn attach_existing(
     }
     let plan = crate::index_runtime::configured_plan(settings)?;
     table
-        .search_snapshot()
+        .verify_text_search_indexes()
         .await
         .map_err(|_| "retrieval index unavailable or incompatible")?;
     let exact_id = plan.is_some();
@@ -350,35 +350,33 @@ struct ScopedSearch {
 impl SemanticSearch for ScopedSearch {
     fn search(&self, query: SemanticQuery) -> SearchFuture<'_> {
         Box::pin(async move {
-            let table = Arc::new(
-                self.table
-                    .search_snapshot()
-                    .await
-                    .map_err(|_| SearchUnavailable)?,
-            );
-            LanceSemanticSearch::new(table, self.provider.clone(), 1)
-                .map_err(|_| SearchUnavailable)?
-                .search(query)
+            self.search_with_failure(query)
                 .await
+                .map_err(|_| SearchUnavailable)
         })
     }
+
+    fn search_with_failure(&self, query: SemanticQuery) -> SearchFutureWithFailure<'_> {
+        Box::pin(
+            self.table
+                .search_with_snapshot(true, move |table| async move {
+                    LanceSemanticSearch::new(Arc::new(table), self.provider.clone(), 1)
+                        .map_err(|_| SearchUnavailable)?
+                        .search_with_failure(query)
+                        .await
+                }),
+        )
+    }
 }
+
 struct ScopedLexical {
     table: GuardedChunkTable,
 }
 impl LexicalSearch for ScopedLexical {
     fn search(&self, query: LexicalQuery) -> SearchFuture<'_> {
-        Box::pin(async move {
-            LexicalSearch::search(
-                &self
-                    .table
-                    .search_snapshot()
-                    .await
-                    .map_err(|_| SearchUnavailable)?,
-                query,
-            )
-            .await
-        })
+        Box::pin(self.table.search_with_snapshot(false, |table| async move {
+            LexicalSearch::search(&table, query).await
+        }))
     }
 }
 
@@ -389,20 +387,24 @@ struct ScopedHybrid {
 impl HybridSearch for ScopedHybrid {
     fn search(&self, query: SemanticQuery) -> SearchFuture<'_> {
         Box::pin(async move {
-            // Both rankers use one validated committed revision per call.
-            let table = Arc::new(
-                self.table
-                    .search_snapshot()
-                    .await
-                    .map_err(|_| SearchUnavailable)?,
-            );
-            let semantic = Arc::new(
-                LanceSemanticSearch::new(table.clone(), self.provider.clone(), 1)
-                    .map_err(|_| SearchUnavailable)?,
-            );
-            HybridFusion::new(semantic, table, ReciprocalRankFusion::default())?
-                .search(query)
+            self.search_with_failure(query)
                 .await
+                .map_err(|_| SearchUnavailable)
         })
+    }
+
+    fn search_with_failure(&self, query: SemanticQuery) -> SearchFutureWithFailure<'_> {
+        Box::pin(
+            self.table
+                .search_with_snapshots(move |semantic, lexical| async move {
+                    let semantic = Arc::new(
+                        LanceSemanticSearch::new(Arc::new(semantic), self.provider.clone(), 1)
+                            .map_err(|_| SearchUnavailable)?,
+                    );
+                    HybridFusion::new(semantic, Arc::new(lexical), ReciprocalRankFusion::default())?
+                        .search_with_failure(query)
+                        .await
+                }),
+        )
     }
 }

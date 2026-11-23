@@ -27,8 +27,8 @@ use notion_knowledge_core::{
         IndexedChunk, IndexedMetadata, LinkTarget, PropertyValue, SchemaVersion, SourceMetadata,
     },
     search::{
-        LexicalQuery, LexicalSearch, SearchFuture, SearchHit, SearchSource, SearchUnavailable,
-        SemanticQuery, SemanticSearch,
+        LexicalQuery, LexicalSearch, SearchFailure, SearchFuture, SearchFutureWithFailure,
+        SearchHit, SearchSource, SearchUnavailable, SemanticQuery, SemanticSearch,
     },
     source::{
         ExpandedSource, SourceContentScope, SourceExpandQuery, SourceExpansion,
@@ -43,7 +43,13 @@ pub mod lexical_binding;
 #[cfg(unix)]
 mod guarded;
 #[cfg(unix)]
-pub use guarded::{GuardedChunkTable, PreparedPageMutation};
+mod semantic_jobs;
+#[cfg(unix)]
+mod text;
+#[cfg(unix)]
+pub use guarded::{GuardedChunkTable, PreparedPageMutation, PreparedSemanticProjection};
+#[cfg(unix)]
+pub use semantic_jobs::SemanticBacklog;
 
 pub const CHUNK_TABLE_SCHEMA_VERSION: &str = "1";
 const CANONICAL_CHUNK_SCHEMA_VERSION: &str = "1";
@@ -297,6 +303,7 @@ pub struct VectorIndexHit {
 pub struct LanceChunkTable {
     table: Table,
     embedding: EmbeddingMetadata,
+    text_only: bool,
 }
 
 /// Semantic composition over an already configured local table and embedding
@@ -305,6 +312,7 @@ pub struct LanceSemanticSearch {
     table: Arc<LanceChunkTable>,
     provider: Arc<dyn EmbeddingProvider>,
     nprobes: usize,
+    embedding_deadline: Option<tokio::time::Instant>,
 }
 
 impl LanceSemanticSearch {
@@ -325,13 +333,16 @@ impl LanceSemanticSearch {
             table,
             provider,
             nprobes,
+            embedding_deadline: None,
         })
     }
 
-    async fn semantic_search(
-        &self,
-        query: SemanticQuery,
-    ) -> Result<Vec<SearchHit>, ChunkTableError> {
+    pub(crate) fn with_embedding_deadline(mut self, deadline: tokio::time::Instant) -> Self {
+        self.embedding_deadline = Some(deadline);
+        self
+    }
+
+    async fn semantic_search(&self, query: SemanticQuery) -> Result<Vec<SearchHit>, SearchFailure> {
         let scope = LexicalQuery {
             query: query.query.clone(),
             limit: query.limit,
@@ -339,12 +350,33 @@ impl LanceSemanticSearch {
             root_page_ids: query.root_page_ids,
             metadata: query.metadata,
         };
-        let snapshot = self.table.read_snapshot().await?;
-        let predicate = snapshot.metadata_predicate(&scope).await?;
-        let vectors = embedding::embed_batch(self.provider.as_ref(), &[query.query]).await?;
+        let snapshot = self
+            .table
+            .read_snapshot()
+            .await
+            .map_err(|_| SearchFailure::Retrieval)?;
+        let predicate = snapshot
+            .metadata_predicate(&scope)
+            .await
+            .map_err(|_| SearchFailure::Retrieval)?;
+        let input = [query.query];
+        let work = embedding::embed_batch(self.provider.as_ref(), &input);
+        let result = match self.embedding_deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, work)
+                .await
+                .map_err(|_| SearchFailure::EmbeddingUnavailable)?,
+            None => work.await,
+        };
+        let vectors = result.map_err(|error| match error {
+            EmbeddingError::InvalidMetadata | EmbeddingError::IncompatibleIndex => {
+                SearchFailure::Retrieval
+            }
+            _ => SearchFailure::EmbeddingUnavailable,
+        })?;
         let mut hits = snapshot
             .vector_query_scoped(&vectors[0], query.limit, self.nprobes, predicate.as_deref())
-            .await?
+            .await
+            .map_err(|_| SearchFailure::Retrieval)?
             .into_iter()
             .map(|hit| SearchHit {
                 lexical_matches: Vec::new(),
@@ -382,6 +414,10 @@ impl SemanticSearch for LanceSemanticSearch {
                 .map_err(|_| SearchUnavailable)
         })
     }
+
+    fn search_with_failure(&self, query: SemanticQuery) -> SearchFutureWithFailure<'_> {
+        Box::pin(self.semantic_search(query))
+    }
 }
 
 impl LanceChunkTable {
@@ -401,7 +437,11 @@ impl LanceChunkTable {
             .execute()
             .await?;
         validate_table_schema(&table, &embedding).await?;
-        let result = Self { table, embedding };
+        let result = Self {
+            table,
+            embedding,
+            text_only: false,
+        };
         if let Err(error) = result.ensure_fts_index(&FtsIndexConfig::default()).await {
             drop(result);
             database.drop_table(table_name, &[]).await?;
@@ -451,7 +491,11 @@ impl LanceChunkTable {
 
         match validate_table_schema(&table, &embedding).await {
             Ok(()) => {
-                let result = Self { table, embedding };
+                let result = Self {
+                    table,
+                    embedding,
+                    text_only: false,
+                };
                 result.ensure_fts_index(&FtsIndexConfig::default()).await?;
                 result.validate_vector_index_layout().await?;
                 Ok((result, IndexStartupAction::Opened))
@@ -466,7 +510,11 @@ impl LanceChunkTable {
                     .execute()
                     .await?;
                 validate_table_schema(&table, &embedding).await?;
-                let result = Self { table, embedding };
+                let result = Self {
+                    table,
+                    embedding,
+                    text_only: false,
+                };
                 result.ensure_fts_index(&FtsIndexConfig::default()).await?;
                 Ok((result, IndexStartupAction::Rebuilt))
             }
@@ -815,6 +863,7 @@ impl LanceChunkTable {
         Ok(Self {
             table: self.table.checkout_current().await?,
             embedding: self.embedding.clone(),
+            text_only: self.text_only,
         })
     }
 
@@ -1137,7 +1186,7 @@ impl LanceChunkTable {
             .await?
             .try_collect()
             .await?;
-        decode_stored_chunks(&batches)
+        decode_stored_chunks(&batches, self.text_only)
     }
 
     async fn scoped_rows_for_ref(
@@ -1559,7 +1608,10 @@ fn decode_vector(column: &FixedSizeListArray, row: usize) -> Result<Vec<f32>, Ch
     Ok(values.values().to_vec())
 }
 
-fn decode_stored_chunks(batches: &[RecordBatch]) -> Result<Vec<StoredChunk>, ChunkTableError> {
+fn decode_stored_chunks(
+    batches: &[RecordBatch],
+    text_only: bool,
+) -> Result<Vec<StoredChunk>, ChunkTableError> {
     let mut rows = Vec::new();
     for batch in batches {
         let chunk_ids = string_column(batch, "chunk_id")?;
@@ -1578,7 +1630,9 @@ fn decode_stored_chunks(batches: &[RecordBatch]) -> Result<Vec<StoredChunk>, Chu
         let texts = string_column(batch, "text")?;
         let hashes = string_column(batch, "content_hash")?;
         let edited = string_column(batch, "last_edited_time")?;
-        let vectors = vector_column(batch, "vector")?;
+        let vectors = (!text_only)
+            .then(|| vector_column(batch, "vector"))
+            .transpose()?;
         for row in 0..batch.num_rows() {
             if versions.value(row) != CANONICAL_CHUNK_SCHEMA_VERSION {
                 return Err(ChunkTableError::InvalidSchema(
@@ -1602,7 +1656,10 @@ fn decode_stored_chunks(batches: &[RecordBatch]) -> Result<Vec<StoredChunk>, Chu
                 links: serde_json::from_str(links.value(row))?,
                 text: texts.value(row).to_owned(),
                 content_hash: hashes.value(row).to_owned(),
-                vector: decode_vector(vectors, row)?,
+                vector: vectors
+                    .map(|vectors| decode_vector(vectors, row))
+                    .transpose()?
+                    .unwrap_or_default(),
             });
         }
     }
@@ -1687,28 +1744,30 @@ fn chunk_schema(embedding: &EmbeddingMetadata) -> Result<SchemaRef, ChunkTableEr
         ),
         (EMBEDDING_KEY.to_string(), serde_json::to_string(embedding)?),
     ]);
-    Ok(Arc::new(
-        Schema::new(vec![
-            Field::new("schema_version", DataType::Utf8, false),
-            Field::new("chunk_id", DataType::Utf8, false),
-            Field::new("page_id", DataType::Utf8, false),
-            Field::new("block_id", DataType::Utf8, true),
-            Field::new("url", DataType::Utf8, false),
-            Field::new("title", DataType::Utf8, false),
-            Field::new("heading_path_json", DataType::Utf8, false),
-            Field::new("last_edited_time", DataType::Utf8, false),
-            Field::new("workspace_id", DataType::Utf8, false),
-            Field::new("root_page_id", DataType::Utf8, false),
-            Field::new("database_id", DataType::Utf8, true),
-            Field::new("data_source_id", DataType::Utf8, true),
-            Field::new("properties_json", DataType::Utf8, false),
-            Field::new("text", DataType::Utf8, false),
-            Field::new("content_hash", DataType::Utf8, false),
-            Field::new("links_json", DataType::Utf8, false),
-            Field::new("vector", vector, false),
-        ])
-        .with_metadata(metadata),
-    ))
+    let mut fields = text_fields();
+    fields.push(Field::new("vector", vector, false));
+    Ok(Arc::new(Schema::new(fields).with_metadata(metadata)))
+}
+
+fn text_fields() -> Vec<Field> {
+    vec![
+        Field::new("schema_version", DataType::Utf8, false),
+        Field::new("chunk_id", DataType::Utf8, false),
+        Field::new("page_id", DataType::Utf8, false),
+        Field::new("block_id", DataType::Utf8, true),
+        Field::new("url", DataType::Utf8, false),
+        Field::new("title", DataType::Utf8, false),
+        Field::new("heading_path_json", DataType::Utf8, false),
+        Field::new("last_edited_time", DataType::Utf8, false),
+        Field::new("workspace_id", DataType::Utf8, false),
+        Field::new("root_page_id", DataType::Utf8, false),
+        Field::new("database_id", DataType::Utf8, true),
+        Field::new("data_source_id", DataType::Utf8, true),
+        Field::new("properties_json", DataType::Utf8, false),
+        Field::new("text", DataType::Utf8, false),
+        Field::new("content_hash", DataType::Utf8, false),
+        Field::new("links_json", DataType::Utf8, false),
+    ]
 }
 
 async fn validate_table_schema(
@@ -1812,18 +1871,6 @@ fn rows_to_batch(
     rows: &[EmbeddedChunk],
     embedding: &EmbeddingMetadata,
 ) -> Result<RecordBatch, ChunkTableError> {
-    let headings = rows
-        .iter()
-        .map(|row| serde_json::to_string(&row.chunk.metadata.heading_path))
-        .collect::<Result<Vec<_>, _>>()?;
-    let properties = rows
-        .iter()
-        .map(|row| serde_json::to_string(&row.chunk.metadata.properties))
-        .collect::<Result<Vec<_>, _>>()?;
-    let links = rows
-        .iter()
-        .map(|row| serde_json::to_string(&row.chunk.links))
-        .collect::<Result<Vec<_>, _>>()?;
     let vectors = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
         rows.iter().map(|row| {
             Some(
@@ -1838,87 +1885,102 @@ fn rows_to_batch(
             ChunkTableError::InvalidSchema("embedding dimension exceeds Arrow list limit".into())
         })?,
     );
-    let schema = chunk_schema(embedding)?;
-    Ok(RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| schema_version(row.chunk.schema_version))
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| row.chunk.chunk_id.as_str())
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| row.chunk.metadata.page_id.as_str())
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| row.chunk.metadata.block_id.as_deref())
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| row.chunk.metadata.url.as_str())
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| row.chunk.metadata.title.as_str())
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(StringArray::from(
-                headings.iter().map(String::as_str).collect::<Vec<_>>(),
-            )),
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| row.chunk.metadata.last_edited_time.as_str())
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| row.chunk.metadata.source.workspace_id.as_str())
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| row.chunk.metadata.source.root_page_id.as_str())
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| row.chunk.metadata.source.database_id.as_deref())
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| row.chunk.metadata.source.data_source_id.as_deref())
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(StringArray::from(
-                properties.iter().map(String::as_str).collect::<Vec<_>>(),
-            )),
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| row.chunk.text.as_str())
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| row.chunk.content_hash.as_str())
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(StringArray::from(
-                links.iter().map(String::as_str).collect::<Vec<_>>(),
-            )),
-            Arc::new(vectors),
-        ],
-    )?)
+    let mut columns = text_columns(rows.iter().map(|row| &row.chunk))?;
+    columns.push(Arc::new(vectors));
+    Ok(RecordBatch::try_new(chunk_schema(embedding)?, columns)?)
+}
+
+fn text_columns<'a>(
+    rows: impl Iterator<Item = &'a IndexedChunk> + Clone,
+) -> Result<Vec<arrow_array::ArrayRef>, ChunkTableError> {
+    let headings = rows
+        .clone()
+        .map(|row| serde_json::to_string(&row.metadata.heading_path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let properties = rows
+        .clone()
+        .map(|row| serde_json::to_string(&row.metadata.properties))
+        .collect::<Result<Vec<_>, _>>()?;
+    let links = rows
+        .clone()
+        .map(|row| serde_json::to_string(&row.links))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(vec![
+        Arc::new(StringArray::from(
+            rows.clone()
+                .map(|row| schema_version(row.schema_version))
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            rows.clone()
+                .map(|row| row.chunk_id.as_str())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            rows.clone()
+                .map(|row| row.metadata.page_id.as_str())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            rows.clone()
+                .map(|row| row.metadata.block_id.as_deref())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            rows.clone()
+                .map(|row| row.metadata.url.as_str())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            rows.clone()
+                .map(|row| row.metadata.title.as_str())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            headings.iter().map(String::as_str).collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            rows.clone()
+                .map(|row| row.metadata.last_edited_time.as_str())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            rows.clone()
+                .map(|row| row.metadata.source.workspace_id.as_str())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            rows.clone()
+                .map(|row| row.metadata.source.root_page_id.as_str())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            rows.clone()
+                .map(|row| row.metadata.source.database_id.as_deref())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            rows.clone()
+                .map(|row| row.metadata.source.data_source_id.as_deref())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            properties.iter().map(String::as_str).collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            rows.clone()
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            rows.clone()
+                .map(|row| row.content_hash.as_str())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            links.iter().map(String::as_str).collect::<Vec<_>>(),
+        )),
+    ])
 }
 
 #[cfg(test)]
