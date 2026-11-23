@@ -851,6 +851,10 @@ async fn read_only_commands_reject_previous_schema_without_migration_or_auxiliar
     let f = Fixture::new(&http).await;
     let db = rusqlite::Connection::open(&f.state).unwrap();
     db.execute_batch(include_str!(
+        "../../../retrieval/tests/it/fixtures/remove_source_cache_schema.sql"
+    ))
+    .unwrap();
+    db.execute_batch(include_str!(
         "../../../retrieval/tests/it/fixtures/remove_schedule_schema.sql"
     ))
     .unwrap();

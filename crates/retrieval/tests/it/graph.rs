@@ -217,6 +217,9 @@ fn relation_label_migration_is_explicit_and_preserves_operational_state_and_lega
         .unwrap();
     drop(store);
     let connection = Connection::open(&db.0).unwrap();
+    connection
+        .execute_batch(include_str!("fixtures/remove_source_cache_schema.sql"))
+        .unwrap();
     connection.execute_batch("ALTER TABLE graph_edges DROP COLUMN display_name;
         DROP TABLE file_refresh_intents; DROP TABLE mutation_refresh; DROP TABLE alias_operation_proposals; DROP TABLE page_alias_projections; DROP TABLE relation_operation_proposals; DROP TABLE page_relation_projections; DELETE FROM schema_migrations WHERE version>=14;
         INSERT INTO crawl_checkpoints(checkpoint_key,cursor) VALUES('crawl','next');

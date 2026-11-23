@@ -464,6 +464,12 @@ async fn default_and_explicit_indexed_reads_do_not_call_notion_or_claim_refresh(
             "Expanded content for 11111111-1111-1111-1111-111111111111"
         );
         assert_eq!(source["content_scope"], "indexed");
+        assert_eq!(source["provenance"]["root_page_id"], scope_fixture::ROOT);
+        assert_eq!(
+            source["provenance"]["indexed_last_edited_time"],
+            "2026-10-07T11:00:00Z"
+        );
+        assert!(source.get("read_from").is_none());
         assert!(
             source["provenance"]
                 .get("refreshed_last_edited_time")

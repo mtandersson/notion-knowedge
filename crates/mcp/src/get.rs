@@ -483,6 +483,9 @@ pub fn tool() -> Tool {
                     "type":"object",
                     "additionalProperties":false,
                     "required":["reference","text","truncated","provenance","content_scope"],
+                    "if":{"properties":{"content_scope":{"const":"indexed"}}},
+                    "then":{"properties":{"provenance":{"required":["root_page_id","indexed_last_edited_time"]}}},
+                    "else":{"required":["read_from"]},
                     "properties":{
                         "content_scope":{"type":"string","enum":["indexed","page"]},
                         "read_from":{"type":"string","enum":["cache","notion"]},

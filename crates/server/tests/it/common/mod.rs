@@ -32,11 +32,24 @@ pub fn assert_search_catalog(tools: &Value) {
         source["properties"]["content_scope"]["enum"],
         json!(["indexed", "page"])
     );
-    assert!(
-        source["properties"]["provenance"]["required"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("indexed_last_edited_time"))
+    assert_eq!(
+        source["if"]["properties"]["content_scope"]["const"],
+        "indexed"
+    );
+    assert_eq!(
+        source["then"]["properties"]["provenance"]["required"],
+        json!(["root_page_id", "indexed_last_edited_time"])
+    );
+    let required = source["properties"]["provenance"]["required"]
+        .as_array()
+        .unwrap();
+    for indexed_only in ["root_page_id", "indexed_last_edited_time"] {
+        assert!(!required.contains(&json!(indexed_only)));
+    }
+    assert_eq!(source["else"]["required"], json!(["read_from"]));
+    assert_eq!(
+        source["properties"]["read_from"]["enum"],
+        json!(["cache", "notion"])
     );
     assert_eq!(
         source["properties"]["provenance"]["properties"]["refreshed_last_edited_time"]["type"],
