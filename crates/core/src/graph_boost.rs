@@ -8,7 +8,8 @@ use crate::{
     graph::{GraphEdgeStore, GraphTarget},
     root_scope::ReadAuthority,
     search::{
-        HybridSearch, RetrievalPath, SearchFuture, SearchHit, SearchUnavailable, SemanticQuery,
+        HybridSearch, RetrievalPath, SearchFuture, SearchFutureWithFailure, SearchHit,
+        SearchUnavailable, SemanticQuery,
     },
 };
 use std::{
@@ -97,11 +98,19 @@ impl GraphBoostedHybrid {
 impl HybridSearch for GraphBoostedHybrid {
     fn search(&self, query: SemanticQuery) -> SearchFuture<'_> {
         Box::pin(async move {
+            self.search_with_failure(query)
+                .await
+                .map_err(|_| SearchUnavailable)
+        })
+    }
+
+    fn search_with_failure(&self, query: SemanticQuery) -> SearchFutureWithFailure<'_> {
+        Box::pin(async move {
             if !self.config.enabled {
-                return self.inner.search(query).await;
+                return self.inner.search_with_failure(query).await;
             }
             if !(1..=100).contains(&query.limit) || self.config.candidate_limit < query.limit {
-                return Err(SearchUnavailable);
+                return Err(SearchUnavailable.into());
             }
             // Hold one owned graph read fence across the underlying index read,
             // graph traversal and read authorization. Persistent
@@ -113,7 +122,7 @@ impl HybridSearch for GraphBoostedHybrid {
             let requested_roots = query.root_page_ids.clone();
             let candidates = self
                 .inner
-                .search(SemanticQuery {
+                .search_with_failure(SemanticQuery {
                     limit: self.config.candidate_limit,
                     ..query
                 })
@@ -133,7 +142,7 @@ impl HybridSearch for GraphBoostedHybrid {
                         .await
                         .map_err(|_| SearchUnavailable)?;
                     if !permit.belongs_to_any(&roots) {
-                        return Err(SearchUnavailable);
+                        return Err(SearchUnavailable.into());
                     }
                 }
             }

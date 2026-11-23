@@ -545,16 +545,100 @@ async fn hybrid_dependency_failures_never_return_partial_results() {
             fail: !semantic_fail,
         });
         let hybrid = Arc::new(
-            HybridFusion::new(semantic, lexical, ReciprocalRankFusion::default()).unwrap(),
+            HybridFusion::new(semantic, lexical.clone(), ReciprocalRankFusion::default()).unwrap(),
         );
         let response = exchange_server(
-            KnowledgeServer::default().and_hybrid_search(hybrid),
+            KnowledgeServer::default()
+                .and_hybrid_search(hybrid)
+                .and_lexical_search(lexical.clone()),
             json!({"query":"question","limit":2,"mode":"hybrid"}),
         )
         .await;
         assert_eq!(response["result"]["isError"], true);
         assert!(response["result"]["structuredContent"].is_null());
+        assert_eq!(
+            lexical.calls.lock().unwrap().len(),
+            usize::from(!semantic_fail)
+        );
     }
+}
+
+#[tokio::test]
+async fn model_failure_degrades_hybrid_to_scoped_lexical_and_keeps_semantic_explicit() {
+    use notion_knowledge_core::hybrid::{HybridFusion, ReciprocalRankFusion};
+
+    struct UnavailableModel;
+    impl SemanticSearch for UnavailableModel {
+        fn search(&self, _: SemanticQuery) -> SearchFuture<'_> {
+            Box::pin(async { Err(SearchUnavailable) })
+        }
+
+        fn search_with_failure(&self, _: SemanticQuery) -> SearchFutureWithFailure<'_> {
+            Box::pin(async { Err(SearchFailure::EmbeddingUnavailable) })
+        }
+    }
+
+    let model = Arc::new(UnavailableModel);
+    let lexical = Arc::new(LexicalFixture {
+        calls: Mutex::new(Vec::new()),
+        fail: false,
+    });
+    let hybrid = Arc::new(
+        HybridFusion::new(
+            model.clone(),
+            lexical.clone(),
+            ReciprocalRankFusion::default(),
+        )
+        .unwrap(),
+    );
+    let mut request = json!({
+        "query": "question",
+        "limit": 1,
+        "mode": "hybrid",
+        "filters": {
+            "page_ids": ["11111111-1111-1111-1111-111111111111"],
+            "root_page_ids": ["22222222-2222-2222-2222-222222222222"],
+            "metadata": {"workspace_ids": ["workspace"]}
+        }
+    });
+    let reply = exchange_server(
+        KnowledgeServer::default()
+            .and_hybrid_search(hybrid)
+            .and_lexical_search(lexical.clone()),
+        request.clone(),
+    )
+    .await;
+    let result = &reply["result"]["structuredContent"];
+    assert_eq!(result["semantic_status"], "unavailable");
+    assert_eq!(result["results"][0]["matched_paths"], json!(["lexical"]));
+    {
+        let calls = lexical.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].limit, 1);
+        assert_eq!(
+            calls[0].page_ids.as_ref().unwrap(),
+            &["11111111-1111-1111-1111-111111111111"]
+        );
+        assert_eq!(
+            calls[0].root_page_ids.as_ref().unwrap(),
+            &["22222222-2222-2222-2222-222222222222"]
+        );
+        assert_eq!(
+            calls[0].metadata.workspace_ids.as_ref().unwrap(),
+            &["workspace"]
+        );
+    }
+
+    request["mode"] = "semantic".into();
+    let reply = exchange_server(KnowledgeServer::with_search(model), request).await;
+    assert_eq!(reply["result"]["isError"], true);
+    assert!(
+        reply["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("semantic_unavailable:")
+    );
+    assert_eq!(lexical.calls.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

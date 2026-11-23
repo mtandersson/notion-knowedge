@@ -19,6 +19,17 @@ pub struct LexicalQuery {
     pub root_page_ids: Option<Vec<String>>,
     pub metadata: crate::search_filters::MetadataFilters,
 }
+impl From<SemanticQuery> for LexicalQuery {
+    fn from(query: SemanticQuery) -> Self {
+        Self {
+            query: query.query,
+            limit: query.limit,
+            page_ids: query.page_ids,
+            root_page_ids: query.root_page_ids,
+            metadata: query.metadata,
+        }
+    }
+}
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchSource {
     pub last_edited_time: String,
@@ -94,9 +105,29 @@ impl SearchHit {
 pub struct SearchUnavailable;
 pub type SearchFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Vec<SearchHit>, SearchUnavailable>> + Send + 'a>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchFailure {
+    Retrieval,
+    EmbeddingUnavailable,
+}
+
+impl From<SearchUnavailable> for SearchFailure {
+    fn from(_: SearchUnavailable) -> Self {
+        Self::Retrieval
+    }
+}
+
+pub type SearchFutureWithFailure<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<SearchHit>, SearchFailure>> + Send + 'a>>;
+
 /// Implementations must narrow by every supplied filter before limiting, or fail.
 pub trait SemanticSearch: Send + Sync {
     fn search(&self, query: SemanticQuery) -> SearchFuture<'_>;
+
+    fn search_with_failure(&self, query: SemanticQuery) -> SearchFutureWithFailure<'_> {
+        Box::pin(async move { Ok(self.search(query).await?) })
+    }
 }
 
 /// Implementations must narrow by every supplied filter before limiting, or fail.
@@ -113,6 +144,10 @@ pub enum RetrievalPath {
 
 pub trait HybridSearch: Send + Sync {
     fn search(&self, query: SemanticQuery) -> SearchFuture<'_>;
+
+    fn search_with_failure(&self, query: SemanticQuery) -> SearchFutureWithFailure<'_> {
+        Box::pin(async move { Ok(self.search(query).await?) })
+    }
 }
 
 /// Redact URL-bearing tokens before taking a Unicode prefix. Link targets are
