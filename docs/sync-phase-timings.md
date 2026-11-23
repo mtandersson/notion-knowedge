@@ -81,6 +81,8 @@ by `pages` for an average.
 
 The worker emits separate `operation: "semantic_projection"` events. A
 `published` outcome gives the number of vectors published for that page.
+`staged` gives progress retained for a later attempt, with a typed provider
+reason when an embedding failed during the batch.
 `embedding_deferred` reports a typed provider reason, including `InputLimit`.
 `retry_deferred` reports an infrastructure failure in the retry loop.
 The read-only status tool reports the current backlog.

@@ -46,6 +46,7 @@ mod guarded;
 mod semantic_jobs;
 #[cfg(unix)]
 mod text;
+mod windows;
 #[cfg(unix)]
 pub use guarded::{GuardedChunkTable, PreparedPageMutation, PreparedSemanticProjection};
 #[cfg(unix)]
@@ -313,6 +314,7 @@ pub struct LanceSemanticSearch {
     provider: Arc<dyn EmbeddingProvider>,
     nprobes: usize,
     embedding_deadline: Option<tokio::time::Instant>,
+    canonical: Option<Arc<LanceChunkTable>>,
 }
 
 impl LanceSemanticSearch {
@@ -334,11 +336,17 @@ impl LanceSemanticSearch {
             provider,
             nprobes,
             embedding_deadline: None,
+            canonical: None,
         })
     }
 
     pub fn with_embedding_deadline(mut self, deadline: tokio::time::Instant) -> Self {
         self.embedding_deadline = Some(deadline);
+        self
+    }
+
+    pub fn with_canonical_text(mut self, canonical: Arc<LanceChunkTable>) -> Self {
+        self.canonical = Some(canonical);
         self
     }
 
@@ -373,29 +381,39 @@ impl LanceSemanticSearch {
             }
             _ => SearchFailure::EmbeddingUnavailable,
         })?;
-        let mut hits = snapshot
-            .vector_query_scoped(&vectors[0], query.limit, self.nprobes, predicate.as_deref())
-            .await
-            .map_err(|_| SearchFailure::Retrieval)?
-            .into_iter()
-            .map(|hit| SearchHit {
-                lexical_matches: Vec::new(),
-                matched_paths: Vec::new(),
-                text: notion_knowledge_core::search::snippet(&hit.text, 2000),
-                // Native distance is lower-is-better for every supported metric.
-                // Negation preserves ranking without claiming cross-metric calibration.
-                score: -hit.distance,
-                source: SearchSource {
-                    last_edited_time: hit.last_edited_time,
-                    page_id: hit.page_id,
-                    chunk_id: hit.chunk_id,
-                    url: hit.url,
-                    title: hit.title,
-                    heading_path: hit.heading_path,
-                    block_id: hit.block_id,
-                },
-            })
-            .collect::<Vec<_>>();
+        let mut hits = Vec::with_capacity(query.limit);
+        let mut seen: HashSet<String> = HashSet::new();
+        while hits.len() < query.limit {
+            let mut conditions = predicate.iter().cloned().collect::<Vec<_>>();
+            for id in &seen {
+                conditions.push(format!("chunk_id != {}", sql_string(id)));
+                if let Some(pattern) = windows::anchor_pattern(id) {
+                    conditions.push(format!("chunk_id NOT LIKE {}", sql_string(&pattern)));
+                }
+            }
+            let condition = (!conditions.is_empty()).then(|| conditions.join(" AND "));
+            let remaining = query.limit - hits.len();
+            let candidates = snapshot
+                .vector_query_scoped(&vectors[0], remaining, self.nprobes, condition.as_deref())
+                .await
+                .map_err(|_| SearchFailure::Retrieval)?;
+            let exhaustive = candidates.len() < remaining;
+            let before = hits.len();
+            for candidate in candidates {
+                let window =
+                    windows::parse(&candidate.chunk_id).map_err(|_| SearchFailure::Retrieval)?;
+                let id = window
+                    .as_ref()
+                    .map_or_else(|| candidate.chunk_id.clone(), windows::Window::anchor);
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+                hits.push(self.cite_candidate(candidate, id).await?);
+            }
+            if exhaustive || hits.len() == before {
+                break;
+            }
+        }
         hits.sort_by(|a, b| {
             b.score
                 .total_cmp(&a.score)
@@ -403,6 +421,68 @@ impl LanceSemanticSearch {
                 .then_with(|| a.source.chunk_id.cmp(&b.source.chunk_id))
         });
         Ok(hits)
+    }
+
+    async fn cite_candidate(
+        &self,
+        hit: VectorIndexHit,
+        chunk_id: String,
+    ) -> Result<SearchHit, SearchFailure> {
+        use notion_knowledge_core::search::{SemanticSpan, snippet, snippet_span};
+
+        let mut span = None;
+        let text = if let Some(window) =
+            windows::parse(&hit.chunk_id).map_err(|_| SearchFailure::Retrieval)?
+        {
+            let canonical = self.canonical.as_ref().ok_or(SearchFailure::Retrieval)?;
+            let predicate = format!(
+                "page_id = {} AND chunk_id = {}",
+                sql_string(&hit.page_id),
+                sql_string(&chunk_id)
+            );
+            let rows = canonical
+                .rows_matching(predicate)
+                .await
+                .map_err(|_| SearchFailure::Retrieval)?;
+            let [row] = rows.as_slice() else {
+                return Err(SearchFailure::Retrieval);
+            };
+            if row.page_id != hit.page_id
+                || row.chunk_id != chunk_id
+                || row.root_page_id != hit.root_page_id
+                || row.last_edited_time != hit.last_edited_time
+                || row.url != hit.url
+                || row.title != hit.title
+                || row.heading_path != hit.heading_path
+                || row.block_id != hit.block_id
+                || !window.matches(&row.text, &hit.text)
+            {
+                return Err(SearchFailure::Retrieval);
+            }
+            span = Some(SemanticSpan {
+                start_byte: window.range.start,
+                end_byte: window.range.end,
+            });
+            snippet_span(&row.text, window.range, 2000).ok_or(SearchFailure::Retrieval)?
+        } else {
+            snippet(&hit.text, 2000)
+        };
+        Ok(SearchHit {
+            lexical_matches: Vec::new(),
+            matched_paths: Vec::new(),
+            semantic_span: span,
+            text,
+            score: -hit.distance,
+            source: SearchSource {
+                last_edited_time: hit.last_edited_time,
+                page_id: hit.page_id,
+                chunk_id,
+                url: hit.url,
+                title: hit.title,
+                heading_path: hit.heading_path,
+                block_id: hit.block_id,
+            },
+        })
     }
 }
 
@@ -951,6 +1031,7 @@ impl LanceChunkTable {
                 let key = (hit.page_id.clone(), hit.chunk_id.clone());
                 let candidate = SearchHit {
                     lexical_matches: Vec::new(),
+                    semantic_span: None,
                     matched_paths: Vec::new(),
                     text: notion_knowledge_core::search::snippet(&hit.text, 2000),
                     score,

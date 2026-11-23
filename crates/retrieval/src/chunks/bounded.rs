@@ -401,6 +401,7 @@ fn merge_hit(
             LexicalCandidate {
                 hit: SearchHit {
                     lexical_matches: Vec::new(),
+                    semantic_span: None,
                     matched_paths: vec![],
                     text,
                     score,

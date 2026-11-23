@@ -161,6 +161,7 @@ fn selected(query: &SemanticQuery, chunk: &IndexedChunk) -> bool {
 fn hit(chunk: IndexedChunk, score: f32) -> SearchHit {
     SearchHit {
         lexical_matches: Vec::new(),
+        semantic_span: None,
         matched_paths: Vec::new(),
         text: notion_knowledge_core::search::snippet(&chunk.text, 2000),
         score,

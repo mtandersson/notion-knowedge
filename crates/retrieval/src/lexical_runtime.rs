@@ -121,10 +121,11 @@ impl SemanticSearch for LexicalSearchRuntime {
         Box::pin(async move {
             self.run(|_reservation, deadline| {
                 self.table
-                    .search_with_snapshot(true, move |snapshot| async move {
+                    .search_with_snapshots(move |snapshot, canonical| async move {
                         LanceSemanticSearch::new(Arc::new(snapshot), self.provider.clone(), 1)
                             .map_err(|_| SearchUnavailable)?
                             .with_embedding_deadline(deadline)
+                            .with_canonical_text(Arc::new(canonical))
                             .search_with_failure(query)
                             .await
                     })
@@ -162,12 +163,14 @@ impl HybridSearch for LexicalSearchRuntime {
             self.run(|reservation, deadline| {
                 self.table
                     .search_with_snapshots(move |semantic, lexical| async move {
+                        let lexical = Arc::new(lexical);
                         let semantic = Arc::new(
                             LanceSemanticSearch::new(Arc::new(semantic), self.provider.clone(), 1)
                                 .map_err(|_| SearchUnavailable)?
-                                .with_embedding_deadline(deadline),
+                                .with_embedding_deadline(deadline)
+                                .with_canonical_text(lexical.clone()),
                         );
-                        let lexical = Arc::new(self.lexical(Arc::new(lexical), reservation));
+                        let lexical = Arc::new(self.lexical(lexical, reservation));
                         HybridFusion::new(semantic, lexical, ReciprocalRankFusion::default())?
                             .search_with_failure(query)
                             .await

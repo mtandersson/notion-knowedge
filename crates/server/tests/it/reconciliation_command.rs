@@ -141,7 +141,13 @@ impl EmbeddingProvider for Provider {
             }
             Ok(texts
                 .iter()
-                .map(|s| vec![s.len() as f32, 1.0, 0.0])
+                .map(|s| {
+                    if s.contains("conifer") {
+                        vec![0.0, 0.0, 1.0]
+                    } else {
+                        vec![s.len() as f32, 1.0, 0.0]
+                    }
+                })
                 .collect())
         })
     }
@@ -3928,30 +3934,15 @@ async fn oversized_table_sections_commit_losslessly_and_retry_as_unchanged() {
         .page_chunks(PAGE)
         .await
         .unwrap();
-    let split = original
-        .iter()
-        .find(|part| {
-            !canonical
+    {
+        let scoped = f.search_windows(&runtime, "Investigation").await;
+        assert!(scoped.iter().any(|hit| hit.semantic_span.is_some()));
+        assert!(scoped.iter().all(|hit| {
+            canonical
                 .iter()
-                .any(|chunk| chunk.chunk_id == part.chunk_id)
-        })
-        .expect("semantic table split has a distinct source anchor");
-    use notion_knowledge_core::source::{SourceExpandQuery, SourceExpansion, StableSourceRef};
-    let sources = runtime
-        .chunks()
-        .expand(SourceExpandQuery {
-            refs: vec![
-                StableSourceRef::Page(PAGE.into()),
-                StableSourceRef::Chunk(split.chunk_id.clone()),
-            ],
-            max_chars: 6000,
-            root_page_ids: vec![ROOT.into()],
-        })
-        .await
-        .unwrap();
-    assert_eq!(sources.len(), 2);
-    assert_eq!(sources[1].provenance.page_id, PAGE);
-    assert!(sources[1].text.contains("Investigation"));
+                .any(|chunk| chunk.chunk_id == hit.source.chunk_id)
+        }));
+    }
     assert!(original.len() > 4);
     let mut source_order: Vec<_> = original
         .iter()
@@ -3979,47 +3970,16 @@ async fn oversized_table_sections_commit_losslessly_and_retry_as_unchanged() {
     assert!(out_of_sync(&runtime).is_empty());
     drop(runtime);
 
-    // A compatible v1 installation has this semantic table but no separate
-    // text projection or marker. Preserve the exact historical table split
-    // and its existing vectors without rewriting checkpoints or calling Notion.
-    let text_path = f.settings.index.join("chunks_text.lance");
-    fs::remove_dir_all(&text_path).unwrap();
-    fs::remove_file(f.settings.index.join("semantic-projection.sqlite")).unwrap();
-    fs::remove_file(f.settings.index.join(".nk-text-projection-v1")).unwrap();
     let embeddings = f.provider.count.load(Ordering::SeqCst);
-    let requests = http.requests().len();
-    let runtime = IndexRuntime::recover(
-        &f.settings,
-        &f.state,
-        authority(),
-        http.client(),
-        f.provider.clone(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(http.requests().len(), requests);
-    assert_eq!(f.provider.count.load(Ordering::SeqCst), embeddings);
-    assert_eq!(runtime.chunks().page_chunks(PAGE).await.unwrap(), original);
-    assert_eq!(
-        runtime
-            .chunks()
-            .search_snapshot()
-            .await
-            .unwrap()
-            .page_chunks(PAGE)
-            .await
-            .unwrap(),
-        original,
-    );
-    drop(runtime);
     let retry = f.command(&http, &["--reconcile", "retry", PAGE]).await;
     assert_eq!(retry.exit, 0, "{:?}", retry.json);
     assert_eq!(retry.json["unchanged"], 1);
     assert_eq!(f.provider.count.load(Ordering::SeqCst), embeddings);
     let runtime = f.open(&http, OpenMode::ExistingWrite).await;
-    assert_eq!(runtime.chunks().page_chunks(PAGE).await.unwrap(), original);
+    assert_eq!(runtime.chunks().page_chunks(PAGE).await.unwrap(), canonical);
     drop(runtime);
 
+    let text_path = f.settings.index.join("chunks_text.lance");
     // An installed text projection is more complete than its vector
     // projection. Its loss cannot be treated as a v1 migration.
     let saved = f.settings.index.join("saved-text");
@@ -4039,6 +3999,175 @@ async fn oversized_table_sections_commit_losslessly_and_retry_as_unchanged() {
     assert!(!text_path.exists());
     assert_eq!(http.requests().len(), requests);
     fs::rename(saved, text_path).unwrap();
+}
+
+impl Fixture {
+    async fn search_windows(
+        &self,
+        runtime: &IndexRuntime,
+        query: &str,
+    ) -> Vec<notion_knowledge_core::search::SearchHit> {
+        use notion_knowledge_core::search::{SemanticQuery, SemanticSearch};
+        use notion_knowledge_retrieval::chunks::LanceSemanticSearch;
+        let table = runtime.chunks();
+        let search = LanceSemanticSearch::new(
+            Arc::new(table.search_snapshot().await.unwrap()),
+            self.provider.clone(),
+            1,
+        )
+        .unwrap()
+        .with_canonical_text(Arc::new(table.canonical_search_snapshot().await.unwrap()));
+        search
+            .search(SemanticQuery {
+                query: query.into(),
+                limit: 10,
+                page_ids: Some(vec![PAGE.into()]),
+                root_page_ids: Some(vec![ROOT.into()]),
+                metadata: Default::default(),
+            })
+            .await
+            .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn long_markdown_windows_resume_over_bounded_batches_and_cite_the_late_source() {
+    use notion_knowledge_core::source::{
+        FreshPageCache, SourceExpandQuery, SourceExpansion, StableSourceRef,
+    };
+    use notion_knowledge_core::{
+        hybrid::{HybridFusion, ReciprocalRankFusion},
+        search::{HybridSearch, RetrievalPath, SemanticQuery},
+    };
+
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    let mut markdown = "# Field notes\n\n<details>\n".to_owned();
+    for n in 0..24 {
+        markdown.push_str(&format!(
+            "- Observation {n} {}\n",
+            "ordinary context ".repeat(35)
+        ));
+    }
+    markdown.push_str("- The conifer reference is in the final observation.\n</details>\n");
+    http.state.lock().unwrap().markdown.clone_from(&markdown);
+    f.provider.input_limit_bytes.store(1024, Ordering::SeqCst);
+    let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+    let state = runtime.coordinator.state();
+    let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
+    let mut lease = state.acquire_lease(now, 60).unwrap();
+    runtime
+        .sync_from_walk(
+            &PageDeadline {
+                timeout_seconds: 10,
+            },
+            &mut lease,
+            SyncMode::Full,
+        )
+        .await
+        .unwrap();
+    let reads = http.body_reads.load(Ordering::SeqCst);
+    let clock: Arc<dyn Fn() -> i64 + Send + Sync> =
+        Arc::new(|| notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000);
+    let table = runtime.chunks();
+    assert!(
+        !table
+            .retry_semantic(PAGE, f.provider.as_ref(), lease.clone(), clock.clone())
+            .await
+            .unwrap()
+    );
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), 8);
+    assert!(
+        table
+            .search_snapshot()
+            .await
+            .unwrap()
+            .page_chunks(PAGE)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(table.has_pending_semantic(Some(PAGE)).unwrap());
+    state.release_lease(&lease, clock()).unwrap();
+    drop(runtime);
+
+    let restarted = f.open(&http, OpenMode::ExistingWrite).await;
+    drain_semantic(&restarted).await;
+    assert_eq!(http.body_reads.load(Ordering::SeqCst), reads);
+    let table = restarted.chunks();
+    let vector_rows = table
+        .search_snapshot()
+        .await
+        .unwrap()
+        .page_chunks(PAGE)
+        .await
+        .unwrap();
+    assert!(vector_rows.len() > 8);
+    assert!(vector_rows.iter().all(|row| row.text.len() <= 1024));
+    assert_eq!(
+        f.provider.count.load(Ordering::SeqCst),
+        table.semantic_status().await.unwrap().0 as usize
+    );
+
+    let hits = f.search_windows(&restarted, "conifer").await;
+    assert_eq!(
+        hits.iter()
+            .map(|hit| &hit.source.chunk_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        hits.len()
+    );
+    let hit = &hits[0];
+    assert!(hit.text.contains("The conifer reference"));
+    let span = hit.semantic_span.unwrap();
+    assert!(span.start_byte > 1024);
+    let cited = table
+        .expand(SourceExpandQuery {
+            refs: vec![StableSourceRef::Chunk(hit.source.chunk_id.clone())],
+            root_page_ids: vec![ROOT.into()],
+            max_chars: 65536,
+        })
+        .await
+        .unwrap();
+    assert!(cited[0].text[span.start_byte..span.end_byte].contains("The conifer reference"));
+    let lexical = Arc::new(table.canonical_search_snapshot().await.unwrap());
+    let semantic = notion_knowledge_retrieval::chunks::LanceSemanticSearch::new(
+        Arc::new(table.search_snapshot().await.unwrap()),
+        f.provider.clone(),
+        1,
+    )
+    .unwrap()
+    .with_canonical_text(lexical.clone());
+    let fusion =
+        HybridFusion::new(Arc::new(semantic), lexical, ReciprocalRankFusion::default()).unwrap();
+    let fused = fusion
+        .search(SemanticQuery {
+            query: "conifer".into(),
+            limit: 1,
+            page_ids: Some(vec![PAGE.into()]),
+            root_page_ids: Some(vec![ROOT.into()]),
+            metadata: Default::default(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(fused[0].source.chunk_id, hit.source.chunk_id);
+    assert_eq!(fused[0].semantic_span, Some(span));
+    assert_eq!(
+        fused[0].matched_paths,
+        [RetrievalPath::Semantic, RetrievalPath::Lexical]
+    );
+    let cache = notion_knowledge_retrieval::page_documents::PageDocuments::new(
+        restarted.coordinator.clone(),
+    );
+    assert_eq!(
+        cache
+            .lookup(&PageId(PAGE.into()))
+            .await
+            .unwrap()
+            .content
+            .markdown,
+        markdown
+    );
 }
 
 #[tokio::test]

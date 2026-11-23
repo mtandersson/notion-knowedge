@@ -1,11 +1,8 @@
 //! Commit canonical text first and use the existing vector table as its derived
 //! semantic projection. Only the source/text revision receives the page receipt.
 use super::*;
-use crate::chunks::{semantic_jobs as jobs, text};
-use notion_knowledge_core::{
-    chunking::{ChunkDraft, table_section_boundaries},
-    fingerprint::identify_chunks,
-};
+use crate::chunks::{semantic_jobs as jobs, text, windows};
+use notion_knowledge_core::chunking::table_section_boundaries;
 
 type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
@@ -13,8 +10,15 @@ type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 /// lease. Commit verifies both again before changing the searchable projection.
 pub struct PreparedSemanticProjection {
     job: jobs::Job,
-    vectors: Option<Result<Vec<EmbeddedChunk>, ChunkTableError>>,
+    vectors: Option<Result<ProjectionStep, ChunkTableError>>,
 }
+
+enum ProjectionStep {
+    Complete(Vec<EmbeddedChunk>),
+    Staged(Vec<EmbeddedChunk>, Option<EmbeddingError>),
+}
+
+const INFERENCES_PER_STEP: usize = 8;
 
 impl GuardedChunkTable {
     /// Imported v1 rows predate the publication table. A v2 receipt always
@@ -292,12 +296,10 @@ impl GuardedChunkTable {
             .map_err(index_failure)?;
         let staged = jobs::reusable(&self.index_directory, &job).map_err(index_failure)?;
         drop(guard);
-        let vectors = tokio::time::timeout(
-            timeout,
-            self.prepare_vectors(provider, &canonical, &old, staged),
-        )
-        .await
-        .unwrap_or(Err(ChunkTableError::Embedding(EmbeddingError::Unavailable)));
+        let deadline = tokio::time::Instant::now() + timeout;
+        let vectors = self
+            .prepare_vectors(provider, &canonical, &old, staged, deadline)
+            .await;
         Ok(Some(PreparedSemanticProjection {
             job,
             vectors: Some(vectors),
@@ -339,7 +341,7 @@ impl GuardedChunkTable {
                     return Ok(());
                 };
                 match result {
-                    Ok(rows) => {
+                    Ok(ProjectionStep::Complete(rows)) => {
                         let semantic = this.open_semantic().await.map_err(failure)?;
                         verify_no_collisions(
                             &semantic,
@@ -387,6 +389,22 @@ impl GuardedChunkTable {
                         );
                         owned_wrote.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
+                    Ok(ProjectionStep::Staged(rows, error)) => {
+                        jobs::stage(&this.index_directory, &job, &rows).map_err(failure)?;
+                        if let Some(error) = error {
+                            jobs::fail(&this.index_directory, &job, error, owned_clock())
+                                .map_err(failure)?;
+                        }
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({
+                                "operation":"semantic_projection",
+                                "outcome":"staged",
+                                "chunks":rows.len(),
+                                "reason":error.map(|failure|format!("{failure:?}")),
+                            })
+                        );
+                    }
                     Err(ChunkTableError::Embedding(error)) => {
                         jobs::fail(&this.index_directory, &job, error, owned_clock())
                             .map_err(failure)?;
@@ -428,14 +446,16 @@ impl GuardedChunkTable {
         canonical: &[IndexedChunk],
         old: &[StoredChunk],
         mut staged: HashMap<String, Vec<f32>>,
-    ) -> Result<Vec<EmbeddedChunk>, ChunkTableError> {
+        deadline: tokio::time::Instant,
+    ) -> Result<ProjectionStep, ChunkTableError> {
         self.embedding.ensure_compatible(provider.metadata())?;
-        let chunks = semantic_chunks(provider, canonical, old, &staged).await?;
-        let existing = old
-            .iter()
-            .map(|row| (row.chunk_id.as_str(), row))
-            .collect::<HashMap<_, _>>();
+        let chunks =
+            tokio::time::timeout_at(deadline, semantic_chunks(provider, canonical, old, &staged))
+                .await
+                .map_err(|_| EmbeddingError::Unavailable)??;
+        let existing: HashMap<_, _> = old.iter().map(|row| (row.chunk_id.as_str(), row)).collect();
         let mut vectors = Vec::with_capacity(chunks.len());
+        let mut attempts = 0;
         let _embed = page_timings::timer(Bucket::Embed);
         for chunk in chunks {
             let vector = if let Some(old) = existing.get(chunk.chunk_id.as_str())
@@ -445,15 +465,29 @@ impl GuardedChunkTable {
             } else if let Some(vector) = staged.remove(&chunk.chunk_id) {
                 vector
             } else {
-                embedding::embed_batch(provider, std::slice::from_ref(&chunk.text))
-                    .await?
-                    .pop()
-                    .ok_or(EmbeddingError::InvalidOutput)?
+                if attempts == INFERENCES_PER_STEP {
+                    return Ok(ProjectionStep::Staged(vectors, None));
+                }
+                let input = std::slice::from_ref(&chunk.text);
+                let encoded =
+                    tokio::time::timeout_at(deadline, embedding::embed_batch(provider, input))
+                        .await
+                        .unwrap_or(Err(EmbeddingError::Unavailable));
+                match encoded {
+                    Ok(mut encoded) => {
+                        attempts += 1;
+                        encoded.pop().ok_or(EmbeddingError::InvalidOutput)?
+                    }
+                    Err(error) if attempts > 0 => {
+                        return Ok(ProjectionStep::Staged(vectors, Some(error)));
+                    }
+                    Err(error) => return Err(error.into()),
+                }
             };
             vectors.push(EmbeddedChunk::new(chunk, vector));
         }
         validate_rows(&vectors, self.embedding.dimension())?;
-        Ok(vectors)
+        Ok(ProjectionStep::Complete(vectors))
     }
 }
 
@@ -532,47 +566,43 @@ async fn semantic_chunks(
         .iter()
         .map(|row| (row.chunk_id.as_str(), row.text.as_str()))
         .collect();
-    let mut cuts = Vec::with_capacity(canonical.len());
+    let mut rows = Vec::new();
     for chunk in canonical {
-        let boundaries = table_section_boundaries(&chunk.text);
-        let points = if boundaries.is_empty()
-            || existing.contains(&(chunk.chunk_id.as_str(), chunk.text.as_str()))
+        if existing.contains(&(chunk.chunk_id.as_str(), chunk.text.as_str()))
             || staged.contains_key(&chunk.chunk_id)
         {
-            Vec::new()
-        } else {
-            provider.partition_input(&chunk.text, boundaries).await?
-        };
-        cuts.push(points);
-    }
-    if cuts.iter().all(Vec::is_empty) {
-        return Ok(canonical.to_vec());
-    }
-    let mut drafts = Vec::new();
-    let mut parents = Vec::new();
-    for (chunk, points) in canonical.iter().zip(cuts) {
-        let mut start = 0;
-        for end in points.into_iter().chain(std::iter::once(chunk.text.len())) {
-            let body = chunk
+            rows.push(chunk.clone());
+            continue;
+        }
+        let mut boundaries = table_section_boundaries(&chunk.text);
+        boundaries.extend(
+            chunk
                 .text
-                .get(start..end)
-                .filter(|part| !part.trim().is_empty())
-                .ok_or(EmbeddingError::InvalidInput)?;
-            drafts.push(ChunkDraft {
-                text: body.to_owned(),
-                source_bytes: start..end,
-                metadata: chunk.metadata.clone(),
-            });
-            parents.push(chunk);
-            start = end;
+                .match_indices('\n')
+                .map(|(offset, _)| offset + 1)
+                .filter(|&offset| offset < chunk.text.len()),
+        );
+        boundaries.sort_unstable();
+        boundaries.dedup();
+        let ranges = provider.embedding_windows(&chunk.text, boundaries).await?;
+        let fingerprint = windows::digest(&chunk.text);
+        let mut covered = 0;
+        for range in ranges {
+            if range.start > covered || range.end <= covered {
+                return Err(EmbeddingError::InvalidInput.into());
+            }
+            covered = range.end;
+            if range.start == 0 && range.end == chunk.text.len() {
+                rows.push(chunk.clone());
+            } else {
+                rows.push(windows::row(chunk, &fingerprint, range)?);
+            }
+        }
+        if covered != chunk.text.len() {
+            return Err(EmbeddingError::InvalidInput.into());
         }
     }
-    let mut chunks =
-        identify_chunks(drafts, canonical).map_err(|_| EmbeddingError::InvalidInput)?;
-    for (part, parent) in chunks.iter_mut().zip(parents) {
-        part.links.clone_from(&parent.links);
-    }
-    Ok(chunks)
+    Ok(rows)
 }
 
 async fn verify_no_collisions<'a>(

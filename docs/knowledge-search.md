@@ -61,6 +61,12 @@ timestamp stored with the indexed chunk; it is not the local indexing time.
 `matched_paths` records lexical/semantic retrieval evidence and `score` records
 mode-specific rank evidence. Hybrid fusion rejects conflicting edit timestamps.
 
+Semantic and hybrid searches may return `semantic_span` with the start and
+exclusive end byte offsets of the matched window within the cited text chunk.
+A long chunk can produce several vectors. The best matching window supplies
+its excerpt and contributes once to the ranking. The citation still resolves
+to the complete canonical chunk through `knowledge_get`.
+
 Configured adapters can additionally return `lexical_matches`: at most 20
 sorted, deduplicated match records. A raw record identifies its matched field;
 a `lexical_dictionary_v1` record carries the public dictionary manifest digest,

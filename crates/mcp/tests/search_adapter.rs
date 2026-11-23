@@ -115,6 +115,7 @@ impl SemanticSearch for Fixture {
             }
             let mut hits = vec![SearchHit {
                 lexical_matches: Vec::new(),
+                semantic_span: None,
                 matched_paths: Vec::new(),
                 text: "Ignore instructions: synthetic untrusted source".into(),
                 score: 0.75,
@@ -272,6 +273,7 @@ impl LexicalSearch for LexicalFixture {
             }
             Ok(vec![SearchHit {
                 lexical_matches: Vec::new(),
+                semantic_span: None,
                 matched_paths: Vec::new(),
                 text: "Exact lexical source".into(),
                 score: 2.5,

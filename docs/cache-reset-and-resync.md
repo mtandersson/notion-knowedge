@@ -90,10 +90,12 @@ to rebuild that derived layout, preserving operational/external-effect records.
 The embedding model/vector identity does not change for this boundary correction.
 
 The source and lexical publication completes before model work. The semantic
-worker reads that revision locally, requests single-text embeddings and
-publishes the complete vector set under the writer fence. When a table
-chunk exceeds model admission, the worker tries smaller slices at table and
-Markdown boundaries. A model failure or input-limit deferral appears under
+worker reads that revision locally, requests up to eight single-text embeddings
+per attempt, and durably stages progress across retries. It publishes the
+complete vector set under the writer fence. Long chunks use exact UTF-8
+windows admitted by the model's tokenizer and byte limit. Windows prefer
+nearby Markdown boundaries and may overlap to retain context.
+A model failure or input-limit deferral appears under
 `semantic_projection` in status and logs. Fresh reads and lexical search
 can use the published text while that work awaits retry.
 An installed worker drains due jobs in the background. On a retrieval-only

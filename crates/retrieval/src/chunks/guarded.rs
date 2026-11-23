@@ -576,6 +576,14 @@ impl GuardedChunkTable {
         self.open_search_snapshot().await
     }
 
+    pub async fn canonical_search_snapshot(&self) -> Result<LanceChunkTable, ChunkTableError> {
+        let _guard = self
+            .coordinator
+            .search_guard()
+            .map_err(|_| ChunkTableError::InvalidPath)?;
+        self.open_text_search_snapshot().await
+    }
+
     pub(crate) fn require_lexical_plan(
         &self,
         plan: &lexical_binding::LexicalCachePlan,

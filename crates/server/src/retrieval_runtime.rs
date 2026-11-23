@@ -368,10 +368,11 @@ impl SemanticSearch for ScopedSearch {
         let deadline = tokio::time::Instant::now() + self.timeout;
         Box::pin(
             self.table
-                .search_with_snapshot(true, move |table| async move {
+                .search_with_snapshots(move |table, canonical| async move {
                     LanceSemanticSearch::new(Arc::new(table), self.provider.clone(), 1)
                         .map_err(|_| SearchUnavailable)?
                         .with_embedding_deadline(deadline)
+                        .with_canonical_text(Arc::new(canonical))
                         .search_with_failure(query)
                         .await
                 }),
@@ -409,12 +410,14 @@ impl HybridSearch for ScopedHybrid {
         Box::pin(
             self.table
                 .search_with_snapshots(move |semantic, lexical| async move {
+                    let lexical = Arc::new(lexical);
                     let semantic = Arc::new(
                         LanceSemanticSearch::new(Arc::new(semantic), self.provider.clone(), 1)
                             .map_err(|_| SearchUnavailable)?
-                            .with_embedding_deadline(deadline),
+                            .with_embedding_deadline(deadline)
+                            .with_canonical_text(lexical.clone()),
                     );
-                    HybridFusion::new(semantic, Arc::new(lexical), ReciprocalRankFusion::default())?
+                    HybridFusion::new(semantic, lexical, ReciprocalRankFusion::default())?
                         .search_with_failure(query)
                         .await
                 }),

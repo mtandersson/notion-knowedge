@@ -92,6 +92,7 @@ impl SemanticSearch for Search {
                 text: "PRIVATE_CONTENT_SHOULD_NOT_LEAK".into(),
                 score: 0.9,
                 lexical_matches: Vec::new(),
+                semantic_span: None,
                 matched_paths: vec![],
                 source: SearchSource {
                     page_id: PAGE.into(),
