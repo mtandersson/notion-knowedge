@@ -548,6 +548,17 @@ impl GuardedChunkTable {
         Ok(())
     }
 
+    /// Allow the worker to start and recover unfinished receipts. Serving
+    /// search still requires an independently settled snapshot.
+    pub async fn verify_bound_text_layout(&self) -> Result<(), ChunkTableError> {
+        let _guard = self
+            .coordinator
+            .document_read_guard()
+            .map_err(|_| ChunkTableError::InvalidPath)?;
+        self.open_text_search_snapshot().await?;
+        Ok(())
+    }
+
     pub async fn search_snapshot(&self) -> Result<LanceChunkTable, ChunkTableError> {
         let _guard = self
             .coordinator

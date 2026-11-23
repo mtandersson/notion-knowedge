@@ -394,13 +394,7 @@ impl IndexRuntime {
                         let installed = table
                             .text_projection_installed()
                             .map_err(|_| "text projection state unavailable")?;
-                        let ready = if options.lexical.is_some() {
-                            Box::pin(table.probe_lexical_cache()).await
-                        } else if installed {
-                            table.verify_text_search_indexes().await
-                        } else {
-                            table.verify_search_indexes().await
-                        };
+                        let ready = table.verify_bound_text_layout().await;
                         match ready {
                             Err(error) if !installed && error.is_incompatible_index() => {
                                 rebuild = true

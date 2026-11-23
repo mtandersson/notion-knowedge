@@ -274,6 +274,7 @@ impl AuthoritativePageRefresh {
         walked: &WalkedPage,
         operation_id: &str,
     ) -> Result<PrefetchedPage, RefreshError> {
+        crate::test_hooks::preparation_pause(self.coordinator.index_directory()).await;
         let page = PageId(walked.entry.page_id.clone());
         let root = PageId(walked.entry.root_id.clone());
         if !self.scope.roots.contains(&root) || operation_id.is_empty() {

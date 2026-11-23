@@ -11,7 +11,7 @@ use notion_knowledge_core::{
 };
 use notion_knowledge_notion::NotionClient;
 use notion_knowledge_retrieval::{
-    chunks::{GuardedChunkTable, LanceChunkTable},
+    chunks::GuardedChunkTable,
     commit::{CommitBinding, IndexCommitCoordinator},
     refresh::AuthoritativePageRefresh,
 };
@@ -2648,21 +2648,24 @@ async fn shutdown_cancels_owned_commit_releases_fence_and_restart_processes_heal
         roots: vec![PageId(ROOT.into())],
         exclusions: ExclusionRules::default(),
     };
-    let journal = notion_knowledge_retrieval::planner::production_scope(&scope).unwrap();
+    let config = retrieval_config(&runtime);
+    let index = Arc::new(
+        notion_knowledge_server::index_runtime::IndexRuntime::recover(
+            config.retrieval.as_ref().unwrap(),
+            &runtime.db,
+            scope,
+            runtime.source.client(),
+            provider,
+        )
+        .await
+        .unwrap(),
+    );
     let restarted = Worker {
         webhook_enabled: true,
         scheduled: None,
-        state: original.state.clone(),
-        coordinator: original.coordinator.clone(),
-        index: index_runtime(
-            runtime.source.client(),
-            original.index.chunks().clone(),
-            original.coordinator.clone(),
-            scope,
-            journal,
-            provider,
-            None,
-        ),
+        state: index.coordinator.state().clone(),
+        coordinator: index.coordinator.clone(),
+        index,
         scope: original.scope.clone(),
         integration: original.integration.clone(),
         poll: original.poll,
@@ -2677,7 +2680,17 @@ async fn shutdown_cancels_owned_commit_releases_fence_and_restart_processes_heal
     .unwrap()
     .unwrap();
     assert_eq!(inspect(&restarted, &healthy).state, EventState::Succeeded);
-    assert!(runtime.searchable("cinnamon").await > 0);
+    assert!(
+        runtime
+            .worker
+            .index
+            .chunks()
+            .page_chunks(OTHER)
+            .await
+            .unwrap()
+            .iter()
+            .any(|chunk| chunk.text.contains("cinnamon"))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2816,7 +2829,17 @@ async fn deadline_cancellation_retains_due_retry_and_allows_healthy_page_progres
     );
     assert_eq!(inspect(&runtime.worker, &healthy).cycle_attempts, 1);
     assert_eq!(inspect(&runtime.worker, &healthy).lifetime_attempts, 1);
-    assert!(runtime.searchable("cinnamon").await > 0);
+    assert!(
+        runtime
+            .worker
+            .index
+            .chunks()
+            .page_chunks(OTHER)
+            .await
+            .unwrap()
+            .iter()
+            .any(|chunk| chunk.text.contains("cinnamon"))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

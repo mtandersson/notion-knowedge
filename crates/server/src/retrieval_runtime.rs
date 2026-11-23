@@ -242,7 +242,7 @@ pub(crate) async fn attach_existing(
     }
     let plan = crate::index_runtime::configured_plan(settings)?;
     table
-        .verify_text_search_indexes()
+        .verify_bound_text_layout()
         .await
         .map_err(|_| "retrieval index unavailable or incompatible")?;
     let exact_id = plan.is_some();

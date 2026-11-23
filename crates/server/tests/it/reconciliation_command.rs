@@ -814,26 +814,7 @@ async fn read_only_startup_rolls_back_a_hot_journal_left_by_a_crash() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
     counts(&f.command(&http, &["--reconcile", "apply"]).await, 3, 0, 0);
-    let journal = std::path::PathBuf::from(format!("{}-journal", f.state.display()));
-    let crashed = f.state.with_extension("crashed");
-    let crashed_journal = f.state.with_extension("crashed-journal");
-    {
-        let db = rusqlite::Connection::open(&f.state).unwrap();
-        // A tiny cache spills uncommitted pages into the database file.
-        db.execute_batch(
-            "PRAGMA cache_size=1; BEGIN;
-             CREATE TABLE uncommitted_crash(x);
-             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<200)
-             INSERT INTO uncommitted_crash SELECT randomblob(4000) FROM n;",
-        )
-        .unwrap();
-        assert!(fs::metadata(&journal).unwrap().len() > 0);
-        // Capture the files as a crash would leave them.
-        fs::copy(&f.state, &crashed).unwrap();
-        fs::copy(&journal, &crashed_journal).unwrap();
-    }
-    fs::rename(&crashed, &f.state).unwrap();
-    fs::rename(&crashed_journal, &journal).unwrap();
+    let journal = simulate_hot_rollback_journal(&f.state);
     let runtime = IndexRuntime::recover_for_reads(
         &f.settings,
         &f.state,
@@ -858,6 +839,60 @@ async fn read_only_startup_rolls_back_a_hot_journal_left_by_a_crash() {
         .query_row("PRAGMA integrity_check", [], |r| r.get(0))
         .unwrap();
     assert_eq!(check, "ok");
+}
+
+fn simulate_hot_rollback_journal(path: &std::path::Path) -> std::path::PathBuf {
+    let journal = std::path::PathBuf::from(format!("{}-journal", path.display()));
+    let crashed = path.with_extension("crashed");
+    let crashed_journal = path.with_extension("crashed-journal");
+    {
+        let db = rusqlite::Connection::open(&path).unwrap();
+        // A tiny cache spills uncommitted pages into the database file.
+        db.execute_batch(
+            "PRAGMA cache_size=1; BEGIN;
+             CREATE TABLE uncommitted_crash(x);
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<200)
+             INSERT INTO uncommitted_crash SELECT randomblob(4000) FROM n;",
+        )
+        .unwrap();
+        assert!(fs::metadata(&journal).unwrap().len() > 0);
+        // Capture the files as a crash would leave them.
+        fs::copy(&path, &crashed).unwrap();
+        fs::copy(&journal, &crashed_journal).unwrap();
+    }
+    fs::rename(&crashed, &path).unwrap();
+    fs::rename(&crashed_journal, &journal).unwrap();
+    journal
+}
+
+#[tokio::test]
+async fn both_writers_recover_an_interrupted_semantic_queue_without_refetching_pages() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    counts(&f.command(&http, &["--reconcile", "apply"]).await, 3, 0, 0);
+    let queue = f.settings.index.join("semantic-projection.sqlite");
+    let reads = http.body_reads.load(Ordering::SeqCst);
+    let embeds = f.provider.count.load(Ordering::SeqCst);
+
+    let journal = simulate_hot_rollback_journal(&queue);
+    let runtime = IndexRuntime::recover(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(!journal.exists());
+    assert!(runtime.chunks().semantic_status().await.unwrap().0 > 0);
+    assert_eq!(http.body_reads.load(Ordering::SeqCst), reads);
+    drop(runtime);
+
+    let journal = simulate_hot_rollback_journal(&queue);
+    counts(&f.command(&http, &["--reconcile", "apply"]).await, 0, 0, 3);
+    assert!(!journal.exists());
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), embeds);
 }
 
 #[tokio::test]
@@ -4700,22 +4735,22 @@ async fn a_page_deadline_is_counted_as_a_timeout_not_only_a_failure() {
     let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
     let mut lease = state.acquire_lease(now, 90).unwrap();
     notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Info);
-    http.change(|model| {
-        model.relation_name = Some("Related".into());
-        model.relation_targets = (0..30)
-            .map(|n| format!("aaaaaaaa-0000-0000-0000-{n:012}"))
-            .collect();
-    });
-    http.preparation_pause.armed.store(true, Ordering::SeqCst);
+    let pause = Arc::new(RequestPause::default());
+    pause.armed.store(true, Ordering::SeqCst);
+    let observed = pause.clone();
+    notion_knowledge_retrieval::test_hooks::set_preparation_pause(
+        &f.settings.index,
+        Arc::new(move || {
+            let pause = pause.clone();
+            Box::pin(async move { pause.hold().await })
+        }),
+    );
     let release = async {
-        tokio::time::timeout(
-            Duration::from_secs(10),
-            http.preparation_pause.started.notified(),
-        )
-        .await
-        .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), observed.started.notified())
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(1500)).await;
-        http.preparation_pause.proceed.notify_one();
+        observed.proceed.notify_one();
     };
     let (totals, ()) = tokio::join!(
         async {

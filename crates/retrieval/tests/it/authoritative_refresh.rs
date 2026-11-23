@@ -335,7 +335,6 @@ async fn create_metadata_content_delete_duplicate_and_persistent_restart() {
                 num_partitions: Some(1),
                 sample_rate: 8,
                 max_iterations: 20,
-                ..VectorIndexConfig::default()
             },
             index.lease.clone(),
             clock(),

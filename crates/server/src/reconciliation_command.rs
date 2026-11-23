@@ -298,6 +298,22 @@ pub mod runtime {
         let page = PageDeadline {
             timeout_seconds: settings.timeout_seconds,
         };
+        let initialized = tokio::time::timeout(
+            Duration::from_secs(settings.timeout_seconds),
+            runtime
+                .chunks()
+                .ensure_text_projection(lease.clone(), clock.clone()),
+        )
+        .await;
+        if !matches!(initialized, Ok(Ok(()))) {
+            attempt.cancel();
+            let _ = runtime.coordinator.drain_owned().await;
+            let _ = runtime
+                .coordinator
+                .state()
+                .release_lease(&lease, now_ms() / 1000);
+            return Output::error("projection_storage_unavailable", 3);
+        }
         // A single-page sync never proves the whole walk complete.
         let projection_page = match &command {
             Command::Retry(page) => Some(page.clone()),
