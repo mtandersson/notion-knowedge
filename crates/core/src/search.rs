@@ -219,12 +219,14 @@ pub fn snippet_span(text: &str, range: std::ops::Range<usize>, limit: usize) -> 
         let to = range.end.min(end);
         if from < to {
             let sanitized = snippet(token, usize::MAX);
+            let included = &excerpt[from - range.start..to - range.start];
             if from == offset && to == end {
                 output.push_str(&sanitized);
-            } else if sanitized == token {
-                output.push_str(&excerpt[from - range.start..to - range.start]);
+            } else if sanitized == token || included.trim().is_empty() {
+                output.push_str(included);
             } else {
                 output.push_str("[link omitted]");
+                output.push_str(&included[included.trim_end().len()..]);
             }
         }
         if end >= range.end {

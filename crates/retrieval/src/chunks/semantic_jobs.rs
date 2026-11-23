@@ -26,7 +26,14 @@ pub struct SemanticBacklog {
 }
 
 pub(super) fn fingerprint(chunks: &[IndexedChunk]) -> Result<String, ChunkTableError> {
-    let mut ordered = chunks.iter().collect::<Vec<_>>();
+    fingerprint_chunks(chunks.iter().collect())
+}
+
+pub(super) fn vector_fingerprint(rows: &[EmbeddedChunk]) -> Result<String, ChunkTableError> {
+    fingerprint_chunks(rows.iter().map(|row| &row.chunk).collect())
+}
+
+fn fingerprint_chunks(mut ordered: Vec<&IndexedChunk>) -> Result<String, ChunkTableError> {
     ordered.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
     Ok(format!(
         "{:x}",

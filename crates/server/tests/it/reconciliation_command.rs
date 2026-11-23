@@ -3935,7 +3935,7 @@ async fn oversized_table_sections_commit_losslessly_and_retry_as_unchanged() {
         .await
         .unwrap();
     {
-        let scoped = f.search_windows(&runtime, "Investigation").await;
+        let scoped = f.search_windows(&runtime, "Investigation", 10).await;
         assert!(scoped.iter().any(|hit| hit.semantic_span.is_some()));
         assert!(scoped.iter().all(|hit| {
             canonical
@@ -4006,6 +4006,7 @@ impl Fixture {
         &self,
         runtime: &IndexRuntime,
         query: &str,
+        limit: usize,
     ) -> Vec<notion_knowledge_core::search::SearchHit> {
         use notion_knowledge_core::search::{SemanticQuery, SemanticSearch};
         use notion_knowledge_retrieval::chunks::LanceSemanticSearch;
@@ -4020,7 +4021,7 @@ impl Fixture {
         search
             .search(SemanticQuery {
                 query: query.into(),
-                limit: 10,
+                limit,
                 page_ids: Some(vec![PAGE.into()]),
                 root_page_ids: Some(vec![ROOT.into()]),
                 metadata: Default::default(),
@@ -4049,7 +4050,7 @@ async fn long_markdown_windows_resume_over_bounded_batches_and_cite_the_late_sou
             "ordinary context ".repeat(35)
         ));
     }
-    markdown.push_str("- The conifer reference is in the final observation.\n</details>\n");
+    markdown.push_str("- The conifer reference is in the final observation.\n</details>\n\n# Summary\n\nDistinct competing source.\n");
     http.state.lock().unwrap().markdown.clone_from(&markdown);
     f.provider.input_limit_bytes.store(1024, Ordering::SeqCst);
     let runtime = f.open(&http, OpenMode::ExistingWrite).await;
@@ -4109,13 +4110,21 @@ async fn long_markdown_windows_resume_over_bounded_batches_and_cite_the_late_sou
         table.semantic_status().await.unwrap().0 as usize
     );
 
-    let hits = f.search_windows(&restarted, "conifer").await;
+    let hits = f.search_windows(&restarted, "conifer", 2).await;
     assert_eq!(
         hits.iter()
             .map(|hit| &hit.source.chunk_id)
             .collect::<std::collections::HashSet<_>>()
             .len(),
         hits.len()
+    );
+    assert_eq!(hits.len(), 2);
+    let competing = f.search_windows(&restarted, "ordinary context", 2).await;
+    assert_eq!(competing.len(), 2);
+    assert!(
+        competing
+            .iter()
+            .any(|hit| hit.semantic_span.is_none() && hit.text.contains("competing source"))
     );
     let hit = &hits[0];
     assert!(hit.text.contains("The conifer reference"));
@@ -4168,6 +4177,18 @@ async fn long_markdown_windows_resume_over_bounded_batches_and_cite_the_late_sou
             .markdown,
         markdown
     );
+    let count = f.provider.count.load(Ordering::SeqCst);
+    http.change(|model| {
+        model.title = "Renamed notes".into();
+        model.revision = "2026-10-10T14:00:00Z".into();
+    });
+    let update = f.command(&http, &["--reconcile", "retry", PAGE]).await;
+    assert_eq!(update.exit, 0, "{:?}", update.json);
+    assert_eq!(update.json["semantic_projection"], "settled");
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), count);
+    let hits = f.search_windows(&restarted, "conifer", 2).await;
+    assert_eq!(hits[0].source.chunk_id, hit.source.chunk_id);
+    assert_eq!(hits[0].source.title, "Renamed notes");
 }
 
 #[tokio::test]

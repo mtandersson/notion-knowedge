@@ -351,6 +351,9 @@ impl LanceSemanticSearch {
     }
 
     async fn semantic_search(&self, query: SemanticQuery) -> Result<Vec<SearchHit>, SearchFailure> {
+        if !(1..=100).contains(&query.limit) {
+            return Err(SearchFailure::Retrieval);
+        }
         let scope = LexicalQuery {
             query: query.query.clone(),
             limit: query.limit,
@@ -382,7 +385,7 @@ impl LanceSemanticSearch {
             _ => SearchFailure::EmbeddingUnavailable,
         })?;
         let mut hits = Vec::with_capacity(query.limit);
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut seen = std::collections::BTreeSet::<String>::new();
         while hits.len() < query.limit {
             let mut conditions = predicate.iter().cloned().collect::<Vec<_>>();
             for id in &seen {
