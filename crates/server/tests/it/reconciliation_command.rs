@@ -50,10 +50,6 @@ struct Provider {
     busy: AtomicBool,
     idle_entered: tokio::sync::Notify,
     idle_release: tokio::sync::Semaphore,
-    /// Releasable embedding pause: the next call waits for `hold_release`.
-    hold: AtomicBool,
-    held: tokio::sync::Notify,
-    hold_release: tokio::sync::Semaphore,
     active: AtomicUsize,
     max_active: AtomicUsize,
 }
@@ -73,9 +69,6 @@ impl Provider {
             busy: AtomicBool::new(false),
             idle_entered: tokio::sync::Notify::new(),
             idle_release: tokio::sync::Semaphore::new(0),
-            hold: AtomicBool::new(false),
-            held: tokio::sync::Notify::new(),
-            hold_release: tokio::sync::Semaphore::new(0),
             active: AtomicUsize::new(0),
             max_active: AtomicUsize::new(0),
         }
@@ -128,10 +121,6 @@ impl EmbeddingProvider for Provider {
             let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_active.fetch_max(now, Ordering::SeqCst);
             let _active = Active(&self.active);
-            if self.hold.swap(false, Ordering::SeqCst) {
-                self.held.notify_one();
-                self.hold_release.acquire().await.unwrap().forget();
-            }
             if self.busy.load(Ordering::SeqCst) {
                 return Err(EmbeddingError::ResourceExhausted);
             }
@@ -264,6 +253,22 @@ impl Fixture {
             )
             .await
             .unwrap();
+        // Seed the v1 physical fixture, without promoting an ANN. This
+        // intentionally predates separate text and embedding state.
+        let raw = notion_knowledge_retrieval::chunks::LanceChunkTable::open(
+            &self.settings.index,
+            "chunks",
+            self.provider.metadata().clone(),
+        )
+        .await
+        .unwrap();
+        for page in runtime.coordinator.owned_page_ids().unwrap() {
+            let text = runtime.chunks().page_chunks(&page).await.unwrap();
+            raw.apply_page_diff(self.provider.as_ref(), &page, &text)
+                .await
+                .unwrap();
+        }
+        remove_text_projection(&self.settings.index);
         runtime
             .coordinator
             .state()
@@ -357,6 +362,7 @@ async fn lexical_cache_rebuild_blocks_reads_and_preserves_external_work() {
             .identity()
             .matches(plan.dictionary())
     );
+    drain_semantic(&runtime).await;
     let snapshot = runtime.chunks().search_snapshot().await.unwrap();
     for text in ["ravioli", PAGE] {
         let hits = snapshot
@@ -461,7 +467,7 @@ async fn lexical_cache_failed_resync_remains_unavailable_and_retries_current_sco
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
     let plan = LexicalCachePlan::verified(Arc::new(dictionary(&[("saffron", "saffran")]))).unwrap();
-    f.provider.fail.store(true, Ordering::SeqCst);
+    http.change(|source| source.unauthenticated = true);
     assert!(
         IndexRuntime::recover_lexical_cache(
             &f.settings,
@@ -480,7 +486,7 @@ async fn lexical_cache_failed_resync_remains_unavailable_and_retries_current_sco
             .unwrap();
     assert!(state.cache_rebuild_pending().unwrap());
     drop(state);
-    f.provider.fail.store(false, Ordering::SeqCst);
+    http.change(|source| source.unauthenticated = false);
     let recovered = IndexRuntime::recover_lexical_cache(
         &f.settings,
         &f.state,
@@ -667,13 +673,18 @@ async fn index_failures_stop_the_sync_and_a_busy_writer_does_not_consume_work() 
         .release_lease(&lease, now)
         .unwrap();
     drop(runtime);
-    f.provider.fail.store(true, Ordering::SeqCst);
+    let db = rusqlite::Connection::open(&f.state).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER fail_text_ack BEFORE UPDATE OF status ON index_commit_receipts
+        WHEN NEW.status = 1 BEGIN SELECT RAISE(ABORT,'fixture'); END;",
+    )
+    .unwrap();
     let failed = f.command(&http, &["--reconcile", "apply"]).await;
     assert_eq!(failed.exit, 3);
     // An index failure stops the sync; nothing partial is acknowledged.
     assert_eq!(failed.json["status"], "work_failure");
-    let embeds = f.provider.count.load(Ordering::SeqCst);
-    f.provider.fail.store(false, Ordering::SeqCst);
+    db.execute_batch("DROP TRIGGER fail_text_ack;").unwrap();
+    drop(db);
     for page in [PAGE, ROOT, OTHER] {
         let result = f.command(&http, &["--reconcile", "retry", page]).await;
         assert!(result.exit == 0 || result.exit == 3, "{:?}", result.json);
@@ -697,22 +708,26 @@ async fn index_failures_stop_the_sync_and_a_busy_writer_does_not_consume_work() 
         done.json["changed"].as_u64().unwrap() + done.json["unchanged"].as_u64().unwrap(),
         3
     );
-    assert!(f.provider.count.load(Ordering::SeqCst) > embeds);
+    let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+    assert!(out_of_sync(&runtime).is_empty());
 }
 
 #[tokio::test]
 async fn cancellation_leaves_no_partial_state_and_a_vanished_page_is_removed_by_the_next_walk() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
-    f.provider.pause.store(true, Ordering::SeqCst);
+    let commit = Arc::new(RequestPause::default());
+    commit.armed.store(true, Ordering::SeqCst);
+    pause_owned_commits(&f.settings.index, commit.clone());
     let stop = CancellationToken::new();
     let pending = f.command_cancel(&http, &["--reconcile", "apply"], stop.clone());
     let cancel = async {
-        f.provider.entered.notified().await;
+        commit.started.notified().await;
         stop.cancel();
     };
     let (out, _) = tokio::join!(pending, cancel);
     assert_eq!(out.exit, 5);
+    commit.proceed.notify_one();
     // Independent connections and runtime are rebuilt by each command invocation.
     counts(&f.command(&http, &["--reconcile", "apply"]).await, 3, 0, 0);
     http.change(|m| {
@@ -799,26 +814,7 @@ async fn read_only_startup_rolls_back_a_hot_journal_left_by_a_crash() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
     counts(&f.command(&http, &["--reconcile", "apply"]).await, 3, 0, 0);
-    let journal = std::path::PathBuf::from(format!("{}-journal", f.state.display()));
-    let crashed = f.state.with_extension("crashed");
-    let crashed_journal = f.state.with_extension("crashed-journal");
-    {
-        let db = rusqlite::Connection::open(&f.state).unwrap();
-        // A tiny cache spills uncommitted pages into the database file.
-        db.execute_batch(
-            "PRAGMA cache_size=1; BEGIN;
-             CREATE TABLE uncommitted_crash(x);
-             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<200)
-             INSERT INTO uncommitted_crash SELECT randomblob(4000) FROM n;",
-        )
-        .unwrap();
-        assert!(fs::metadata(&journal).unwrap().len() > 0);
-        // Capture the files as a crash would leave them.
-        fs::copy(&f.state, &crashed).unwrap();
-        fs::copy(&journal, &crashed_journal).unwrap();
-    }
-    fs::rename(&crashed, &f.state).unwrap();
-    fs::rename(&crashed_journal, &journal).unwrap();
+    let journal = simulate_hot_rollback_journal(&f.state);
     let runtime = IndexRuntime::recover_for_reads(
         &f.settings,
         &f.state,
@@ -843,6 +839,60 @@ async fn read_only_startup_rolls_back_a_hot_journal_left_by_a_crash() {
         .query_row("PRAGMA integrity_check", [], |r| r.get(0))
         .unwrap();
     assert_eq!(check, "ok");
+}
+
+fn simulate_hot_rollback_journal(path: &std::path::Path) -> std::path::PathBuf {
+    let journal = std::path::PathBuf::from(format!("{}-journal", path.display()));
+    let crashed = path.with_extension("crashed");
+    let crashed_journal = path.with_extension("crashed-journal");
+    {
+        let db = rusqlite::Connection::open(path).unwrap();
+        // A tiny cache spills uncommitted pages into the database file.
+        db.execute_batch(
+            "PRAGMA cache_size=1; BEGIN;
+             CREATE TABLE uncommitted_crash(x);
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<200)
+             INSERT INTO uncommitted_crash SELECT randomblob(4000) FROM n;",
+        )
+        .unwrap();
+        assert!(fs::metadata(&journal).unwrap().len() > 0);
+        // Capture the files as a crash would leave them.
+        fs::copy(path, &crashed).unwrap();
+        fs::copy(&journal, &crashed_journal).unwrap();
+    }
+    fs::rename(&crashed, path).unwrap();
+    fs::rename(&crashed_journal, &journal).unwrap();
+    journal
+}
+
+#[tokio::test]
+async fn both_writers_recover_an_interrupted_semantic_queue_without_refetching_pages() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    counts(&f.command(&http, &["--reconcile", "apply"]).await, 3, 0, 0);
+    let queue = f.settings.index.join("semantic-projection.sqlite");
+    let reads = http.body_reads.load(Ordering::SeqCst);
+    let embeds = f.provider.count.load(Ordering::SeqCst);
+
+    let journal = simulate_hot_rollback_journal(&queue);
+    let runtime = IndexRuntime::recover(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(!journal.exists());
+    assert!(runtime.chunks().semantic_status().await.unwrap().0 > 0);
+    assert_eq!(http.body_reads.load(Ordering::SeqCst), reads);
+    drop(runtime);
+
+    let journal = simulate_hot_rollback_journal(&queue);
+    counts(&f.command(&http, &["--reconcile", "apply"]).await, 0, 0, 3);
+    assert!(!journal.exists());
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), embeds);
 }
 
 #[tokio::test]
@@ -1030,6 +1080,19 @@ async fn actual_scheduled_http_preserves_deadline_restart_and_unchanged_next_cyc
             .unwrap()
             .is_some()
     );
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if let Ok((vectors, backlog)) = worker.index.chunks().semantic_status().await
+                && vectors > 0
+                && backlog.queued == 0
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
     stop.cancel();
     server.await.unwrap().unwrap();
     let bodies = http.body_reads.load(Ordering::SeqCst);
@@ -1221,6 +1284,33 @@ async fn sync(
     (totals, indexed_pages(&runtime.coordinator))
 }
 
+fn remove_text_projection(index: &std::path::Path) {
+    fs::remove_dir_all(index.join("chunks_text.lance")).unwrap();
+    fs::remove_file(index.join("semantic-projection.sqlite")).unwrap();
+    fs::remove_file(index.join(".nk-text-projection-v1")).unwrap();
+}
+
+async fn drain_semantic(runtime: &IndexRuntime) {
+    use notion_knowledge_server::webhook_worker::runtime::now_ms;
+    let state = runtime.coordinator.state();
+    let now = now_ms() / 1000;
+    let lease = state.acquire_lease(now, 90).unwrap();
+    let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| now_ms() / 1000);
+    let table = runtime.chunks();
+    while let Some(page) = table.next_semantic_retry(clock()).unwrap() {
+        table
+            .retry_semantic(
+                &page,
+                runtime.provider.as_ref(),
+                lease.clone(),
+                clock.clone(),
+            )
+            .await
+            .unwrap();
+    }
+    state.release_lease(&lease, clock()).unwrap();
+}
+
 /// Pages with live (not removed) index content.
 fn indexed_pages(
     coordinator: &notion_knowledge_retrieval::commit::IndexCommitCoordinator,
@@ -1288,6 +1378,7 @@ async fn first_sync_resolves_a_relation_between_pages_it_walks() {
             .current_relation_projection_complete(PAGE)
             .unwrap()
     );
+    drain_semantic(&runtime).await;
     // Every chunk was embedded once: the resolving pass embedded nothing.
     let embedded = f.provider.count.load(Ordering::SeqCst);
     let mut chunks = 0;
@@ -2672,7 +2763,7 @@ async fn ordinary_reconciliation_repairs_missing_rows_without_a_source_revision_
         assert_eq!(dry.json["scanned"], 3);
         assert_eq!(dry.json["drift"]["changed"], 0);
         assert_eq!(dry.json["drift"]["removed"], 0);
-        counts(&f.command(&http, &["--reconcile", "apply"]).await, 1, 0, 2);
+        counts(&f.command(&http, &["--reconcile", "apply"]).await, 0, 0, 3);
         assert_eq!(
             f.provider.count.load(Ordering::SeqCst) - embeds,
             original.len() - retained.len(),
@@ -2807,6 +2898,7 @@ async fn lost_or_incompatible_cache_resyncs_without_replaying_external_effects()
             db.execute("INSERT INTO mutation_refresh(workspace_id,mutation_digest,page_id,state) VALUES(?1,'done-write',?2,2)", [WORKSPACE, PAGE]).unwrap();
         }
         let provider = if damage == "incompatible" {
+            remove_text_projection(&f.settings.index);
             Arc::new(Provider {
                 metadata: EmbeddingMetadata::new("count".into(), "fixture".into(), "v2".into(), 3)
                     .unwrap(),
@@ -2864,6 +2956,7 @@ async fn lost_or_incompatible_cache_resyncs_without_replaying_external_effects()
             table.search_snapshot().await.is_ok(),
             "rebuilt cache must have usable search indexes"
         );
+        drain_semantic(&recovered).await;
         let snapshot = table.search_snapshot().await.unwrap();
         assert!(
             !snapshot
@@ -2987,6 +3080,7 @@ async fn cache_sync_indexes_available_text_without_resolving_template_references
     .await
     .unwrap();
     assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
+    drain_semantic(&runtime).await;
     assert!(
         runtime
             .chunks()
@@ -3038,6 +3132,7 @@ async fn unreadable_page_does_not_block_embedded_search_and_next_sync_can_recove
     let inventory = runtime.coordinator.state().inventory_counts().unwrap();
     assert_eq!((inventory.indexed, inventory.pending), (2, 0));
     assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
+    drain_semantic(&runtime).await;
     assert!(runtime.chunks().page_chunks(PAGE).await.unwrap().is_empty());
     assert!(
         !runtime
@@ -3122,7 +3217,7 @@ async fn failed_cache_resync_stays_pending_and_next_start_retries_from_notion() 
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
     fs::remove_dir_all(&f.settings.index).unwrap();
-    f.provider.fail.store(true, Ordering::SeqCst);
+    http.change(|source| source.unauthenticated = true);
     assert!(
         IndexRuntime::recover(
             &f.settings,
@@ -3138,7 +3233,7 @@ async fn failed_cache_resync_stays_pending_and_next_start_retries_from_notion() 
         notion_knowledge_retrieval::sync_state::SqliteSyncStateStore::open_existing(&f.state)
             .unwrap();
     assert!(state.cache_rebuild_pending().unwrap());
-    f.provider.fail.store(false, Ordering::SeqCst);
+    http.change(|source| source.unauthenticated = false);
     let recovered = IndexRuntime::recover(
         &f.settings,
         &f.state,
@@ -3296,28 +3391,9 @@ async fn streaming_initial_sync_separates_discovery_and_page_budgets() {
         .await
         .unwrap();
         await_cached_page(&f.state, ROOT).await;
-        // Discovery may wait longer than a page budget after an earlier page
-        // has already committed. A subsequent embedding keeps its own bound.
+        // Discovery can outlast a page budget while earlier text is readable.
         tokio::time::sleep(Duration::from_millis(5100)).await;
-        f.provider
-            .retain_when_cancelled
-            .store(true, Ordering::SeqCst);
-        f.provider.pause.store(true, Ordering::SeqCst);
         http.discovery_pause.proceed.notify_one();
-        tokio::time::timeout(Duration::from_secs(30), f.provider.entered.notified())
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(30), f.provider.idle_entered.notified())
-            .await
-            .unwrap();
-        let calls = f.provider.count.load(Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(
-            f.provider.count.load(Ordering::SeqCst),
-            calls,
-            "no sibling admission while cancelled work is busy"
-        );
-        f.provider.idle_release.add_permits(1);
     };
     let recovery = IndexRuntime::reset_and_resync(
         &f.settings,
@@ -3332,38 +3408,13 @@ async fn streaming_initial_sync_separates_discovery_and_page_budgets() {
     .await
     .unwrap();
     let runtime = result.unwrap();
-    let failed = out_of_sync(&runtime);
-    assert_eq!(failed.len(), 1, "{failed:?}");
-    let (timed_out_page, failure) = &failed[0];
-    assert_eq!(
-        *failure,
-        notion_knowledge_core::inventory::InventoryOutcome::Failed(
-            notion_knowledge_core::reconciliation::FailureClass::Unavailable
-        )
-    );
+    assert!(out_of_sync(&runtime).is_empty());
     let inventory = runtime.coordinator.state().inventory_counts().unwrap();
-    assert_eq!((inventory.indexed, inventory.pending), (2, 0));
-    assert!(
-        runtime
-            .chunks()
-            .page_chunks(timed_out_page)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        !runtime
-            .chunks()
-            .page_chunks(if timed_out_page == PAGE { OTHER } else { PAGE })
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
-    drop(runtime);
+    assert_eq!((inventory.indexed, inventory.pending), (3, 0));
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), 0);
+    drain_semantic(&runtime).await;
+    assert!(f.provider.count.load(Ordering::SeqCst) > 0);
     assert_writer_available_during_inventory(&f.state);
-    // A later normal cycle can retry the timed-out readable page without source edits.
-    counts(&f.command(&http, &["--reconcile", "apply"]).await, 1, 0, 2);
 }
 
 #[tokio::test]
@@ -3390,6 +3441,7 @@ async fn periodic_sync_retries_unreadable_pages_on_the_next_normal_cycle() {
         inventory_timeout: Duration::from_secs(60),
     };
     assert!(worker.tick(CancellationToken::new()).await.unwrap());
+    drain_semantic(&worker.index).await;
     let coordinator = &worker.index.coordinator;
     let first = coordinator.schedule("periodic").unwrap();
     assert_eq!(first.status, ScheduleStatus::Ready);
@@ -3490,7 +3542,7 @@ async fn await_cached_page(path: &std::path::Path, page: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn initial_sync_embeds_and_commits_before_discovery_finishes() {
+async fn initial_sync_publishes_text_before_discovery_finishes() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
     fs::remove_dir_all(&f.settings.index).unwrap();
@@ -3509,7 +3561,7 @@ async fn initial_sync_embeds_and_commits_before_discovery_finishes() {
     .await
     .unwrap();
     await_cached_page(&f.state, ROOT).await;
-    assert!(f.provider.count.load(Ordering::SeqCst) > 0);
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), 0);
     assert!(
         !recovery.is_finished(),
         "serving readiness still requires the completed inventory"
@@ -3806,7 +3858,8 @@ async fn streaming_progress_reports_actual_commits_and_failed_pages() {
     assert_eq!(counts["total_pages"], 3);
     assert_eq!(counts["committed_pages"], 2);
     assert_eq!(counts["skipped_pages"], 1);
-    assert!(counts["embedded_chunks"].as_u64().unwrap() > 0);
+    assert_eq!(counts["embedded_chunks"], 0);
+    assert!(totals["text_chunks"].as_u64().unwrap() > 0);
     for event in events
         .iter()
         .filter(|event| event["operation"] == "notion_api" || event["operation"] == "index_commit")
@@ -3866,7 +3919,39 @@ async fn oversized_table_sections_commit_losslessly_and_retry_as_unchanged() {
     let result = f.command(&http, &["--reconcile", "apply"]).await;
     assert_eq!(result.exit, 0, "{:?}", result.json);
     let runtime = f.open(&http, OpenMode::ExistingWrite).await;
-    let mut original = runtime.chunks().page_chunks(PAGE).await.unwrap();
+    let canonical = runtime.chunks().page_chunks(PAGE).await.unwrap();
+    let original = runtime
+        .chunks()
+        .search_snapshot()
+        .await
+        .unwrap()
+        .page_chunks(PAGE)
+        .await
+        .unwrap();
+    let split = original
+        .iter()
+        .find(|part| {
+            !canonical
+                .iter()
+                .any(|chunk| chunk.chunk_id == part.chunk_id)
+        })
+        .expect("semantic table split has a distinct source anchor");
+    use notion_knowledge_core::source::{SourceExpandQuery, SourceExpansion, StableSourceRef};
+    let sources = runtime
+        .chunks()
+        .expand(SourceExpandQuery {
+            refs: vec![
+                StableSourceRef::Page(PAGE.into()),
+                StableSourceRef::Chunk(split.chunk_id.clone()),
+            ],
+            max_chars: 6000,
+            root_page_ids: vec![ROOT.into()],
+        })
+        .await
+        .unwrap();
+    assert_eq!(sources.len(), 2);
+    assert_eq!(sources[1].provenance.page_id, PAGE);
+    assert!(sources[1].text.contains("Investigation"));
     assert!(original.len() > 4);
     let mut source_order: Vec<_> = original
         .iter()
@@ -3894,29 +3979,15 @@ async fn oversized_table_sections_commit_losslessly_and_retry_as_unchanged() {
     assert!(out_of_sync(&runtime).is_empty());
     drop(runtime);
 
+    // A compatible v1 installation has this semantic table but no separate
+    // text projection or marker. Preserve the exact historical table split
+    // and its existing vectors without rewriting checkpoints or calling Notion.
+    let text_path = f.settings.index.join("chunks_text.lance");
+    fs::remove_dir_all(&text_path).unwrap();
+    fs::remove_file(f.settings.index.join("semantic-projection.sqlite")).unwrap();
+    fs::remove_file(f.settings.index.join(".nk-text-projection-v1")).unwrap();
     let embeddings = f.provider.count.load(Ordering::SeqCst);
-    let retry = f.command(&http, &["--reconcile", "retry", PAGE]).await;
-    assert_eq!(retry.exit, 0, "{:?}", retry.json);
-    assert_eq!(retry.json["unchanged"], 1);
-    assert_eq!(f.provider.count.load(Ordering::SeqCst), embeddings);
-    let runtime = f.open(&http, OpenMode::ExistingWrite).await;
-    let mut current = runtime.chunks().page_chunks(PAGE).await.unwrap();
-    original.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
-    current.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
-    assert_eq!(current, original);
-}
-
-#[tokio::test]
-async fn embedding_input_limits_remain_visible_while_siblings_commit_and_normal_sync_can_retry() {
-    let http = start_notion().await;
-    let f = Fixture::new(&http).await;
-    notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Info);
-    http.state.lock().unwrap().markdown = format!(
-        "<details>\n{}\n</details>\n",
-        "private atomic source ".repeat(100)
-    );
-    f.provider.input_limit_bytes.store(1024, Ordering::SeqCst);
-    fs::remove_dir_all(&f.settings.index).unwrap();
+    let requests = http.requests().len();
     let runtime = IndexRuntime::recover(
         &f.settings,
         &f.state,
@@ -3926,18 +3997,86 @@ async fn embedding_input_limits_remain_visible_while_siblings_commit_and_normal_
     )
     .await
     .unwrap();
+    assert_eq!(http.requests().len(), requests);
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), embeddings);
+    assert_eq!(runtime.chunks().page_chunks(PAGE).await.unwrap(), original);
     assert_eq!(
-        out_of_sync(&runtime),
-        [(
-            PAGE.to_owned(),
-            notion_knowledge_core::inventory::InventoryOutcome::Failed(
-                notion_knowledge_core::reconciliation::FailureClass::Source
-            )
-        )]
+        runtime
+            .chunks()
+            .search_snapshot()
+            .await
+            .unwrap()
+            .page_chunks(PAGE)
+            .await
+            .unwrap(),
+        original,
     );
+    drop(runtime);
+    let retry = f.command(&http, &["--reconcile", "retry", PAGE]).await;
+    assert_eq!(retry.exit, 0, "{:?}", retry.json);
+    assert_eq!(retry.json["unchanged"], 1);
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), embeddings);
+    let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+    assert_eq!(runtime.chunks().page_chunks(PAGE).await.unwrap(), original);
+    drop(runtime);
+
+    // An installed text projection is more complete than its vector
+    // projection. Its loss cannot be treated as a v1 migration.
+    let saved = f.settings.index.join("saved-text");
+    fs::rename(&text_path, &saved).unwrap();
+    let requests = http.requests().len();
+    assert!(
+        IndexRuntime::recover(
+            &f.settings,
+            &f.state,
+            authority(),
+            http.client(),
+            f.provider.clone(),
+        )
+        .await
+        .is_err()
+    );
+    assert!(!text_path.exists());
+    assert_eq!(http.requests().len(), requests);
+    fs::rename(saved, text_path).unwrap();
+}
+
+#[tokio::test]
+async fn oversized_atomic_input_remains_fresh_and_searchable_with_a_typed_semantic_failure() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Info);
+    http.state.lock().unwrap().markdown = format!(
+        "<details>\n{}\n</details>\n",
+        "private atomic source ".repeat(100)
+    );
+    f.provider.input_limit_bytes.store(1024, Ordering::SeqCst);
+    let result = f.command(&http, &["--reconcile", "apply"]).await;
+    assert_eq!(result.exit, 0, "{:?}", result.json);
+    assert_eq!(result.json["semantic_projection"], "deferred");
+    let runtime = f.open(&http, OpenMode::ExistingWrite).await;
+    assert!(out_of_sync(&runtime).is_empty());
     let inventory = runtime.coordinator.state().inventory_counts().unwrap();
-    assert_eq!((inventory.indexed, inventory.pending), (2, 0));
-    assert!(runtime.chunks().page_chunks(PAGE).await.unwrap().is_empty());
+    assert_eq!((inventory.indexed, inventory.pending), (3, 0));
+    let text = runtime.chunks().page_chunks(PAGE).await.unwrap();
+    assert!(
+        text.iter()
+            .any(|chunk| chunk.text.contains("private atomic source"))
+    );
+    let (vectors, backlog) = runtime.chunks().semantic_status().await.unwrap();
+    assert_eq!(backlog.input_limit, 1);
+    assert!(vectors > 0);
+    assert!(
+        runtime
+            .chunks()
+            .search_snapshot()
+            .await
+            .unwrap()
+            .page_chunks(PAGE)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     use notion_knowledge_core::source::FreshPageCache;
     let cache =
         notion_knowledge_retrieval::page_documents::PageDocuments::new(runtime.coordinator.clone());
@@ -3947,26 +4086,14 @@ async fn embedding_input_limits_remain_visible_while_siblings_commit_and_normal_
         .expect("source remains current despite the embedding limit");
     assert!(cached.content.markdown.contains("private atomic source"));
     assert!(cache.is_current(&cached.stamp));
-    assert!(
-        !runtime
-            .chunks()
-            .page_chunks(OTHER)
-            .await
-            .unwrap()
-            .is_empty()
-    );
     assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
-    drop(runtime);
-    // Removing the local admission restriction requires no Notion source edit.
-    f.provider.input_limit_bytes.store(0, Ordering::SeqCst);
-    counts(&f.command(&http, &["--reconcile", "apply"]).await, 1, 0, 2);
 }
 
 #[tokio::test]
 async fn embedding_input_limit_logs_contain_only_the_typed_reason_and_counts() {
     let output = tokio::time::timeout(std::time::Duration::from_secs(30),
         tokio::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "reconciliation_command::embedding_input_limits_remain_visible_while_siblings_commit_and_normal_sync_can_retry", "--nocapture"])
+            .args(["--exact", "reconciliation_command::oversized_atomic_input_remains_fresh_and_searchable_with_a_typed_semantic_failure", "--nocapture"])
             .stdin(std::process::Stdio::null()).kill_on_drop(true).output()).await.unwrap().unwrap();
     assert!(
         output.status.success(),
@@ -3983,11 +4110,10 @@ async fn embedding_input_limit_logs_contain_only_the_typed_reason_and_counts() {
         .collect();
     let event = events
         .iter()
-        .find(|e| e["status"] == "page_skipped" && e["reason"] == "embedding_input_limit")
+        .find(|e| e["outcome"] == "embedding_deferred" && e["reason"] == "InputLimit")
         .unwrap();
-    assert_eq!(event["operation"], "cache_sync");
-    assert!(event["sync_progress"].is_object());
-    assert_page_line_is_content_free(event);
+    assert_eq!(event["operation"], "semantic_projection");
+    assert_eq!(event.as_object().unwrap().len(), 3);
 }
 
 /// A per-page line holds fixed words, the sync counts and numbers only; its
@@ -4011,7 +4137,7 @@ fn assert_page_line_is_content_free(event: &serde_json::Value) {
         "commit_api_ops",
         "commit_api_ms",
         "limiter_wait_ms",
-        "embedded_chunks",
+        "text_chunks",
         "skipped_chunks",
     ];
     let line = event.to_string();
@@ -4206,7 +4332,7 @@ async fn page_deadline_logs_expose_only_fixed_reason_and_aggregate_counts() {
         std::time::Duration::from_secs(180),
         tokio::process::Command::new(std::env::current_exe().unwrap())
             .args([
-                "reconciliation_command::streaming_initial_sync_separates_discovery_and_page_budgets",
+                "reconciliation_command::a_page_deadline_is_counted_as_a_timeout_not_only_a_failure",
                 "--exact",
                 "--nocapture",
             ])
@@ -4249,12 +4375,14 @@ async fn await_body_reads(http: &HttpNotion, count: usize) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn initial_sync_fetches_next_page_while_one_embedding_is_paused() {
+async fn initial_sync_fetches_next_page_while_a_text_commit_is_paused() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
     fs::remove_dir_all(&f.settings.index).unwrap();
     http.reset_markdown_pages();
-    f.provider.hold.store(true, Ordering::SeqCst);
+    let commit = Arc::new(RequestPause::default());
+    commit.armed.store(true, Ordering::SeqCst);
+    pause_owned_commits(&f.settings.index, commit.clone());
     let settings = f.settings.clone();
     let state = f.state.clone();
     let source = http.client();
@@ -4264,30 +4392,25 @@ async fn initial_sync_fetches_next_page_while_one_embedding_is_paused() {
     });
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        f.provider.held.notified(),
+        commit.started.notified(),
     )
     .await
     .unwrap();
-    // Page A's embedding is held. The walk still reads the other pages.
+    // The source commit waits while discovery reads other pages.
     await_body_reads(&http, 3).await;
-    assert_eq!(f.provider.active.load(Ordering::SeqCst), 1);
     assert!(!recovery.is_finished());
-    f.provider.hold_release.add_permits(1);
+    commit.proceed.notify_one();
     let runtime = recovery.await.unwrap().unwrap();
     assert_eq!(runtime.coordinator.owned_page_ids().unwrap().len(), 3);
     for page in [ROOT, PAGE, OTHER] {
         assert!(!runtime.chunks().page_chunks(page).await.unwrap().is_empty());
     }
     assert!(!runtime.coordinator.state().cache_rebuild_pending().unwrap());
-    assert_eq!(
-        f.provider.max_active.load(Ordering::SeqCst),
-        1,
-        "one embedding worker"
-    );
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn initial_sync_read_ahead_is_bounded_while_embedding_is_paused() {
+async fn initial_sync_read_ahead_is_bounded_while_a_text_commit_is_paused() {
     let http = start_notion().await;
     http.change(|m| {
         for n in 0..40 {
@@ -4304,7 +4427,9 @@ async fn initial_sync_read_ahead_is_bounded_while_embedding_is_paused() {
     let f = Fixture::new(&http).await;
     fs::remove_dir_all(&f.settings.index).unwrap();
     http.reset_markdown_pages();
-    f.provider.hold.store(true, Ordering::SeqCst);
+    let commit = Arc::new(RequestPause::default());
+    commit.armed.store(true, Ordering::SeqCst);
+    pause_owned_commits(&f.settings.index, commit.clone());
     let settings = f.settings.clone();
     let state = f.state.clone();
     let source = http.client();
@@ -4314,7 +4439,7 @@ async fn initial_sync_read_ahead_is_bounded_while_embedding_is_paused() {
     });
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        f.provider.held.notified(),
+        commit.started.notified(),
     )
     .await
     .unwrap();
@@ -4326,10 +4451,10 @@ async fn initial_sync_read_ahead_is_bounded_while_embedding_is_paused() {
         fetched <= 24,
         "root, held page, one queued, two preparing, 8 in the walk channel and 8 in its outbox or in flight, with slack; got {fetched}"
     );
-    f.provider.hold_release.add_permits(1);
+    commit.proceed.notify_one();
     let runtime = recovery.await.unwrap().unwrap();
     assert_eq!(runtime.coordinator.owned_page_ids().unwrap().len(), 43);
-    assert_eq!(f.provider.max_active.load(Ordering::SeqCst), 1);
+    assert_eq!(f.provider.count.load(Ordering::SeqCst), 0);
 }
 
 /// Add `count` visible pages under the root, so planned work exceeds read-ahead.
@@ -4467,9 +4592,8 @@ async fn full_sync_makes_two_calls_per_plain_page_and_one_per_row() {
 async fn cancelled_command_drains_its_submitted_owned_guard_before_releasing_the_writer() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
-    // Armed by the embedding, fired only inside the owned commit.
     let commits = Arc::new(RequestPause::default());
-    *f.provider.boundary_pause.lock().unwrap() = Some(commits.clone());
+    commits.armed.store(true, Ordering::SeqCst);
     pause_owned_commits(&f.settings.index, commits.clone());
     let stop = CancellationToken::new();
     let pending = f.command_cancel(&http, &["--reconcile", "apply"], stop.clone());
@@ -4500,9 +4624,8 @@ async fn cancelled_command_drains_its_submitted_owned_guard_before_releasing_the
 async fn actual_scheduled_http_shutdown_drains_live_owned_effect_before_release() {
     let http = start_notion().await;
     let f = Fixture::new(&http).await;
-    // Armed by the embedding, fired only inside the owned commit.
     let commits = Arc::new(RequestPause::default());
-    *f.provider.boundary_pause.lock().unwrap() = Some(commits.clone());
+    commits.armed.store(true, Ordering::SeqCst);
     pause_owned_commits(&f.settings.index, commits.clone());
     let (worker, stop, server) =
         scheduled_server(&f, &http, std::time::Duration::from_secs(60)).await;
@@ -4611,25 +4734,33 @@ async fn a_page_deadline_is_counted_as_a_timeout_not_only_a_failure() {
     let state = runtime.coordinator.state().clone();
     let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
     let mut lease = state.acquire_lease(now, 90).unwrap();
-    // The embedding call outlasts the one-second page deadline.
-    f.provider.hold.store(true, Ordering::SeqCst);
+    notion_knowledge_core::logging::set_level(notion_knowledge_core::logging::Level::Info);
+    let pause = Arc::new(RequestPause::default());
+    pause.armed.store(true, Ordering::SeqCst);
+    let observed = pause.clone();
+    notion_knowledge_retrieval::test_hooks::set_preparation_pause(
+        &f.settings.index,
+        Arc::new(move || {
+            let pause = pause.clone();
+            Box::pin(async move { pause.hold().await })
+        }),
+    );
     let release = async {
-        tokio::time::timeout(Duration::from_secs(10), f.provider.held.notified())
+        tokio::time::timeout(Duration::from_secs(10), observed.started.notified())
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(1500)).await;
-        f.provider.hold_release.add_permits(1);
+        observed.proceed.notify_one();
     };
     let (totals, ()) = tokio::join!(
         async {
-            runtime
-                .sync_from_walk(
-                    &PageDeadline { timeout_seconds: 1 },
-                    &mut lease,
-                    SyncMode::Full,
-                )
-                .await
-                .unwrap()
+            notion_knowledge_core::logging::with_sync_progress(runtime.sync_from_walk(
+                &PageDeadline { timeout_seconds: 1 },
+                &mut lease,
+                SyncMode::Full,
+            ))
+            .await
+            .unwrap()
         },
         release
     );
@@ -4643,7 +4774,7 @@ async fn http_answers_liveness_and_reports_startup_while_the_cache_rebuild_runs(
     let f = Fixture::new(&http).await;
     // A failed rebuild leaves the durable rebuild flag pending for the next start.
     fs::remove_dir_all(&f.settings.index).unwrap();
-    f.provider.fail.store(true, Ordering::SeqCst);
+    http.change(|source| source.unauthenticated = true);
     assert!(
         IndexRuntime::recover(
             &f.settings,
@@ -4655,7 +4786,7 @@ async fn http_answers_liveness_and_reports_startup_while_the_cache_rebuild_runs(
         .await
         .is_err()
     );
-    f.provider.fail.store(false, Ordering::SeqCst);
+    http.change(|source| source.unauthenticated = false);
     // Without a search listing the walk reads PAGE's metadata, where it pauses.
     http.change(|m| m.search_unavailable = true);
     http.pause.armed.store(true, Ordering::SeqCst);

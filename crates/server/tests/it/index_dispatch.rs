@@ -22,7 +22,7 @@ fn index_operator_rejects_mixed_unknown_and_payload_arguments_before_configurati
 }
 
 #[test]
-fn index_operator_refuses_missing_model_before_creating_state_or_serving() {
+fn index_operator_requires_existing_storage_even_without_model_assets() {
     let dir = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_notion-knowledge-server"))
         .env_clear()
@@ -47,8 +47,9 @@ fn index_operator_refuses_missing_model_before_creating_state_or_serving() {
     #[cfg(all(unix, feature = "webhook-worker"))]
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
-        serde_json::json!({"operation":"index","status":"model_configuration"})
+        serde_json::json!({"operation":"index","status":"index_state_configuration"})
     );
     #[cfg(not(all(unix, feature = "webhook-worker")))]
     assert!(output.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("fixture-sensitive"));
 }

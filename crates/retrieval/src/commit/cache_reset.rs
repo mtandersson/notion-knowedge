@@ -130,6 +130,7 @@ impl IndexCommitCoordinator {
                 .map_err(|_| CommitError::Unavailable)?;
             for table in [
                 index.join("chunks.lance"),
+                index.join("chunks_text.lance"),
                 index.join("page_documents.lance"),
             ] {
                 if table.symlink_metadata().is_ok() {
@@ -143,6 +144,11 @@ impl IndexCommitCoordinator {
             for path in [
                 index.join(ANCHOR),
                 index.join(".nk-lexical-binding-v1.json"),
+                index.join(".nk-text-projection-v1"),
+                index.join("semantic-projection.sqlite"),
+                index.join("semantic-projection.sqlite-journal"),
+                index.join("semantic-projection.sqlite-wal"),
+                index.join("semantic-projection.sqlite-shm"),
                 legacy_journal_path(state)?,
             ] {
                 match fs::remove_file(path) {

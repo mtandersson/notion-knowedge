@@ -78,22 +78,16 @@ pub mod runtime {
         else {
             return output("configuration", 2);
         };
-        // Validate exact external assets in the shipping runtime, even though
-        // ANN training consumes already committed vectors and makes no API call.
+        // Validate the lexical identity. ANN maintenance uses persisted vectors
+        // and does not need to open the embedding model.
         if crate::index_runtime::configured_plan(&settings).is_err() {
             return output("configuration", 2);
         }
-        let provider = match notion_knowledge_retrieval::embedder::load_configured_embedder(
-            &notion_knowledge_retrieval::embedder::EmbedderConfig::LocalQwen {
+        let provider = notion_knowledge_retrieval::embedder::deferred_configured_embedder(
+            notion_knowledge_retrieval::embedder::EmbedderConfig::LocalQwen {
                 assets: settings.assets.clone(),
             },
-            None,
-        )
-        .await
-        {
-            Ok(p) => p,
-            Err(_) => return output("model_configuration", 2),
-        };
+        );
         if command == Command::Reset {
             let crate::config::NotionAuth::Integration(token) = &config.notion_auth else {
                 return output("configuration", 2);

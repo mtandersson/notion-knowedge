@@ -13,6 +13,7 @@ use std::{
 pub type CommitPause = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 static PAUSES: Mutex<BTreeMap<PathBuf, CommitPause>> = Mutex::new(BTreeMap::new());
+static PREPARATION_PAUSES: Mutex<BTreeMap<PathBuf, CommitPause>> = Mutex::new(BTreeMap::new());
 
 /// Run `pause` inside every owned page commit on `index` until cleared.
 fn key(index: &Path) -> PathBuf {
@@ -29,6 +30,23 @@ pub fn clear_commit_pause(index: &Path) {
 
 pub(crate) async fn commit_pause(index: &Path) {
     let pause = PAUSES.lock().unwrap().get(&key(index)).cloned();
+    if let Some(pause) = pause {
+        pause().await;
+    }
+}
+
+pub fn set_preparation_pause(index: &Path, pause: CommitPause) {
+    PREPARATION_PAUSES.lock().unwrap().insert(key(index), pause);
+}
+
+pub(crate) async fn preparation_pause(index: &Path) {
+    let pause = {
+        let pauses = PREPARATION_PAUSES.lock().unwrap();
+        if pauses.is_empty() {
+            return;
+        }
+        pauses.get(&key(index)).cloned()
+    };
     if let Some(pause) = pause {
         pause().await;
     }

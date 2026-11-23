@@ -39,7 +39,11 @@ through LanceDB's typed full-text query API rather than interpolated into a SQL
 predicate. See [lexical-search.md](lexical-search.md) for field ranking and
 tokenization behavior.
 
-Dependency failures return `retrieval_unavailable`. Invalid arguments always
+If the embedding model cannot process a query, `hybrid` returns lexical
+matches using the same filters and sets `semantic_status` to `unavailable`.
+The status is present even when the lexical query has no matches.
+`semantic` returns `semantic_unavailable` for the same model failure.
+Other dependency failures return `retrieval_unavailable`. Invalid arguments always
 return JSON-RPC invalid-params without echoing supplied input. Successful content
 blocks identify retrieved excerpts as untrusted data. Production [semantic retrieval](semantic-search.md) can be injected through the
 same handler, with hybrid fusion and typed metadata filters implemented below.

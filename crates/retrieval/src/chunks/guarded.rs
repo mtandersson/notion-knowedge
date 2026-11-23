@@ -12,6 +12,9 @@ use std::{
 };
 
 use super::lexical_binding::{self, LexicalIndexBinding, LexicalPlanIdentity};
+mod projected;
+pub use projected::PreparedSemanticProjection;
+
 use super::*;
 use crate::commit::{
     CommitError, CommitOutcome, IndexCommitCoordinator, PageAction, PageOperation,
@@ -139,22 +142,51 @@ impl SourceExpansion for GuardedChunkTable {
                 .coordinator
                 .search_guard()
                 .map_err(|_| SourceExpansionError::Unavailable)?;
-            let snapshot = open_current(
-                &self.index_directory,
-                &self.table_name,
-                &self.embedding,
-                &self.lexical_binding,
-            )
-            .await
-            .map_err(|_| SourceExpansionError::Unavailable)?
-            .read_snapshot()
-            .await
-            .map_err(|_| SourceExpansionError::Unavailable)?;
-            let result = snapshot.expand(query).await;
+            let snapshot = self
+                .open_canonical()
+                .await
+                .map_err(|_| SourceExpansionError::Unavailable)?
+                .read_snapshot()
+                .await
+                .map_err(|_| SourceExpansionError::Unavailable)?;
+            if query.refs.is_empty() || query.root_page_ids.is_empty() || query.max_chars == 0 {
+                return Err(SourceExpansionError::Unavailable);
+            }
+            let mut remaining = query.max_chars;
+            let mut sources = Vec::with_capacity(query.refs.len());
+            let mut semantic = None;
+            for reference in query.refs {
+                let source = match snapshot
+                    .expand_one(reference.clone(), &query.root_page_ids, remaining)
+                    .await
+                {
+                    Err(SourceExpansionError::Missing)
+                        if snapshot.text_only && matches!(reference, StableSourceRef::Chunk(_)) =>
+                    {
+                        let vector_snapshot = match &semantic {
+                            Some(table) => table,
+                            None => semantic.insert(
+                                self.open_semantic()
+                                    .await
+                                    .map_err(|_| SourceExpansionError::Unavailable)?
+                                    .read_snapshot()
+                                    .await
+                                    .map_err(|_| SourceExpansionError::Unavailable)?,
+                            ),
+                        };
+                        vector_snapshot
+                            .expand_one(reference, &query.root_page_ids, remaining)
+                            .await?
+                    }
+                    result => result?,
+                };
+                remaining = remaining.saturating_sub(source.text.chars().count());
+                sources.push(source);
+            }
             self.coordinator
                 .identities()
                 .map_err(|_| SourceExpansionError::Unavailable)?;
-            result
+            Ok(sources)
         })
     }
 }
@@ -224,6 +256,7 @@ async fn open_current(
     Ok(LanceChunkTable {
         table,
         embedding: embedding.clone(),
+        text_only: false,
     })
 }
 
@@ -506,6 +539,35 @@ impl GuardedChunkTable {
 
     /// Open the current compatible search snapshot without index repair or writes.
     /// The operational authority is rechecked before and after opening storage.
+    pub async fn verify_text_search_indexes(&self) -> Result<(), ChunkTableError> {
+        let _guard = self
+            .coordinator
+            .search_guard()
+            .map_err(|_| ChunkTableError::InvalidPath)?;
+        self.open_text_search_snapshot().await?;
+        Ok(())
+    }
+
+    /// Allow the worker to start and recover unfinished receipts. Serving
+    /// search still requires an independently settled snapshot.
+    pub async fn verify_bound_text_layout(&self) -> Result<(), ChunkTableError> {
+        let _guard = self
+            .coordinator
+            .document_read_guard()
+            .map_err(|_| ChunkTableError::InvalidPath)?;
+        self.open_text_search_snapshot().await?;
+        Ok(())
+    }
+
+    pub async fn verify_bound_legacy_layout(&self) -> Result<(), ChunkTableError> {
+        let _guard = self
+            .coordinator
+            .document_read_guard()
+            .map_err(|_| ChunkTableError::InvalidPath)?;
+        self.open_search_snapshot().await?;
+        Ok(())
+    }
+
     pub async fn search_snapshot(&self) -> Result<LanceChunkTable, ChunkTableError> {
         let _guard = self
             .coordinator
@@ -529,32 +591,136 @@ impl GuardedChunkTable {
         }
     }
 
-    /// Keep both rankers and metadata filtering on one committed revision.
-    /// Only retrieval adapters may execute inside this read fence.
-    pub(crate) async fn search_with_snapshot<F, Fut>(
+    /// Keep one ranker on a validated committed snapshot.
+    pub async fn search_with_snapshot<F, Fut, E>(
         &self,
+        semantic: bool,
         operation: F,
-    ) -> Result<Vec<SearchHit>, SearchUnavailable>
+    ) -> Result<Vec<SearchHit>, E>
     where
         F: FnOnce(LanceChunkTable) -> Fut,
-        Fut: Future<Output = Result<Vec<SearchHit>, SearchUnavailable>>,
+        Fut: Future<Output = Result<Vec<SearchHit>, E>>,
+        E: From<SearchUnavailable>,
     {
         let _guard = self
             .coordinator
             .search_guard()
             .map_err(|_| SearchUnavailable)?;
-        let snapshot = self
+        let snapshot = if semantic {
+            self.open_search_snapshot().await
+        } else {
+            self.open_text_search_snapshot().await
+        }
+        .map_err(|_| SearchUnavailable)?;
+        let results = operation(snapshot).await?;
+        self.validate_search_authority()?;
+        Ok(results)
+    }
+
+    /// Pin the vector and text projections under the same authority fence.
+    pub async fn search_with_snapshots<F, Fut, E>(&self, operation: F) -> Result<Vec<SearchHit>, E>
+    where
+        F: FnOnce(LanceChunkTable, LanceChunkTable) -> Fut,
+        Fut: Future<Output = Result<Vec<SearchHit>, E>>,
+        E: From<SearchUnavailable>,
+    {
+        let _guard = self
+            .coordinator
+            .search_guard()
+            .map_err(|_| SearchUnavailable)?;
+        let semantic = self
             .open_search_snapshot()
             .await
             .map_err(|_| SearchUnavailable)?;
-        let results = operation(snapshot).await?;
+        let lexical = self
+            .open_text_search_snapshot()
+            .await
+            .map_err(|_| SearchUnavailable)?;
+        let results = operation(semantic, lexical).await?;
+        self.validate_search_authority()?;
+        Ok(results)
+    }
+
+    fn validate_search_authority(&self) -> Result<(), SearchUnavailable> {
         self.coordinator
             .identities()
             .map_err(|_| SearchUnavailable)?;
         lexical_binding::verify(&self.index_directory, &self.lexical_binding)
-            .map_err(|_| SearchUnavailable)?;
-        Ok(results)
+            .map_err(|_| SearchUnavailable)
     }
+
+    /// True after the fenced v1 import finished creating the text indexes.
+    pub fn text_projection_installed(&self) -> Result<bool, ChunkTableError> {
+        super::semantic_jobs::installed(&self.index_directory)
+    }
+
+    async fn open_canonical(&self) -> Result<LanceChunkTable, ChunkTableError> {
+        lexical_binding::verify(&self.index_directory, &self.lexical_binding)?;
+        if self.text_projection_installed()? {
+            return super::text::current(&self.index_directory, self.binding(), &self.embedding)
+                .await?
+                .ok_or_else(|| {
+                    ChunkTableError::InvalidSchema("installed text projection is missing".into())
+                });
+        }
+        open_current(
+            &self.index_directory,
+            &self.table_name,
+            &self.embedding,
+            &self.lexical_binding,
+        )
+        .await
+    }
+
+    async fn open_text_search_snapshot(&self) -> Result<LanceChunkTable, ChunkTableError> {
+        let current = self.open_canonical().await?.read_snapshot().await?;
+        Self::verify_fts(&current).await?;
+        self.coordinator
+            .identities()
+            .map_err(|_| ChunkTableError::InvalidPath)?;
+        Ok(current)
+    }
+
+    /// Import canonical text from the compatible v1 vector table without
+    /// reading Notion or opening model assets.
+    pub fn ensure_text_projection(
+        &self,
+        lease: Lease,
+        clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> impl Future<Output = Result<(), CommitError>> + Send + 'static {
+        let this = self.clone();
+        self.coordinator
+            .maintain(lease, clock, move |context| async move {
+                this.provision_text(&context)
+                    .await
+                    .map(|_| ())
+                    .map_err(failure)
+            })
+    }
+
+    async fn provision_text(
+        &self,
+        context: &crate::commit::CommitContext,
+    ) -> Result<LanceChunkTable, ChunkTableError> {
+        context
+            .revalidate()
+            .map_err(|_| ChunkTableError::InvalidPath)?;
+        let current = open_current(
+            &self.index_directory,
+            &self.table_name,
+            &self.embedding,
+            &self.lexical_binding,
+        )
+        .await?;
+        let fts = if self.lexical_binding.is_some() {
+            FtsIndexConfig::lexical_expansion_v1()
+        } else {
+            FtsIndexConfig::default()
+        };
+        super::text::provision(&self.index_directory, context.binding(), &current, &fts).await?;
+        self.open_canonical().await
+    }
+
     /// Inspect search layout without admitting content while rebuild is pending.
     pub async fn verify_search_indexes(&self) -> Result<(), ChunkTableError> {
         let _guard = self
@@ -572,7 +738,7 @@ impl GuardedChunkTable {
             .coordinator
             .index_read_guard()
             .map_err(|_| ChunkTableError::InvalidPath)?;
-        let snapshot = self.open_search_snapshot().await?;
+        let snapshot = self.open_text_search_snapshot().await?;
         let mut stream = snapshot
             .table
             .query()
@@ -629,6 +795,15 @@ impl GuardedChunkTable {
                 "required vector index unavailable".into(),
             ));
         }
+        Self::verify_fts(&current).await?;
+        self.coordinator
+            .identities()
+            .map_err(|_| ChunkTableError::InvalidPath)?;
+        Ok(current)
+    }
+
+    async fn verify_fts(current: &LanceChunkTable) -> Result<(), ChunkTableError> {
+        let indexes = current.table.list_indices().await?;
         for (name, column) in CHUNK_FTS_INDEXES {
             if !indexes.iter().any(|index| {
                 index.name == name
@@ -640,11 +815,9 @@ impl GuardedChunkTable {
                 ));
             }
         }
-        self.coordinator
-            .identities()
-            .map_err(|_| ChunkTableError::InvalidPath)?;
-        Ok(current)
+        Ok(())
     }
+
     /// Execute under one directory/authority fence. Installation additionally
     /// requires the exact versioned lexical identity binding.
     pub async fn expanded_lexical_search<C>(
@@ -672,7 +845,7 @@ impl GuardedChunkTable {
                 .coordinator
                 .search_guard()
                 .map_err(|_| ChunkTableError::InvalidPath)?;
-            let snapshot = self.open_search_snapshot().await?;
+            let snapshot = self.open_text_search_snapshot().await?;
             let result = snapshot
                 .expanded_lexical_inner(query, dictionary, pool)
                 .await;
@@ -700,16 +873,47 @@ impl GuardedChunkTable {
         .version()
         .await?)
     }
+    /// Current canonical text version and chunk count.
+    pub async fn text_status(&self) -> Result<(u64, u64), ChunkTableError> {
+        let _guard = self
+            .coordinator
+            .search_guard()
+            .map_err(|_| ChunkTableError::InvalidPath)?;
+        let current = self.open_text_search_snapshot().await?;
+        Ok((
+            current.table.version().await?,
+            current.count_rows().await? as u64,
+        ))
+    }
+
+    /// Published vector count and queued failure classes, without a model call.
+    pub async fn semantic_status(&self) -> Result<(u64, super::SemanticBacklog), ChunkTableError> {
+        let _guard = self
+            .coordinator
+            .search_guard()
+            .map_err(|_| ChunkTableError::InvalidPath)?;
+        let current = self.open_search_snapshot().await?;
+        Ok((
+            current.count_rows().await? as u64,
+            super::semantic_jobs::backlog(&self.index_directory)?,
+        ))
+    }
+
+    /// Includes jobs parked after a deterministic model failure.
+    pub fn has_pending_semantic(&self, page: Option<&str>) -> Result<bool, ChunkTableError> {
+        let _guard = self
+            .coordinator
+            .search_guard()
+            .map_err(|_| ChunkTableError::InvalidPath)?;
+        if let Some(page) = page {
+            return Ok(super::semantic_jobs::for_page(&self.index_directory, page)?.is_some());
+        }
+        let backlog = super::semantic_jobs::backlog(&self.index_directory)?;
+        Ok(backlog != super::SemanticBacklog::default())
+    }
+
     pub async fn indexed_page_ids(&self) -> Result<Vec<String>, ChunkTableError> {
-        let current = open_current(
-            &self.index_directory,
-            &self.table_name,
-            &self.embedding,
-            &self.lexical_binding,
-        )
-        .await?
-        .read_snapshot()
-        .await?;
+        let current = self.open_canonical().await?.read_snapshot().await?;
         let rows = current.rows_matching("true".into()).await?;
         Ok(rows
             .into_iter()
@@ -726,15 +930,7 @@ impl GuardedChunkTable {
         self.coordinator.binding()
     }
     pub async fn page_chunks(&self, page_id: &str) -> Result<Vec<IndexedChunk>, ChunkTableError> {
-        open_current(
-            &self.index_directory,
-            &self.table_name,
-            &self.embedding,
-            &self.lexical_binding,
-        )
-        .await?
-        .page_chunks(page_id)
-        .await
+        self.open_canonical().await?.page_chunks(page_id).await
     }
 
     /// Prepare a complete source page snapshot outside the commit guard.
@@ -987,22 +1183,9 @@ impl GuardedChunkTable {
         );
         async move {
             let outcome = commit.await?;
-            if outcome == CommitOutcome::Applied && this.record_commit() {
-                // The page is durable. A failed pass keeps its pages pending
-                // and delays the next commit-triggered attempt by one interval,
-                // so persistent failure costs one attempt per interval, not per
-                // commit; the next successful pass folds every row in.
-                let _in_flight = InFlight(this.cadence.clone());
-                if let Err(error) = this.optimize_indexes(maintenance.0, maintenance.1).await {
-                    eprintln!(
-                        "{}",
-                        serde_json::json!({
-                            "operation": "index_optimize",
-                            "outcome": "deferred",
-                            "error": format!("{error:?}"),
-                        })
-                    );
-                }
+            if outcome == CommitOutcome::Applied {
+                this.optimize_after_commit(maintenance.0, maintenance.1)
+                    .await;
             }
             Ok(outcome)
         }
@@ -1021,6 +1204,24 @@ impl GuardedChunkTable {
             .unwrap_or_else(|e| e.into_inner())
             .pending()
             > 0
+    }
+
+    async fn optimize_after_commit(&self, lease: Lease, clock: Arc<dyn Fn() -> i64 + Send + Sync>) {
+        if self.record_commit() {
+            // Failures leave the committed projection available. Throttle
+            // attempts until the next maintenance interval.
+            let _in_flight = InFlight(self.cadence.clone());
+            if let Err(error) = self.optimize_indexes(lease, clock).await {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "operation": "index_optimize",
+                        "outcome": "deferred",
+                        "error": format!("{error:?}"),
+                    })
+                );
+            }
+        }
     }
 
     /// Count one committed page and report whether optimization is due.
@@ -1066,23 +1267,25 @@ impl GuardedChunkTable {
                     .map_err(failure)?;
                 context.revalidate().map_err(fence_failure)?;
                 lexical_binding::verify(&directory, &lexical).map_err(failure)?;
-                let fts = page_timings::timer(Bucket::FtsOptimize);
-                current
-                    .ensure_fts_index(&if lexical.is_some() {
-                        FtsIndexConfig::lexical_expansion_v1()
-                    } else {
-                        FtsIndexConfig::default()
-                    })
+                let text = super::text::current(&directory, context.binding(), &embedding)
                     .await
                     .map_err(failure)?;
-                // Coalesce the fragments written since the last pass while no
-                // index covers them yet, so each pass adds one indexed fragment
-                // and one index delta rather than one per page. Deleted rows
-                // are left to the threshold step, so this rewrites no indexed
-                // fragment for deletions alone.
-                compact(&current, &storage, false).await?;
-                context.revalidate().map_err(fence_failure)?;
-                current.optimize_fts_index().await.map_err(failure)?;
+                let fts = page_timings::timer(Bucket::FtsOptimize);
+                for table in std::iter::once(&current).chain(text.iter()) {
+                    table
+                        .ensure_fts_index(&if lexical.is_some() {
+                            FtsIndexConfig::lexical_expansion_v1()
+                        } else {
+                            FtsIndexConfig::default()
+                        })
+                        .await
+                        .map_err(failure)?;
+                    // Coalesce recently written fragments before updating the
+                    // indexes, which keeps query costs independent of page count.
+                    compact(table, &storage, false).await?;
+                    context.revalidate().map_err(fence_failure)?;
+                    table.optimize_fts_index().await.map_err(failure)?;
+                }
                 drop(fts);
                 let _vector = page_timings::timer(Bucket::VectorOptimize);
                 let indices = current
@@ -1110,6 +1313,9 @@ impl GuardedChunkTable {
                 }
                 drop(_vector);
                 context.revalidate().map_err(fence_failure)?;
+                if let Some(text) = text {
+                    maintain_storage(&text, &storage, &context).await?;
+                }
                 maintain_storage(&current, &storage, &context).await
             });
         async move {

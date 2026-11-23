@@ -34,6 +34,16 @@ It returns structured content:
   full coordinator binding and persisted vector metadata must match trusted
   scope and the pinned Qwen identity. Unknown/foreign/incompatible identities
   return null without exposing arbitrary metadata strings.
+- `source_documents`: count of canonical pages cached under the configured
+  binding, including pages that still need indexing. Freshness is checked
+  separately when serving each page.
+- `lexical_projection`: current text table version and chunk count. Lexical
+  publication can succeed while semantic work is queued or the model is
+  unavailable.
+- `semantic_projection`: published vector count and page counts by projection
+  state. `queued_pages` are awaiting an attempt, `model_unavailable_pages` are
+  waiting for a retry, and `input_limit_pages` and `rejected_pages` are parked
+  after an input limit or another embedding failure.
 
 The tool opens existing local state read-only. It never creates/migrates SQLite,
 loads/downloads a model, contacts Notion, repairs/creates an index, retries work
@@ -43,9 +53,8 @@ files or hiding live WAL data. Normal serving workers may independently write
 state; the tool adds no writes. SQLite counts and Lance generation are observations
 of independently changing components, not a cross-store atomic snapshot.
 
-No IDs, paths, titles, source bodies, event payloads, credentials or upstream
-error strings are returned. Null availability is honest and does not establish
-freshness or production readiness.
+The inventory can include out-of-sync page IDs. Status excludes paths, titles,
+source bodies, event payloads, credentials and upstream error strings.
 
 Verify with the pinned production toolchain:
 

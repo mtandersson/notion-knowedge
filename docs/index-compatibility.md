@@ -51,6 +51,28 @@ There is no in-place migration in schema version 1. A future change that can be 
 
 Never coerce metadata, resize vectors, or mix rows from different vector spaces.
 
+## Independent text projection
+
+The first writer startup imports existing chunk text and stable chunk IDs from
+a pinned `chunks` snapshot into `chunks_text` under the index commit fence.
+The original vector schema and compatible vectors stay in place. The writer
+publishes future edits to the text table and derives complete semantic
+projections from that text. Normal source synchronization backfills canonical
+page Markdown.
+
+Before deploying, stop the writer and save the complete index directory and
+operational database. Follow the offline migration procedure if the schema
+changes. Keep the pre-upgrade state and index paired. [Offline migration](operational-state-migration.md)
+
+After the new writer can admit source or write operations, preserve live
+operational state and durable write ledgers. A pre-projection binary requires
+the same operational schema, a verified compatible legacy index, and disabled
+write and sync operations for read-only rollback.
+A pre-projection writer updates only the legacy table. If one has run, rebuild
+the derived cache from Notion with the new writer before serving again.
+Use the cache reset procedure to retain operational state and ledgers.
+[Cache reset and resync](cache-reset-and-resync.md)
+
 ## Spike reconciliation
 
 Spike #215 demonstrated the same fail/rebuild rule on the disposable end-to-end corpus: incompatible persisted vector identity fails before source reads/model reuse, and deleting/rebuilding derived index state from unchanged Notion pages reproduces the expected retrieval result. Production #43 moves that policy into the reusable LanceDB adapter rather than keeping it in spike-only code.

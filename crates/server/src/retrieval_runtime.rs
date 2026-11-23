@@ -7,8 +7,8 @@ use notion_knowledge_core::{
     embedding::EmbeddingProvider,
     hybrid::{HybridFusion, ReciprocalRankFusion},
     search::{
-        HybridSearch, LexicalQuery, LexicalSearch, SearchFuture, SearchUnavailable, SemanticQuery,
-        SemanticSearch,
+        HybridSearch, LexicalQuery, LexicalSearch, SearchFuture, SearchFutureWithFailure,
+        SearchUnavailable, SemanticQuery, SemanticSearch,
     },
 };
 use notion_knowledge_mcp::KnowledgeServer;
@@ -140,14 +140,11 @@ pub async fn configured(
         NotionClient::integration(token.expose_secret())
             .map_err(|_| "authoritative retrieval source unavailable")?,
     );
-    let provider = notion_knowledge_retrieval::embedder::load_configured_embedder(
-        &notion_knowledge_retrieval::embedder::EmbedderConfig::LocalQwen {
+    let provider = notion_knowledge_retrieval::embedder::deferred_configured_embedder(
+        notion_knowledge_retrieval::embedder::EmbedderConfig::LocalQwen {
             assets: settings.assets.clone(),
         },
-        None,
-    )
-    .await
-    .map_err(|_| "retrieval model unavailable or incompatible")?;
+    );
     compose(handler, config, transport, source, provider).await
 }
 
@@ -245,13 +242,14 @@ pub(crate) async fn attach_existing(
     }
     let plan = crate::index_runtime::configured_plan(settings)?;
     table
-        .search_snapshot()
+        .verify_bound_text_layout()
         .await
         .map_err(|_| "retrieval index unavailable or incompatible")?;
     let exact_id = plan.is_some();
     let adapters = search_adapters(settings, table.clone(), provider, plan)?;
     let handler = if matches!(transport, Transport::Http) {
-        handler.with_index_health_probe(crate::index_readiness::observe(table.clone(), exact_id))
+        handler
+            .with_index_health_probe(crate::index_readiness::observe(table.clone(), exact_id).await)
     } else {
         handler
     };
@@ -334,78 +332,92 @@ fn search_adapters(
             hybrid: search,
         });
     }
+    let timeout = std::time::Duration::from_secs(settings.timeout_seconds);
     Ok(SearchAdapters {
         semantic: Arc::new(ScopedSearch {
             table: table.clone(),
             provider: provider.clone(),
+            timeout,
         }),
         lexical: Arc::new(ScopedLexical {
             table: table.clone(),
         }),
-        hybrid: Arc::new(ScopedHybrid { table, provider }),
+        hybrid: Arc::new(ScopedHybrid {
+            table,
+            provider,
+            timeout,
+        }),
     })
 }
 
 struct ScopedSearch {
     table: GuardedChunkTable,
     provider: Arc<dyn EmbeddingProvider>,
+    timeout: std::time::Duration,
 }
 impl SemanticSearch for ScopedSearch {
     fn search(&self, query: SemanticQuery) -> SearchFuture<'_> {
         Box::pin(async move {
-            let table = Arc::new(
-                self.table
-                    .search_snapshot()
-                    .await
-                    .map_err(|_| SearchUnavailable)?,
-            );
-            LanceSemanticSearch::new(table, self.provider.clone(), 1)
-                .map_err(|_| SearchUnavailable)?
-                .search(query)
+            self.search_with_failure(query)
                 .await
+                .map_err(|_| SearchUnavailable)
         })
     }
+
+    fn search_with_failure(&self, query: SemanticQuery) -> SearchFutureWithFailure<'_> {
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        Box::pin(
+            self.table
+                .search_with_snapshot(true, move |table| async move {
+                    LanceSemanticSearch::new(Arc::new(table), self.provider.clone(), 1)
+                        .map_err(|_| SearchUnavailable)?
+                        .with_embedding_deadline(deadline)
+                        .search_with_failure(query)
+                        .await
+                }),
+        )
+    }
 }
+
 struct ScopedLexical {
     table: GuardedChunkTable,
 }
 impl LexicalSearch for ScopedLexical {
     fn search(&self, query: LexicalQuery) -> SearchFuture<'_> {
-        Box::pin(async move {
-            LexicalSearch::search(
-                &self
-                    .table
-                    .search_snapshot()
-                    .await
-                    .map_err(|_| SearchUnavailable)?,
-                query,
-            )
-            .await
-        })
+        Box::pin(self.table.search_with_snapshot(false, |table| async move {
+            LexicalSearch::search(&table, query).await
+        }))
     }
 }
 
 struct ScopedHybrid {
     table: GuardedChunkTable,
     provider: Arc<dyn EmbeddingProvider>,
+    timeout: std::time::Duration,
 }
 impl HybridSearch for ScopedHybrid {
     fn search(&self, query: SemanticQuery) -> SearchFuture<'_> {
         Box::pin(async move {
-            // Both rankers use one validated committed revision per call.
-            let table = Arc::new(
-                self.table
-                    .search_snapshot()
-                    .await
-                    .map_err(|_| SearchUnavailable)?,
-            );
-            let semantic = Arc::new(
-                LanceSemanticSearch::new(table.clone(), self.provider.clone(), 1)
-                    .map_err(|_| SearchUnavailable)?,
-            );
-            HybridFusion::new(semantic, table, ReciprocalRankFusion::default())?
-                .search(query)
+            self.search_with_failure(query)
                 .await
+                .map_err(|_| SearchUnavailable)
         })
+    }
+
+    fn search_with_failure(&self, query: SemanticQuery) -> SearchFutureWithFailure<'_> {
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        Box::pin(
+            self.table
+                .search_with_snapshots(move |semantic, lexical| async move {
+                    let semantic = Arc::new(
+                        LanceSemanticSearch::new(Arc::new(semantic), self.provider.clone(), 1)
+                            .map_err(|_| SearchUnavailable)?
+                            .with_embedding_deadline(deadline),
+                    );
+                    HybridFusion::new(semantic, Arc::new(lexical), ReciprocalRankFusion::default())?
+                        .search_with_failure(query)
+                        .await
+                }),
+        )
     }
 }

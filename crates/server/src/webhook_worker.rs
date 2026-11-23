@@ -240,14 +240,11 @@ pub mod runtime {
                 .map_err(|_| "Notion client unavailable")?,
         );
         crate::index_runtime::configured_plan(settings)?;
-        let provider = notion_knowledge_retrieval::embedder::load_configured_embedder(
-            &notion_knowledge_retrieval::embedder::EmbedderConfig::LocalQwen {
+        let provider = notion_knowledge_retrieval::embedder::deferred_configured_embedder(
+            notion_knowledge_retrieval::embedder::EmbedderConfig::LocalQwen {
                 assets: settings.assets.clone(),
             },
-            None,
-        )
-        .await
-        .map_err(|_| "Qwen assets unavailable or incompatible")?;
+        );
         let state_file = config
             .webhook_state_file
             .clone()
@@ -306,7 +303,7 @@ pub mod runtime {
                 let webhook_stop = stop.clone();
                 let webhook_loop = async {
                     let _guard = webhook_stop.drop_guard();
-                    self.run_webhooks(stop.clone()).await
+                    self.run_queues(stop.clone()).await
                 };
                 let (webhook_result, scheduled_result) = tokio::join!(webhook_loop, scheduled_loop);
                 let result = webhook_result.and(scheduled_result);
@@ -317,8 +314,99 @@ pub mod runtime {
                     .map_err(|_| "index drain failed")?;
                 return result;
             }
-            self.run_webhooks(stop).await
+            self.run_queues(stop).await
         }
+
+        async fn run_queues(&self, stop: CancellationToken) -> Result<(), &'static str> {
+            let source_stop = stop.clone();
+            let source = async {
+                let _guard = source_stop.drop_guard();
+                self.run_webhooks(stop.clone()).await
+            };
+            let (source_result, ()) = tokio::join!(source, self.run_semantic(stop.clone()));
+            source_result
+        }
+
+        async fn run_semantic(&self, stop: CancellationToken) {
+            loop {
+                if stop.is_cancelled() {
+                    break;
+                }
+                let result = self.semantic_step_until(&stop).await;
+                if let Err(reason) = result {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "operation": "semantic_projection",
+                            "outcome": "retry_deferred",
+                            "reason": reason,
+                        })
+                    );
+                }
+                tokio::select! {
+                    _ = stop.cancelled() => break,
+                    _ = tokio::time::sleep(self.poll) => {}
+                }
+            }
+        }
+
+        /// Model work holds neither the source writer lease nor its directory
+        /// lock. A newer source callback can commit while inference runs.
+        pub async fn semantic_step(&self) -> Result<bool, &'static str> {
+            self.semantic_step_until(&CancellationToken::new()).await
+        }
+
+        async fn semantic_step_until(
+            &self,
+            stop: &CancellationToken,
+        ) -> Result<bool, &'static str> {
+            use notion_knowledge_core::reconciliation::JournalError;
+            use notion_knowledge_retrieval::commit::CommitError;
+
+            let table = self.index.chunks();
+            let now = now_ms() / 1000;
+            let Some(page) = table
+                .next_semantic_retry(now)
+                .map_err(|_| "semantic queue unavailable")?
+            else {
+                return Ok(false);
+            };
+            let result = tokio::select! {
+                biased;
+                _ = stop.cancelled() => return Ok(false),
+                result = table.prepare_semantic(
+                    &page, self.index.provider.as_ref(), now, self.timeout,
+                ) => result,
+            };
+            let prepared = match result {
+                Ok(Some(prepared)) => prepared,
+                Ok(None) | Err(CommitError::Conflict | CommitError::LeaseLost) => return Ok(false),
+                Err(_) => return Err("semantic preparation unavailable"),
+            };
+            let state = self.state.clone();
+            let duration = self.timeout.as_secs() as i64 + 30;
+            let lease =
+                match blocking(move || state.acquire_lease(now_ms() / 1000, duration)).await? {
+                    Ok(lease) => lease,
+                    Err(JournalError::Busy) => return Ok(false),
+                    Err(_) => return Err("semantic writer unavailable"),
+                };
+            let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| now_ms() / 1000);
+            let result = table
+                .complete_semantic(prepared, lease.clone(), clock)
+                .await;
+            let state = self.state.clone();
+            match blocking(move || state.release_lease(&lease, now_ms() / 1000)).await? {
+                Ok(()) | Err(JournalError::LeaseLost) => {}
+                Err(_) => return Err("semantic writer release failed"),
+            }
+            match result {
+                Ok(_) => Ok(true),
+                Err(CommitError::Conflict | CommitError::LeaseLost) => Ok(false),
+                Err(_) => Err("semantic publication unavailable"),
+            }
+        }
+
         async fn run_webhooks(&self, stop: CancellationToken) -> Result<(), &'static str> {
             let mut page_first = true;
             loop {
@@ -627,11 +715,48 @@ mod tests {
     }
     #[cfg(all(unix, feature = "webhook-worker"))]
     #[tokio::test]
-    async fn missing_model_assets_reject_production_startup() {
+    async fn missing_model_assets_do_not_block_production_startup() {
+        use std::os::unix::fs::DirBuilderExt;
         let dir = tempfile::tempdir().unwrap();
         let assets = dir.path().join("missing");
-        let config = parse(&[("NK_WEBHOOK_QWEN_ASSETS", assets.to_str().unwrap())]).unwrap();
-        assert!(super::runtime::configured(&config).await.is_err());
+        let index = dir.path().join("index");
+        let state = dir.path().join("state.sqlite");
+        let config = parse(&[
+            ("NK_WEBHOOK_QWEN_ASSETS", assets.to_str().unwrap()),
+            ("NK_WEBHOOK_INDEX_DIR", index.to_str().unwrap()),
+            ("NK_WEBHOOK_STATE_FILE", state.to_str().unwrap()),
+        ])
+        .unwrap();
+        use notion_knowledge_retrieval::{
+            chunks::LanceChunkTable,
+            commit::{CommitBinding, IndexCommitCoordinator},
+            planner::production_scope,
+        };
+        let scope = config.notion_scope.as_ref().unwrap();
+        let binding = CommitBinding::new(
+            "chunks",
+            &scope.workspace_id,
+            &production_scope(scope).unwrap(),
+            &scope.generation.to_string(),
+            scope.generation,
+        )
+        .unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&index)
+            .unwrap();
+        IndexCommitCoordinator::initialize(&index, &state, binding).unwrap();
+        LanceChunkTable::create(
+            &index,
+            "chunks",
+            notion_knowledge_retrieval::qwen::metadata(),
+        )
+        .await
+        .unwrap();
+        let worker = super::runtime::configured(&config).await.unwrap();
+        assert!(worker.is_some());
+        assert!(index.join("chunks_text.lance").is_dir());
+        assert!(!assets.exists());
     }
 }
 

@@ -1,7 +1,7 @@
 //! Weighted reciprocal-rank fusion. Native scores are not compared across paths.
 use crate::search::{
-    HybridSearch, LexicalQuery, LexicalSearch, RetrievalPath, SearchFuture, SearchHit,
-    SearchUnavailable, SemanticQuery, SemanticSearch,
+    HybridSearch, LexicalQuery, LexicalSearch, RetrievalPath, SearchFuture,
+    SearchFutureWithFailure, SearchHit, SearchUnavailable, SemanticQuery, SemanticSearch,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -57,6 +57,14 @@ impl HybridFusion {
 impl HybridSearch for HybridFusion {
     fn search(&self, query: SemanticQuery) -> SearchFuture<'_> {
         Box::pin(async move {
+            self.search_with_failure(query)
+                .await
+                .map_err(|_| SearchUnavailable)
+        })
+    }
+
+    fn search_with_failure(&self, query: SemanticQuery) -> SearchFutureWithFailure<'_> {
+        Box::pin(async move {
             if query.metadata.validate().is_err()
                 || query.query.trim().is_empty()
                 || query.query.chars().count() > 4096
@@ -72,7 +80,7 @@ impl HybridSearch for HybridFusion {
                                 .any(|id| id.trim().is_empty() || id.chars().count() > 128)
                     })
             {
-                return Err(SearchUnavailable);
+                return Err(SearchUnavailable.into());
             }
             let lexical_query = LexicalQuery {
                 query: query.query.clone(),
@@ -84,13 +92,13 @@ impl HybridSearch for HybridFusion {
             let limit = query.limit;
             let semantic = self
                 .semantic
-                .search(SemanticQuery {
+                .search_with_failure(SemanticQuery {
                     limit: self.config.candidate_limit,
                     ..query
                 })
                 .await?;
             let lexical = self.lexical.search(lexical_query).await?;
-            fuse(semantic, lexical, self.config, limit)
+            Ok(fuse(semantic, lexical, self.config, limit)?)
         })
     }
 }

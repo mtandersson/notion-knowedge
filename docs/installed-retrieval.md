@@ -28,18 +28,17 @@ Supply these immutable startup settings through the service environment:
 
 `NK_RETRIEVAL` accepts only `true` or `false`. Retrieval does not require webhook
 admission or `NK_WEBHOOK_WORKER=true`. Use the existing authoritative indexing or
-reconciliation workflow to populate and maintain the shared index first. After
-population, the operator must build the IVF_FLAT vector index with the trusted
-local command below. It uses the shared writer lease and commit coordinator,
-as described in [index commits](index-commits.md). Worker table
-creation installs FTS only; it does not train IVF automatically. Read
-activation requires an operator-owned mode-0700 index directory and mode-0600
+reconciliation workflow to populate and maintain the shared index. The worker
+publishes canonical text and lexical chunks before embedding. Its first
+successful vector publication initializes the production vector index.
+Operators can also maintain that index explicitly with the commands below.
+Read activation requires an operator-owned mode-0700 index directory and mode-0600
 state file, beneath operator-controlled ancestors. Use existing protected storage;
 activation never changes permissions. Read startup performs no state initialization, migration, FTS repair or writer lease.
 Missing/corrupt state, foreign inode bindings, changed scope/generation, missing
-FTS indexes and incompatible provider/model/vector-space metadata fail startup
-with a bounded error. `--check` validates settings only; actual transport startup
-also validates existing storage and loads the offline provider.
+FTS indexes and incompatible local storage fail startup with a bounded error.
+`--check` validates settings only. Actual transport startup also validates
+existing storage. The first vector operation loads the pinned offline provider.
 
 Trusted operator stdio may activate directly. Local fallback HTTP requires
 `NK_HTTP_AUTH=bearer`, its configured token and a loopback listener; it is the
@@ -65,10 +64,9 @@ notion-knowledge-server --index rebuild
 existing compatible index, and folds in unindexed committed rows. `rebuild`
 explicitly replaces the derived ANN index over the same committed vectors.
 Neither command changes canonical chunks, source text, ownership, page receipts
-or Notion content. Neither calls Notion or embeds source text. The configured
-offline Qwen assets are validated and loaded before storage access, so an
-incompatible model identity cannot be attached to existing vectors. No model
-download or provider fallback occurs. Preserve the normal integration configuration
+or Notion content. Both operate on persisted vectors and validate the configured
+Qwen identity against the table metadata. They can run with model assets
+offline. Preserve the normal integration configuration
 required for the configured scope; that credential remains
 unused by this local operation. Configuration validation is unchanged.
 
@@ -98,8 +96,9 @@ nix develop .#spike --command cargo test -p notion-knowledge-server --features w
 
 Trusted installed readers also bind guarded indexed source expansion and the
 same configured authoritative client for `knowledge_get` with `freshness: "fresh"`.
-Fresh mode retains its indexed anchor and root checks; moved/out-of-root pages
-are rejected before Markdown is read.
+A complete cached page serves a fresh read while its source revision remains
+current. Otherwise fresh mode reads the explicitly requested page from Notion,
+which authorizes that read. A chunk reference resolves through the scoped index.
 
 Search modes use the existing Lance semantic adapter, BM25 lexical adapter and
 weighted reciprocal-rank fusion (100 candidates per path, rank constant 60,

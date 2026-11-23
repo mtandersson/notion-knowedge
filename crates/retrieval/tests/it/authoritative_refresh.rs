@@ -331,10 +331,10 @@ async fn create_metadata_content_delete_duplicate_and_persistent_restart() {
         .guarded()
         .ensure_vector_index(
             VectorIndexConfig {
+                distance: notion_knowledge_retrieval::chunks::VectorDistance::Cosine,
                 num_partitions: Some(1),
                 sample_rate: 8,
                 max_iterations: 20,
-                ..VectorIndexConfig::default()
             },
             index.lease.clone(),
             clock(),
@@ -593,7 +593,7 @@ async fn out_of_scope_recovery_archive_and_failed_source_do_not_corrupt_index() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn provider_identity_or_scope_generation_mismatch_blocks_index_effects() {
+async fn scope_generation_and_model_identity_guard_their_separate_projections() {
     let index = Fixture::new();
     index.create().await;
     let source = HttpNotion::start().await;
@@ -631,8 +631,13 @@ async fn provider_identity_or_scope_generation_mismatch_blocks_index_effects() {
             clock(),
         )
         .await;
-    assert_eq!(result.unwrap_err(), RefreshError::Index);
+    assert_eq!(result.unwrap().outcome, CommitOutcome::Applied);
+    assert!(!index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
     assert_eq!(index.table().await.count_rows().await.unwrap(), 0);
+    assert_eq!(
+        index.guarded().semantic_status().await.unwrap().1.rejected,
+        1
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -669,16 +674,10 @@ async fn original_event_recovers_after_index_apply_before_ack_and_changed_source
             .is_none()
     );
     assert!(index.coordinator.metadata_identity(PAGE).unwrap().is_none());
-    assert_eq!(
-        index
-            .table()
-            .await
-            .fts_query("text", "Saffron", 10)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
+    assert!(!index.guarded().page_chunks(PAGE).await.unwrap().is_empty());
+    assert!(index.guarded().search_snapshot().await.is_err());
+    assert_eq!(index.table().await.count_rows().await.unwrap(), 0);
+    assert_eq!(provider.embeddings(), 0);
     sql.execute_batch("DROP TRIGGER fail_checkpoint;").unwrap();
     drop(sql);
 
@@ -722,7 +721,7 @@ async fn original_event_recovers_after_index_apply_before_ack_and_changed_source
             .outcome,
         CommitOutcome::Applied
     );
-    assert_eq!(provider.embeddings(), embeddings);
+    assert!(provider.embeddings() > embeddings);
     assert!(
         index
             .guarded()
@@ -781,7 +780,8 @@ async fn original_event_recovers_after_index_apply_before_ack_and_changed_source
             .unwrap_err(),
         RefreshError::Conflict
     );
-    // New generation establishes its own atomic metadata identity/ownership.
+    // The previous text generation cannot be adopted under changed scope.
+    // Production recovery provisions the replacement from authoritative roots.
     assert_eq!(
         next_handler
             .refresh_page(
@@ -793,9 +793,8 @@ async fn original_event_recovers_after_index_apply_before_ack_and_changed_source
                 clock()
             )
             .await
-            .unwrap()
-            .outcome,
-        CommitOutcome::Applied
+            .unwrap_err(),
+        RefreshError::Index
     );
 }
 
@@ -835,19 +834,23 @@ async fn successful_later_event_does_not_leave_original_retry_receipt_unresolved
         )
         .await
         .unwrap();
-    let embeddings = provider.embeddings();
-    handler
-        .refresh_page(
-            &page,
-            &root,
-            "original",
-            &provider,
-            index.lease.clone(),
-            clock(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(provider.embeddings(), embeddings);
+    let embedded = provider.embeddings();
+    assert!(embedded > 0);
+    assert!(!index.coordinator.has_unfinished_commits().unwrap());
+    assert!(
+        handler
+            .refresh_page(
+                &page,
+                &root,
+                "original",
+                &provider,
+                index.lease.clone(),
+                clock(),
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(provider.embeddings(), embedded);
     assert_eq!(
         index
             .coordinator
@@ -855,7 +858,7 @@ async fn successful_later_event_does_not_leave_original_retry_receipt_unresolved
             .unwrap()
             .unwrap()
             .status,
-        notion_knowledge_retrieval::commit::ReceiptStatus::Applied
+        notion_knowledge_retrieval::commit::ReceiptStatus::Superseded,
     );
 }
 

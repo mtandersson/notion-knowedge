@@ -113,6 +113,7 @@ pub fn tool() -> Tool {
         "filters":{"type":"object","additionalProperties":false,"properties":{"page_ids":ids,"root_page_ids":ids,"metadata":metadata}}
     }});
     let output = json!({"type":"object","additionalProperties":false,"required":["results"],"properties":{
+        "semantic_status":{"type":"string","enum":["unavailable"],"description":"Hybrid search returned lexical results after the embedding model could not process the query."},
         "results":{"type":"array","maxItems":100,"items":{"type":"object","additionalProperties":false,"required":["source","text","score","matched_paths"],"properties":{
             "source":{"type":"object","additionalProperties":false,"required":["page_id","chunk_id","url","title","heading_path","last_edited_time"],"properties":{
                 "last_edited_time":{"type":"string","minLength":1,"description":"Authoritative Notion edit timestamp from the indexed snapshot."},

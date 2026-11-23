@@ -9,6 +9,25 @@ pub struct SyncStatus {
     pub operational_schema_version: Option<i64>,
     pub index: Option<IndexStatus>,
     pub inventory: Option<InventoryStatus>,
+    #[serde(default)]
+    pub source_documents: Option<u64>,
+    #[serde(default)]
+    pub lexical_projection: Option<LexicalProjectionStatus>,
+    #[serde(default)]
+    pub semantic_projection: Option<SemanticProjectionStatus>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LexicalProjectionStatus {
+    pub version: u64,
+    pub chunks: u64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SemanticProjectionStatus {
+    pub vectors: u64,
+    pub queued_pages: u64,
+    pub model_unavailable_pages: u64,
+    pub input_limit_pages: u64,
+    pub rejected_pages: u64,
 }
 /// Page inventory counts, the last sync's drift and the out-of-sync pages.
 /// Ids and typed reasons only: never titles or content.

@@ -188,17 +188,11 @@ pub mod runtime {
         if crate::index_runtime::configured_plan(&settings).is_err() {
             return Output::error("configuration", 2);
         }
-        let provider = match notion_knowledge_retrieval::embedder::load_configured_embedder(
-            &notion_knowledge_retrieval::embedder::EmbedderConfig::LocalQwen {
+        let provider = notion_knowledge_retrieval::embedder::deferred_configured_embedder(
+            notion_knowledge_retrieval::embedder::EmbedderConfig::LocalQwen {
                 assets: settings.assets.clone(),
             },
-            None,
-        )
-        .await
-        {
-            Ok(p) => p,
-            Err(_) => return Output::error("model_configuration", 2),
-        };
+        );
         execute(command, &settings, &state, scope, source, provider, stop).await
     }
 
@@ -304,8 +298,28 @@ pub mod runtime {
         let page = PageDeadline {
             timeout_seconds: settings.timeout_seconds,
         };
+        let initialized = tokio::time::timeout(
+            Duration::from_secs(settings.timeout_seconds),
+            runtime
+                .chunks()
+                .ensure_text_projection(lease.clone(), clock.clone()),
+        )
+        .await;
+        if !matches!(initialized, Ok(Ok(()))) {
+            attempt.cancel();
+            let _ = runtime.coordinator.drain_owned().await;
+            let _ = runtime
+                .coordinator
+                .state()
+                .release_lease(&lease, now_ms() / 1000);
+            return Output::error("projection_storage_unavailable", 3);
+        }
         // A single-page sync never proves the whole walk complete.
-        let command_is_page = matches!(command, Command::Retry(_));
+        let projection_page = match &command {
+            Command::Retry(page) => Some(page.clone()),
+            _ => None,
+        };
+        let command_is_page = projection_page.is_some();
         let result = {
             let runtime = &runtime;
             let lease = &mut lease;
@@ -352,6 +366,35 @@ pub mod runtime {
                 result = work => Some(result),
             }
         };
+        let semantic_projection = if matches!(result, Some(Ok(_))) {
+            // A one-shot operator command has no resident worker to drain its
+            // semantic jobs. Run a separate bounded local phase after the
+            // source result, with model errors recorded in the projection.
+            let projection = project_local(
+                &runtime,
+                settings,
+                &mut lease,
+                projection_page.as_deref(),
+                &stop,
+            );
+            match tokio::time::timeout(
+                Duration::from_secs(settings.inventory_timeout_seconds),
+                Box::pin(projection),
+            )
+            .await
+            {
+                Ok(Ok(false)) => "settled",
+                Ok(Ok(true)) => "deferred",
+                Ok(Err(_)) => "deferred",
+                Err(_) => {
+                    attempt.cancel();
+                    let _ = runtime.coordinator.drain_owned().await;
+                    "deferred"
+                }
+            }
+        } else {
+            "deferred"
+        };
         if !matches!(result, Some(Ok(_))) {
             // A submitted owned effect still holds its guard: drain it before
             // releasing the lease or exiting.
@@ -381,12 +424,59 @@ pub mod runtime {
                         "scanned":t.inventory, "changed":t.indexed, "deleted":t.removed,
                         "unchanged":t.unchanged, "skipped":t.skipped, "errors":errors,
                         "permanent":t.permanent, "held":t.held, "complete":t.complete,
-                        "drift":t.drift}),
+                        "semantic_projection":semantic_projection, "drift":t.drift}),
                     exit: if clean { 0 } else { 3 },
                 }
             }
         }
     }
+    async fn project_local(
+        runtime: &IndexRuntime,
+        settings: &WorkerSettings,
+        lease: &mut notion_knowledge_core::reconciliation::Lease,
+        selected_page: Option<&str>,
+        stop: &CancellationToken,
+    ) -> Result<bool, &'static str> {
+        let table = runtime.chunks();
+        let timeout = Duration::from_secs(settings.timeout_seconds);
+        let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| now_ms() / 1000);
+        loop {
+            let now = clock();
+            let page = match selected_page {
+                Some(page) => page.to_owned(),
+                None => match table
+                    .next_semantic_retry(now)
+                    .map_err(|_| "semantic queue unavailable")?
+                {
+                    Some(page) => page,
+                    None => break,
+                },
+            };
+            *lease = runtime
+                .coordinator
+                .state()
+                .renew_lease(lease, now, settings.timeout_seconds as i64 + 30)
+                .map_err(|_| "semantic writer unavailable")?;
+            let prepared = tokio::select! { biased;
+                _ = stop.cancelled() => return Err("semantic projection cancelled"),
+                result = table.prepare_semantic(&page, runtime.provider.as_ref(), now, timeout) =>
+                    result.map_err(|_| "semantic preparation unavailable")?,
+            };
+            if let Some(prepared) = prepared {
+                table
+                    .complete_semantic(prepared, lease.clone(), clock.clone())
+                    .await
+                    .map_err(|_| "semantic publication unavailable")?;
+            }
+            if selected_page.is_some() {
+                break;
+            }
+        }
+        table
+            .has_pending_semantic(selected_page)
+            .map_err(|_| "semantic queue unavailable")
+    }
+
     fn schedule_command(runtime: &IndexRuntime, command: Command) -> Output {
         use crate::scheduled_reconciliation::runtime::ID;
         let coordinator = &runtime.coordinator;

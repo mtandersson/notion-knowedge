@@ -474,6 +474,10 @@ impl KnowledgeServer {
                 ))
             }
             "knowledge_search" => {
+                use notion_knowledge_core::search::{
+                    LexicalQuery, RetrievalPath, SearchFailure, SearchFutureWithFailure,
+                    SemanticQuery,
+                };
                 let input: search::SearchRequest =
                     serde_json::from_value(serde_json::Value::Object(arguments)).map_err(|_| {
                         rmcp::ErrorData::invalid_params("invalid knowledge_search arguments", None)
@@ -550,31 +554,35 @@ impl KnowledgeServer {
                 }
                 let limit = usize::from(input.limit);
                 let single_path = match input.mode {
-                    search::SearchMode::Semantic => {
-                        Some(notion_knowledge_core::search::RetrievalPath::Semantic)
-                    }
-                    search::SearchMode::Lexical => {
-                        Some(notion_knowledge_core::search::RetrievalPath::Lexical)
-                    }
+                    search::SearchMode::Semantic => Some(RetrievalPath::Semantic),
+                    search::SearchMode::Lexical => Some(RetrievalPath::Lexical),
                     search::SearchMode::Hybrid => None,
                 };
                 if context.ct.is_cancelled() {
                     return Ok(error("retrieval_unavailable: search cancelled"));
                 }
-                let search = match input.mode {
+                let query = SemanticQuery {
+                    query: input.query,
+                    limit,
+                    page_ids,
+                    root_page_ids,
+                    metadata,
+                };
+                let lexical_fallback = if matches!(input.mode, search::SearchMode::Hybrid) {
+                    self.lexical_search
+                        .as_ref()
+                        .map(|adapter| (adapter, LexicalQuery::from(query.clone())))
+                } else {
+                    None
+                };
+                let search: SearchFutureWithFailure<'_> = match input.mode {
                     search::SearchMode::Semantic => {
                         let Some(adapter) = &self.search else {
                             return Ok(error(
                                 "mode_unavailable: semantic search adapter is not configured; no search was performed",
                             ));
                         };
-                        adapter.search(notion_knowledge_core::search::SemanticQuery {
-                            query: input.query,
-                            limit,
-                            page_ids,
-                            root_page_ids,
-                            metadata,
-                        })
+                        adapter.search_with_failure(query)
                     }
                     search::SearchMode::Lexical => {
                         let Some(adapter) = &self.lexical_search else {
@@ -582,13 +590,7 @@ impl KnowledgeServer {
                                 "mode_unavailable: lexical search adapter is not configured; no search was performed",
                             ));
                         };
-                        adapter.search(notion_knowledge_core::search::LexicalQuery {
-                            query: input.query,
-                            limit,
-                            page_ids,
-                            root_page_ids,
-                            metadata,
-                        })
+                        Box::pin(async move { Ok(adapter.search(query.into()).await?) })
                     }
                     search::SearchMode::Hybrid => {
                         let Some(adapter) = &self.hybrid_search else {
@@ -596,23 +598,25 @@ impl KnowledgeServer {
                                 "mode_unavailable: hybrid search is not configured; no search was performed",
                             ));
                         };
-                        adapter.search(notion_knowledge_core::search::SemanticQuery {
-                            query: input.query,
-                            limit,
-                            page_ids,
-                            root_page_ids,
-                            metadata,
-                        })
+                        adapter.search_with_failure(query)
                     }
                 };
                 // Reads may stop promptly; mutation/receipt execution is kept
                 // outside this cancellation boundary.
                 let results = tokio::select! { biased;
-                    _ = context.ct.cancelled() => Err(notion_knowledge_core::search::SearchUnavailable),
-                    result = search => result,
+                    _ = context.ct.cancelled() => Err(SearchFailure::Retrieval),
+                    result = async {
+                        let result = search.await;
+                        if matches!(result, Err(SearchFailure::EmbeddingUnavailable))
+                            && let Some((adapter, query)) = lexical_fallback
+                        {
+                            return Ok((adapter.search(query).await?, true));
+                        }
+                        Ok((result?, false))
+                    } => result,
                 };
                 match results {
-                    Ok(mut results)
+                    Ok((mut results, semantic_unavailable))
                         if results.len() <= limit
                             && results.iter().all(|hit| {
                                 hit.score.is_finite()
@@ -641,15 +645,18 @@ impl KnowledgeServer {
                                 ));
                             }
                         }
+                        let single_path = if semantic_unavailable {
+                            Some(RetrievalPath::Lexical)
+                        } else {
+                            single_path
+                        };
                         for hit in &mut results {
                             if let Some(path) = single_path {
                                 hit.matched_paths = vec![path];
                             }
                             if hit.normalize_lexical_matches().is_err()
                                 || (!hit.lexical_matches.is_empty()
-                                    && !hit.matched_paths.contains(
-                                        &notion_knowledge_core::search::RetrievalPath::Lexical,
-                                    ))
+                                    && !hit.matched_paths.contains(&RetrievalPath::Lexical))
                             {
                                 return Ok(error("retrieval_unavailable: invalid search evidence"));
                             }
@@ -665,7 +672,10 @@ impl KnowledgeServer {
                                 "result_too_large: search results exceed the output budget; request fewer hits",
                             ));
                         }
-                        let output = serde_json::json!({"results": results});
+                        let mut output = serde_json::json!({"results": results});
+                        if semantic_unavailable {
+                            output["semantic_status"] = "unavailable".into();
+                        }
                         if !output_fits_budget(&output) {
                             return Ok(error(
                                 "result_too_large: search results exceed the output budget; request fewer hits",
@@ -676,6 +686,9 @@ impl KnowledgeServer {
                         search_metric.succeed();
                         Ok(result.into())
                     }
+                    Err(SearchFailure::EmbeddingUnavailable) => Ok(error(
+                        "semantic_unavailable: the embedding model could not process this query",
+                    )),
                     _ => Ok(error(
                         "retrieval_unavailable: selected retrieval dependency failed; no results returned",
                     )),
