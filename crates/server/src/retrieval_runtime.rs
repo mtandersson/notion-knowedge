@@ -263,6 +263,11 @@ pub(crate) async fn attach_existing(
         .and_authoritative_scope(crate::inventory_membership::from_config(config)?, scope)
         .map(|h| {
             h.and_fresh_source(source)
+                .and_fresh_page_cache(Arc::new(
+                    notion_knowledge_retrieval::page_documents::PageDocuments::new(
+                        coordinator.clone(),
+                    ),
+                ))
                 .and_search(adapters.semantic)
                 .and_lexical_search(adapters.lexical)
                 .and_hybrid_search(adapters.hybrid)

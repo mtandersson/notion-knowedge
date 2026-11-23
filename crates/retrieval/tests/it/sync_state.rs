@@ -236,6 +236,9 @@ fn metadata_identity_migration_preserves_checkpoints_without_fabricating_identit
     drop(store);
     let connection = Connection::open(db.path()).unwrap();
     connection
+        .execute_batch(include_str!("fixtures/remove_source_cache_schema.sql"))
+        .unwrap();
+    connection
         .execute_batch(include_str!("fixtures/remove_schedule_schema.sql"))
         .unwrap();
     connection
@@ -262,6 +265,8 @@ fn schema_22_drops_populated_plan_tables_and_keeps_failure_history() {
     drop(SqliteSyncStateStore::open(db.path()).unwrap());
     let c = Connection::open(db.path()).unwrap();
     c.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+    c.execute_batch(include_str!("fixtures/remove_source_cache_schema.sql"))
+        .unwrap();
     // Recreate a populated schema-21 database: plan tables plus their triggers.
     c.execute_batch(include_str!(
         "../../migrations/0010_reconciliation_plan.sql"

@@ -647,6 +647,11 @@ impl IndexRuntime {
             revision: String::new(),
         };
         let state = self.coordinator.state();
+        // The source signal fence is taken before discovery and before any
+        // prefetched Markdown reads. A later event cannot be cleared by this run.
+        let watermark = state
+            .source_signal_watermark()
+            .map_err(|_| "source cache freshness unavailable")?;
         let since = match &mode {
             SyncMode::Incremental => state
                 .inventory_high_water()
@@ -668,17 +673,25 @@ impl IndexRuntime {
             let (hits, complete) = match mode {
                 SyncMode::Page(page) => {
                     match self.source.page_hit(&page).await {
-                        Ok(hit) => (hit.into_iter().collect(), true),
-                        // The integration callback's own retrieve confirms the page
-                        // is gone or revoked: remove it if indexed. Without this, a
-                        // setup that never walks would keep it searchable.
+                        Ok(hit) => {
+                            if hit.is_none() {
+                                self.invalidate_source(&page.0, true)?;
+                            }
+                            (hit.into_iter().collect(), true)
+                        }
+                        // An authenticated page lookup confirms it is gone or
+                        // revoked. Invalidate any dependent cached descendants.
                         Err(e) if notion_knowledge_core::discovery::inaccessible(e.kind) => {
+                            self.invalidate_source(&page.0, true)?;
                             return Ok(Discovered::Hits(HitSync {
                                 removals: vec![page.0.clone()],
                                 ..HitSync::default()
                             }));
                         }
-                        Err(e) => return Err(SyncError::source(&e)),
+                        Err(e) => {
+                            self.invalidate_source(&page.0, false)?;
+                            return Err(SyncError::source(&e));
+                        }
                     }
                 }
                 _ => {
@@ -816,6 +829,7 @@ impl IndexRuntime {
                 let deadline = std::time::Duration::from_secs(settings.timeout_seconds);
                 let embedding = SyncEmbedding(self.provider.as_ref());
                 let pending_targets = std::sync::Mutex::new(Vec::new());
+                let source_published = std::sync::atomic::AtomicBool::new(false);
                 let end;
                 let result = match work {
                     PageWork::Failed(error) => Ok(Err(error)),
@@ -838,6 +852,15 @@ impl IndexRuntime {
                             };
                             *pending_targets.lock().expect("targets") =
                                 prefetched.unresolved_targets();
+                            self.handler
+                                .publish_prefetched_document(
+                                    &prefetched,
+                                    watermark,
+                                    lease.clone(),
+                                    clock.clone(),
+                                )
+                                .await?;
+                            source_published.store(true, std::sync::atomic::Ordering::SeqCst);
                             let result = timings
                                 .scope(
                                     ApiPhase::Commit,
@@ -866,6 +889,9 @@ impl IndexRuntime {
                         .drain_owned()
                         .await
                         .map_err(|_| "cache sync drain failed")?;
+                }
+                if !source_published.load(std::sync::atomic::Ordering::SeqCst) {
+                    self.invalidate_source(&page.0, false)?;
                 }
                 match result {
                     Ok(Ok(result)) => {
@@ -1000,7 +1026,7 @@ impl IndexRuntime {
             Discovered::Walk(walk) => {
                 // Read the previous inventory before this walk replaces it.
                 let held = if walk.authoritative() {
-                    self.held_removals(&walk)?
+                    self.held_removals(&walk).await?
                 } else {
                     Default::default()
                 };
@@ -1012,6 +1038,13 @@ impl IndexRuntime {
                 totals.skipped += walk.skipped.len() as u64;
                 totals.complete = walk.authoritative();
                 if walk.authoritative() {
+                    state
+                        .record_source_inventory_watermark(
+                            self.coordinator.binding().workspace(),
+                            self.coordinator.binding().scope(),
+                            watermark,
+                        )
+                        .map_err(|_| "source cache freshness unavailable")?;
                     totals.removed =
                         Box::pin(self.remove_unreached(settings, lease, &walk, &held, &base))
                             .await?;
@@ -1158,6 +1191,7 @@ impl IndexRuntime {
                         Err(e) => return Err(SyncError::source(&e)),
                     };
                 if confirmed {
+                    self.invalidate_source(&hit.page_id, true)?;
                     entry.in_trash = true;
                     entry.last_edited_time = hit.last_edited_time.clone();
                     out.skipped.push(SkippedContent {
@@ -1184,6 +1218,7 @@ impl IndexRuntime {
                 continue;
             }
             let Some((parent, root)) = self.place(&hit, previous, &sent)? else {
+                self.invalidate_source(&hit.page_id, true)?;
                 out.unplaced += 1;
                 continue;
             };
@@ -1194,14 +1229,19 @@ impl IndexRuntime {
             {
                 Ok(Some(page)) => page,
                 Ok(None) => {
+                    self.invalidate_source(&hit.page_id, true)?;
                     out.unplaced += 1;
                     continue;
                 }
                 Err(e) if inaccessible(e.kind) => {
+                    self.invalidate_source(&hit.page_id, true)?;
                     out.unplaced += 1;
                     continue;
                 }
-                Err(e) => return Err(SyncError::source(&e)),
+                Err(e) => {
+                    self.invalidate_source(&hit.page_id, false)?;
+                    return Err(SyncError::source(&e));
+                }
             };
             out.entries.push(page.entry.clone());
             if let Some(reason) = page.skip {
@@ -1281,19 +1321,49 @@ impl IndexRuntime {
         })
     }
 
+    fn invalidate_source(&self, page: &str, affects_subtree: bool) -> Result<(), SyncError> {
+        self.coordinator
+            .state()
+            .invalidate_source_page(
+                self.coordinator.binding().workspace(),
+                page,
+                affects_subtree,
+            )
+            .map_err(|_| "source cache freshness unavailable".into())
+    }
+
+    async fn owned_source_and_search_pages(
+        &self,
+    ) -> Result<std::collections::BTreeSet<String>, &'static str> {
+        let mut candidates: std::collections::BTreeSet<_> = self
+            .coordinator
+            .owned_page_ids()
+            .map_err(|_| "cache sync state unavailable")?
+            .into_iter()
+            .collect();
+        candidates.extend(
+            notion_knowledge_retrieval::page_documents::PageDocuments::new(
+                self.coordinator.clone(),
+            )
+            .page_ids()
+            .await
+            .map_err(|_| "source cache unavailable")?,
+        );
+        Ok(candidates)
+    }
+
     /// Indexed pages a complete walk did not reach that sit under a page
     /// newly answering 404/403. A spurious 404 then costs one walk of
     /// staleness instead of the subtree; the next walk confirms and removes.
-    fn held_removals(
+    async fn held_removals(
         &self,
         walk: &notion_knowledge_notion::walk::TreeWalk,
     ) -> Result<std::collections::BTreeSet<String>, &'static str> {
         use notion_knowledge_core::discovery::SkipReason;
         let readable = walk.readable();
         let candidates: Vec<_> = self
-            .coordinator
-            .owned_page_ids()
-            .map_err(|_| "cache sync state unavailable")?
+            .owned_source_and_search_pages()
+            .await?
             .into_iter()
             .filter(|page| !readable.contains(page))
             .collect();
@@ -1322,9 +1392,8 @@ impl IndexRuntime {
     ) -> Result<u64, &'static str> {
         let readable = walk.readable();
         let unreached: Vec<_> = self
-            .coordinator
-            .owned_page_ids()
-            .map_err(|_| "cache sync state unavailable")?
+            .owned_source_and_search_pages()
+            .await?
             .into_iter()
             .filter(|page| !readable.contains(page) && !held.contains(page))
             .collect();
@@ -1442,13 +1511,10 @@ impl IndexRuntime {
         let state = self.coordinator.state();
         let ttl = settings.timeout_seconds as i64 + 30;
         for page in pages {
-            if !state
+            let indexed = state
                 .page_state(page)
                 .map_err(|_| "cache sync state unavailable")?
-                .is_some_and(|state| !state.is_tombstone())
-            {
-                continue;
-            }
+                .is_some_and(|state| !state.is_tombstone());
             *lease = state
                 .renew_lease(lease, now_ms() / 1000, ttl)
                 .map_err(|_| "cache sync lease unavailable")?;
@@ -1467,15 +1533,30 @@ impl IndexRuntime {
                     claim()
                 }
             });
+            let documents = notion_knowledge_retrieval::page_documents::PageDocuments::new(
+                self.coordinator.clone(),
+            );
+            let page = notion_knowledge_core::backend::PageId(page.clone());
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(settings.timeout_seconds),
-                Box::pin(self.handler.remove_unreached(
-                    &notion_knowledge_core::backend::PageId(page.clone()),
-                    &operation,
-                    &SyncEmbedding(self.provider.as_ref()),
-                    lease.clone(),
-                    clock,
-                )),
+                async {
+                    documents
+                        .remove(page.clone(), lease.clone(), clock.clone())
+                        .await
+                        .map_err(|_| "source cache removal failed")?;
+                    if indexed {
+                        Box::pin(self.handler.remove_unreached(
+                            &page,
+                            &operation,
+                            &SyncEmbedding(self.provider.as_ref()),
+                            lease.clone(),
+                            clock,
+                        ))
+                        .await
+                        .map_err(|_| "cache sync removal failed")?;
+                    }
+                    Ok::<(), &'static str>(())
+                },
             )
             .await;
             expired.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1486,7 +1567,7 @@ impl IndexRuntime {
             result
                 .map_err(|_| "cache sync removal timeout")?
                 .map_err(|_| "cache sync removal failed")?;
-            removed += 1;
+            removed += u64::from(indexed);
         }
         Ok(removed)
     }

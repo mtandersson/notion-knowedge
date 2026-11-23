@@ -1,76 +1,23 @@
-# Optional authoritative source verification
+# Source expansion and whole-page reads
 
-`knowledge_get` accepts optional `freshness: "indexed" | "fresh"`. Omission
-preserves indexed expansion. A caller who sees an old search result's
-`last_edited_time`, or needs authoritative content now, requests `fresh` using
-the stable page or chunk reference already returned by retrieval:
+`knowledge_get` accepts `freshness: "indexed" | "fresh"`. Indexed expansion is the default. An indexed page or chunk reference expands stored search text within the configured root. A fresh read accepts an explicit lowercase, hyphenated Notion page UUID or an indexed chunk reference and returns a whole-page view within the requested response budget.
+
+A fresh request can use the complete canonical Markdown published by synchronization. The stored document must agree with the inventory placement and latest observed edit timestamp, with no newer observed source signal. A verified change webhook or admitted local mutation invalidates that page even when Notion reports the same edit timestamp. An observed ancestor move or removal invalidates dependent cached pages until an authoritative walk settles the placement. Sync publishes whole-page text independently of embedding success.
+
+A missing, stale or unverifiable local copy causes a verified Notion read. For an explicit page UUID, Notion's integration permissions govern access to this live read. The configured roots govern the local corpus and resolution of chunk references. A live direct read outside that corpus leaves local provenance absent and does not index the page.
+
+For example, to read a particular page:
 
 ```json
 {
-  "refs": [{"kind": "chunk", "id": "stable-indexed-chunk"}],
+  "refs": [{"kind": "page", "id": "11111111-1111-1111-1111-111111111111"}],
   "max_chars": 4096,
   "freshness": "fresh"
 }
 ```
 
-The handler first resolves every reference through the configured index and
-validates the server-owned allowed roots, page identity, chunk lineage and
-output budget. Arbitrary unindexed IDs and unauthorized references cannot use
-fresh mode to bypass this gate. Then the configured read-only `NotionRead`
-backend reads authoritative Markdown by the resolved stable **page ID**.
-The existing Notion client implements this capability. Compose it with
-`KnowledgeServer::and_fresh_source`; the default bootstrap has no authoritative
-backend configured and reports that explicitly.
+Fresh reads return `content_scope: "page"` and `read_from: "cache" | "notion"`. Live reads include `refreshed_last_edited_time`. Indexed provenance is present when available, and `index_stale` compares that edit timestamp with the returned page timestamp. A cached document can supply its known root even when lexical/vector publication has failed. Cached Markdown uses canonical media references without Notion-issued expiring access credentials.
 
-Fresh mode returns **whole-page content**, including when a chunk reference was
-the indexed anchor. `content_scope: "page"` makes this explicit; indexed mode
-uses `content_scope: "indexed"`. Original reference and indexed chunk IDs remain
-as anchor lineage, while fresh heading paths are empty and fresh block IDs are
-omitted because the old section may have moved or disappeared. Fresh title and
-citation URL come from authoritative metadata. Text remains untrusted data,
-never instructions. The existing total `max_chars` budget applies in request
-order with Unicode character counting and an explicit `truncated` flag.
+One logical source read per unique page verifies metadata around the Markdown fetch. At most one full body is buffered for a multi-page request. Disclosed text respects the existing total Unicode character and response-size budgets, with a `truncated` flag. If a page is inaccessible, its data changed during verification or its local evidence becomes stale during the request, the tool fails the complete request. Errors omit raw upstream bodies and credentials.
 
-Every provenance object contains `indexed_last_edited_time`, from the persisted
-source metadata. A successful fresh read additionally contains
-`refreshed_last_edited_time` and `index_stale`; the latter compares the indexed
-and authoritative edit timestamps. Unchanged pages still carry both timestamps
-and `index_stale: false`. Indexed responses omit these refresh-only fields.
-`index_stale` concerns the page edit timestamp; it is not a claim that every
-indexed chunk is semantically different.
-
-All references resolving to the same page share one content read and metadata
-verification within a call. After the content read, the service fetches metadata
-again and rejects changes rather than pairing content with an inconsistent
-freshness claim. This detects edits/archive changes during the read; it cannot
-promise that the page will never change after the final verification, nor does
-it provide an atomic snapshot across different pages.
-
-Missing/out-of-scope indexed references keep the same public inaccessible
-error. Missing or permission-denied authoritative pages and archived pages
-also fail safely. An unconfigured or failing Notion backend returns
-`notion_unavailable`; concurrent metadata changes return `notion_conflict`.
-Failures return neither partial fresh content nor a silent indexed fallback.
-No upstream content, credentials or raw errors appear in failure messages.
-
-Authorization here uses the configured indexed root provenance. `NotionRead`
-metadata does not expose authoritative ancestry, so a relocation since indexing
-cannot be detected by this mode. Root membership must be refreshed through the
-scoped discovery/index lifecycle; fresh mode does not establish new root access.
-
-Fresh reads have no index or Notion write capability. They do not persist new
-content, timestamps, fingerprints or embeddings, and do not schedule an implicit
-reindex. Subsequent indexed calls continue to reflect the indexed snapshot.
-
-The [versioned stale-index evaluation matrix](../eval/retrieval/README.md#stale-index-and-authoritative-read-evaluation-101) exercises
-explicit and default indexed reads, newer and unchanged authoritative content,
-unavailable/archived/concurrently edited sources, and subsequent indexed
-read-back. It asserts per-scenario timestamp provenance and that an
-authoritative read never silently mutates the derived index. These
-synthetic scenarios test behavior, not production reconciliation latency.
-
-Verification uses credential-free MCP protocol fixtures for fresh/stale and
-unchanged pages, indexed default compatibility, stable-ID mapping, Unicode total
-bounds, repeated-page reads, concurrent edits, invalid metadata, unavailable
-backends and root rejection. Shared HTTP/stdio catalog checks assert the same
-freshness input and output contract.
+A sharing change that produces no event takes effect for cached reads when synchronization observes it. There is no separate freshness TTL. The read-only path neither updates Notion nor admits local indexing work.

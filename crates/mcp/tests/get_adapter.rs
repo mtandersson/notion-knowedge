@@ -410,6 +410,7 @@ async fn fresh_reads_by_resolved_stable_page_id_and_reports_stale_or_unchanged_i
         let source = &response["result"]["structuredContent"]["sources"][0];
         assert_eq!(source["text"], "Färsk 🥖 authoritative page");
         assert_eq!(source["content_scope"], "page");
+        assert_eq!(source["read_from"], "notion");
         assert_eq!(
             source["reference"],
             json!({"kind":"chunk","id":"stable-chunk"})
@@ -463,6 +464,12 @@ async fn default_and_explicit_indexed_reads_do_not_call_notion_or_claim_refresh(
             "Expanded content for 11111111-1111-1111-1111-111111111111"
         );
         assert_eq!(source["content_scope"], "indexed");
+        assert_eq!(source["provenance"]["root_page_id"], scope_fixture::ROOT);
+        assert_eq!(
+            source["provenance"]["indexed_last_edited_time"],
+            "2026-10-07T11:00:00Z"
+        );
+        assert!(source.get("read_from").is_none());
         assert!(
             source["provenance"]
                 .get("refreshed_last_edited_time")
@@ -541,7 +548,45 @@ async fn fresh_failures_are_explicit_and_never_fall_back_to_indexed_content() {
 }
 
 #[tokio::test]
-async fn fresh_cannot_bypass_indexed_identity_and_root_authorization() {
+async fn fresh_page_uuid_uses_notion_permissions_without_an_indexed_anchor() {
+    let page = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    let args = json!({
+        "refs":[{"kind":"page","id":page}], "max_chars":128, "freshness":"fresh"
+    });
+    let fresh = fresh_fixture("2026-10-07T11:30:00Z", FreshBehavior::Valid);
+    let response = exchange_with_backend(
+        indexed_fixture(Behavior::Missing),
+        args.clone(),
+        Some(fresh.clone()),
+    )
+    .await;
+    let source = &response["result"]["structuredContent"]["sources"][0];
+    assert_eq!(source["read_from"], "notion");
+    assert_eq!(source["provenance"]["page_id"], page);
+    assert_eq!(source["provenance"]["chunk_ids"], json!([]));
+    assert!(source["provenance"].get("root_page_id").is_none());
+    assert!(
+        source["provenance"]
+            .get("indexed_last_edited_time")
+            .is_none()
+    );
+    assert_eq!(fresh.calls.lock().unwrap().len(), 2);
+
+    let denied = exchange_with_backend(
+        indexed_fixture(Behavior::Missing),
+        args,
+        Some(fresh_fixture(
+            "2026-10-07T11:30:00Z",
+            FreshBehavior::Failed(BackendErrorKind::PermissionDenied),
+        )),
+    )
+    .await;
+    assert_eq!(denied["result"]["isError"], true);
+    assert!(denied["result"]["structuredContent"].is_null());
+}
+
+#[tokio::test]
+async fn fresh_chunk_requires_an_authorized_anchor_and_page_ref_requires_a_uuid() {
     for behavior in [
         Behavior::Missing,
         Behavior::OutOfScope,
@@ -552,12 +597,23 @@ async fn fresh_cannot_bypass_indexed_identity_and_root_authorization() {
         let response = exchange_with_backend(
             indexed_fixture(behavior),
             json!({
-                "refs":[{"kind":"page","id":"arbitrary-page"}], "max_chars":128, "freshness":"fresh"
+                "refs":[{"kind":"chunk","id":"untrusted-chunk"}], "max_chars":128, "freshness":"fresh"
             }),
             Some(fresh.clone()),
         )
         .await;
         assert_eq!(response["result"]["isError"], true);
+        assert!(fresh.calls.lock().unwrap().is_empty());
+
+        let malformed = exchange_with_backend(
+            indexed_fixture(behavior),
+            json!({
+                "refs":[{"kind":"page","id":"arbitrary-page"}], "max_chars":128, "freshness":"fresh"
+            }),
+            Some(fresh.clone()),
+        )
+        .await;
+        assert_eq!(malformed["error"]["code"], -32602);
         assert!(fresh.calls.lock().unwrap().is_empty());
     }
 }

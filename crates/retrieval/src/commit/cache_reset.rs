@@ -128,12 +128,16 @@ impl IndexCommitCoordinator {
             store
                 .reset_retrieval_cache(&lease, now)
                 .map_err(|_| CommitError::Unavailable)?;
-            let table = index.join("chunks.lance");
-            if table.symlink_metadata().is_ok() {
-                if table.symlink_metadata().map_err(io)?.is_dir() {
-                    fs::remove_dir_all(&table).map_err(io)?;
-                } else {
-                    fs::remove_file(&table).map_err(io)?;
+            for table in [
+                index.join("chunks.lance"),
+                index.join("page_documents.lance"),
+            ] {
+                if table.symlink_metadata().is_ok() {
+                    if table.symlink_metadata().map_err(io)?.is_dir() {
+                        fs::remove_dir_all(&table).map_err(io)?;
+                    } else {
+                        fs::remove_file(&table).map_err(io)?;
+                    }
                 }
             }
             for path in [

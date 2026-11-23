@@ -39,6 +39,14 @@ fn parent_columns(parent: &InventoryParent) -> ParentColumns<'_> {
     }
 }
 
+#[cfg(any(test, all(unix, feature = "local-lancedb")))]
+pub(crate) fn source_parent_key(parent: &InventoryParent) -> String {
+    // Use the same explicit placement fields as the inventory database.
+    // InventoryParent::Page is an internally tagged newtype and does not
+    // itself support serialization of its string payload.
+    serde_json::json!(parent_columns(parent)).to_string()
+}
+
 fn read_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<InventoryEntry>> {
     let kind: String = row.get(1)?;
     let parent_id: Option<String> = row.get(2)?;
@@ -79,6 +87,30 @@ fn entry(db: &Connection, page_id: &str) -> Result<Option<InventoryEntry>, SyncS
     .map_or(Ok(None), |entry| {
         entry.ok_or(SyncStateError::CorruptState).map(Some)
     })
+}
+
+fn lineage(db: &Connection, page_id: &str) -> Result<Option<Vec<InventoryEntry>>, SyncStateError> {
+    let mut lineage = Vec::new();
+    let mut seen = BTreeSet::from([page_id.to_owned()]);
+    let mut current = page_id.to_owned();
+    loop {
+        let Some(next) = entry(db, &current)? else {
+            return Ok(None);
+        };
+        let parent = match &next.parent {
+            InventoryParent::Root => {
+                lineage.push(next);
+                return Ok(Some(lineage));
+            }
+            InventoryParent::Page(id) => id.clone(),
+            InventoryParent::DataSource { owner_page_id, .. } => owner_page_id.clone(),
+        };
+        lineage.push(next);
+        if !seen.insert(parent.clone()) || lineage.len() > MAX_CHAIN {
+            return Ok(None);
+        }
+        current = parent;
+    }
 }
 
 /// Classify one entry against its stored row without writing it.
@@ -308,27 +340,184 @@ impl SqliteSyncStateStore {
         page_id: &str,
     ) -> Result<Option<Vec<InventoryEntry>>, SyncStateError> {
         let db = self.lock_connection()?;
-        let mut lineage = Vec::new();
-        let mut seen = BTreeSet::from([page_id.to_owned()]);
-        let mut current = page_id.to_owned();
-        loop {
-            let Some(next) = entry(&db, &current)? else {
-                return Ok(None);
-            };
-            let parent = match &next.parent {
-                InventoryParent::Root => {
-                    lineage.push(next);
-                    return Ok(Some(lineage));
-                }
-                InventoryParent::Page(id) => id.clone(),
-                InventoryParent::DataSource { owner_page_id, .. } => owner_page_id.clone(),
-            };
-            lineage.push(next);
-            if !seen.insert(parent.clone()) || lineage.len() > MAX_CHAIN {
-                return Ok(None);
-            }
-            current = parent;
+        lineage(&db, page_id)
+    }
+
+    /// A durable source-change fence observed before starting Notion reads.
+    pub fn source_signal_watermark(&self) -> Result<i64, SyncStateError> {
+        self.lock_connection()?
+            .query_row(
+                "SELECT sequence FROM source_signal_clock WHERE singleton = 1",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(map_sqlite_error)
+    }
+
+    /// Parent-chain changes are settled by a later successful authoritative
+    /// walk, not by a targeted read of one of that parent's children.
+    pub fn record_source_inventory_watermark(
+        &self,
+        workspace: &str,
+        scope: &str,
+        watermark: i64,
+    ) -> Result<(), SyncStateError> {
+        self.lock_connection()?
+            .execute(
+                "INSERT INTO source_inventory_watermarks VALUES (?1, ?2, ?3)
+                 ON CONFLICT(workspace_id, scope_id) DO UPDATE
+                 SET sequence = MAX(sequence, excluded.sequence)",
+                params![workspace, scope, watermark],
+            )
+            .map_err(map_sqlite_error)?;
+        Ok(())
+    }
+
+    /// Mark a known source change or failed source read independently of embeddings.
+    pub fn invalidate_source_page(
+        &self,
+        workspace: &str,
+        page: &str,
+        affects_subtree: bool,
+    ) -> Result<(), SyncStateError> {
+        let mut db = self.lock_connection()?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_sqlite_error)?;
+        tx.execute(
+            "UPDATE source_signal_clock SET sequence = sequence + 1 WHERE singleton = 1",
+            [],
+        )
+        .map_err(map_sqlite_error)?;
+        tx.execute(
+            "INSERT INTO source_change_signals
+             SELECT ?1, 'page', ?2, sequence, CASE WHEN ?3 THEN sequence ELSE 0 END
+             FROM source_signal_clock WHERE singleton = 1
+             ON CONFLICT(workspace_id, entity_type, entity_id) DO UPDATE
+             SET sequence = excluded.sequence,
+                 subtree_sequence = MAX(subtree_sequence, excluded.subtree_sequence)",
+            params![workspace, page, affects_subtree],
+        )
+        .map_err(map_sqlite_error)?;
+        tx.commit().map_err(map_sqlite_error)
+    }
+
+    #[cfg(any(test, all(unix, feature = "local-lancedb")))]
+    pub(crate) fn set_source_document_publication(
+        &self,
+        workspace: &str,
+        scope: &str,
+        page: &str,
+        publication: Option<&str>,
+    ) -> Result<(), SyncStateError> {
+        let db = self.lock_connection()?;
+        if let Some(publication) = publication {
+            db.execute(
+                "INSERT INTO source_document_publications VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(workspace_id, scope_id, page_id) DO UPDATE
+                 SET publication = excluded.publication",
+                params![workspace, scope, page, publication],
+            )
+        } else {
+            db.execute(
+                "DELETE FROM source_document_publications
+                 WHERE workspace_id = ?1 AND scope_id = ?2 AND page_id = ?3",
+                params![workspace, scope, page],
+            )
         }
+        .map_err(map_sqlite_error)?;
+        Ok(())
+    }
+
+    /// Decide freshness from one SQLite read snapshot across inventory and
+    /// accepted source signals. A failed vector publication does not invalidate
+    /// an independently published source document.
+    #[cfg(any(test, all(unix, feature = "local-lancedb")))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn source_document_is_current(
+        &self,
+        workspace: &str,
+        scope: &str,
+        page: &str,
+        root: &str,
+        parent: &str,
+        revision: &str,
+        watermark: i64,
+        publication: &str,
+    ) -> Result<bool, SyncStateError> {
+        let mut db = self.lock_connection()?;
+        let tx = db.transaction().map_err(map_sqlite_error)?;
+        let published = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM source_document_publications
+             WHERE workspace_id = ?1 AND scope_id = ?2 AND page_id = ?3 AND publication = ?4)",
+                params![workspace, scope, page, publication],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(map_sqlite_error)?;
+        if !published {
+            return Ok(false);
+        }
+        let Some(chain) = lineage(&tx, page)? else {
+            return Ok(false);
+        };
+        let Some(first) = chain.first() else {
+            return Ok(false);
+        };
+        if first.root_id != root
+            || first.last_edited_time != revision
+            || source_parent_key(&first.parent) != parent
+            || chain.last().is_none_or(|entry| entry.page_id != root)
+        {
+            return Ok(false);
+        }
+        let scope_watermark: i64 = tx
+            .query_row(
+                "SELECT sequence FROM source_inventory_watermarks
+                 WHERE workspace_id = ?1 AND scope_id = ?2",
+                params![workspace, scope],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(map_sqlite_error)?
+            .unwrap_or(0);
+        let has_signal = |kind: &str, id: &str, own_page: bool| -> Result<bool, SyncStateError> {
+            tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM source_change_signals
+                 WHERE workspace_id = ?1 AND entity_type = ?2 AND entity_id = ?3
+                 AND ((?4 AND sequence > ?5) OR (NOT ?4 AND subtree_sequence > ?6)))",
+                params![workspace, kind, id, own_page, watermark, scope_watermark],
+                |row| row.get(0),
+            )
+            .map_err(map_sqlite_error)
+        };
+        for (i, entry) in chain.into_iter().enumerate() {
+            let readable: bool = tx
+                .query_row(
+                    "SELECT outcome IS NOT 'skipped' FROM page_inventory WHERE page_id = ?1",
+                    [&entry.page_id],
+                    |row| row.get(0),
+                )
+                .map_err(map_sqlite_error)?;
+            if !readable
+                || entry.in_trash
+                || entry.last_edited_time.is_empty()
+                || has_signal("page", &entry.page_id, i == 0)?
+            {
+                return Ok(false);
+            }
+            if let InventoryParent::DataSource {
+                data_source_id,
+                database_id,
+                ..
+            } = entry.parent
+                && (has_signal("data_source", &data_source_id, false)?
+                    || has_signal("database", &database_id, false)?)
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Of `candidates` (indexed pages a complete walk did not reach), those to
@@ -638,5 +827,85 @@ impl notion_knowledge_core::root_scope::Membership for SqliteSyncStateStore {
     ) -> Result<Option<Vec<InventoryEntry>>, notion_knowledge_core::root_scope::ScopeError> {
         self.inventory_lineage(page)
             .map_err(|_| notion_knowledge_core::root_scope::ScopeError::Unverifiable)
+    }
+}
+
+#[cfg(test)]
+mod document_freshness {
+    use super::*;
+    use notion_knowledge_core::webhook::{WebhookEvent, WebhookInbox};
+
+    const ROOT: &str = "11111111-1111-1111-1111-111111111111";
+    const PAGE: &str = "22222222-2222-2222-2222-222222222222";
+    const WORKSPACE: &str = "33333333-3333-3333-3333-333333333333";
+    const REVISION: &str = "2026-11-22T21:00:00Z";
+
+    #[test]
+    fn a_same_minute_ancestor_move_requires_a_later_inventory_walk() {
+        let state = SqliteSyncStateStore::open_in_memory().unwrap();
+        let parent = InventoryParent::Page(ROOT.into());
+        let parent_json = source_parent_key(&parent);
+        let entry = |id: &str, parent| InventoryEntry {
+            page_id: id.into(),
+            parent,
+            root_id: ROOT.into(),
+            last_edited_time: REVISION.into(),
+            in_trash: false,
+        };
+        state
+            .record_walk(
+                "walk",
+                &[entry(ROOT, InventoryParent::Root), entry(PAGE, parent)],
+                true,
+            )
+            .unwrap();
+        state
+            .set_source_document_publication(WORKSPACE, "scope", PAGE, Some("first"))
+            .unwrap();
+        let current = |watermark, publication| {
+            state
+                .source_document_is_current(
+                    WORKSPACE,
+                    "scope",
+                    PAGE,
+                    ROOT,
+                    &parent_json,
+                    REVISION,
+                    watermark,
+                    publication,
+                )
+                .unwrap()
+        };
+        let start = state.source_signal_watermark().unwrap();
+        assert!(current(start, "first"));
+
+        let event = WebhookEvent {
+            id: "44444444-4444-4444-4444-444444444444".into(),
+            workspace_id: WORKSPACE.into(),
+            subscription_id: "55555555-5555-5555-5555-555555555555".into(),
+            integration_id: "66666666-6666-6666-6666-666666666666".into(),
+            timestamp: REVISION.into(),
+            event_type: "page.moved".into(),
+            entity_id: ROOT.into(),
+            entity_type: "page".into(),
+            attempt_number: 1,
+        };
+        state.receive(&event).unwrap();
+        let after_event = state.source_signal_watermark().unwrap();
+        assert!(after_event > start);
+        assert!(!current(start, "first"));
+        assert!(!current(after_event, "first"));
+        state
+            .record_source_inventory_watermark(WORKSPACE, "scope", after_event)
+            .unwrap();
+        assert!(current(start, "first"));
+
+        // A replacement from the same source timestamp changes the published
+        // content proof, so a reader holding the old body cannot claim it.
+        state
+            .set_source_document_publication(WORKSPACE, "scope", PAGE, Some("second"))
+            .unwrap();
+        assert!(!current(after_event, "first"));
+        assert!(current(after_event, "second"));
     }
 }
