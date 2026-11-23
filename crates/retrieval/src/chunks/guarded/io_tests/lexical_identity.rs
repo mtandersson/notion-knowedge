@@ -11,7 +11,9 @@ fn dictionary() -> crate::lexical_dictionary::Dictionary {
 #[tokio::test]
 async fn configured_search_reserves_before_model_work_and_releases_on_cancel_or_deadline() {
     use crate::{chunks::bounded::CandidateBudget, lexical_runtime::LexicalSearchRuntime};
-    use notion_knowledge_core::search::{LexicalQuery, SemanticQuery, SemanticSearch};
+    use notion_knowledge_core::search::{
+        HybridSearch, LexicalQuery, LexicalSearch, SearchFailure, SemanticQuery, SemanticSearch,
+    };
     struct WaitingProvider {
         metadata: EmbeddingMetadata,
         started: Arc<tokio::sync::Notify>,
@@ -112,9 +114,9 @@ async fn configured_search_reserves_before_model_work_and_releases_on_cancel_or_
     assert!(pool.try_reserve().is_ok());
     assert_fence_released(&f.index).await;
     let timed = LexicalSearchRuntime::new(
-        table,
-        provider,
-        plan,
+        table.clone(),
+        provider.clone(),
+        plan.clone(),
         pool.clone(),
         std::time::Duration::from_nanos(1),
     )
@@ -122,6 +124,26 @@ async fn configured_search_reserves_before_model_work_and_releases_on_cancel_or_
     assert!(SemanticSearch::search(&timed, query()).await.is_err());
     assert!(pool.try_reserve().is_ok());
     assert_fence_released(&f.index).await;
+
+    let model_deadline = LexicalSearchRuntime::new(
+        table,
+        provider,
+        plan,
+        pool.clone(),
+        std::time::Duration::from_secs(2),
+    )
+    .unwrap();
+    assert!(matches!(
+        HybridSearch::search_with_failure(&model_deadline, query()).await,
+        Err(SearchFailure::EmbeddingUnavailable)
+    ));
+    assert!(pool.try_reserve().is_ok());
+    assert_fence_released(&f.index).await;
+    assert!(
+        LexicalSearch::search(&model_deadline, query().into())
+            .await
+            .is_ok()
+    );
 }
 fn enabled(
     f: &Fixture,

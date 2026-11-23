@@ -88,20 +88,27 @@ impl LocalStatus {
         }
         #[cfg(all(unix, feature = "webhook-worker"))]
         if let Some((index, binding)) = &self.index {
-            let index = index.clone();
+            use notion_knowledge_core::sync_status::{
+                IndexStatus, LexicalProjectionStatus, ModelIdentity, SemanticProjectionStatus,
+            };
+            use notion_knowledge_retrieval::{
+                commit::IndexCommitCoordinator, page_documents::PageDocuments, qwen,
+            };
+            let index_path = index.clone();
             let state = self.state.clone().unwrap();
             let binding = binding.clone();
             if let Some(coordinator) = tokio::task::spawn_blocking(move || {
-                notion_knowledge_retrieval::commit::IndexCommitCoordinator::open_read_only(
-                    index, state, binding,
-                )
-                .ok()
+                IndexCommitCoordinator::open_read_only(index_path, state, binding).ok()
             })
             .await
             .ok()
             .flatten()
             {
-                let metadata = notion_knowledge_retrieval::qwen::metadata();
+                result.last_successful_reconciliation_unix_seconds =
+                    coordinator.last_successful_reconciliation().ok().flatten();
+                result.source_documents =
+                    PageDocuments::new(coordinator.clone()).count().await.ok();
+                let metadata = qwen::metadata();
                 let plan = match self
                     .lexical
                     .as_ref()
@@ -112,24 +119,35 @@ impl LocalStatus {
                     Err(_) => return result,
                 };
                 let table = crate::index_runtime::bind_cache(
-                    &self.index.as_ref().unwrap().0,
+                    index,
                     metadata.clone(),
-                    coordinator.clone(),
+                    coordinator,
                     plan.as_ref(),
                 );
-                if let Ok(table) = table
-                    && let Ok(version) = table.inventory_version().await
-                    && let Ok(last_success) = coordinator.last_successful_reconciliation()
-                {
-                    result.index = Some(notion_knowledge_core::sync_status::IndexStatus {
-                        version,
-                        chunk_schema_version: 1,
-                        canonical_schema_version: 1,
-                        model: notion_knowledge_core::sync_status::ModelIdentity::Qwen3Embedding06b,
-                        model_version: metadata.model_version().into(),
-                        provider: metadata.provider_id().into(),
-                    });
-                    result.last_successful_reconciliation_unix_seconds = last_success;
+                if let Ok(table) = table {
+                    if let Ok(version) = table.inventory_version().await {
+                        result.index = Some(IndexStatus {
+                            version,
+                            chunk_schema_version: 1,
+                            canonical_schema_version: 1,
+                            model: ModelIdentity::Qwen3Embedding06b,
+                            model_version: metadata.model_version().into(),
+                            provider: metadata.provider_id().into(),
+                        });
+                    }
+                    if let Ok((version, chunks)) = table.text_status().await {
+                        result.lexical_projection =
+                            Some(LexicalProjectionStatus { version, chunks });
+                    }
+                    if let Ok((vectors, backlog)) = table.semantic_status().await {
+                        result.semantic_projection = Some(SemanticProjectionStatus {
+                            vectors,
+                            queued_pages: backlog.queued,
+                            model_unavailable_pages: backlog.model_unavailable,
+                            input_limit_pages: backlog.input_limit,
+                            rejected_pages: backlog.rejected,
+                        });
+                    }
                 }
             }
         }

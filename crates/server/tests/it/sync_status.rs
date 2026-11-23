@@ -125,6 +125,9 @@ async fn installed_mcp_reports_current_scoped_states_after_restart_without_write
         notion_knowledge_retrieval::sync_state::LATEST_SCHEMA_VERSION
     );
     assert!(result["index"].is_null());
+    assert!(result["source_documents"].is_null());
+    assert!(result["lexical_projection"].is_null());
+    assert!(result["semantic_projection"].is_null());
     assert!(result["last_successful_crawl_unix_seconds"].is_null());
     assert!(result["last_successful_reconciliation_unix_seconds"].is_null());
     assert!(responses[3]["error"].is_object());
@@ -292,6 +295,7 @@ async fn installed_status_validates_real_index_metadata_without_model_assets_or_
         let before = snapshot(dir.path());
         let responses = wire(&config).await;
         let result = &responses[2]["result"]["structuredContent"];
+        assert_eq!(result["source_documents"], 0);
         if compatible {
             assert!(result["index"]["version"].as_u64().unwrap() > 0);
             assert_eq!(result["last_successful_reconciliation_unix_seconds"], 20);
@@ -301,6 +305,13 @@ async fn installed_status_validates_real_index_metadata_without_model_assets_or_
             assert_eq!(
                 result["index"]["model_version"],
                 notion_knowledge_retrieval::qwen::metadata().model_version()
+            );
+            assert!(result["lexical_projection"]["version"].as_u64().unwrap() > 0);
+            assert_eq!(result["lexical_projection"]["chunks"], 0);
+            assert_eq!(
+                result["semantic_projection"],
+                json!({"vectors":0,"queued_pages":0,"model_unavailable_pages":0,
+                    "input_limit_pages":0,"rejected_pages":0})
             );
         } else {
             assert!(result["index"].is_null());
@@ -322,7 +333,19 @@ async fn installed_status_validates_real_index_metadata_without_model_assets_or_
             *result
         );
         config.notion_scope.as_mut().unwrap().generation = 2;
-        assert!(wire(&config).await[2]["result"]["structuredContent"]["index"].is_null());
+        let other_scope = wire(&config).await;
+        let result = &other_scope[2]["result"]["structuredContent"];
+        for field in [
+            "index",
+            "source_documents",
+            "lexical_projection",
+            "semantic_projection",
+        ] {
+            assert!(
+                result[field].is_null(),
+                "unexpected {field} from previous scope"
+            );
+        }
         assert_eq!(before, snapshot(dir.path()));
     }
 }
