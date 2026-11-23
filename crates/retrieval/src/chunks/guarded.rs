@@ -850,9 +850,9 @@ impl GuardedChunkTable {
     pub async fn text_status(&self) -> Result<(u64, u64), ChunkTableError> {
         let _guard = self
             .coordinator
-            .document_read_guard()
+            .search_guard()
             .map_err(|_| ChunkTableError::InvalidPath)?;
-        let current = self.open_canonical().await?.read_snapshot().await?;
+        let current = self.open_text_search_snapshot().await?;
         Ok((
             current.table.version().await?,
             current.count_rows().await? as u64,
@@ -865,7 +865,7 @@ impl GuardedChunkTable {
             .coordinator
             .search_guard()
             .map_err(|_| ChunkTableError::InvalidPath)?;
-        let current = self.open_semantic().await?.read_snapshot().await?;
+        let current = self.open_search_snapshot().await?;
         Ok((
             current.count_rows().await? as u64,
             super::semantic_jobs::backlog(&self.index_directory)?,
