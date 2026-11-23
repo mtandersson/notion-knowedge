@@ -1235,32 +1235,21 @@ async fn serving_lifecycle_processes_signed_http_admission_and_stops_idle_and_de
     );
 }
 
-struct PausedProvider {
-    metadata: EmbeddingMetadata,
-    entered: tokio::sync::Notify,
-    proceed: tokio::sync::Notify,
-}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mutation_refresh_expired_ownership_during_embedding_cannot_commit_under_live_writer_lease()
-{
+async fn mutation_refresh_expired_ownership_during_source_read_cannot_commit_under_live_writer_lease()
+ {
     use notion_knowledge_core::write_refresh::{IndexStatus, MutationRefreshQueue, RefreshKey};
-    let mut runtime = TestRuntime::new().await;
+    let runtime = TestRuntime::new().await;
     let key = RefreshKey {
         workspace_id: WORKSPACE.into(),
         mutation_digest: "d".repeat(64),
         page_id: PAGE.into(),
     };
     runtime.worker.state.admit(&key).unwrap();
-    let provider = runtime.worker.index.provider.clone();
-    let paused = Arc::new(PausedProvider {
-        metadata: provider.metadata().clone(),
-        entered: tokio::sync::Notify::new(),
-        proceed: tokio::sync::Notify::new(),
-    });
-    set_provider(&mut runtime.worker, paused.clone());
+    runtime.source.pause_next.store(true, Ordering::SeqCst);
     let worker = runtime.worker.clone();
     let task = tokio::spawn(async move { worker.tick(CancellationToken::new(), false).await });
-    tokio::time::timeout(Duration::from_secs(5), paused.entered.notified())
+    tokio::time::timeout(Duration::from_secs(5), runtime.source.entered.notified())
         .await
         .unwrap();
     // Keep the shared writer lease live while expiring ONLY mutation ownership.
@@ -1269,11 +1258,10 @@ async fn mutation_refresh_expired_ownership_during_embedding_cannot_commit_under
         .unwrap()
         .execute_batch("UPDATE mutation_refresh SET lease_until=0 WHERE state=1;")
         .unwrap();
-    paused.proceed.notify_one();
+    runtime.source.proceed.notify_one();
     task.await.unwrap().unwrap();
     assert_eq!(runtime.searchable("Saffron").await, 0);
     assert!(runtime.worker.state.page_state(PAGE).unwrap().is_none());
-    set_provider(&mut runtime.worker, provider);
     tick(&runtime.worker, false).await;
     assert_eq!(
         runtime.worker.state.status(&key).unwrap(),
@@ -1282,40 +1270,9 @@ async fn mutation_refresh_expired_ownership_during_embedding_cannot_commit_under
     assert!(runtime.searchable("Saffron").await > 0);
     assert_eq!(runtime.source.writes.load(Ordering::SeqCst), 0);
 }
-impl EmbeddingProvider for PausedProvider {
-    fn metadata(&self) -> &EmbeddingMetadata {
-        &self.metadata
-    }
-    fn embed_batch<'a>(&'a self, texts: &'a [String]) -> EmbeddingFuture<'a> {
-        Box::pin(async move {
-            self.entered.notify_one();
-            self.proceed.notified().await;
-            Ok(texts
-                .iter()
-                .map(|t| {
-                    if t.contains("ANKARE") || t == "Saffron fyr" || t == "CSV electricity" {
-                        vec![1., 0., 0.]
-                    } else if t.contains("GRANNE") {
-                        vec![0.96, 0.28, 0.]
-                    } else if t.contains("KONTROLL") {
-                        vec![0.98, 0.2, 0.]
-                    } else {
-                        vec![t.len() as f32, 1., 0.]
-                    }
-                })
-                .collect())
-        })
-    }
-}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shared_index_fence_and_expired_inbox_ownership_reject_stale_commit() {
-    let mut runtime = TestRuntime::new().await;
-    let paused = Arc::new(PausedProvider {
-        metadata: runtime.worker.index.provider.metadata().clone(),
-        entered: tokio::sync::Notify::new(),
-        proceed: tokio::sync::Notify::new(),
-    });
-    set_provider(&mut runtime.worker, paused.clone());
+    let runtime = TestRuntime::new().await;
     let e = event(PAGE, "page.created");
     runtime.worker.state.receive(&e).unwrap();
     let competing = runtime
@@ -1336,16 +1293,19 @@ async fn shared_index_fence_and_expired_inbox_ownership_reject_stale_commit() {
         .state
         .release_lease(&competing, now_ms() / 1000)
         .unwrap();
+    runtime.source.pause_next.store(true, Ordering::SeqCst);
     let worker = runtime.worker.clone();
     let task = tokio::spawn(async move { worker.tick(CancellationToken::new(), false).await });
-    paused.entered.notified().await;
+    tokio::time::timeout(Duration::from_secs(5), runtime.source.entered.notified())
+        .await
+        .unwrap();
     // Ownership expires during preparation; final commit must consult the
     // actual inbox lease, rather than the separately acquired writer fence.
     rusqlite::Connection::open(&runtime.db)
         .unwrap()
         .execute_batch("UPDATE webhook_inbox SET lease_until=0 WHERE state=1;")
         .unwrap();
-    paused.proceed.notify_one();
+    runtime.source.proceed.notify_one();
     task.await.unwrap().unwrap();
     assert_eq!(runtime.searchable("Saffron").await, 0);
     let receipt = runtime.worker.coordinator.state().page_state(PAGE).unwrap();
@@ -1358,18 +1318,13 @@ async fn shared_index_fence_and_expired_inbox_ownership_reject_stale_commit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn writer_lease_takeover_rejects_stale_effects_without_fatal_cleanup_or_releasing_new_owner()
 {
-    let mut runtime = TestRuntime::new().await;
-    let paused = Arc::new(PausedProvider {
-        metadata: runtime.worker.index.provider.metadata().clone(),
-        entered: tokio::sync::Notify::new(),
-        proceed: tokio::sync::Notify::new(),
-    });
-    set_provider(&mut runtime.worker, paused.clone());
+    let runtime = TestRuntime::new().await;
     let stale = event(PAGE, "page.created");
     runtime.worker.state.receive(&stale).unwrap();
+    runtime.source.pause_next.store(true, Ordering::SeqCst);
     let worker = runtime.worker.clone();
     let task = tokio::spawn(async move { worker.tick(CancellationToken::new(), false).await });
-    tokio::time::timeout(Duration::from_secs(10), paused.entered.notified())
+    tokio::time::timeout(Duration::from_secs(5), runtime.source.entered.notified())
         .await
         .unwrap();
     rusqlite::Connection::open(&runtime.db)
@@ -1381,7 +1336,7 @@ async fn writer_lease_takeover_rejects_stale_effects_without_fatal_cleanup_or_re
         .state
         .acquire_lease(now_ms() / 1000, 60)
         .unwrap();
-    paused.proceed.notify_one();
+    runtime.source.proceed.notify_one();
     assert!(task.await.unwrap().unwrap());
     assert_eq!(runtime.searchable("Saffron").await, 0);
     assert_eq!(inspect(&runtime.worker, &stale).state, EventState::Pending);
