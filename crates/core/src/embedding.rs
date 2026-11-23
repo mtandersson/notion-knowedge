@@ -120,6 +120,8 @@ pub type EmbeddingIdleFuture<'a> =
 
 pub type EmbeddingPartitionFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Vec<usize>, EmbeddingError>> + Send + 'a>>;
+pub type EmbeddingWindowsFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<std::ops::Range<usize>>, EmbeddingError>> + Send + 'a>>;
 
 pub trait EmbeddingProvider: Send + Sync {
     /// Wait for work retained after a cancelled embedding observer. Providers
@@ -139,6 +141,31 @@ pub trait EmbeddingProvider: Send + Sync {
         _boundaries: Vec<usize>,
     ) -> EmbeddingPartitionFuture<'a> {
         Box::pin(async { Ok(Vec::new()) })
+    }
+    /// Exact byte ranges for a complete embedding projection of a source
+    /// chunk. Ranges may overlap and must cover the full original input.
+    fn embedding_windows<'a>(
+        &'a self,
+        input: &'a str,
+        boundaries: Vec<usize>,
+    ) -> EmbeddingWindowsFuture<'a> {
+        Box::pin(async move {
+            let mut start = 0;
+            let mut ranges = Vec::new();
+            for end in self
+                .partition_input(input, boundaries)
+                .await?
+                .into_iter()
+                .chain(std::iter::once(input.len()))
+            {
+                if start >= end || input.get(start..end).is_none() {
+                    return Err(EmbeddingError::InvalidInput);
+                }
+                ranges.push(start..end);
+                start = end;
+            }
+            Ok(ranges)
+        })
     }
 }
 

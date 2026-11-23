@@ -110,6 +110,19 @@ impl EmbeddingProvider for DeferredEmbedder {
                 .await
         })
     }
+
+    fn embedding_windows<'a>(
+        &'a self,
+        input: &'a str,
+        boundaries: Vec<usize>,
+    ) -> notion_knowledge_core::embedding::EmbeddingWindowsFuture<'a> {
+        Box::pin(async move {
+            self.provider()
+                .await?
+                .embedding_windows(input, boundaries)
+                .await
+        })
+    }
 }
 
 /// Load the configured provider. When `expected` is given, a provider with a

@@ -326,6 +326,91 @@ fn persist_metadata(identity: &EmbeddingMetadata, path: &Path) -> Result<(), Emb
         .map_err(|_| EmbeddingError::Unavailable)
 }
 const MAX_TEXT_BYTES: usize = 32768;
+const WINDOW_OVERLAP_TOKENS: usize = 64;
+
+fn token_windows(
+    input: &str,
+    boundaries: &[usize],
+    max_tokens: usize,
+    mut count: impl FnMut(&str) -> Result<usize, EmbeddingError>,
+) -> Result<Vec<std::ops::Range<usize>>, EmbeddingError> {
+    if input.trim().is_empty()
+        || boundaries.windows(2).any(|pair| pair[0] >= pair[1])
+        || boundaries.iter().any(|&position| {
+            position == 0 || position >= input.len() || !input.is_char_boundary(position)
+        })
+    {
+        return Err(EmbeddingError::InvalidInput);
+    }
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    let mut covered = 0;
+    while covered < input.len() {
+        let cap = input.floor_char_boundary(input.len().min(start + MAX_TEXT_BYTES));
+        let mut end = cap;
+        if count(&input[start..cap])? > max_tokens {
+            let offsets: Vec<_> = input[start..cap]
+                .char_indices()
+                .map(|(position, _)| start + position)
+                .collect();
+            let (mut fit, mut excess) = (0, offsets.len());
+            while excess - fit > 1 {
+                let middle = (fit + excess) / 2;
+                if count(&input[start..offsets[middle]])? <= max_tokens {
+                    fit = middle;
+                } else {
+                    excess = middle;
+                }
+            }
+            end = offsets[fit];
+        }
+        if end <= covered {
+            if start == covered {
+                return Err(EmbeddingError::InputLimit);
+            }
+            start = covered;
+            continue;
+        }
+        if end < input.len() {
+            // Prefer the last structural boundary near the admitted end.
+            let near = covered + (end - covered) * 3 / 4;
+            let at = boundaries.partition_point(|offset| *offset <= end);
+            if let Some(&cut) = at.checked_sub(1).and_then(|i| boundaries.get(i))
+                && cut >= near
+                && cut > covered
+                && count(&input[start..cut])? <= max_tokens
+            {
+                end = cut;
+            }
+        }
+        if input[start..end].trim().is_empty() || count(&input[start..end])? == 0 {
+            return Err(EmbeddingError::InvalidInput);
+        }
+        ranges.push(start..end);
+        covered = end;
+        if covered == input.len() {
+            break;
+        }
+        let overlap = WINDOW_OVERLAP_TOKENS.min(max_tokens / 8);
+        let offsets: Vec<_> = input[start..end]
+            .char_indices()
+            .skip(1)
+            .map(|(position, _)| start + position)
+            .chain(std::iter::once(end))
+            .collect();
+        let (mut low, mut high) = (0, offsets.len() - 1);
+        while low < high {
+            let middle = (low + high) / 2;
+            if count(&input[offsets[middle]..end])? <= overlap {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        start = offsets[low];
+    }
+    Ok(ranges)
+}
 
 fn validate_inputs(inputs: &[String]) -> Result<(), EmbeddingError> {
     // Bound cloning/tokenization before admission. Caller can split large jobs.
@@ -339,6 +424,42 @@ fn validate_inputs(inputs: &[String]) -> Result<(), EmbeddingError> {
         return Err(EmbeddingError::InvalidInput);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    #[test]
+    fn windows_cover_indivisible_unicode_with_bounded_overlap() {
+        let input = "å東🌿".repeat(1000);
+        let ranges = token_windows(&input, &[], 1024, |text| Ok(text.chars().count())).unwrap();
+        assert_eq!(ranges[0].start, 0);
+        assert_eq!(ranges.last().unwrap().end, input.len());
+        let mut rebuilt = String::new();
+        let mut covered = 0;
+        for range in ranges {
+            assert!(range.start <= covered && covered < range.end);
+            assert_eq!(
+                input[range.start..covered].chars().count(),
+                if covered == 0 { 0 } else { 64 }
+            );
+            assert!(input[range.clone()].chars().count() <= 1024);
+            rebuilt.push_str(&input[covered..range.end]);
+            covered = range.end;
+        }
+        assert_eq!(rebuilt, input);
+    }
+
+    #[test]
+    fn windows_prefer_admitted_structure_and_leave_short_text_whole() {
+        let input = format!("{}\n{}", "a".repeat(879), "b".repeat(400));
+        let ranges = token_windows(&input, &[880], 1024, |text| Ok(text.len())).unwrap();
+        assert_eq!(ranges, [0..880, 816..1280]);
+        let short = token_windows("kort", &[], 1024, |text| Ok(text.len())).unwrap();
+        assert_eq!(short.len(), 1);
+        assert_eq!(short[0], 0..4);
+    }
 }
 impl EmbeddingProvider for QwenProvider {
     fn wait_idle(&self) -> notion_knowledge_core::embedding::EmbeddingIdleFuture<'_> {
@@ -388,6 +509,32 @@ impl EmbeddingProvider for QwenProvider {
                         return Err(EmbeddingError::InputLimit);
                     }
                     Ok(())
+                })
+            })
+            .await
+            .map_err(|_| EmbeddingError::Unavailable)?
+        })
+    }
+    fn embedding_windows<'a>(
+        &'a self,
+        input: &'a str,
+        boundaries: Vec<usize>,
+    ) -> notion_knowledge_core::embedding::EmbeddingWindowsFuture<'a> {
+        Box::pin(async move {
+            let permit = self
+                .admission
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| EmbeddingError::Unavailable)?;
+            let input = input.to_owned();
+            let runtime = self.runtime.clone();
+            let max_tokens = self.config.max_tokens;
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let tokenizer = runtime.lock();
+                token_windows(&input, &boundaries, max_tokens, |part| {
+                    tokenizer.token_count(part)
                 })
             })
             .await
