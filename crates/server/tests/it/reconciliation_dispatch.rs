@@ -24,7 +24,7 @@ fn manual_dispatch_rejects_unknown_mixed_and_invalid_arguments_without_echoing_i
     }
 }
 #[test]
-fn manual_configuration_failure_does_not_start_stdio_or_create_local_paths() {
+fn manual_reconciliation_requires_existing_storage_without_opening_model_assets() {
     let dir = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_notion-knowledge-server"))
         .env_clear()
@@ -54,5 +54,5 @@ fn manual_configuration_failure_does_not_start_stdio_or_create_local_paths() {
     assert!(!all.contains("fixture-sensitive"));
     assert!(!all.contains("Serving MCP"));
     #[cfg(all(unix, feature = "webhook-worker"))]
-    assert!(all.contains("model_configuration"));
+    assert!(all.contains("index_state_configuration"));
 }

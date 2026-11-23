@@ -64,10 +64,9 @@ notion-knowledge-server --index rebuild
 existing compatible index, and folds in unindexed committed rows. `rebuild`
 explicitly replaces the derived ANN index over the same committed vectors.
 Neither command changes canonical chunks, source text, ownership, page receipts
-or Notion content. Neither calls Notion or embeds source text. The configured
-offline Qwen assets are validated and loaded before storage access, so an
-incompatible model identity cannot be attached to existing vectors. No model
-download or provider fallback occurs. Preserve the normal integration configuration
+or Notion content. Both operate on persisted vectors and validate the configured
+Qwen identity against the table metadata. They can run with model assets
+offline. Preserve the normal integration configuration
 required for the configured scope; that credential remains
 unused by this local operation. Configuration validation is unchanged.
 
