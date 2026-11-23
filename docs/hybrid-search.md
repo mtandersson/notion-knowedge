@@ -28,11 +28,11 @@ receive both contributions and serialize `matched_paths: ["semantic",
 final top-k. Every search hit includes `matched_paths`; nonhybrid results identify their
 single retrieval path. The MCP output schema requires it.
 
-Matching page/chunk IDs across rankers with conflicting excerpts or citation metadata fail
-closed as unavailable rather than silently mixing snapshots. Failure of either
-retrieval path also fails the entire request with no partial results. Both
-paths must share configured indexing scope; filters narrow it, never grant
-access. This service does not refresh indexes or reconcile their generations.
+Matching page/chunk IDs across rankers with conflicting excerpts or citation
+metadata fail as unavailable. An embedding model failure lets MCP run the
+lexical query with the same filters and report `semantic_status: "unavailable"`.
+Storage, authorization and lexical failures return an error for the request.
+Both paths share the configured indexing scope and apply the same filters.
 Candidate truncation and approximate vector recall limit fusion recall; RRF
 scores are ranking values rather than probabilities or relevance thresholds.
 
