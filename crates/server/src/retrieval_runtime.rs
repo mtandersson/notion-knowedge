@@ -140,14 +140,11 @@ pub async fn configured(
         NotionClient::integration(token.expose_secret())
             .map_err(|_| "authoritative retrieval source unavailable")?,
     );
-    let provider = notion_knowledge_retrieval::embedder::load_configured_embedder(
-        &notion_knowledge_retrieval::embedder::EmbedderConfig::LocalQwen {
+    let provider = notion_knowledge_retrieval::embedder::deferred_configured_embedder(
+        notion_knowledge_retrieval::embedder::EmbedderConfig::LocalQwen {
             assets: settings.assets.clone(),
         },
-        None,
-    )
-    .await
-    .map_err(|_| "retrieval model unavailable or incompatible")?;
+    );
     compose(handler, config, transport, source, provider).await
 }
 
