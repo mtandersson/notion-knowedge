@@ -249,6 +249,7 @@ impl PageOperation {
     pub fn action(&self) -> PageAction {
         self.action
     }
+    #[cfg(feature = "local-lancedb")]
     pub(crate) fn replacing_page_projection(mut self) -> Self {
         self.replaces_page_projection = true;
         self
@@ -943,6 +944,7 @@ impl IndexCommitCoordinator {
         ).map_err(sql)
     }
 
+    #[cfg(feature = "local-lancedb")]
     pub(crate) fn has_unfinished_page(&self, page: &str) -> Result<bool, CommitError> {
         self.identities()?;
         let db = self

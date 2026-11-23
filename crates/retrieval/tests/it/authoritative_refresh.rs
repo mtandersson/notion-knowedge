@@ -834,19 +834,23 @@ async fn successful_later_event_does_not_leave_original_retry_receipt_unresolved
         )
         .await
         .unwrap();
-    assert_eq!(provider.embeddings(), 0);
-    handler
-        .refresh_page(
-            &page,
-            &root,
-            "original",
-            &provider,
-            index.lease.clone(),
-            clock(),
-        )
-        .await
-        .unwrap();
-    assert!(provider.embeddings() > 0);
+    let embedded = provider.embeddings();
+    assert!(embedded > 0);
+    assert!(!index.coordinator.has_unfinished_commits().unwrap());
+    assert!(
+        handler
+            .refresh_page(
+                &page,
+                &root,
+                "original",
+                &provider,
+                index.lease.clone(),
+                clock(),
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(provider.embeddings(), embedded);
     assert_eq!(
         index
             .coordinator
@@ -854,7 +858,7 @@ async fn successful_later_event_does_not_leave_original_retry_receipt_unresolved
             .unwrap()
             .unwrap()
             .status,
-        notion_knowledge_retrieval::commit::ReceiptStatus::Applied
+        notion_knowledge_retrieval::commit::ReceiptStatus::Superseded,
     );
 }
 
