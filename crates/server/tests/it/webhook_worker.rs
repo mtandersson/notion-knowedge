@@ -2649,6 +2649,17 @@ async fn shutdown_cancels_owned_commit_releases_fence_and_restart_processes_heal
         exclusions: ExclusionRules::default(),
     };
     let config = retrieval_config(&runtime);
+    let handler = installed_retrieval(
+        &runtime,
+        &config,
+        notion_knowledge_server::root_scope::Transport::Http,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        handler.index_health_probe().unwrap().state(),
+        notion_knowledge_core::health::DependencyState::Unavailable,
+    );
     let index = Arc::new(
         notion_knowledge_server::index_runtime::IndexRuntime::recover(
             config.retrieval.as_ref().unwrap(),
@@ -2691,6 +2702,27 @@ async fn shutdown_cancels_owned_commit_releases_fence_and_restart_processes_heal
             .iter()
             .any(|chunk| chunk.text.contains("cinnamon"))
     );
+    assert_eq!(runtime.searchable("cinnamon").await, 0);
+    let now = now_ms() / 1000;
+    let mut lease = restarted.state.acquire_lease(now, 60).unwrap();
+    restarted
+        .index
+        .sync_from_walk(
+            &notion_knowledge_server::index_runtime::PageDeadline {
+                timeout_seconds: 10,
+            },
+            &mut lease,
+            notion_knowledge_server::index_runtime::SyncMode::Page(PageId(PAGE.into())),
+        )
+        .await
+        .unwrap();
+    restarted
+        .state
+        .release_lease(&lease, now_ms() / 1000)
+        .unwrap();
+    assert!(!restarted.coordinator.has_unfinished_commits().unwrap());
+    assert!(runtime.searchable("cinnamon").await > 0);
+    assert!(runtime.searchable("Saffron").await > 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

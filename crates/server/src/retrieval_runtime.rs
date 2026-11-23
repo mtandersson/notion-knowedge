@@ -248,7 +248,8 @@ pub(crate) async fn attach_existing(
     let exact_id = plan.is_some();
     let adapters = search_adapters(settings, table.clone(), provider, plan)?;
     let handler = if matches!(transport, Transport::Http) {
-        handler.with_index_health_probe(crate::index_readiness::observe(table.clone(), exact_id))
+        handler
+            .with_index_health_probe(crate::index_readiness::observe(table.clone(), exact_id).await)
     } else {
         handler
     };

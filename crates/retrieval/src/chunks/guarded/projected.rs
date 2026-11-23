@@ -74,78 +74,92 @@ impl GuardedChunkTable {
         let owned_clock = clock.clone();
         let outcome = self
             .coordinator
-            .submit_with_authority(operation, lease, clock, move |context| async move {
-                let text = this.provision_text(&context).await.map_err(failure)?;
-                let actual = text.page_chunks(&page).await.map_err(failure)?;
-                if actual != previous {
-                    return Err(FailureClass::Conflict);
-                }
-                verify_no_collisions(&text, &page, chunks.iter().map(|c| &c.chunk_id)).await?;
-                context.revalidate().map_err(fence_failure)?;
-                let authority = verify().await?;
-                context.revalidate().map_err(fence_failure)?;
-                lexical_binding::verify(&this.index_directory, &this.lexical_binding)
-                    .map_err(failure)?;
-                jobs::set_text_revision(&this.index_directory, &page, &revision, &fingerprint)
-                    .map_err(failure)?;
-                let prior_fingerprint = jobs::fingerprint(&actual).map_err(failure)?;
-                let changed = deletion || prior_fingerprint != fingerprint;
-                if changed {
-                    let semantic = this.open_semantic().await.map_err(failure)?;
-                    let old = semantic
-                        .rows_matching(page_predicate(&page))
-                        .await
-                        .map_err(failure)?;
-                    let staged =
-                        match jobs::for_page(&this.index_directory, &page).map_err(failure)? {
-                            Some(job) if job.text == prior_fingerprint => {
-                                jobs::reusable(&this.index_directory, &job).map_err(failure)?
-                            }
-                            _ => HashMap::new(),
-                        };
-                    let (reusable, missing) =
-                        reusable_rows(&old, &actual, &chunks, staged).map_err(failure)?;
-                    // Persist the retry before changing either table. An
-                    // interrupted receipt cannot authorize searching; a retry
-                    // also compares the exact current text before any vector work.
-                    if missing {
-                        jobs::enqueue(
-                            &this.index_directory,
-                            &page,
-                            &revision,
-                            &fingerprint,
-                            &reusable,
-                            owned_clock(),
-                        )
-                        .map_err(failure)?;
-                    } else {
-                        jobs::clear(&this.index_directory, &page).map_err(failure)?;
+            .submit_with_authority(
+                operation.replacing_page_projection(),
+                lease,
+                clock,
+                move |context| async move {
+                    let text = this.provision_text(&context).await.map_err(failure)?;
+                    let actual = text.page_chunks(&page).await.map_err(failure)?;
+                    if actual != previous {
+                        return Err(FailureClass::Conflict);
                     }
-                    let _merge = page_timings::timer(Bucket::LanceMerge);
-                    // An edited page with any blocked vector leaves the
-                    // active projection in one deletion. Its reusable
-                    // vectors survive only in the revision-bound job.
-                    if !old.is_empty() || (!missing && !reusable.is_empty()) {
-                        let visible = if missing { &[] } else { reusable.as_slice() };
-                        replace_vectors(&semantic, &page, visible)
+                    verify_no_collisions(&text, &page, chunks.iter().map(|c| &c.chunk_id)).await?;
+                    context.revalidate().map_err(fence_failure)?;
+                    let authority = verify().await?;
+                    context.revalidate().map_err(fence_failure)?;
+                    lexical_binding::verify(&this.index_directory, &this.lexical_binding)
+                        .map_err(failure)?;
+                    jobs::set_text_revision(&this.index_directory, &page, &revision, &fingerprint)
+                        .map_err(failure)?;
+                    let prior_fingerprint = jobs::fingerprint(&actual).map_err(failure)?;
+                    let changed = deletion || prior_fingerprint != fingerprint;
+                    if changed {
+                        let semantic = this.open_semantic().await.map_err(failure)?;
+                        let old = semantic
+                            .rows_matching(page_predicate(&page))
+                            .await
+                            .map_err(failure)?;
+                        let staged =
+                            match jobs::for_page(&this.index_directory, &page).map_err(failure)? {
+                                Some(job) if job.text == prior_fingerprint => {
+                                    jobs::reusable(&this.index_directory, &job).map_err(failure)?
+                                }
+                                _ => HashMap::new(),
+                            };
+                        let (reusable, missing) =
+                            reusable_rows(&old, &actual, &chunks, staged).map_err(failure)?;
+                        // Persist the retry before changing either table. An
+                        // interrupted receipt cannot authorize searching; a retry
+                        // also compares the exact current text before any vector work.
+                        if missing {
+                            jobs::enqueue(
+                                &this.index_directory,
+                                &page,
+                                &revision,
+                                &fingerprint,
+                                &reusable,
+                                owned_clock(),
+                            )
+                            .map_err(failure)?;
+                        } else {
+                            jobs::clear(&this.index_directory, &page).map_err(failure)?;
+                        }
+                        let _merge = page_timings::timer(Bucket::LanceMerge);
+                        // An edited page with any blocked vector leaves the
+                        // active projection in one deletion. Its reusable
+                        // vectors survive only in the revision-bound job.
+                        if !old.is_empty() || (!missing && !reusable.is_empty()) {
+                            let visible = if missing { &[] } else { reusable.as_slice() };
+                            replace_vectors(&semantic, &page, visible)
+                                .await
+                                .map_err(failure)?;
+                        }
+                        context.revalidate().map_err(fence_failure)?;
+                        text::replace(&text, context.binding(), &page, &chunks)
                             .await
                             .map_err(failure)?;
                     }
-                    context.revalidate().map_err(fence_failure)?;
-                    text::replace(&text, context.binding(), &page, &chunks)
-                        .await
-                        .map_err(failure)?;
-                }
-                if changed
-                    && jobs::for_page(&this.index_directory, &page)
-                        .map_err(failure)?
-                        .is_none()
-                {
-                    jobs::set_semantic_revision(&this.index_directory, &page, &fingerprint)
-                        .map_err(failure)?;
-                }
-                Ok(authority)
-            })
+                    if changed
+                        && jobs::for_page(&this.index_directory, &page)
+                            .map_err(failure)?
+                            .is_none()
+                    {
+                        jobs::set_semantic_revision(&this.index_directory, &page, &fingerprint)
+                            .map_err(failure)?;
+                    } else {
+                        this.repair_semantic_if_missing(
+                            &context,
+                            &page,
+                            &revision,
+                            &chunks,
+                            owned_clock(),
+                        )
+                        .await?;
+                    }
+                    Ok(authority)
+                },
+            )
             .await?;
         if outcome == CommitOutcome::Applied {
             self.optimize_after_commit(maintenance.0, maintenance.1)
@@ -164,19 +178,22 @@ impl GuardedChunkTable {
         chunks: &[IndexedChunk],
         now: i64,
     ) -> Result<(), FailureClass> {
-        if chunks.is_empty()
-            || jobs::for_page(&self.index_directory, page)
-                .map_err(failure)?
-                .is_some()
-        {
+        if chunks.is_empty() {
             return Ok(());
         }
         if !self.text_projection_installed().map_err(failure)? {
             return Ok(());
         }
+        let text = jobs::fingerprint(chunks).map_err(failure)?;
+        if let Some(job) = jobs::for_page(&self.index_directory, page).map_err(failure)? {
+            if job.text == text {
+                return Ok(());
+            }
+            context.revalidate().map_err(fence_failure)?;
+            jobs::clear(&self.index_directory, page).map_err(failure)?;
+        }
         let semantic = self.open_semantic().await.map_err(failure)?;
         let current = semantic.page_chunks(page).await.map_err(failure)?;
-        let text = jobs::fingerprint(chunks).map_err(failure)?;
         let expected = jobs::semantic_revision(&self.index_directory, page)
             .map_err(failure)?
             .unwrap_or_else(|| text.clone());

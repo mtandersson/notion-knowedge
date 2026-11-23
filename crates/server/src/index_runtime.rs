@@ -394,7 +394,11 @@ impl IndexRuntime {
                         let installed = table
                             .text_projection_installed()
                             .map_err(|_| "text projection state unavailable")?;
-                        let ready = table.verify_bound_text_layout().await;
+                        let ready = if installed {
+                            table.verify_bound_text_layout().await
+                        } else {
+                            table.verify_bound_legacy_layout().await
+                        };
                         match ready {
                             Err(error) if !installed && error.is_incompatible_index() => {
                                 rebuild = true

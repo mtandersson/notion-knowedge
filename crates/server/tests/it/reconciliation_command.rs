@@ -846,7 +846,7 @@ fn simulate_hot_rollback_journal(path: &std::path::Path) -> std::path::PathBuf {
     let crashed = path.with_extension("crashed");
     let crashed_journal = path.with_extension("crashed-journal");
     {
-        let db = rusqlite::Connection::open(&path).unwrap();
+        let db = rusqlite::Connection::open(path).unwrap();
         // A tiny cache spills uncommitted pages into the database file.
         db.execute_batch(
             "PRAGMA cache_size=1; BEGIN;
@@ -857,10 +857,10 @@ fn simulate_hot_rollback_journal(path: &std::path::Path) -> std::path::PathBuf {
         .unwrap();
         assert!(fs::metadata(&journal).unwrap().len() > 0);
         // Capture the files as a crash would leave them.
-        fs::copy(&path, &crashed).unwrap();
+        fs::copy(path, &crashed).unwrap();
         fs::copy(&journal, &crashed_journal).unwrap();
     }
-    fs::rename(&crashed, &path).unwrap();
+    fs::rename(&crashed, path).unwrap();
     fs::rename(&crashed_journal, &journal).unwrap();
     journal
 }
@@ -3918,7 +3918,6 @@ async fn oversized_table_sections_commit_losslessly_and_retry_as_unchanged() {
     f.provider.input_limit_bytes.store(1024, Ordering::SeqCst);
     let result = f.command(&http, &["--reconcile", "apply"]).await;
     assert_eq!(result.exit, 0, "{:?}", result.json);
-    assert_eq!(result.json["semantic_projection"], "deferred");
     let runtime = f.open(&http, OpenMode::ExistingWrite).await;
     let canonical = runtime.chunks().page_chunks(PAGE).await.unwrap();
     let original = runtime
@@ -4054,6 +4053,7 @@ async fn oversized_atomic_input_remains_fresh_and_searchable_with_a_typed_semant
     f.provider.input_limit_bytes.store(1024, Ordering::SeqCst);
     let result = f.command(&http, &["--reconcile", "apply"]).await;
     assert_eq!(result.exit, 0, "{:?}", result.json);
+    assert_eq!(result.json["semantic_projection"], "deferred");
     let runtime = f.open(&http, OpenMode::ExistingWrite).await;
     assert!(out_of_sync(&runtime).is_empty());
     let inventory = runtime.coordinator.state().inventory_counts().unwrap();

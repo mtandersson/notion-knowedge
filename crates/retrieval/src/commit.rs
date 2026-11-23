@@ -145,6 +145,7 @@ pub struct PageOperation {
     alias_projection: Option<AliasProjection>,
     retry_latest_refresh: bool,
     retry_latest_lifecycle: bool,
+    replaces_page_projection: bool,
 }
 impl PageOperation {
     pub fn new(
@@ -176,6 +177,7 @@ impl PageOperation {
             alias_projection: None,
             retry_latest_refresh: false,
             retry_latest_lifecycle: false,
+            replaces_page_projection: false,
         })
     }
     /// Retry durable page-refresh work using freshly authorized current content.
@@ -246,6 +248,10 @@ impl PageOperation {
     }
     pub fn action(&self) -> PageAction {
         self.action
+    }
+    pub(crate) fn replacing_page_projection(mut self) -> Self {
+        self.replaces_page_projection = true;
+        self
     }
     pub fn checkpoint(&self) -> &PageSyncState {
         &self.checkpoint
@@ -937,6 +943,19 @@ impl IndexCommitCoordinator {
         ).map_err(sql)
     }
 
+    pub(crate) fn has_unfinished_page(&self, page: &str) -> Result<bool, CommitError> {
+        self.identities()?;
+        let db = self
+            .state
+            .lock_connection()
+            .map_err(|_| CommitError::Unavailable)?;
+        self.validate_binding(&db)?;
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM index_commit_receipts WHERE generation=?1 AND page_id=?2 AND status IN(0,2))",
+            params![self.binding.generation, page], |row| row.get(0),
+        ).map_err(sql)
+    }
+
     pub fn receipt(&self, operation_id: &str) -> Result<Option<OperationReceipt>, CommitError> {
         validate(operation_id).map_err(|_| CommitError::InvalidInput)?;
         let db = self
@@ -1156,6 +1175,16 @@ impl IndexCommitCoordinator {
         let count=tx.execute("UPDATE index_commit_receipts SET status=1,failure=NULL WHERE operation_id=?1 AND status=0",[&operation.id]).map_err(sql)?;
         if count != 1 {
             return Err(CommitError::Conflict);
+        }
+        if operation.replaces_page_projection {
+            // The new authoritative replacement and terminal receipt settle
+            // all older incomplete effects for this page in the same transaction.
+            tx.execute(
+                "UPDATE index_commit_receipts SET status=3,failure=2
+                 WHERE generation=?1 AND page_id=?2 AND status IN(0,2)",
+                params![self.binding.generation, checkpoint.page_id()],
+            )
+            .map_err(sql)?;
         }
         tx.commit().map_err(sql)
     }

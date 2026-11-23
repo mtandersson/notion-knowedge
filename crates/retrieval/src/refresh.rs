@@ -667,7 +667,11 @@ impl AuthoritativePageRefresh {
             .is_some();
         // A genuinely unchanged page is a no-op, including durable state.
         // Metadata/links are compared too, so citations are still refreshed.
-        if complete && !has_receipt && same_revision {
+        if complete
+            && !has_receipt
+            && same_revision
+            && !self.coordinator.has_unfinished_page(&page.0)?
+        {
             let handler = self.clone();
             let expected_projection = projection.clone();
             let expected_aliases = aliases.clone();

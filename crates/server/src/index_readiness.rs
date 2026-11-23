@@ -57,11 +57,13 @@ async fn refresh(snapshot: &Snapshot, table: &GuardedChunkTable, exact_id: bool)
     }
 }
 
-pub(crate) fn observe(table: GuardedChunkTable, exact_id: bool) -> Arc<IndexReadiness> {
-    // Composition has already opened and validated this exact index.
+pub(crate) async fn observe(table: GuardedChunkTable, exact_id: bool) -> Arc<IndexReadiness> {
+    // Bound layout validation permits unfinished receipts during recovery.
+    // Only a settled snapshot can establish readiness.
     let snapshot = Arc::new(Snapshot {
-        latest: Mutex::new((DependencyState::Healthy, Instant::now())),
+        latest: Mutex::new((DependencyState::Unknown, Instant::now())),
     });
+    refresh(&snapshot, &table, exact_id).await;
     let latest = snapshot.clone();
     let observer = tokio::spawn(async move {
         let mut interval = tokio::time::interval(INTERVAL);
