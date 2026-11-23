@@ -190,6 +190,8 @@ pub struct FakeNotion {
     /// Pauses the next response to [`OTHER`]'s Markdown. The first such read is
     /// the walk's, so the walk stays open while other reached pages proceed.
     pub discovery_pause: Arc<RequestPause>,
+    /// Pause the first paginated property read without blocking sibling requests.
+    pub preparation_pause: Arc<RequestPause>,
     requests: Arc<Mutex<Vec<String>>>,
     server: tokio::task::JoinHandle<()>,
     pub port: u16,
@@ -475,6 +477,8 @@ impl FakeNotion {
         let fail_once = Arc::new(AtomicBool::new(false));
         let pause = Arc::new(RequestPause::default());
         let discovery_pause = Arc::new(RequestPause::default());
+        let preparation_pause = Arc::new(RequestPause::default());
+        let preparation = preparation_pause.clone();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -620,10 +624,18 @@ impl FakeNotion {
                     "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
-                if route == format!("/v1/pages/{OTHER}/markdown")
+                let barrier = if route == format!("/v1/pages/{OTHER}/markdown")
                     && discovery.armed.swap(false, Ordering::SeqCst)
                 {
-                    let barrier = discovery.clone();
+                    Some(discovery.clone())
+                } else if route.starts_with(&format!("/v1/pages/{PAGE}/properties/"))
+                    && preparation.ready()
+                {
+                    Some(preparation.clone())
+                } else {
+                    None
+                };
+                if let Some(barrier) = barrier {
                     pending_responses.spawn(async move {
                         barrier.started.notify_one();
                         barrier.proceed.notified().await;
@@ -645,6 +657,7 @@ impl FakeNotion {
             fail_once,
             pause,
             discovery_pause,
+            preparation_pause,
             requests,
             server,
             port,

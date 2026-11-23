@@ -17,6 +17,21 @@ pub struct PreparedSemanticProjection {
 }
 
 impl GuardedChunkTable {
+    /// Imported v1 rows predate the publication table. A v2 receipt always
+    /// writes its revision before touching the text, including a replay
+    /// interrupted between the LanceDB merge and SQLite acknowledgment.
+    pub(crate) fn text_matches_revision(
+        &self,
+        page: &str,
+        revision: &str,
+        chunks: &[IndexedChunk],
+    ) -> Result<bool, ChunkTableError> {
+        match jobs::text_revision(&self.index_directory, page)? {
+            Some((current, text)) => Ok(current == revision && text == jobs::fingerprint(chunks)?),
+            None => Ok(true),
+        }
+    }
+
     pub(crate) async fn commit_text_with_authority<F, Fut, Authority>(
         &self,
         operation: PageOperation,
@@ -71,13 +86,25 @@ impl GuardedChunkTable {
                 context.revalidate().map_err(fence_failure)?;
                 lexical_binding::verify(&this.index_directory, &this.lexical_binding)
                     .map_err(failure)?;
-                if deletion || jobs::fingerprint(&actual).map_err(failure)? != fingerprint {
+                jobs::set_text_revision(&this.index_directory, &page, &revision, &fingerprint)
+                    .map_err(failure)?;
+                let prior_fingerprint = jobs::fingerprint(&actual).map_err(failure)?;
+                let changed = deletion || prior_fingerprint != fingerprint;
+                if changed {
                     let semantic = this.open_semantic().await.map_err(failure)?;
                     let old = semantic
                         .rows_matching(page_predicate(&page))
                         .await
                         .map_err(failure)?;
-                    let (reusable, missing) = reusable_rows(&old, &chunks).map_err(failure)?;
+                    let staged =
+                        match jobs::for_page(&this.index_directory, &page).map_err(failure)? {
+                            Some(job) if job.text == prior_fingerprint => {
+                                jobs::reusable(&this.index_directory, &job).map_err(failure)?
+                            }
+                            _ => HashMap::new(),
+                        };
+                    let (reusable, missing) =
+                        reusable_rows(&old, &actual, &chunks, staged).map_err(failure)?;
                     // Persist the retry before changing either table. An
                     // interrupted receipt cannot authorize searching; a retry
                     // also compares the exact current text before any vector work.
@@ -98,7 +125,7 @@ impl GuardedChunkTable {
                     // An edited page with any blocked vector leaves the
                     // active projection in one deletion. Its reusable
                     // vectors survive only in the revision-bound job.
-                    if !old.is_empty() {
+                    if !old.is_empty() || (!missing && !reusable.is_empty()) {
                         let visible = if missing { &[] } else { reusable.as_slice() };
                         replace_vectors(&semantic, &page, visible)
                             .await
@@ -109,6 +136,14 @@ impl GuardedChunkTable {
                         .await
                         .map_err(failure)?;
                 }
+                if changed
+                    && jobs::for_page(&this.index_directory, &page)
+                        .map_err(failure)?
+                        .is_none()
+                {
+                    jobs::set_semantic_revision(&this.index_directory, &page, &fingerprint)
+                        .map_err(failure)?;
+                }
                 Ok(authority)
             })
             .await?;
@@ -117,6 +152,59 @@ impl GuardedChunkTable {
                 .await;
         }
         Ok((outcome, diff))
+    }
+
+    /// Preserve ordinary reconciliation's repair of missing derived rows, using
+    /// the unchanged canonical source and preserving compatible vectors.
+    pub(crate) async fn repair_semantic_if_missing(
+        &self,
+        context: &crate::commit::CommitContext,
+        page: &str,
+        revision: &str,
+        chunks: &[IndexedChunk],
+        now: i64,
+    ) -> Result<(), FailureClass> {
+        if chunks.is_empty()
+            || jobs::for_page(&self.index_directory, page)
+                .map_err(failure)?
+                .is_some()
+        {
+            return Ok(());
+        }
+        if !self.text_projection_installed().map_err(failure)? {
+            return Ok(());
+        }
+        let semantic = self.open_semantic().await.map_err(failure)?;
+        let current = semantic.page_chunks(page).await.map_err(failure)?;
+        let text = jobs::fingerprint(chunks).map_err(failure)?;
+        let expected = jobs::semantic_revision(&self.index_directory, page)
+            .map_err(failure)?
+            .unwrap_or_else(|| text.clone());
+        if jobs::fingerprint(&current).map_err(failure)? == expected {
+            return Ok(());
+        }
+        let old = semantic
+            .rows_matching(page_predicate(page))
+            .await
+            .map_err(failure)?;
+        let (reusable, missing) =
+            reusable_rows(&old, chunks, chunks, HashMap::new()).map_err(failure)?;
+        context.revalidate().map_err(fence_failure)?;
+        jobs::set_text_revision(&self.index_directory, page, revision, &text).map_err(failure)?;
+        let _merge = page_timings::timer(Bucket::LanceMerge);
+        if missing {
+            jobs::enqueue(&self.index_directory, page, revision, &text, &reusable, now)
+                .map_err(failure)?;
+            replace_vectors(&semantic, page, &[])
+                .await
+                .map_err(failure)?;
+        } else {
+            replace_vectors(&semantic, page, &reusable)
+                .await
+                .map_err(failure)?;
+            jobs::set_semantic_revision(&self.index_directory, page, &text).map_err(failure)?;
+        }
+        Ok(())
     }
 
     /// Next retry for the sync worker. Admission is serialized by its existing
@@ -148,10 +236,10 @@ impl GuardedChunkTable {
             return Ok(false);
         }
         let timeout = std::time::Duration::from_secs((remaining - 1) as u64);
-        let prepared = self.prepare_semantic(page, provider, now, timeout).await?;
-        match prepared {
-            Some(prepared) => self.complete_semantic(prepared, lease, clock).await,
-            None => Ok(false),
+        match self.prepare_semantic(page, provider, now, timeout).await {
+            Ok(Some(prepared)) => self.complete_semantic(prepared, lease, clock).await,
+            Ok(None) | Err(CommitError::Conflict | CommitError::LeaseLost) => Ok(false),
+            Err(error) => Err(error),
         }
     }
 
@@ -173,7 +261,10 @@ impl GuardedChunkTable {
             return Ok(None);
         }
         let text = self.open_canonical().await.map_err(index_failure)?;
-        let canonical = text.page_chunks(page).await.map_err(index_failure)?;
+        let canonical = text
+            .page_chunks_in_source_order(page)
+            .await
+            .map_err(index_failure)?;
         if jobs::fingerprint(&canonical).map_err(index_failure)? != job.text {
             return Ok(Some(PreparedSemanticProjection { job, vectors: None }));
         }
@@ -263,7 +354,20 @@ impl GuardedChunkTable {
                                 .await
                                 .map_err(failure)?;
                         }
+                        let semantic_chunks =
+                            rows.iter().map(|row| row.chunk.clone()).collect::<Vec<_>>();
+                        let fingerprint = jobs::fingerprint(&semantic_chunks).map_err(failure)?;
+                        jobs::set_semantic_revision(&this.index_directory, &job.page, &fingerprint)
+                            .map_err(failure)?;
                         jobs::clear(&this.index_directory, &job.page).map_err(failure)?;
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({
+                                "operation": "semantic_projection",
+                                "outcome": "published",
+                                "chunks": rows.len(),
+                            })
+                        );
                         owned_wrote.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
                     Err(ChunkTableError::Embedding(error)) => {
@@ -363,7 +467,9 @@ fn reusable(old: &StoredChunk, chunk: &IndexedChunk) -> bool {
 
 fn reusable_rows(
     rows: &[StoredChunk],
+    previous: &[IndexedChunk],
     chunks: &[IndexedChunk],
+    mut staged: HashMap<String, Vec<f32>>,
 ) -> Result<(Vec<EmbeddedChunk>, bool), ChunkTableError> {
     let mut old = HashMap::with_capacity(rows.len());
     for row in rows {
@@ -373,13 +479,26 @@ fn reusable_rows(
             ));
         }
     }
+    let previous: HashMap<_, _> = previous
+        .iter()
+        .map(|chunk| (chunk.chunk_id.as_str(), chunk))
+        .collect();
     let rows: Vec<_> = chunks
         .iter()
         .filter_map(|chunk| {
-            let existing = old
+            let vector = if let Some(existing) = old
                 .get(chunk.chunk_id.as_str())
-                .filter(|old| reusable(old, chunk))?;
-            Some(EmbeddedChunk::new(chunk.clone(), existing.vector.clone()))
+                .filter(|old| reusable(old, chunk))
+            {
+                existing.vector.clone()
+            } else {
+                let previous = previous.get(chunk.chunk_id.as_str())?;
+                if previous.content_hash != chunk.content_hash || previous.text != chunk.text {
+                    return None;
+                }
+                staged.remove(&chunk.chunk_id)?
+            };
+            Some(EmbeddedChunk::new(chunk.clone(), vector))
         })
         .collect();
     let missing = rows.len() < chunks.len();

@@ -582,7 +582,7 @@ impl EmbeddingProvider for UnavailableEmbedding {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mutation_refresh_preserves_verified_write_on_index_failure_and_retries_only_hash_diff() {
+async fn mutation_refresh_preserves_verified_write_and_text_when_embedding_fails() {
     use notion_knowledge_core::{
         append::{AppendRequest, append_once_and_refresh},
         write_refresh::{IndexStatus, MutationRefreshQueue, RefreshKey},
@@ -644,7 +644,7 @@ async fn mutation_refresh_preserves_verified_write_on_index_failure_and_retries_
     tick(&runtime.worker, false).await;
     assert_eq!(
         state.status(&result.refresh).unwrap(),
-        Some(IndexStatus::Failed)
+        Some(IndexStatus::Completed)
     );
     assert!(
         runtime
@@ -666,12 +666,19 @@ async fn mutation_refresh_preserves_verified_write_on_index_failure_and_retries_
     .await
     .unwrap();
     assert!(replay.replayed);
-    assert_eq!(replay.index, IndexStatus::Failed);
+    assert_eq!(replay.index, IndexStatus::Completed);
     assert_eq!(replay.receipt, result.receipt);
     assert_eq!(runtime.source.writes.load(Ordering::SeqCst), 1);
+    let (vectors, backlog) = runtime
+        .worker
+        .index
+        .chunks()
+        .semantic_status()
+        .await
+        .unwrap();
+    assert_eq!((vectors, backlog.model_unavailable), (0, 1));
     set_provider(&mut runtime.worker, provider);
-    state.retry_mutation_refresh(&result.refresh).unwrap();
-    tick(&runtime.worker, false).await;
+
     assert_eq!(
         state.status(&result.refresh).unwrap(),
         Some(IndexStatus::Completed)
@@ -740,6 +747,7 @@ async fn mutation_refresh_recovers_committed_index_after_lost_queue_ack_without_
         Some(IndexStatus::Running)
     );
     assert!(runtime.searchable("Saffron").await > 0);
+    assert!(runtime.worker.semantic_step().await.unwrap());
     let embedded = runtime.embeddings.load(Ordering::SeqCst);
     db.execute_batch(
         "DROP TRIGGER fail_mutation_ack; UPDATE mutation_refresh SET lease_until=0 WHERE state=1;",
@@ -989,6 +997,7 @@ async fn debounce_and_lifecycle_follow_authority_and_recover_effects_before_inbo
     assert!(runtime.searchable("Saffron").await > 0);
     assert_eq!(inspect(&runtime.worker, &a).state, EventState::Running);
     sql.execute_batch("DROP TRIGGER fail_ack; UPDATE webhook_inbox SET lease_until=0 WHERE state=1; UPDATE webhook_page_work SET lease_until_ms=0 WHERE lease_until_ms IS NOT NULL;").unwrap();
+    assert!(runtime.worker.semantic_step().await.unwrap());
     let embedded_before_replay = runtime.embeddings.load(Ordering::SeqCst);
     // Reopen SQLite and index authority just as a restarted serving process does.
     let reopened = IndexCommitCoordinator::open(
@@ -2555,40 +2564,10 @@ async fn installed_fresh_get_prefers_current_cache_and_defers_live_permissions_t
     assert!(output[1]["result"]["structuredContent"].is_null());
 }
 
-struct PauseSourceProvider {
-    metadata: EmbeddingMetadata,
-    pause: Arc<AtomicBool>,
-}
-impl EmbeddingProvider for PauseSourceProvider {
-    fn metadata(&self) -> &EmbeddingMetadata {
-        &self.metadata
-    }
-    fn embed_batch<'a>(&'a self, texts: &'a [String]) -> EmbeddingFuture<'a> {
-        self.pause.store(true, Ordering::SeqCst);
-        Box::pin(async move {
-            Ok(texts
-                .iter()
-                .map(|t| {
-                    if t.contains("ANKARE") || t == "Saffron fyr" || t == "CSV electricity" {
-                        vec![1., 0., 0.]
-                    } else if t.contains("GRANNE") {
-                        vec![0.96, 0.28, 0.]
-                    } else if t.contains("KONTROLL") {
-                        vec![0.98, 0.2, 0.]
-                    } else {
-                        vec![t.len() as f32, 1., 0.]
-                    }
-                })
-                .collect())
-        })
-    }
-}
-
-/// Hold the owned commit (guard and fence held, before effects) once the
-/// next pause is armed, as the removed in-guard source read used to.
+/// Hold exactly one owned commit after it acquires its writer fence.
 fn pause_owned_commits(runtime: &TestRuntime) {
     let (armed, entered, proceed) = (
-        runtime.source.pause_next.clone(),
+        Arc::new(AtomicBool::new(true)),
         runtime.source.entered.clone(),
         runtime.source.proceed.clone(),
     );
@@ -2607,17 +2586,8 @@ fn pause_owned_commits(runtime: &TestRuntime) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shutdown_cancels_owned_commit_source_read_releases_fence_and_restart_processes_healthy_page()
- {
-    let mut runtime = TestRuntime::new().await;
-    let metadata = runtime.worker.index.provider.metadata().clone();
-    set_provider(
-        &mut runtime.worker,
-        Arc::new(PauseSourceProvider {
-            metadata,
-            pause: runtime.source.pause_next.clone(),
-        }),
-    );
+async fn shutdown_cancels_owned_commit_releases_fence_and_restart_processes_healthy_page() {
+    let runtime = TestRuntime::new().await;
     pause_owned_commits(&runtime);
     let interrupted = event(PAGE, "page.created");
     runtime.worker.state.receive(&interrupted).unwrap();
@@ -2628,8 +2598,7 @@ async fn shutdown_cancels_owned_commit_source_read_releases_fence_and_restart_pr
     tokio::time::timeout(Duration::from_secs(10), runtime.source.entered.notified())
         .await
         .unwrap();
-    // Pause is inside the operation-owned precommit source revalidation, after
-    // embedding and directory acquisition, rather than only in preparation.
+    // The commit holds the directory fence and has recorded its receipt.
     let pending = rusqlite::Connection::open(&runtime.db)
         .unwrap()
         .query_row("SELECT count(*) FROM index_commit_receipts", [], |r| {
@@ -2720,14 +2689,6 @@ async fn deadline_cancellation_retains_due_retry_and_allows_healthy_page_progres
         tokio::net::TcpStream::connect(("127.0.0.1", runtime.source.port))
             .await
             .unwrap(),
-    );
-    let metadata = runtime.worker.index.provider.metadata().clone();
-    set_provider(
-        &mut runtime.worker,
-        Arc::new(PauseSourceProvider {
-            metadata,
-            pause: runtime.source.pause_next.clone(),
-        }),
     );
     let worker = Arc::get_mut(&mut runtime.worker).unwrap();
     worker.timeout = Duration::from_secs(6);
@@ -2860,7 +2821,7 @@ async fn deadline_cancellation_retains_due_retry_and_allows_healthy_page_progres
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn installed_graph_denies_reads_after_interrupted_owned_producer_commit() {
-    let mut runtime = TestRuntime::with_scope_policy("webhook-v1").await;
+    let runtime = TestRuntime::with_scope_policy("webhook-v1").await;
     commit_graph_fixture(&runtime).await;
     let config = graph_config(&runtime);
     let handler = installed_retrieval(
@@ -2870,14 +2831,6 @@ async fn installed_graph_denies_reads_after_interrupted_owned_producer_commit() 
     )
     .await
     .unwrap();
-    let metadata = runtime.worker.index.provider.metadata().clone();
-    set_provider(
-        &mut runtime.worker,
-        Arc::new(PauseSourceProvider {
-            metadata,
-            pause: runtime.source.pause_next.clone(),
-        }),
-    );
     pause_owned_commits(&runtime);
     runtime.source.change(|m| {
         m.markdown = "Changed Saffron.".into();
@@ -2968,7 +2921,7 @@ async fn installed_missing_qwen_assets_leave_fresh_and_lexical_available() {
         search_request(3, "hybrid", scoped.clone()),
         search_request(4, "semantic", scoped),
         json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{
-            "name":"knowledge_get","arguments":{"refs":[{"kind":"page","id":PAGE}],"freshness":"fresh"}}}),
+            "name":"knowledge_get","arguments":{"refs":[{"kind":"page","id":PAGE}],"max_chars":2000,"freshness":"fresh"}}}),
     ]).await;
     let lexical = &output[1]["result"]["structuredContent"];
     assert_eq!(
@@ -2990,4 +2943,165 @@ async fn installed_missing_qwen_assets_leave_fresh_and_lexical_available() {
         runtime.source.body_reads.load(Ordering::SeqCst),
         source_reads
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn edited_text_commits_during_inference_and_semantic_retry_uses_only_current_text() {
+    use notion_knowledge_core::embedding::EmbeddingError;
+    use notion_knowledge_core::search::{LexicalQuery, LexicalSearch, SearchUnavailable};
+
+    struct Model {
+        inner: Provider,
+        pause: AtomicBool,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Semaphore,
+        failed: AtomicBool,
+    }
+    impl EmbeddingProvider for Model {
+        fn metadata(&self) -> &EmbeddingMetadata {
+            self.inner.metadata()
+        }
+        fn embed_batch<'a>(&'a self, texts: &'a [String]) -> EmbeddingFuture<'a> {
+            Box::pin(async move {
+                if self.pause.swap(false, Ordering::SeqCst) {
+                    self.entered.notify_one();
+                    self.release.acquire().await.unwrap().forget();
+                }
+                if self.failed.load(Ordering::SeqCst) {
+                    return Err(EmbeddingError::Unavailable);
+                }
+                self.inner.embed_batch(texts).await
+            })
+        }
+    }
+
+    let model = Arc::new(Model {
+        inner: Provider {
+            metadata: EmbeddingMetadata::new("switchable".into(), "fixture".into(), "1".into(), 3)
+                .unwrap(),
+            count: Arc::new(AtomicUsize::new(0)),
+        },
+        pause: AtomicBool::new(false),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Semaphore::new(0),
+        failed: AtomicBool::new(false),
+    });
+    let runtime = TestRuntime::with_provider(
+        "webhook-v1",
+        ExclusionRules::default(),
+        false,
+        Some(model.clone()),
+    )
+    .await;
+    let table = runtime.worker.index.chunks();
+    runtime.source.change(|source| {
+        source.markdown = "# Stable section\n\nCamomile recurring instructions.\n\n# Changing section\n\nSaffron from the old version.\n".into();
+    });
+    let refresh = || async {
+        let update = event(PAGE, "page.content_updated");
+        runtime.worker.state.receive(&update).unwrap();
+        assert!(
+            runtime
+                .worker
+                .tick(CancellationToken::new(), false)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            inspect(&runtime.worker, &update).state,
+            EventState::Succeeded
+        );
+    };
+    refresh().await;
+    assert!(runtime.worker.semantic_step().await.unwrap());
+    assert_eq!(table.semantic_status().await.unwrap().0, 2);
+    let initial_inferences = model.inner.count.load(Ordering::SeqCst);
+
+    runtime.source.change(|source| {
+        source.markdown = source.markdown.replace(
+            "Saffron from the old version.",
+            "Ginger from a superseded version.",
+        );
+    });
+    refresh().await;
+    assert_eq!(table.semantic_status().await.unwrap().0, 0);
+    model.pause.store(true, Ordering::SeqCst);
+    let worker = runtime.worker.clone();
+    let old_projection = tokio::spawn(async move { worker.semantic_step().await.unwrap() });
+    tokio::time::timeout(Duration::from_secs(5), model.entered.notified())
+        .await
+        .unwrap();
+
+    runtime.source.change(|source| {
+        // Keep the same edit timestamp to exercise exact text identity.
+        source.markdown = source.markdown.replace(
+            "Ginger from a superseded version.",
+            "Coriander from the newest version.",
+        );
+    });
+    refresh().await;
+    assert_eq!(table.semantic_status().await.unwrap().0, 0);
+    let reads = runtime.source.body_reads.load(Ordering::SeqCst);
+    model.release.add_permits(1);
+    old_projection.await.unwrap();
+    assert_eq!(table.semantic_status().await.unwrap().0, 0);
+
+    model.failed.store(true, Ordering::SeqCst);
+    assert!(runtime.worker.semantic_step().await.unwrap());
+    let (vectors, backlog) = table.semantic_status().await.unwrap();
+    assert_eq!((vectors, backlog.model_unavailable), (0, 1));
+    let hits = table
+        .search_with_snapshot(false, |text| async move {
+            LexicalSearch::search(
+                &text,
+                LexicalQuery {
+                    query: "Coriander".into(),
+                    limit: 2,
+                    page_ids: Some(vec![PAGE.into()]),
+                    root_page_ids: Some(vec![ROOT.into()]),
+                    metadata: Default::default(),
+                },
+            )
+            .await
+        })
+        .await
+        .map_err(|_: SearchUnavailable| "lexical projection unavailable")
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+
+    model.failed.store(false, Ordering::SeqCst);
+    let now = now_ms() / 1000;
+    let prepared = table
+        .prepare_semantic(PAGE, model.as_ref(), now + 31, Duration::from_secs(5))
+        .await
+        .unwrap()
+        .expect("scheduled retry");
+    let lease = runtime.worker.state.acquire_lease(now, 30).unwrap();
+    assert!(
+        table
+            .complete_semantic(prepared, lease.clone(), Arc::new(|| now_ms() / 1000))
+            .await
+            .unwrap()
+    );
+    runtime
+        .worker
+        .state
+        .release_lease(&lease, now_ms() / 1000)
+        .unwrap();
+    let (vectors, backlog) = table.semantic_status().await.unwrap();
+    assert_eq!((vectors, backlog.model_unavailable), (2, 0));
+    let active = table
+        .search_snapshot()
+        .await
+        .unwrap()
+        .page_chunks(PAGE)
+        .await
+        .unwrap();
+    assert!(active.iter().any(|chunk| chunk.text.contains("Coriander")));
+    assert!(active.iter().all(|chunk| !chunk.text.contains("Ginger")));
+    assert_eq!(
+        model.inner.count.load(Ordering::SeqCst),
+        initial_inferences + 2
+    );
+    assert_eq!(runtime.source.body_reads.load(Ordering::SeqCst), reads);
 }

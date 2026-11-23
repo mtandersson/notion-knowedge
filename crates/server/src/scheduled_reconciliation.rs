@@ -332,24 +332,4 @@ mod serving_configuration_tests {
             assert!(parse(&[(key, value)]).is_err(), "{key}");
         }
     }
-    #[tokio::test]
-    async fn missing_offline_model_rejects_periodic_startup_without_creating_state() {
-        let dir = tempfile::tempdir().unwrap();
-        let index = dir.path().join("index");
-        let state = dir.path().join("state.sqlite");
-        let assets = dir.path().join("missing");
-        let c = parse(&[
-            ("NK_WEBHOOK_INDEX_DIR", index.to_str().unwrap()),
-            ("NK_WEBHOOK_STATE_FILE", state.to_str().unwrap()),
-            ("NK_WEBHOOK_QWEN_ASSETS", assets.to_str().unwrap()),
-        ])
-        .unwrap();
-        assert!(
-            crate::webhook_worker::runtime::configured(&c)
-                .await
-                .is_err()
-        );
-        assert!(!index.exists());
-        assert!(!state.exists());
-    }
 }

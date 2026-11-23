@@ -629,6 +629,15 @@ impl AuthoritativePageRefresh {
             Some(document.metadata.last_edited_time.clone()),
         )
         .map_err(|_| RefreshError::InvalidConfiguration)?;
+        // Revision includes canonical metadata and content, not just body text.
+        // Unacknowledged durable refresh work can retry a changed proposal.
+        // Applied receipts remain immutable in the SQLite store.
+        let mut hasher = Sha256::new();
+        let serialized =
+            serde_json::to_vec(&document).map_err(|_| RefreshError::InvalidConfiguration)?;
+        hasher.update(serialized);
+        hasher.update(&metadata_identity);
+        let revision = format!("{:x}", hasher.finalize());
         let same_revision = self
             .coordinator
             .state()
@@ -637,7 +646,10 @@ impl AuthoritativePageRefresh {
             .as_ref()
             == Some(&checkpoint)
             && self.coordinator.metadata_identity(&page.0)?.as_ref() == Some(&metadata_identity)
-            && (!previous.is_empty() || chunks.is_empty());
+            && (!previous.is_empty() || chunks.is_empty())
+            && self
+                .guard
+                .text_matches_revision(&page.0, &revision, &previous)?;
         // The compatible v1 copy may contain previously partitioned HTML
         // tables. Preserve parents, split boundaries and citations while
         // the canonical source revision remains identical.
@@ -663,6 +675,7 @@ impl AuthoritativePageRefresh {
             let expected_metadata = metadata_identity.clone();
             let unchanged_chunks = previous.len();
             let expected_chunks = previous;
+            let owned_clock = clock.clone();
             self.check_owned_snapshot(lease, clock, move |context| async move {
                 let _authority = handler
                     .relations
@@ -703,6 +716,16 @@ impl AuthoritativePageRefresh {
                 {
                     return Err(FailureClass::Conflict);
                 }
+                handler
+                    .guard
+                    .repair_semantic_if_missing(
+                        &context,
+                        expected_projection.page_id(),
+                        &revision,
+                        &expected_chunks,
+                        owned_clock(),
+                    )
+                    .await?;
                 Ok(())
             })
             .await?;
@@ -715,15 +738,6 @@ impl AuthoritativePageRefresh {
             });
         }
 
-        // Revision includes canonical metadata and content, not just body text.
-        // Unacknowledged durable refresh work can retry a changed proposal.
-        // Applied receipts remain immutable in the SQLite store.
-        let mut hasher = Sha256::new();
-        let serialized =
-            serde_json::to_vec(&document).map_err(|_| RefreshError::InvalidConfiguration)?;
-        hasher.update(serialized);
-        hasher.update(&metadata_identity);
-        let revision = format!("{:x}", hasher.finalize());
         let repair_id;
         let operation_id = if self
             .coordinator

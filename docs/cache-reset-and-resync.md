@@ -17,8 +17,8 @@ rebuild trigger reset and a fresh authoritative inventory. A healthy cache is
 reused; healthy read-only composition still opens it without writes.
 
 Reset holds the directory guard and current writer lease, clears an explicit
-allowlist of derived SQLite bookkeeping, and removes only the canonical chunks
-table and its known binding/journal artifacts. It preserves the directory and
+allowlist of derived SQLite bookkeeping, and removes the known source cache,
+lexical and semantic tables, projection queue and binding artifacts. It preserves the directory and
 operational SQLite file, admitted webhook work, mutation/file refresh intents
 and unrelated application tables. A single pending-sync flag remains until the
 inventory and independent page attempts produce a usable search index.
@@ -28,15 +28,15 @@ remain visible in existing reconciliation errors while readable pages become
 searchable. Template references are kept as returned by Notion, without fetching
 their originals or requiring source repairs. A later sync can recover skipped
 pages. Storage/index failures, invalid ownership, invalid credentials, failed
-inventory execution and unusable assets still leave startup unavailable and the
+inventory execution and unusable lexical assets still leave startup unavailable and the
 flag pending. The next start retries recovery; arbitrary storage errors do not
 trigger destructive reset.
 
 Initial/reset sync overlaps discovery with useful indexing. A bounded channel
 holds at most eight discovered page IDs. Two read-only workers freshly authorize
-and prepare page content (shared Notion rate limiter) while one consumer embeds
-and durably commits pages in discovery order, so the next page downloads while
-the model works. At most one prepared page waits beyond those in flight. Each
+and prepare page content (shared Notion rate limiter) while one consumer
+durably commits pages in discovery order. At most one prepared page waits
+beyond those in flight. Each
 preparation reserves 32 MiB of a 64 MiB retained-byte budget before its first
 request, keeps only its measured size while queued and committing, and is
 prepared again from the same walked read by the consumer if it exceeds its
@@ -46,7 +46,7 @@ read); nothing is read again before or inside the commit. Prefetching captures
 no index version, lease or receipt decision: the consumer builds the guarded
 mutation plan from current index state and re-chunks a page whose own indexed
 chunks changed meanwhile. A source edit or move after the read is picked up by
-the next walk. Preparation and embedding/commit each have their own page deadline, so one
+the next walk. Preparation and publication each have their own page deadline, so one
 page may take up to twice `timeout_seconds`; both timeouts use the existing settlement. The existing writer
 lease is renewed while waiting for more pages; timed-out work is fenced and
 drained before releasing it. No Notion write or upload is issued.
@@ -65,7 +65,7 @@ roughly every ten seconds as work completes, and phase completion. Every normal
 operation event within a startup sync also includes `sync_progress`: phase,
 `discovered_pages`, `content_reads`, `prefetched_pages`, `embedded_chunks`, `committed_pages`,
 `skipped_pages`, and `total_pages`. These are actual metadata discoveries, successful
-content reads, pages prepared ahead of embedding, completed embedding outputs and acknowledged page commits; reads
+content reads, pages prepared for publication, completed embedding outputs and acknowledged page commits; reads
 happen once per page per sync. They are not estimates
 of unique indexed sources. The total stays null until traversal completes; no
 workspace-wide page count is guessed. Counts contain no titles, IDs, URLs or text.
@@ -89,18 +89,15 @@ checkpoint. Use the existing trusted scoped cache reset/resync procedure below
 to rebuild that derived layout, preserving operational/external-effect records.
 The embedding model/vector identity does not change for this boundary correction.
 
-Each guarded page prepares its embeddings with sequential single-text provider
-requests, then commits the complete page atomically. A page with many valid
-chunks therefore does not exceed the provider's per-request text-count bound.
-When a chunk containing a complete HTML table exceeds the model's input limit,
-the worker checks smaller, contiguous source slices at table rows and surrounding
-Markdown boundaries before finalizing chunk identities. Accepted chunks keep
-their existing layout. Every slice must fit before the complete page can commit.
-An indivisible oversized input records `EmbeddingInputLimit` in reconciliation
-status and emits the fixed `embedding_input_limit` skip reason. Independent pages
-can still become searchable. Normal later sync can retry the failed page.
-Model availability, malformed outputs, concurrency/resource exhaustion and index,
-ownership or authentication failures retain their failure handling.
+The source and lexical publication completes before model work. The semantic
+worker reads that revision locally, requests single-text embeddings and
+publishes the complete vector set under the writer fence. When a table
+chunk exceeds model admission, the worker tries smaller slices at table and
+Markdown boundaries. A model failure or input-limit deferral appears under
+`semantic_projection` in status and logs. Fresh reads and lexical search
+can use the published text while that work awaits retry.
+An installed worker drains due jobs in the background. On a retrieval-only
+installation, run `--reconcile apply` to attempt due jobs after source sync.
 
 With `NK_GRAPH=false`, source content, link text and relation properties remain
 canonical, but optional foreign-target metadata resolution is disabled. References
@@ -113,9 +110,8 @@ previously resolved source projection. This setting is trusted immutable runtime
 composition and cannot be supplied by source metadata or a prepared proposal.
 
 During initial population, a pre-commit page deadline cancels its observer and
-expires its commit clock before owned work is drained. Blocking embeddings retain
-admission until their work finishes; siblings wait for provider readiness under
-the existing bounds. Unresolved/failed effects and genuine storage, authentication
+expires its commit clock before owned work is drained. Unresolved/failed effects
+and genuine storage, authentication
 or ownership errors remain fatal. An applied receipt uses existing bounded
 recovery rather than being labeled skipped. A safe page deadline emits the fixed
 `page_timeout` reason and becomes `PageTimeout` in durable per-page progress once

@@ -6,7 +6,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
 const FILE: &str = "semantic-projection.sqlite";
-const FORMAT: i64 = 1;
+const INSTALLED: &str = ".nk-text-projection-v1";
 const RETRY_DELAY_SECONDS: i64 = 30;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -52,7 +52,13 @@ fn connect(directory: &Path, writable: bool) -> Result<Connection, ChunkTableErr
                 due INTEGER,
                 reusable TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS projection_due ON projection_jobs(due, page);",
+            CREATE INDEX IF NOT EXISTS projection_due ON projection_jobs(due, page);
+            CREATE TABLE IF NOT EXISTS text_publications (
+                page TEXT PRIMARY KEY NOT NULL,
+                revision TEXT NOT NULL,
+                text TEXT NOT NULL,
+                semantic TEXT
+            );",
         )
         .map_err(|_| ChunkTableError::Storage)?;
     }
@@ -60,27 +66,97 @@ fn connect(directory: &Path, writable: bool) -> Result<Connection, ChunkTableErr
 }
 
 pub(super) fn installed(directory: &Path) -> Result<bool, ChunkTableError> {
-    let Some(database) = reader(directory)? else {
-        return Ok(false);
-    };
-    let version: i64 = database
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(|_| ChunkTableError::Storage)?;
-    match version {
-        0 => Ok(false),
-        FORMAT => Ok(true),
-        _ => Err(ChunkTableError::InvalidSchema(
-            "unsupported text projection format".into(),
-        )),
+    match directory.join(INSTALLED).symlink_metadata() {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err(ChunkTableError::InvalidPath),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
     }
 }
 
 pub(super) fn mark_installed(directory: &Path) -> Result<(), ChunkTableError> {
-    if !installed(directory)? {
-        connect(directory, true)?
-            .pragma_update(None, "user_version", FORMAT)
-            .map_err(|_| ChunkTableError::Storage)?;
+    // Open writable under the owner lock, so SQLite can roll back a hot
+    // journal before any queued job or text publication is used.
+    let existing = installed(directory)?;
+    if existing && !directory.join(FILE).try_exists()? {
+        return Err(ChunkTableError::InvalidSchema(
+            "installed semantic projection state is missing".into(),
+        ));
     }
+    connect(directory, true)?;
+    if !existing {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(directory.join(INSTALLED))?
+            .sync_all()?;
+        std::fs::File::open(directory)?.sync_all()?;
+    }
+    Ok(())
+}
+
+pub(super) fn text_revision(
+    directory: &Path,
+    page: &str,
+) -> Result<Option<(String, String)>, ChunkTableError> {
+    let Some(db) = reader(directory)? else {
+        return Ok(None);
+    };
+    db.query_row(
+        "SELECT revision, text FROM text_publications WHERE page = ?1",
+        [page],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(|_| ChunkTableError::Storage)
+}
+
+pub(super) fn set_text_revision(
+    directory: &Path,
+    page: &str,
+    revision: &str,
+    fingerprint: &str,
+) -> Result<(), ChunkTableError> {
+    connect(directory, true)?
+        .execute(
+            "INSERT INTO text_publications(page, revision, text) VALUES(?1, ?2, ?3)
+         ON CONFLICT(page) DO UPDATE SET revision = excluded.revision, text = excluded.text, semantic = NULL
+           WHERE text_publications.revision <> excluded.revision
+              OR text_publications.text <> excluded.text",
+            params![page, revision, fingerprint],
+        )
+        .map_err(|_| ChunkTableError::Storage)?;
+    Ok(())
+}
+
+pub(super) fn semantic_revision(
+    directory: &Path,
+    page: &str,
+) -> Result<Option<String>, ChunkTableError> {
+    let Some(db) = reader(directory)? else {
+        return Ok(None);
+    };
+    db.query_row(
+        "SELECT semantic FROM text_publications WHERE page = ?1",
+        [page],
+        |row| row.get(0),
+    )
+    .optional()
+    .map(Option::flatten)
+    .map_err(|_| ChunkTableError::Storage)
+}
+
+pub(super) fn set_semantic_revision(
+    directory: &Path,
+    page: &str,
+    fingerprint: &str,
+) -> Result<(), ChunkTableError> {
+    connect(directory, true)?
+        .execute(
+            "UPDATE text_publications SET semantic = ?2 WHERE page = ?1",
+            params![page, fingerprint],
+        )
+        .map_err(|_| ChunkTableError::Storage)?;
     Ok(())
 }
 

@@ -629,12 +629,19 @@ impl GuardedChunkTable {
             .map_err(|_| SearchUnavailable)
     }
 
+    /// True after the fenced v1 import finished creating the text indexes.
+    pub fn text_projection_installed(&self) -> Result<bool, ChunkTableError> {
+        super::semantic_jobs::installed(&self.index_directory)
+    }
+
     async fn open_canonical(&self) -> Result<LanceChunkTable, ChunkTableError> {
         lexical_binding::verify(&self.index_directory, &self.lexical_binding)?;
-        if let Some(text) =
-            super::text::current(&self.index_directory, self.binding(), &self.embedding).await?
-        {
-            return Ok(text);
+        if self.text_projection_installed()? {
+            return super::text::current(&self.index_directory, self.binding(), &self.embedding)
+                .await?
+                .ok_or_else(|| {
+                    ChunkTableError::InvalidSchema("installed text projection is missing".into())
+                });
         }
         open_current(
             &self.index_directory,
@@ -870,6 +877,19 @@ impl GuardedChunkTable {
             current.count_rows().await? as u64,
             super::semantic_jobs::backlog(&self.index_directory)?,
         ))
+    }
+
+    /// Includes jobs parked after a deterministic model failure.
+    pub fn has_pending_semantic(&self, page: Option<&str>) -> Result<bool, ChunkTableError> {
+        let _guard = self
+            .coordinator
+            .search_guard()
+            .map_err(|_| ChunkTableError::InvalidPath)?;
+        if let Some(page) = page {
+            return Ok(super::semantic_jobs::for_page(&self.index_directory, page)?.is_some());
+        }
+        let backlog = super::semantic_jobs::backlog(&self.index_directory)?;
+        Ok(backlog != super::SemanticBacklog::default())
     }
 
     pub async fn indexed_page_ids(&self) -> Result<Vec<String>, ChunkTableError> {

@@ -13,17 +13,13 @@ fixture's titles, IDs or content appear in it.
  "vector_optimize_ms":0,"receipt_ms":112,"other_ms":96,"queue_wait_ms":363,
  "walk_api_ops":1,"walk_api_ms":11,"prepare_api_ops":0,"prepare_api_ms":0,
  "commit_api_ops":0,"commit_api_ms":0,"limiter_wait_ms":0,
- "embedded_chunks":1,"skipped_chunks":0,"sync_progress":{"...":"..."}}
+ "text_chunks":1,"skipped_chunks":0,"sync_progress":{"...":"..."}}
 ```
 
 `status` is `page_committed`, `page_unchanged` (already applied; nothing was
-written) or `page_skipped` with a fixed `reason`: `embedding_input_limit`,
-`page_timeout`, `out_of_scope`, `permanent_source` or `source`. These lines
-replace the older separate `page_skipped` lines (which covered only
-`embedding_input_limit` and `page_timeout`), so a page emits exactly one line.
-Every settled page now logs at info level, so consumers that filtered on
-`status == "page_skipped"` also see the new reasons, and log volume is one line
-per page.
+written) or `page_skipped` with a fixed `reason`: `page_timeout`,
+`out_of_scope`, `permanent_source` or `source`. Every settled page logs at
+info level.
 Pages the walk itself skips (archived, excluded, unreadable) never reach the
 consumer and have no line; a failure that stops the whole sync (authentication,
 index or authority) has none either.
@@ -38,7 +34,7 @@ parts of it and **sum to `wall_ms` exactly**:
 | Field | Meaning |
 | --- | --- |
 | `consumer_wait_ms` | The consumer waited for a prefetched page (the walk or preparation is the bottleneck). With `NK_PREFETCH_WORKERS=0` the page is prepared only after the consumer asks, so this includes its whole preparation. |
-| `embed_ms` | Embedding the changed chunks (sequential single-text provider calls). |
+| `embed_ms` | Zero in the source/text phase. The semantic worker runs separately. |
 | `lance_merge_ms` | The Lance `merge_insert` (or delete) for the page. |
 | `fts_optimize_ms` | FTS index ensure, compaction and `optimize_fts_index`. |
 | `vector_optimize_ms` | Vector-index layout check and optimize. |
@@ -66,8 +62,8 @@ other, so they are **not** added to the sum:
 | `prepare_api_ops`, `prepare_api_ms` | Requests made authorizing relation and link targets while preparing the page. |
 | `commit_api_ops`, `commit_api_ms` | Requests made on the commit path. Sync no longer rechecks the source before committing, so this must be 0; it is kept to show that. |
 | `limiter_wait_ms` | Time the page's requests spent queued in the shared limiter's `admit()` (one request per 334 ms). It is part of the `*_api_ms` fields; subtract it for time on the wire. |
-| `queue_wait_ms` | From the prepared page being handed to the bounded queue (including blocking while it is full) until the consumer received it. Large values mean embedding and commit are the bottleneck. |
-| `embedded_chunks`, `skipped_chunks` | Chunks embedded (added plus changed) and chunks reused unchanged, from the page's chunk diff. |
+| `queue_wait_ms` | From the prepared page being handed to the bounded queue (including blocking while it is full) until the consumer received it. Large values can indicate a publication bottleneck. |
+| `text_chunks`, `skipped_chunks` | Lexical chunks added or changed, and chunks reused unchanged. |
 
 The old issue wording named "authorization/lifecycle walk, content fetch and
 commit revalidation". Since the bulk tree-walk, one read returns metadata and
@@ -83,6 +79,13 @@ The periodic and final `cache_sync` progress line for the `indexing` phase adds
 `page_totals`: `pages` plus the running sum of every numeric field above. Divide
 by `pages` for an average.
 
+The worker emits separate `operation: "semantic_projection"` events. A
+`published` outcome gives the number of vectors published for that page.
+`embedding_deferred` reports a typed provider reason, including `InputLimit`.
+`retry_deferred` reports an infrastructure failure in the retry loop.
+The read-only status tool reports the current backlog.
+[Synchronization status](knowledge-sync-status.md)
+
 ## Recipes
 
 Average per phase over all pages of the journal window:
@@ -90,7 +93,7 @@ Average per phase over all pages of the journal window:
 ```sh
 journalctl -u notion-knowledge -o cat --since today | jq -R -n '
   [inputs | fromjson? | select(.operation == "cache_sync" and ((.status // "") | startswith("page_")))] as $p
-  | ["wall_ms", "consumer_wait_ms", "embed_ms", "lance_merge_ms", "fts_optimize_ms", "vector_optimize_ms", "receipt_ms", "other_ms", "queue_wait_ms", "walk_api_ms", "prepare_api_ms", "commit_api_ms", "limiter_wait_ms", "walk_api_ops", "prepare_api_ops", "commit_api_ops", "embedded_chunks", "skipped_chunks"]
+  | ["wall_ms", "consumer_wait_ms", "embed_ms", "lance_merge_ms", "fts_optimize_ms", "vector_optimize_ms", "receipt_ms", "other_ms", "queue_wait_ms", "walk_api_ms", "prepare_api_ms", "commit_api_ms", "limiter_wait_ms", "walk_api_ops", "prepare_api_ops", "commit_api_ops", "text_chunks", "skipped_chunks"]
   | map(. as $k | {key: $k, value: (($p | map(.[$k]) | add) / ($p | length))})
   | from_entries + {pages: ($p | length)}'
 ```

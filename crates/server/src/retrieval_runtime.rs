@@ -331,21 +331,28 @@ fn search_adapters(
             hybrid: search,
         });
     }
+    let timeout = std::time::Duration::from_secs(settings.timeout_seconds);
     Ok(SearchAdapters {
         semantic: Arc::new(ScopedSearch {
             table: table.clone(),
             provider: provider.clone(),
+            timeout,
         }),
         lexical: Arc::new(ScopedLexical {
             table: table.clone(),
         }),
-        hybrid: Arc::new(ScopedHybrid { table, provider }),
+        hybrid: Arc::new(ScopedHybrid {
+            table,
+            provider,
+            timeout,
+        }),
     })
 }
 
 struct ScopedSearch {
     table: GuardedChunkTable,
     provider: Arc<dyn EmbeddingProvider>,
+    timeout: std::time::Duration,
 }
 impl SemanticSearch for ScopedSearch {
     fn search(&self, query: SemanticQuery) -> SearchFuture<'_> {
@@ -357,11 +364,13 @@ impl SemanticSearch for ScopedSearch {
     }
 
     fn search_with_failure(&self, query: SemanticQuery) -> SearchFutureWithFailure<'_> {
+        let deadline = tokio::time::Instant::now() + self.timeout;
         Box::pin(
             self.table
                 .search_with_snapshot(true, move |table| async move {
                     LanceSemanticSearch::new(Arc::new(table), self.provider.clone(), 1)
                         .map_err(|_| SearchUnavailable)?
+                        .with_embedding_deadline(deadline)
                         .search_with_failure(query)
                         .await
                 }),
@@ -383,6 +392,7 @@ impl LexicalSearch for ScopedLexical {
 struct ScopedHybrid {
     table: GuardedChunkTable,
     provider: Arc<dyn EmbeddingProvider>,
+    timeout: std::time::Duration,
 }
 impl HybridSearch for ScopedHybrid {
     fn search(&self, query: SemanticQuery) -> SearchFuture<'_> {
@@ -394,12 +404,14 @@ impl HybridSearch for ScopedHybrid {
     }
 
     fn search_with_failure(&self, query: SemanticQuery) -> SearchFutureWithFailure<'_> {
+        let deadline = tokio::time::Instant::now() + self.timeout;
         Box::pin(
             self.table
                 .search_with_snapshots(move |semantic, lexical| async move {
                     let semantic = Arc::new(
                         LanceSemanticSearch::new(Arc::new(semantic), self.provider.clone(), 1)
-                            .map_err(|_| SearchUnavailable)?,
+                            .map_err(|_| SearchUnavailable)?
+                            .with_embedding_deadline(deadline),
                     );
                     HybridFusion::new(semantic, Arc::new(lexical), ReciprocalRankFusion::default())?
                         .search_with_failure(query)

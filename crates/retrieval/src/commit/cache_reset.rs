@@ -144,6 +144,7 @@ impl IndexCommitCoordinator {
             for path in [
                 index.join(ANCHOR),
                 index.join(".nk-lexical-binding-v1.json"),
+                index.join(".nk-text-projection-v1"),
                 index.join("semantic-projection.sqlite"),
                 index.join("semantic-projection.sqlite-journal"),
                 index.join("semantic-projection.sqlite-wal"),

@@ -337,7 +337,7 @@ impl LanceSemanticSearch {
         })
     }
 
-    pub(crate) fn with_embedding_deadline(mut self, deadline: tokio::time::Instant) -> Self {
+    pub fn with_embedding_deadline(mut self, deadline: tokio::time::Instant) -> Self {
         self.embedding_deadline = Some(deadline);
         self
     }
@@ -1135,6 +1135,15 @@ impl LanceChunkTable {
     /// These rows are NOT authorization evidence; callers must separately check
     /// trusted live physical ancestry before any source refresh or disclosure.
     pub async fn page_chunks(&self, page_id: &str) -> Result<Vec<IndexedChunk>, ChunkTableError> {
+        let mut chunks = self.page_chunks_in_source_order(page_id).await?;
+        chunks.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
+        Ok(chunks)
+    }
+
+    async fn page_chunks_in_source_order(
+        &self,
+        page_id: &str,
+    ) -> Result<Vec<IndexedChunk>, ChunkTableError> {
         if page_id.is_empty() || page_id.chars().any(char::is_control) {
             return Err(ChunkTableError::InvalidRows("invalid page identity".into()));
         }
@@ -1173,7 +1182,6 @@ impl LanceChunkTable {
                 links: row.links,
             });
         }
-        chunks.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
         Ok(chunks)
     }
 

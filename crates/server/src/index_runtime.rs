@@ -206,36 +206,6 @@ impl Drop for Attempt {
     }
 }
 
-struct SyncEmbedding<'a>(&'a dyn EmbeddingProvider);
-impl EmbeddingProvider for SyncEmbedding<'_> {
-    fn wait_idle(&self) -> notion_knowledge_core::embedding::EmbeddingIdleFuture<'_> {
-        self.0.wait_idle()
-    }
-    fn metadata(&self) -> &notion_knowledge_core::embedding::EmbeddingMetadata {
-        self.0.metadata()
-    }
-    fn partition_input<'a>(
-        &'a self,
-        input: &'a str,
-        boundaries: Vec<usize>,
-    ) -> notion_knowledge_core::embedding::EmbeddingPartitionFuture<'a> {
-        self.0.partition_input(input, boundaries)
-    }
-    fn embed_batch<'a>(
-        &'a self,
-        texts: &'a [String],
-    ) -> notion_knowledge_core::embedding::EmbeddingFuture<'a> {
-        Box::pin(async move {
-            let vectors = self.0.embed_batch(texts).await?;
-            notion_knowledge_core::logging::sync_count(
-                notion_knowledge_core::logging::SyncCount::EmbeddedChunk,
-                vectors.len(),
-            );
-            Ok(vectors)
-        })
-    }
-}
-
 pub struct IndexRuntime {
     pub coordinator: Arc<IndexCommitCoordinator>,
     pub scope: ReconciliationScope,
@@ -421,13 +391,20 @@ impl IndexRuntime {
                     Err(error) if error.is_incompatible_index() => rebuild = true,
                     Err(_) => return Err("index unavailable"),
                     Ok(table) => {
+                        let installed = table
+                            .text_projection_installed()
+                            .map_err(|_| "text projection state unavailable")?;
                         let ready = if options.lexical.is_some() {
                             Box::pin(table.probe_lexical_cache()).await
+                        } else if installed {
+                            table.verify_text_search_indexes().await
                         } else {
                             table.verify_search_indexes().await
                         };
                         match ready {
-                            Err(error) if error.is_incompatible_index() => rebuild = true,
+                            Err(error) if !installed && error.is_incompatible_index() => {
+                                rebuild = true
+                            }
                             Err(_) => return Err("index unavailable"),
                             Ok(()) => {}
                         }
@@ -526,27 +503,6 @@ impl IndexRuntime {
         }
         let state = self.coordinator.state();
         let ttl = settings.timeout_seconds as i64 + 30;
-        *lease = state
-            .renew_lease(lease, now_ms() / 1000, ttl)
-            .map_err(|_| "cache sync lease unavailable")?;
-        let idle = tokio::time::timeout(
-            Duration::from_secs(settings.timeout_seconds),
-            self.provider.wait_idle(),
-        );
-        tokio::pin!(idle);
-        loop {
-            tokio::select! {
-                result = &mut idle => {
-                    result.map_err(|_| "cache embedding drain timeout")?
-                        .map_err(|_| "cache embedding drain unavailable")?;
-                    break;
-                },
-                _ = tokio::time::sleep(Duration::from_secs((ttl as u64/3).max(1))) => {
-                    *lease = state.renew_lease(lease, now_ms()/1000, ttl)
-                        .map_err(|_| "cache sync lease unavailable")?;
-                }
-            }
-        }
         *lease = state
             .renew_lease(lease, now_ms() / 1000, ttl)
             .map_err(|_| "cache sync lease unavailable")?;
@@ -988,7 +944,7 @@ impl IndexRuntime {
                         wall: asked.elapsed(),
                         consumer_wait,
                         queue_wait,
-                        embedded_chunks: diff.added + diff.changed,
+                        text_chunks: diff.added + diff.changed,
                         skipped_chunks: diff.skipped,
                     },
                 );
@@ -1541,7 +1497,7 @@ impl IndexRuntime {
                         Box::pin(self.handler.remove_unreached(
                             &page,
                             &operation,
-                            &SyncEmbedding(self.provider.as_ref()),
+                            self.provider.as_ref(),
                             lease.clone(),
                             clock,
                         ))

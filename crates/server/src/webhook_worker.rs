@@ -716,6 +716,7 @@ mod tests {
     #[cfg(all(unix, feature = "webhook-worker"))]
     #[tokio::test]
     async fn missing_model_assets_do_not_block_production_startup() {
+        use std::os::unix::fs::DirBuilderExt;
         let dir = tempfile::tempdir().unwrap();
         let assets = dir.path().join("missing");
         let index = dir.path().join("index");
@@ -725,6 +726,32 @@ mod tests {
             ("NK_WEBHOOK_INDEX_DIR", index.to_str().unwrap()),
             ("NK_WEBHOOK_STATE_FILE", state.to_str().unwrap()),
         ])
+        .unwrap();
+        use notion_knowledge_retrieval::{
+            chunks::LanceChunkTable,
+            commit::{CommitBinding, IndexCommitCoordinator},
+            planner::production_scope,
+        };
+        let scope = config.notion_scope.as_ref().unwrap();
+        let binding = CommitBinding::new(
+            "chunks",
+            &scope.workspace_id,
+            &production_scope(scope).unwrap(),
+            &scope.generation.to_string(),
+            scope.generation,
+        )
+        .unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&index)
+            .unwrap();
+        IndexCommitCoordinator::initialize(&index, &state, binding).unwrap();
+        LanceChunkTable::create(
+            &index,
+            "chunks",
+            notion_knowledge_retrieval::qwen::metadata(),
+        )
+        .await
         .unwrap();
         let worker = super::runtime::configured(&config).await.unwrap();
         assert!(worker.is_some());

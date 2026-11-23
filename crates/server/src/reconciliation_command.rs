@@ -367,7 +367,8 @@ pub mod runtime {
             )
             .await
             {
-                Ok(Ok(())) => "settled",
+                Ok(Ok(false)) => "settled",
+                Ok(Ok(true)) => "deferred",
                 Ok(Err(_)) => "deferred",
                 Err(_) => {
                     attempt.cancel();
@@ -419,7 +420,7 @@ pub mod runtime {
         lease: &mut notion_knowledge_core::reconciliation::Lease,
         selected_page: Option<&str>,
         stop: &CancellationToken,
-    ) -> Result<(), &'static str> {
+    ) -> Result<bool, &'static str> {
         let table = runtime.chunks();
         let timeout = Duration::from_secs(settings.timeout_seconds);
         let clock: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| now_ms() / 1000);
@@ -432,7 +433,7 @@ pub mod runtime {
                     .map_err(|_| "semantic queue unavailable")?
                 {
                     Some(page) => page,
-                    None => return Ok(()),
+                    None => break,
                 },
             };
             *lease = runtime
@@ -452,9 +453,12 @@ pub mod runtime {
                     .map_err(|_| "semantic publication unavailable")?;
             }
             if selected_page.is_some() {
-                return Ok(());
+                break;
             }
         }
+        table
+            .has_pending_semantic(selected_page)
+            .map_err(|_| "semantic queue unavailable")
     }
 
     fn schedule_command(runtime: &IndexRuntime, command: Command) -> Output {

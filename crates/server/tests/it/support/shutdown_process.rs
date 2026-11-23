@@ -250,7 +250,7 @@ async fn sigterm_drains_or_rolls_back_native_work_and_preserves_acknowledged_web
                 .unwrap();
         let handler = AuthoritativePageRefresh::new(
             source.client(),
-            table,
+            table.clone(),
             coordinator.clone(),
             scope,
             &journal,
@@ -302,11 +302,8 @@ async fn sigterm_drains_or_rolls_back_native_work_and_preserves_acknowledged_web
             .release_lease(&lease, recovery_now)
             .unwrap();
         coordinator.drain_owned().await.unwrap();
-        let reopened = LanceChunkTable::open(&index, "chunks", metadata)
-            .await
-            .unwrap();
         assert!(
-            reopened
+            table
                 .page_chunks(PAGE)
                 .await
                 .unwrap()

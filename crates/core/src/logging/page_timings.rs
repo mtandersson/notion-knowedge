@@ -191,7 +191,7 @@ pub struct PageWait {
     /// How long the prepared page sat queued for the consumer. Spent on the
     /// producer side while earlier pages were consumed, so outside `wall`.
     pub queue_wait: Duration,
-    pub embedded_chunks: usize,
+    pub text_chunks: usize,
     pub skipped_chunks: usize,
 }
 
@@ -237,7 +237,7 @@ pub fn page_fields(snapshot: &PageSnapshot, wait: &PageWait) -> Vec<(String, u64
         fields.push((format!("{name}_api_ms"), snapshot.api_nanos[index] / MS));
     }
     fields.push(("limiter_wait_ms".to_owned(), snapshot.limiter_wait / MS));
-    fields.push(("embedded_chunks".to_owned(), wait.embedded_chunks as u64));
+    fields.push(("text_chunks".to_owned(), wait.text_chunks as u64));
     fields.push(("skipped_chunks".to_owned(), wait.skipped_chunks as u64));
     fields
 }
@@ -287,7 +287,7 @@ mod tests {
             wall: Duration::from_micros(40_100),
             consumer_wait: Duration::from_micros(9_900),
             queue_wait: Duration::from_millis(3),
-            embedded_chunks: 2,
+            text_chunks: 2,
             skipped_chunks: 5,
         };
         let fields: std::collections::BTreeMap<_, _> = page_fields(&timings.snapshot(), &wait)
@@ -308,9 +308,6 @@ mod tests {
         );
         assert_eq!(fields["wall_ms"], 40);
         assert_eq!(fields["queue_wait_ms"], 3);
-        assert_eq!(
-            (fields["embedded_chunks"], fields["skipped_chunks"]),
-            (2, 5)
-        );
+        assert_eq!((fields["text_chunks"], fields["skipped_chunks"]), (2, 5));
     }
 }
