@@ -2670,6 +2670,10 @@ async fn shutdown_cancels_owned_commit_releases_fence_and_restart_processes_heal
         })
         .unwrap();
     assert_eq!(pending, 1);
+    assert!(
+        runtime.lexical_hit_count("Saffron").await.is_err(),
+        "the held writer fence must make the lexical snapshot unavailable"
+    );
     stop.cancel();
     tokio::time::timeout(Duration::from_secs(2), running)
         .await
@@ -2694,7 +2698,10 @@ async fn shutdown_cancels_owned_commit_releases_fence_and_restart_processes_heal
     })
     .await
     .unwrap();
-    assert_eq!(runtime.lexical_hit_count("Saffron").await.unwrap(), 0);
+    assert!(
+        runtime.lexical_hit_count("Saffron").await.is_err(),
+        "the unfinished receipt must make lexical search unavailable"
+    );
     runtime.source.proceed.notify_one();
     // A newly started serving worker can process another page without waiting
     // for the cancelled page's original inbox lease to expire.
@@ -2877,7 +2884,10 @@ async fn deadline_cancellation_retains_due_retry_and_allows_healthy_page_progres
                 .deadline(dispatch_started_at + 6, pending.cycle_attempts)
                 .unwrap()
     );
-    assert_eq!(runtime.lexical_hit_count("Saffron").await.unwrap(), 0);
+    assert!(
+        runtime.lexical_hit_count("Saffron").await.is_err(),
+        "the unfinished receipt must make lexical search unavailable"
+    );
     runtime.source.proceed.notify_one();
     let metadata = runtime.worker.index.provider.metadata().clone();
     set_provider(
