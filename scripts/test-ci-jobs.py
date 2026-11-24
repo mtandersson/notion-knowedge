@@ -171,10 +171,9 @@ class Gate(unittest.TestCase):
                 self.assertIn(f'      {job}: ${{{{ steps.select.outputs.{job} }}}}', workflow)
                 self.assertIn(f"if: needs.changes.outputs.{job} == 'true'", workflow)
 
-    def test_check_job_removed_and_clippy_covers_all_targets(self):
+    def test_workspace_clippy_covers_all_targets_without_a_separate_check_job(self):
         workflow = (WORKFLOWS / 'ci.yml').read_text()
         self.assertNotIn('\n  check:\n', workflow)
-        self.assertNotIn('cargo check', workflow)
         clippy = workflow.split('\n  clippy:\n', 1)[1].split('\n  clippy-features:\n', 1)[0]
         self.assertIn('nix develop --command cargo clippy --workspace --all-targets --locked -- -D warnings',
                       clippy)
@@ -182,6 +181,15 @@ class Gate(unittest.TestCase):
         features = workflow.split('\n  clippy-features:\n', 1)[1].split('\n  test:\n', 1)[0]
         self.assertEqual(features.count('nix develop .#spike --command cargo clippy'), 4)
         self.assertIn('job: clippy-features', features)
+
+    def test_only_shipping_binary_has_a_cargo_check_before_native_lint(self):
+        workflow = (WORKFLOWS / 'ci.yml').read_text()
+        shipping_check = ('nix develop .#spike --command cargo check -p notion-knowledge-server '
+                          '--bin notion-knowledge-server --features webhook-worker --locked')
+        self.assertEqual(len(re.findall(r'\bcargo\s+check\b', workflow)), 1)
+        features = workflow.split('\n  clippy-features:\n', 1)[1].split('\n  test:\n', 1)[0]
+        self.assertLess(features.index(f'        run: {shipping_check}\n'),
+                        features.index('--all-targets'))
 
     def test_debug_info_and_incremental_settings_apply_to_every_cargo_job(self):
         workflow = (WORKFLOWS / 'ci.yml').read_text()

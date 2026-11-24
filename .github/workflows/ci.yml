@@ -198,6 +198,8 @@ jobs:
           job: clippy-features
           profile: debug
 
+      - name: Check shipping webhook binary without test fixtures
+        run: nix develop .#spike --command cargo check -p notion-knowledge-server --bin notion-knowledge-server --features webhook-worker --locked
       - name: Lint optional local Qwen provider
         run: nix develop .#spike --command cargo clippy -p notion-knowledge-retrieval --all-targets --features local-qwen --locked -- -D warnings
       - name: Lint production webhook worker
