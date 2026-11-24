@@ -46,6 +46,7 @@ impl HybridSearch for HybridFixture {
                         last_edited_time: "2026-10-10T00:00:00Z".into(),
                     },
                     lexical_matches: Vec::new(),
+                    semantic_span: None,
                     matched_paths: if joined {
                         vec![RetrievalPath::Semantic, RetrievalPath::Lexical]
                     } else {

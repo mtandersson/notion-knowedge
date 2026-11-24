@@ -26,7 +26,14 @@ pub struct SemanticBacklog {
 }
 
 pub(super) fn fingerprint(chunks: &[IndexedChunk]) -> Result<String, ChunkTableError> {
-    let mut ordered = chunks.iter().collect::<Vec<_>>();
+    fingerprint_chunks(chunks.iter().collect())
+}
+
+pub(super) fn vector_fingerprint(rows: &[EmbeddedChunk]) -> Result<String, ChunkTableError> {
+    fingerprint_chunks(rows.iter().map(|row| &row.chunk).collect())
+}
+
+fn fingerprint_chunks(mut ordered: Vec<&IndexedChunk>) -> Result<String, ChunkTableError> {
     ordered.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
     Ok(format!(
         "{:x}",
@@ -83,7 +90,25 @@ pub(super) fn mark_installed(directory: &Path) -> Result<(), ChunkTableError> {
             "installed semantic projection state is missing".into(),
         ));
     }
-    connect(directory, true)?;
+    let db = connect(directory, true)?;
+    let policy: u32 = db
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|_| ChunkTableError::Storage)?;
+    if policy == 0 {
+        // Earlier projections parked oversized pages indefinitely. The new
+        // window policy can retry them from local text, without a new edit.
+        db.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE projection_jobs SET failure=0,due=unixepoch() WHERE failure=2;
+             PRAGMA user_version=1;
+             COMMIT;",
+        )
+        .map_err(|_| ChunkTableError::Storage)?;
+    } else if policy != 1 {
+        return Err(ChunkTableError::InvalidSchema(
+            "unexpected semantic window policy".into(),
+        ));
+    }
     if !existing {
         std::fs::OpenOptions::new()
             .write(true)
@@ -91,6 +116,30 @@ pub(super) fn mark_installed(directory: &Path) -> Result<(), ChunkTableError> {
             .open(directory.join(INSTALLED))?
             .sync_all()?;
         std::fs::File::open(directory)?.sync_all()?;
+    }
+    Ok(())
+}
+
+pub(super) fn stage(
+    directory: &Path,
+    job: &Job,
+    vectors: &[EmbeddedChunk],
+) -> Result<(), ChunkTableError> {
+    let mut values = reusable(directory, job)?;
+    values.extend(
+        vectors
+            .iter()
+            .map(|row| (row.chunk.chunk_id.clone(), row.vector.clone())),
+    );
+    let serialized = serde_json::to_string(&values)?;
+    let updated = connect(directory, true)?
+        .execute(
+            "UPDATE projection_jobs SET reusable=?4 WHERE page=?1 AND revision=?2 AND text=?3",
+            params![job.page, job.revision, job.text, serialized],
+        )
+        .map_err(|_| ChunkTableError::Storage)?;
+    if updated != 1 {
+        return Err(ChunkTableError::Storage);
     }
     Ok(())
 }

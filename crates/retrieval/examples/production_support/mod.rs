@@ -482,20 +482,20 @@ pub async fn run_with_lexical(
         )?);
         (runtime.clone(), runtime.clone(), runtime)
     } else {
-        let semantic = Arc::new(LanceSemanticSearch::new(
-            snapshot.clone(),
-            provider.clone(),
-            1,
-        )?);
+        let canonical = Arc::new(table.canonical_search_snapshot().await?);
+        let semantic = Arc::new(
+            LanceSemanticSearch::new(snapshot.clone(), provider.clone(), 1)?
+                .with_canonical_text(canonical.clone()),
+        );
         let hybrid = Arc::new(
             HybridFusion::new(
                 semantic.clone(),
-                snapshot.clone(),
+                canonical.clone(),
                 ReciprocalRankFusion::default(),
             )
             .map_err(|_| "invalid fusion")?,
         );
-        (semantic, snapshot.clone(), hybrid)
+        (semantic, canonical, hybrid)
     };
     let hybrid: Arc<dyn HybridSearch> = if let Some(b) = &r.graph_boost {
         Arc::new(

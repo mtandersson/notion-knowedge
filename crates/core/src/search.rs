@@ -50,6 +50,15 @@ pub struct SearchHit {
     pub matched_paths: Vec<RetrievalPath>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub lexical_matches: Vec<LexicalMatch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_span: Option<SemanticSpan>,
+}
+
+/// Byte offsets relative to the cited canonical chunk's original text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SemanticSpan {
+    pub start_byte: usize,
+    pub end_byte: usize,
 }
 
 /// Bounded public match evidence, separate from authoritative source citations.
@@ -193,6 +202,56 @@ pub fn snippet(text: &str, limit: usize) -> String {
         }
     }
     output.chars().take(limit).collect()
+}
+
+/// Redact an excerpt in its original token context, including URLs cut by
+/// either edge of an embedding window.
+pub fn snippet_span(text: &str, range: std::ops::Range<usize>, limit: usize) -> Option<String> {
+    let excerpt = text.get(range.clone())?;
+    let mut output = String::new();
+    let start = text[..range.start]
+        .rfind(char::is_whitespace)
+        .map_or(0, |i| i + text[i..].chars().next().unwrap().len_utf8());
+    let mut offset = start;
+    for token in text[start..].split_inclusive(char::is_whitespace) {
+        let end = offset + token.len();
+        let from = range.start.max(offset);
+        let to = range.end.min(end);
+        if from < to {
+            let sanitized = snippet(token, usize::MAX);
+            let included = &excerpt[from - range.start..to - range.start];
+            if from == offset && to == end {
+                output.push_str(&sanitized);
+            } else if sanitized == token || included.trim().is_empty() {
+                output.push_str(included);
+            } else {
+                output.push_str("[link omitted]");
+                output.push_str(&included[included.trim_end().len()..]);
+            }
+        }
+        if end >= range.end {
+            break;
+        }
+        offset = end;
+    }
+    Some(output.chars().take(limit).collect())
+}
+
+#[cfg(test)]
+#[test]
+fn semantic_excerpt_redacts_a_url_even_when_the_window_begins_inside_it() {
+    let text = "Dörr https://example.invalid/private/path?mark=do-not-disclose next";
+    let start = text.find("private").unwrap();
+    let end = text.find(" next").unwrap();
+    assert_eq!(
+        snippet_span(text, start..end, 2000).as_deref(),
+        Some("[link omitted]"),
+    );
+    assert_eq!(
+        snippet_span(text, end..text.len(), 2000).as_deref(),
+        Some(" next")
+    );
+    assert!(snippet_span(text, 2..text.len(), 2000).is_none());
 }
 
 fn decode_percent(value: &str) -> String {

@@ -110,6 +110,20 @@ impl EmbeddingProvider for DeferredEmbedder {
                 .await
         })
     }
+
+    fn next_embedding_window<'a>(
+        &'a self,
+        input: Arc<str>,
+        boundaries: Arc<[usize]>,
+        previous: Option<std::ops::Range<usize>>,
+    ) -> notion_knowledge_core::embedding::EmbeddingWindowFuture<'a> {
+        Box::pin(async move {
+            self.provider()
+                .await?
+                .next_embedding_window(input, boundaries, previous)
+                .await
+        })
+    }
 }
 
 /// Load the configured provider. When `expected` is given, a provider with a

@@ -1,11 +1,8 @@
 //! Commit canonical text first and use the existing vector table as its derived
 //! semantic projection. Only the source/text revision receives the page receipt.
 use super::*;
-use crate::chunks::{semantic_jobs as jobs, text};
-use notion_knowledge_core::{
-    chunking::{ChunkDraft, table_section_boundaries},
-    fingerprint::identify_chunks,
-};
+use crate::chunks::{semantic_jobs as jobs, text, windows};
+use notion_knowledge_core::chunking::table_section_boundaries;
 
 type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
@@ -13,8 +10,15 @@ type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 /// lease. Commit verifies both again before changing the searchable projection.
 pub struct PreparedSemanticProjection {
     job: jobs::Job,
-    vectors: Option<Result<Vec<EmbeddedChunk>, ChunkTableError>>,
+    vectors: Option<Result<ProjectionStep, ChunkTableError>>,
 }
+
+enum ProjectionStep {
+    Complete(Vec<EmbeddedChunk>),
+    Staged(Vec<EmbeddedChunk>, Option<EmbeddingError>),
+}
+
+const INFERENCES_PER_STEP: usize = 8;
 
 impl GuardedChunkTable {
     /// Imported v1 rows predate the publication table. A v2 receipt always
@@ -139,14 +143,11 @@ impl GuardedChunkTable {
                         text::replace(&text, context.binding(), &page, &chunks)
                             .await
                             .map_err(failure)?;
-                    }
-                    if changed
-                        && jobs::for_page(&this.index_directory, &page)
-                            .map_err(failure)?
-                            .is_none()
-                    {
-                        jobs::set_semantic_revision(&this.index_directory, &page, &fingerprint)
-                            .map_err(failure)?;
+                        if !missing {
+                            let projected = jobs::vector_fingerprint(&reusable).map_err(failure)?;
+                            jobs::set_semantic_revision(&this.index_directory, &page, &projected)
+                                .map_err(failure)?;
+                        }
                     } else {
                         this.repair_semantic_if_missing(
                             &context,
@@ -219,7 +220,9 @@ impl GuardedChunkTable {
             replace_vectors(&semantic, page, &reusable)
                 .await
                 .map_err(failure)?;
-            jobs::set_semantic_revision(&self.index_directory, page, &text).map_err(failure)?;
+            let projected = jobs::vector_fingerprint(&reusable).map_err(failure)?;
+            jobs::set_semantic_revision(&self.index_directory, page, &projected)
+                .map_err(failure)?;
         }
         Ok(())
     }
@@ -292,12 +295,10 @@ impl GuardedChunkTable {
             .map_err(index_failure)?;
         let staged = jobs::reusable(&self.index_directory, &job).map_err(index_failure)?;
         drop(guard);
-        let vectors = tokio::time::timeout(
-            timeout,
-            self.prepare_vectors(provider, &canonical, &old, staged),
-        )
-        .await
-        .unwrap_or(Err(ChunkTableError::Embedding(EmbeddingError::Unavailable)));
+        let deadline = tokio::time::Instant::now() + timeout;
+        let vectors = self
+            .prepare_vectors(provider, &canonical, &old, staged, deadline)
+            .await;
         Ok(Some(PreparedSemanticProjection {
             job,
             vectors: Some(vectors),
@@ -339,7 +340,7 @@ impl GuardedChunkTable {
                     return Ok(());
                 };
                 match result {
-                    Ok(rows) => {
+                    Ok(ProjectionStep::Complete(rows)) => {
                         let semantic = this.open_semantic().await.map_err(failure)?;
                         verify_no_collisions(
                             &semantic,
@@ -371,9 +372,7 @@ impl GuardedChunkTable {
                                 .await
                                 .map_err(failure)?;
                         }
-                        let semantic_chunks =
-                            rows.iter().map(|row| row.chunk.clone()).collect::<Vec<_>>();
-                        let fingerprint = jobs::fingerprint(&semantic_chunks).map_err(failure)?;
+                        let fingerprint = jobs::vector_fingerprint(&rows).map_err(failure)?;
                         jobs::set_semantic_revision(&this.index_directory, &job.page, &fingerprint)
                             .map_err(failure)?;
                         jobs::clear(&this.index_directory, &job.page).map_err(failure)?;
@@ -386,6 +385,22 @@ impl GuardedChunkTable {
                             })
                         );
                         owned_wrote.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    Ok(ProjectionStep::Staged(rows, error)) => {
+                        jobs::stage(&this.index_directory, &job, &rows).map_err(failure)?;
+                        if let Some(error) = error {
+                            jobs::fail(&this.index_directory, &job, error, owned_clock())
+                                .map_err(failure)?;
+                        }
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({
+                                "operation":"semantic_projection",
+                                "outcome":"staged",
+                                "chunks":rows.len(),
+                                "reason":error.map(|failure|format!("{failure:?}")),
+                            })
+                        );
                     }
                     Err(ChunkTableError::Embedding(error)) => {
                         jobs::fail(&this.index_directory, &job, error, owned_clock())
@@ -428,32 +443,100 @@ impl GuardedChunkTable {
         canonical: &[IndexedChunk],
         old: &[StoredChunk],
         mut staged: HashMap<String, Vec<f32>>,
-    ) -> Result<Vec<EmbeddedChunk>, ChunkTableError> {
+        deadline: tokio::time::Instant,
+    ) -> Result<ProjectionStep, ChunkTableError> {
         self.embedding.ensure_compatible(provider.metadata())?;
-        let chunks = semantic_chunks(provider, canonical, old, &staged).await?;
-        let existing = old
-            .iter()
-            .map(|row| (row.chunk_id.as_str(), row))
-            .collect::<HashMap<_, _>>();
-        let mut vectors = Vec::with_capacity(chunks.len());
+        let existing: HashMap<_, _> = old.iter().map(|row| (row.chunk_id.as_str(), row)).collect();
+        let mut cached_windows = cached_windows(
+            staged
+                .keys()
+                .map(String::as_str)
+                .chain(existing.keys().copied()),
+        )?;
+        let mut vectors = Vec::new();
+        let mut attempts = 0;
         let _embed = page_timings::timer(Bucket::Embed);
-        for chunk in chunks {
-            let vector = if let Some(old) = existing.get(chunk.chunk_id.as_str())
-                && reusable(old, &chunk)
+        let mut retained_vector = |part: &IndexedChunk| {
+            existing
+                .get(part.chunk_id.as_str())
+                .filter(|row| reusable(row, part))
+                .map(|row| row.vector.clone())
+                .or_else(|| staged.remove(&part.chunk_id))
+        };
+        for chunk in canonical {
+            if let Some(vector) = retained_vector(chunk) {
+                vectors.push(EmbeddedChunk::new(chunk.clone(), vector));
+                continue;
+            }
+            let fingerprint = windows::digest(&chunk.text);
+            let prior = cached_windows.remove(&chunk.chunk_id).unwrap_or_default();
+            let (parts, _) = rehydrate_windows(chunk, &fingerprint, prior)?;
+            let mut previous = None;
+            for part in parts {
+                let Some(vector) = retained_vector(&part) else {
+                    break;
+                };
+                previous = Some(
+                    windows::parse(&part.chunk_id)?
+                        .ok_or(EmbeddingError::InvalidInput)?
+                        .range,
+                );
+                vectors.push(EmbeddedChunk::new(part, vector));
+            }
+            if previous
+                .as_ref()
+                .is_some_and(|range| range.end == chunk.text.len())
             {
-                old.vector.clone()
-            } else if let Some(vector) = staged.remove(&chunk.chunk_id) {
-                vector
-            } else {
-                embedding::embed_batch(provider, std::slice::from_ref(&chunk.text))
-                    .await?
-                    .pop()
-                    .ok_or(EmbeddingError::InvalidOutput)?
-            };
-            vectors.push(EmbeddedChunk::new(chunk, vector));
+                continue;
+            }
+            // The provider owns only one bounded window computation.
+            // Its next call can resume at the last staged UTF-8 range.
+            let input: Arc<str> = Arc::from(chunk.text.as_str());
+            let boundaries: Arc<[usize]> = structural_boundaries(&input).into();
+            while previous.as_ref().map_or(0, |range| range.end) < input.len() {
+                if attempts == INFERENCES_PER_STEP {
+                    return Ok(ProjectionStep::Staged(vectors, None));
+                }
+                let step = async {
+                    let covered = previous.as_ref().map_or(0, |range| range.end);
+                    let range = provider
+                        .next_embedding_window(input.clone(), boundaries.clone(), previous.clone())
+                        .await?
+                        .filter(|range| {
+                            range.start <= covered
+                                && range.end > covered
+                                && range.end <= input.len()
+                        })
+                        .ok_or(EmbeddingError::InvalidInput)?;
+                    let part = if range.start == 0 && range.end == input.len() {
+                        chunk.clone()
+                    } else {
+                        windows::row(chunk, &fingerprint, range.clone())?
+                    };
+                    let vector = embedding::embed_batch(provider, std::slice::from_ref(&part.text))
+                        .await?
+                        .pop()
+                        .ok_or(EmbeddingError::InvalidOutput)?;
+                    Ok::<_, ChunkTableError>((range, EmbeddedChunk::new(part, vector)))
+                };
+                match tokio::time::timeout_at(deadline, step)
+                    .await
+                    .unwrap_or(Err(EmbeddingError::Unavailable.into()))
+                {
+                    Ok((range, row)) => {
+                        attempts += 1;
+                        previous = Some(range);
+                        vectors.push(row);
+                    }
+                    Err(ChunkTableError::Embedding(error)) if attempts > 0 => {
+                        return Ok(ProjectionStep::Staged(vectors, Some(error)));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
         }
         validate_rows(&vectors, self.embedding.dimension())?;
-        Ok(vectors)
+        Ok(ProjectionStep::Complete(vectors))
     }
 }
 
@@ -500,79 +583,96 @@ fn reusable_rows(
         .iter()
         .map(|chunk| (chunk.chunk_id.as_str(), chunk))
         .collect();
-    let rows: Vec<_> = chunks
-        .iter()
-        .filter_map(|chunk| {
-            let vector = if let Some(existing) = old
-                .get(chunk.chunk_id.as_str())
-                .filter(|old| reusable(old, chunk))
-            {
-                existing.vector.clone()
-            } else {
+    let mut windowed =
+        cached_windows(staged.keys().map(String::as_str).chain(old.keys().copied()))?;
+    let mut vectors = Vec::new();
+    let mut missing = false;
+    for chunk in chunks {
+        let admitted = old
+            .get(chunk.chunk_id.as_str())
+            .filter(|row| reusable(row, chunk))
+            .map(|row| row.vector.clone())
+            .or_else(|| {
                 let previous = previous.get(chunk.chunk_id.as_str())?;
                 if previous.content_hash != chunk.content_hash || previous.text != chunk.text {
                     return None;
                 }
-                staged.remove(&chunk.chunk_id)?
+                staged.remove(&chunk.chunk_id)
+            });
+        if let Some(vector) = admitted {
+            vectors.push(EmbeddedChunk::new(chunk.clone(), vector));
+            continue;
+        }
+        let prior = windowed.remove(&chunk.chunk_id).unwrap_or_default();
+        let (parts, _) = rehydrate_windows(chunk, &windows::digest(&chunk.text), prior)?;
+        let mut covered = 0;
+        for part in parts {
+            let vector = old
+                .get(part.chunk_id.as_str())
+                .filter(|row| reusable(row, &part))
+                .map(|row| row.vector.clone())
+                .or_else(|| staged.remove(&part.chunk_id));
+            let Some(vector) = vector else {
+                break;
             };
-            Some(EmbeddedChunk::new(chunk.clone(), vector))
-        })
-        .collect();
-    let missing = rows.len() < chunks.len();
-    Ok((rows, missing))
+            let window = windows::parse(&part.chunk_id)?.ok_or(EmbeddingError::InvalidInput)?;
+            covered = window.range.end;
+            vectors.push(EmbeddedChunk::new(part, vector));
+        }
+        missing |= covered != chunk.text.len();
+    }
+    Ok((vectors, missing))
 }
 
-async fn semantic_chunks(
-    provider: &dyn EmbeddingProvider,
-    canonical: &[IndexedChunk],
-    old: &[StoredChunk],
-    staged: &HashMap<String, Vec<f32>>,
-) -> Result<Vec<IndexedChunk>, ChunkTableError> {
-    let existing: HashSet<_> = old
-        .iter()
-        .map(|row| (row.chunk_id.as_str(), row.text.as_str()))
-        .collect();
-    let mut cuts = Vec::with_capacity(canonical.len());
-    for chunk in canonical {
-        let boundaries = table_section_boundaries(&chunk.text);
-        let points = if boundaries.is_empty()
-            || existing.contains(&(chunk.chunk_id.as_str(), chunk.text.as_str()))
-            || staged.contains_key(&chunk.chunk_id)
-        {
-            Vec::new()
-        } else {
-            provider.partition_input(&chunk.text, boundaries).await?
-        };
-        cuts.push(points);
-    }
-    if cuts.iter().all(Vec::is_empty) {
-        return Ok(canonical.to_vec());
-    }
-    let mut drafts = Vec::new();
-    let mut parents = Vec::new();
-    for (chunk, points) in canonical.iter().zip(cuts) {
-        let mut start = 0;
-        for end in points.into_iter().chain(std::iter::once(chunk.text.len())) {
-            let body = chunk
-                .text
-                .get(start..end)
-                .filter(|part| !part.trim().is_empty())
-                .ok_or(EmbeddingError::InvalidInput)?;
-            drafts.push(ChunkDraft {
-                text: body.to_owned(),
-                source_bytes: start..end,
-                metadata: chunk.metadata.clone(),
-            });
-            parents.push(chunk);
-            start = end;
+type CachedWindow = (String, std::ops::Range<usize>);
+
+fn cached_windows<'a>(
+    ids: impl Iterator<Item = &'a str>,
+) -> Result<HashMap<String, Vec<CachedWindow>>, ChunkTableError> {
+    let mut map: HashMap<String, Vec<CachedWindow>> = HashMap::new();
+    for id in ids {
+        if let Some(window) = windows::parse(id)? {
+            map.entry(window.anchor())
+                .or_default()
+                .push((id.to_owned(), window.range));
         }
     }
-    let mut chunks =
-        identify_chunks(drafts, canonical).map_err(|_| EmbeddingError::InvalidInput)?;
-    for (part, parent) in chunks.iter_mut().zip(parents) {
-        part.links.clone_from(&parent.links);
+    Ok(map)
+}
+
+fn rehydrate_windows(
+    chunk: &IndexedChunk,
+    fingerprint: &str,
+    mut prior: Vec<CachedWindow>,
+) -> Result<(Vec<IndexedChunk>, usize), ChunkTableError> {
+    prior.sort_unstable_by(|(a, x), (b, y)| (x.start, x.end, a).cmp(&(y.start, y.end, b)));
+    prior.dedup();
+    let mut covered = 0;
+    let mut cached = Vec::new();
+    for (id, range) in prior {
+        if range.start > covered || range.end <= covered || range.end > chunk.text.len() {
+            break;
+        }
+        let row = windows::row(chunk, fingerprint, range.clone())?;
+        if row.chunk_id != id {
+            break;
+        }
+        covered = range.end;
+        cached.push(row);
     }
-    Ok(chunks)
+    Ok((cached, covered))
+}
+
+fn structural_boundaries(text: &str) -> Vec<usize> {
+    let mut boundaries = table_section_boundaries(text);
+    boundaries.extend(
+        text.match_indices('\n')
+            .map(|(offset, _)| offset + 1)
+            .filter(|&offset| offset < text.len()),
+    );
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    boundaries
 }
 
 async fn verify_no_collisions<'a>(

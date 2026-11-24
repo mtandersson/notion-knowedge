@@ -462,15 +462,13 @@ pub mod runtime {
                 result = table.prepare_semantic(&page, runtime.provider.as_ref(), now, timeout) =>
                     result.map_err(|_| "semantic preparation unavailable")?,
             };
-            if let Some(prepared) = prepared {
-                table
-                    .complete_semantic(prepared, lease.clone(), clock.clone())
-                    .await
-                    .map_err(|_| "semantic publication unavailable")?;
-            }
-            if selected_page.is_some() {
+            let Some(prepared) = prepared else {
                 break;
-            }
+            };
+            table
+                .complete_semantic(prepared, lease.clone(), clock.clone())
+                .await
+                .map_err(|_| "semantic publication unavailable")?;
         }
         table
             .has_pending_semantic(selected_page)

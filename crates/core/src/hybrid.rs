@@ -128,6 +128,9 @@ fn fuse(
                 || hit.source.chunk_id.is_empty()
                 || hit.source.url.is_empty()
                 || hit.text.chars().count() > 2000
+                || hit.semantic_span.is_some_and(|span| {
+                    path != RetrievalPath::Semantic || span.start_byte >= span.end_byte
+                })
             {
                 return Err(SearchUnavailable);
             }
@@ -148,7 +151,7 @@ fn fuse(
                     let (existing, score) = entry.get_mut();
                     // Conflicting snapshots cannot be presented as one trustworthy chunk.
                     if existing.source.last_edited_time != hit.source.last_edited_time
-                        || existing.text != hit.text
+                        || (existing.semantic_span.is_none() && existing.text != hit.text)
                         || existing.source.url != hit.source.url
                         || existing.source.title != hit.source.title
                         || existing.source.heading_path != hit.source.heading_path
@@ -195,6 +198,7 @@ mod tests {
             text: id.into(),
             score: 999.0,
             lexical_matches: Vec::new(),
+            semantic_span: None,
             matched_paths: vec![],
             source: SearchSource {
                 last_edited_time: "2026-10-07T12:00:00Z".into(),

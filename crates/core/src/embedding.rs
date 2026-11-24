@@ -120,6 +120,9 @@ pub type EmbeddingIdleFuture<'a> =
 
 pub type EmbeddingPartitionFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Vec<usize>, EmbeddingError>> + Send + 'a>>;
+pub type EmbeddingWindowFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<Option<std::ops::Range<usize>>, EmbeddingError>> + Send + 'a>,
+>;
 
 pub trait EmbeddingProvider: Send + Sync {
     /// Wait for work retained after a cancelled embedding observer. Providers
@@ -139,6 +142,34 @@ pub trait EmbeddingProvider: Send + Sync {
         _boundaries: Vec<usize>,
     ) -> EmbeddingPartitionFuture<'a> {
         Box::pin(async { Ok(Vec::new()) })
+    }
+    /// Return the next admitted byte range. The previous range is the
+    /// durable coverage cursor. Each result may overlap it and must extend it.
+    fn next_embedding_window<'a>(
+        &'a self,
+        input: std::sync::Arc<str>,
+        boundaries: std::sync::Arc<[usize]>,
+        previous: Option<std::ops::Range<usize>>,
+    ) -> EmbeddingWindowFuture<'a> {
+        Box::pin(async move {
+            let covered = previous.map_or(0, |range| range.end);
+            let mut start = 0;
+            for end in self
+                .partition_input(&input, boundaries.to_vec())
+                .await?
+                .into_iter()
+                .chain(std::iter::once(input.len()))
+            {
+                if start >= end || input.get(start..end).is_none() {
+                    return Err(EmbeddingError::InvalidInput);
+                }
+                if end > covered {
+                    return Ok(Some(start..end));
+                }
+                start = end;
+            }
+            Ok(None)
+        })
     }
 }
 
