@@ -8,6 +8,7 @@ use notion_knowledge_core::{
     embedding::{EmbeddingFuture, EmbeddingMetadata, EmbeddingProvider},
     lifecycle::LifecycleScope,
     reconciliation::{ReconciliationJournal, ReconciliationScope},
+    search::{LexicalQuery, LexicalSearch, SearchUnavailable},
 };
 use notion_knowledge_notion::NotionClient;
 use notion_knowledge_retrieval::{
@@ -486,8 +487,7 @@ impl TestRuntime {
             .record_walk(&walk.run_id, &walk.entries, walk.authoritative())
             .unwrap();
     }
-    async fn searchable(&self, text: &str) -> usize {
-        use notion_knowledge_core::search::{LexicalQuery, LexicalSearch, SearchUnavailable};
+    async fn lexical_hit_count(&self, text: &str) -> Result<usize, SearchUnavailable> {
         self.worker
             .index
             .chunks()
@@ -506,7 +506,6 @@ impl TestRuntime {
             })
             .await
             .map(|hits| hits.len())
-            .unwrap_or_else(|_: SearchUnavailable| 0)
     }
 }
 
@@ -692,7 +691,7 @@ async fn mutation_refresh_preserves_verified_write_and_text_when_embedding_fails
             .unwrap(),
         old_hash
     );
-    assert!(runtime.searchable("Marjoram").await > 0);
+    assert!(runtime.lexical_hit_count("Marjoram").await.unwrap() > 0);
     let embedded = runtime.embeddings.load(Ordering::SeqCst);
     state
         .admit(&RefreshKey {
@@ -746,7 +745,7 @@ async fn mutation_refresh_recovers_committed_index_after_lost_queue_ack_without_
         runtime.worker.state.status(&key).unwrap(),
         Some(IndexStatus::Running)
     );
-    assert!(runtime.searchable("Saffron").await > 0);
+    assert!(runtime.lexical_hit_count("Saffron").await.unwrap() > 0);
     assert!(runtime.worker.semantic_step().await.unwrap());
     let embedded = runtime.embeddings.load(Ordering::SeqCst);
     db.execute_batch(
@@ -797,7 +796,7 @@ async fn mutation_refresh_cancellation_fences_the_old_attempt_and_recovers_after
         runtime.worker.state.status(&key).unwrap(),
         Some(IndexStatus::Completed)
     );
-    assert!(runtime.searchable("Saffron").await > 0);
+    assert!(runtime.lexical_hit_count("Saffron").await.unwrap() > 0);
     assert_eq!(runtime.source.writes.load(Ordering::SeqCst), 0);
 }
 fn event(page: &str, kind: &str) -> WebhookEvent {
@@ -886,7 +885,7 @@ async fn isolated_bad_page_exhausts_while_healthy_page_becomes_searchable_and_op
     assert_eq!(inspect(&runtime.worker, &good).state, EventState::Succeeded);
     assert_eq!(inspect(&runtime.worker, &good).cycle_attempts, 1);
     assert_eq!(inspect(&runtime.worker, &good).lifetime_attempts, 1);
-    assert!(runtime.searchable("Saffron").await > 0);
+    assert!(runtime.lexical_hit_count("Saffron").await.unwrap() > 0);
     if inspect(&runtime.worker, &bad).state != EventState::Failed {
         tokio::time::sleep(Duration::from_secs(1)).await;
         tick(&runtime.worker, false).await;
@@ -933,7 +932,7 @@ async fn isolated_bad_page_exhausts_while_healthy_page_becomes_searchable_and_op
     runtime.source.change(|m| m.repair_bad = true);
     tick(&runtime.worker, false).await;
     assert_eq!(inspect(&runtime.worker, &bad).state, EventState::Succeeded);
-    assert!(runtime.searchable("marjoram").await > 0);
+    assert!(runtime.lexical_hit_count("marjoram").await.unwrap() > 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -962,7 +961,7 @@ async fn transient_failure_retries_and_unknown_hint_is_permanent() {
         EventState::Succeeded
     );
     assert_eq!(inspect(&runtime.worker, &transient).cycle_attempts, 2);
-    assert!(runtime.searchable("Saffron").await > 0);
+    assert!(runtime.lexical_hit_count("Saffron").await.unwrap() > 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -994,7 +993,7 @@ async fn debounce_and_lifecycle_follow_authority_and_recover_effects_before_inbo
             .await
             .is_err()
     );
-    assert!(runtime.searchable("Saffron").await > 0);
+    assert!(runtime.lexical_hit_count("Saffron").await.unwrap() > 0);
     assert_eq!(inspect(&runtime.worker, &a).state, EventState::Running);
     sql.execute_batch("DROP TRIGGER fail_ack; UPDATE webhook_inbox SET lease_until=0 WHERE state=1; UPDATE webhook_page_work SET lease_until_ms=0 WHERE lease_until_ms IS NOT NULL;").unwrap();
     assert!(runtime.worker.semantic_step().await.unwrap());
@@ -1056,12 +1055,12 @@ async fn debounce_and_lifecycle_follow_authority_and_recover_effects_before_inbo
     let deleted = event(PAGE, "page.deleted");
     runtime.worker.state.receive(&deleted).unwrap();
     tick(&runtime.worker, false).await;
-    assert_eq!(runtime.searchable("Saffron").await, 0);
+    assert_eq!(runtime.lexical_hit_count("Saffron").await.unwrap(), 0);
     runtime.source.change(|m| m.archived = false);
     let restored = event(PAGE, "page.undeleted");
     runtime.worker.state.receive(&restored).unwrap();
     tick(&runtime.worker, false).await;
-    assert!(runtime.searchable("Saffron").await > 0);
+    assert!(runtime.lexical_hit_count("Saffron").await.unwrap() > 0);
     // Moved under a page the inventory does not hold: unplaced, so it stays
     // until the next walk settles it, and the event still succeeds.
     runtime.source.change(|m| m.parent = FOREIGN.into());
@@ -1073,7 +1072,7 @@ async fn debounce_and_lifecycle_follow_authority_and_recover_effects_before_inbo
         EventState::Succeeded
     );
     assert_eq!(unplaced(&runtime), 1);
-    assert!(runtime.searchable("Saffron").await > 0);
+    assert!(runtime.lexical_hit_count("Saffron").await.unwrap() > 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1082,7 +1081,7 @@ async fn page_answering_not_found_to_its_callback_is_removed_without_a_walk() {
     let created = event(PAGE, "page.created");
     runtime.worker.state.receive(&created).unwrap();
     tick(&runtime.worker, false).await;
-    assert!(runtime.searchable("Saffron").await > 0);
+    assert!(runtime.lexical_hit_count("Saffron").await.unwrap() > 0);
     runtime.source.change(|m| m.gone = true);
     let deleted = event(PAGE, "page.deleted");
     runtime.worker.state.receive(&deleted).unwrap();
@@ -1091,7 +1090,7 @@ async fn page_answering_not_found_to_its_callback_is_removed_without_a_walk() {
         inspect(&runtime.worker, &deleted).state,
         EventState::Succeeded
     );
-    assert_eq!(runtime.searchable("Saffron").await, 0);
+    assert_eq!(runtime.lexical_hit_count("Saffron").await.unwrap(), 0);
 }
 
 fn unplaced(runtime: &TestRuntime) -> u64 {
@@ -1185,7 +1184,19 @@ async fn serving_lifecycle_processes_signed_http_admission_and_stops_idle_and_de
     })
     .await
     .unwrap();
-    assert!(runtime.searchable("Saffron").await > 0);
+    // Completion acknowledges the lexical commit. Concurrent semantic
+    // publication can briefly prevent a reader from acquiring a snapshot.
+    let hits = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match runtime.lexical_hit_count("Saffron").await {
+                Ok(hits) => break hits,
+                Err(SearchUnavailable) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+    })
+    .await
+    .expect("lexical snapshot stayed unavailable after webhook completion");
+    assert!(hits > 0, "available lexical snapshot omitted Saffron");
     assert!(runtime.source.attempts.load(Ordering::SeqCst) > 0);
     assert!(runtime.source.body_reads.load(Ordering::SeqCst) > 0);
     // Hold the shared writer fence while creating delayed work so the running
@@ -1269,14 +1280,14 @@ async fn mutation_refresh_expired_ownership_during_source_read_cannot_commit_und
         .unwrap();
     runtime.source.proceed.notify_one();
     task.await.unwrap().unwrap();
-    assert_eq!(runtime.searchable("Saffron").await, 0);
+    assert_eq!(runtime.lexical_hit_count("Saffron").await.unwrap(), 0);
     assert!(runtime.worker.state.page_state(PAGE).unwrap().is_none());
     tick(&runtime.worker, false).await;
     assert_eq!(
         runtime.worker.state.status(&key).unwrap(),
         Some(IndexStatus::Completed)
     );
-    assert!(runtime.searchable("Saffron").await > 0);
+    assert!(runtime.lexical_hit_count("Saffron").await.unwrap() > 0);
     assert_eq!(runtime.source.writes.load(Ordering::SeqCst), 0);
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1316,7 +1327,7 @@ async fn shared_index_fence_and_expired_inbox_ownership_reject_stale_commit() {
         .unwrap();
     runtime.source.proceed.notify_one();
     task.await.unwrap().unwrap();
-    assert_eq!(runtime.searchable("Saffron").await, 0);
+    assert_eq!(runtime.lexical_hit_count("Saffron").await.unwrap(), 0);
     let receipt = runtime.worker.coordinator.state().page_state(PAGE).unwrap();
     assert!(receipt.is_none());
     let stop = CancellationToken::new();
@@ -1347,7 +1358,7 @@ async fn writer_lease_takeover_rejects_stale_effects_without_fatal_cleanup_or_re
         .unwrap();
     runtime.source.proceed.notify_one();
     assert!(task.await.unwrap().unwrap());
-    assert_eq!(runtime.searchable("Saffron").await, 0);
+    assert_eq!(runtime.lexical_hit_count("Saffron").await.unwrap(), 0);
     assert_eq!(inspect(&runtime.worker, &stale).state, EventState::Pending);
     let renewed = runtime
         .worker
@@ -1428,7 +1439,7 @@ async fn unsupported_content_fails_permanently_and_out_of_scope_page_is_unplaced
     assert_eq!(observed.state, EventState::Succeeded);
     assert_eq!(observed.cycle_attempts, 1);
     assert_eq!(unplaced(&runtime), 1);
-    assert_eq!(runtime.searchable("Saffron").await, 0);
+    assert_eq!(runtime.lexical_hit_count("Saffron").await.unwrap(), 0);
 }
 
 fn retrieval_config(runtime: &TestRuntime) -> notion_knowledge_server::config::Config {
@@ -1772,7 +1783,7 @@ async fn commit_search_fixture(runtime: &TestRuntime) {
             .unwrap();
         tick(&runtime.worker, false).await;
     }
-    assert!(runtime.searchable("Saffron").await > 0);
+    assert!(runtime.lexical_hit_count("Saffron").await.unwrap() > 0);
     let guard = GuardedChunkTable::bind(
         &runtime.index,
         "chunks",
@@ -2659,6 +2670,10 @@ async fn shutdown_cancels_owned_commit_releases_fence_and_restart_processes_heal
         })
         .unwrap();
     assert_eq!(pending, 1);
+    assert!(
+        runtime.lexical_hit_count("Saffron").await.is_err(),
+        "the held writer fence must make the lexical snapshot unavailable"
+    );
     stop.cancel();
     tokio::time::timeout(Duration::from_secs(2), running)
         .await
@@ -2683,7 +2698,10 @@ async fn shutdown_cancels_owned_commit_releases_fence_and_restart_processes_heal
     })
     .await
     .unwrap();
-    assert_eq!(runtime.searchable("Saffron").await, 0);
+    assert!(
+        runtime.lexical_hit_count("Saffron").await.is_err(),
+        "the unfinished receipt must make lexical search unavailable"
+    );
     runtime.source.proceed.notify_one();
     // A newly started serving worker can process another page without waiting
     // for the cancelled page's original inbox lease to expire.
@@ -2755,7 +2773,7 @@ async fn shutdown_cancels_owned_commit_releases_fence_and_restart_processes_heal
             .iter()
             .any(|chunk| chunk.text.contains("cinnamon"))
     );
-    assert_eq!(runtime.searchable("cinnamon").await, 0);
+    assert!(runtime.lexical_hit_count("cinnamon").await.is_err());
     let now = now_ms() / 1000;
     let mut lease = restarted.state.acquire_lease(now, 60).unwrap();
     restarted
@@ -2774,8 +2792,8 @@ async fn shutdown_cancels_owned_commit_releases_fence_and_restart_processes_heal
         .release_lease(&lease, now_ms() / 1000)
         .unwrap();
     assert!(!restarted.coordinator.has_unfinished_commits().unwrap());
-    assert!(runtime.searchable("cinnamon").await > 0);
-    assert!(runtime.searchable("Saffron").await > 0);
+    assert!(runtime.lexical_hit_count("cinnamon").await.unwrap() > 0);
+    assert!(runtime.lexical_hit_count("Saffron").await.unwrap() > 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2866,7 +2884,10 @@ async fn deadline_cancellation_retains_due_retry_and_allows_healthy_page_progres
                 .deadline(dispatch_started_at + 6, pending.cycle_attempts)
                 .unwrap()
     );
-    assert_eq!(runtime.searchable("Saffron").await, 0);
+    assert!(
+        runtime.lexical_hit_count("Saffron").await.is_err(),
+        "the unfinished receipt must make lexical search unavailable"
+    );
     runtime.source.proceed.notify_one();
     let metadata = runtime.worker.index.provider.metadata().clone();
     set_provider(
@@ -3056,7 +3077,6 @@ async fn installed_missing_qwen_assets_leave_fresh_and_lexical_available() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn edited_text_commits_during_inference_and_semantic_retry_uses_only_current_text() {
     use notion_knowledge_core::embedding::EmbeddingError;
-    use notion_knowledge_core::search::{LexicalQuery, LexicalSearch, SearchUnavailable};
 
     struct Model {
         inner: Provider,
