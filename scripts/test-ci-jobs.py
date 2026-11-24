@@ -186,10 +186,10 @@ class Gate(unittest.TestCase):
         workflow = (WORKFLOWS / 'ci.yml').read_text()
         shipping_check = ('nix develop .#spike --command cargo check -p notion-knowledge-server '
                           '--bin notion-knowledge-server --features webhook-worker --locked')
-        self.assertEqual(re.findall(r'^        run: (.*\bcargo check\b.*)$', workflow, re.M),
-                         [shipping_check])
+        self.assertEqual(len(re.findall(r'\bcargo\s+check\b', workflow)), 1)
         features = workflow.split('\n  clippy-features:\n', 1)[1].split('\n  test:\n', 1)[0]
-        self.assertLess(features.index(shipping_check), features.index('--all-targets'))
+        self.assertLess(features.index(f'        run: {shipping_check}\n'),
+                        features.index('--all-targets'))
 
     def test_debug_info_and_incremental_settings_apply_to_every_cargo_job(self):
         workflow = (WORKFLOWS / 'ci.yml').read_text()
