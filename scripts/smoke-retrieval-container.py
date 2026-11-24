@@ -181,6 +181,8 @@ class Stack:
                   "Signed hint did not produce an authoritative committed page", name)
         self.wait(lambda: self.helper("disposable", check=False).returncode == 0,
                   "Fixture work did not reach a completed no-write state", name)
+        self.wait(lambda: self.helper("semantic", check=False).returncode == 0,
+                  "Fixture semantic projection did not publish the current page", name)
         checkpoint = json.loads(self.helper("page").stdout)
         permissions = json.loads(self.helper("permissions").stdout)
         print(f"Actual runtime storage permissions: {permissions}", flush=True)
@@ -203,22 +205,22 @@ class Stack:
                 raise RuntimeError(message)
             time.sleep(1)
 
-    def maintain(self, generation, action="ensure", model=None, expected=0):
+    def maintain(self, generation, action="ensure"):
         name = self.prefix + f"-index-{generation}-{action}"
-        result = docker("run", *self.options(name, model), self.image, "--index", action,
+        result = docker("run", *self.options(name), self.image, "--index", action,
                         check=False, capture_output=True)
-        common.require(result.returncode == expected, "Shipping index command returned an unexpected exit status")
+        common.require(result.returncode == 0, "Shipping index command returned an unexpected exit status")
         output = json.loads(result.stdout)
-        common.require(output == {"operation": "index", "status": "complete" if expected == 0 else "model_configuration"},
+        common.require(output == {"operation": "index", "status": "complete"},
                        "Shipping index command did not report its expected bounded result")
 
     def launch_reader(self, command, **kwargs):
         return subprocess.Popen(command, **kwargs)
 
-    def retrieve(self, generation):
+    def retrieve(self, generation, unavailable_model=None):
         name = self.prefix + f"-reader-{generation}"
         with tempfile.TemporaryFile(mode="w+t") as diagnostics:
-            process = self.launch_reader(["docker", "run", "-i", *self.options(name),
+            process = self.launch_reader(["docker", "run", "-i", *self.options(name, unavailable_model),
                 "--env", "NK_RETRIEVAL=true", self.image], stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=diagnostics, text=True)
             selector = selectors.DefaultSelector()
@@ -238,9 +240,7 @@ class Stack:
                             raise RuntimeError("Feature-built MCP reader exited: " + diagnostics.read()[-2000:])
                         reply = json.loads(line)
                         if reply.get("id") == value["id"]:
-                            result = common.response(reply, value["id"])
-                            common.require(result.get("isError") is not True, "Installed retrieval tool failed")
-                            return result
+                            return common.response(reply, value["id"])
                 raise RuntimeError("Feature-built MCP reader did not answer within its deadline")
 
             try:
@@ -251,12 +251,22 @@ class Stack:
                     output = send({"jsonrpc": "2.0", "id": request_id, "method": "tools/call", "params": {
                         "name": "knowledge_search", "arguments": {"query": "saffron ravioli", "mode": mode,
                             "limit": 1, "filters": {"page_ids": [fixture.PAGE]}}}})
+                    if unavailable_model is not None and mode == "semantic":
+                        common.require(output.get("isError") is True and any(
+                            item.get("text", "").startswith("semantic_unavailable:") for item in output["content"]),
+                            "Missing or invalid assets must surface a semantic-only failure")
+                        continue
+                    common.require(output.get("isError") is not True, "Installed search tool failed")
                     hits = output["structuredContent"]["results"]
                     common.require(len(hits) == 1 and hits[0]["source"]["page_id"] == fixture.PAGE,
                                    "Real semantic/lexical/hybrid retrieval did not return indexed source")
                     common.require(math.isfinite(hits[0]["score"]) and "cinnamon" in hits[0]["text"],
                                    "Indexed source text/finite score missing")
                     expected_paths = {"semantic", "lexical"} if mode == "hybrid" else {mode}
+                    if unavailable_model is not None and mode == "hybrid":
+                        expected_paths = {"lexical"}
+                        common.require(output["structuredContent"].get("semantic_status") == "unavailable",
+                                       "Hybrid search must expose the lexical fallback")
                     common.require(set(hits[0]["matched_paths"]) == expected_paths,
                                    "Installed search did not execute the requested production retrieval paths")
                     identity = (hits[0]["source"]["chunk_id"], hits[0]["text"])
@@ -266,6 +276,7 @@ class Stack:
                 output = send({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {
                     "name": "knowledge_get", "arguments": {"refs": [{"kind": "page", "id": fixture.PAGE}],
                         "max_chars": 2000, "freshness": "fresh"}}})
+                common.require(output.get("isError") is not True, "Installed source read failed")
                 common.require("cinnamon" in json.dumps(output), "Fresh get did not retrieve the authoritative fixture")
                 process.stdin.close()
                 common.require(process.wait(timeout=30) == 0, "MCP reader did not shut down cleanly")
@@ -321,17 +332,18 @@ def main():
                 "--mount", f"type=bind,src={directory},dst=/fixture,readonly",
                 "--mount", f"type=bind,src={FIXTURE_SCRIPT},dst=/fixture.py,readonly",
                 PYTHON_IMAGE, "python", "/fixture.py", "serve", stdout=subprocess.DEVNULL)
+            checkpoint = stack.worker("initial")
+            stack.maintain("initial")
+            before = json.loads(stack.helper("snapshot").stdout)
+            first = stack.retrieve("initial")
             for invalid, content in (("missing", None), ("tampered", "{}")):
                 location = directory / invalid
                 location.mkdir()
                 location.chmod(0o755)
                 if content is not None:
                     (location / "config.json").write_text(content)
-                stack.maintain(invalid, model=location, expected=2)
-            checkpoint = stack.worker("initial")
-            stack.maintain("initial")
-            before = json.loads(stack.helper("snapshot").stdout)
-            first = stack.retrieve("initial")
+                common.require(stack.retrieve(invalid, unavailable_model=location) == first,
+                               "Missing or invalid assets changed source-linked lexical results")
             common.require(json.loads(stack.helper("snapshot").stdout) == before,
                            "Installed read-only retrieval mutated committed index/state bytes")
             # Replace the reader process/container while retaining the actual mounts.
