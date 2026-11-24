@@ -50,6 +50,7 @@ def sync_status(result):
         "last_successful_reconciliation_unix_seconds": None,
         "webhooks": None, "operational_schema_version": None, "index": None,
         "inventory": None,
+        "source_documents": None, "lexical_projection": None, "semantic_projection": None,
     }, "Unconfigured image must report honest unavailable synchronization state")
 
 
