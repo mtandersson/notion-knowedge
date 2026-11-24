@@ -122,6 +122,20 @@ fn scope_sets_are_canonical_and_resume_rejects_policy_generation_and_root_change
     }
 }
 #[test]
+fn a_conflicting_sqlite_transaction_reports_a_busy_writer() {
+    let db = Db::new();
+    let store = db.open();
+    let other = Connection::open(&db.0).unwrap();
+    other.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    assert_eq!(store.acquire_lease(10, 2), Err(JournalError::Busy));
+
+    other.execute_batch("ROLLBACK").unwrap();
+    let lease = store.acquire_lease(10, 2).unwrap();
+    store.release_lease(&lease, 10).unwrap();
+}
+
+#[test]
 fn leases_contend_across_connections_expire_and_fence_every_old_holder_mutation() {
     let db = Db::new();
     let one = db.open();

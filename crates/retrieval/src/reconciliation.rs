@@ -1,9 +1,14 @@
 //! SQLite journal. Each command uses an IMMEDIATE transaction across connections.
 use crate::sync_state::SqliteSyncStateStore;
 use notion_knowledge_core::reconciliation::*;
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-fn sql(_: rusqlite::Error) -> JournalError {
-    JournalError::Unavailable
+use rusqlite::{
+    Connection, ErrorCode, OptionalExtension, Transaction, TransactionBehavior, params,
+};
+fn sql(error: rusqlite::Error) -> JournalError {
+    match error.sqlite_error_code() {
+        Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => JournalError::Busy,
+        _ => JournalError::Unavailable,
+    }
 }
 fn expiry(now: i64, duration: i64) -> Result<i64, JournalError> {
     if now < 0 || !(1..=3600).contains(&duration) {
