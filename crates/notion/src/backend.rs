@@ -28,13 +28,13 @@ impl NotionRead for NotionClient {
     }
 
     fn fetch_source_page<'a>(&'a self, page_id: &'a PageId) -> BackendFuture<'a, Page> {
-        Box::pin(NotionClient::fetch_source_page(self, page_id))
+        Box::pin(NotionClient::fetch_source_page(self, &page_id.0))
     }
 
     fn read_source_content<'a>(&'a self, page_id: &'a PageId) -> BackendFuture<'a, PageContent> {
         Box::pin(async move {
-            let page = NotionClient::fetch_source_page(self, page_id).await?;
-            let markdown = self.read_markdown(page_id).await?;
+            let page = NotionClient::fetch_source_page(self, &page_id.0).await?;
+            let markdown = self.read_markdown(&page.id).await?;
             Ok(PageContent { page, markdown })
         })
     }
@@ -178,6 +178,26 @@ mod tests {
             .map(|(headers, _)| headers.lines().next().unwrap())
             .collect();
         assert_eq!(paths, [&page_path, &markdown_path, &page_path, &page_path]);
+    }
+
+    #[tokio::test]
+    async fn fresh_source_ports_reject_invalid_page_ids_before_fetching() {
+        let (client, server) = mock(vec![]).await;
+        let backend: &dyn NotionRead = &client;
+        let invalid = PageId("../users/me".into());
+        assert_eq!(
+            backend.fetch_source_page(&invalid).await.unwrap_err().kind,
+            BackendErrorKind::InvalidInput
+        );
+        assert_eq!(
+            backend
+                .read_source_content(&invalid)
+                .await
+                .unwrap_err()
+                .kind,
+            BackendErrorKind::InvalidInput
+        );
+        assert!(server.await.unwrap().is_empty());
     }
 
     #[tokio::test]
