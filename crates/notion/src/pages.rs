@@ -6,7 +6,7 @@ use notion_knowledge_core::{
 };
 use reqwest::{Url, header::AUTHORIZATION};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const PAGE_VERSION: &str = "2026-03-11";
 /// Marks a relation, people, title or rich-text value whose items were read in full through the
@@ -260,6 +260,18 @@ fn property(value: &Value) -> Result<PropertyValue, BackendError> {
     })
 }
 pub(crate) fn metadata(value: &Value, expected: &PageId) -> Result<Page, BackendError> {
+    project_metadata(value, expected, false)
+}
+
+pub(crate) fn index_metadata(value: &Value, expected: &PageId) -> Result<Page, BackendError> {
+    project_metadata(value, expected, true)
+}
+
+fn project_metadata(
+    value: &Value,
+    expected: &PageId,
+    omit_array_rollups: bool,
+) -> Result<Page, BackendError> {
     let id = uuid(&string(&value["id"])?).ok_or_else(|| error(BackendErrorKind::Internal))?;
     let url = string(&value["url"])?;
     let edited = string(&value["last_edited_time"])?;
@@ -274,18 +286,39 @@ pub(crate) fn metadata(value: &Value, expected: &PageId) -> Result<Page, Backend
     let mut properties = BTreeMap::new();
     let mut relation_names = BTreeMap::new();
     let mut title = None;
+    let mut property_ids = BTreeSet::new();
     for (name, value) in value["properties"]
         .as_object()
         .ok_or_else(|| error(BackendErrorKind::Internal))?
         .iter()
     {
-        let key = string(&value["id"])?;
-        if key.is_empty() {
+        let key = value["id"]
+            .as_str()
+            .ok_or_else(|| error(BackendErrorKind::Internal))?;
+        if key.is_empty() || !property_ids.insert(key) {
             return Err(error(BackendErrorKind::Internal));
+        }
+        // Array rollups may contain heterogeneous derived values. They have no
+        // faithful indexed filter representation, but the page body is intact.
+        if omit_array_rollups
+            && value["type"] == "rollup"
+            && value["rollup"]["type"] == "array"
+            && value["rollup"]["function"]
+                .as_str()
+                .is_some_and(|function| !function.is_empty())
+            && value["rollup"]["array"].as_array().is_some_and(|items| {
+                items.iter().all(|item| {
+                    item["type"]
+                        .as_str()
+                        .is_some_and(|kind| !kind.is_empty() && item.get(kind).is_some())
+                })
+            })
+        {
+            continue;
         }
         let normalized = property(value)?;
         if value["type"] == "relation" {
-            relation_names.insert(key.clone(), name.clone());
+            relation_names.insert(key.to_owned(), name.clone());
         }
         if value["type"] == "title" {
             let PropertyValue::Text(text) = &normalized else {
@@ -295,9 +328,7 @@ pub(crate) fn metadata(value: &Value, expected: &PageId) -> Result<Page, Backend
                 return Err(error(BackendErrorKind::Internal));
             }
         }
-        if properties.insert(key, normalized).is_some() {
-            return Err(error(BackendErrorKind::Internal));
-        }
+        properties.insert(key.to_owned(), normalized);
     }
     Ok(Page {
         relation_names,
@@ -312,10 +343,21 @@ pub(crate) fn metadata(value: &Value, expected: &PageId) -> Result<Page, Backend
 impl NotionClient {
     /// Fresh exact metadata. Does not read page content, cache or follow links.
     pub async fn fetch_page(&self, input: &str) -> Result<Page, BackendError> {
-        let id = page_id(input)?;
-        let mut value = self.fetch_page_value(&id).await?;
-        self.complete_properties(&id, &mut value, &mut 0).await?;
-        metadata(&value, &id)
+        self.fetch_metadata(&page_id(input)?, metadata).await
+    }
+
+    pub(crate) async fn fetch_index_page(&self, id: &PageId) -> Result<Page, BackendError> {
+        self.fetch_metadata(id, index_metadata).await
+    }
+
+    async fn fetch_metadata(
+        &self,
+        id: &PageId,
+        project: fn(&Value, &PageId) -> Result<Page, BackendError>,
+    ) -> Result<Page, BackendError> {
+        let mut value = self.fetch_page_value(id).await?;
+        self.complete_properties(id, &mut value, &mut 0).await?;
+        project(&value, id)
     }
 
     pub(crate) async fn fetch_source_page(&self, input: &str) -> Result<Page, BackendError> {
