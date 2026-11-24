@@ -75,6 +75,17 @@ impl NotionClient {
         Ok(PageContent { page, markdown })
     }
 
+    /// Scoped index refresh shares the walk's metadata projection.
+    pub(crate) async fn read_index_content(
+        &self,
+        input: &str,
+    ) -> Result<PageContent, BackendError> {
+        let id = page_id(input)?;
+        let page = self.fetch_index_page(&id).await?;
+        let markdown = self.read_markdown(&id).await?;
+        Ok(PageContent { page, markdown })
+    }
+
     /// One complete enhanced-Markdown read, for a caller that already holds
     /// the page's metadata. Incomplete content fails.
     pub async fn read_markdown(&self, page: &PageId) -> Result<String, BackendError> {

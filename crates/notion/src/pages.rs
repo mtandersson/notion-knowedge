@@ -303,7 +303,16 @@ fn project_metadata(
         if omit_array_rollups
             && value["type"] == "rollup"
             && value["rollup"]["type"] == "array"
-            && value["rollup"]["array"].is_array()
+            && value["rollup"]["function"]
+                .as_str()
+                .is_some_and(|function| !function.is_empty())
+            && value["rollup"]["array"].as_array().is_some_and(|items| {
+                items.iter().all(|item| {
+                    item["type"]
+                        .as_str()
+                        .is_some_and(|kind| !kind.is_empty() && item.get(kind).is_some())
+                })
+            })
         {
             continue;
         }
@@ -334,10 +343,21 @@ fn project_metadata(
 impl NotionClient {
     /// Fresh exact metadata. Does not read page content, cache or follow links.
     pub async fn fetch_page(&self, input: &str) -> Result<Page, BackendError> {
-        let id = page_id(input)?;
-        let mut value = self.fetch_page_value(&id).await?;
-        self.complete_properties(&id, &mut value, &mut 0).await?;
-        metadata(&value, &id)
+        self.fetch_metadata(&page_id(input)?, metadata).await
+    }
+
+    pub(crate) async fn fetch_index_page(&self, id: &PageId) -> Result<Page, BackendError> {
+        self.fetch_metadata(id, index_metadata).await
+    }
+
+    async fn fetch_metadata(
+        &self,
+        id: &PageId,
+        project: fn(&Value, &PageId) -> Result<Page, BackendError>,
+    ) -> Result<Page, BackendError> {
+        let mut value = self.fetch_page_value(id).await?;
+        self.complete_properties(id, &mut value, &mut 0).await?;
+        project(&value, id)
     }
 
     pub(crate) async fn fetch_source_page(&self, input: &str) -> Result<Page, BackendError> {

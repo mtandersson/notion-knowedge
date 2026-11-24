@@ -294,7 +294,7 @@ impl RelationProposalAdapter {
         previous: &[IndexedChunk],
         chunks: ChunkConfig,
     ) -> Result<RelationProposal, BackendError> {
-        let content = self.client.read_content(&page.0).await?;
+        let content = self.client.read_index_content(&page.0).await?;
         if content.page.id != *page {
             return Err(conflict());
         }

@@ -1076,6 +1076,8 @@ mod tests {
         properties["Rollup"] = json!({"id":"rollup", "type":"rollup",
             "rollup":{"type":"array", "array":[{"type":"number", "number":1}], "function":"show_original"}});
         properties["Score"] = json!({"id":"score", "type":"number", "number":42});
+        let first_row = query["results"][0].clone();
+        routes.insert(format!("GET /v1/pages/{ROW1}"), (200, first_row));
         let (client, _) = serve(routes).await;
         let (sink, mut pages) = tokio::sync::mpsc::channel(16);
         let walk = client
@@ -1106,6 +1108,31 @@ mod tests {
             Some(&notion_knowledge_core::indexed::PropertyValue::Number(42.0))
         );
         assert!(!content.page.properties.contains_key("rollup"));
+        assert_eq!(client.read_index_content(ROW1).await.unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn malformed_array_rollup_still_makes_the_row_metadata_unreadable() {
+        let mut routes = nested_tree();
+        let (_, query) = routes
+            .get_mut(&format!("POST /v1/data_sources/{S}/query"))
+            .unwrap();
+        query["results"][0]["properties"]["Rollup"] = json!({"id":"rollup", "type":"rollup",
+            "rollup":{"type":"array", "array":[null], "function":"show_original"}});
+        let (client, _) = serve(routes).await;
+        let walk = client
+            .walk_tree(&scope(ExclusionRules::default()), None)
+            .await
+            .unwrap();
+        assert!(!walk.authoritative());
+        assert_eq!(
+            walk.skipped,
+            [SkippedContent {
+                id: ROW1.into(),
+                reason: SkipReason::UnreadableMetadata
+            }]
+        );
+        assert!(walk.readable().contains(ROW2));
     }
 
     #[tokio::test]
