@@ -274,6 +274,7 @@ impl AuthoritativePageRefresh {
         walked: &WalkedPage,
         operation_id: &str,
     ) -> Result<PrefetchedPage, RefreshError> {
+        #[cfg(any(test, feature = "test-fixtures"))]
         crate::test_hooks::preparation_pause(self.coordinator.index_directory()).await;
         let page = PageId(walked.entry.page_id.clone());
         let root = PageId(walked.entry.root_id.clone());
