@@ -446,37 +446,8 @@ async fn frame(mut response: reqwest::Response) -> Value {
 #[tokio::test]
 async fn installed_authenticated_http_attaches_and_rejects_unauthenticated_requests() {
     for image in [true, false] {
-        let (mut config, handler, dir, requests, source, notion, paths) =
-            fixture(image, true).await;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        config.http_bind = listener.local_addr().unwrap();
-        drop(listener);
-        let url = format!("http://{}/mcp", config.http_bind);
-        let ready = format!("http://{}/livez", config.http_bind);
-        let shutdown = tokio_util::sync::CancellationToken::new();
-        let cancel = shutdown.clone();
-        let task = tokio::spawn(async move {
-            serve_installed(
-                config,
-                handler,
-                #[cfg(all(unix, feature = "webhook-worker"))]
-                None,
-                shutdown,
-            )
-            .await
-            .unwrap();
-        });
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if client.get(&ready).send().await.is_ok() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        let (config, handler, dir, requests, source, notion, paths) = fixture(image, true).await;
+        let (client, url, cancel, task) = start_http_fixture(config, handler).await;
         let post = || {
             client
                 .post(&url)
@@ -544,7 +515,7 @@ async fn installed_authenticated_http_attaches_and_rejects_unauthenticated_reque
         .await;
         assert_result(&result, image, &requests, &dir, &paths);
         cancel.cancel();
-        task.await.unwrap();
+        task.await.unwrap().unwrap();
         source.await.unwrap();
         notion.await.unwrap();
     }
@@ -634,6 +605,7 @@ async fn installed_transports_ordered_batch_keeps_success_and_reports_source_fai
             stdio_call(handler, request).await
         };
         let files = &result["result"]["structuredContent"]["files"];
+        assert_eq!(files.as_array().unwrap().len(), 2);
         assert_eq!(files[0]["index"], 0);
         assert_eq!(files[0]["status"], "verified");
         assert_eq!(files[1]["index"], 1);
@@ -1061,40 +1033,46 @@ async fn installed_stdio_cancellation_during_multipart_send_or_readback_cleans_a
         notion.abort();
     }
 }
-async fn http_call(
+async fn start_http_fixture(
     mut config: Config,
     handler: notion_knowledge_mcp::KnowledgeServer,
-    request: Value,
-) -> Value {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+) -> (
+    reqwest::Client,
+    String,
+    tokio_util::sync::CancellationToken,
+    tokio::task::JoinHandle<io::Result<()>>,
+) {
+    // Keep the allocated port bound until the installed HTTP server shuts down.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     config.http_bind = listener.local_addr().unwrap();
-    drop(listener);
     let url = format!("http://{}/mcp", config.http_bind);
     let ready = format!("http://{}/livez", config.http_bind);
     let shutdown = tokio_util::sync::CancellationToken::new();
-    let cancel = shutdown.clone();
-    let task = tokio::spawn(async move {
-        serve_installed(
-            config,
-            handler,
-            #[cfg(all(unix, feature = "webhook-worker"))]
-            None,
-            shutdown,
-        )
+    let task = tokio::spawn(serve_installed_on(
+        listener,
+        config,
+        handler,
+        #[cfg(all(unix, feature = "webhook-worker"))]
+        None,
+        shutdown.clone(),
+    ));
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let response = client
+        .get(ready)
+        .timeout(Duration::from_secs(5))
+        .send()
         .await
         .unwrap();
-    });
-    let client = reqwest::Client::builder().no_proxy().build().unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if client.get(&ready).send().await.is_ok() {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    (client, url, shutdown, task)
+}
+
+async fn http_call(
+    config: Config,
+    handler: notion_knowledge_mcp::KnowledgeServer,
+    request: Value,
+) -> Value {
+    let (client, url, cancel, task) = start_http_fixture(config, handler).await;
     let post = || {
         client
             .post(&url)
@@ -1149,7 +1127,7 @@ async fn http_call(
     )
     .await;
     cancel.cancel();
-    task.await.unwrap();
+    task.await.unwrap().unwrap();
     result
 }
 #[tokio::test]
