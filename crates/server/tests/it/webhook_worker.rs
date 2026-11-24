@@ -2470,7 +2470,7 @@ async fn installed_graph_suppresses_explicitly_excluded_producer_targets() {
 mod joined_graph;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn installed_fresh_get_prefers_current_cache_and_defers_live_permissions_to_notion() {
+async fn installed_whole_page_reads_distinguish_current_cache_from_live_notion() {
     let runtime = TestRuntime::with_scope_policy("webhook-v1").await;
     runtime.source.change(|model| {
         model.markdown.push_str(
@@ -2495,8 +2495,24 @@ async fn installed_fresh_get_prefers_current_cache_and_defers_live_permissions_t
         "name":"knowledge_get","arguments":{"refs":[{"kind":"page","id":PAGE}],"max_chars":2000,"freshness":freshness}}})
     };
     let body_reads = runtime.source.body_reads.load(Ordering::SeqCst);
-    let output = wire_stdio(handler.clone(), vec![request(2, "fresh")]).await;
-    let cached = &output[1]["result"]["structuredContent"]["sources"][0];
+    let output = wire_stdio(
+        handler.clone(),
+        vec![
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+            request(3, "fresh"),
+        ],
+    )
+    .await;
+    let tools = output[1]["result"]["tools"].as_array().unwrap();
+    let get = tools
+        .iter()
+        .find(|tool| tool["name"] == "knowledge_get")
+        .unwrap();
+    assert_eq!(
+        get["inputSchema"]["properties"]["freshness"]["enum"],
+        json!(["indexed", "fresh", "live"])
+    );
+    let cached = &output[2]["result"]["structuredContent"]["sources"][0];
     assert_eq!(cached["read_from"], "cache");
     assert!(cached["text"].as_str().unwrap().contains("Saffron"));
     let canonical = cached["text"].as_str().unwrap();
@@ -2504,11 +2520,48 @@ async fn installed_fresh_get_prefers_current_cache_and_defers_live_permissions_t
     assert!(!canonical.contains("X-Amz-Signature"));
     assert_eq!(runtime.source.body_reads.load(Ordering::SeqCst), body_reads);
 
-    // The persisted acceptance signal dirties the page immediately, before
-    // queue processing and even though Notion's edit timestamp is unchanged.
+    // The source changed before Astra received a signal.
     runtime.source.change(|model| {
         model.markdown = "# Updated\n\nFresh cardamom from the authoritative source.\n".into();
     });
+    let before = std::fs::read(&runtime.db).unwrap();
+    let output = wire_stdio(
+        handler.clone(),
+        vec![request(2, "fresh"), request(3, "live")],
+    )
+    .await;
+    let cached = &output[1]["result"]["structuredContent"]["sources"][0];
+    assert_eq!(cached["read_from"], "cache");
+    assert!(cached["text"].as_str().unwrap().contains("Saffron"));
+    let live = &output[2]["result"]["structuredContent"]["sources"][0];
+    assert_eq!(live["read_from"], "notion");
+    assert_eq!(live["content_scope"], "page");
+    assert_eq!(
+        live["provenance"]["refreshed_last_edited_time"],
+        "2026-10-10T12:00:00Z"
+    );
+    assert!(live["text"].as_str().unwrap().contains("Fresh cardamom"));
+    assert_eq!(
+        runtime.source.body_reads.load(Ordering::SeqCst),
+        body_reads + 1
+    );
+
+    runtime.source.change(|model| model.gone = true);
+    let output = wire_stdio(handler.clone(), vec![request(2, "live")]).await;
+    assert_eq!(output[1]["result"]["isError"], true);
+    assert!(output[1]["result"]["structuredContent"].is_null());
+    assert!(
+        output[1]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("source_not_accessible:")
+    );
+    assert_eq!(std::fs::read(&runtime.db).unwrap(), before);
+    runtime.source.change(|model| model.gone = false);
+    let body_reads = runtime.source.body_reads.load(Ordering::SeqCst);
+
+    // The accepted signal dirties the cached page before queue processing,
+    // even though Notion's edit timestamp is unchanged.
     runtime
         .worker
         .state

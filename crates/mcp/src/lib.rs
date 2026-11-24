@@ -750,7 +750,7 @@ impl KnowledgeServer {
                     .validate()
                     .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
 
-                if input.freshness == get::Freshness::Fresh {
+                if input.freshness != get::Freshness::Indexed {
                     return Ok(match get::fresh_sources(self, input).await {
                         Ok(sources) => get::result(sources),
                         Err(message) => error(message),

@@ -21,7 +21,7 @@ pub fn assert_search_catalog(tools: &Value) {
     assert_eq!(get["annotations"]["openWorldHint"], true);
     assert_eq!(
         get["inputSchema"]["properties"]["freshness"]["enum"],
-        json!(["indexed", "fresh"])
+        json!(["indexed", "fresh", "live"])
     );
     assert_eq!(
         get["inputSchema"]["properties"]["freshness"]["default"],

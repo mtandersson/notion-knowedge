@@ -95,10 +95,11 @@ nix develop .#spike --command cargo test -p notion-knowledge-server --features w
 ```
 
 Trusted installed readers also bind guarded indexed source expansion and the
-same configured authoritative client for `knowledge_get` with `freshness: "fresh"`.
-A complete cached page serves a fresh read while its source revision remains
-current. Otherwise fresh mode reads the explicitly requested page from Notion,
-which authorizes that read. A chunk reference resolves through the scoped index.
+same configured authoritative client for `knowledge_get` whole-page reads.
+`freshness: "fresh"` can use a complete cached page current as of the latest
+source signals. `freshness: "live"` always reads directly from Notion and reports
+failures to the caller. Notion authorizes the live read, and a chunk reference
+resolves through the scoped index.
 
 Search modes use the existing Lance semantic adapter, BM25 lexical adapter and
 weighted reciprocal-rank fusion (100 candidates per path, rank constant 60,
