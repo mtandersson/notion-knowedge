@@ -26,6 +26,18 @@ impl NotionRead for NotionClient {
     fn read_content<'a>(&'a self, page_id: &'a PageId) -> BackendFuture<'a, PageContent> {
         Box::pin(NotionClient::read_content(self, &page_id.0))
     }
+
+    fn fetch_source_page<'a>(&'a self, page_id: &'a PageId) -> BackendFuture<'a, Page> {
+        Box::pin(NotionClient::fetch_source_page(self, page_id))
+    }
+
+    fn read_source_content<'a>(&'a self, page_id: &'a PageId) -> BackendFuture<'a, PageContent> {
+        Box::pin(async move {
+            let page = NotionClient::fetch_source_page(self, page_id).await?;
+            let markdown = self.read_markdown(page_id).await?;
+            Ok(PageContent { page, markdown })
+        })
+    }
 }
 
 impl NotionWrite for NotionClient {
@@ -131,6 +143,41 @@ mod tests {
             requests
         });
         (client, server)
+    }
+
+    #[tokio::test]
+    async fn fresh_source_verification_ignores_database_rollups() {
+        let mut value: Value = serde_json::from_str(&metadata()).unwrap();
+        value["parent"] = json!({"type":"data_source_id", "data_source_id":ID});
+        value["properties"]["Rollup"] = json!({"id":"rollup", "type":"rollup",
+            "rollup":{"type":"array", "array":[{"type":"number", "number":1}], "function":"show_original"}});
+        let metadata = value.to_string();
+        let (client, server) = mock(vec![
+            (200, metadata.clone()),
+            (200, content("# Complete\n")),
+            (200, metadata.clone()),
+            (200, metadata),
+        ])
+        .await;
+        let id = PageId(ID.into());
+        let verified = notion_knowledge_core::source::read_verified_page(&id, &client)
+            .await
+            .unwrap();
+        assert_eq!(verified.page.id, id);
+        assert_eq!(verified.page.title, "Hello");
+        assert_eq!(verified.markdown, "# Complete\n");
+        assert_eq!(
+            client.fetch_page(ID).await.unwrap_err().kind,
+            BackendErrorKind::UnsupportedContent
+        );
+        let requests = server.await.unwrap();
+        let page_path = format!("GET /v1/pages/{ID} HTTP/1.1");
+        let markdown_path = format!("GET /v1/pages/{ID}/markdown HTTP/1.1");
+        let paths: Vec<_> = requests
+            .iter()
+            .map(|(headers, _)| headers.lines().next().unwrap())
+            .collect();
+        assert_eq!(paths, [&page_path, &markdown_path, &page_path, &page_path]);
     }
 
     #[tokio::test]

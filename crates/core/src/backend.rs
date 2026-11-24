@@ -105,6 +105,17 @@ pub trait NotionRead: Send + Sync {
 
     fn fetch_page<'a>(&'a self, page_id: &'a PageId) -> BackendFuture<'a, Page>;
     fn read_content<'a>(&'a self, page_id: &'a PageId) -> BackendFuture<'a, PageContent>;
+
+    /// Page identity and citation metadata for verifying a read, independent
+    /// of database properties used by indexing or writes.
+    fn fetch_source_page<'a>(&'a self, page_id: &'a PageId) -> BackendFuture<'a, Page> {
+        self.fetch_page(page_id)
+    }
+
+    /// Complete Markdown and the same metadata returned by `fetch_source_page`.
+    fn read_source_content<'a>(&'a self, page_id: &'a PageId) -> BackendFuture<'a, PageContent> {
+        self.read_content(page_id)
+    }
 }
 
 /// Separate capability allows read-only consumers to omit write authority.
