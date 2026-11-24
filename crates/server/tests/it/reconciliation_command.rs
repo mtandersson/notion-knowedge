@@ -43,6 +43,7 @@ struct Provider {
     fail: AtomicBool,
     fail_next: AtomicBool,
     input_limit_bytes: AtomicUsize,
+    planned_windows: AtomicUsize,
     pause: AtomicBool,
     entered: tokio::sync::Notify,
     boundary_pause: Mutex<Option<Arc<RequestPause>>>,
@@ -62,6 +63,7 @@ impl Provider {
             fail: AtomicBool::new(false),
             fail_next: AtomicBool::new(false),
             input_limit_bytes: AtomicUsize::new(0),
+            planned_windows: AtomicUsize::new(0),
             pause: AtomicBool::new(false),
             entered: tokio::sync::Notify::new(),
             boundary_pause: Mutex::new(None),
@@ -93,6 +95,7 @@ impl EmbeddingProvider for Provider {
         text: &'a str,
         boundaries: Vec<usize>,
     ) -> notion_knowledge_core::embedding::EmbeddingPartitionFuture<'a> {
+        self.planned_windows.fetch_add(1, Ordering::SeqCst);
         let input_limit = self.input_limit_bytes.load(Ordering::SeqCst);
         Box::pin(async move {
             notion_knowledge_core::embedding::partition_at_boundaries(text, &boundaries, |part| {
@@ -4078,6 +4081,7 @@ async fn long_markdown_windows_resume_over_bounded_batches_and_cite_the_late_sou
             .unwrap()
     );
     assert_eq!(f.provider.count.load(Ordering::SeqCst), 8);
+    assert_eq!(f.provider.planned_windows.load(Ordering::SeqCst), 8);
     assert!(
         table
             .search_snapshot()
@@ -4108,6 +4112,11 @@ async fn long_markdown_windows_resume_over_bounded_batches_and_cite_the_late_sou
     assert_eq!(
         f.provider.count.load(Ordering::SeqCst),
         table.semantic_status().await.unwrap().0 as usize
+    );
+    assert_eq!(
+        f.provider.planned_windows.load(Ordering::SeqCst),
+        f.provider.count.load(Ordering::SeqCst),
+        "recovery must continue at the staged range without planning admitted windows again"
     );
 
     let hits = f.search_windows(&restarted, "conifer", 2).await;

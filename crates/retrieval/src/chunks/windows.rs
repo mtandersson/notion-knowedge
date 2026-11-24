@@ -92,12 +92,15 @@ pub(super) fn row(
         .filter(|value| valid_anchor(value))
         .ok_or_else(invalid)?;
     let text = chunk.text.get(range.clone()).ok_or_else(invalid)?;
-    let mut row = chunk.clone();
-    row.chunk_id = format!(
-        "{PREFIX}{anchor}~{fingerprint}~{}~{}",
-        range.start, range.end
-    );
-    row.text = text.to_owned();
-    row.content_hash = notion_knowledge_core::fingerprint::content_hash(text);
-    Ok(row)
+    Ok(IndexedChunk {
+        schema_version: chunk.schema_version,
+        chunk_id: format!(
+            "{PREFIX}{anchor}~{fingerprint}~{}~{}",
+            range.start, range.end
+        ),
+        metadata: chunk.metadata.clone(),
+        text: text.to_owned(),
+        content_hash: notion_knowledge_core::fingerprint::content_hash(text),
+        links: Vec::new(),
+    })
 }

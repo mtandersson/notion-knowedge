@@ -90,8 +90,9 @@ to rebuild that derived layout, preserving operational/external-effect records.
 The embedding model/vector identity does not change for this boundary correction.
 
 The source and lexical publication completes before model work. The semantic
-worker reads that revision locally, requests up to eight single-text embeddings
-per attempt, and durably stages progress across retries. It publishes the
+worker reads that revision locally and plans and embeds up to eight windows
+per attempt. Each attempt resumes from the byte ranges already staged for the
+same revision. It publishes the
 complete vector set under the writer fence. Long chunks use exact UTF-8
 windows admitted by the model's tokenizer and byte limit. Windows prefer
 nearby Markdown boundaries and may overlap to retain context.

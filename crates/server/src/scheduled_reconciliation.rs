@@ -248,15 +248,35 @@ pub mod runtime {
             let Some(mut lease) = self.lease()? else {
                 return Ok(false);
             };
-            let admitted = self
-                .index
-                .coordinator
-                .ensure_no_active_reconciliation(&lease, now_ms() / 1000);
-            if admitted.is_ok() {
-                self.sync(&stop, &mut lease, SyncMode::Incremental).await?;
+            let result = async {
+                let now = now_ms() / 1000;
+                let coordinator = &self.index.coordinator;
+                match coordinator.schedule(ID) {
+                    Ok(_) => {}
+                    Err(JournalError::InvalidTransition) => return Ok(false),
+                    Err(_) => return Err("scheduled state unavailable"),
+                }
+                // A busy lease can hide a due full walk from tick(). Give
+                // that walk priority over catch-up once we acquire the lease.
+                if coordinator
+                    .due_schedules(now, 1000)
+                    .map_err(|_| "scheduled state unavailable")?
+                    .iter()
+                    .any(|s| s.schedule_id == ID)
+                {
+                    return Ok(false);
+                }
+                if coordinator
+                    .ensure_no_active_reconciliation(&lease, now)
+                    .is_ok()
+                {
+                    self.sync(&stop, &mut lease, SyncMode::Incremental).await?;
+                }
+                Ok(true)
             }
+            .await;
             self.release(&lease)?;
-            Ok(true)
+            result
         }
     }
 }

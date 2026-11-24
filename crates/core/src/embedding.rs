@@ -120,8 +120,9 @@ pub type EmbeddingIdleFuture<'a> =
 
 pub type EmbeddingPartitionFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Vec<usize>, EmbeddingError>> + Send + 'a>>;
-pub type EmbeddingWindowsFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<Vec<std::ops::Range<usize>>, EmbeddingError>> + Send + 'a>>;
+pub type EmbeddingWindowFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<Option<std::ops::Range<usize>>, EmbeddingError>> + Send + 'a>,
+>;
 
 pub trait EmbeddingProvider: Send + Sync {
     /// Wait for work retained after a cancelled embedding observer. Providers
@@ -142,18 +143,19 @@ pub trait EmbeddingProvider: Send + Sync {
     ) -> EmbeddingPartitionFuture<'a> {
         Box::pin(async { Ok(Vec::new()) })
     }
-    /// Exact byte ranges for a complete embedding projection of a source
-    /// chunk. Ranges may overlap and must cover the full original input.
-    fn embedding_windows<'a>(
+    /// Return the next admitted byte range. The previous range is the
+    /// durable coverage cursor. Each result may overlap it and must extend it.
+    fn next_embedding_window<'a>(
         &'a self,
-        input: &'a str,
-        boundaries: Vec<usize>,
-    ) -> EmbeddingWindowsFuture<'a> {
+        input: std::sync::Arc<str>,
+        boundaries: std::sync::Arc<[usize]>,
+        previous: Option<std::ops::Range<usize>>,
+    ) -> EmbeddingWindowFuture<'a> {
         Box::pin(async move {
+            let covered = previous.map_or(0, |range| range.end);
             let mut start = 0;
-            let mut ranges = Vec::new();
             for end in self
-                .partition_input(input, boundaries)
+                .partition_input(&input, boundaries.to_vec())
                 .await?
                 .into_iter()
                 .chain(std::iter::once(input.len()))
@@ -161,10 +163,12 @@ pub trait EmbeddingProvider: Send + Sync {
                 if start >= end || input.get(start..end).is_none() {
                     return Err(EmbeddingError::InvalidInput);
                 }
-                ranges.push(start..end);
+                if end > covered {
+                    return Ok(Some(start..end));
+                }
                 start = end;
             }
-            Ok(ranges)
+            Ok(None)
         })
     }
 }

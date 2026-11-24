@@ -456,58 +456,83 @@ impl GuardedChunkTable {
         let mut vectors = Vec::new();
         let mut attempts = 0;
         let _embed = page_timings::timer(Bucket::Embed);
+        let mut retained_vector = |part: &IndexedChunk| {
+            existing
+                .get(part.chunk_id.as_str())
+                .filter(|row| reusable(row, part))
+                .map(|row| row.vector.clone())
+                .or_else(|| staged.remove(&part.chunk_id))
+        };
         for chunk in canonical {
-            let ready = existing
-                .get(chunk.chunk_id.as_str())
-                .is_some_and(|row| reusable(row, chunk))
-                || staged.contains_key(&chunk.chunk_id);
-            let parts = if ready {
-                vec![chunk.clone()]
-            } else {
+            if let Some(vector) = retained_vector(chunk) {
+                vectors.push(EmbeddedChunk::new(chunk.clone(), vector));
+                continue;
+            }
+            let fingerprint = windows::digest(&chunk.text);
+            let prior = cached_windows.remove(&chunk.chunk_id).unwrap_or_default();
+            let (parts, _) = rehydrate_windows(chunk, &fingerprint, prior)?;
+            let mut previous = None;
+            for part in parts {
+                let Some(vector) = retained_vector(&part) else {
+                    break;
+                };
+                previous = Some(
+                    windows::parse(&part.chunk_id)?
+                        .ok_or(EmbeddingError::InvalidInput)?
+                        .range,
+                );
+                vectors.push(EmbeddedChunk::new(part, vector));
+            }
+            if previous
+                .as_ref()
+                .is_some_and(|range| range.end == chunk.text.len())
+            {
+                continue;
+            }
+            // The provider owns only one bounded window computation.
+            // Its next call can resume at the last staged UTF-8 range.
+            let input: Arc<str> = Arc::from(chunk.text.as_str());
+            let boundaries: Arc<[usize]> = structural_boundaries(&input).into();
+            while previous.as_ref().map_or(0, |range| range.end) < input.len() {
                 if attempts == INFERENCES_PER_STEP {
                     return Ok(ProjectionStep::Staged(vectors, None));
                 }
-                let prior = cached_windows.remove(&chunk.chunk_id).unwrap_or_default();
-                let result =
-                    tokio::time::timeout_at(deadline, semantic_chunk(provider, chunk, prior))
-                        .await
-                        .unwrap_or(Err(EmbeddingError::Unavailable.into()));
-                match result {
-                    Ok(parts) => parts,
+                let step = async {
+                    let covered = previous.as_ref().map_or(0, |range| range.end);
+                    let range = provider
+                        .next_embedding_window(input.clone(), boundaries.clone(), previous.clone())
+                        .await?
+                        .filter(|range| {
+                            range.start <= covered
+                                && range.end > covered
+                                && range.end <= input.len()
+                        })
+                        .ok_or(EmbeddingError::InvalidInput)?;
+                    let part = if range.start == 0 && range.end == input.len() {
+                        chunk.clone()
+                    } else {
+                        windows::row(chunk, &fingerprint, range.clone())?
+                    };
+                    let vector = embedding::embed_batch(provider, std::slice::from_ref(&part.text))
+                        .await?
+                        .pop()
+                        .ok_or(EmbeddingError::InvalidOutput)?;
+                    Ok::<_, ChunkTableError>((range, EmbeddedChunk::new(part, vector)))
+                };
+                match tokio::time::timeout_at(deadline, step)
+                    .await
+                    .unwrap_or(Err(EmbeddingError::Unavailable.into()))
+                {
+                    Ok((range, row)) => {
+                        attempts += 1;
+                        previous = Some(range);
+                        vectors.push(row);
+                    }
                     Err(ChunkTableError::Embedding(error)) if attempts > 0 => {
                         return Ok(ProjectionStep::Staged(vectors, Some(error)));
                     }
                     Err(error) => return Err(error),
                 }
-            };
-            for part in parts {
-                let vector = if let Some(old) = existing.get(part.chunk_id.as_str())
-                    && reusable(old, &part)
-                {
-                    old.vector.clone()
-                } else if let Some(vector) = staged.remove(&part.chunk_id) {
-                    vector
-                } else {
-                    if attempts == INFERENCES_PER_STEP {
-                        return Ok(ProjectionStep::Staged(vectors, None));
-                    }
-                    let input = std::slice::from_ref(&part.text);
-                    let encoded =
-                        tokio::time::timeout_at(deadline, embedding::embed_batch(provider, input))
-                            .await
-                            .unwrap_or(Err(EmbeddingError::Unavailable));
-                    match encoded {
-                        Ok(mut encoded) => {
-                            attempts += 1;
-                            encoded.pop().ok_or(EmbeddingError::InvalidOutput)?
-                        }
-                        Err(error) if attempts > 0 => {
-                            return Ok(ProjectionStep::Staged(vectors, Some(error)));
-                        }
-                        Err(error) => return Err(error.into()),
-                    }
-                };
-                vectors.push(EmbeddedChunk::new(part, vector));
             }
         }
         validate_rows(&vectors, self.embedding.dimension())?;
@@ -638,47 +663,16 @@ fn rehydrate_windows(
     Ok((cached, covered))
 }
 
-async fn semantic_chunk(
-    provider: &dyn EmbeddingProvider,
-    chunk: &IndexedChunk,
-    prior: Vec<CachedWindow>,
-) -> Result<Vec<IndexedChunk>, ChunkTableError> {
-    let fingerprint = windows::digest(&chunk.text);
-    // Completed window plans survive a bounded job step without paying
-    // tokenization costs again. Failed or incomplete coverage is replanned.
-    let (cached, covered) = rehydrate_windows(chunk, &fingerprint, prior)?;
-    if covered == chunk.text.len() && !cached.is_empty() {
-        return Ok(cached);
-    }
-
-    let mut boundaries = table_section_boundaries(&chunk.text);
+fn structural_boundaries(text: &str) -> Vec<usize> {
+    let mut boundaries = table_section_boundaries(text);
     boundaries.extend(
-        chunk
-            .text
-            .match_indices('\n')
+        text.match_indices('\n')
             .map(|(offset, _)| offset + 1)
-            .filter(|&offset| offset < chunk.text.len()),
+            .filter(|&offset| offset < text.len()),
     );
     boundaries.sort_unstable();
     boundaries.dedup();
-    let ranges = provider.embedding_windows(&chunk.text, boundaries).await?;
-    let mut rows = Vec::new();
-    let mut covered = 0;
-    for range in ranges {
-        if range.start > covered || range.end <= covered {
-            return Err(EmbeddingError::InvalidInput.into());
-        }
-        covered = range.end;
-        if range.start == 0 && range.end == chunk.text.len() {
-            rows.push(chunk.clone());
-        } else {
-            rows.push(windows::row(chunk, &fingerprint, range)?);
-        }
-    }
-    if covered != chunk.text.len() || rows.is_empty() {
-        return Err(EmbeddingError::InvalidInput.into());
-    }
-    Ok(rows)
+    boundaries
 }
 
 async fn verify_no_collisions<'a>(

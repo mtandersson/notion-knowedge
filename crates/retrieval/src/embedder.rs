@@ -111,15 +111,16 @@ impl EmbeddingProvider for DeferredEmbedder {
         })
     }
 
-    fn embedding_windows<'a>(
+    fn next_embedding_window<'a>(
         &'a self,
-        input: &'a str,
-        boundaries: Vec<usize>,
-    ) -> notion_knowledge_core::embedding::EmbeddingWindowsFuture<'a> {
+        input: Arc<str>,
+        boundaries: Arc<[usize]>,
+        previous: Option<std::ops::Range<usize>>,
+    ) -> notion_knowledge_core::embedding::EmbeddingWindowFuture<'a> {
         Box::pin(async move {
             self.provider()
                 .await?
-                .embedding_windows(input, boundaries)
+                .next_embedding_window(input, boundaries, previous)
                 .await
         })
     }
