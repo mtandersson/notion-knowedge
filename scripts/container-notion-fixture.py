@@ -72,7 +72,7 @@ class Notion(http.server.BaseHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["serve", "page", "snapshot", "health", "started", "admit", "permissions", "ledgers", "disposable"])
+    parser.add_argument("action", choices=["serve", "page", "semantic", "snapshot", "health", "started", "admit", "permissions", "ledgers", "disposable"])
     parser.add_argument("--event")
     args = parser.parse_args()
     if args.action == "serve":
@@ -116,6 +116,13 @@ def main():
             if not row or not row[0] or row[1] != 0:
                 raise SystemExit(1)
             print(json.dumps({"content_hash": row[0], "tombstoned": False}))
+    elif args.action == "semantic":
+        with sqlite3.connect("file:/index/semantic-projection.sqlite?mode=ro", uri=True) as state:
+            row = state.execute("""SELECT text = semantic AND NOT EXISTS (
+                SELECT 1 FROM projection_jobs WHERE page = ?) FROM text_publications WHERE page = ?""",
+                (PAGE, PAGE)).fetchone()
+            if row != (1,):
+                raise SystemExit(1)
     elif args.action in ("ledgers", "disposable"):
         with sqlite3.connect("file:/state/state.sqlite?mode=ro", uri=True) as state:
             names = {row[0] for row in state.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
