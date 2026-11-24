@@ -4,7 +4,7 @@
 //! walk falls back to reading a page when its listing is missing or disagrees.
 use crate::{
     NotionClient,
-    pages::{metadata, page_id},
+    pages::{index_metadata, page_id},
 };
 use notion_knowledge_core::backend::{BackendError, BackendErrorKind, Page, PageId};
 use reqwest::Method;
@@ -33,7 +33,7 @@ pub type SearchMetadata = BTreeMap<String, ListedPage>;
 
 fn listed(value: &Value) -> Option<(String, ListedPage)> {
     let id = page_id(value["id"].as_str()?).ok()?;
-    let page = metadata(value, &id).ok()?;
+    let page = index_metadata(value, &id).ok()?;
     let parent_page_id = (value["parent"]["type"] == "page_id")
         .then(|| page_id(value["parent"]["page_id"].as_str()?).ok())
         .flatten()

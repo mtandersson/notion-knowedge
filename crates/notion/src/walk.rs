@@ -7,7 +7,7 @@ use crate::{
     NotionClient,
     content::MarkdownBody,
     links::child_tags,
-    pages::{PAGE_VERSION, drop_truncated, inactive, metadata, page_id},
+    pages::{PAGE_VERSION, drop_truncated, inactive, index_metadata, page_id},
     search::SearchMetadata,
 };
 use futures_util::{StreamExt, stream::FuturesUnordered};
@@ -344,7 +344,7 @@ impl NotionClient {
             // Metadata that cannot be parsed (an unknown property type, say)
             // fails only this page: it is a typed skip, and the walk is not
             // authoritative so nothing is removed on its account.
-            None => match metadata(&value, &page_ref) {
+            None => match index_metadata(&value, &page_ref) {
                 Ok(page) => page,
                 Err(_) => {
                     visit.incomplete = true;
@@ -1064,6 +1064,48 @@ mod tests {
         }
         streamed.sort();
         assert_eq!(streamed, [ROOT, P, ROW1, ROW2]);
+    }
+
+    #[tokio::test]
+    async fn array_rollup_does_not_hide_indexable_database_row_text() {
+        let mut routes = nested_tree();
+        let (_, query) = routes
+            .get_mut(&format!("POST /v1/data_sources/{S}/query"))
+            .unwrap();
+        let properties = &mut query["results"][0]["properties"];
+        properties["Rollup"] = json!({"id":"rollup", "type":"rollup",
+            "rollup":{"type":"array", "array":[{"type":"number", "number":1}], "function":"show_original"}});
+        properties["Score"] = json!({"id":"score", "type":"number", "number":42});
+        let (client, _) = serve(routes).await;
+        let (sink, mut pages) = tokio::sync::mpsc::channel(16);
+        let walk = client
+            .walk_tree(&scope(ExclusionRules::default()), Some(&sink))
+            .await
+            .unwrap();
+        drop(sink);
+        assert!(walk.authoritative());
+        assert!(walk.skipped.is_empty());
+        let row = loop {
+            let page = pages.recv().await.expect("database row must be streamed");
+            if page.entry.page_id == ROW1 {
+                break page;
+            }
+        };
+        assert_eq!(
+            row.entry.parent,
+            InventoryParent::DataSource {
+                data_source_id: S.into(),
+                database_id: D.into(),
+                owner_page_id: P.into(),
+            }
+        );
+        let content = row.content.expect("row must include indexable Markdown");
+        assert_eq!(content.markdown, "Row body\n");
+        assert_eq!(
+            content.page.properties.get("score"),
+            Some(&notion_knowledge_core::indexed::PropertyValue::Number(42.0))
+        );
+        assert!(!content.page.properties.contains_key("rollup"));
     }
 
     #[tokio::test]
