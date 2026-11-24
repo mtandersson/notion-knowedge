@@ -101,7 +101,7 @@ pub async fn read_verified_page(
         BackendErrorKind::Conflict => FreshSourceError::Conflict,
         _ => FreshSourceError::Unavailable,
     };
-    let content = backend.read_content(id).await.map_err(failure)?;
+    let content = backend.read_source_content(id).await.map_err(failure)?;
     if &content.page.id != id
         || content.page.url.is_empty()
         || content.page.last_edited_time.is_empty()
@@ -113,7 +113,7 @@ pub async fn read_verified_page(
     }
     // The content adapter obtains metadata before Markdown. Check it again
     // to detect edits or revocation during the read.
-    if backend.fetch_page(id).await.map_err(failure)? != content.page {
+    if backend.fetch_source_page(id).await.map_err(failure)? != content.page {
         return Err(FreshSourceError::Conflict);
     }
     Ok(content)

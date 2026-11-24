@@ -318,6 +318,16 @@ impl NotionClient {
         metadata(&value, &id)
     }
 
+    pub(crate) async fn fetch_source_page(&self, input: &str) -> Result<Page, BackendError> {
+        let id = page_id(input)?;
+        let mut value = self.fetch_page_value(&id).await?;
+        if let Some(properties) = value["properties"].as_object_mut() {
+            properties.retain(|_, property| property["type"] == "title");
+        }
+        self.complete_properties(&id, &mut value, &mut 0).await?;
+        metadata(&value, &id)
+    }
+
     /// Replaces each relation, people, title or rich-text property Notion cut
     /// at its inline 25-item limit with every item from the property item
     /// endpoint, so one
