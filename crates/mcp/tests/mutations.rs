@@ -502,7 +502,10 @@ async fn installed_writes_explain_root_selection_and_allow_retry_without_consumi
         let out = output(&rejected);
         assert_eq!(out["write"]["status"], "not_authorized");
         assert_eq!(out["write"]["reason"], "root_not_configured");
-        assert_eq!(out["write"]["message"], root_description);
+        assert_eq!(
+            out["write"]["message"],
+            "Use sources[].provenance.root_page_id from knowledge_get on an indexed page under the intended root. Use the destination page for that lookup when it is indexed. Supply the destination separately as parent_page_id for create or page_id for append or section updates."
+        );
         assert_eq!(out["index"]["status"], "not_attempted");
         assert_eq!(out["audit"]["status"], "recorded");
         assert!(!rejected.to_string().contains(ROOT));
@@ -957,4 +960,25 @@ async fn transport_cancellation_after_effect_is_indeterminate_and_cannot_repeat_
         assert_eq!(f.source.effects.load(Ordering::SeqCst), 1);
         assert_eq!(f.queue.calls.load(Ordering::SeqCst), 0);
     }
+}
+
+#[tokio::test]
+async fn write_tool_definitions_stay_compact() {
+    let catalog = request(Fixture::new().server(false), "tools/list", json!({})).await;
+    let tools = catalog["result"]["tools"].as_array().unwrap();
+    let writes: Vec<_> = tools
+        .iter()
+        .filter(|tool| {
+            matches!(
+                tool["name"].as_str().unwrap(),
+                "knowledge_create_page" | "knowledge_append"
+            )
+        })
+        .collect();
+    assert_eq!(writes.len(), 2);
+    let total: usize = writes.iter().map(|tool| tool.to_string().len()).sum();
+    let output = writes[0]["outputSchema"].to_string().len();
+    // Limits sit just above the sizes when this guard was added (see #812).
+    assert!(output <= 850, "write result schema grew to {output} B");
+    assert!(total <= 4600, "write definitions grew to {total} B");
 }
