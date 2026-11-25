@@ -4,8 +4,8 @@ use crate::{
     root_scope::Transport,
     webhook_worker::runtime::Worker,
 };
-use notion_knowledge_core::audit::{AuditActor, AuditRetention};
-use notion_knowledge_mcp::{KnowledgeServer, mutations::MutationRuntime};
+use notion_knowledge_core::audit::AuditRetention;
+use notion_knowledge_mcp::KnowledgeServer;
 use notion_knowledge_notion::NotionClient;
 use notion_knowledge_retrieval::{audit::SqliteAuditStore, idempotency::SqliteIdempotencyStore};
 use std::sync::Arc;
@@ -88,14 +88,5 @@ pub async fn compose(
     } else {
         handler
     };
-    let mutations = MutationRuntime::new(
-        source,
-        scope,
-        ledger,
-        worker.state.clone(),
-        audit,
-        AuditActor::Automation,
-    )
-    .map_err(|_| "integration mutation scope unavailable")?;
-    Ok(handler.and_mutations(Arc::new(mutations)))
+    crate::write_stores::attach_runtime(handler, source, scope, ledger, worker.state.clone(), audit)
 }

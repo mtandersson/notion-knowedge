@@ -10,6 +10,7 @@ use notion_knowledge_core::{
     lifecycle::LifecycleScope,
     revision::RevisionMetadata,
     root_scope::{ScopeError, validate_scope},
+    row_write::{CreateRowRequest, RowCreate},
     section_update::{
         SectionUpdateError, SectionUpdateRequest, update_section_confirmed_once_and_refresh,
     },
@@ -21,7 +22,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-const ROOT_GUIDANCE: &str = "Use sources[].provenance.root_page_id from knowledge_get on an indexed page under the intended root. Use the destination page for that lookup when it is indexed. Supply the destination separately as parent_page_id for create or page_id for append or section updates.";
+pub(crate) const ROOT_GUIDANCE: &str = "Use sources[].provenance.root_page_id from knowledge_get on an indexed page under the intended root. Use the destination page for that lookup when it is indexed. Supply the destination separately as parent_page_id for create or page_id for append or section updates.";
 
 pub trait MutationSource: NotionRead + NotionWrite + NotionSectionWrite {}
 impl<T: NotionRead + NotionWrite + NotionSectionWrite> MutationSource for T {}
@@ -36,6 +37,7 @@ pub struct MutationRuntime {
     audit: Arc<dyn AuditStore>,
     actor: AuditActor,
     confirmation: Option<Arc<dyn ConfirmationProvider>>,
+    row_create: Option<Arc<dyn RowCreate>>,
 }
 impl MutationRuntime {
     pub fn new(
@@ -55,19 +57,27 @@ impl MutationRuntime {
             audit,
             actor,
             confirmation: None,
+            row_create: None,
         })
     }
     pub fn with_confirmation(mut self, provider: Arc<dyn ConfirmationProvider>) -> Self {
         self.confirmation = Some(provider);
         self
     }
+    pub fn with_row_create(mut self, source: Arc<dyn RowCreate>) -> Self {
+        self.row_create = Some(source);
+        self
+    }
+
     pub(crate) fn supports(&self, name: &str) -> bool {
         matches!(name, "knowledge_create_page" | "knowledge_append")
+            || (name == crate::row_write::CREATE_TOOL && self.row_create.is_some())
             || (name == "knowledge_update_section" && self.confirmation.is_some())
     }
     pub(crate) fn tools(&self) -> Vec<rmcp::model::Tool> {
         [
             "knowledge_create_page",
+            crate::row_write::CREATE_TOOL,
             "knowledge_append",
             "knowledge_update_section",
         ]
@@ -148,6 +158,13 @@ impl MutationRuntime {
             )
             .await
             .map_err(Failure::from),
+            Input::CreateRow(input) => self
+                .row_create
+                .as_ref()
+                .ok_or(Failure::Denied)?
+                .create_row(input, &scope, self.ledger.as_ref(), self.queue.as_ref())
+                .await
+                .map_err(Failure::from),
             Input::Append(input) => append_once_and_refresh(
                 self.source.as_ref(),
                 self.source.as_ref(),
@@ -227,6 +244,7 @@ struct SectionInput {
 }
 enum Input {
     Create(CreateInput),
+    CreateRow(CreateRowRequest),
     Append(AppendInput),
     Section(SectionInput),
 }
@@ -248,6 +266,9 @@ impl Input {
             "knowledge_create_page" => {
                 Self::Create(serde_json::from_value(value).map_err(|_| bad())?)
             }
+            crate::row_write::CREATE_TOOL => {
+                Self::CreateRow(serde_json::from_value(value).map_err(|_| bad())?)
+            }
             "knowledge_append" => Self::Append(serde_json::from_value(value).map_err(|_| bad())?),
             "knowledge_update_section" => {
                 Self::Section(serde_json::from_value(value).map_err(|_| bad())?)
@@ -262,6 +283,7 @@ impl Input {
     fn root(&self) -> &str {
         match self {
             Self::Create(q) => &q.root_page_id,
+            Self::CreateRow(q) => &q.root_page_id,
             Self::Append(q) => &q.root_page_id,
             Self::Section(q) => &q.root_page_id,
         }
@@ -269,13 +291,14 @@ impl Input {
     fn target(&self) -> &str {
         match self {
             Self::Create(q) => &q.parent_page_id,
+            Self::CreateRow(q) => &q.data_source_id,
             Self::Append(q) => &q.page_id,
             Self::Section(q) => &q.page_id,
         }
     }
     fn audit_tool(&self) -> AuditTool {
         match self {
-            Self::Create(_) => AuditTool::PageCreate,
+            Self::Create(_) | Self::CreateRow(_) => AuditTool::PageCreate,
             Self::Append(_) => AuditTool::PageAppend,
             Self::Section(_) => AuditTool::PageReplace,
         }
@@ -420,6 +443,16 @@ impl Drop for AuditAttempt<'_> {
 }
 
 pub(crate) fn tool(name: &str) -> rmcp::model::Tool {
+    let mut tool = if name == crate::row_write::CREATE_TOOL {
+        crate::row_write::create_tool()
+    } else {
+        existing_tool(name)
+    };
+    tool.output_schema = Some(common_output());
+    tool
+}
+
+fn existing_tool(name: &str) -> rmcp::model::Tool {
     let mut tool = crate::write_contract::tool(name).expect("implemented semantic mutation");
     tool.description = Some(match name {
         "knowledge_create_page" => "Create one page under an explicitly authorized parent with once-only idempotency, authoritative read-back and separate local refresh status.",
@@ -457,7 +490,11 @@ pub(crate) fn tool(name: &str) -> rmcp::model::Tool {
         }
     }
     tool.input_schema = Arc::new(schema);
-    tool.output_schema=Some(Arc::new(json!({
+    tool
+}
+
+fn common_output() -> Arc<serde_json::Map<String, Value>> {
+    Arc::new(json!({
         "type":"object","required":["write","index","audit"],"additionalProperties":false,
         "properties":{
             "write":{"type":"object","required":["status"],"additionalProperties":false,"properties":{
@@ -472,8 +509,7 @@ pub(crate) fn tool(name: &str) -> rmcp::model::Tool {
             }},
             "audit":{"type":"object","required":["status"],"additionalProperties":false,"properties":{"status":{"enum":["recorded","unavailable"]}}}
         }
-    }).as_object().unwrap().clone()));
-    tool
+    }).as_object().unwrap().clone())
 }
 
 /// The installed write surface is deliberately narrower than all mutation
@@ -481,6 +517,9 @@ pub(crate) fn tool(name: &str) -> rmcp::model::Tool {
 pub fn is_semantic_mutation(name: &str) -> bool {
     matches!(
         name,
-        "knowledge_create_page" | "knowledge_append" | "knowledge_update_section"
+        "knowledge_create_page"
+            | "knowledge_append"
+            | "knowledge_update_section"
+            | crate::row_write::CREATE_TOOL
     )
 }

@@ -57,7 +57,7 @@ pub fn markdown_sha256(markdown: &str) -> String {
 
 /// Notion may omit a single final LF when exporting persisted Markdown.
 /// Only post-write verification uses this allowance; revision hashes stay exact.
-pub(crate) fn written_markdown_matches(expected: &str, actual: &str) -> bool {
+pub fn written_markdown_matches(expected: &str, actual: &str) -> bool {
     expected == actual
         || expected.strip_suffix('\n') == Some(actual)
         || actual.strip_suffix('\n') == Some(expected)

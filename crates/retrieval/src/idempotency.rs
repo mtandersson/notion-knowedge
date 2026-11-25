@@ -5,7 +5,8 @@
 use std::{fs, path::Path, sync::Mutex, time::Duration};
 
 use notion_knowledge_core::idempotency::{
-    IdempotencyError, MutationClaim, Reservation, VerifiedReceipt, WriteIdempotencyStore,
+    ExistingClaim, IdempotencyError, MutationClaim, Reservation, VerifiedReceipt,
+    WriteIdempotencyStore,
 };
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
@@ -56,6 +57,25 @@ fn checked(stored: Option<Stored>, claim: &MutationClaim) -> Result<Stored, Idem
         return Err(IdempotencyError::KeyConflict);
     }
     Ok(row)
+}
+
+fn claim_state(row: Stored, claim: &MutationClaim) -> Result<ExistingClaim, IdempotencyError> {
+    let (digest, status, page_id, url, edited) = row;
+    if digest != claim.request_digest() {
+        return Err(IdempotencyError::KeyConflict);
+    }
+    match status.as_str() {
+        "pending" | "unknown" => Ok(ExistingClaim::Reconcile),
+        "committed" => Ok(ExistingClaim::Replay(
+            VerifiedReceipt::from_readback(
+                page_id.ok_or(IdempotencyError::CorruptState)?,
+                url.ok_or(IdempotencyError::CorruptState)?,
+                edited.ok_or(IdempotencyError::CorruptState)?,
+            )
+            .map_err(|_| IdempotencyError::CorruptState)?,
+        )),
+        _ => Err(IdempotencyError::CorruptState),
+    }
 }
 
 impl SqliteIdempotencyStore {
@@ -169,6 +189,14 @@ impl SqliteIdempotencyStore {
 }
 
 impl WriteIdempotencyStore for SqliteIdempotencyStore {
+    fn lookup(&self, claim: &MutationClaim) -> Result<Option<ExistingClaim>, IdempotencyError> {
+        let mut connection = self.transaction()?;
+        let tx = connection.transaction().map_err(unavailable)?;
+        existing(&tx, claim.key_digest())?
+            .map(|row| claim_state(row, claim))
+            .transpose()
+    }
+
     fn begin(&self, claim: &MutationClaim) -> Result<Reservation, IdempotencyError> {
         let mut connection = self.transaction()?;
         let tx = connection
@@ -176,21 +204,9 @@ impl WriteIdempotencyStore for SqliteIdempotencyStore {
             .map_err(unavailable)?;
         let state = existing(&tx, claim.key_digest())?;
         let result = if let Some(row) = state {
-            let (digest, status, page_id, url, edited) = row;
-            if digest != claim.request_digest() {
-                return Err(IdempotencyError::KeyConflict);
-            }
-            match status.as_str() {
-                "pending" | "unknown" => Reservation::Reconcile,
-                "committed" => Reservation::Replay(
-                    VerifiedReceipt::from_readback(
-                        page_id.ok_or(IdempotencyError::CorruptState)?,
-                        url.ok_or(IdempotencyError::CorruptState)?,
-                        edited.ok_or(IdempotencyError::CorruptState)?,
-                    )
-                    .map_err(|_| IdempotencyError::CorruptState)?,
-                ),
-                _ => return Err(IdempotencyError::CorruptState),
+            match claim_state(row, claim)? {
+                ExistingClaim::Reconcile => Reservation::Reconcile,
+                ExistingClaim::Replay(receipt) => Reservation::Replay(receipt),
             }
         } else {
             tx.execute(

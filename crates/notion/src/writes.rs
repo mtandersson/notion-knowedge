@@ -24,6 +24,18 @@ fn failure(operation: &'static str, kind: BackendErrorKind) -> BackendError {
     }
 }
 
+pub(crate) fn encode_write_body(
+    body: &Value,
+    operation: &'static str,
+) -> Result<Vec<u8>, BackendError> {
+    let bytes =
+        serde_json::to_vec(body).map_err(|_| failure(operation, BackendErrorKind::InvalidInput))?;
+    if bytes.len() > 500 * 1024 {
+        return Err(failure(operation, BackendErrorKind::InvalidInput));
+    }
+    Ok(bytes)
+}
+
 fn valid_id(id: &PageId) -> bool {
     let raw: String = id.0.chars().filter(|c| *c != '-').collect();
     (id.0.len() == 32
@@ -98,11 +110,7 @@ impl NotionClient {
         effect_started: &mut bool,
     ) -> Result<Value, BackendError> {
         // Notion request payload limit. Reject before a potentially non-idempotent mutation.
-        let body = serde_json::to_vec(&body)
-            .map_err(|_| failure(operation, BackendErrorKind::InvalidInput))?;
-        if body.len() > 500 * 1024 {
-            return Err(failure(operation, BackendErrorKind::InvalidInput));
-        }
+        let body = encode_write_body(&body, operation)?;
         let request = self
             .http
             .request(method, format!("{}{path}", self.api_root))

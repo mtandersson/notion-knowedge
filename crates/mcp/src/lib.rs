@@ -431,6 +431,7 @@ pub mod view;
 pub mod write_contract;
 
 pub mod mutations;
+mod row_write;
 
 impl KnowledgeServer {
     async fn call_tool_authorized(

@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MutationOperation {
     CreatePage,
+    CreateRow,
     Append,
     UpdateSection,
     ArchivePage,
@@ -17,6 +18,7 @@ impl MutationOperation {
     fn as_str(self) -> &'static str {
         match self {
             Self::CreatePage => "create_page",
+            Self::CreateRow => "create_row",
             Self::Append => "append",
             Self::UpdateSection => "update_section",
             Self::ArchivePage => "archive_page",
@@ -163,9 +165,20 @@ pub enum Reservation {
     Replay(VerifiedReceipt),
 }
 
+/// Status of a claim already in the ledger. Reading never creates a claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExistingClaim {
+    Reconcile,
+    Replay(VerifiedReceipt),
+}
+
 /// All transitions must be durable, atomic and cross-process safe.
 /// Losing this ledger is NOT equivalent to having no committed operations.
 pub trait WriteIdempotencyStore: Send + Sync {
+    fn lookup(&self, _claim: &MutationClaim) -> Result<Option<ExistingClaim>, IdempotencyError> {
+        Err(IdempotencyError::Unavailable)
+    }
+
     fn begin(&self, claim: &MutationClaim) -> Result<Reservation, IdempotencyError>;
     fn mark_uncertain(&self, claim: &MutationClaim) -> Result<(), IdempotencyError>;
     fn record_verified(
