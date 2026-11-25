@@ -1433,4 +1433,6 @@ mod tests {
 #[cfg(test)]
 mod ingestion_tests;
 #[cfg(test)]
+mod row_write_tests;
+#[cfg(test)]
 mod view_tests;

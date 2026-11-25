@@ -2,6 +2,29 @@
 use crate::config::{ConfigError, invalid};
 use std::{ffi::OsString, path::PathBuf};
 
+/// Wire the installed mutation capabilities once, using operator-owned stores.
+#[cfg(any(test, all(unix, feature = "webhook-worker")))]
+pub(crate) fn attach_runtime(
+    handler: notion_knowledge_mcp::KnowledgeServer,
+    source: std::sync::Arc<notion_knowledge_notion::NotionClient>,
+    scope: notion_knowledge_core::lifecycle::LifecycleScope,
+    ledger: std::sync::Arc<notion_knowledge_retrieval::idempotency::SqliteIdempotencyStore>,
+    queue: std::sync::Arc<notion_knowledge_retrieval::sync_state::SqliteSyncStateStore>,
+    audit: std::sync::Arc<notion_knowledge_retrieval::audit::SqliteAuditStore>,
+) -> Result<notion_knowledge_mcp::KnowledgeServer, &'static str> {
+    let runtime = notion_knowledge_mcp::mutations::MutationRuntime::new(
+        source.clone(),
+        scope,
+        ledger,
+        queue,
+        audit,
+        notion_knowledge_core::audit::AuditActor::Automation,
+    )
+    .map_err(|_| "integration mutation scope unavailable")?
+    .with_row_create(source);
+    Ok(handler.and_mutations(std::sync::Arc::new(runtime)))
+}
+
 #[derive(Debug)]
 pub struct Settings {
     pub ledger: PathBuf,

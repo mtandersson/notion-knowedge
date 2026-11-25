@@ -199,6 +199,30 @@ impl NotionClient {
         Err(failure(Kind::PermissionDenied))
     }
 
+    /// Resolve the actual owner of a data source with live root authorization.
+    pub(crate) async fn scoped_data_source(
+        &self,
+        source: &str,
+        scope: &LifecycleScope,
+    ) -> Result<(Value, String), BackendError> {
+        if scope
+            .exclusions
+            .exclusion(source, SourceType::DataSource)
+            .is_some()
+        {
+            return Err(failure(Kind::PermissionDenied));
+        }
+        let metadata = self.view_object("data_sources", source).await?;
+        object(&metadata, "data_source", source)?;
+        if metadata["parent"]["type"] != "database_id" || pages::inactive(&metadata) == Some(true) {
+            return Err(failure(Kind::PermissionDenied));
+        }
+        let source_database = id(&metadata["parent"]["database_id"])?;
+        self.verify_database_scope(&source_database, false, scope)
+            .await?;
+        Ok((metadata, source_database))
+    }
+
     async fn verified_view(
         &self,
         view: &str,
@@ -217,21 +241,7 @@ impl NotionClient {
         }
         let database = id(&value["parent"]["database_id"])?;
         let source = id(&value["data_source_id"])?;
-        if scope
-            .exclusions
-            .exclusion(&source, SourceType::DataSource)
-            .is_some()
-        {
-            return Err(failure(Kind::PermissionDenied));
-        }
-        let metadata = self.view_object("data_sources", &source).await?;
-        object(&metadata, "data_source", &source)?;
-        if metadata["parent"]["type"] != "database_id" || pages::inactive(&metadata) == Some(true) {
-            return Err(failure(Kind::PermissionDenied));
-        }
-        let source_database = id(&metadata["parent"]["database_id"])?;
-        self.verify_database_scope(&source_database, false, scope)
-            .await?;
+        let (_, source_database) = self.scoped_data_source(&source, scope).await?;
         if source_database != database {
             self.verify_database_scope(&database, true, scope).await?;
         }

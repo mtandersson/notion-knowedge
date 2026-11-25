@@ -43,13 +43,16 @@ fn ledger_error(e: IdempotencyError) -> CreateError {
     }
 }
 pub fn valid_request(request: &CreateRequest) -> bool {
-    !request.title.trim().is_empty()
-        && request.title.chars().count() <= 200
-        && request.title.chars().all(|c| !c.is_control() && !bidi(c))
-        && !request.markdown.trim().is_empty()
-        && request.markdown.len() <= 200_000
-        && request
-            .markdown
+    valid_contents(&request.title, &request.markdown)
+}
+
+pub fn valid_contents(title: &str, markdown: &str) -> bool {
+    !title.trim().is_empty()
+        && title.chars().count() <= 200
+        && title.chars().all(|c| !c.is_control() && !bidi(c))
+        && !markdown.trim().is_empty()
+        && markdown.len() <= 200_000
+        && markdown
             .chars()
             .all(|c| (!c.is_control() || matches!(c, '\n' | '\r' | '\t')) && !bidi(c))
 }

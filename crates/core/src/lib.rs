@@ -86,6 +86,7 @@ pub mod idempotency;
 
 /// Read authorization from the walked page inventory.
 pub mod root_scope;
+pub mod row_write;
 
 /// Opt-in, scope-checked, durable once-only Notion append application workflow.
 pub mod append;
