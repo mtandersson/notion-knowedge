@@ -76,6 +76,7 @@ pub struct KnowledgeServer {
     fresh_page_cache: Option<Arc<dyn notion_knowledge_core::source::FreshPageCache>>,
     write_design_preview: bool,
     mutations: Option<Arc<mutations::MutationRuntime>>,
+    saved_view_query: Option<Arc<dyn view::SavedViewQuery>>,
     sync_status: Option<Arc<dyn notion_knowledge_core::sync_status::SyncStatusSource>>,
     related_graph: Option<Arc<dyn notion_knowledge_core::graph::GraphEdgeStore>>,
 }
@@ -95,6 +96,7 @@ impl Default for KnowledgeServer {
             fresh_page_cache: None,
             write_design_preview: false,
             mutations: None,
+            saved_view_query: None,
             sync_status: None,
             related_graph: None,
             search: None,
@@ -133,6 +135,7 @@ impl KnowledgeServer {
                     | "knowledge_get"
                     | "knowledge_sync_status"
                     | "knowledge_related"
+                    | view::TOOL
             ))
             && (self.destructive_writes_enabled || !write_contract::is_destructive_write(name))
             && self.capability_policy.permits(name)
@@ -147,6 +150,17 @@ impl KnowledgeServer {
             return Err("related graph requires trusted root authorization");
         }
         self.related_graph = Some(graph);
+        Ok(self)
+    }
+
+    pub fn and_saved_view_query(
+        mut self,
+        service: Arc<dyn view::SavedViewQuery>,
+    ) -> Result<Self, &'static str> {
+        if self.root_gate.is_none() {
+            return Err("saved view queries require authoritative scope");
+        }
+        self.saved_view_query = Some(service);
         Ok(self)
     }
 
@@ -223,6 +237,9 @@ impl KnowledgeServer {
             sync_status::tool(),
             upload::tool_with_limit(self.max_upload_files),
         ];
+        if self.saved_view_query.is_some() {
+            catalog.push(view::tool());
+        }
         if self.related_graph.is_some() {
             catalog.push(related::tool());
         }
@@ -410,6 +427,7 @@ pub mod related;
 pub mod search;
 pub mod sync_status;
 pub mod upload;
+pub mod view;
 pub mod write_contract;
 
 pub mod mutations;
@@ -428,6 +446,32 @@ impl KnowledgeServer {
         };
 
         match request.name.as_ref() {
+            view::TOOL => {
+                let input: view::Request =
+                    serde_json::from_value(serde_json::Value::Object(arguments))
+                        .ok()
+                        .filter(view::Request::valid)
+                        .ok_or_else(|| {
+                            rmcp::ErrorData::invalid_params(
+                                "invalid knowledge_query_view arguments",
+                                None,
+                            )
+                        })?;
+                let Some(service) = &self.saved_view_query else {
+                    return Ok(error(
+                        "notion_unavailable: saved view queries are not installed",
+                    ));
+                };
+                match service.query(input).await {
+                    Ok(output) if output_fits_budget(&output) => {
+                        Ok(rmcp::model::CallToolResult::structured(output).into())
+                    }
+                    Ok(_) => Ok(error(
+                        "incomplete: response exceeds the tool limit; request a smaller page",
+                    )),
+                    Err(failure) => Ok(error(view::failure(failure.kind))),
+                }
+            }
             "knowledge_sync_status" => {
                 if !arguments.is_empty() {
                     return Err(rmcp::ErrorData::invalid_params(
@@ -893,6 +937,7 @@ impl ServerHandler for KnowledgeServer {
             "knowledge_get" => Some(get::tool()),
             "knowledge_related" if self.related_graph.is_some() => Some(related::tool()),
             "knowledge_sync_status" => Some(sync_status::tool()),
+            view::TOOL if self.saved_view_query.is_some() => Some(view::tool()),
             "knowledge_upload_file" => Some(upload::tool_with_limit(self.max_upload_files)),
             name if self
                 .mutations
