@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 pub enum MutationOperation {
     CreatePage,
     CreateRow,
+    UpdateRow,
     Append,
     UpdateSection,
     ArchivePage,
@@ -19,6 +20,7 @@ impl MutationOperation {
         match self {
             Self::CreatePage => "create_page",
             Self::CreateRow => "create_row",
+            Self::UpdateRow => "update_row",
             Self::Append => "append",
             Self::UpdateSection => "update_section",
             Self::ArchivePage => "archive_page",

@@ -13,7 +13,8 @@ use notion_knowledge_core::{
     lifecycle::LifecycleScope,
     revision::written_markdown_matches,
     row_write::{
-        CreateRowRequest, MAX_PROPERTIES, MAX_RELATIONS, PropertyPatch, PropertyValue, RowCreate,
+        CreateRowRequest, MAX_PROPERTIES, MAX_RELATIONS, PropertyPatch, PropertyValue, RowWrite,
+        UpdateRowError, UpdateRowRequest,
     },
     write_refresh::{MutationRefreshQueue, RefreshKey, WriteCompletion, admit_verified},
 };
@@ -381,7 +382,7 @@ impl NotionClient {
     }
 }
 
-impl RowCreate for NotionClient {
+impl RowWrite for NotionClient {
     fn create_row<'a>(
         &'a self,
         request: CreateRowRequest,
@@ -479,5 +480,14 @@ impl RowCreate for NotionClient {
                 replayed,
             ))
         })
+    }
+    fn update_row<'a>(
+        &'a self,
+        _request: UpdateRowRequest,
+        _scope: &'a LifecycleScope,
+        _ledger: &'a dyn WriteIdempotencyStore,
+        _queue: &'a dyn MutationRefreshQueue,
+    ) -> Pin<Box<dyn Future<Output = Result<WriteCompletion, UpdateRowError>> + Send + 'a>> {
+        Box::pin(async { Err(Error::Unavailable.into()) })
     }
 }
