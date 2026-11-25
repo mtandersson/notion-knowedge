@@ -82,7 +82,10 @@ fn row(id: &str, due: &str) -> (u16, Value) {
         json!({"object":"page","id":id,"in_trash":false,"last_edited_time":REVISION,
             "parent":{"type":"data_source_id","data_source_id":SOURCE},"properties":{
             "Status":{"id":"status","type":"status","status":{"name":"Done","id":"option"}},
-            "Due":{"id":"date","type":"date","date":{"start":due,"end":null,"time_zone":null}}
+            "Due":{"id":"date","type":"date","date":{"start":due,"end":null,"time_zone":null}},
+        "Attachment":{"id":"file","type":"files","files":[{"type":"file","file":{"url":"https://files.example/?token=secret"}}]},
+        "Private relation":{"id":"rel","type":"relation","relation":[{"id":"33333333-3333-3333-3333-333333333333"}]},
+        "Related summary":{"id":"roll","type":"rollup","rollup":{"type":"number","number":910019}}
         }}),
     )
 }
@@ -178,6 +181,14 @@ async fn linked_view_uses_notion_order_and_paginates_with_typed_rows() {
     assert_eq!(output["rows"][0]["page_id"], FIRST);
     assert_eq!(output["rows"][1]["page_id"], SECOND);
     assert_eq!(
+        output["rows"][0]["omitted_properties"],
+        json!(["Attachment", "Private relation", "Related summary"])
+    );
+    let wire = first.to_string();
+    assert!(!wire.contains("token=secret"));
+    assert!(!wire.contains("33333333-3333-3333-3333-333333333333"));
+    assert!(!wire.contains("910019"));
+    assert_eq!(
         output["rows"][0]["properties"]["Due"]["date"]["start"],
         "2026-11-29"
     );
@@ -196,6 +207,37 @@ async fn linked_view_uses_notion_order_and_paginates_with_typed_rows() {
     assert_eq!(
         serde_json::from_slice::<Value>(&log[7].1).unwrap(),
         json!({"page_size":2})
+    );
+
+    let mut continuation = output["continuation"].clone();
+    continuation["cursor"] = json!("arbitrary-cursor");
+    let (forged, log) = call(
+        vec![],
+        query(json!({"view_id":VIEW,"continuation":continuation})),
+        true,
+    )
+    .await;
+    assert!(
+        forged["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("invalid_input")
+    );
+    assert!(log.is_empty());
+
+    let mut changed = scoped_view(true);
+    changed[0].1["filter"] = json!({"property":"Status","status":{"equals":"Canceled"}});
+    let (stale, _) = call(
+        changed,
+        query(json!({"view_id":VIEW,"continuation":output["continuation"]})),
+        false,
+    )
+    .await;
+    assert!(
+        stale["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("view_query_expired_or_changed")
     );
 
     let mut steps = scoped_view(true);
@@ -237,6 +279,9 @@ async fn view_results_distinguish_empty_denied_unsupported_and_unavailable() {
     let mut denied = scoped_view(true);
     denied[2].1["parent"] = json!({"type":"workspace","workspace":true});
     denied.truncate(3);
+    let mut outside_host = scoped_view(true);
+    outside_host[5].1["parent"] = json!({"type":"workspace","workspace":true});
+    outside_host.truncate(6);
     let mut unsupported = scoped_view(false);
     unsupported[0].1["type"] = json!("dashboard");
     unsupported.truncate(1);
@@ -244,6 +289,7 @@ async fn view_results_distinguish_empty_denied_unsupported_and_unavailable() {
     unavailable.push((503, json!({"message":"Never expose upstream detail"})));
     for (steps, code) in [
         (denied, "source_not_accessible"),
+        (outside_host, "source_not_accessible"),
         (unsupported, "unsupported_view"),
         (unavailable, "notion_unavailable"),
     ] {

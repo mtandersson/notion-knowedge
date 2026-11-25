@@ -22,7 +22,13 @@ The result includes the view and data-source IDs, saved filter and sorts, and
 rows in Notion's result order. Each row has a stable page ID, its current
 revision, and typed Notion property values read at the time of the call.
 Notion establishes membership and order when the first page is requested.
-Property values can subsequently change as the source is edited.
+Property values can subsequently change as the source is edited. Each
+returned property retains its Notion ID and type. Title and rich text are
+returned as plain strings when they contain only text runs. Dates, status and
+select options retain their typed values. Checkboxes, numbers, URLs, email,
+phone numbers and timestamps are also supported. `omitted_properties` lists
+names whose values could not be safely projected, including files, relations,
+rollups, formulas and rich text with mentions. It never includes their values.
 
 - `empty` means the first page has no matches.
 - `more` means pass the continuation to read the next page.

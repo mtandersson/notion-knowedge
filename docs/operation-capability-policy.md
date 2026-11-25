@@ -14,19 +14,19 @@ server-owned capability policy in both stdio and HTTP. Discovery (`list_tools`,
 - Each setting is a comma-separated list of exact canonical tool names or
   the categories `read`, `write`, `admin`.
 - Current exact **read** operations: `knowledge_search`, `knowledge_get`,
-  `knowledge_related` and `knowledge_sync_status`.
+  `knowledge_related`, `knowledge_sync_status` and `knowledge_query_view`.
 - Current exact **write** operations: `knowledge_upload_file`,
-  `knowledge_create_page`, `knowledge_append`,
+  `knowledge_file_refresh`, `knowledge_create_page`, `knowledge_append`,
   `knowledge_update_section` and `knowledge_archive_page`.
-- These nine names are the canonical set in
+- These names are the canonical set in
   [`crates/mcp/src/capabilities.rs`](../crates/mcp/src/capabilities.rs).
-  `read` selects all four read operations; `write` selects all five write
-  operations. No admin tool exists today: `admin` is a reserved selector, not
+  `read` and `write` select their respective categories. No admin tool exists today: `admin` is a reserved selector, not
   permission to invoke an unknown or future administrator tool.
 - Selection is **not activation**: search/get need installed retrieval and
   authoritative root authorization; `knowledge_related` needs an installed
   graph plus that gate; `knowledge_sync_status` returns only bounded
-  operational metadata. Upload is a real optional audited file operation only
+  operational metadata. Saved-view queries require trusted Notion integration
+  and scope. Upload is a real optional audited file operation only
   with explicit write/ingestion settings and a trusted transport; the other
   write tools are currently non-mutating previews or unavailable.
 - Values with unknown, empty interior, or malformed selectors cause startup

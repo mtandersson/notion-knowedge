@@ -119,10 +119,14 @@ pub(crate) fn attach_client(
     if !trusted_transport(config, transport) {
         return Ok(handler);
     }
-    let handler = handler.and_saved_view_query(Arc::new(crate::saved_view::Runtime {
-        source: source.clone(),
-        scope: scope.clone(),
-    }))?;
+    let NotionAuth::Integration(token) = &config.notion_auth else {
+        return Err("saved view queries require integration credentials");
+    };
+    let handler = handler.and_saved_view_query(Arc::new(crate::saved_view::Runtime::new(
+        source.clone(),
+        scope.clone(),
+        token,
+    )))?;
     let Some(settings) = &config.file_ingestion else {
         return Ok(handler);
     };

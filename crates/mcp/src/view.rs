@@ -24,6 +24,7 @@ pub struct Continuation {
     pub query_id: String,
     pub cursor: String,
     pub view_revision: String,
+    pub signature: String,
 }
 
 impl Request {
@@ -39,7 +40,8 @@ impl Request {
                     && !next.cursor.is_empty()
                     && next.cursor.len() <= MAX_CURSOR_BYTES
                     && !next.cursor.chars().any(char::is_control)
-                    && (1..=64).contains(&next.view_revision.len())
+                    && next.view_revision.len() == 64
+                    && next.signature.len() == 64
             })
     }
 }
@@ -58,18 +60,22 @@ pub(crate) fn tool() -> Tool {
         json!({"type":"object","additionalProperties":false,"required":["view_id"],"properties":{
             "view_id":{"type":"string","minLength":32,"maxLength":43,"description":"View UUID or view:// followed by the UUID."},
             "page_size":{"type":"integer","minimum":1,"maximum":MAX_PAGE_SIZE,"default":10},
-            "continuation":{"type":"object","additionalProperties":false,"required":["query_id","cursor","view_revision"],"properties":{
+            "continuation":{"type":"object","additionalProperties":false,"required":["query_id","cursor","view_revision","signature"],"properties":{
                 "query_id":{"type":"string","minLength":32,"maxLength":36},
                 "cursor":{"type":"string","minLength":1,"maxLength":MAX_CURSOR_BYTES},
-                "view_revision":{"type":"string","minLength":1,"maxLength":64}
+                "view_revision":{"type":"string","minLength":64,"maxLength":64},
+                "signature":{"type":"string","minLength":64,"maxLength":64}
             }}
         }}).as_object().unwrap().clone(),
     )
     .with_annotations(ToolAnnotations::new().read_only(true).destructive(false).open_world(true))
 }
 
-pub(crate) fn failure(kind: BackendErrorKind) -> &'static str {
-    match kind {
+pub(crate) fn failure(error: BackendError) -> &'static str {
+    if error.operation == "notion.view_query.response_limit" {
+        return "incomplete: response exceeds the tool limit; request a smaller page";
+    }
+    match error.kind {
         BackendErrorKind::InvalidInput => {
             "invalid_input: expected a Notion view UUID and a valid continuation"
         }

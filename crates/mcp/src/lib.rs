@@ -469,7 +469,7 @@ impl KnowledgeServer {
                     Ok(_) => Ok(error(
                         "incomplete: response exceeds the tool limit; request a smaller page",
                     )),
-                    Err(failure) => Ok(error(view::failure(failure.kind))),
+                    Err(failure) => Ok(error(view::failure(failure))),
                 }
             }
             "knowledge_sync_status" => {

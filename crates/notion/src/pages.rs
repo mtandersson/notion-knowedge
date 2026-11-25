@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const PAGE_VERSION: &str = "2026-03-11";
 /// Marks a relation, people, title or rich-text value whose items were read in full through the
 /// property item endpoint. Never present in a Notion response key we keep.
-pub(crate) const PAGINATED: &str = "__nk_paginated";
+const PAGINATED: &str = "__nk_paginated";
 /// Items read for one truncated property before the page is unsupported.
 const MAX_PROPERTY_ITEMS: usize = 10_000;
 /// Whether `value` (one page property) is cut at Notion's inline limit.

@@ -7,9 +7,12 @@ use notion_knowledge_core::{
     lifecycle::LifecycleScope,
 };
 use reqwest::Method;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::{NotionClient, pages};
+
+const MAX_VIEW_ROW_PAYLOAD_BYTES: usize = 512 * 1024;
 
 fn failure(kind: Kind) -> BackendError {
     BackendError {
@@ -34,11 +37,89 @@ fn object(value: &Value, kind: &str, expected: &str) -> Result<(), BackendError>
     Ok(())
 }
 
+pub fn normalize_view_id(reference: &str) -> Option<String> {
+    pages::uuid(reference.strip_prefix("view://").unwrap_or(reference))
+}
+
+fn plain_text(value: &Value) -> Option<Value> {
+    let elements = value.as_array()?;
+    let mut text = String::new();
+    for element in elements {
+        if element["type"] != "text" {
+            return None;
+        }
+        text.push_str(element["plain_text"].as_str()?);
+    }
+    Some(json!(text))
+}
+
+fn option(value: &Value) -> Option<Value> {
+    Some(json!({"id":value["id"].as_str()?, "name":value["name"].as_str()?}))
+}
+
+/// Only intrinsic values of the authorized row. Notion's inline relation,
+/// rollup and media payloads can refer to resources outside this scope.
+fn project_property(property: &Value) -> Option<Value> {
+    let id = property["id"].as_str()?;
+    let kind = property["type"].as_str()?;
+    let value = property.get(kind)?;
+    let projected = match kind {
+        "title" | "rich_text" => plain_text(value)?,
+        "select" | "status" => {
+            if value.is_null() {
+                Value::Null
+            } else {
+                option(value)?
+            }
+        }
+        "multi_select" => Value::Array(
+            value
+                .as_array()?
+                .iter()
+                .map(option)
+                .collect::<Option<_>>()?,
+        ),
+        "date" if value.is_object() => {
+            json!({"start":value["start"].as_str()?, "end":value["end"].as_str(), "time_zone":value["time_zone"].as_str()})
+        }
+        "date" if value.is_null() => Value::Null,
+        "number" if value.is_number() || value.is_null() => value.clone(),
+        "checkbox" if value.is_boolean() => value.clone(),
+        // This is the row's user-entered URL, not a generated file URL.
+        "url" | "email" | "phone_number" if value.is_string() || value.is_null() => value.clone(),
+        "created_time" | "last_edited_time" if value.is_string() => value.clone(),
+        _ => return None,
+    };
+    Some(json!({"id":id, "type":kind, (kind):projected}))
+}
+
 struct View {
     value: Value,
     database: String,
     source: String,
     source_database: String,
+}
+
+impl View {
+    fn fingerprint(&self) -> Result<String, BackendError> {
+        let value = &self.value;
+        if !value["last_edited_time"].is_string() {
+            return Err(failure(Kind::Internal));
+        }
+        let fields = json!([
+            value["id"],
+            self.database,
+            self.source,
+            self.source_database,
+            value["last_edited_time"],
+            value["filter"],
+            value["sorts"]
+        ]);
+        Ok(format!(
+            "{:x}",
+            Sha256::digest(fields.to_string().as_bytes())
+        ))
+    }
 }
 
 impl NotionClient {
@@ -171,13 +252,9 @@ impl NotionClient {
         if !(1..=25).contains(&page_size) {
             return Err(failure(Kind::InvalidInput));
         }
-        let view_id = pages::uuid(reference.strip_prefix("view://").unwrap_or(reference))
-            .ok_or_else(|| failure(Kind::InvalidInput))?;
+        let view_id = normalize_view_id(reference).ok_or_else(|| failure(Kind::InvalidInput))?;
         let view = self.verified_view(&view_id, scope).await?;
-        let revision = view.value["last_edited_time"]
-            .as_str()
-            .filter(|time| !time.is_empty() && time.len() <= 64)
-            .ok_or_else(|| failure(Kind::Internal))?;
+        let revision = view.fingerprint()?;
         let path = format!("views/{view_id}/queries");
         let (response, query_id) = match continuation {
             Some((query, cursor, expected_revision)) => {
@@ -248,6 +325,7 @@ impl NotionClient {
         // revalidate its active physical source before exposing its properties.
         let mut ids = HashSet::new();
         let mut rows = Vec::with_capacity(entries.len());
+        let mut bytes = 0;
         for entry in entries {
             if entry["object"] != "page" {
                 return Err(failure(Kind::UnsupportedContent));
@@ -263,7 +341,7 @@ impl NotionClient {
             {
                 return Err(failure(Kind::PermissionDenied));
             }
-            let mut row = self.fetch_page_value(&PageId(row_id.clone())).await?;
+            let row = self.fetch_page_value(&PageId(row_id.clone())).await?;
             object(&row, "page", &row_id)?;
             if pages::inactive(&row) != Some(false)
                 || row["parent"]["type"] != "data_source_id"
@@ -274,43 +352,35 @@ impl NotionClient {
             let revision = row["last_edited_time"]
                 .as_str()
                 .filter(|value| !value.is_empty())
-                .ok_or_else(|| failure(Kind::Internal))?
-                .to_owned();
-            let mut calls = 0;
-            self.complete_properties(&PageId(row_id.clone()), &mut row, &mut calls)
-                .await?;
-            if calls != 0 {
-                let current = self.fetch_page_value(&PageId(row_id.clone())).await?;
-                object(&current, "page", &row_id)?;
-                if pages::inactive(&current) != Some(false)
-                    || row["parent"] != current["parent"]
-                    || current["last_edited_time"] != revision
-                {
-                    return Err(failure(Kind::Conflict));
+                .ok_or_else(|| failure(Kind::Internal))?;
+            let properties = row["properties"]
+                .as_object()
+                .ok_or_else(|| failure(Kind::Internal))?;
+            let mut projected = Map::new();
+            let mut omitted = Vec::new();
+            for (name, property) in properties {
+                if let Some(value) = project_property(property) {
+                    projected.insert(name.clone(), value);
+                } else {
+                    omitted.push(name);
                 }
             }
-            let properties = row["properties"]
-                .as_object_mut()
-                .ok_or_else(|| failure(Kind::Internal))?;
-            for property in properties.values_mut() {
-                let fields = property
-                    .as_object_mut()
-                    .ok_or_else(|| failure(Kind::Internal))?;
-                fields.remove(pages::PAGINATED);
+            let row = json!({
+                "page_id":row_id, "last_edited_time":revision, "properties":projected,
+                "omitted_properties":omitted
+            });
+            bytes += row.to_string().len();
+            if bytes > MAX_VIEW_ROW_PAYLOAD_BYTES {
+                return Err(BackendError {
+                    operation: "notion.view_query.response_limit",
+                    ..failure(Kind::UnsupportedContent)
+                });
             }
-            rows.push(
-                json!({"page_id":row_id,"last_edited_time":revision,"properties":properties}),
-            );
+            rows.push(row);
         }
         // Before emitting data, reject a reparented or reconfigured view/source.
         let current = self.verified_view(&view_id, scope).await?;
-        if view.database != current.database
-            || view.source != current.source
-            || view.source_database != current.source_database
-            || view.value["last_edited_time"] != current.value["last_edited_time"]
-            || view.value["filter"] != current.value["filter"]
-            || view.value["sorts"] != current.value["sorts"]
-        {
+        if revision != current.fingerprint()? {
             return Err(failure(Kind::Conflict));
         }
         let status = if truncated {
