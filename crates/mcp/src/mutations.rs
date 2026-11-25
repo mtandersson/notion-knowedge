@@ -25,6 +25,8 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// Short field description; the full guidance is returned when a root is rejected.
+pub(crate) const ROOT_FIELD: &str = "Root page UUID: sources[].provenance.root_page_id from knowledge_get on an indexed page under it.";
 pub(crate) const ROOT_GUIDANCE: &str = "Use sources[].provenance.root_page_id from knowledge_get on an indexed page under the intended root. Use the destination page for that lookup when it is indexed. Supply the destination separately as parent_page_id for create or page_id for append or section updates.";
 
 pub trait MutationSource: NotionRead + NotionWrite + NotionSectionWrite {}
@@ -507,8 +509,7 @@ fn existing_tool(name: &str) -> rmcp::model::Tool {
         .unwrap()
         .as_object_mut()
         .unwrap();
-    properties.get_mut("root_page_id").expect("root argument")["description"] =
-        json!(ROOT_GUIDANCE);
+    properties.get_mut("root_page_id").expect("root argument")["description"] = json!(ROOT_FIELD);
     let (destination, description) = if name == "knowledge_create_page" {
         (
             "parent_page_id",
@@ -537,19 +538,19 @@ fn existing_tool(name: &str) -> rmcp::model::Tool {
 
 fn common_output() -> Arc<serde_json::Map<String, Value>> {
     Arc::new(json!({
-        "type":"object","required":["write","index","audit"],"additionalProperties":false,
+        "type":"object","required":["write","index","audit"],
         "properties":{
-            "write":{"type":"object","required":["status"],"additionalProperties":false,"properties":{
+            "write":{"type":"object","required":["status"],"properties":{
                 "status":{"enum":["verified","cancelled","invalid_input","not_authorized","revision_conflict","idempotency_conflict","unavailable","outcome_unknown"]},
                 "page_id":{"type":"string"},"url":{"type":"string"},"last_edited_time":{"type":"string"},"current_last_edited_time":{"type":"string"},"replayed":{"type":"boolean"},
                 "reason":{"enum":["root_not_configured"]},
                 "message":{"type":"string"}
             }},
-            "index":{"type":"object","required":["status"],"additionalProperties":false,"properties":{
+            "index":{"type":"object","required":["status"],"properties":{
                 "status":{"enum":["queued","running","completed","failed","unavailable","not_attempted"]},
-                "refresh_id":{"type":"string","pattern":"^[a-f0-9]{64}$"}
+                "refresh_id":{"type":"string"}
             }},
-            "audit":{"type":"object","required":["status"],"additionalProperties":false,"properties":{"status":{"enum":["recorded","unavailable"]}}}
+            "audit":{"type":"object","required":["status"],"properties":{"status":{"type":"string"}}}
         }
     }).as_object().unwrap().clone())
 }

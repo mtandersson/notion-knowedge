@@ -43,7 +43,7 @@ pub(super) fn create_tool() -> Tool {
         "type":"object","additionalProperties":false,
         "required":["root_page_id","data_source_id","title","markdown","properties","idempotency_key"],
         "properties":{
-            "root_page_id":{"type":"string","pattern":UUID,"description":crate::mutations::ROOT_GUIDANCE},
+            "root_page_id":{"type":"string","pattern":UUID,"description":crate::mutations::ROOT_FIELD},
             "data_source_id":{"type":"string","pattern":UUID,"description":"UUID of the original Notion data source."},
             "title":{"type":"string","minLength":1,"maxLength":200},
             "markdown":{"type":"string","minLength":1,"maxLength":200000},
@@ -67,7 +67,7 @@ pub(super) fn update_tool() -> Tool {
         "type":"object","additionalProperties":false,
         "required":["root_page_id","page_id","expected_row_revision","properties","idempotency_key"],
         "properties":{
-            "root_page_id":{"type":"string","pattern":UUID,"description":crate::mutations::ROOT_GUIDANCE},
+            "root_page_id":{"type":"string","pattern":UUID,"description":crate::mutations::ROOT_FIELD},
             "page_id":{"type":"string","pattern":UUID,"description":"Stable page_id of the row returned by knowledge_query_view."},
             "expected_row_revision":{"type":"string","pattern":"^[a-f0-9]{64}$",
                 "description":"The row_revision from a current authoritative knowledge_query_view result."},

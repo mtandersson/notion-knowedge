@@ -502,7 +502,12 @@ async fn installed_writes_explain_root_selection_and_allow_retry_without_consumi
         let out = output(&rejected);
         assert_eq!(out["write"]["status"], "not_authorized");
         assert_eq!(out["write"]["reason"], "root_not_configured");
-        assert_eq!(out["write"]["message"], root_description);
+        assert!(
+            out["write"]["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("Use sources[].provenance.root_page_id from knowledge_get")
+        );
         assert_eq!(out["index"]["status"], "not_attempted");
         assert_eq!(out["audit"]["status"], "recorded");
         assert!(!rejected.to_string().contains(ROOT));
@@ -957,4 +962,32 @@ async fn transport_cancellation_after_effect_is_indeterminate_and_cannot_repeat_
         assert_eq!(f.source.effects.load(Ordering::SeqCst), 1);
         assert_eq!(f.queue.calls.load(Ordering::SeqCst), 0);
     }
+}
+
+#[tokio::test]
+async fn write_tool_definitions_stay_compact() {
+    let catalog = request(Fixture::new().server(false), "tools/list", json!({})).await;
+    let tools = catalog["result"]["tools"].as_array().unwrap();
+    let writes: Vec<_> = tools
+        .iter()
+        .filter(|tool| {
+            tool["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("knowledge_create")
+                || tool["name"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("knowledge_append")
+                || tool["name"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("knowledge_update")
+        })
+        .collect();
+    let total: usize = writes.iter().map(|tool| tool.to_string().len()).sum();
+    let output = writes[0]["outputSchema"].to_string().len();
+    assert_eq!(writes.len(), 2);
+    assert!(output <= 800, "write result schema grew to {output} B");
+    assert!(total <= 4500, "write definitions grew to {total} B");
 }
