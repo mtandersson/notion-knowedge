@@ -693,7 +693,8 @@ async fn installed_write_catalog_stays_within_its_size_budget() {
         })
         .collect();
     eprintln!("MEASURE catalog total={total} {}", sizes.join(" "));
-    assert!(total <= 28_000, "catalog is {total} B");
+    assert!(total <= 25_000, "catalog is {total} B");
+}
 
 fn merged(mut request: Value, name: &str, operation: Option<&str>) -> Value {
     request["params"]["name"] = json!(name);

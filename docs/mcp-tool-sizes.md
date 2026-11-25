@@ -9,6 +9,7 @@ They measure MCP-level size, not ChatGPT token use.
 | Measurement | Baseline (`b285cf2`) | After #810 and #812 |
 | --- | ---: | ---: |
 | Catalog, nine tools | 28 518 B | 27 862 B |
+| Catalog after #818 (seven listed tools) | | 24 315 B |
 | Ten-row view, three columns | 7 800 B | 2 080 B |
 | Ten-row view with row revisions | 7 800 B | 2 900 B |
 
@@ -17,7 +18,9 @@ Per tool after #812: `knowledge_search` 7 152, `knowledge_create_row` 3 747,
 `knowledge_get` 3 064, `knowledge_append` 2 180, `knowledge_create_page`
 1 944, `knowledge_query_view` 1 470 and `knowledge_upload_file` 1 338.
 
-The catalog barely shrinks from compaction alone. The large remaining cost is
+After #818 `knowledge_create_page` is 3 910 B and `knowledge_update_page` 3 915 B; the row, append and old create tools are no longer listed.
+
+The catalog barely shrank from compaction alone. The large remaining cost is
 the number of tools and their typed-property schemas, which #813 addresses by
 merging the page and row tools.
 

@@ -1,5 +1,11 @@
 # Update properties on a Notion database row
 
+> Listed as `knowledge_update_page` with `"operation":"patch_properties"`.
+> `knowledge_update_row` is still accepted but no longer advertised, and the
+> `knowledge_update_row` capability selector governs this operation. Append
+> uses `"operation":"append_markdown"`, governed by `knowledge_append`. Both
+> selectors and `knowledge_update_page` must allow a call.
+
 `knowledge_update_row` is installed on authenticated HTTP when guarded
 integration writes are enabled. Call `knowledge_query_view` with `include_row_revision` for the latest
 `page_id` and `row_revision` of the target row. Select the configured root
