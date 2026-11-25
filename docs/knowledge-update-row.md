@@ -1,7 +1,7 @@
 # Update properties on a Notion database row
 
 `knowledge_update_row` is installed on authenticated HTTP when guarded
-integration writes are enabled. Call `knowledge_query_view` for the latest
+integration writes are enabled. Call `knowledge_query_view` with `include_row_revision` for the latest
 `page_id` and `row_revision` of the target row. Select the configured root
 that contains the row's actual data source.
 

@@ -59,7 +59,13 @@ fn scoped_view(linked: bool) -> Vec<(u16, Value)> {
         }),
     )];
     route.extend([
-        (200,json!({"object":"data_source","id":SOURCE,"parent":{"type":"database_id","database_id":DB}})),
+        (200,json!({"object":"data_source","id":SOURCE,"parent":{"type":"database_id","database_id":DB},"properties":{
+            "Name":{"id":"title","type":"title","title":{}},
+            "Status":{"id":"status","type":"status","status":{}},
+            "Due":{"id":"date","type":"date","date":{}},
+            "Attachment":{"id":"file","type":"files","files":{}},
+            "Private relation":{"id":"rel","type":"relation","relation":{}},
+            "Related summary":{"id":"roll","type":"rollup","rollup":{}}}})),
         (200,database),
         (200,root.clone()),
     ]);
@@ -82,6 +88,7 @@ fn row(id: &str, due: &str) -> (u16, Value) {
         200,
         json!({"object":"page","id":id,"in_trash":false,"last_edited_time":REVISION,
             "parent":{"type":"data_source_id","data_source_id":SOURCE},"properties":{
+            "Name":{"id":"title","type":"title","title":[{"type":"text","plain_text":id}]},
             "Status":{"id":"status","type":"status","status":{"name":"Done","id":"option"}},
             "Due":{"id":"date","type":"date","date":{"start":due,"end":null,"time_zone":null}},
         "Attachment":{"id":"file","type":"files","files":[{"type":"file","file":{"url":"https://files.example/?token=secret"}}]},
@@ -186,20 +193,25 @@ async fn linked_view_uses_notion_order_and_paginates_with_typed_rows() {
     assert_eq!(output["rows"][0]["page_id"], FIRST);
     assert_eq!(output["rows"][1]["page_id"], SECOND);
     assert_eq!(
-        output["rows"][0]["omitted_properties"],
-        json!(["Attachment", "Private relation", "Related summary"])
+        output["omitted_columns"],
+        json!([{"id":"file","name":"Attachment","type":"files"},
+            {"id":"rel","name":"Private relation","type":"relation"},
+            {"id":"roll","name":"Related summary","type":"rollup"}])
     );
+    assert_eq!(
+        output["columns"],
+        json!([{"id":"title","name":"Name","type":"title"},
+            {"id":"date","name":"Due","type":"date"},{"id":"status","name":"Status","type":"status"}])
+    );
+    assert!(output["rows"][0].get("row_revision").is_none());
+    assert!(output["rows"][0].get("omitted").is_none());
     let wire = first.to_string();
     assert!(!wire.contains("token=secret"));
     assert!(!wire.contains("33333333-3333-3333-3333-333333333333"));
     assert!(!wire.contains("910019"));
     assert_eq!(
-        output["rows"][0]["properties"]["Due"]["date"]["start"],
-        "2026-11-29"
-    );
-    assert_eq!(
-        output["rows"][0]["properties"]["Status"]["status"]["name"],
-        "Done"
+        output["rows"][0]["values"],
+        json!([FIRST, {"start":"2026-11-29"}, {"id":"option","name":"Done"}])
     );
     assert!(log[4].0.starts_with(&format!("GET /v1/databases/{LINK} ")));
     assert!(log[5].0.starts_with(&format!("GET /v1/blocks/{LINK} ")));
@@ -303,4 +315,59 @@ async fn view_results_distinguish_empty_denied_unsupported_and_unavailable() {
         let text = result["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.starts_with(code), "{text}");
     }
+}
+
+#[tokio::test]
+async fn selected_columns_and_explicit_row_revision_shrink_the_response() {
+    let mut steps = scoped_view(false);
+    steps.extend([
+        (
+            200,
+            json!({"object":"view_query","view_id":VIEW,"id":QUERY,"results":[{"object":"page","id":FIRST}],
+            "has_more":false,"next_cursor":null}),
+        ),
+        row(FIRST, "2026-11-29"),
+    ]);
+    steps.extend(scoped_view(false));
+    let (result, _) = call(
+        steps,
+        query(json!({"view_id":VIEW,"fields":["status","Attachment"],"include_row_revision":true})),
+        false,
+    )
+    .await;
+    let output = &result["result"]["structuredContent"];
+    assert_eq!(
+        output["columns"],
+        json!([{"id":"title","name":"Name","type":"title"},{"id":"status","name":"Status","type":"status"}]),
+        "{result}"
+    );
+    assert_eq!(
+        output["omitted_columns"],
+        json!([{"id":"file","name":"Attachment","type":"files"}])
+    );
+    assert_eq!(
+        output["rows"][0]["values"],
+        json!([FIRST, {"id":"option","name":"Done"}])
+    );
+    assert_eq!(
+        output["rows"][0]["row_revision"].as_str().unwrap().len(),
+        64
+    );
+    assert!(!result.to_string().contains("token=secret"));
+
+    let mut unknown = scoped_view(false);
+    unknown.truncate(4);
+    let (result, _) = call(
+        unknown,
+        query(json!({"view_id":VIEW,"fields":["Missing"]})),
+        false,
+    )
+    .await;
+    assert!(
+        result["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("invalid_input"),
+        "{result}"
+    );
 }

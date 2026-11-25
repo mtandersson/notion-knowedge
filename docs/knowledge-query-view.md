@@ -9,9 +9,16 @@ both be in scope. A linked view does not grant access to an outside source.
 ```json
 {
   "view_id": "view://aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-  "page_size": 10
+  "page_size": 10,
+  "fields": ["Status", "Due"],
+  "include_row_revision": false
 }
 ```
+
+`fields` lists column names or property IDs. The title column is always
+included. Without `fields` every readable column is returned. An unknown
+or ambiguous field (a name that is another column's ID) is `invalid_input`. Set `include_row_revision` only when the rows will
+be updated.
 
 Use the view UUID, with or without the `view://` prefix. Pass the returned
 `continuation` object unchanged alongside the same view ID to fetch the next
@@ -19,18 +26,22 @@ page. Page size can be 1–25 and defaults to 10. Notion expires the query cache
 after 15 minutes. If it expires or the view changes, start a new query.
 
 The result includes the view and data-source IDs, saved filter, quick filters and sorts, and
-rows in Notion's result order. Each row has a stable page ID, its current
-revision, and typed Notion property values read at the time of the call.
-Pass the opaque `row_revision` to [update the row](knowledge-update-row.md).
-It is null when the upstream response truncates an editable property.
+rows in Notion's result order. The response describes the columns once as `columns` (`id`, `name`, `type`).
+Each row has a stable `page_id` and `values`, an array in the same order as
+`columns`, read at the time of the call. With `include_row_revision` each row
+also has an opaque `row_revision` to pass to
+[update the row](knowledge-update-row.md). It is null when the upstream
+response truncates an editable property.
 Notion establishes membership and order when the first page is requested.
-Property values can subsequently change as the source is edited. Each
-returned property retains its Notion ID and type. Title and rich text are
-returned as plain strings when they contain only text runs. Dates, status and
-select options retain their typed values. Checkboxes, numbers, URLs, email,
-phone numbers and timestamps are also supported. `omitted_properties` lists
-names whose values could not be safely projected, including files, relations,
-rollups, formulas and rich text with mentions. It never includes their values.
+Property values can subsequently change as the source is edited. Title and rich text are returned as plain strings when they contain only text
+runs. Dates are `{start, end?, time_zone?}`, omitting null parts. Rows no longer
+carry `last_edited_time`; use `row_revision` to detect changes. Status and select values are
+`{id, name}`, so their option IDs can be used in writes. Checkboxes, numbers, URLs, email,
+phone numbers and timestamps are also supported. `omitted_columns` lists
+the `id`, `name` and `type` of columns that are never projected, including files, relations,
+rollups and formulas. A row's `omitted` lists column IDs whose value could not
+be safely projected in that row, such as rich text with mentions; its value is
+null. Neither ever includes the value.
 
 - `empty` means the first page has no matches.
 - `more` means pass the continuation to read the next page.

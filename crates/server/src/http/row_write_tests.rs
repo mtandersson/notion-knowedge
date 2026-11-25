@@ -435,7 +435,7 @@ async fn view_row(stores: &Stores, page: Value) -> Value {
     ]);
     script.extend(view_steps());
     let request = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
-        "name":"knowledge_query_view","arguments":{"view_id":VIEW}
+        "name":"knowledge_query_view","arguments":{"view_id":VIEW,"include_row_revision":true}
     }});
     let (snapshot, _) = stores.invoke(script, request, false).await;
     snapshot["result"]["structuredContent"]["rows"][0].clone()
