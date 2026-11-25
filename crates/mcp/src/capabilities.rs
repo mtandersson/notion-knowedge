@@ -16,7 +16,7 @@ enum Category {
     Write,
 }
 
-const OPERATIONS: [(&str, Category); 13] = [
+const OPERATIONS: [(&str, Category); 14] = [
     ("knowledge_search", Category::Read),
     ("knowledge_get", Category::Read),
     ("knowledge_related", Category::Read),
@@ -25,6 +25,7 @@ const OPERATIONS: [(&str, Category); 13] = [
     ("knowledge_upload_file", Category::Write),
     ("knowledge_file_refresh", Category::Write),
     ("knowledge_create_page", Category::Write),
+    ("knowledge_update_page", Category::Write),
     (crate::row_write::CREATE_TOOL, Category::Write),
     (crate::row_write::UPDATE_TOOL, Category::Write),
     ("knowledge_append", Category::Write),
@@ -86,6 +87,28 @@ impl CapabilityPolicy {
         Ok(Self {
             allowlist,
             blocklist,
+        })
+    }
+
+    /// A merged tool is reachable when its own selector, or the selector of any
+    /// operation it subsumes, is allowed, so existing allowlists keep working.
+    /// A blocklisted merged name or category still blocks it. Each call is then
+    /// checked against its own operation's selector.
+    pub fn permits_via(&self, operation: &str, subsumed: &[&str]) -> bool {
+        let Some(category) = known(operation) else {
+            return false;
+        };
+        let category = match category {
+            Category::Read => "read",
+            Category::Write => "write",
+        };
+        if self.blocklist.contains(operation) || self.blocklist.contains(category) {
+            return false;
+        }
+        self.allowlist.as_ref().is_none_or(|allow| {
+            allow.contains(operation)
+                || allow.contains(category)
+                || subsumed.iter().any(|name| self.permits(name))
         })
     }
 

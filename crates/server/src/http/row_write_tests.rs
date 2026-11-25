@@ -185,13 +185,13 @@ async fn installed_row_create_writes_typed_properties_and_markdown_once_and_repl
             false,
         )
         .await;
-    assert!(
-        discovery["result"]["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|tool| tool["name"] == TOOL)
-    );
+    let listed = discovery["result"]["tools"].as_array().unwrap();
+    let create = listed
+        .iter()
+        .find(|tool| tool["name"] == "knowledge_create_page")
+        .unwrap();
+    assert!(create["inputSchema"]["properties"]["data_source_id"].is_object());
+    assert!(listed.iter().all(|tool| tool["name"] != TOOL));
     let mut script = schema();
     script.extend([
         (200,row()), (200,row()),
@@ -507,9 +507,20 @@ async fn installed_row_update_patches_only_requested_fields_and_replays() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|tool| tool["name"] == UPDATE)
+        .find(|tool| tool["name"] == "knowledge_update_page")
         .unwrap();
     assert_eq!(tool["annotations"]["destructiveHint"], false);
+    assert_eq!(
+        tool["inputSchema"]["properties"]["operation"]["enum"],
+        json!(["append_markdown", "patch_properties"])
+    );
+    assert!(
+        discovery["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|tool| tool["name"] != UPDATE && tool["name"] != "knowledge_append")
+    );
     let mut script = patch_steps(updated_row());
     script.extend(schema());
     let (first, log) = stores.invoke(script, update(&revision, KEY), false).await;
@@ -682,5 +693,83 @@ async fn installed_write_catalog_stays_within_its_size_budget() {
         })
         .collect();
     eprintln!("MEASURE catalog total={total} {}", sizes.join(" "));
-    assert!(total <= 28_000, "catalog is {total} B");
+    assert!(total <= 25_000, "catalog is {total} B");
+}
+
+fn merged(mut request: Value, name: &str, operation: Option<&str>) -> Value {
+    request["params"]["name"] = json!(name);
+    if let Some(operation) = operation {
+        request["params"]["arguments"]["operation"] = json!(operation);
+    }
+    request
+}
+
+#[tokio::test]
+async fn merged_page_tools_create_and_patch_rows_like_the_old_names() {
+    let stores = Stores::new();
+    let revision = revision(&stores).await;
+    let mut script = patch_steps(updated_row());
+    script.extend(schema());
+    let (patched, log) = stores
+        .invoke(
+            script,
+            merged(
+                update(&revision, KEY),
+                "knowledge_update_page",
+                Some("patch_properties"),
+            ),
+            false,
+        )
+        .await;
+    assert_eq!(status(&patched), "verified", "{patched}");
+    assert_eq!(
+        log.iter()
+            .filter(|entry| entry.0.starts_with("PATCH "))
+            .count(),
+        1
+    );
+
+    let (denied, _) = stores
+        .invoke(
+            vec![],
+            merged(
+                update(&revision, KEY),
+                "knowledge_update_page",
+                Some("unknown_operation"),
+            ),
+            false,
+        )
+        .await;
+    assert!(
+        denied["error"].is_object() || denied["result"]["isError"] == true,
+        "{denied}"
+    );
+}
+
+#[tokio::test]
+async fn merged_create_page_creates_a_row_and_replays_through_the_old_name() {
+    let stores = Stores::new();
+    let mut script = schema();
+    script.extend([
+        (200, row()),
+        (200, row()),
+        (200, json!({"object":"page_markdown","id":ROW,"markdown":BODY,"truncated":false,"unknown_block_ids":[]})),
+        (200, row()),
+    ]);
+    script.extend(schema());
+    let (first, _) = stores
+        .invoke(script, merged(call(), "knowledge_create_page", None), false)
+        .await;
+    assert_eq!(status(&first), "verified", "{first}");
+
+    // The same key through the old name replays without a second write.
+    let mut read = schema();
+    read[0].1["properties"]["State"]["status"]["options"] = json!([]);
+    read.push((200, row()));
+    let (replay, log) = stores.invoke(read, call(), false).await;
+    assert_eq!(
+        replay["result"]["structuredContent"]["write"]["replayed"], true,
+        "{replay}"
+    );
+    assert!(log.iter().all(|entry| !entry.0.starts_with("POST ")));
 }
