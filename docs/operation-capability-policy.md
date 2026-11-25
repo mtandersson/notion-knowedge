@@ -61,3 +61,17 @@ cover exact/category precedence, unknown selectors, empty lists, discovery,
 read-only and destructive gates; installed ingestion also tests policy rejection
 before external effects (see [installed-file-ingestion.md](installed-file-ingestion.md)).
 Do not interpret a tool's read-only annotation as its authorization decision.
+
+## Merged page tools
+
+`knowledge_create_page` and `knowledge_update_page` are the listed write
+tools. `knowledge_update_page` takes `operation` = `append_markdown` or
+`patch_properties`, and `knowledge_create_page` creates a row when given
+`data_source_id`. Each call is checked against its operation's own selector:
+`knowledge_append`, `knowledge_update_row`, `knowledge_create_row`, or
+`knowledge_create_page` for the page form. A merged tool is reachable when its
+own name or any subsumed selector is allowlisted, so an existing
+`read,knowledge_append` allowlist now lists `knowledge_update_page` with
+`append_markdown` only. A blocklisted merged name, `write` or the category
+blocks it entirely. The old names stay callable under their own selectors but
+are not advertised.

@@ -104,7 +104,11 @@ impl MutationRuntime {
         let rows_create = self.row_writer.is_some() && permits(crate::row_write::CREATE_TOOL);
         let append = permits("knowledge_append");
         let patch = self.row_writer.is_some() && permits(crate::row_write::UPDATE_TOOL);
-        let mut tools = vec![with_output(merged_create_tool(rows_create))];
+        let page_create = permits("knowledge_create_page");
+        let mut tools = Vec::new();
+        if page_create || rows_create {
+            tools.push(with_output(merged_create_tool(page_create, rows_create)));
+        }
         if append || patch {
             tools.push(with_output(merged_update_tool(append, patch)));
         }
@@ -517,7 +521,7 @@ pub(crate) fn tool(name: &str) -> rmcp::model::Tool {
     with_output(match name {
         crate::row_write::CREATE_TOOL => crate::row_write::create_tool(),
         crate::row_write::UPDATE_TOOL => crate::row_write::update_tool(),
-        "knowledge_create_page" => merged_create_tool(true),
+        "knowledge_create_page" => merged_create_tool(true, true),
         "knowledge_update_page" => merged_update_tool(true, true),
         _ => existing_tool(name),
     })
@@ -530,7 +534,7 @@ fn with_output(mut tool: rmcp::model::Tool) -> rmcp::model::Tool {
 
 /// `knowledge_create_page`: a page under `parent_page_id`, or, when rows are
 /// permitted, a row in `data_source_id` with typed `properties`.
-fn merged_create_tool(rows: bool) -> rmcp::model::Tool {
+fn merged_create_tool(page: bool, rows: bool) -> rmcp::model::Tool {
     if !rows {
         return existing_tool("knowledge_create_page");
     }
@@ -546,6 +550,28 @@ fn merged_create_tool(rows: bool) -> rmcp::model::Tool {
         "UUID of the original Notion data source for a new row. Give this or parent_page_id; properties apply only to a row."
     );
     schema["required"] = json!(["root_page_id", "title", "markdown", "idempotency_key"]);
+    if !page {
+        schema["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("parent_page_id");
+        schema["required"] = json!([
+            "root_page_id",
+            "data_source_id",
+            "title",
+            "markdown",
+            "properties",
+            "idempotency_key"
+        ]);
+        schema["properties"]["data_source_id"]["description"] =
+            json!("UUID of the original Notion data source.");
+        tool.description = Some(
+            "Create one row in a data source with typed properties and Markdown. Keep the same idempotency key for retries."
+                .into(),
+        );
+        tool.input_schema = Arc::new(schema);
+        return tool;
+    }
     tool.description = Some(
         "Create one page under parent_page_id, or one row in a data source with typed properties and Markdown. Keep the same idempotency key for retries."
             .into(),
@@ -583,7 +609,10 @@ fn merged_update_tool(append: bool, patch: bool) -> rmcp::model::Tool {
         );
         fields.insert("properties".into(), row["properties"]["properties"].clone());
     }
-    fields.insert("operation".into(), json!({"enum":operations}));
+    fields.insert(
+        "operation".into(),
+        json!({"type":"string","enum":operations}),
+    );
     tool.description = Some(
         "Update one authorized page. append_markdown adds Markdown at the end under a revision guard. patch_properties changes selected row properties under the authoritative row_revision. Reuse the same idempotency key after an uncertain response."
             .into(),
@@ -682,6 +711,7 @@ pub fn is_semantic_mutation(name: &str) -> bool {
     matches!(
         name,
         "knowledge_create_page"
+            | "knowledge_update_page"
             | "knowledge_append"
             | "knowledge_update_section"
             | crate::row_write::CREATE_TOOL

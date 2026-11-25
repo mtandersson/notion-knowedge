@@ -1021,3 +1021,125 @@ async fn merged_update_page_offers_only_operations_the_policy_permits() {
     let denied = invoke(blocked, "knowledge_update_page", patch).await;
     assert!(denied["error"].is_object(), "{denied}");
 }
+
+fn merged_append(key: &str) -> Value {
+    let mut args = append(key);
+    args["operation"] = json!("append_markdown");
+    args
+}
+
+fn is_rejected(response: &Value) -> bool {
+    response["error"].is_object() || response["result"]["isError"] == true
+}
+
+#[tokio::test]
+async fn merged_append_replays_across_old_and_new_names_and_rejects_smuggled_fields() {
+    let f = Fixture::new();
+    let handler = f.server(true);
+    let key = "append-across-names-fixture";
+    let first = invoke(handler.clone(), "knowledge_append", append(key)).await;
+    assert_eq!(output(&first)["write"]["status"], "verified", "{first}");
+    let replay = invoke(handler.clone(), "knowledge_update_page", merged_append(key)).await;
+    assert_eq!(output(&replay)["write"]["replayed"], true, "{replay}");
+    assert_eq!(f.source.effects.load(Ordering::SeqCst), 1);
+
+    let mut row_field = merged_append("append-with-row-revision-fixture");
+    row_field["expected_row_revision"] = json!("0".repeat(64));
+    let mut page_field = create("create-with-properties-fixture");
+    page_field["properties"] = json!({});
+    let mut null_source = create("create-with-null-source-fixture");
+    null_source["data_source_id"] = Value::Null;
+    let mut bad_operation = merged_append("append-bad-operation-fixture");
+    bad_operation["operation"] = json!("APPEND_MARKDOWN");
+    for (name, args) in [
+        ("knowledge_update_page", row_field),
+        ("knowledge_create_page", page_field),
+        ("knowledge_create_page", null_source),
+        ("knowledge_update_page", bad_operation),
+        (
+            "knowledge_update_page",
+            append("append-missing-operation-fixture"),
+        ),
+    ] {
+        let response = invoke(handler.clone(), name, args).await;
+        assert!(is_rejected(&response), "{name}: {response}");
+    }
+    assert_eq!(f.source.effects.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn existing_allowlists_keep_reaching_append_through_the_merged_tool() {
+    use notion_knowledge_mcp::capabilities::CapabilityPolicy;
+    let fixtures: Vec<Fixture> = (0..3).map(|_| Fixture::new()).collect();
+    let allow = |index: usize, list: Option<&str>, block: Option<&str>| {
+        fixtures[index]
+            .server(true)
+            .with_capability_policy(CapabilityPolicy::from_lists(list, block).unwrap())
+    };
+    let listed = |handler: KnowledgeServer| async move {
+        let catalog = request(handler, "tools/list", json!({})).await;
+        catalog["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let only_append = allow(0, Some("read,knowledge_append"), None);
+    let names = listed(only_append.clone()).await;
+    assert!(
+        names.contains(&"knowledge_update_page".to_owned()),
+        "{names:?}"
+    );
+    assert!(!names.contains(&"knowledge_create_page".to_owned()));
+    let response = invoke(
+        only_append.clone(),
+        "knowledge_update_page",
+        merged_append("allowlisted-append-fixture"),
+    )
+    .await;
+    assert_eq!(
+        output(&response)["write"]["status"],
+        "verified",
+        "{response}"
+    );
+    // Page creation still needs its own selector.
+    let denied = invoke(
+        only_append,
+        "knowledge_create_page",
+        create("allowlisted-create-fixture"),
+    )
+    .await;
+    assert!(denied["error"].is_object(), "{denied}");
+
+    let blocked = allow(1, None, Some("knowledge_update_page"));
+    assert!(
+        !listed(blocked.clone())
+            .await
+            .contains(&"knowledge_update_page".to_owned())
+    );
+    let denied = invoke(
+        blocked.clone(),
+        "knowledge_update_page",
+        merged_append("blocked-merged-fixture"),
+    )
+    .await;
+    assert!(denied["error"].is_object(), "{denied}");
+    // The old name keeps its own selector.
+    let old = invoke(
+        blocked,
+        "knowledge_append",
+        append("blocked-merged-old-name-fixture"),
+    )
+    .await;
+    assert_eq!(output(&old)["write"]["status"], "verified", "{old}");
+
+    let read_only = fixtures[2].server(true).with_read_only(true);
+    let denied = invoke(
+        read_only,
+        "knowledge_update_page",
+        merged_append("read-only-merged-fixture"),
+    )
+    .await;
+    assert!(denied["error"].is_object(), "{denied}");
+}

@@ -90,6 +90,28 @@ impl CapabilityPolicy {
         })
     }
 
+    /// A merged tool is reachable when its own selector, or the selector of any
+    /// operation it subsumes, is allowed, so existing allowlists keep working.
+    /// A blocklisted merged name or category still blocks it. Each call is then
+    /// checked against its own operation's selector.
+    pub fn permits_via(&self, operation: &str, subsumed: &[&str]) -> bool {
+        let Some(category) = known(operation) else {
+            return false;
+        };
+        let category = match category {
+            Category::Read => "read",
+            Category::Write => "write",
+        };
+        if self.blocklist.contains(operation) || self.blocklist.contains(category) {
+            return false;
+        }
+        self.allowlist.as_ref().is_none_or(|allow| {
+            allow.contains(operation)
+                || allow.contains(category)
+                || subsumed.iter().any(|name| self.permits(name))
+        })
+    }
+
     /// Fail closed on all unregistered operations. Blocklist takes priority
     /// over allowlist, including category-vs-exact-name combinations.
     pub fn permits(&self, operation: &str) -> bool {

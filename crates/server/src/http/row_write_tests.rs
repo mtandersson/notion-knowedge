@@ -745,3 +745,31 @@ async fn merged_page_tools_create_and_patch_rows_like_the_old_names() {
         "{denied}"
     );
 }
+
+#[tokio::test]
+async fn merged_create_page_creates_a_row_and_replays_through_the_old_name() {
+    let stores = Stores::new();
+    let mut script = schema();
+    script.extend([
+        (200, row()),
+        (200, row()),
+        (200, json!({"object":"page_markdown","id":ROW,"markdown":BODY,"truncated":false,"unknown_block_ids":[]})),
+        (200, row()),
+    ]);
+    script.extend(schema());
+    let (first, _) = stores
+        .invoke(script, merged(call(), "knowledge_create_page", None), false)
+        .await;
+    assert_eq!(status(&first), "verified", "{first}");
+
+    // The same key through the old name replays without a second write.
+    let mut read = schema();
+    read[0].1["properties"]["State"]["status"]["options"] = json!([]);
+    read.push((200, row()));
+    let (replay, log) = stores.invoke(read, call(), false).await;
+    assert_eq!(
+        replay["result"]["structuredContent"]["write"]["replayed"], true,
+        "{replay}"
+    );
+    assert!(log.iter().all(|entry| !entry.0.starts_with("POST ")));
+}
