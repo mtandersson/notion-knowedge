@@ -64,7 +64,7 @@ impl Runtime {
         let mut tag = [0u8; 32];
         for (byte, pair) in tag
             .iter_mut()
-            .zip(next.signature.as_bytes().chunks_exact(2))
+            .zip(next.signature.as_bytes().as_chunks::<2>().0)
         {
             *byte = std::str::from_utf8(pair)
                 .ok()
