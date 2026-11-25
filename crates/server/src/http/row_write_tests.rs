@@ -23,6 +23,9 @@ const KEY: &str = "journal-entry-unique-101";
 const BODY: &str = "Journal entry";
 const REVISION: &str = "2026-11-25T16:00:00Z";
 const TOOL: &str = "knowledge_create_row";
+const UPDATE: &str = "knowledge_update_row";
+const VIEW: &str = "33333333-3333-3333-3333-333333333333";
+const QUERY: &str = "55555555-5555-5555-5555-555555555555";
 
 fn config(path: &std::path::Path, read_only: bool) -> Config {
     let values = [
@@ -56,11 +59,13 @@ fn schema() -> Vec<(u16, Value)> {
             "properties":{
                 "Renamed entry title":{"id":"title","type":"title","title":{}},
                 "Due date":{"id":"date-id","type":"date","date":{}},
-                "State":{"id":"status-id","type":"status","status":{"options":[{"id":"done-id","name":"Done"}]}},
+                "State":{"id":"status-id","type":"status","status":{"options":[{"id":"done-id","name":"Done"},{"id":"pending-id","name":"Pending"}]}},
                 "Points":{"id":"number-id","type":"number","number":{}},
                 "Sent":{"id":"check-id","type":"checkbox","checkbox":{}},
                 "Reference URL":{"id":"url-id","type":"url","url":{}},
-                "Link":{"id":"related-id","type":"relation","relation":{"data_source_id":SOURCE,"limit":1}}
+                "Link":{"id":"related-id","type":"relation","relation":{"data_source_id":SOURCE,"limit":1}},
+                "Note":{"id":"note-id","type":"rich_text","rich_text":{}},
+                "Kind":{"id":"select-id","type":"select","select":{"options":[{"id":"report-id","name":"Report"}]}}
             }}),
         ),
         (
@@ -84,7 +89,9 @@ fn row() -> Value {
             "State":{"id":"status-id","type":"status","status":{"id":"done-id","name":"Done"}},
             "Points":{"id":"number-id","type":"number","number":2.5},
             "Sent":{"id":"check-id","type":"checkbox","checkbox":true},
-            "Reference URL":{"id":"url-id","type":"url","url":"https://example.org/receipt"}
+            "Reference URL":{"id":"url-id","type":"url","url":"https://example.org/receipt"},
+            "Note":{"id":"note-id","type":"rich_text","rich_text":[]},
+            "Kind":{"id":"select-id","type":"select","select":null}
         }
     })
 }
@@ -126,6 +133,29 @@ impl Stores {
         }
     }
 
+    fn handler(
+        &self,
+        source: notion_knowledge_notion::NotionClient,
+        config: &Config,
+    ) -> KnowledgeServer {
+        let handler = root_scope::attach_client(
+            KnowledgeServer::default().with_read_only(config.read_only),
+            config,
+            Transport::Http,
+            source.clone(),
+        )
+        .unwrap();
+        crate::write_stores::attach_runtime(
+            handler,
+            Arc::new(source),
+            config.notion_scope.clone().unwrap(),
+            self.ledger.clone(),
+            self.queue.clone(),
+            self.audit.clone(),
+        )
+        .unwrap()
+    }
+
     async fn invoke(
         &self,
         script: Vec<(u16, Value)>,
@@ -134,22 +164,7 @@ impl Stores {
     ) -> (Value, Vec<(String, Vec<u8>)>) {
         let config = config(self.directory.path(), read_only);
         let (source, log, fake) = notion(script).await;
-        let handler = root_scope::attach_client(
-            KnowledgeServer::default().with_read_only(read_only),
-            &config,
-            Transport::Http,
-            source.clone(),
-        )
-        .unwrap();
-        let handler = crate::write_stores::attach_runtime(
-            handler,
-            Arc::new(source),
-            config.notion_scope.clone().unwrap(),
-            self.ledger.clone(),
-            self.queue.clone(),
-            self.audit.clone(),
-        )
-        .unwrap();
+        let handler = self.handler(source, &config);
         let response = http_call(config, handler, request).await;
         tokio::time::timeout(std::time::Duration::from_secs(2), fake)
             .await
@@ -393,5 +408,219 @@ async fn oversized_row_create_rejects_without_consuming_the_key() {
     assert_eq!(
         invalid["result"]["structuredContent"]["write"]["status"], "invalid_input",
         "{invalid}"
+    );
+}
+
+fn view_steps() -> Vec<(u16, Value)> {
+    let mut steps = vec![(
+        200,
+        json!({
+            "object":"view","id":VIEW,"parent":{"type":"database_id","database_id":DATABASE},
+            "type":"table","data_source_id":SOURCE,"last_edited_time":REVISION
+        }),
+    )];
+    steps.extend(schema());
+    steps
+}
+
+async fn revision(stores: &Stores) -> String {
+    let mut script = view_steps();
+    script.extend([
+        (
+            200,
+            json!({"object":"view_query","view_id":VIEW,"id":QUERY,
+            "results":[{"object":"page","id":ROW}],"has_more":false,"next_cursor":null}),
+        ),
+        (200, row()),
+    ]);
+    script.extend(view_steps());
+    let request = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+        "name":"knowledge_query_view","arguments":{"view_id":VIEW}
+    }});
+    let (snapshot, _) = stores.invoke(script, request, false).await;
+    let token = snapshot["result"]["structuredContent"]["rows"][0]["row_revision"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(token.len(), 64);
+    token
+}
+
+fn update(revision: &str, key: &str) -> Value {
+    json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":UPDATE,"arguments":{
+        "root_page_id":ROOT,"page_id":ROW,"idempotency_key":key,"expected_row_revision":revision,
+        "properties":{
+            "status-id":{"type":"status","value":"pending-id"},
+            "date-id":{"type":"date","value":null},
+            "url-id":{"type":"url","value":"https://example.org/updated"},
+            "note-id":{"type":"rich_text","value":"Followed up"},
+            "select-id":{"type":"select","value":"report-id"}
+        }
+    }}})
+}
+
+fn updated_row() -> Value {
+    let mut page = row();
+    // Intentionally unchanged timestamp. The server must detect value changes too.
+    page["properties"]["State"]["status"] = json!({"id":"pending-id","name":"Pending"});
+    page["properties"]["Due date"]["date"] = Value::Null;
+    page["properties"]["Reference URL"]["url"] = json!("https://example.org/updated");
+    page["properties"]["Note"]["rich_text"] = json!([{"type":"text","plain_text":"Followed up"}]);
+    page["properties"]["Kind"]["select"] = json!({"id":"report-id","name":"Report"});
+    page
+}
+
+fn patch_steps(readback: Value) -> Vec<(u16, Value)> {
+    let mut script = vec![(200, row())];
+    script.extend(schema());
+    script.extend([(200, row()), (200, updated_row()), (200, readback)]);
+    script
+}
+
+fn status(output: &Value) -> &str {
+    output["result"]["structuredContent"]["write"]["status"]
+        .as_str()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn installed_row_update_patches_only_requested_fields_and_replays() {
+    let stores = Stores::new();
+    let revision = revision(&stores).await;
+    let (discovery, upstream) = stores
+        .invoke(
+            vec![],
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}),
+            false,
+        )
+        .await;
+    assert!(upstream.is_empty());
+    let tool = discovery["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == UPDATE)
+        .unwrap();
+    assert_eq!(tool["annotations"]["destructiveHint"], false);
+    let mut script = patch_steps(updated_row());
+    script.extend(schema());
+    let (first, log) = stores.invoke(script, update(&revision, KEY), false).await;
+    assert_eq!(status(&first), "verified", "{first}");
+    assert_eq!(
+        first["result"]["structuredContent"]["index"]["status"],
+        "queued"
+    );
+    assert_eq!(
+        first["result"]["structuredContent"]["audit"]["status"],
+        "recorded"
+    );
+    let patches: Vec<_> = log
+        .iter()
+        .filter(|entry| entry.0.starts_with("PATCH "))
+        .collect();
+    assert_eq!(patches.len(), 1);
+    assert!(patches[0].0.starts_with(&format!("PATCH /v1/pages/{ROW} ")));
+    let body: Value = serde_json::from_slice(&patches[0].1).unwrap();
+    assert_eq!(
+        body,
+        json!({"properties":{
+            "status-id":{"status":{"id":"pending-id"}},
+            "date-id":{"date":null},
+            "url-id":{"url":"https://example.org/updated"},
+            "note-id":{"rich_text":[{"type":"text","text":{"content":"Followed up"}}]},
+            "select-id":{"select":{"id":"report-id"}}
+        }})
+    );
+
+    let mut script = vec![(200, updated_row())];
+    let mut changed_schema = schema();
+    changed_schema[0].1["properties"]["State"]["status"]["options"] = json!([]);
+    script.extend(changed_schema);
+    let (replay, log) = stores.invoke(script, update(&revision, KEY), false).await;
+    assert_eq!(status(&replay), "verified", "{replay}");
+    assert_eq!(
+        replay["result"]["structuredContent"]["write"]["replayed"],
+        true
+    );
+    assert!(log.iter().all(|entry| entry.0.starts_with("GET ")));
+}
+
+#[tokio::test]
+async fn row_update_denies_scope_and_detects_edits_between_two_reads() {
+    let stores = Stores::new();
+    let revision = revision(&stores).await;
+    let mut outside = schema();
+    outside[1].1["parent"] = json!({"type":"workspace"});
+    outside.truncate(2);
+    let mut script = vec![(200, row())];
+    script.extend(outside);
+    let (denied, log) = stores.invoke(script, update(&revision, KEY), false).await;
+    assert_eq!(status(&denied), "not_authorized");
+    assert!(log.iter().all(|entry| entry.0.starts_with("GET ")));
+
+    let mut script = vec![(200, row())];
+    script.extend(schema());
+    let mut changed = row();
+    changed["properties"]["Note"]["rich_text"] =
+        json!([{"type":"text","plain_text":"Concurrent edit"}]);
+    script.push((200, changed));
+    let (conflict, log) = stores.invoke(script, update(&revision, KEY), false).await;
+    assert_eq!(status(&conflict), "revision_conflict");
+    assert_eq!(
+        conflict["result"]["structuredContent"]["write"]["current_last_edited_time"],
+        REVISION
+    );
+    assert!(log.iter().all(|entry| entry.0.starts_with("GET ")));
+
+    let script = patch_steps(row());
+    let (unknown, log) = stores.invoke(script, update(&revision, KEY), false).await;
+    assert_eq!(status(&unknown), "outcome_unknown");
+    assert_eq!(
+        log.iter()
+            .filter(|entry| entry.0.starts_with("PATCH "))
+            .count(),
+        1
+    );
+    let mut script = vec![(200, row())];
+    script.extend(schema());
+    let (retry, log) = stores.invoke(script, update(&revision, KEY), false).await;
+    assert_eq!(status(&retry), "outcome_unknown");
+    assert!(log.iter().all(|entry| entry.0.starts_with("GET ")));
+}
+
+#[tokio::test]
+async fn concurrent_row_updates_with_distinct_keys_only_patch_once() {
+    let stores = Stores::new();
+    let revision = revision(&stores).await;
+    let mut script = patch_steps(updated_row());
+    script.extend(schema());
+    script.push((200, updated_row()));
+    script.extend(schema());
+    let (source, log, fake) = notion(script).await;
+    let first = config(stores.directory.path(), false);
+    let second = config(stores.directory.path(), false);
+    let handler = stores.handler(source, &first);
+    let (one, two) = tokio::join!(
+        http_call(first, handler.clone(), update(&revision, KEY)),
+        http_call(
+            second,
+            handler,
+            update(&revision, "another-journal-entry-102")
+        ),
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(2), fake)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut results = [status(&one), status(&two)];
+    results.sort();
+    assert_eq!(results, ["revision_conflict", "verified"]);
+    assert_eq!(
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry.0.starts_with("PATCH "))
+            .count(),
+        1
     );
 }

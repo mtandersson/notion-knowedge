@@ -16,7 +16,8 @@ server-owned capability policy in both stdio and HTTP. Discovery (`list_tools`,
 - Current exact **read** operations: `knowledge_search`, `knowledge_get`,
   `knowledge_related`, `knowledge_sync_status` and `knowledge_query_view`.
 - Current exact **write** operations: `knowledge_upload_file`,
-  `knowledge_file_refresh`, `knowledge_create_page`, `knowledge_create_row`, `knowledge_append`,
+  `knowledge_file_refresh`, `knowledge_create_page`, `knowledge_create_row`,
+  `knowledge_update_row`, `knowledge_append`,
   `knowledge_update_section` and `knowledge_archive_page`.
 - These names are the canonical set in
   [`crates/mcp/src/capabilities.rs`](../crates/mcp/src/capabilities.rs).
@@ -28,7 +29,8 @@ server-owned capability policy in both stdio and HTTP. Discovery (`list_tools`,
   operational metadata. Saved-view queries require trusted Notion integration
   and scope. Upload is a real optional audited file operation only
   with explicit write/ingestion settings and a trusted transport. Guarded integration writes install the audited
-  page and [row create](knowledge-create-row.md) and append tools.
+  page and [row create](knowledge-create-row.md), append and
+  [row update](knowledge-update-row.md) tools.
 - Values with unknown, empty interior, or malformed selectors cause startup
   to fail, identifying only the setting name and never logging raw values.
 

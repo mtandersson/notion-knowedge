@@ -23,7 +23,6 @@ impl AuditActor {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuditTool {
     PageCreate,
-    RowUpdate,
     PageAppend,
     PageReplace,
     PageDelete,
@@ -35,7 +34,6 @@ impl AuditTool {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::PageCreate => "page_create",
-            Self::RowUpdate => "row_update",
             Self::PageAppend => "page_append",
             Self::PageReplace => "page_replace",
             Self::PageDelete => "page_delete",

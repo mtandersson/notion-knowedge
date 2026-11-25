@@ -11,7 +11,7 @@ use notion_knowledge_core::{
         VerifiedReceipt, WriteIdempotencyStore,
     },
     lifecycle::LifecycleScope,
-    revision::written_markdown_matches,
+    revision::{RevisionMetadata, written_markdown_matches},
     row_write::{
         CreateRowRequest, MAX_PROPERTIES, MAX_RELATIONS, PropertyPatch, PropertyValue, RowWrite,
         UpdateRowError, UpdateRowRequest,
@@ -20,9 +20,10 @@ use notion_knowledge_core::{
 };
 use serde_json::{Map, Value, json};
 
-use crate::{NotionClient, pages, writes::encode_write_body};
+use crate::{NotionClient, pages, views::row_revision, writes::encode_write_body};
 
 const CREATE: &str = "notion.row.create";
+const UPDATE: &str = "notion.row.update";
 
 fn preflight(error: BackendError) -> Error {
     match error.kind {
@@ -382,6 +383,20 @@ impl NotionClient {
     }
 }
 
+fn check_row_revision(row: &Value, id: &PageId, expected: &str) -> Result<(), UpdateRowError> {
+    let current = row_revision(row).ok_or(Error::Unavailable)?;
+    if expected != current {
+        return Err(UpdateRowError::RevisionConflict(RevisionMetadata {
+            page_id: id.clone(),
+            last_edited_time: row["last_edited_time"]
+                .as_str()
+                .ok_or(Error::Unavailable)?
+                .into(),
+        }));
+    }
+    Ok(())
+}
+
 impl RowWrite for NotionClient {
     fn create_row<'a>(
         &'a self,
@@ -483,11 +498,136 @@ impl RowWrite for NotionClient {
     }
     fn update_row<'a>(
         &'a self,
-        _request: UpdateRowRequest,
-        _scope: &'a LifecycleScope,
-        _ledger: &'a dyn WriteIdempotencyStore,
-        _queue: &'a dyn MutationRefreshQueue,
+        request: UpdateRowRequest,
+        scope: &'a LifecycleScope,
+        ledger: &'a dyn WriteIdempotencyStore,
+        queue: &'a dyn MutationRefreshQueue,
     ) -> Pin<Box<dyn Future<Output = Result<WriteCompletion, UpdateRowError>> + Send + 'a>> {
-        Box::pin(async { Err(Error::Unavailable.into()) })
+        Box::pin(async move {
+            if !canonical_uuid(&request.page_id)
+                || request.expected_row_revision.len() != 64
+                || !request
+                    .expected_row_revision
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || !(1..=MAX_PROPERTIES).contains(&request.properties.len())
+                || request
+                    .properties
+                    .values()
+                    .any(|value| matches!(value, PropertyValue::Relation(_)))
+            {
+                return Err(Error::InvalidInput.into());
+            }
+
+            let id = PageId(request.page_id);
+            if scope
+                .exclusions
+                .exclusion(&id.0, SourceType::Page)
+                .is_some()
+            {
+                return Err(Error::NotAuthorized.into());
+            }
+            let payload = json!([request.expected_row_revision, request.properties]);
+            let claim = MutationClaim::new(
+                &scope.workspace_id,
+                &request.idempotency_key,
+                MutationOperation::UpdateRow,
+                &id.0,
+                &MutationClaim::payload_sha256(payload.to_string().as_bytes()),
+            )
+            .map_err(ledger_error)?;
+            let original = self.fetch_page_value(&id).await.map_err(preflight)?;
+            let data_source = original["parent"]["data_source_id"]
+                .as_str()
+                .and_then(pages::uuid)
+                .filter(|source| active_row(&original, &id.0, source))
+                .ok_or(Error::NotAuthorized)?;
+            let (schema, _) = self
+                .scoped_data_source(&data_source, scope)
+                .await
+                .map_err(preflight)?;
+
+            let (receipt, replayed) = match ledger.lookup(&claim).map_err(ledger_error)? {
+                Some(ExistingClaim::Replay(receipt)) if receipt.page_id == id.0 => (receipt, true),
+                Some(ExistingClaim::Replay(_)) | Some(ExistingClaim::Reconcile) => {
+                    return Err(Error::OutcomeUnknown.into());
+                }
+                None => {
+                    check_row_revision(&original, &id, &request.expected_row_revision)?;
+                    let prepared = prepare_properties(&schema["properties"], &request.properties)?;
+                    let body = json!({"properties":prepared.properties});
+                    encode_write_body(&body, UPDATE).map_err(preflight)?;
+
+                    // A second fresh read after checking the schema and physical
+                    // source catches intervening edits before opening the claim.
+                    // Notion PATCH still has no atomic conditional update.
+                    let current = self.fetch_page_value(&id).await.map_err(preflight)?;
+                    if !active_row(&current, &id.0, &data_source) {
+                        return Err(Error::NotAuthorized.into());
+                    }
+                    check_row_revision(&current, &id, &request.expected_row_revision)?;
+                    match ledger.begin(&claim).map_err(ledger_error)? {
+                        Reservation::Replay(receipt) if receipt.page_id == id.0 => (receipt, true),
+                        Reservation::Replay(_) | Reservation::Reconcile => {
+                            return Err(Error::OutcomeUnknown.into());
+                        }
+                        Reservation::ExecuteOnce => {
+                            ledger.mark_uncertain(&claim).map_err(ledger_error)?;
+                            let accepted = self
+                                .write(
+                                    reqwest::Method::PATCH,
+                                    &format!("/pages/{}", id.0),
+                                    body,
+                                    UPDATE,
+                                )
+                                .await
+                                .map_err(|_| Error::OutcomeUnknown)?;
+                            if !active_row(&accepted, &id.0, &data_source) {
+                                return Err(Error::OutcomeUnknown.into());
+                            }
+                            let readback = self
+                                .fetch_page_value(&id)
+                                .await
+                                .map_err(|_| Error::OutcomeUnknown)?;
+                            if !active_row(&readback, &id.0, &data_source)
+                                || readback["url"] != accepted["url"]
+                                || !matches_properties(&readback, &prepared.properties)
+                            {
+                                return Err(Error::OutcomeUnknown.into());
+                            }
+                            self.scoped_data_source(&data_source, scope)
+                                .await
+                                .map_err(|_| Error::OutcomeUnknown)?;
+                            let receipt = VerifiedReceipt::from_readback(
+                                id.0.clone(),
+                                readback["url"]
+                                    .as_str()
+                                    .ok_or(Error::OutcomeUnknown)?
+                                    .into(),
+                                readback["last_edited_time"]
+                                    .as_str()
+                                    .ok_or(Error::OutcomeUnknown)?
+                                    .into(),
+                            )
+                            .map_err(|_| Error::OutcomeUnknown)?;
+                            ledger
+                                .record_verified(&claim, &receipt)
+                                .map_err(|_| Error::OutcomeUnknown)?;
+                            (receipt, false)
+                        }
+                    }
+                }
+            };
+            Ok(admit_verified(
+                queue,
+                &RefreshKey {
+                    workspace_id: scope.workspace_id.clone(),
+                    mutation_digest: claim.key_digest().into(),
+                    page_id: id.0,
+                },
+                receipt,
+                replayed,
+            ))
+        })
     }
 }

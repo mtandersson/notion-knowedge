@@ -343,7 +343,7 @@ impl Input {
     fn audit_tool(&self) -> AuditTool {
         match self {
             Self::Create(_) | Self::CreateRow(_) => AuditTool::PageCreate,
-            Self::UpdateRow(_) => AuditTool::RowUpdate,
+            Self::UpdateRow(_) => AuditTool::PageReplace,
             Self::Append(_) => AuditTool::PageAppend,
             Self::Section(_) => AuditTool::PageReplace,
         }
