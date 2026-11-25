@@ -371,3 +371,45 @@ async fn selected_columns_and_explicit_row_revision_shrink_the_response() {
         "{result}"
     );
 }
+
+fn nth(index: usize) -> String {
+    format!("00000000-0000-4000-8000-{index:012}")
+}
+
+async fn ten_rows(arguments: Value) -> Value {
+    let ids: Vec<String> = (1..=10).map(nth).collect();
+    let mut steps = scoped_view(false);
+    steps.push((
+        200,
+        json!({"object":"view_query","view_id":VIEW,"id":QUERY,
+        "results":ids.iter().map(|id| json!({"object":"page","id":id})).collect::<Vec<_>>(),
+        "has_more":false,"next_cursor":null}),
+    ));
+    steps.extend(ids.iter().map(|id| row(id, "2026-11-29")));
+    steps.extend(scoped_view(false));
+    let (result, _) = call(steps, query(arguments), false).await;
+    result
+}
+
+/// Catalog and response sizes are part of the agent-facing contract: the
+/// synthetic ten-row response was 7 800 B before #810 (see handover.md).
+#[tokio::test]
+async fn ten_row_view_response_stays_compact() {
+    let selected = ten_rows(json!({"view_id":VIEW,"page_size":10,"fields":["Status","Due"]})).await;
+    let revisions = ten_rows(
+        json!({"view_id":VIEW,"page_size":10,"fields":["Status","Due"],"include_row_revision":true}),
+    )
+    .await;
+    let selected_bytes = selected["result"]["structuredContent"].to_string().len();
+    let revision_bytes = revisions["result"]["structuredContent"].to_string().len();
+    eprintln!("MEASURE view selected={selected_bytes} with_revisions={revision_bytes}");
+    assert_eq!(
+        selected["result"]["structuredContent"]["rows"]
+            .as_array()
+            .unwrap()
+            .len(),
+        10
+    );
+    assert!(selected_bytes <= 2_700, "{selected_bytes} B");
+    assert!(revision_bytes <= 3_500, "{revision_bytes} B");
+}

@@ -657,3 +657,30 @@ async fn view_and_update_withhold_revision_when_notion_truncates_rich_text() {
     assert_eq!(status(&denied), "unavailable");
     assert!(upstream.iter().all(|entry| entry.0.starts_with("GET ")));
 }
+
+/// Measured in the installed transport with every row, page and view tool on.
+#[tokio::test]
+async fn installed_write_catalog_stays_within_its_size_budget() {
+    let stores = Stores::new();
+    let (discovery, _) = stores
+        .invoke(
+            vec![],
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}),
+            false,
+        )
+        .await;
+    let tools = discovery["result"]["tools"].as_array().unwrap();
+    let total: usize = tools.iter().map(|tool| tool.to_string().len()).sum();
+    let sizes: Vec<String> = tools
+        .iter()
+        .map(|tool| {
+            format!(
+                "{}={}",
+                tool["name"].as_str().unwrap(),
+                tool.to_string().len()
+            )
+        })
+        .collect();
+    eprintln!("MEASURE catalog total={total} {}", sizes.join(" "));
+    assert!(total <= 28_000, "catalog is {total} B");
+}
