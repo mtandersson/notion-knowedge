@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 pub const CREATE_TOOL: &str = "knowledge_create_row";
 pub const UPDATE_TOOL: &str = "knowledge_update_row";
-const UUID: &str = "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$";
+pub(crate) const UUID: &str = "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$";
 
 fn input_type(kind: &str, value: Value) -> Value {
     json!({"type":"object","additionalProperties":false,"required":["type","value"],

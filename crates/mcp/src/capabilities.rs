@@ -16,7 +16,7 @@ enum Category {
     Write,
 }
 
-const OPERATIONS: [(&str, Category); 13] = [
+const OPERATIONS: [(&str, Category); 14] = [
     ("knowledge_search", Category::Read),
     ("knowledge_get", Category::Read),
     ("knowledge_related", Category::Read),
@@ -25,6 +25,7 @@ const OPERATIONS: [(&str, Category); 13] = [
     ("knowledge_upload_file", Category::Write),
     ("knowledge_file_refresh", Category::Write),
     ("knowledge_create_page", Category::Write),
+    ("knowledge_update_page", Category::Write),
     (crate::row_write::CREATE_TOOL, Category::Write),
     (crate::row_write::UPDATE_TOOL, Category::Write),
     ("knowledge_append", Category::Write),

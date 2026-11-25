@@ -244,7 +244,7 @@ impl KnowledgeServer {
             catalog.push(related::tool());
         }
         if let Some(runtime) = &self.mutations {
-            catalog.extend(runtime.tools());
+            catalog.extend(runtime.tools(&|name| self.tool_permitted(name)));
         } else if self.write_design_preview {
             catalog.extend(write_contract::tools());
         }
@@ -890,6 +890,14 @@ impl KnowledgeServer {
                 .as_ref()
                 .is_some_and(|runtime| runtime.supports(name)) =>
             {
+                if mutations::effective_operation(name, &arguments)
+                    .is_some_and(|operation| !self.tool_permitted(operation))
+                {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "tool unavailable in read-only mode",
+                        None,
+                    ));
+                }
                 let output = self
                     .mutations
                     .as_ref()

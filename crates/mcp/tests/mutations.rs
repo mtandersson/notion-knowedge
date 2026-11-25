@@ -474,7 +474,12 @@ async fn installed_writes_explain_root_selection_and_allow_retry_without_consumi
             append("correct-root-append-fixture"),
         ),
     ] {
-        let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
+        let listed = if name == "knowledge_append" {
+            "knowledge_update_page"
+        } else {
+            name
+        };
+        let tool = tools.iter().find(|tool| tool["name"] == listed).unwrap();
         let fields = &tool["inputSchema"]["properties"];
         let root_description = fields["root_page_id"]["description"].as_str().unwrap();
         assert!(root_description.contains("knowledge_get"));
@@ -971,14 +976,48 @@ async fn write_tool_definitions_stay_compact() {
         .filter(|tool| {
             matches!(
                 tool["name"].as_str().unwrap(),
-                "knowledge_create_page" | "knowledge_append"
+                "knowledge_create_page" | "knowledge_update_page"
             )
         })
         .collect();
-    assert_eq!(writes.len(), 2);
+    assert_eq!(
+        writes.len(),
+        2,
+        "{:?}",
+        tools
+            .iter()
+            .map(|tool| tool["name"].clone())
+            .collect::<Vec<_>>()
+    );
     let total: usize = writes.iter().map(|tool| tool.to_string().len()).sum();
     let output = writes[0]["outputSchema"].to_string().len();
     // Limits sit just above the sizes when this guard was added (see #812).
     assert!(output <= 850, "write result schema grew to {output} B");
     assert!(total <= 4600, "write definitions grew to {total} B");
+}
+
+#[tokio::test]
+async fn merged_update_page_offers_only_operations_the_policy_permits() {
+    use notion_knowledge_mcp::capabilities::CapabilityPolicy;
+    let blocked = Fixture::new().server(false).with_capability_policy(
+        CapabilityPolicy::from_lists(None, Some("knowledge_update_row")).unwrap(),
+    );
+    let catalog = request(blocked.clone(), "tools/list", json!({})).await;
+    let update = catalog["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "knowledge_update_page")
+        .unwrap();
+    assert_eq!(
+        update["inputSchema"]["properties"]["operation"]["enum"],
+        json!(["append_markdown"])
+    );
+    assert!(update["inputSchema"]["properties"]["properties"].is_null());
+
+    let patch = json!({"operation":"patch_properties","root_page_id":ROOT,"page_id":PAGE,
+        "idempotency_key":"merged-patch-denied-fixture","expected_row_revision":"0".repeat(64),
+        "properties":{"checkbox-id":{"type":"checkbox","value":true}}});
+    let denied = invoke(blocked, "knowledge_update_page", patch).await;
+    assert!(denied["error"].is_object(), "{denied}");
 }
