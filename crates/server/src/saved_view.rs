@@ -5,7 +5,10 @@ use notion_knowledge_core::{
     lifecycle::LifecycleScope,
 };
 use notion_knowledge_mcp::view::{Continuation, Request, SavedViewQuery};
-use notion_knowledge_notion::{NotionClient, views::normalize_view_id};
+use notion_knowledge_notion::{
+    NotionClient,
+    views::{ViewProjection, normalize_view_id},
+};
 use ring::hmac;
 use serde_json::{Value, json};
 
@@ -126,6 +129,10 @@ impl SavedViewQuery for Runtime {
                     &view,
                     input.page_size.unwrap_or(10),
                     continuation,
+                    ViewProjection {
+                        fields: input.fields.as_deref(),
+                        row_revision: input.include_row_revision.unwrap_or(false),
+                    },
                 ),
             )
             .await

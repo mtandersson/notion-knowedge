@@ -59,11 +59,10 @@ fn option(value: &Value) -> Option<Value> {
 
 /// Only intrinsic values of the authorized row. Notion's inline relation,
 /// rollup and media payloads can refer to resources outside this scope.
-fn project_property(property: &Value) -> Option<Value> {
-    let id = property["id"].as_str()?;
+fn project_value(property: &Value) -> Option<Value> {
     let kind = property["type"].as_str()?;
     let value = property.get(kind)?;
-    let projected = match kind {
+    Some(match kind {
         "title" | "rich_text" => plain_text(value)?,
         "select" | "status" => {
             if value.is_null() {
@@ -80,7 +79,14 @@ fn project_property(property: &Value) -> Option<Value> {
                 .collect::<Option<_>>()?,
         ),
         "date" if value.is_object() => {
-            json!({"start":value["start"].as_str()?, "end":value["end"].as_str(), "time_zone":value["time_zone"].as_str()})
+            let mut date = Map::new();
+            date.insert("start".into(), json!(value["start"].as_str()?));
+            for key in ["end", "time_zone"] {
+                if let Some(text) = value[key].as_str() {
+                    date.insert(key.into(), json!(text));
+                }
+            }
+            Value::Object(date)
         }
         "date" if value.is_null() => Value::Null,
         "number" if value.is_number() || value.is_null() => value.clone(),
@@ -89,8 +95,104 @@ fn project_property(property: &Value) -> Option<Value> {
         "url" | "email" | "phone_number" if value.is_string() || value.is_null() => value.clone(),
         "created_time" | "last_edited_time" if value.is_string() => value.clone(),
         _ => return None,
-    };
-    Some(json!({"id":id, "type":kind, (kind):projected}))
+    })
+}
+
+const COLUMN_TYPES: [&str; 13] = [
+    "title",
+    "rich_text",
+    "select",
+    "status",
+    "multi_select",
+    "date",
+    "number",
+    "checkbox",
+    "url",
+    "email",
+    "phone_number",
+    "created_time",
+    "last_edited_time",
+];
+
+/// Which columns and optional per-row fields a view response carries.
+#[derive(Clone, Copy, Default)]
+pub struct ViewProjection<'a> {
+    pub fields: Option<&'a [String]>,
+    pub row_revision: bool,
+}
+
+struct Column {
+    id: String,
+    name: String,
+    kind: String,
+}
+
+/// Columns come from the data-source schema, so they are the same for every
+/// row and for an empty result. The title column is always first.
+fn columns(
+    schema: &Value,
+    fields: Option<&[String]>,
+) -> Result<(Vec<Column>, Vec<String>), BackendError> {
+    let properties = schema["properties"]
+        .as_object()
+        .ok_or_else(|| failure(Kind::Internal))?;
+    let mut all = Vec::with_capacity(properties.len());
+    for (name, property) in properties {
+        all.push(Column {
+            id: property["id"]
+                .as_str()
+                .ok_or_else(|| failure(Kind::Internal))?
+                .to_owned(),
+            name: name.clone(),
+            kind: property["type"]
+                .as_str()
+                .ok_or_else(|| failure(Kind::Internal))?
+                .to_owned(),
+        });
+    }
+    let mut titles = all.iter().filter(|column| column.kind == "title");
+    let title = titles.next().ok_or_else(|| failure(Kind::Internal))?;
+    if titles.next().is_some() {
+        return Err(failure(Kind::Internal));
+    }
+    let title_id = title.id.clone();
+    let mut selected: Vec<usize> = Vec::new();
+    let mut omitted = Vec::new();
+    match fields {
+        None => selected.extend(0..all.len()),
+        Some(fields) => {
+            for field in fields {
+                let index = all
+                    .iter()
+                    .position(|column| &column.id == field)
+                    .or_else(|| all.iter().position(|column| &column.name == field))
+                    .ok_or_else(|| failure(Kind::InvalidInput))?;
+                if !selected.contains(&index) {
+                    selected.push(index);
+                }
+            }
+        }
+    }
+    let mut kept = Vec::new();
+    for index in selected {
+        let column = &all[index];
+        if COLUMN_TYPES.contains(&column.kind.as_str()) {
+            kept.push(index);
+        } else {
+            omitted.push(column.name.clone());
+        }
+    }
+    kept.sort_by_key(|&index| all[index].id != title_id);
+    if kept.first().is_none_or(|&index| all[index].id != title_id) {
+        kept.insert(0, all.iter().position(|c| c.id == title_id).unwrap());
+    }
+    let mut taken: Vec<Option<Column>> = all.into_iter().map(Some).collect();
+    Ok((
+        kept.into_iter()
+            .filter_map(|index| taken[index].take())
+            .collect(),
+        omitted,
+    ))
 }
 
 /// Fingerprint the source revision and stable property values. Notion can give
@@ -134,6 +236,7 @@ pub(crate) fn row_revision(row: &Value) -> Option<String> {
 
 struct View {
     value: Value,
+    schema: Value,
     database: String,
     source: String,
     source_database: String,
@@ -280,12 +383,13 @@ impl NotionClient {
         }
         let database = id(&value["parent"]["database_id"])?;
         let source = id(&value["data_source_id"])?;
-        let (_, source_database) = self.scoped_data_source(&source, scope).await?;
+        let (schema, source_database) = self.scoped_data_source(&source, scope).await?;
         if source_database != database {
             self.verify_database_scope(&database, true, scope).await?;
         }
         Ok(View {
             value,
+            schema,
             database,
             source,
             source_database,
@@ -298,6 +402,7 @@ impl NotionClient {
         reference: &str,
         page_size: usize,
         continuation: Option<(&str, &str, &str)>,
+        projection: ViewProjection<'_>,
     ) -> Result<Value, BackendError> {
         if !(1..=25).contains(&page_size) {
             return Err(failure(Kind::InvalidInput));
@@ -305,6 +410,7 @@ impl NotionClient {
         let view_id = normalize_view_id(reference).ok_or_else(|| failure(Kind::InvalidInput))?;
         let view = self.verified_view(&view_id, scope).await?;
         let revision = view.fingerprint()?;
+        let (columns, omitted_columns) = columns(&view.schema, projection.fields)?;
         let path = format!("views/{view_id}/queries");
         let (response, query_id) = match continuation {
             Some((query, cursor, expected_revision)) => {
@@ -399,27 +505,36 @@ impl NotionClient {
             {
                 return Err(failure(Kind::PermissionDenied));
             }
-            let revision = row["last_edited_time"]
+            row["last_edited_time"]
                 .as_str()
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| failure(Kind::Internal))?;
             let properties = row["properties"]
                 .as_object()
                 .ok_or_else(|| failure(Kind::Internal))?;
-            let mut projected = Map::new();
+            let mut values = Vec::with_capacity(columns.len());
             let mut omitted = Vec::new();
-            for (name, property) in properties {
-                if let Some(value) = project_property(property) {
-                    projected.insert(name.clone(), value);
-                } else {
-                    omitted.push(name);
+            for column in &columns {
+                let value = properties
+                    .get(&column.name)
+                    .filter(|p| p["id"] == column.id && p["type"] == column.kind)
+                    .and_then(project_value);
+                match value {
+                    Some(value) => values.push(value),
+                    None => {
+                        values.push(Value::Null);
+                        omitted.push(column.id.clone());
+                    }
                 }
             }
-            let fingerprint = row_revision(&row);
-            let row = json!({
-                "page_id":row_id, "last_edited_time":revision, "row_revision":fingerprint, "properties":projected,
-                "omitted_properties":omitted
-            });
+            let mut entry = json!({"page_id":row_id, "values":values});
+            if projection.row_revision {
+                entry["row_revision"] = json!(row_revision(&row));
+            }
+            if !omitted.is_empty() {
+                entry["omitted"] = json!(omitted);
+            }
+            let row = entry;
             bytes += row.to_string().len();
             if bytes > MAX_VIEW_ROW_PAYLOAD_BYTES {
                 return Err(BackendError {
@@ -443,9 +558,18 @@ impl NotionClient {
         } else {
             "more"
         };
-        Ok(json!({
+        let header: Vec<Value> = columns
+            .iter()
+            .map(|column| json!({"id":column.id, "name":column.name, "type":column.kind}))
+            .collect();
+        let mut output = json!({
             "view_id":view_id, "data_source_id":current.source, "filter":current.value["filter"],
-            "sorts":current.value["sorts"], "quick_filters":current.value["quick_filters"], "status":status, "rows":rows, "continuation":next
-        }))
+            "sorts":current.value["sorts"], "quick_filters":current.value["quick_filters"], "status":status,
+            "columns":header, "rows":rows, "continuation":next
+        });
+        if !omitted_columns.is_empty() {
+            output["omitted_columns"] = json!(omitted_columns);
+        }
+        Ok(output)
     }
 }

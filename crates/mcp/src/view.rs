@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 
 pub const TOOL: &str = "knowledge_query_view";
 pub const MAX_PAGE_SIZE: usize = 25;
+pub const MAX_FIELDS: usize = 25;
 pub const MAX_CURSOR_BYTES: usize = 256;
 
 #[derive(Deserialize)]
@@ -15,6 +16,9 @@ pub const MAX_CURSOR_BYTES: usize = 256;
 pub struct Request {
     pub view_id: String,
     pub page_size: Option<usize>,
+    /// Column names or property IDs to return. The title is always included.
+    pub fields: Option<Vec<String>>,
+    pub include_row_revision: Option<bool>,
     pub continuation: Option<Continuation>,
 }
 
@@ -34,6 +38,12 @@ impl Request {
             && self
                 .page_size
                 .is_none_or(|size| (1..=MAX_PAGE_SIZE).contains(&size))
+            && self.fields.as_ref().is_none_or(|fields| {
+                (1..=MAX_FIELDS).contains(&fields.len())
+                    && fields
+                        .iter()
+                        .all(|field| !field.is_empty() && field.len() <= 128)
+            })
             && self.continuation.as_ref().is_none_or(|next| {
                 !next.query_id.is_empty()
                     && next.query_id.len() <= 36
@@ -56,10 +66,14 @@ pub trait SavedViewQuery: Send + Sync {
 pub(crate) fn tool() -> Tool {
     Tool::new(
         TOOL,
-        "Read ordered rows from a saved Notion view using its current filters and sorts. Pass the returned continuation unchanged with the same view ID for subsequent pages.",
+        "Read ordered rows from a saved Notion view using its current filters and sorts. Rows hold values positionally, matching the returned columns. Choose columns with fields; set include_row_revision only before updating rows. Pass the returned continuation unchanged with the same view ID for subsequent pages.",
         json!({"type":"object","additionalProperties":false,"required":["view_id"],"properties":{
             "view_id":{"type":"string","minLength":32,"maxLength":43,"description":"View UUID or view:// followed by the UUID."},
             "page_size":{"type":"integer","minimum":1,"maximum":MAX_PAGE_SIZE,"default":10},
+            "fields":{"type":"array","minItems":1,"maxItems":MAX_FIELDS,"uniqueItems":true,
+                "items":{"type":"string","minLength":1,"maxLength":128},
+                "description":"Column names or property IDs. The title column is always included. Default: every readable column."},
+            "include_row_revision":{"type":"boolean","default":false,"description":"Add row_revision to each row for knowledge_update_row."},
             "continuation":{"type":"object","additionalProperties":false,"required":["query_id","cursor","view_revision","signature"],"properties":{
                 "query_id":{"type":"string","minLength":32,"maxLength":36},
                 "cursor":{"type":"string","minLength":1,"maxLength":MAX_CURSOR_BYTES},
