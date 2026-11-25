@@ -4888,7 +4888,13 @@ async fn expired_claim_cannot_write_inventory_or_drift_metadata() {
 async fn a_page_deadline_is_counted_as_a_timeout_not_only_a_failure() {
     use std::time::Duration;
     let http = start_notion().await;
-    let f = Fixture::new(&http).await;
+    // Exercise the full reconciliation consumer with exactly one eligible page.
+    // A short injected preparation deadline must not also constrain unrelated
+    // real Lance/SQLite commits under parallel native CI load.
+    let mut scope = authority();
+    scope.exclusions.page_ids.insert(PAGE.into());
+    scope.exclusions.page_ids.insert(OTHER.into());
+    let f = Fixture::with_scope(&http, scope).await;
     let runtime = f.open(&http, OpenMode::ExistingWrite).await;
     let state = runtime.coordinator.state().clone();
     let now = notion_knowledge_server::webhook_worker::runtime::now_ms() / 1000;
@@ -4904,27 +4910,29 @@ async fn a_page_deadline_is_counted_as_a_timeout_not_only_a_failure() {
             Box::pin(async move { pause.hold().await })
         }),
     );
-    let release = async {
+    // Never release the pause: the preparation must be cancelled by its
+    // own deadline, not race a wall-clock sleep in the fixture.
+    let started = async {
         tokio::time::timeout(Duration::from_secs(10), observed.started.notified())
             .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        observed.proceed.notify_one();
+            .expect("the eligible page reaches the injected preparation pause");
     };
     let (totals, ()) = tokio::join!(
         async {
             notion_knowledge_core::logging::with_sync_progress(runtime.sync_from_walk(
-                &PageDeadline { timeout_seconds: 1 },
+                &PageDeadline { timeout_seconds: 5 },
                 &mut lease,
                 SyncMode::Full,
             ))
             .await
             .unwrap()
         },
-        release
+        started
     );
     assert_eq!((totals.failed, totals.timed_out), (1, 1), "{totals:?}");
     assert_eq!(totals.permanent, 0);
+    assert_eq!((totals.indexed, totals.unchanged), (0, 0));
+    assert!(runtime.coordinator.owned_page_ids().unwrap().is_empty());
 }
 
 #[tokio::test]
