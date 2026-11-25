@@ -194,7 +194,9 @@ async fn linked_view_uses_notion_order_and_paginates_with_typed_rows() {
     assert_eq!(output["rows"][1]["page_id"], SECOND);
     assert_eq!(
         output["omitted_columns"],
-        json!(["Attachment", "Private relation", "Related summary"])
+        json!([{"id":"file","name":"Attachment","type":"files"},
+            {"id":"rel","name":"Private relation","type":"relation"},
+            {"id":"roll","name":"Related summary","type":"rollup"}])
     );
     assert_eq!(
         output["columns"],
@@ -339,7 +341,10 @@ async fn selected_columns_and_explicit_row_revision_shrink_the_response() {
         json!([{"id":"title","name":"Name","type":"title"},{"id":"status","name":"Status","type":"status"}]),
         "{result}"
     );
-    assert_eq!(output["omitted_columns"], json!(["Attachment"]));
+    assert_eq!(
+        output["omitted_columns"],
+        json!([{"id":"file","name":"Attachment","type":"files"}])
+    );
     assert_eq!(
         output["rows"][0]["values"],
         json!([FIRST, {"id":"option","name":"Done"}])

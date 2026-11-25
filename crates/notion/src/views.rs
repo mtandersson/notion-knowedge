@@ -132,7 +132,7 @@ struct Column {
 fn columns(
     schema: &Value,
     fields: Option<&[String]>,
-) -> Result<(Vec<Column>, Vec<String>), BackendError> {
+) -> Result<(Vec<Column>, Vec<Value>), BackendError> {
     let properties = schema["properties"]
         .as_object()
         .ok_or_else(|| failure(Kind::Internal))?;
@@ -162,10 +162,13 @@ fn columns(
         None => selected.extend(0..all.len()),
         Some(fields) => {
             for field in fields {
-                let index = all
-                    .iter()
-                    .position(|column| &column.id == field)
-                    .or_else(|| all.iter().position(|column| &column.name == field))
+                let by_id = all.iter().position(|column| &column.id == field);
+                let by_name = all.iter().position(|column| &column.name == field);
+                if by_id.is_some() && by_name.is_some() && by_id != by_name {
+                    return Err(failure(Kind::InvalidInput));
+                }
+                let index = by_id
+                    .or(by_name)
                     .ok_or_else(|| failure(Kind::InvalidInput))?;
                 if !selected.contains(&index) {
                     selected.push(index);
@@ -179,7 +182,7 @@ fn columns(
         if COLUMN_TYPES.contains(&column.kind.as_str()) {
             kept.push(index);
         } else {
-            omitted.push(column.name.clone());
+            omitted.push(json!({"id":column.id, "name":column.name, "type":column.kind}));
         }
     }
     kept.sort_by_key(|&index| all[index].id != title_id);
@@ -481,7 +484,11 @@ impl NotionClient {
         // revalidate its active physical source before exposing its properties.
         let mut ids = HashSet::new();
         let mut rows = Vec::with_capacity(entries.len());
-        let mut bytes = 0;
+        let header: Vec<Value> = columns
+            .iter()
+            .map(|column| json!({"id":column.id, "name":column.name, "type":column.kind}))
+            .collect();
+        let mut bytes = json!([header, omitted_columns]).to_string().len();
         for entry in entries {
             if entry["object"] != "page" {
                 return Err(failure(Kind::UnsupportedContent));
@@ -558,10 +565,6 @@ impl NotionClient {
         } else {
             "more"
         };
-        let header: Vec<Value> = columns
-            .iter()
-            .map(|column| json!({"id":column.id, "name":column.name, "type":column.kind}))
-            .collect();
         let mut output = json!({
             "view_id":view_id, "data_source_id":current.source, "filter":current.value["filter"],
             "sorts":current.value["sorts"], "quick_filters":current.value["quick_filters"], "status":status,

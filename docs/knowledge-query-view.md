@@ -17,7 +17,7 @@ both be in scope. A linked view does not grant access to an outside source.
 
 `fields` lists column names or property IDs. The title column is always
 included. Without `fields` every readable column is returned. An unknown
-field is `invalid_input`. Set `include_row_revision` only when the rows will
+or ambiguous field (a name that is another column's ID) is `invalid_input`. Set `include_row_revision` only when the rows will
 be updated.
 
 Use the view UUID, with or without the `view://` prefix. Pass the returned
@@ -34,10 +34,11 @@ also has an opaque `row_revision` to pass to
 response truncates an editable property.
 Notion establishes membership and order when the first page is requested.
 Property values can subsequently change as the source is edited. Title and rich text are returned as plain strings when they contain only text
-runs. Dates are `{start, end?, time_zone?}`. Status and select values are
+runs. Dates are `{start, end?, time_zone?}`, omitting null parts. Rows no longer
+carry `last_edited_time`; use `row_revision` to detect changes. Status and select values are
 `{id, name}`, so their option IDs can be used in writes. Checkboxes, numbers, URLs, email,
 phone numbers and timestamps are also supported. `omitted_columns` lists
-the names of columns that are never projected, including files, relations,
+the `id`, `name` and `type` of columns that are never projected, including files, relations,
 rollups and formulas. A row's `omitted` lists column IDs whose value could not
 be safely projected in that row, such as rich text with mentions; its value is
 null. Neither ever includes the value.
