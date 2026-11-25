@@ -98,25 +98,30 @@ fn project_property(property: &Value) -> Option<Value> {
 /// relation/rollup properties vary independently of a patchable row.
 pub(crate) fn row_revision(row: &Value) -> Option<String> {
     let properties = row["properties"].as_object()?;
-    let fields: Map<String, Value> = properties
-        .iter()
-        .filter(|(_, property)| {
-            matches!(
-                property["type"].as_str(),
-                Some(
-                    "title"
-                        | "rich_text"
-                        | "status"
-                        | "select"
-                        | "multi_select"
-                        | "date"
-                        | "url"
-                        | "number"
-                        | "checkbox"
-                )
+    let selected = properties.iter().filter(|(_, property)| {
+        matches!(
+            property["type"].as_str(),
+            Some(
+                "title"
+                    | "rich_text"
+                    | "status"
+                    | "select"
+                    | "multi_select"
+                    | "date"
+                    | "url"
+                    | "number"
+                    | "checkbox"
             )
-        })
-        .map(|(name, property)| (name.clone(), property.clone()))
+        )
+    });
+    if selected
+        .clone()
+        .any(|(_, property)| pages::truncated(property))
+    {
+        return None;
+    }
+    let fields: Map<String, Value> = selected
+        .map(|(name, field)| (name.clone(), field.clone()))
         .collect();
     let time = row["last_edited_time"].as_str()?;
     chrono::DateTime::parse_from_rfc3339(time).ok()?;
@@ -410,7 +415,7 @@ impl NotionClient {
                     omitted.push(name);
                 }
             }
-            let fingerprint = row_revision(&row).ok_or_else(|| failure(Kind::Internal))?;
+            let fingerprint = row_revision(&row);
             let row = json!({
                 "page_id":row_id, "last_edited_time":revision, "row_revision":fingerprint, "properties":projected,
                 "omitted_properties":omitted

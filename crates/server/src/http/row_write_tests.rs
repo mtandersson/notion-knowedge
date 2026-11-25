@@ -423,7 +423,7 @@ fn view_steps() -> Vec<(u16, Value)> {
     steps
 }
 
-async fn revision(stores: &Stores) -> String {
+async fn view_row(stores: &Stores, page: Value) -> Value {
     let mut script = view_steps();
     script.extend([
         (
@@ -431,14 +431,18 @@ async fn revision(stores: &Stores) -> String {
             json!({"object":"view_query","view_id":VIEW,"id":QUERY,
             "results":[{"object":"page","id":ROW}],"has_more":false,"next_cursor":null}),
         ),
-        (200, row()),
+        (200, page),
     ]);
     script.extend(view_steps());
     let request = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
         "name":"knowledge_query_view","arguments":{"view_id":VIEW}
     }});
     let (snapshot, _) = stores.invoke(script, request, false).await;
-    let token = snapshot["result"]["structuredContent"]["rows"][0]["row_revision"]
+    snapshot["result"]["structuredContent"]["rows"][0].clone()
+}
+
+async fn revision(stores: &Stores) -> String {
+    let token = view_row(stores, row()).await["row_revision"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -473,7 +477,11 @@ fn updated_row() -> Value {
 fn patch_steps(readback: Value) -> Vec<(u16, Value)> {
     let mut script = vec![(200, row())];
     script.extend(schema());
-    script.extend([(200, row()), (200, updated_row()), (200, readback)]);
+    script.extend([
+        (200, row()),
+        (200, json!({"object":"page","id":ROW})),
+        (200, readback),
+    ]);
     script
 }
 
@@ -623,4 +631,29 @@ async fn concurrent_row_updates_with_distinct_keys_only_patch_once() {
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn view_and_update_withhold_revision_when_notion_truncates_rich_text() {
+    let stores = Stores::new();
+    let known_revision = revision(&stores).await;
+    let mut truncated = row();
+    truncated["properties"]["Note"]["rich_text"] = json!(
+        (0..25)
+            .map(|_| json!({
+                "type":"mention","mention":{"type":"page","page":{"id":RELATION_TARGET}},
+                "plain_text":"Linked row"
+            }))
+            .collect::<Vec<_>>()
+    );
+    let row = view_row(&stores, truncated.clone()).await;
+    assert_eq!(row["page_id"], ROW);
+    assert!(row["row_revision"].is_null());
+    let mut script = vec![(200, truncated)];
+    script.extend(schema());
+    let (denied, upstream) = stores
+        .invoke(script, update(&known_revision, KEY), false)
+        .await;
+    assert_eq!(status(&denied), "unavailable");
+    assert!(upstream.iter().all(|entry| entry.0.starts_with("GET ")));
 }

@@ -582,7 +582,13 @@ impl RowWrite for NotionClient {
                                 )
                                 .await
                                 .map_err(|_| Error::OutcomeUnknown)?;
-                            if !active_row(&accepted, &id.0, &data_source) {
+                            // Notion can acknowledge with only object and ID. Require
+                            // all other facts from the independent full page read.
+                            let partial = accepted.as_object().is_some_and(|page| page.len() == 2)
+                                && accepted["object"] == "page"
+                                && accepted["id"].as_str().and_then(pages::uuid).as_deref()
+                                    == Some(id.0.as_str());
+                            if !partial && !active_row(&accepted, &id.0, &data_source) {
                                 return Err(Error::OutcomeUnknown.into());
                             }
                             let readback = self
@@ -590,7 +596,7 @@ impl RowWrite for NotionClient {
                                 .await
                                 .map_err(|_| Error::OutcomeUnknown)?;
                             if !active_row(&readback, &id.0, &data_source)
-                                || readback["url"] != accepted["url"]
+                                || (!partial && readback["url"] != accepted["url"])
                                 || !matches_properties(&readback, &prepared.properties)
                             {
                                 return Err(Error::OutcomeUnknown.into());
