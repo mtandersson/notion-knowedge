@@ -21,6 +21,8 @@ after 15 minutes. If it expires or the view changes, start a new query.
 The result includes the view and data-source IDs, saved filter, quick filters and sorts, and
 rows in Notion's result order. Each row has a stable page ID, its current
 revision, and typed Notion property values read at the time of the call.
+Pass the opaque `row_revision` to [update the row](knowledge-update-row.md).
+It is null when the upstream response truncates an editable property.
 Notion establishes membership and order when the first page is requested.
 Property values can subsequently change as the source is edited. Each
 returned property retains its Notion ID and type. Title and rich text are

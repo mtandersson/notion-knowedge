@@ -15,7 +15,7 @@ const PAGINATED: &str = "__nk_paginated";
 /// Items read for one truncated property before the page is unsupported.
 const MAX_PROPERTY_ITEMS: usize = 10_000;
 /// Whether `value` (one page property) is cut at Notion's inline limit.
-fn truncated(value: &Value) -> bool {
+pub(crate) fn truncated(value: &Value) -> bool {
     match value["type"].as_str() {
         Some("relation") => value["has_more"] == true,
         Some("people") => value["people"].as_array().is_some_and(|a| a.len() >= 25),

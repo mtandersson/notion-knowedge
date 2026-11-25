@@ -7,6 +7,7 @@ use crate::{
     create::CreateError,
     idempotency::WriteIdempotencyStore,
     lifecycle::LifecycleScope,
+    revision::RevisionMetadata,
     write_refresh::{MutationRefreshQueue, WriteCompletion},
 };
 
@@ -51,7 +52,28 @@ pub struct CreateRowRequest {
     pub idempotency_key: String,
 }
 
-pub trait RowCreate: Send + Sync {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateRowRequest {
+    pub root_page_id: String,
+    pub page_id: String,
+    pub expected_row_revision: String,
+    pub properties: PropertyPatch,
+    pub idempotency_key: String,
+}
+
+pub enum UpdateRowError {
+    Write(CreateError),
+    RevisionConflict(RevisionMetadata),
+}
+
+impl From<CreateError> for UpdateRowError {
+    fn from(error: CreateError) -> Self {
+        Self::Write(error)
+    }
+}
+
+pub trait RowWrite: Send + Sync {
     fn create_row<'a>(
         &'a self,
         request: CreateRowRequest,
@@ -59,4 +81,11 @@ pub trait RowCreate: Send + Sync {
         ledger: &'a dyn WriteIdempotencyStore,
         queue: &'a dyn MutationRefreshQueue,
     ) -> Pin<Box<dyn Future<Output = Result<WriteCompletion, CreateError>> + Send + 'a>>;
+    fn update_row<'a>(
+        &'a self,
+        request: UpdateRowRequest,
+        scope: &'a LifecycleScope,
+        ledger: &'a dyn WriteIdempotencyStore,
+        queue: &'a dyn MutationRefreshQueue,
+    ) -> Pin<Box<dyn Future<Output = Result<WriteCompletion, UpdateRowError>> + Send + 'a>>;
 }

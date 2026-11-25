@@ -192,7 +192,7 @@ pub(super) async fn notion(
                     .to_ascii_lowercase()
                     .contains("authorization: bearer fixture-secret")
             );
-            if request.0.starts_with("PATCH") {
+            if request.0.starts_with("PATCH") && !request.0.starts_with("PATCH /v1/pages/") {
                 assert!(
                     request
                         .0

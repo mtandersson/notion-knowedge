@@ -21,7 +21,7 @@ pub(crate) fn attach_runtime(
         notion_knowledge_core::audit::AuditActor::Automation,
     )
     .map_err(|_| "integration mutation scope unavailable")?
-    .with_row_create(source);
+    .with_row_writer(source);
     Ok(handler.and_mutations(std::sync::Arc::new(runtime)))
 }
 
