@@ -76,8 +76,10 @@ The default endpoint is `http://127.0.0.1:3000/mcp`. `NK_HTTP_HOST` and
 discovery and calls, stateful sessions, SSE responses, and session deletion.
 Protocol failures return structured JSON-RPC errors. SIGINT/SIGTERM stop HTTP
 admission and drain workers/owned commits under the configurable
-[shutdown deadline](docs/graceful-shutdown.md). Both transports share the [semantic search contract](docs/knowledge-search.md);
-valid search calls in the default bootstrap return an explicit retrieval-unavailable tool error. The isolated [semantic MCP spike](docs/semantic-mcp-spike.md) explicitly configures real local semantic retrieval through this same handler and transport wiring.
+[shutdown deadline](docs/graceful-shutdown.md). Both transports share the [semantic search contract](docs/knowledge-search.md).
+Valid search calls in the default bootstrap return an explicit retrieval-unavailable tool error. The isolated [semantic MCP spike](docs/semantic-mcp-spike.md) explicitly configures real local semantic retrieval through this same handler and transport wiring.
+With a configured integration and root scope, trusted transports also expose
+[`knowledge_query_view`](docs/knowledge-query-view.md) for saved Notion views.
 Calls to unknown tools return protocol errors.
 
 ### Protected local HTTP and private ChatGPT tunnel

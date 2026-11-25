@@ -22,6 +22,7 @@ pub mod webhook_recovery;
 
 /// Trusted Notion scope composition shared by HTTP and stdio.
 pub mod root_scope;
+mod saved_view;
 
 pub mod webhook_worker;
 

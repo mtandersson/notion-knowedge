@@ -46,7 +46,7 @@ pub(crate) fn drop_truncated(value: &mut Value) {
     }
 }
 /// Percent-encodes an opaque cursor for a query string.
-fn query_value(input: &str) -> String {
+pub(crate) fn query_value(input: &str) -> String {
     input
         .bytes()
         .map(|b| {
