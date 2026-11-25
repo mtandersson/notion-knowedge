@@ -31,8 +31,8 @@ revision before the PATCH. The revision includes the source timestamp and
 stable editable properties, so a changed property can be detected even when
 the timestamp is unchanged. If Notion truncates one of those properties, the
 view returns a null revision and the guarded update reports unavailable.
-Concurrent changes through the same installed
-service to the same page are serialized. Notion documents an unconditional
+The connector serializes active requests to edit the same page. Notion
+documents an unconditional
 [Update page](https://developers.notion.com/reference/patch-page.md) endpoint,
 so an edit from elsewhere can still occur between the last read and the
 PATCH. The connector verifies the requested values after the PATCH.
@@ -41,7 +41,8 @@ PATCH. The connector verifies the requested values after the PATCH.
   change against its new revision.
 - Keep the same key and inputs to replay the verified result after a retry.
 - On `outcome_unknown`, inspect the row in Notion before attempting another
-  write. The connector records the unknown outcome durably and does not
-  repeat the PATCH for that key.
+  write. A timed-out or cancelled PATCH can finish at Notion after the
+  connector stops waiting. The connector records the unknown outcome
+  durably and does not repeat the PATCH for that key.
 
 The result reports verification, audit, and local refresh independently.
