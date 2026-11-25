@@ -26,7 +26,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 /// Short field description; the full guidance is returned when a root is rejected.
-pub(crate) const ROOT_FIELD: &str = "Root page UUID: sources[].provenance.root_page_id from knowledge_get on an indexed page under it.";
+pub(crate) const ROOT_FIELD: &str = "Root page UUID (not the destination): sources[].provenance.root_page_id from knowledge_get on an indexed page under it.";
 pub(crate) const ROOT_GUIDANCE: &str = "Use sources[].provenance.root_page_id from knowledge_get on an indexed page under the intended root. Use the destination page for that lookup when it is indexed. Supply the destination separately as parent_page_id for create or page_id for append or section updates.";
 
 pub trait MutationSource: NotionRead + NotionWrite + NotionSectionWrite {}
@@ -550,7 +550,7 @@ fn common_output() -> Arc<serde_json::Map<String, Value>> {
                 "status":{"enum":["queued","running","completed","failed","unavailable","not_attempted"]},
                 "refresh_id":{"type":"string"}
             }},
-            "audit":{"type":"object","required":["status"],"properties":{"status":{"type":"string"}}}
+            "audit":{"type":"object","required":["status"],"properties":{"status":{"enum":["recorded","unavailable"]}}}
         }
     }).as_object().unwrap().clone())
 }
