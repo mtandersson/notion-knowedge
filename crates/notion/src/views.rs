@@ -113,7 +113,8 @@ impl View {
             self.source_database,
             value["last_edited_time"],
             value["filter"],
-            value["sorts"]
+            value["sorts"],
+            value["quick_filters"]
         ]);
         Ok(format!(
             "{:x}",
@@ -394,7 +395,7 @@ impl NotionClient {
         };
         Ok(json!({
             "view_id":view_id, "data_source_id":current.source, "filter":current.value["filter"],
-            "sorts":current.value["sorts"], "status":status, "rows":rows, "continuation":next
+            "sorts":current.value["sorts"], "quick_filters":current.value["quick_filters"], "status":status, "rows":rows, "continuation":next
         }))
     }
 }

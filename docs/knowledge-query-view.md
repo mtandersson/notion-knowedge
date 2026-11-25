@@ -18,7 +18,7 @@ Use the view UUID, with or without the `view://` prefix. Pass the returned
 page. Page size can be 1–25 and defaults to 10. Notion expires the query cache
 after 15 minutes. If it expires or the view changes, start a new query.
 
-The result includes the view and data-source IDs, saved filter and sorts, and
+The result includes the view and data-source IDs, saved filter, quick filters and sorts, and
 rows in Notion's result order. Each row has a stable page ID, its current
 revision, and typed Notion property values read at the time of the call.
 Notion establishes membership and order when the first page is requested.

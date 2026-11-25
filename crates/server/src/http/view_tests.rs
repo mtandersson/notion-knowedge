@@ -54,7 +54,8 @@ fn scoped_view(linked: bool) -> Vec<(u16, Value)> {
             "type":"table","data_source_id":SOURCE,"last_edited_time":REVISION,
             "filter":{"and":[{"property":"Status","status":{"equals":"Done"}},
                 {"property":"Due","date":{"on_or_before":"2026-12-01"}}]},
-            "sorts":[{"property":"Due","direction":"descending"}]
+            "sorts":[{"property":"Due","direction":"descending"}],
+        "quick_filters":{"Category":{"select":{"equals":"Delivery"}}}
         }),
     )];
     route.extend([
@@ -178,6 +179,10 @@ async fn linked_view_uses_notion_order_and_paginates_with_typed_rows() {
         "2026-12-01"
     );
     assert_eq!(output["sorts"][0]["direction"], "descending");
+    assert_eq!(
+        output["quick_filters"]["Category"]["select"]["equals"],
+        "Delivery"
+    );
     assert_eq!(output["rows"][0]["page_id"], FIRST);
     assert_eq!(output["rows"][1]["page_id"], SECOND);
     assert_eq!(
@@ -226,7 +231,7 @@ async fn linked_view_uses_notion_order_and_paginates_with_typed_rows() {
     assert!(log.is_empty());
 
     let mut changed = scoped_view(true);
-    changed[0].1["filter"] = json!({"property":"Status","status":{"equals":"Canceled"}});
+    changed[0].1["quick_filters"] = json!({"Category":{"select":{"equals":"Task"}}});
     let (stale, _) = call(
         changed,
         query(json!({"view_id":VIEW,"continuation":output["continuation"]})),
