@@ -162,10 +162,7 @@ impl MutationRuntime {
         // Caller choice can only narrow trusted roots, never add authority.
         let mut scope = self.scope.clone();
         scope.roots = vec![PageId(input.root().to_owned())];
-        let _page_guard = if matches!(
-            &input,
-            Input::UpdateRow(_) | Input::Append(_) | Input::Section(_)
-        ) {
+        let _page_guard = if matches!(&input, Input::UpdateRow(_)) {
             Some(self.page_lock(input.target())?.lock_owned().await)
         } else {
             None

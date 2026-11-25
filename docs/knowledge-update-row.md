@@ -31,7 +31,7 @@ revision before the PATCH. The revision includes the source timestamp and
 stable editable properties, so a changed property can be detected even when
 the timestamp is unchanged. If Notion truncates one of those properties, the
 view returns a null revision and the guarded update reports unavailable.
-The connector serializes active requests to edit the same page. Notion
+The connector serializes active property updates to the same row. Notion
 documents an unconditional
 [Update page](https://developers.notion.com/reference/patch-page.md) endpoint,
 so an edit from elsewhere can still occur between the last read and the
