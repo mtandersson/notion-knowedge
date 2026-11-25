@@ -116,15 +116,16 @@ pub(crate) fn attach_client(
         crate::inventory_membership::from_config(config)?,
         scope.clone(),
     )?;
+    if !trusted_transport(config, transport) {
+        return Ok(handler);
+    }
+    let handler = handler.and_saved_view_query(Arc::new(crate::saved_view::Runtime {
+        source: source.clone(),
+        scope: scope.clone(),
+    }))?;
     let Some(settings) = &config.file_ingestion else {
         return Ok(handler);
     };
-    // HTTP's existing middleware checks this bearer on every session request.
-    if matches!(transport, Transport::Http)
-        && (config.bearer_fallback.is_none() || !config.http_bind.ip().is_loopback())
-    {
-        return Ok(handler);
-    }
     let service = crate::file_ingestion::Runtime::new(config, settings, source)?;
     handler.and_file_ingestion(Arc::new(service))
 }

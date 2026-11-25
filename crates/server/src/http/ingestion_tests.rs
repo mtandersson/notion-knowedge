@@ -173,7 +173,9 @@ async fn source_many(
     });
     (policy, count, handle, paths)
 }
-async fn notion(steps: Vec<(u16, Value)>) -> (NotionClient, Requests, tokio::task::JoinHandle<()>) {
+pub(super) async fn notion(
+    steps: Vec<(u16, Value)>,
+) -> (NotionClient, Requests, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut client = NotionClient::integration("fixture-secret").unwrap();
     client = client.with_loopback_fixture(listener.local_addr().unwrap().port());
@@ -520,7 +522,10 @@ async fn installed_authenticated_http_attaches_and_rejects_unauthenticated_reque
         notion.await.unwrap();
     }
 }
-async fn stdio_call(handler: notion_knowledge_mcp::KnowledgeServer, request: Value) -> Value {
+pub(super) async fn stdio_call(
+    handler: notion_knowledge_mcp::KnowledgeServer,
+    request: Value,
+) -> Value {
     let (server, client) = tokio::io::duplex(65536);
     let task = tokio::spawn(async move {
         handler
@@ -1067,7 +1072,7 @@ async fn start_http_fixture(
     (client, url, shutdown, task)
 }
 
-async fn http_call(
+pub(super) async fn http_call(
     config: Config,
     handler: notion_knowledge_mcp::KnowledgeServer,
     request: Value,

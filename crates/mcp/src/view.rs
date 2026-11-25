@@ -23,6 +23,7 @@ pub struct Request {
 pub struct Continuation {
     pub query_id: String,
     pub cursor: String,
+    pub view_revision: String,
 }
 
 impl Request {
@@ -38,6 +39,7 @@ impl Request {
                     && !next.cursor.is_empty()
                     && next.cursor.len() <= MAX_CURSOR_BYTES
                     && !next.cursor.chars().any(char::is_control)
+                    && (1..=64).contains(&next.view_revision.len())
             })
     }
 }
@@ -56,9 +58,10 @@ pub(crate) fn tool() -> Tool {
         json!({"type":"object","additionalProperties":false,"required":["view_id"],"properties":{
             "view_id":{"type":"string","minLength":32,"maxLength":43,"description":"View UUID or view:// followed by the UUID."},
             "page_size":{"type":"integer","minimum":1,"maximum":MAX_PAGE_SIZE,"default":10},
-            "continuation":{"type":"object","additionalProperties":false,"required":["query_id","cursor"],"properties":{
+            "continuation":{"type":"object","additionalProperties":false,"required":["query_id","cursor","view_revision"],"properties":{
                 "query_id":{"type":"string","minLength":32,"maxLength":36},
-                "cursor":{"type":"string","minLength":1,"maxLength":MAX_CURSOR_BYTES}
+                "cursor":{"type":"string","minLength":1,"maxLength":MAX_CURSOR_BYTES},
+                "view_revision":{"type":"string","minLength":1,"maxLength":64}
             }}
         }}).as_object().unwrap().clone(),
     )
@@ -78,7 +81,9 @@ pub(crate) fn failure(kind: BackendErrorKind) -> &'static str {
         BackendErrorKind::UnsupportedContent => {
             "unsupported_view: Notion cannot query this saved view"
         }
-        BackendErrorKind::Conflict => "view_query_expired: start again without a continuation",
+        BackendErrorKind::Conflict => {
+            "view_query_expired_or_changed: start again without a continuation"
+        }
         BackendErrorKind::RateLimited => "notion_rate_limited: retry the view query later",
         BackendErrorKind::Unavailable | BackendErrorKind::Internal => {
             "notion_unavailable: no authoritative view page was returned"

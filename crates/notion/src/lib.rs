@@ -20,6 +20,7 @@ pub mod scoped_create;
 pub use scoped_create::{ScopedPageCreateInput, ScopedPageCreated};
 
 pub mod pages;
+pub mod views;
 
 /// Scope discovery: one walk from the root through Markdown child tags.
 pub mod walk;

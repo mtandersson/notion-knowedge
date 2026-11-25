@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const PAGE_VERSION: &str = "2026-03-11";
 /// Marks a relation, people, title or rich-text value whose items were read in full through the
 /// property item endpoint. Never present in a Notion response key we keep.
-const PAGINATED: &str = "__nk_paginated";
+pub(crate) const PAGINATED: &str = "__nk_paginated";
 /// Items read for one truncated property before the page is unsupported.
 const MAX_PROPERTY_ITEMS: usize = 10_000;
 /// Whether `value` (one page property) is cut at Notion's inline limit.
@@ -46,7 +46,7 @@ pub(crate) fn drop_truncated(value: &mut Value) {
     }
 }
 /// Percent-encodes an opaque cursor for a query string.
-fn query_value(input: &str) -> String {
+pub(crate) fn query_value(input: &str) -> String {
     input
         .bytes()
         .map(|b| {
