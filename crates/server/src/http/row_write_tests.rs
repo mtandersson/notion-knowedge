@@ -925,3 +925,20 @@ async fn refused_row_update_reports_why_and_releases_the_key() {
     let (retried, _) = stores.invoke(script, update(&revision, KEY), false).await;
     assert_eq!(status(&retried), "verified", "{retried}");
 }
+
+#[tokio::test]
+async fn row_update_server_error_keeps_the_key_and_never_repeats_the_patch() {
+    let stores = Stores::new();
+    let revision = revision(&stores).await;
+    let mut script = vec![(200, row())];
+    script.extend(schema());
+    script.extend([(200, row()), (500, refusal_body("internal_server_error"))]);
+    let (unknown, log) = stores.invoke(script, update(&revision, KEY), false).await;
+    assert_eq!(status(&unknown), "outcome_unknown", "{unknown}");
+    assert_eq!(log.iter().filter(|e| e.0.starts_with("PATCH ")).count(), 1);
+    let mut script = vec![(200, row())];
+    script.extend(schema());
+    let (retry, log) = stores.invoke(script, update(&revision, KEY), false).await;
+    assert_eq!(status(&retry), "outcome_unknown", "{retry}");
+    assert!(log.iter().all(|e| !e.0.starts_with("PATCH ")));
+}

@@ -11,6 +11,9 @@ local index/operational-state compatibility. `TBD` is a **draft**, not a publish
 - Periodic cache-sync progress logs include `rss_kib` and `rss_peak_kib`.
 
 ### Fixed
+- Row creates and updates that Notion definitely refuses (400, 403, 404) now
+  report the reason and release the idempotency key instead of staying
+  `outcome_unknown` (#831, follows #826). The rejected or unknown stage is logged.
 - Long syncs no longer grow resident memory with pages processed: the server
   caps glibc malloc arenas at 2 at startup (#656). Set `MALLOC_ARENA_MAX` to
   override.
