@@ -125,7 +125,11 @@ async fn section_preflight(
 /// A read refusal during preflight is definite; anything else is transient.
 fn read_failure(error: &crate::backend::BackendError) -> SectionUpdateError {
     match WriteRejection::of(error) {
-        Some(rejection @ (WriteRejection::NotFound | WriteRejection::PermissionDenied)) => {
+        Some(
+            rejection @ (WriteRejection::NotFound
+            | WriteRejection::PermissionDenied
+            | WriteRejection::Unauthenticated),
+        ) => {
             // The caller releases the claim and records the actual outcome.
             SectionUpdateError::Rejected(rejection, ClaimRelease::Retained)
         }

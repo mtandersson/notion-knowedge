@@ -398,6 +398,9 @@ enum Effect {
 /// Fixed guidance for a refused write: no ids, titles or upstream text.
 fn rejection_message(rejection: WriteRejection, effect: Effect, release: ClaimRelease) -> String {
     let refusal = match (effect, rejection) {
+        (_, WriteRejection::Unauthenticated) => {
+            "Notion refused the integration's credentials. Nothing was changed; the operator must renew the Notion integration token."
+        }
         (Effect::Create, WriteRejection::ParentIsDatabase) => {
             "parent_page_id names a Notion database, not a page. Nothing was created. To add a row, call knowledge_create_page with the database's data_source_id and properties instead of parent_page_id."
         }
@@ -452,9 +455,12 @@ impl Failure {
                 WriteRejection::InvalidRequest | WriteRejection::ParentIsDatabase,
                 ..,
             ) => "invalid_input",
-            Self::Rejected(WriteRejection::NotFound | WriteRejection::PermissionDenied, ..) => {
-                "not_authorized"
-            }
+            Self::Rejected(
+                WriteRejection::NotFound
+                | WriteRejection::PermissionDenied
+                | WriteRejection::Unauthenticated,
+                ..,
+            ) => "not_authorized",
             Self::Denied | Self::RootNotConfigured => "not_authorized",
             Self::Conflict(_) => "revision_conflict",
             Self::Idempotency => "idempotency_conflict",
