@@ -41,7 +41,6 @@ fn request(operation: WriteOperation) -> ConfirmationRequest {
 fn all_write_operations_are_classified_conservatively() {
     for (name, operation, destructive) in [
         ("knowledge_create_page", WriteOperation::CreatePage, false),
-        ("knowledge_append", WriteOperation::Append, false),
         (
             "knowledge_update_section",
             WriteOperation::UpdateSection,

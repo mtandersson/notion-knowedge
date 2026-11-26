@@ -95,7 +95,7 @@ fn catalog_and_get_tool_match_for_read_write_and_destructive_previews() {
         .with_destructive_writes_enabled(true)
         .with_write_design_preview()
         .with_capability_policy(policy(
-            Some("read,knowledge_append,knowledge_archive_page"),
+            Some("read,knowledge_create_page,knowledge_archive_page"),
             Some("knowledge_get"),
         ));
     let names: Vec<_> = server
@@ -108,7 +108,7 @@ fn catalog_and_get_tool_match_for_read_write_and_destructive_previews() {
         [
             "knowledge_search",
             "knowledge_sync_status",
-            "knowledge_append",
+            "knowledge_create_page",
             "knowledge_archive_page",
         ]
     );
@@ -116,8 +116,8 @@ fn catalog_and_get_tool_match_for_read_write_and_destructive_previews() {
         "knowledge_get",
         "knowledge_upload_file",
         "knowledge_file_refresh",
-        "knowledge_create_page",
         "knowledge_update_section",
+        "knowledge_append",
         "unknown",
     ] {
         assert!(server.get_tool(operation).is_none(), "{operation}");
@@ -137,7 +137,8 @@ fn category_allowlist_never_bypasses_existing_destructive_mode() {
         .with_read_only(false)
         .with_write_design_preview()
         .with_capability_policy(policy(Some("write"), None));
-    assert!(server.get_tool("knowledge_append").is_some());
+    assert!(server.get_tool("knowledge_create_page").is_some());
+    assert!(server.get_tool("knowledge_append").is_none());
     assert!(server.get_tool("knowledge_archive_page").is_none());
     assert!(server.get_tool("knowledge_update_section").is_none());
 }

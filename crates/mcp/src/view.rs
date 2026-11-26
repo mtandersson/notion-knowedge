@@ -6,7 +6,9 @@ use rmcp::model::{Tool, ToolAnnotations};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-pub const TOOL: &str = "knowledge_query_view";
+/// Capability selector (policy only, not a tool name) for the saved-view mode
+/// of `knowledge_get`; also its tool-budget key.
+pub const SELECTOR: &str = "knowledge_query_view";
 pub const MAX_PAGE_SIZE: usize = 25;
 pub const MAX_FIELDS: usize = 25;
 pub const MAX_CURSOR_BYTES: usize = 256;
@@ -65,7 +67,7 @@ pub trait SavedViewQuery: Send + Sync {
 
 pub(crate) fn tool() -> Tool {
     Tool::new(
-        TOOL,
+        "knowledge_get",
         "Read ordered rows from a saved Notion view using its current filters and sorts. Rows hold values positionally, matching the returned columns. Choose columns with fields; set include_row_revision only before updating rows. Pass the returned continuation unchanged with the same view ID for subsequent pages.",
         json!({"type":"object","additionalProperties":false,"required":["view_id"],"properties":{
             "view_id":{"type":"string","minLength":32,"maxLength":43,"description":"View UUID or view:// followed by the UUID."},
@@ -73,7 +75,7 @@ pub(crate) fn tool() -> Tool {
             "fields":{"type":"array","minItems":1,"maxItems":MAX_FIELDS,"uniqueItems":true,
                 "items":{"type":"string","minLength":1,"maxLength":128},
                 "description":"Column names or property IDs. The title column is always included. Default: every readable column."},
-            "include_row_revision":{"type":"boolean","default":false,"description":"Add row_revision to each row for knowledge_update_row."},
+            "include_row_revision":{"type":"boolean","default":false,"description":"Add row_revision to each row for knowledge_update_page patch_properties."},
             "continuation":{"type":"object","additionalProperties":false,"required":["query_id","cursor","view_revision","signature"],"properties":{
                 "query_id":{"type":"string","minLength":32,"maxLength":36},
                 "cursor":{"type":"string","minLength":1,"maxLength":MAX_CURSOR_BYTES},

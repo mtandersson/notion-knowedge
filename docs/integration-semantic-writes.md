@@ -21,7 +21,7 @@ file audit, credential storage and the disposable index. Preserve these stores
 across cache rebuilds. A service restart or cache loss never authorizes replay
 of an indeterminate source effect.
 
-The server installs `knowledge_create_page` and `knowledge_append` only through
+The server installs `knowledge_create_page` and `knowledge_update_page` only through
 the trusted composition. The local tool policy and configured root claim
 checks apply along with the Notion integration's source permissions. Raw source
 revision/hash checks, verified readback, idempotency and audit still apply.

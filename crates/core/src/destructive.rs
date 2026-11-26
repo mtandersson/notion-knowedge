@@ -56,7 +56,6 @@ impl WriteOperation {
     pub fn from_tool_name(name: &str) -> Option<Self> {
         match name {
             "knowledge_create_page" => Some(Self::CreatePage),
-            "knowledge_append" => Some(Self::Append),
             "knowledge_update_section" => Some(Self::UpdateSection),
             "knowledge_archive_page" => Some(Self::ArchivePage),
             _ => None,

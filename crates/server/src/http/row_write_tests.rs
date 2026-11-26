@@ -22,8 +22,9 @@ const RELATION_TARGET: &str = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
 const KEY: &str = "journal-entry-unique-101";
 const BODY: &str = "Journal entry";
 const REVISION: &str = "2026-11-25T16:00:00Z";
-const TOOL: &str = "knowledge_create_row";
-const UPDATE: &str = "knowledge_update_row";
+// Retired tool names; they remain capability selectors only.
+const RETIRED_CREATE: &str = "knowledge_create_row";
+const RETIRED_UPDATE: &str = "knowledge_update_row";
 const VIEW: &str = "33333333-3333-3333-3333-333333333333";
 const QUERY: &str = "55555555-5555-5555-5555-555555555555";
 
@@ -97,7 +98,7 @@ fn row() -> Value {
 }
 
 fn call() -> Value {
-    json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":TOOL,"arguments":{
+    json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"knowledge_create_page","arguments":{
         "root_page_id":ROOT,"data_source_id":SOURCE,"idempotency_key":KEY,"title":"Fixture journal","markdown":BODY,
         "properties":{
             "date-id":{"type":"date","value":{"start":"2026-12-02"}},
@@ -162,7 +163,26 @@ impl Stores {
         request: Value,
         read_only: bool,
     ) -> (Value, Vec<(String, Vec<u8>)>) {
-        let config = config(self.directory.path(), read_only);
+        self.invoke_with(script, request, read_only, None).await
+    }
+
+    async fn invoke_with(
+        &self,
+        script: Vec<(u16, Value)>,
+        request: Value,
+        read_only: bool,
+        allowlist: Option<&str>,
+    ) -> (Value, Vec<(String, Vec<u8>)>) {
+        let mut config = config(self.directory.path(), read_only);
+        if let Some(allowlist) = allowlist {
+            // The HTTP transport installs the configured policy on every session.
+            config.capability_policy =
+                notion_knowledge_mcp::capabilities::CapabilityPolicy::from_lists(
+                    Some(allowlist),
+                    None,
+                )
+                .unwrap();
+        }
         let (source, log, fake) = notion(script).await;
         let handler = self.handler(source, &config);
         let response = http_call(config, handler, request).await;
@@ -191,7 +211,7 @@ async fn installed_row_create_writes_typed_properties_and_markdown_once_and_repl
         .find(|tool| tool["name"] == "knowledge_create_page")
         .unwrap();
     assert!(create["inputSchema"]["properties"]["data_source_id"].is_object());
-    assert!(listed.iter().all(|tool| tool["name"] != TOOL));
+    assert!(listed.iter().all(|tool| tool["name"] != RETIRED_CREATE));
     let mut script = schema();
     script.extend([
         (200,row()), (200,row()),
@@ -435,7 +455,7 @@ async fn view_row(stores: &Stores, page: Value) -> Value {
     ]);
     script.extend(view_steps());
     let request = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
-        "name":"knowledge_query_view","arguments":{"view_id":VIEW,"include_row_revision":true}
+        "name":"knowledge_get","arguments":{"view_id":VIEW,"include_row_revision":true}
     }});
     let (snapshot, _) = stores.invoke(script, request, false).await;
     snapshot["result"]["structuredContent"]["rows"][0].clone()
@@ -451,8 +471,8 @@ async fn revision(stores: &Stores) -> String {
 }
 
 fn update(revision: &str, key: &str) -> Value {
-    json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":UPDATE,"arguments":{
-        "root_page_id":ROOT,"page_id":ROW,"idempotency_key":key,"expected_row_revision":revision,
+    json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"knowledge_update_page","arguments":{
+        "operation":"patch_properties","root_page_id":ROOT,"page_id":ROW,"idempotency_key":key,"expected_row_revision":revision,
         "properties":{
             "status-id":{"type":"status","value":"pending-id"},
             "date-id":{"type":"date","value":null},
@@ -519,7 +539,7 @@ async fn installed_row_update_patches_only_requested_fields_and_replays() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|tool| tool["name"] != UPDATE && tool["name"] != "knowledge_append")
+            .all(|tool| tool["name"] != RETIRED_UPDATE && tool["name"] != "knowledge_append")
     );
     let mut script = patch_steps(updated_row());
     script.extend(schema());
@@ -705,7 +725,7 @@ fn merged(mut request: Value, name: &str, operation: Option<&str>) -> Value {
 }
 
 #[tokio::test]
-async fn merged_page_tools_create_and_patch_rows_like_the_old_names() {
+async fn merged_update_page_patches_rows_and_rejects_unknown_operations() {
     let stores = Stores::new();
     let revision = revision(&stores).await;
     let mut script = patch_steps(updated_row());
@@ -747,7 +767,7 @@ async fn merged_page_tools_create_and_patch_rows_like_the_old_names() {
 }
 
 #[tokio::test]
-async fn merged_create_page_creates_a_row_and_replays_through_the_old_name() {
+async fn merged_create_page_creates_a_row_and_replays_by_key() {
     let stores = Stores::new();
     let mut script = schema();
     script.extend([
@@ -762,7 +782,7 @@ async fn merged_create_page_creates_a_row_and_replays_through_the_old_name() {
         .await;
     assert_eq!(status(&first), "verified", "{first}");
 
-    // The same key through the old name replays without a second write.
+    // The same key replays without a second write.
     let mut read = schema();
     read[0].1["properties"]["State"]["status"]["options"] = json!([]);
     read.push((200, row()));
@@ -772,4 +792,55 @@ async fn merged_create_page_creates_a_row_and_replays_through_the_old_name() {
         "{replay}"
     );
     assert!(log.iter().all(|entry| !entry.0.starts_with("POST ")));
+}
+
+#[tokio::test]
+async fn page_selectors_alone_never_grant_row_writes() {
+    let stores = Stores::new();
+    let allowlist = Some("read,knowledge_create_page,knowledge_update_page,knowledge_append");
+    let (discovery, _) = stores
+        .invoke_with(
+            vec![],
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}),
+            false,
+            allowlist,
+        )
+        .await;
+    let tools = discovery["result"]["tools"].as_array().unwrap();
+    let create = tools
+        .iter()
+        .find(|tool| tool["name"] == "knowledge_create_page")
+        .unwrap();
+    assert!(create["inputSchema"]["properties"]["data_source_id"].is_null());
+    let listed_update = tools
+        .iter()
+        .find(|tool| tool["name"] == "knowledge_update_page")
+        .unwrap();
+    assert_eq!(
+        listed_update["inputSchema"]["properties"]["operation"]["enum"],
+        json!(["append_markdown"])
+    );
+
+    let (created, log) = stores.invoke_with(vec![], call(), false, allowlist).await;
+    assert!(created["error"].is_object(), "{created}");
+    assert!(log.is_empty());
+    let patch = update(&"0".repeat(64), "row-patch-without-selector");
+    let (patched, log) = stores.invoke_with(vec![], patch, false, allowlist).await;
+    assert!(patched["error"].is_object(), "{patched}");
+    assert!(log.is_empty());
+}
+
+#[tokio::test]
+async fn retired_row_tool_names_are_not_callable() {
+    let stores = Stores::new();
+    for name in [RETIRED_CREATE, RETIRED_UPDATE] {
+        let mut request = call();
+        request["params"]["name"] = json!(name);
+        let (response, log) = stores.invoke(vec![], request, false).await;
+        assert_eq!(
+            response["error"]["message"], "unknown tool",
+            "{name}: {response}"
+        );
+        assert!(log.is_empty());
+    }
 }

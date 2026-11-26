@@ -63,8 +63,8 @@ The [verified write and durable refresh wrapper](write-refresh.md) queues derive
 indexing after verified ledger commit and reports its status independently.
 
 This is a **core application workflow**, not a newly enabled MCP mutation
-tool. The existing `knowledge_append` schema is still development-only
-and cannot mutate Notion; upcoming MCP composition must supply a trusted
+tool. The development-only write preview no longer has an append schema;
+installed append is `knowledge_update_page` with `append_markdown`. Upcoming MCP composition must supply a trusted
 write credential, scope gate, durable ledger, explicit write authorization
 and user confirmation policy. #302 also tracks the remaining optimistic
 concurrency integration.

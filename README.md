@@ -79,7 +79,7 @@ admission and drain workers/owned commits under the configurable
 [shutdown deadline](docs/graceful-shutdown.md). Both transports share the [semantic search contract](docs/knowledge-search.md).
 Valid search calls in the default bootstrap return an explicit retrieval-unavailable tool error. The isolated [semantic MCP spike](docs/semantic-mcp-spike.md) explicitly configures real local semantic retrieval through this same handler and transport wiring.
 With a configured integration and root scope, trusted transports also expose
-[`knowledge_query_view`](docs/knowledge-query-view.md) for saved Notion views.
+the [saved-view mode](docs/knowledge-query-view.md) of `knowledge_get`.
 Calls to unknown tools return protocol errors.
 
 ### Protected local HTTP and private ChatGPT tunnel

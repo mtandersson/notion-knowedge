@@ -6,9 +6,8 @@ use rmcp::model::{Tool, ToolAnnotations};
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
 
-const NAMES: [&str; 4] = [
+const NAMES: [&str; 3] = [
     "knowledge_create_page",
-    "knowledge_append",
     "knowledge_update_section",
     "knowledge_archive_page",
 ];
@@ -47,7 +46,7 @@ fn input(name: &str) -> Value {
             fields.insert("markdown".into(), content());
             required.extend(["parent_page_id", "title", "markdown"]);
         }
-        "knowledge_append" | "knowledge_update_section" => {
+        "knowledge_update_section" => {
             fields.insert("page_id".into(), short_id());
             fields.insert("markdown".into(), content());
             fields.insert(
@@ -111,10 +110,6 @@ pub fn tool(name: &str) -> Option<Tool> {
     let (description, destructive) = match name {
         "knowledge_create_page" => (
             "DESIGN PREVIEW ONLY: create one page under an explicitly authorized parent; requires idempotency and server-controlled root/provenance verification. Unavailable until the authenticated create workflow ships; does not mutate Notion.",
-            false,
-        ),
-        "knowledge_append" => (
-            "DESIGN PREVIEW ONLY: append Markdown to one authorized page, with source revision precondition and idempotency key; never replace content. Unavailable until the guarded append workflow ships.",
             false,
         ),
         "knowledge_update_section" => (

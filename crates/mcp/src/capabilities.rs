@@ -16,18 +16,22 @@ enum Category {
     Write,
 }
 
+/// Tool names plus the policy-only selectors `knowledge_query_view`,
+/// `knowledge_create_row`, `knowledge_update_row` and `knowledge_append`, which
+/// govern operations of `knowledge_get`, `knowledge_create_page` and
+/// `knowledge_update_page` but are not callable tools.
 const OPERATIONS: [(&str, Category); 14] = [
     ("knowledge_search", Category::Read),
     ("knowledge_get", Category::Read),
     ("knowledge_related", Category::Read),
     ("knowledge_sync_status", Category::Read),
-    (crate::view::TOOL, Category::Read),
+    (crate::view::SELECTOR, Category::Read),
     ("knowledge_upload_file", Category::Write),
     ("knowledge_file_refresh", Category::Write),
     ("knowledge_create_page", Category::Write),
     ("knowledge_update_page", Category::Write),
-    (crate::row_write::CREATE_TOOL, Category::Write),
-    (crate::row_write::UPDATE_TOOL, Category::Write),
+    (crate::row_write::CREATE_SELECTOR, Category::Write),
+    (crate::row_write::UPDATE_SELECTOR, Category::Write),
     ("knowledge_append", Category::Write),
     ("knowledge_update_section", Category::Write),
     ("knowledge_archive_page", Category::Write),

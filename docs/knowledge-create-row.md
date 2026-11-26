@@ -1,11 +1,10 @@
 # Create a Notion database row
 
 > Listed as `knowledge_create_page` with `data_source_id` instead of
-> `parent_page_id`. `knowledge_create_row` is still accepted but no longer
-> advertised; its capability selector governs the row form, and
-> `knowledge_create_page` must also allow the call.
+> `parent_page_id`. `knowledge_create_row` is no longer a tool name
+> (#814); it remains the capability selector that governs the row form.
 
-`knowledge_create_row` is installed with the guarded integration write service
+The row form is installed with the guarded integration write service
 on authenticated HTTP. Select a configured `root_page_id` and an original
 Notion `data_source_id` under that root. A database may contain several data
 sources. Use the identifier of the one that owns the intended row.

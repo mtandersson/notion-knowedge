@@ -1124,6 +1124,19 @@ mod tests {
         assert!(configured.capability_policy.permits("knowledge_search"));
         assert!(!configured.capability_policy.permits("knowledge_get"));
         assert!(configured.capability_policy.permits("knowledge_append"));
+        // Per-operation selectors outlive their retired tool names (#814).
+        let operations = parse(&[(
+            "NK_TOOL_ALLOWLIST",
+            "read,knowledge_create_page,knowledge_append,knowledge_upload_file,knowledge_create_row,knowledge_update_row",
+        )])
+        .unwrap();
+        for selector in [
+            "knowledge_create_row",
+            "knowledge_update_row",
+            "knowledge_query_view",
+        ] {
+            assert!(operations.capability_policy.permits(selector), "{selector}");
+        }
         for key in ["NK_TOOL_ALLOWLIST", "NK_TOOL_BLOCKLIST"] {
             let err = parse(&[(key, "invalid_unknown_operation")]).unwrap_err();
             assert_eq!(err.setting, key);

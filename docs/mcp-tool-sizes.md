@@ -32,10 +32,10 @@ merging the page and row tools.
 Not automated. After the image runs on Astra, refresh the connector's tool
 metadata and check:
 
-1. `tools/list` shows `fields` and `include_row_revision` on
-   `knowledge_query_view`.
+1. `tools/list` shows `fields` and `include_row_revision` on the saved-view
+   mode of `knowledge_get`.
 2. A read of selected columns, a follow-up page through `continuation`, and a
-   read followed by `knowledge_update_row` all succeed.
+   read followed by `knowledge_update_page` with `patch_properties` all succeed.
 3. Whether ChatGPT exposes `structuredContent`, the JSON text copy in
    `content`, or both to the model. Drop the duplicate only if the model sees
    the structured form.

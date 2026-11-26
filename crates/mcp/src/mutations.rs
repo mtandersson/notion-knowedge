@@ -88,22 +88,16 @@ impl MutationRuntime {
     }
 
     pub(crate) fn supports(&self, name: &str) -> bool {
-        matches!(
-            name,
-            "knowledge_create_page" | "knowledge_update_page" | "knowledge_append"
-        ) || (matches!(
-            name,
-            crate::row_write::CREATE_TOOL | crate::row_write::UPDATE_TOOL
-        ) && self.row_writer.is_some())
+        matches!(name, "knowledge_create_page" | "knowledge_update_page")
             || (name == "knowledge_update_section" && self.confirmation.is_some())
     }
-    /// The listed write tools. The row and append tools stay callable under
-    /// their old names but are advertised only through these merged tools.
-    /// An operation is offered only when policy permits its own selector.
+    /// The listed write tools. Each operation is offered only when policy
+    /// permits its own selector (`knowledge_append`, `knowledge_create_row`,
+    /// `knowledge_update_row`); those selectors are not tool names.
     pub(crate) fn tools(&self, permits: &dyn Fn(&str) -> bool) -> Vec<rmcp::model::Tool> {
-        let rows_create = self.row_writer.is_some() && permits(crate::row_write::CREATE_TOOL);
+        let rows_create = self.row_writer.is_some() && permits(crate::row_write::CREATE_SELECTOR);
         let append = permits("knowledge_append");
-        let patch = self.row_writer.is_some() && permits(crate::row_write::UPDATE_TOOL);
+        let patch = self.row_writer.is_some() && permits(crate::row_write::UPDATE_SELECTOR);
         let page_create = permits("knowledge_create_page");
         let mut tools = Vec::new();
         if page_create || rows_create {
@@ -344,13 +338,6 @@ impl Input {
                     _ => return Err(bad()),
                 }
             }
-            crate::row_write::CREATE_TOOL => {
-                Self::CreateRow(serde_json::from_value(value).map_err(|_| bad())?)
-            }
-            crate::row_write::UPDATE_TOOL => {
-                Self::UpdateRow(serde_json::from_value(value).map_err(|_| bad())?)
-            }
-            "knowledge_append" => Self::Append(serde_json::from_value(value).map_err(|_| bad())?),
             "knowledge_update_section" => {
                 Self::Section(serde_json::from_value(value).map_err(|_| bad())?)
             }
@@ -528,8 +515,6 @@ impl Drop for AuditAttempt<'_> {
 
 pub(crate) fn tool(name: &str) -> rmcp::model::Tool {
     with_output(match name {
-        crate::row_write::CREATE_TOOL => crate::row_write::create_tool(),
-        crate::row_write::UPDATE_TOOL => crate::row_write::update_tool(),
         "knowledge_create_page" => merged_create_tool(true, true),
         "knowledge_update_page" => merged_update_tool(true, true),
         _ => existing_tool(name),
@@ -636,8 +621,7 @@ fn merged_update_tool(append: bool, patch: bool) -> rmcp::model::Tool {
     tool
 }
 
-/// The old tool name a merged call is governed by, so each operation keeps its
-/// own capability selector.
+/// The capability selector a merged call's operation is governed by.
 pub(crate) fn effective_operation(
     name: &str,
     arguments: &serde_json::Map<String, Value>,
@@ -645,11 +629,11 @@ pub(crate) fn effective_operation(
     match name {
         "knowledge_update_page" => match arguments.get("operation").and_then(Value::as_str) {
             Some("append_markdown") => Some("knowledge_append"),
-            Some("patch_properties") => Some(crate::row_write::UPDATE_TOOL),
+            Some("patch_properties") => Some(crate::row_write::UPDATE_SELECTOR),
             _ => None,
         },
         "knowledge_create_page" if arguments.contains_key("data_source_id") => {
-            Some(crate::row_write::CREATE_TOOL)
+            Some(crate::row_write::CREATE_SELECTOR)
         }
         _ => None,
     }
@@ -659,7 +643,6 @@ fn existing_tool(name: &str) -> rmcp::model::Tool {
     let mut tool = crate::write_contract::tool(name).expect("implemented semantic mutation");
     tool.description = Some(match name {
         "knowledge_create_page" => "Create one page under an explicitly authorized parent with once-only idempotency, authoritative read-back and separate local refresh status.",
-        "knowledge_append" => "Append exact Markdown at the end of one authorized page with fresh revision guards, once-only idempotency and separate local refresh status.",
         _ => "Update one exact heading's body with fresh revision guards, trusted server confirmation, once-only idempotency and separate local refresh status.",
     }.into());
     let mut schema = tool.input_schema.as_ref().clone();
@@ -719,11 +702,6 @@ fn common_output() -> Arc<serde_json::Map<String, Value>> {
 pub fn is_semantic_mutation(name: &str) -> bool {
     matches!(
         name,
-        "knowledge_create_page"
-            | "knowledge_update_page"
-            | "knowledge_append"
-            | "knowledge_update_section"
-            | crate::row_write::CREATE_TOOL
-            | crate::row_write::UPDATE_TOOL
+        "knowledge_create_page" | "knowledge_update_page" | "knowledge_update_section"
     )
 }

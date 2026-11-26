@@ -129,8 +129,10 @@ impl KnowledgeServer {
     /// Only explicitly audited read tools are permitted in read-only mode.
     fn tool_permitted(&self, name: &str) -> bool {
         let subsumed: &[&str] = match name {
-            "knowledge_update_page" => &["knowledge_append", row_write::UPDATE_TOOL],
-            "knowledge_create_page" => &[row_write::CREATE_TOOL],
+            "knowledge_update_page" => &["knowledge_append", row_write::UPDATE_SELECTOR],
+            "knowledge_create_page" => &[row_write::CREATE_SELECTOR],
+            // A view-only allowlist still reaches saved views through knowledge_get.
+            "knowledge_get" if self.saved_view_query.is_some() => &[view::SELECTOR],
             _ => return self.tool_permitted_strict(name),
         };
         self.modes_permit(name)
@@ -150,7 +152,7 @@ impl KnowledgeServer {
                     | "knowledge_get"
                     | "knowledge_sync_status"
                     | "knowledge_related"
-                    | view::TOOL
+                    | view::SELECTOR
             ))
             && (self.destructive_writes_enabled || !write_contract::is_destructive_write(name))
     }
@@ -163,7 +165,7 @@ impl KnowledgeServer {
                     | "knowledge_get"
                     | "knowledge_sync_status"
                     | "knowledge_related"
-                    | view::TOOL
+                    | view::SELECTOR
             ))
             && (self.destructive_writes_enabled || !write_contract::is_destructive_write(name))
             && self.capability_policy.permits(name)
@@ -259,14 +261,14 @@ impl KnowledgeServer {
 
     /// `knowledge_get`, with its saved-view mode when that read is installed and permitted.
     fn get_tool_definition(&self) -> rmcp::model::Tool {
-        if self.saved_view_query.is_some() && self.tool_permitted(view::TOOL) {
+        if self.saved_view_query.is_some() && self.tool_permitted(view::SELECTOR) {
             get::tool_with_views()
         } else {
             get::tool()
         }
     }
 
-    /// Saved-view reads, shared by `knowledge_get` (view mode) and the old name.
+    /// Saved-view reads through the view mode of `knowledge_get`.
     async fn query_view(
         &self,
         arguments: serde_json::Map<String, serde_json::Value>,
@@ -510,7 +512,6 @@ impl KnowledgeServer {
         };
 
         match request.name.as_ref() {
-            view::TOOL => self.query_view(arguments).await,
             "knowledge_sync_status" => {
                 if !arguments.is_empty() {
                     return Err(rmcp::ErrorData::invalid_params(
@@ -826,7 +827,7 @@ impl KnowledgeServer {
             }
             "knowledge_get" if arguments.contains_key("view_id") => {
                 // Saved-view mode is governed by the knowledge_query_view selector.
-                if !self.tool_permitted(view::TOOL) {
+                if !self.tool_permitted(view::SELECTOR) {
                     return Err(rmcp::ErrorData::invalid_params(
                         "tool unavailable in read-only mode",
                         None,
@@ -835,6 +836,13 @@ impl KnowledgeServer {
                 self.query_view(arguments).await
             }
             "knowledge_get" => {
+                // Source mode needs the knowledge_get selector itself.
+                if !self.tool_permitted_strict("knowledge_get") {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "tool unavailable in read-only mode",
+                        None,
+                    ));
+                }
                 let input: get::GetRequest =
                     serde_json::from_value(serde_json::Value::Object(arguments)).map_err(|_| {
                         rmcp::ErrorData::invalid_params("invalid knowledge_get arguments", None)
@@ -997,7 +1005,6 @@ impl ServerHandler for KnowledgeServer {
             "knowledge_get" => Some(self.get_tool_definition()),
             "knowledge_related" if self.related_graph.is_some() => Some(related::tool()),
             "knowledge_sync_status" => Some(sync_status::tool()),
-            view::TOOL if self.saved_view_query.is_some() => Some(view::tool()),
             "knowledge_upload_file" => Some(upload::tool_with_limit(self.max_upload_files)),
             name if self
                 .mutations
@@ -1037,7 +1044,7 @@ impl ServerHandler for KnowledgeServer {
                 .as_ref()
                 .is_some_and(|arguments| arguments.contains_key("view_id"))
         {
-            view::TOOL
+            view::SELECTOR
         } else {
             request.name.as_ref()
         };

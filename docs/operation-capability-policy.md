@@ -11,14 +11,21 @@ server-owned capability policy in both stdio and HTTP. Discovery (`list_tools`,
   restrictions. An explicitly empty value disables every tool.
 - `NK_TOOL_BLOCKLIST` is optional. When omitted/empty, no operations are
   removed by this policy.
-- Each setting is a comma-separated list of exact canonical tool names or
+- Each setting is a comma-separated list of exact canonical selectors (tool or
+  operation names) or
   the categories `read`, `write`, `admin`.
-- Current exact **read** operations: `knowledge_search`, `knowledge_get`,
-  `knowledge_related`, `knowledge_sync_status` and `knowledge_query_view`. The `knowledge_query_view` selector also governs the saved-view mode of `knowledge_get`.
-- Current exact **write** operations: `knowledge_upload_file`,
-  `knowledge_file_refresh`, `knowledge_create_page`, `knowledge_create_row`,
-  `knowledge_update_row`, `knowledge_append`,
+- Current exact **read** selectors: `knowledge_search`, `knowledge_get`,
+  `knowledge_related`, `knowledge_sync_status` and `knowledge_query_view`.
+- Current exact **write** selectors: `knowledge_upload_file`,
+  `knowledge_file_refresh`, `knowledge_create_page`, `knowledge_update_page`,
+  `knowledge_create_row`, `knowledge_update_row`, `knowledge_append`,
   `knowledge_update_section` and `knowledge_archive_page`.
+- `knowledge_query_view`, `knowledge_create_row`, `knowledge_update_row` and
+  `knowledge_append` are operation selectors only, not tools (#814). They
+  govern the saved-view mode of `knowledge_get`, the row form of
+  `knowledge_create_page`, and the `patch_properties` and `append_markdown`
+  operations of `knowledge_update_page`. Calling them as tools fails as an
+  unknown tool.
 - These names are the canonical set in
   [`crates/mcp/src/capabilities.rs`](../crates/mcp/src/capabilities.rs).
   `read` and `write` select their respective categories. No admin tool exists today: `admin` is a reserved selector, not
@@ -47,9 +54,9 @@ administrator capabilities which do not already exist.
 - `NK_TOOL_ALLOWLIST=read`: select search, get, related and sync status
   (subject to each tool's own installation/scope restrictions).
 - `NK_TOOL_ALLOWLIST=read,knowledge_append` and
-  `NK_TOOL_BLOCKLIST=knowledge_get`: allow search; deny get; append remains
-  unavailable unless the independent write-preview and read-only gates allow
-  it. The preview is never a real Notion mutation.
+  `NK_TOOL_BLOCKLIST=knowledge_get`: allow search; deny get; list
+  `knowledge_update_page` with `append_markdown` only when installed writes
+  and the read-only gate allow it.
 - `NK_TOOL_BLOCKLIST=write`: deny both installed audited upload and every
   write-preview schema, even if read-only mode and upload settings permit them.
 
@@ -73,5 +80,9 @@ tools. `knowledge_update_page` takes `operation` = `append_markdown` or
 own name or any subsumed selector is allowlisted, so an existing
 `read,knowledge_append` allowlist now lists `knowledge_update_page` with
 `append_markdown` only. A blocklisted merged name, `write` or the category
-blocks it entirely. The old names stay callable under their own selectors but
-are not advertised.
+blocks it entirely. The old names are no longer tools; they remain only as
+these selectors, so existing allowlists keep parsing and keep their meaning.
+Without `knowledge_query_view` (directly or through `read`), `knowledge_get`
+hides and rejects `view_id`. An allowlist with `knowledge_query_view` but not
+`knowledge_get` still lists `knowledge_get` for saved views and rejects its
+`refs` mode. Blocklisting `knowledge_get` now also blocks saved views.
