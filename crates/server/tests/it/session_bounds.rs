@@ -438,8 +438,39 @@ impl notion_knowledge_mcp::upload::FileIngestion for LoadGate {
     }
 }
 
+/// Resource metrics are process-global, and other tests in this binary admit
+/// tool work concurrently, so the exact gauges are asserted in a child process
+/// that runs only the fixture below.
 #[tokio::test]
 async fn installed_http_mixed_search_upload_and_graph_share_weighted_work_capacity() {
+    let output = timeout(
+        Duration::from_secs(60),
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "session_bounds::weighted_work_capacity_process_fixture",
+                "--ignored",
+                "--nocapture",
+            ])
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("1 passed"), "fixture did not run: {stdout}");
+}
+
+#[tokio::test]
+#[ignore = "run in its own process by installed_http_mixed_search_upload_and_graph_share_weighted_work_capacity"]
+async fn weighted_work_capacity_process_fixture() {
     use std::sync::{Arc, atomic::Ordering};
     timeout(Duration::from_secs(20), async {
         let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
