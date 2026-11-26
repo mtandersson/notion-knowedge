@@ -382,7 +382,8 @@ enum Failure {
     Conflict(RevisionMetadata),
     Idempotency,
     Unavailable,
-    /// Notion definitely refused the request; nothing changed and the key was released.
+    /// Notion definitely refused the request; nothing changed. The claim
+    /// release outcome decides whether the same key can be retried.
     Rejected(WriteRejection, Effect, ClaimRelease),
     Unknown,
 }

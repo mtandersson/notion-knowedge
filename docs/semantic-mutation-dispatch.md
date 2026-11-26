@@ -47,8 +47,8 @@ complete request fingerprint and idempotency key. Fresh
 source preconditions are checked after approval may have waited. A verified
 ledger replay returns its existing receipt without consuming another one-use
 approval. A declined, failed or unknown reserved intent is not automatically
-released, reprompted or repeated. Only a preflight read failure or selection
-rejection before any effect, or a definite Notion refusal, releases the key.
+released, reprompted or repeated. Any other preflight failure before an effect,
+or a definite Notion refusal, releases the key.
 
 Every admitted mutation attempt requires a durable content-free audit intent before source
 effects. Success/denial/failure/indeterminate outcomes receive a terminal audit;
