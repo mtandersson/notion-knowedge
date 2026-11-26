@@ -10,8 +10,8 @@ use crate::{
     backend::{NotionRead, NotionSectionWrite, PageId, UpdateSectionContent, WriteRejection},
     destructive::{ConfirmationProvider, ConfirmationRequest, DestructivePolicy, WriteOperation},
     idempotency::{
-        IdempotencyError, MutationClaim, MutationOperation, Reservation, VerifiedReceipt,
-        WriteIdempotencyStore, release_rejected, release_unstarted,
+        ClaimRelease, IdempotencyError, MutationClaim, MutationOperation, Reservation,
+        VerifiedReceipt, WriteIdempotencyStore, release_rejected, release_unstarted,
     },
     lifecycle::LifecycleScope,
     revision::{
@@ -126,7 +126,8 @@ async fn section_preflight(
 fn read_failure(error: &crate::backend::BackendError) -> SectionUpdateError {
     match WriteRejection::of(error) {
         Some(rejection @ (WriteRejection::NotFound | WriteRejection::PermissionDenied)) => {
-            SectionUpdateError::Rejected(rejection)
+            // The caller releases the claim and records the actual outcome.
+            SectionUpdateError::Rejected(rejection, ClaimRelease::Retained)
         }
         _ => SectionUpdateError::Unavailable,
     }
@@ -211,9 +212,9 @@ pub enum SectionUpdateError {
     SelectionRejected,
     IdempotencyConflict,
     Unavailable,
-    /// Notion definitely refused the request before any effect; the claim
-    /// was released, so the same key may be retried.
-    Rejected(WriteRejection),
+    /// Notion definitely refused the request before any effect. When the
+    /// claim was released, the same key may be retried.
+    Rejected(WriteRejection, ClaimRelease),
     /// The ledger must remain reserved; reconcile, NEVER resend the PATCH.
     OutcomeUnknown,
 }
@@ -275,9 +276,9 @@ fn fingerprint(request: &SectionUpdateRequest) -> String {
 ///
 /// Ledger order is reserve -> preflight -> mark_uncertain -> one PATCH ->
 /// authoritative full readback -> record_verified. A failure before
-/// mark_uncertain other than a revision conflict, or a definite Notion refusal
-/// of the PATCH, releases the key; any other failure after mark_uncertain
-/// never does. The ledger MUST be persistent,
+/// mark_uncertain other than a revision conflict or declined confirmation, or
+/// a definite Notion refusal of the PATCH, releases the key; any other failure
+/// after mark_uncertain never does. The ledger MUST be persistent,
 /// transactional and shared between workers, as required by its interface.
 pub async fn update_section_once(
     reader: &dyn NotionRead,
@@ -343,21 +344,26 @@ async fn update_section_inner(
         Reservation::ExecuteOnce => {}
     }
 
-    // Nothing has been sent yet, so a preflight failure, including a declined
-    // confirmation, releases the claim and the same key can run again. A
-    // revision conflict keeps it: the caller must review the newer source and
+    // Nothing has been sent yet, so a preflight failure releases the claim and
+    // the same key can run again. A revision conflict or a declined or failed
+    // confirmation keeps it, as documented: the caller must review and
     // resubmit with a new key.
     let plan = match section_preflight(reader, scope, &request, confirmation).await {
         Ok(plan) => plan,
         Err(error) => {
-            match &error {
-                SectionUpdateError::RevisionConflict(_) => {}
-                SectionUpdateError::Rejected(rejection) => {
-                    release_unstarted(ledger, &claim, "section.preflight", Some(*rejection))
+            return Err(match error {
+                SectionUpdateError::RevisionConflict(_) | SectionUpdateError::NotAuthorized => {
+                    error
                 }
-                _ => release_unstarted(ledger, &claim, "section.preflight", None),
-            }
-            return Err(error);
+                SectionUpdateError::Rejected(rejection, _) => SectionUpdateError::Rejected(
+                    rejection,
+                    release_rejected(ledger, &claim, "section.preflight", rejection.label()),
+                ),
+                other => {
+                    release_unstarted(ledger, &claim, "section.preflight");
+                    other
+                }
+            });
         }
     };
     let old = plan.original_body();
@@ -376,8 +382,8 @@ async fn update_section_inner(
         let Some(rejection) = WriteRejection::of(&error) else {
             return Err(unknown("section.patch", error.kind.label()));
         };
-        release_rejected(ledger, &claim, "section.patch", rejection.label());
-        return Err(SectionUpdateError::Rejected(rejection));
+        let release = release_rejected(ledger, &claim, "section.patch", rejection.label());
+        return Err(SectionUpdateError::Rejected(rejection, release));
     }
 
     let after = reader

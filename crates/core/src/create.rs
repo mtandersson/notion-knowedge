@@ -3,8 +3,8 @@
 use crate::{
     backend::{CreatePage, NotionRead, NotionWrite, PageId, WriteRejection},
     idempotency::{
-        IdempotencyError, MutationClaim, MutationOperation, Reservation, VerifiedReceipt,
-        WriteIdempotencyStore, release_rejected,
+        ClaimRelease, IdempotencyError, MutationClaim, MutationOperation, Reservation,
+        VerifiedReceipt, WriteIdempotencyStore, release_rejected,
     },
     lifecycle::LifecycleScope,
     write_refresh::{MutationRefreshQueue, RefreshKey, WriteCompletion, admit_verified},
@@ -24,9 +24,9 @@ pub enum CreateError {
     NotAuthorized,
     IdempotencyConflict,
     Unavailable,
-    /// Notion definitely refused the POST: nothing was created and the claim
-    /// was released, so the same key may be retried.
-    Rejected(WriteRejection),
+    /// Notion definitely refused the POST: nothing was created. When the claim
+    /// was released, the same key may be retried.
+    Rejected(WriteRejection, ClaimRelease),
     /// A source effect might exist. Reconcile; never repeat the POST.
     OutcomeUnknown,
 }
@@ -154,10 +154,12 @@ pub async fn create_once_and_refresh(
                     let Some(rejection) = WriteRejection::of(&error) else {
                         return Err(unknown("create.post", error.kind.label()));
                     };
+                    // Release first: the probe below only shapes the message.
+                    let release =
+                        release_rejected(ledger, &claim, "create.post", rejection.label());
                     let rejection =
                         explain_parent(reader, &request.parent_page_id, rejection).await;
-                    release_rejected(ledger, &claim, "create.post", rejection.label());
-                    return Err(CreateError::Rejected(rejection));
+                    return Err(CreateError::Rejected(rejection, release));
                 }
             };
             if created.archived || created.title != request.title {

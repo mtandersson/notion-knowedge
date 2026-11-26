@@ -1274,6 +1274,10 @@ async fn definite_notion_refusals_fail_cleanly_and_release_the_key_for_a_retry()
         assert_eq!(out["write"]["reason"], reason);
         let message = out["write"]["message"].as_str().unwrap();
         assert!(message.contains("Nothing was"), "{message}");
+        assert!(
+            message.ends_with("The same idempotency key can be retried."),
+            "{message}"
+        );
         assert_eq!(out["index"]["status"], "not_attempted");
         assert_eq!(out["audit"]["status"], "recorded");
         for id in [ROOT, PAGE, CHILD] {

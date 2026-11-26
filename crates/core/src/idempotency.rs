@@ -194,30 +194,40 @@ pub trait WriteIdempotencyStore: Send + Sync {
     ) -> Result<(), IdempotencyError>;
 }
 
-/// Release a claim whose effect never happened, logging the refusal with fixed
-/// labels. A failed release keeps the key in reconciliation; it is logged but
-/// does not change the caller's definite result.
+/// Whether a claim that never took effect was released for a retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimRelease {
+    /// The same key can run again.
+    Released,
+    /// The release failed: the key stays in reconciliation and a retry needs a new key.
+    Retained,
+}
+
+/// Release a claim whose effect Notion definitely refused, logging the refusal
+/// with fixed labels. A failed release is logged and reported, never retried.
 pub(crate) fn release_rejected(
     ledger: &dyn WriteIdempotencyStore,
     claim: &MutationClaim,
     stage: &'static str,
     detail: &'static str,
-) {
+) -> ClaimRelease {
     let released = ledger.release(claim).is_ok();
     crate::logging::emit_write_rejected(stage, detail, released);
+    if released {
+        ClaimRelease::Released
+    } else {
+        ClaimRelease::Retained
+    }
 }
 
-/// No request has been sent, so the claim is released whatever the failure.
+/// Release a claim after a local preflight failure: no request was sent.
+/// Only a failed release is logged.
 pub(crate) fn release_unstarted(
     ledger: &dyn WriteIdempotencyStore,
     claim: &MutationClaim,
     stage: &'static str,
-    rejection: Option<crate::backend::WriteRejection>,
 ) {
-    match rejection {
-        Some(rejection) => release_rejected(ledger, claim, stage, rejection.label()),
-        None => {
-            let _ = ledger.release(claim);
-        }
+    if ledger.release(claim).is_err() {
+        crate::logging::emit_write_rejected(stage, "preflight_failed", false);
     }
 }

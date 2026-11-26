@@ -10,8 +10,8 @@ use sha2::{Digest, Sha256};
 use crate::{
     backend::{AppendPageContent, NotionRead, NotionWrite, PageId, WriteRejection},
     idempotency::{
-        IdempotencyError, MutationClaim, MutationOperation, Reservation, VerifiedReceipt,
-        WriteIdempotencyStore, release_rejected, release_unstarted,
+        ClaimRelease, IdempotencyError, MutationClaim, MutationOperation, Reservation,
+        VerifiedReceipt, WriteIdempotencyStore, release_rejected, release_unstarted,
     },
     lifecycle::LifecycleScope,
     revision::{
@@ -46,9 +46,9 @@ pub enum AppendError {
     RevisionConflict(RevisionMetadata),
     IdempotencyConflict,
     Unavailable,
-    /// Notion definitely refused the request before any effect; the claim
-    /// was released, so the same key may be retried.
-    Rejected(WriteRejection),
+    /// Notion definitely refused the request before any effect. When the
+    /// claim was released, the same key may be retried.
+    Rejected(WriteRejection, ClaimRelease),
     OutcomeUnknown,
 }
 
@@ -160,14 +160,17 @@ pub async fn append_once(
     let before = match append_preflight(reader, &request).await {
         Ok(before) => before,
         Err(error) => {
-            match &error {
-                AppendError::RevisionConflict(_) => {}
-                AppendError::Rejected(rejection) => {
-                    release_unstarted(ledger, &claim, "append.preflight", Some(*rejection))
+            return Err(match error {
+                AppendError::RevisionConflict(_) => error,
+                AppendError::Rejected(rejection, _) => AppendError::Rejected(
+                    rejection,
+                    release_rejected(ledger, &claim, "append.preflight", rejection.label()),
+                ),
+                other => {
+                    release_unstarted(ledger, &claim, "append.preflight");
+                    other
                 }
-                _ => release_unstarted(ledger, &claim, "append.preflight", None),
-            }
-            return Err(error);
+            });
         }
     };
     let before_comparison = reader.comparison_markdown(&before.markdown);
@@ -188,8 +191,8 @@ pub async fn append_once(
             let Some(rejection) = WriteRejection::of(&error) else {
                 return Err(unknown("append.patch", error.kind.label()));
             };
-            release_rejected(ledger, &claim, "append.patch", rejection.label());
-            return Err(AppendError::Rejected(rejection));
+            let release = release_rejected(ledger, &claim, "append.patch", rejection.label());
+            return Err(AppendError::Rejected(rejection, release));
         }
     };
     if written.id != request.page_id || written.archived {
@@ -303,7 +306,8 @@ async fn append_preflight(
 fn read_failure(error: &crate::backend::BackendError) -> AppendError {
     match WriteRejection::of(error) {
         Some(rejection @ (WriteRejection::NotFound | WriteRejection::PermissionDenied)) => {
-            AppendError::Rejected(rejection)
+            // The caller releases the claim and records the actual outcome.
+            AppendError::Rejected(rejection, ClaimRelease::Retained)
         }
         _ => AppendError::Unavailable,
     }

@@ -139,12 +139,15 @@ enum Mode {
     RewriteOriginal,
     ReadbackUnavailable,
     ConcurrentEditBeforePatch,
+    /// Notion refuses the first PATCH with 403 and changes nothing.
+    RefuseFirstPatch,
 }
 
 struct Fixture {
     markdown: Mutex<String>,
     writes: AtomicUsize,
     reads: AtomicUsize,
+    refused: AtomicUsize,
     mode: Mode,
 }
 impl Fixture {
@@ -153,6 +156,7 @@ impl Fixture {
             markdown: Mutex::new("# Existing\n\noriginal\n".into()),
             writes: AtomicUsize::new(0),
             reads: AtomicUsize::new(0),
+            refused: AtomicUsize::new(0),
             mode,
         })
     }
@@ -208,6 +212,14 @@ impl NotionWrite for Fixture {
     fn append_content(&self, request: AppendPageContent) -> BackendFuture<'_, Page> {
         Box::pin(async move {
             assert_eq!(request.page_id.0, PAGE);
+            if matches!(self.mode, Mode::RefuseFirstPatch)
+                && self.refused.fetch_add(1, Ordering::SeqCst) == 0
+            {
+                return Err(BackendError {
+                    kind: BackendErrorKind::PermissionDenied,
+                    ..error()
+                });
+            }
             self.writes.fetch_add(1, Ordering::SeqCst);
             let mut markdown = self.markdown.lock().unwrap();
             if matches!(self.mode, Mode::RewriteOriginal) {
@@ -236,6 +248,7 @@ type LedgerRecord = (String, u8, Option<VerifiedReceipt>);
 struct Ledger {
     state: Mutex<HashMap<String, LedgerRecord>>,
     starts: AtomicUsize,
+    fail_release: AtomicBool,
 }
 impl WriteIdempotencyStore for Ledger {
     fn begin(&self, claim: &MutationClaim) -> Result<Reservation, IdempotencyError> {
@@ -266,6 +279,9 @@ impl WriteIdempotencyStore for Ledger {
     }
 
     fn release(&self, claim: &MutationClaim) -> Result<(), IdempotencyError> {
+        if self.fail_release.load(Ordering::SeqCst) {
+            return Err(IdempotencyError::Unavailable);
+        }
         let mut state = self.state.lock().unwrap();
         assert_ne!(
             state[claim.key_digest()].1,
@@ -561,4 +577,55 @@ async fn same_timestamp_human_edit_between_preflight_and_patch_denies_append() {
         .await,
         Err(AppendError::OutcomeUnknown)
     );
+}
+
+#[tokio::test]
+async fn a_refused_patch_releases_the_key_unless_the_release_fails() {
+    use notion_knowledge_core::{backend::WriteRejection, idempotency::ClaimRelease};
+    let source = Fixture::new(Mode::RefuseFirstPatch);
+    let ledger = Ledger::default();
+    let trusted = scope();
+    let run = || {
+        append_once(
+            source.as_ref(),
+            source.as_ref(),
+            &trusted,
+            &ledger,
+            request(),
+        )
+    };
+    assert_eq!(
+        run().await,
+        Err(AppendError::Rejected(
+            WriteRejection::PermissionDenied,
+            ClaimRelease::Released
+        ))
+    );
+    assert!(!source.markdown.lock().unwrap().contains("## New entry"));
+    assert!(!run().await.unwrap().replayed);
+    assert_eq!(source.writes.load(Ordering::SeqCst), 1);
+
+    // A failed release is reported, and the key stays in reconciliation.
+    let source = Fixture::new(Mode::RefuseFirstPatch);
+    let ledger = Ledger::default();
+    ledger.fail_release.store(true, Ordering::SeqCst);
+    let trusted = scope();
+    let run = || {
+        append_once(
+            source.as_ref(),
+            source.as_ref(),
+            &trusted,
+            &ledger,
+            request(),
+        )
+    };
+    assert_eq!(
+        run().await,
+        Err(AppendError::Rejected(
+            WriteRejection::PermissionDenied,
+            ClaimRelease::Retained
+        ))
+    );
+    assert_eq!(run().await, Err(AppendError::OutcomeUnknown));
+    assert_eq!(source.writes.load(Ordering::SeqCst), 0);
 }
