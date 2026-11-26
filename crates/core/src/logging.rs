@@ -397,6 +397,33 @@ pub fn emit(
     }
 }
 
+/// Record which stage left a guarded write unproven. Fixed labels only: no
+/// page ids, titles or Markdown. The caller still sees plain `outcome_unknown`.
+pub fn emit_write_outcome_unknown(stage: &str, detail: &str) {
+    let level = Outcome::Failed.level();
+    if enabled(level) {
+        write_event(write_unknown_value(&current_id(), stage, detail));
+    }
+}
+
+fn write_unknown_value(id: &CorrelationId, stage: &str, detail: &str) -> serde_json::Value {
+    let mut event = event_value(
+        id,
+        Operation::McpTool,
+        Outcome::Failed,
+        Duration::ZERO,
+        None,
+        Level::Error,
+    );
+    event["tool"] = "guarded_write".into();
+    event["result"] = "outcome_unknown".into();
+    event["stage"] = stage.into();
+    if !detail.is_empty() {
+        event["detail"] = detail.into();
+    }
+    event
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum FileIngestPhase {
@@ -607,5 +634,15 @@ mod tests {
         })
         .await;
         assert!(current_sync_progress().is_none());
+    }
+
+    #[test]
+    fn unknown_write_event_names_the_stage_without_content() {
+        let event = write_unknown_value(&CorrelationId::new(), "create.readback_mismatch", "title");
+        assert_eq!(event["tool"], "guarded_write");
+        assert_eq!(event["result"], "outcome_unknown");
+        assert_eq!(event["stage"], "create.readback_mismatch");
+        assert_eq!(event["detail"], "title");
+        assert!(write_unknown_value(&CorrelationId::new(), "x", "")["detail"].is_null());
     }
 }

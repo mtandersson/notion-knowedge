@@ -136,7 +136,12 @@ impl MutationRuntime {
             })?;
         let outcome = tokio::select! {
             biased;
-            _=cancel.cancelled()=>Err(Failure::Unknown),
+            _=cancel.cancelled()=>{
+                // The caller went away (cancel notification or disconnect)
+                // while the write was in flight; the effect may still exist.
+                notion_knowledge_core::logging::emit_write_outcome_unknown("mutation.caller_cancelled", "");
+                Err(Failure::Unknown)
+            }
             result=self.execute(input)=>result,
         };
         let audit_outcome = match &outcome {

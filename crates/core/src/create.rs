@@ -33,6 +33,32 @@ impl std::fmt::Display for CreateError {
     }
 }
 impl std::error::Error for CreateError {}
+/// An unknown outcome is deliberately reported to the caller without detail;
+/// the operator log names the stage that could not prove the result.
+fn unknown(stage: &str, detail: &str) -> CreateError {
+    crate::logging::emit_write_outcome_unknown(stage, detail);
+    CreateError::OutcomeUnknown
+}
+
+/// Which readback check failed, as a fixed label, never page content.
+fn readback_mismatch(
+    created: &crate::backend::Page,
+    content: &crate::backend::PageContent,
+    request: &CreateRequest,
+) -> &'static str {
+    if content.page.id != created.id {
+        "page_id"
+    } else if content.page.archived {
+        "archived"
+    } else if content.page.url != created.url {
+        "url"
+    } else if content.page.title != request.title {
+        "title"
+    } else {
+        "markdown"
+    }
+}
+
 fn ledger_error(e: IdempotencyError) -> CreateError {
     match e {
         IdempotencyError::InvalidInput => CreateError::InvalidInput,
@@ -87,7 +113,7 @@ pub async fn create_once_and_refresh(
     .map_err(ledger_error)?;
     let (receipt, replayed) = match ledger.begin(&claim).map_err(ledger_error)? {
         Reservation::Replay(receipt) => (receipt, true),
-        Reservation::Reconcile => return Err(CreateError::OutcomeUnknown),
+        Reservation::Reconcile => return Err(unknown("create.reconcile_required", "")),
         Reservation::ExecuteOnce => {
             ledger.mark_uncertain(&claim).map_err(ledger_error)?;
             let created = writer
@@ -97,32 +123,35 @@ pub async fn create_once_and_refresh(
                     markdown: request.markdown.clone(),
                 })
                 .await
-                .map_err(|_| CreateError::OutcomeUnknown)?;
+                .map_err(|error| unknown("create.post", &format!("{:?}", error.kind)))?;
             if created.archived || created.title != request.title {
-                return Err(CreateError::OutcomeUnknown);
+                return Err(unknown("create.receipt_mismatch", ""));
             }
             // A receipt alone is never proof of complete persisted Markdown.
             let content = reader
                 .read_content(&created.id)
                 .await
-                .map_err(|_| CreateError::OutcomeUnknown)?;
+                .map_err(|error| unknown("create.readback", &format!("{:?}", error.kind)))?;
             if content.page.id != created.id
                 || content.page.archived
                 || content.page.url != created.url
                 || content.page.title != request.title
                 || !crate::revision::written_markdown_matches(&request.markdown, &content.markdown)
             {
-                return Err(CreateError::OutcomeUnknown);
+                return Err(unknown(
+                    "create.readback_mismatch",
+                    readback_mismatch(&created, &content, &request),
+                ));
             }
             let receipt = VerifiedReceipt::from_readback(
                 content.page.id.0,
                 content.page.url,
                 content.page.last_edited_time,
             )
-            .map_err(|_| CreateError::OutcomeUnknown)?;
+            .map_err(|_| unknown("create.receipt_invalid", ""))?;
             ledger
                 .record_verified(&claim, &receipt)
-                .map_err(|_| CreateError::OutcomeUnknown)?;
+                .map_err(|_| unknown("create.ledger_commit", ""))?;
             (receipt, false)
         }
     };
