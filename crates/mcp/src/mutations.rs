@@ -634,7 +634,6 @@ fn merged_create_tool(page: bool, rows: bool) -> rmcp::model::Tool {
             "data_source_id",
             "title",
             "markdown",
-            "properties",
             "idempotency_key"
         ]);
         schema["properties"]["data_source_id"]["description"] =

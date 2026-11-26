@@ -942,3 +942,21 @@ async fn row_update_server_error_keeps_the_key_and_never_repeats_the_patch() {
     assert_eq!(status(&retry), "outcome_unknown", "{retry}");
     assert!(log.iter().all(|e| !e.0.starts_with("PATCH ")));
 }
+
+#[tokio::test]
+async fn row_create_without_properties_writes_only_the_title_and_body() {
+    let stores = Stores::new();
+    let mut request = call();
+    request["params"]["arguments"]
+        .as_object_mut()
+        .unwrap()
+        .remove("properties");
+    let (created, log) = stores.invoke(created_steps(), request, false).await;
+    assert_eq!(status(&created), "verified", "{created}");
+    let post = log
+        .iter()
+        .find(|entry| entry.0.starts_with("POST /v1/pages "))
+        .unwrap();
+    let sent: Value = serde_json::from_slice(&post.1).unwrap();
+    assert_eq!(sent["properties"].as_object().unwrap().len(), 1);
+}
