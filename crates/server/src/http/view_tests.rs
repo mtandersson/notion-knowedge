@@ -103,11 +103,20 @@ async fn call(
     request: Value,
     http: bool,
 ) -> (Value, Vec<(String, Vec<u8>)>) {
+    call_with(KnowledgeServer::default(), steps, request, http).await
+}
+
+async fn call_with(
+    server: KnowledgeServer,
+    steps: Vec<(u16, Value)>,
+    request: Value,
+    http: bool,
+) -> (Value, Vec<(String, Vec<u8>)>) {
     let dir = tempfile::tempdir().unwrap();
     let config = config(dir.path(), http);
     let (source, log, fake) = notion(steps).await;
     let handler = root_scope::attach_client(
-        KnowledgeServer::default(),
+        server,
         &config,
         if http {
             Transport::Http
@@ -476,4 +485,87 @@ async fn knowledge_get_view_mode_matches_the_old_tool_and_rejects_mixed_argument
         "{mixed}"
     );
     assert!(upstream.is_empty());
+}
+
+fn get_view(arguments: Value) -> Value {
+    let mut request = query(arguments);
+    request["params"]["name"] = json!("knowledge_get");
+    request
+}
+
+fn is_rejected(response: &Value) -> bool {
+    response["error"].is_object() || response["result"]["isError"] == true
+}
+
+#[tokio::test]
+async fn view_mode_follows_the_view_selector_and_validates_its_arguments() {
+    use notion_knowledge_mcp::capabilities::CapabilityPolicy;
+    let blocked = || {
+        KnowledgeServer::default()
+            .with_capability_policy(CapabilityPolicy::from_lists(None, Some(TOOL)).unwrap())
+    };
+    let (list, _) = call_with(
+        blocked(),
+        vec![],
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}),
+        false,
+    )
+    .await;
+    let get = list["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "knowledge_get")
+        .unwrap();
+    assert!(get["inputSchema"]["properties"]["view_id"].is_null());
+    let (denied, upstream) =
+        call_with(blocked(), vec![], get_view(json!({"view_id":VIEW})), false).await;
+    assert!(is_rejected(&denied), "{denied}");
+    assert!(upstream.is_empty());
+
+    for arguments in [
+        json!({"view_id":null}),
+        json!({"view_id":""}),
+        json!({"view_id":VIEW,"freshness":"live"}),
+    ] {
+        let (response, upstream) = call(vec![], get_view(arguments), false).await;
+        assert!(is_rejected(&response), "{response}");
+        assert!(upstream.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn view_mode_works_at_the_smallest_tool_capacity_and_declares_its_output() {
+    let mut steps = scoped_view(false);
+    steps.push((
+        200,
+        json!({"object":"view_query","view_id":VIEW,"id":QUERY,"results":[],"has_more":false,"next_cursor":null}),
+    ));
+    steps.extend(scoped_view(false));
+    let (response, _) = call_with(
+        KnowledgeServer::default().with_tool_capacity(8),
+        steps,
+        get_view(json!({"view_id":VIEW})),
+        false,
+    )
+    .await;
+    assert_eq!(
+        response["result"]["structuredContent"]["status"], "empty",
+        "{response}"
+    );
+
+    let (list, _) = call(
+        vec![],
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}),
+        false,
+    )
+    .await;
+    let get = list["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "knowledge_get")
+        .unwrap();
+    assert!(get["outputSchema"]["required"].is_null());
+    assert_eq!(get["outputSchema"]["properties"]["rows"]["type"], "array");
 }

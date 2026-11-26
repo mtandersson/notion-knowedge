@@ -14,7 +14,7 @@ server-owned capability policy in both stdio and HTTP. Discovery (`list_tools`,
 - Each setting is a comma-separated list of exact canonical tool names or
   the categories `read`, `write`, `admin`.
 - Current exact **read** operations: `knowledge_search`, `knowledge_get`,
-  `knowledge_related`, `knowledge_sync_status` and `knowledge_query_view`.
+  `knowledge_related`, `knowledge_sync_status` and `knowledge_query_view`. The `knowledge_query_view` selector also governs the saved-view mode of `knowledge_get`.
 - Current exact **write** operations: `knowledge_upload_file`,
   `knowledge_file_refresh`, `knowledge_create_page`, `knowledge_create_row`,
   `knowledge_update_row`, `knowledge_append`,
