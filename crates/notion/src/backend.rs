@@ -27,6 +27,10 @@ impl NotionRead for NotionClient {
         Box::pin(NotionClient::read_content(self, &page_id.0))
     }
 
+    fn is_database<'a>(&'a self, id: &'a PageId) -> BackendFuture<'a, bool> {
+        Box::pin(NotionClient::is_database(self, &id.0))
+    }
+
     fn fetch_source_page<'a>(&'a self, page_id: &'a PageId) -> BackendFuture<'a, Page> {
         Box::pin(NotionClient::fetch_source_page(self, &page_id.0))
     }
@@ -178,6 +182,34 @@ mod tests {
             .map(|(headers, _)| headers.lines().next().unwrap())
             .collect();
         assert_eq!(paths, [&page_path, &markdown_path, &page_path, &page_path]);
+    }
+
+    #[tokio::test]
+    async fn database_probe_names_only_a_readable_database() {
+        let (client, server) = mock(vec![
+            (200, json!({"object":"database","id":ID}).to_string()),
+            (200, metadata()),
+            (404, json!({"object":"error"}).to_string()),
+        ])
+        .await;
+        let backend: &dyn NotionRead = &client;
+        let id = PageId(ID.into());
+        assert!(backend.is_database(&id).await.unwrap());
+        assert!(!backend.is_database(&id).await.unwrap());
+        assert!(!backend.is_database(&id).await.unwrap());
+        assert!(
+            !backend
+                .is_database(&PageId("../users/me".into()))
+                .await
+                .unwrap()
+        );
+        let requests = server.await.unwrap();
+        assert!(
+            requests.iter().all(
+                |(headers, _)| headers.starts_with(&format!("GET /v1/databases/{ID} HTTP/1.1"))
+            )
+        );
+        assert_eq!(requests.len(), 3);
     }
 
     #[tokio::test]

@@ -265,6 +265,17 @@ impl WriteIdempotencyStore for Ledger {
         Ok(())
     }
 
+    fn release(&self, claim: &MutationClaim) -> Result<(), IdempotencyError> {
+        let mut state = self.state.lock().unwrap();
+        assert_ne!(
+            state[claim.key_digest()].1,
+            2,
+            "a committed claim is never released"
+        );
+        state.remove(claim.key_digest());
+        Ok(())
+    }
+
     fn record_verified(
         &self,
         claim: &MutationClaim,

@@ -183,9 +183,41 @@ pub trait WriteIdempotencyStore: Send + Sync {
 
     fn begin(&self, claim: &MutationClaim) -> Result<Reservation, IdempotencyError>;
     fn mark_uncertain(&self, claim: &MutationClaim) -> Result<(), IdempotencyError>;
+    /// Remove a pending or uncertain claim so the same key can run again. Only
+    /// for a write that never started its effect, or whose effect the provider
+    /// definitely refused. A committed claim is never released.
+    fn release(&self, claim: &MutationClaim) -> Result<(), IdempotencyError>;
     fn record_verified(
         &self,
         claim: &MutationClaim,
         receipt: &VerifiedReceipt,
     ) -> Result<(), IdempotencyError>;
+}
+
+/// Release a claim whose effect never happened, logging the refusal with fixed
+/// labels. A failed release keeps the key in reconciliation; it is logged but
+/// does not change the caller's definite result.
+pub(crate) fn release_rejected(
+    ledger: &dyn WriteIdempotencyStore,
+    claim: &MutationClaim,
+    stage: &'static str,
+    detail: &'static str,
+) {
+    let released = ledger.release(claim).is_ok();
+    crate::logging::emit_write_rejected(stage, detail, released);
+}
+
+/// No request has been sent, so the claim is released whatever the failure.
+pub(crate) fn release_unstarted(
+    ledger: &dyn WriteIdempotencyStore,
+    claim: &MutationClaim,
+    stage: &'static str,
+    rejection: Option<crate::backend::WriteRejection>,
+) {
+    match rejection {
+        Some(rejection) => release_rejected(ledger, claim, stage, rejection.label()),
+        None => {
+            let _ = ledger.release(claim);
+        }
+    }
 }
