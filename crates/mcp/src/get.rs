@@ -432,6 +432,42 @@ async fn belongs_to(server: &KnowledgeServer, page: &str, roots: &[String]) -> b
     }
 }
 
+/// `knowledge_get` with the saved-view mode of the old `knowledge_query_view`.
+pub fn tool_with_views() -> Tool {
+    let mut tool = tool();
+    let mut input = tool.input_schema.as_ref().clone();
+    let view = crate::view::tool().input_schema;
+    let properties = input["properties"].as_object_mut().unwrap();
+    for (key, schema) in view["properties"].as_object().unwrap() {
+        properties.insert(key.clone(), schema.clone());
+    }
+    properties["view_id"]["description"] = json!(
+        "Saved-view mode instead of refs: view UUID or view:// UUID, with page_size, fields, include_row_revision and the returned continuation."
+    );
+    input.remove("required");
+    input.insert(
+        "anyOf".into(),
+        json!([{"required":["refs","max_chars"]},{"required":["view_id"]}]),
+    );
+    tool.input_schema = std::sync::Arc::new(input);
+    // View mode returns rows and columns instead of sources.
+    let mut output = tool.output_schema.as_deref().cloned().unwrap_or_default();
+    output.remove("required");
+    output.remove("additionalProperties");
+    let properties = output["properties"].as_object_mut().unwrap();
+    for key in ["columns", "rows", "omitted_columns"] {
+        properties.insert(key.into(), json!({"type":"array"}));
+    }
+    properties.insert("status".into(), json!({"type":"string"}));
+    properties.insert("continuation".into(), json!({"type":["object","null"]}));
+    tool.output_schema = Some(std::sync::Arc::new(output));
+    tool.description = Some(format!(
+        "{} With view_id, read ordered rows from a saved Notion view using its filters and sorts; rows hold values positionally matching the returned columns, so choose columns with fields and set include_row_revision only before updating rows.",
+        tool.description.as_deref().unwrap_or_default()
+    ).into());
+    tool
+}
+
 pub fn tool() -> Tool {
     let source_ref = json!({
         "type":"object",
