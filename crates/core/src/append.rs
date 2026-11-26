@@ -154,16 +154,19 @@ pub async fn append_once(
         Reservation::ExecuteOnce => {}
     }
 
-    // Nothing has been sent yet: any preflight failure releases the claim so
-    // the same key can run again.
+    // Nothing has been sent yet, so a preflight failure releases the claim and
+    // the same key can run again. A revision conflict keeps it: the caller
+    // must review the newer source and resubmit with a new key.
     let before = match append_preflight(reader, &request).await {
         Ok(before) => before,
         Err(error) => {
-            let rejection = match &error {
-                AppendError::Rejected(rejection) => Some(*rejection),
-                _ => None,
-            };
-            release_unstarted(ledger, &claim, "append.preflight", rejection);
+            match &error {
+                AppendError::RevisionConflict(_) => {}
+                AppendError::Rejected(rejection) => {
+                    release_unstarted(ledger, &claim, "append.preflight", Some(*rejection))
+                }
+                _ => release_unstarted(ledger, &claim, "append.preflight", None),
+            }
             return Err(error);
         }
     };

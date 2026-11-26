@@ -30,10 +30,17 @@ revision preflight, and the **durable**, separate `WriteIdempotencyStore`.
    `OutcomeUnknown` and **never** repeats the operation.
 3. Read the authoritative source and check every supplied precondition.
    Re-read the exact full Markdown before mutation. Any archived page,
-   revision mismatch, or source read error prevents PATCH.
+   revision mismatch, or source read error prevents PATCH. No effect has
+   started, so any failure here other than a revision conflict releases the
+   reservation and the same key can run again. A source read that Notion
+   refuses (404 or 403) is reported as a definite rejection.
 4. **Durably mark the reservation uncertain before
    the first network mutation**. A crash, timeout or 5xx after this point never
-   causes automatic retry. The Notion adapter uses a single PATCH.
+   causes automatic retry. The Notion adapter uses a single PATCH. Only a
+   definite Notion refusal of that PATCH (400, 403 or 404 with no committed
+   page) is a rejection: nothing changed, the reservation is released and the
+   caller may retry the same key. Timeouts, 5xx, rate limits and transport
+   errors stay `OutcomeUnknown`.
 5. Re-read the complete page authoritatively. Only a readback with the original Markdown prefix
    in the provider comparison view, followed by the inserted Markdown (with one
    optional final LF to account for Notion export formatting), an

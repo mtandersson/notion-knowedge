@@ -23,9 +23,12 @@ caller revisions and unverifiable upstream reads fail closed.
 However, the original durable reservation is NOT automatically rearmed.
 Explicitly re-fetch current source, review intended changes, supply a fresh
 revision and use a new idempotency key for a consciously resubmitted intent.
-The original key remains blocked. If a PATCH was dispatched, timeouts,
-unexpected receipts and read-back failures are OutcomeUnknown and require
-explicit reconciliation before any fresh attempt. There are no automatic
+The original key remains blocked. Other preflight failures (a refused or
+unavailable read, a declined confirmation) release the reservation. If a PATCH
+was dispatched and Notion definitely refused it (400, 403 or 404 with no
+committed page), the reservation is released too. Timeouts,
+5xx, rate limits, unexpected receipts and read-back failures are OutcomeUnknown
+and require explicit reconciliation before any fresh attempt. There are no automatic
 network retries.
 
 The preview-only MCP semantic write schema documents `anyOf` timestamp or

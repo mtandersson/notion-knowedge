@@ -717,6 +717,19 @@ mod tests {
     }
 
     #[test]
+    fn rejected_write_event_names_the_stage_and_claim_without_content() {
+        let event = write_rejected_value(&CorrelationId::new(), "create.post", "not_found", true);
+        assert_eq!(event["result"], "rejected");
+        assert_eq!(event["stage"], "create.post");
+        assert_eq!(event["detail"], "not_found");
+        assert_eq!(event["claim"], "released");
+        assert_eq!(event["outcome"], "rejected");
+        let retained = write_rejected_value(&CorrelationId::new(), "append.patch", "", false);
+        assert_eq!(retained["claim"], "retained");
+        assert!(retained.get("detail").is_none());
+    }
+
+    #[test]
     fn unknown_write_event_names_the_stage_without_content() {
         let event = write_unknown_value(
             &CorrelationId::new(),

@@ -80,7 +80,15 @@ scope returns `write.status: not_authorized` with
 `write.reason: root_not_configured` and a fixed guidance message before any
 provider call or idempotency reservation. The caller can correct the root and
 reuse the same key for the same intended mutation. Revision conflicts return only page ID and
-current edit time, never source text. `outcome_unknown` requires authoritative
+current edit time, never source text. A request Notion definitely refuses
+before any effect (400, 403 or 404 on the create POST, append PATCH or section
+PATCH, or a refused preflight read) returns `not_authorized` or
+`invalid_input` with `write.reason` `not_found`, `permission_denied`,
+`invalid_request` or `parent_is_database` and a fixed message without ids.
+The idempotency claim is released and the audit records `failed`, so the
+same key can be retried. A create whose `parent_page_id` is a readable
+database reports `parent_is_database` and points to `data_source_id`.
+`outcome_unknown` requires authoritative
 reconciliation and the original durable key. Index or audit repair must never use
 a new mutation key to repeat the source write. A terminal audit failure retains
 the verified receipt and marks the MCP result as an error with
