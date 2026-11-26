@@ -399,21 +399,26 @@ pub fn emit(
 
 /// Record which stage left a guarded write unproven. Fixed labels only: no
 /// page ids, titles or Markdown. The caller still sees plain `outcome_unknown`.
-pub fn emit_write_outcome_unknown(stage: &str, detail: &str) {
-    let level = Outcome::Failed.level();
+pub fn emit_write_outcome_unknown(outcome: Outcome, stage: &'static str, detail: &'static str) {
+    let level = outcome.level();
     if enabled(level) {
-        write_event(write_unknown_value(&current_id(), stage, detail));
+        write_event(write_unknown_value(&current_id(), outcome, stage, detail));
     }
 }
 
-fn write_unknown_value(id: &CorrelationId, stage: &str, detail: &str) -> serde_json::Value {
+fn write_unknown_value(
+    id: &CorrelationId,
+    outcome: Outcome,
+    stage: &'static str,
+    detail: &'static str,
+) -> serde_json::Value {
     let mut event = event_value(
         id,
         Operation::McpTool,
-        Outcome::Failed,
+        outcome,
         Duration::ZERO,
         None,
-        Level::Error,
+        outcome.level(),
     );
     event["tool"] = "guarded_write".into();
     event["result"] = "outcome_unknown".into();
@@ -638,11 +643,46 @@ mod tests {
 
     #[test]
     fn unknown_write_event_names_the_stage_without_content() {
-        let event = write_unknown_value(&CorrelationId::new(), "create.readback_mismatch", "title");
-        assert_eq!(event["tool"], "guarded_write");
+        let event = write_unknown_value(
+            &CorrelationId::new(),
+            Outcome::Failed,
+            "create.readback_mismatch",
+            "title",
+        );
+        let mut keys: Vec<&str> = event
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "correlation_id",
+                "detail",
+                "duration_ms",
+                "http_status",
+                "level",
+                "operation",
+                "outcome",
+                "result",
+                "runtime_thread",
+                "stage",
+                "timestamp_unix_ms",
+                "tool",
+                "worker"
+            ]
+        );
         assert_eq!(event["result"], "outcome_unknown");
         assert_eq!(event["stage"], "create.readback_mismatch");
-        assert_eq!(event["detail"], "title");
-        assert!(write_unknown_value(&CorrelationId::new(), "x", "")["detail"].is_null());
+        let cancelled = write_unknown_value(
+            &CorrelationId::new(),
+            Outcome::Rejected,
+            "mutation.caller_cancelled",
+            "",
+        );
+        assert!(cancelled["detail"].is_null());
+        assert_eq!(cancelled["level"], "warn");
     }
 }

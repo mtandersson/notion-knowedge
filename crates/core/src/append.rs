@@ -58,8 +58,8 @@ impl std::error::Error for AppendError {}
 
 /// An unknown outcome is deliberately reported to the caller without detail;
 /// the operator log names the stage that could not prove the result.
-fn unknown(stage: &str, detail: &str) -> AppendError {
-    crate::logging::emit_write_outcome_unknown(stage, detail);
+fn unknown(stage: &'static str, detail: &'static str) -> AppendError {
+    crate::logging::emit_write_outcome_unknown(crate::logging::Outcome::Failed, stage, detail);
     AppendError::OutcomeUnknown
 }
 
@@ -218,7 +218,7 @@ pub async fn append_once(
             markdown: request.markdown.clone(),
         })
         .await
-        .map_err(|error| unknown("append.patch", &format!("{:?}", error.kind)))?;
+        .map_err(|error| unknown("append.patch", error.kind.label()))?;
     if written.id != request.page_id || written.archived {
         return Err(unknown("append.receipt_mismatch", ""));
     }
@@ -226,7 +226,7 @@ pub async fn append_once(
     let after = reader
         .read_content(&request.page_id)
         .await
-        .map_err(|error| unknown("append.readback", &format!("{:?}", error.kind)))?;
+        .map_err(|error| unknown("append.readback", error.kind.label()))?;
     if after.page.id != request.page_id || after.page.archived {
         return Err(unknown("append.readback_identity", ""));
     }

@@ -123,6 +123,13 @@ impl std::fmt::Display for SectionUpdateError {
 }
 impl std::error::Error for SectionUpdateError {}
 
+/// An unknown outcome is reported to the caller without detail; the operator
+/// log names the stage that could not prove the result.
+fn unknown(stage: &'static str, detail: &'static str) -> SectionUpdateError {
+    crate::logging::emit_write_outcome_unknown(crate::logging::Outcome::Failed, stage, detail);
+    SectionUpdateError::OutcomeUnknown
+}
+
 fn ledger_error(error: IdempotencyError) -> SectionUpdateError {
     match error {
         IdempotencyError::InvalidInput => SectionUpdateError::InvalidInput,
@@ -228,7 +235,7 @@ async fn update_section_inner(
                 replayed: true,
             });
         }
-        Reservation::Reconcile => return Err(SectionUpdateError::OutcomeUnknown),
+        Reservation::Reconcile => return Err(unknown("section.reconcile_required", "")),
         Reservation::ExecuteOnce => {}
     }
 
@@ -321,17 +328,17 @@ async fn update_section_inner(
             new_str: plan.replacement_body().to_owned(),
         })
         .await
-        .map_err(|_| SectionUpdateError::OutcomeUnknown)?;
+        .map_err(|error| unknown("section.patch", error.kind.label()))?;
 
     let after = reader
         .read_content(&request.page_id)
         .await
-        .map_err(|_| SectionUpdateError::OutcomeUnknown)?;
-    if after.page.id != request.page_id
-        || after.page.archived
-        || !plan.verify_readback(&after.markdown)
-    {
-        return Err(SectionUpdateError::OutcomeUnknown);
+        .map_err(|error| unknown("section.readback", error.kind.label()))?;
+    if after.page.id != request.page_id || after.page.archived {
+        return Err(unknown("section.readback_identity", ""));
+    }
+    if !plan.verify_readback(&after.markdown) {
+        return Err(unknown("section.readback_mismatch", "markdown"));
     }
 
     let receipt = VerifiedReceipt::from_readback(
@@ -339,10 +346,10 @@ async fn update_section_inner(
         after.page.url,
         after.page.last_edited_time,
     )
-    .map_err(|_| SectionUpdateError::OutcomeUnknown)?;
+    .map_err(|_| unknown("section.receipt_invalid", ""))?;
     ledger
         .record_verified(&claim, &receipt)
-        .map_err(|_| SectionUpdateError::OutcomeUnknown)?;
+        .map_err(|_| unknown("section.ledger_commit", ""))?;
     Ok(SectionUpdateResult {
         receipt,
         replayed: false,

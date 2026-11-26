@@ -139,7 +139,11 @@ impl MutationRuntime {
             _=cancel.cancelled()=>{
                 // The caller went away (cancel notification or disconnect)
                 // while the write was in flight; the effect may still exist.
-                notion_knowledge_core::logging::emit_write_outcome_unknown("mutation.caller_cancelled", "");
+                notion_knowledge_core::logging::emit_write_outcome_unknown(
+                    notion_knowledge_core::logging::Outcome::Rejected,
+                    "mutation.caller_cancelled",
+                    "",
+                );
                 Err(Failure::Unknown)
             }
             result=self.execute(input)=>result,
