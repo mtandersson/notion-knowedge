@@ -3,8 +3,9 @@
 use notion_knowledge_core::{
     audit::{AuditError, AuditEvent, AuditOutcome, AuditRetention, AuditStore},
     backend::{
-        AppendPageContent, BackendFuture, CreatePage, NotionRead, NotionSectionWrite, NotionWrite,
-        Page, PageContent, PageId, ReplacePageContent, UpdateSectionContent,
+        AppendPageContent, BackendError, BackendErrorKind, BackendFuture, CreatePage, NotionRead,
+        NotionSectionWrite, NotionWrite, Page, PageContent, PageId, ReplacePageContent,
+        UpdateSectionContent,
     },
     destructive::{
         ConfirmationDecision, ConfirmationFuture, ConfirmationProvider, ConfirmationRequest,
@@ -119,8 +120,24 @@ struct Source {
     pause: AtomicBool,
     entered: Notify,
     proceed: Notify,
+    /// The next provider effect fails with this error and changes nothing.
+    refuse: Mutex<Option<BackendError>>,
+    /// The next page metadata read fails with this error.
+    refuse_read: Mutex<Option<BackendError>>,
+    parent_is_database: AtomicBool,
+}
+fn refusal(kind: BackendErrorKind, committed: Option<&str>) -> BackendError {
+    BackendError {
+        kind,
+        operation: "fixture.effect",
+        retry_after: None,
+        committed_page_id: committed.map(|id| PageId(id.into())),
+    }
 }
 impl Source {
+    fn refused(&self) -> Result<(), BackendError> {
+        self.refuse.lock().unwrap().take().map_or(Ok(()), Err)
+    }
     fn page(&self, id: &str) -> Page {
         let pages = self.pages.lock().unwrap();
         let d = pages.get(id).unwrap();
@@ -153,8 +170,14 @@ impl NotionRead for Source {
     fn fetch_page<'a>(&'a self, id: &'a PageId) -> BackendFuture<'a, Page> {
         Box::pin(async move {
             self.reads.fetch_add(1, Ordering::SeqCst);
+            if let Some(error) = self.refuse_read.lock().unwrap().take() {
+                return Err(error);
+            }
             Ok(self.page(&id.0))
         })
+    }
+    fn is_database<'a>(&'a self, _: &'a PageId) -> BackendFuture<'a, bool> {
+        Box::pin(async move { Ok(self.parent_is_database.load(Ordering::SeqCst)) })
     }
     fn read_content<'a>(&'a self, id: &'a PageId) -> BackendFuture<'a, PageContent> {
         Box::pin(async move {
@@ -177,6 +200,7 @@ impl NotionWrite for Source {
     fn append_content(&self, q: AppendPageContent) -> BackendFuture<'_, Page> {
         Box::pin(async move {
             self.before_effect();
+            self.refused()?;
             {
                 let mut pages = self.pages.lock().unwrap();
                 let d = pages.get_mut(&q.page_id.0).unwrap();
@@ -196,6 +220,7 @@ impl NotionWrite for Source {
     fn create_page(&self, q: CreatePage) -> BackendFuture<'_, Page> {
         Box::pin(async move {
             self.before_effect();
+            self.refused()?;
             let mut body = q.markdown;
             if self.omit_final_lf.load(Ordering::SeqCst) && body.ends_with('\n') {
                 body.pop();
@@ -220,6 +245,7 @@ impl NotionSectionWrite for Source {
     fn update_section(&self, q: UpdateSectionContent) -> BackendFuture<'_, ()> {
         Box::pin(async move {
             self.before_effect();
+            self.refused()?;
             {
                 let mut pages = self.pages.lock().unwrap();
                 let d = pages.get_mut(&q.page_id.0).unwrap();
@@ -308,6 +334,9 @@ impl Fixture {
             pause: AtomicBool::new(false),
             entered: Notify::new(),
             proceed: Notify::new(),
+            refuse: Mutex::new(None),
+            refuse_read: Mutex::new(None),
+            parent_is_database: AtomicBool::new(false),
         });
         let queue = Arc::new(Queue {
             inner: SqliteSyncStateStore::open(dir.0.join("sync.sqlite")).unwrap(),
@@ -491,7 +520,13 @@ async fn installed_writes_explain_root_selection_and_allow_retry_without_consumi
         let response_properties = &tool["outputSchema"]["properties"]["write"]["properties"];
         assert_eq!(
             response_properties["reason"]["enum"],
-            json!(["root_not_configured"])
+            json!([
+                "root_not_configured",
+                "not_found",
+                "permission_denied",
+                "invalid_request",
+                "parent_is_database"
+            ])
         );
         assert_eq!(response_properties["message"]["type"], "string");
         assert!(!tool.to_string().contains(ROOT));
@@ -1000,8 +1035,9 @@ async fn write_tool_definitions_stay_compact() {
     );
     let total: usize = writes.iter().map(|tool| tool.to_string().len()).sum();
     let output = writes[0]["outputSchema"].to_string().len();
-    // Limits sit just above the sizes when this guard was added (see #812).
-    assert!(output <= 850, "write result schema grew to {output} B");
+    // Limits sit just above the sizes when this guard was added (see #812),
+    // plus the refusal reasons of #826.
+    assert!(output <= 900, "write result schema grew to {output} B");
     assert!(total <= 4600, "write definitions grew to {total} B");
 }
 
@@ -1184,4 +1220,166 @@ fn update_page_selector_alone_grants_no_operation() {
             .iter()
             .all(|tool| tool.name != "knowledge_update_page")
     );
+}
+
+fn outcomes(f: &Fixture) -> Vec<AuditOutcome> {
+    f.audit
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(AuditEvent::outcome)
+        .collect()
+}
+
+#[tokio::test]
+async fn definite_notion_refusals_fail_cleanly_and_release_the_key_for_a_retry() {
+    for (name, args, kind, status, reason) in [
+        (
+            "knowledge_create_page",
+            create("refused-create-not-found"),
+            BackendErrorKind::NotFound,
+            "not_authorized",
+            "not_found",
+        ),
+        (
+            "knowledge_create_page",
+            create("refused-create-forbidden"),
+            BackendErrorKind::PermissionDenied,
+            "not_authorized",
+            "permission_denied",
+        ),
+        (
+            "knowledge_update_page",
+            append("refused-append-forbidden"),
+            BackendErrorKind::PermissionDenied,
+            "not_authorized",
+            "permission_denied",
+        ),
+        (
+            "knowledge_update_section",
+            section("refused-section-invalid"),
+            BackendErrorKind::InvalidInput,
+            "invalid_input",
+            "invalid_request",
+        ),
+    ] {
+        let f = Fixture::new();
+        let handler = f.server(true);
+        *f.source.refuse.lock().unwrap() = Some(refusal(kind, None));
+        let refused = invoke(handler.clone(), name, args.clone()).await;
+        assert_eq!(refused["result"]["isError"], true);
+        let out = output(&refused);
+        assert_eq!(out["write"]["status"], status, "{refused}");
+        assert_eq!(out["write"]["reason"], reason);
+        let message = out["write"]["message"].as_str().unwrap();
+        assert!(message.contains("Nothing was"), "{message}");
+        assert!(
+            message.ends_with("The same idempotency key can be retried."),
+            "{message}"
+        );
+        assert_eq!(out["index"]["status"], "not_attempted");
+        assert_eq!(out["audit"]["status"], "recorded");
+        for id in [ROOT, PAGE, CHILD] {
+            assert!(!refused.to_string().contains(id), "{refused}");
+        }
+        assert_eq!(
+            outcomes(&f),
+            [AuditOutcome::Attempted, AuditOutcome::Failed]
+        );
+
+        let retried = invoke(handler, name, args).await;
+        let out = output(&retried);
+        assert_eq!(out["write"]["status"], "verified", "{retried}");
+        assert_eq!(out["write"]["replayed"], false);
+        assert_eq!(f.source.effects.load(Ordering::SeqCst), 2);
+        assert_eq!(f.queue.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn a_database_given_as_the_parent_page_points_to_data_source_id() {
+    let f = Fixture::new();
+    f.source.parent_is_database.store(true, Ordering::SeqCst);
+    *f.source.refuse.lock().unwrap() = Some(refusal(BackendErrorKind::NotFound, None));
+    let handler = f.server(false);
+    let refused = invoke(
+        handler.clone(),
+        "knowledge_create_page",
+        create("database-parent-key"),
+    )
+    .await;
+    let out = output(&refused);
+    assert_eq!(out["write"]["status"], "invalid_input", "{refused}");
+    assert_eq!(out["write"]["reason"], "parent_is_database");
+    let message = out["write"]["message"].as_str().unwrap();
+    assert!(message.contains("data_source_id"), "{message}");
+    assert!(!message.contains("knowledge_create_row"));
+    assert!(!refused.to_string().contains(PAGE));
+
+    // The key was released: the same request runs again once the parent is fixed.
+    f.source.parent_is_database.store(false, Ordering::SeqCst);
+    let retried = invoke(
+        handler,
+        "knowledge_create_page",
+        create("database-parent-key"),
+    )
+    .await;
+    assert_eq!(output(&retried)["write"]["status"], "verified", "{retried}");
+}
+
+#[tokio::test]
+async fn ambiguous_failures_and_refused_verify_reads_stay_outcome_unknown() {
+    for error in [
+        refusal(BackendErrorKind::Unavailable, None),
+        refusal(BackendErrorKind::RateLimited, None),
+        refusal(BackendErrorKind::Internal, None),
+        // A verify read after a successful POST names the committed page: a
+        // 404 there is read-after-write lag, not a refusal.
+        refusal(BackendErrorKind::NotFound, Some(CHILD)),
+    ] {
+        let f = Fixture::new();
+        let handler = f.server(false);
+        let args = create("ambiguous-create-failure");
+        *f.source.refuse.lock().unwrap() = Some(error);
+        for _ in 0..2 {
+            let result = invoke(handler.clone(), "knowledge_create_page", args.clone()).await;
+            assert_eq!(output(&result)["write"]["status"], "outcome_unknown");
+        }
+        assert_eq!(f.source.effects.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            outcomes(&f),
+            [
+                AuditOutcome::Attempted,
+                AuditOutcome::Indeterminate,
+                AuditOutcome::Attempted,
+                AuditOutcome::Indeterminate
+            ]
+        );
+    }
+}
+
+#[tokio::test]
+async fn failures_before_any_effect_release_the_key() {
+    for (name, args) in [
+        ("knowledge_update_page", append("preflight-append-key")),
+        ("knowledge_update_section", section("preflight-section-key")),
+    ] {
+        let f = Fixture::new();
+        let handler = f.server(true);
+        *f.source.refuse_read.lock().unwrap() = Some(refusal(BackendErrorKind::NotFound, None));
+        let refused = invoke(handler.clone(), name, args.clone()).await;
+        let out = output(&refused);
+        assert_eq!(out["write"]["status"], "not_authorized", "{refused}");
+        assert_eq!(out["write"]["reason"], "not_found");
+        assert_eq!(f.source.effects.load(Ordering::SeqCst), 0);
+
+        *f.source.refuse_read.lock().unwrap() = Some(refusal(BackendErrorKind::Unavailable, None));
+        let unavailable = invoke(handler.clone(), name, args.clone()).await;
+        assert_eq!(output(&unavailable)["write"]["status"], "unavailable");
+
+        let retried = invoke(handler, name, args).await;
+        assert_eq!(output(&retried)["write"]["status"], "verified", "{retried}");
+        assert_eq!(f.source.effects.load(Ordering::SeqCst), 1);
+    }
 }

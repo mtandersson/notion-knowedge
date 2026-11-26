@@ -8,10 +8,10 @@ use chrono::DateTime;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    backend::{AppendPageContent, NotionRead, NotionWrite, PageId},
+    backend::{AppendPageContent, NotionRead, NotionWrite, PageId, WriteRejection},
     idempotency::{
-        IdempotencyError, MutationClaim, MutationOperation, Reservation, VerifiedReceipt,
-        WriteIdempotencyStore,
+        ClaimRelease, IdempotencyError, MutationClaim, MutationOperation, Reservation,
+        VerifiedReceipt, WriteIdempotencyStore, release_rejected, release_unstarted,
     },
     lifecycle::LifecycleScope,
     revision::{
@@ -46,6 +46,9 @@ pub enum AppendError {
     RevisionConflict(RevisionMetadata),
     IdempotencyConflict,
     Unavailable,
+    /// Notion definitely refused the request before any effect. When the
+    /// claim was released, the same key may be retried.
+    Rejected(WriteRejection, ClaimRelease),
     OutcomeUnknown,
 }
 
@@ -151,74 +154,47 @@ pub async fn append_once(
         Reservation::ExecuteOnce => {}
     }
 
-    // Revision preflight never uses indexed Markdown. Once a reservation
-    // exists, any failure leaves it non-retryable until explicit reconciliation.
-    let expected = ExpectedRevision {
-        last_edited_time: request.expected_last_edited_time.clone(),
-        markdown_sha256: request.expected_markdown_sha256.clone(),
+    // Nothing has been sent yet, so a preflight failure releases the claim and
+    // the same key can run again. A revision conflict keeps it: the caller
+    // must review the newer source and resubmit with a new key.
+    let before = match append_preflight(reader, &request).await {
+        Ok(before) => before,
+        Err(error) => {
+            return Err(match error {
+                AppendError::RevisionConflict(_) => error,
+                AppendError::Rejected(rejection, _) => AppendError::Rejected(
+                    rejection,
+                    release_rejected(ledger, &claim, "append.preflight", rejection.label()),
+                ),
+                other => {
+                    release_unstarted(ledger, &claim, "append.preflight");
+                    other
+                }
+            });
+        }
     };
-    let revision = check_revision(reader, &request.page_id, &expected)
-        .await
-        .map_err(|failure| match failure {
-            RevisionError::Conflict(meta) | RevisionError::Inactive(meta) => {
-                AppendError::RevisionConflict(meta)
-            }
-            RevisionError::InvalidPrecondition => AppendError::InvalidInput,
-            RevisionError::Read(_) => AppendError::Unavailable,
-        })?;
-
-    let before = reader
-        .read_content(&request.page_id)
-        .await
-        .map_err(|_| AppendError::Unavailable)?;
-    let before_meta =
-        compare_content_snapshot(&request.page_id, &expected, &before).map_err(|failure| {
-            match failure {
-                RevisionError::Conflict(meta) | RevisionError::Inactive(meta) => {
-                    AppendError::RevisionConflict(meta)
-                }
-                RevisionError::InvalidPrecondition => AppendError::InvalidInput,
-                RevisionError::Read(_) => AppendError::Unavailable,
-            }
-        })?;
-    // Detect a change between the first fresh preflight and this full read.
-    if DateTime::parse_from_rfc3339(&before_meta.last_edited_time).ok()
-        != DateTime::parse_from_rfc3339(&revision.last_edited_time).ok()
-    {
-        return Err(AppendError::RevisionConflict(before_meta));
-    }
-
-    // Best-effort immediate fresh preflight. This cannot be atomic CAS.
-    let fresh = reader
-        .read_content(&request.page_id)
-        .await
-        .map_err(|_| AppendError::Unavailable)?;
-    let final_meta =
-        compare_content_snapshot(&request.page_id, &expected, &fresh).map_err(|failure| {
-            match failure {
-                RevisionError::Conflict(meta) | RevisionError::Inactive(meta) => {
-                    AppendError::RevisionConflict(meta)
-                }
-                RevisionError::InvalidPrecondition => AppendError::InvalidInput,
-                RevisionError::Read(_) => AppendError::Unavailable,
-            }
-        })?;
     let before_comparison = reader.comparison_markdown(&before.markdown);
-    if reader.comparison_markdown(&fresh.markdown) != before_comparison {
-        return Err(AppendError::RevisionConflict(final_meta));
-    }
 
     // Persist the uncertain state BEFORE issuing the network mutation: after
     // any crash or timeout, repeat requests are reconciliation-only.
     ledger.mark_uncertain(&claim).map_err(ledger_error)?;
 
-    let written = writer
+    let written = match writer
         .append_content(AppendPageContent {
             page_id: request.page_id.clone(),
             markdown: request.markdown.clone(),
         })
         .await
-        .map_err(|error| unknown("append.patch", error.kind.label()))?;
+    {
+        Ok(written) => written,
+        Err(error) => {
+            let Some(rejection) = WriteRejection::of(&error) else {
+                return Err(unknown("append.patch", error.kind.label()));
+            };
+            let release = release_rejected(ledger, &claim, "append.patch", rejection.label());
+            return Err(AppendError::Rejected(rejection, release));
+        }
+    };
     if written.id != request.page_id || written.archived {
         return Err(unknown("append.receipt_mismatch", ""));
     }
@@ -261,6 +237,80 @@ pub async fn append_once(
         receipt,
         replayed: false,
     })
+}
+
+/// Revision preflight before any effect. It never uses indexed Markdown and
+/// returns the exact preimage the readback must preserve.
+async fn append_preflight(
+    reader: &dyn NotionRead,
+    request: &AppendRequest,
+) -> Result<crate::backend::PageContent, AppendError> {
+    let expected = ExpectedRevision {
+        last_edited_time: request.expected_last_edited_time.clone(),
+        markdown_sha256: request.expected_markdown_sha256.clone(),
+    };
+    let revision = check_revision(reader, &request.page_id, &expected)
+        .await
+        .map_err(|failure| match failure {
+            RevisionError::Conflict(meta) | RevisionError::Inactive(meta) => {
+                AppendError::RevisionConflict(meta)
+            }
+            RevisionError::InvalidPrecondition => AppendError::InvalidInput,
+            RevisionError::Read(error) => read_failure(&error),
+        })?;
+
+    let before = reader
+        .read_content(&request.page_id)
+        .await
+        .map_err(|error| read_failure(&error))?;
+    let before_meta =
+        compare_content_snapshot(&request.page_id, &expected, &before).map_err(|failure| {
+            match failure {
+                RevisionError::Conflict(meta) | RevisionError::Inactive(meta) => {
+                    AppendError::RevisionConflict(meta)
+                }
+                RevisionError::InvalidPrecondition => AppendError::InvalidInput,
+                RevisionError::Read(error) => read_failure(&error),
+            }
+        })?;
+    // Detect a change between the first fresh preflight and this full read.
+    if DateTime::parse_from_rfc3339(&before_meta.last_edited_time).ok()
+        != DateTime::parse_from_rfc3339(&revision.last_edited_time).ok()
+    {
+        return Err(AppendError::RevisionConflict(before_meta));
+    }
+
+    // Best-effort immediate fresh preflight. This cannot be atomic CAS.
+    let fresh = reader
+        .read_content(&request.page_id)
+        .await
+        .map_err(|error| read_failure(&error))?;
+    let final_meta =
+        compare_content_snapshot(&request.page_id, &expected, &fresh).map_err(|failure| {
+            match failure {
+                RevisionError::Conflict(meta) | RevisionError::Inactive(meta) => {
+                    AppendError::RevisionConflict(meta)
+                }
+                RevisionError::InvalidPrecondition => AppendError::InvalidInput,
+                RevisionError::Read(error) => read_failure(&error),
+            }
+        })?;
+    let before_comparison = reader.comparison_markdown(&before.markdown);
+    if reader.comparison_markdown(&fresh.markdown) != before_comparison {
+        return Err(AppendError::RevisionConflict(final_meta));
+    }
+    Ok(before)
+}
+
+/// A read refusal during preflight is definite; anything else is transient.
+fn read_failure(error: &crate::backend::BackendError) -> AppendError {
+    match WriteRejection::of(error) {
+        Some(rejection @ (WriteRejection::NotFound | WriteRejection::PermissionDenied)) => {
+            // The caller releases the claim and records the actual outcome.
+            AppendError::Rejected(rejection, ClaimRelease::Retained)
+        }
+        _ => AppendError::Unavailable,
+    }
 }
 
 /// Verified append followed by durable local refresh admission. Queue failure

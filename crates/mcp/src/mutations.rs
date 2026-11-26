@@ -3,10 +3,10 @@
 use notion_knowledge_core::{
     append::{AppendError, AppendRequest, append_once_and_refresh},
     audit::{AuditActor, AuditEvent, AuditOutcome, AuditStore, AuditTool},
-    backend::{NotionRead, NotionSectionWrite, NotionWrite, PageId},
+    backend::{NotionRead, NotionSectionWrite, NotionWrite, PageId, WriteRejection},
     create::{CreateError, CreateRequest, create_once_and_refresh},
     destructive::ConfirmationProvider,
-    idempotency::WriteIdempotencyStore,
+    idempotency::{ClaimRelease, WriteIdempotencyStore},
     lifecycle::LifecycleScope,
     revision::RevisionMetadata,
     root_scope::{ScopeError, validate_scope},
@@ -382,12 +382,59 @@ enum Failure {
     Conflict(RevisionMetadata),
     Idempotency,
     Unavailable,
+    /// Notion definitely refused the request; nothing changed. The claim
+    /// release outcome decides whether the same key can be retried.
+    Rejected(WriteRejection, Effect, ClaimRelease),
     Unknown,
+}
+/// Which kind of effect Notion refused, for the caller's guidance.
+#[derive(Clone, Copy)]
+enum Effect {
+    Create,
+    Change,
+}
+/// Fixed guidance for a refused write: no ids, titles or upstream text.
+fn rejection_message(rejection: WriteRejection, effect: Effect, release: ClaimRelease) -> String {
+    let refusal = match (effect, rejection) {
+        (Effect::Create, WriteRejection::ParentIsDatabase) => {
+            "parent_page_id names a Notion database, not a page. Nothing was created. To add a row, call knowledge_create_page with the database's data_source_id and properties instead of parent_page_id."
+        }
+        (Effect::Create, WriteRejection::NotFound) => {
+            "Notion found no parent page with that id shared with the integration. Nothing was created. If the parent is a database, pass its data_source_id instead of parent_page_id."
+        }
+        (Effect::Create, WriteRejection::PermissionDenied) => {
+            "Notion denied the integration access to the parent page. Nothing was created; share the parent with the integration first."
+        }
+        (Effect::Create, WriteRejection::InvalidRequest) => {
+            "Notion rejected the create request as invalid. Nothing was created; correct the request first."
+        }
+        (Effect::Change, WriteRejection::NotFound | WriteRejection::ParentIsDatabase) => {
+            "Notion found no page with that id shared with the integration. Nothing was changed."
+        }
+        (Effect::Change, WriteRejection::PermissionDenied) => {
+            "Notion denied the integration access to the page. Nothing was changed; share the page with the integration first."
+        }
+        (Effect::Change, WriteRejection::InvalidRequest) => {
+            "Notion rejected the change as invalid. Nothing was changed; correct the request first."
+        }
+    };
+    let retry = match release {
+        ClaimRelease::Released => "The same idempotency key can be retried.",
+        ClaimRelease::Retained => "This idempotency key stays reserved; retry with a new key.",
+    };
+    format!("{refusal} {retry}")
 }
 impl Failure {
     fn code(&self) -> &'static str {
         match self {
             Self::Invalid => "invalid_input",
+            Self::Rejected(
+                WriteRejection::InvalidRequest | WriteRejection::ParentIsDatabase,
+                ..,
+            ) => "invalid_input",
+            Self::Rejected(WriteRejection::NotFound | WriteRejection::PermissionDenied, ..) => {
+                "not_authorized"
+            }
             Self::Denied | Self::RootNotConfigured => "not_authorized",
             Self::Conflict(_) => "revision_conflict",
             Self::Idempotency => "idempotency_conflict",
@@ -402,6 +449,10 @@ impl Failure {
             Self::RootNotConfigured => {
                 write["reason"] = json!("root_not_configured");
                 write["message"] = json!(ROOT_GUIDANCE);
+            }
+            Self::Rejected(rejection, effect, release) => {
+                write["reason"] = json!(rejection.label());
+                write["message"] = json!(rejection_message(*rejection, *effect, *release));
             }
             Self::Conflict(meta) => {
                 write["page_id"] = json!(meta.page_id.0);
@@ -419,6 +470,9 @@ impl From<CreateError> for Failure {
             CreateError::NotAuthorized => Self::Denied,
             CreateError::IdempotencyConflict => Self::Idempotency,
             CreateError::Unavailable => Self::Unavailable,
+            CreateError::Rejected(rejection, release) => {
+                Self::Rejected(rejection, Effect::Create, release)
+            }
             CreateError::OutcomeUnknown => Self::Unknown,
         }
     }
@@ -431,6 +485,9 @@ impl From<AppendError> for Failure {
             AppendError::RevisionConflict(meta) => Self::Conflict(meta),
             AppendError::IdempotencyConflict => Self::Idempotency,
             AppendError::Unavailable => Self::Unavailable,
+            AppendError::Rejected(rejection, release) => {
+                Self::Rejected(rejection, Effect::Change, release)
+            }
             AppendError::OutcomeUnknown => Self::Unknown,
         }
     }
@@ -445,6 +502,9 @@ impl From<SectionUpdateError> for Failure {
             SectionUpdateError::RevisionConflict(meta) => Self::Conflict(meta),
             SectionUpdateError::IdempotencyConflict => Self::Idempotency,
             SectionUpdateError::Unavailable => Self::Unavailable,
+            SectionUpdateError::Rejected(rejection, release) => {
+                Self::Rejected(rejection, Effect::Change, release)
+            }
             SectionUpdateError::OutcomeUnknown => Self::Unknown,
         }
     }
@@ -685,7 +745,7 @@ fn common_output() -> Arc<serde_json::Map<String, Value>> {
             "write":{"type":"object","required":["status"],"properties":{
                 "status":{"enum":["verified","cancelled","invalid_input","not_authorized","revision_conflict","idempotency_conflict","unavailable","outcome_unknown"]},
                 "page_id":{"type":"string"},"url":{"type":"string"},"last_edited_time":{"type":"string"},"current_last_edited_time":{"type":"string"},"replayed":{"type":"boolean"},
-                "reason":{"enum":["root_not_configured"]},
+                "reason":{"enum":["root_not_configured","not_found","permission_denied","invalid_request","parent_is_database"]},
                 "message":{"type":"string"}
             }},
             "index":{"type":"object","required":["status"],"properties":{

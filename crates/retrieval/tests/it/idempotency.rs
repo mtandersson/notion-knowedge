@@ -173,6 +173,50 @@ fn committing_requires_a_reservation_and_never_changes_an_existing_receipt() {
 }
 
 #[test]
+fn a_released_claim_can_run_again_but_a_committed_one_is_never_released() {
+    let db = TestDb::new();
+    let operation = claim(KEY, "append text");
+    let store = SqliteIdempotencyStore::initialize_new(db.path()).unwrap();
+    assert_eq!(
+        store.release(&operation),
+        Err(IdempotencyError::NotReserved)
+    );
+
+    // Pending: released before any effect started.
+    assert_eq!(store.begin(&operation).unwrap(), Reservation::ExecuteOnce);
+    store.release(&operation).unwrap();
+    assert_eq!(store.lookup(&operation).unwrap(), None);
+    assert_eq!(store.begin(&operation).unwrap(), Reservation::ExecuteOnce);
+
+    // Uncertain: released after the provider definitely refused the effect.
+    store.mark_uncertain(&operation).unwrap();
+    assert_eq!(
+        store.release(&claim(KEY, "other text")),
+        Err(IdempotencyError::KeyConflict)
+    );
+    assert_eq!(store.begin(&operation).unwrap(), Reservation::Reconcile);
+    store.release(&operation).unwrap();
+    drop(store);
+
+    // The release is durable, and a corrected payload may reuse the key.
+    let reopened = SqliteIdempotencyStore::open_existing(db.path()).unwrap();
+    let corrected = claim(KEY, "corrected text");
+    assert_eq!(
+        reopened.begin(&corrected).unwrap(),
+        Reservation::ExecuteOnce
+    );
+    reopened.record_verified(&corrected, &receipt()).unwrap();
+    assert_eq!(
+        reopened.release(&corrected),
+        Err(IdempotencyError::AlreadyCommitted)
+    );
+    assert_eq!(
+        reopened.begin(&corrected).unwrap(),
+        Reservation::Replay(receipt())
+    );
+}
+
+#[test]
 fn simultaneous_process_connections_reserve_only_once() {
     let db = TestDb::new();
     SqliteIdempotencyStore::initialize_new(db.path()).unwrap();

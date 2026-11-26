@@ -102,6 +102,46 @@ pub struct BackendError {
     pub committed_page_id: Option<PageId>,
 }
 
+/// A provider answer that proves a write was refused before any effect: the
+/// request never reached a state Notion could have committed. Timeouts,
+/// 5xx, rate limits and transport failures are never rejections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteRejection {
+    /// The target or parent does not exist or is not shared with the integration.
+    NotFound,
+    PermissionDenied,
+    /// Notion's request validation refused the payload.
+    InvalidRequest,
+    /// A create named a database as its parent page.
+    ParentIsDatabase,
+}
+
+impl WriteRejection {
+    /// Classify an effect failure. A failure that names a committed page (a
+    /// verify read after a successful write) is never a rejection.
+    pub fn of(error: &BackendError) -> Option<Self> {
+        if error.committed_page_id.is_some() {
+            return None;
+        }
+        match error.kind {
+            BackendErrorKind::NotFound => Some(Self::NotFound),
+            BackendErrorKind::PermissionDenied => Some(Self::PermissionDenied),
+            BackendErrorKind::InvalidInput => Some(Self::InvalidRequest),
+            _ => None,
+        }
+    }
+
+    /// Fixed lowercase label for logs and tool responses.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::PermissionDenied => "permission_denied",
+            Self::InvalidRequest => "invalid_request",
+            Self::ParentIsDatabase => "parent_is_database",
+        }
+    }
+}
+
 impl std::fmt::Display for BackendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} failed: {:?}", self.operation, self.kind)
@@ -132,6 +172,12 @@ pub trait NotionRead: Send + Sync {
     /// Complete Markdown and the same metadata returned by `fetch_source_page`.
     fn read_source_content<'a>(&'a self, page_id: &'a PageId) -> BackendFuture<'a, PageContent> {
         self.read_content(page_id)
+    }
+
+    /// Whether this id names a database the integration can read. Used only
+    /// to explain a refused create; an adapter without the lookup says no.
+    fn is_database<'a>(&'a self, _id: &'a PageId) -> BackendFuture<'a, bool> {
+        Box::pin(async { Ok(false) })
     }
 }
 

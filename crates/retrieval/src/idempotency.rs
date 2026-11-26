@@ -244,6 +244,29 @@ impl WriteIdempotencyStore for SqliteIdempotencyStore {
         Ok(())
     }
 
+    fn release(&self, claim: &MutationClaim) -> Result<(), IdempotencyError> {
+        let mut connection = self.transaction()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(unavailable)?;
+        let row = checked(existing(&tx, claim.key_digest())?, claim)?;
+        match row.1.as_str() {
+            "pending" | "unknown" => {
+                tx.execute(
+                    "DELETE FROM mutation_claims
+                     WHERE key_digest=?1 AND request_digest=?2
+                         AND status IN ('pending','unknown')",
+                    params![claim.key_digest(), claim.request_digest()],
+                )
+                .map_err(unavailable)?;
+            }
+            "committed" => return Err(IdempotencyError::AlreadyCommitted),
+            _ => return Err(IdempotencyError::CorruptState),
+        }
+        tx.commit().map_err(unavailable)?;
+        Ok(())
+    }
+
     fn record_verified(
         &self,
         claim: &MutationClaim,

@@ -70,6 +70,18 @@ impl NotionClient {
         })
     }
 
+    /// Whether `id` names a database the integration can read. Any lookup
+    /// failure or other object answers false: this only explains a refused create.
+    pub async fn is_database(&self, id: &str) -> Result<bool, BackendError> {
+        let Some(id) = crate::pages::uuid(id) else {
+            return Ok(false);
+        };
+        Ok(self
+            .walk_request(Method::GET, &format!("databases/{id}"), None)
+            .await
+            .is_ok_and(|value| value["object"] == "database"))
+    }
+
     /// Append only: no selection, replacement, deletion, batching or ambiguous-failure retries.
     pub async fn append_content(&self, request: AppendPageContent) -> Result<(), BackendError> {
         let operation = "notion.append";

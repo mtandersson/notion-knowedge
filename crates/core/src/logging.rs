@@ -429,6 +429,40 @@ fn write_unknown_value(
     event
 }
 
+/// Record that Notion definitely refused a guarded write before any effect,
+/// and whether its idempotency claim was released. Fixed labels only.
+pub fn emit_write_rejected(stage: &'static str, detail: &'static str, released: bool) {
+    let outcome = Outcome::Rejected;
+    if enabled(outcome.level()) {
+        write_event(write_rejected_value(&current_id(), stage, detail, released));
+    }
+}
+
+fn write_rejected_value(
+    id: &CorrelationId,
+    stage: &'static str,
+    detail: &'static str,
+    released: bool,
+) -> serde_json::Value {
+    let outcome = Outcome::Rejected;
+    let mut event = event_value(
+        id,
+        Operation::McpTool,
+        outcome,
+        Duration::ZERO,
+        None,
+        outcome.level(),
+    );
+    event["tool"] = "guarded_write".into();
+    event["result"] = "rejected".into();
+    event["stage"] = stage.into();
+    if !detail.is_empty() {
+        event["detail"] = detail.into();
+    }
+    event["claim"] = if released { "released" } else { "retained" }.into();
+    event
+}
+
 /// Record why a saved-view query failed using fixed classifications only: the
 /// failure kind and the stage that produced it, never an id or upstream text.
 pub fn emit_view_query_failure(
@@ -680,6 +714,19 @@ mod tests {
         })
         .await;
         assert!(current_sync_progress().is_none());
+    }
+
+    #[test]
+    fn rejected_write_event_names_the_stage_and_claim_without_content() {
+        let event = write_rejected_value(&CorrelationId::new(), "create.post", "not_found", true);
+        assert_eq!(event["result"], "rejected");
+        assert_eq!(event["stage"], "create.post");
+        assert_eq!(event["detail"], "not_found");
+        assert_eq!(event["claim"], "released");
+        assert_eq!(event["outcome"], "rejected");
+        let retained = write_rejected_value(&CorrelationId::new(), "append.patch", "", false);
+        assert_eq!(retained["claim"], "retained");
+        assert!(retained.get("detail").is_none());
     }
 
     #[test]

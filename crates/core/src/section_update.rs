@@ -7,11 +7,11 @@ use chrono::DateTime;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    backend::{NotionRead, NotionSectionWrite, PageId, UpdateSectionContent},
+    backend::{NotionRead, NotionSectionWrite, PageId, UpdateSectionContent, WriteRejection},
     destructive::{ConfirmationProvider, ConfirmationRequest, DestructivePolicy, WriteOperation},
     idempotency::{
-        IdempotencyError, MutationClaim, MutationOperation, Reservation, VerifiedReceipt,
-        WriteIdempotencyStore,
+        ClaimRelease, IdempotencyError, MutationClaim, MutationOperation, Reservation,
+        VerifiedReceipt, WriteIdempotencyStore, release_rejected, release_unstarted,
     },
     lifecycle::LifecycleScope,
     revision::{
@@ -31,6 +31,106 @@ pub struct SectionUpdateRequest {
     pub expected_markdown_sha256: Option<String>,
     /// Globally unique per intent and at least 16 URL-safe characters.
     pub idempotency_key: String,
+}
+
+/// Revision, selection and confirmation checks before any effect. Returns the
+/// plan whose exact original body is the PATCH's unique `old_str`.
+async fn section_preflight(
+    reader: &dyn NotionRead,
+    scope: &LifecycleScope,
+    request: &SectionUpdateRequest,
+    confirmation: Option<&dyn ConfirmationProvider>,
+) -> Result<crate::sections::SectionPlan, SectionUpdateError> {
+    let expected = ExpectedRevision {
+        last_edited_time: request.expected_last_edited_time.clone(),
+        markdown_sha256: request.expected_markdown_sha256.clone(),
+    };
+    check_revision(reader, &request.page_id, &expected)
+        .await
+        .map_err(|err| match err {
+            RevisionError::Conflict(meta) | RevisionError::Inactive(meta) => {
+                SectionUpdateError::RevisionConflict(meta)
+            }
+            RevisionError::InvalidPrecondition => SectionUpdateError::InvalidInput,
+            RevisionError::Read(error) => read_failure(&error),
+        })?;
+
+    let original = reader
+        .read_content(&request.page_id)
+        .await
+        .map_err(|error| read_failure(&error))?;
+    compare_content_snapshot(&request.page_id, &expected, &original).map_err(map_revision_error)?;
+
+    let plan = plan_section(
+        &original.markdown,
+        request.anchor.clone(),
+        &request.replacement,
+    )
+    .map_err(|err| match err {
+        SectionError::InvalidInput | SectionError::NoChange => SectionUpdateError::InvalidInput,
+        SectionError::NotFound | SectionError::Ambiguous | SectionError::Unsupported => {
+            SectionUpdateError::SelectionRejected
+        }
+    })?;
+    let old = plan.original_body();
+    // Upstream update_content matches textual occurrences, not our byte offsets.
+    // It cannot select an empty range or distinguish identical sibling content.
+    if old.is_empty() || original.markdown.match_indices(old).count() != 1 {
+        return Err(SectionUpdateError::SelectionRejected);
+    }
+
+    if let Some(provider) = confirmation {
+        let scope_identity = crate::destructive::confirmation_scope(scope)
+            .map_err(|_| SectionUpdateError::InvalidInput)?;
+        let intended = ConfirmationRequest::new(
+            WriteOperation::UpdateSection,
+            &scope_identity,
+            &request.page_id.0,
+            &fingerprint(request),
+            &request.idempotency_key,
+        )
+        .and_then(|request_intent| {
+            request_intent.with_section_preview(crate::destructive::SectionConfirmationPreview {
+                section_anchor: format!(
+                    "{} {}",
+                    "#".repeat(request.anchor.level as usize),
+                    request.anchor.heading
+                ),
+                original_body: old.to_owned(),
+                replacement_body: plan.replacement_body().to_owned(),
+            })
+        })
+        .map_err(|_| SectionUpdateError::InvalidInput)?;
+        DestructivePolicy::new(true)
+            .require_confirmation(&intended, Some(provider))
+            .await
+            .map_err(|_| SectionUpdateError::NotAuthorized)?
+            .consume(&intended)
+            .map_err(|_| SectionUpdateError::NotAuthorized)?;
+    }
+    // Approval can await human input; re-read the source AFTER it.
+    // Best-effort final immediate preflight. Not an atomic CAS.
+    let fresh = reader
+        .read_content(&request.page_id)
+        .await
+        .map_err(|error| read_failure(&error))?;
+    let fresh_meta = compare_content_snapshot(&request.page_id, &expected, &fresh)
+        .map_err(map_revision_error)?;
+    if fresh.markdown != original.markdown {
+        return Err(SectionUpdateError::RevisionConflict(fresh_meta));
+    }
+    Ok(plan)
+}
+
+/// A read refusal during preflight is definite; anything else is transient.
+fn read_failure(error: &crate::backend::BackendError) -> SectionUpdateError {
+    match WriteRejection::of(error) {
+        Some(rejection @ (WriteRejection::NotFound | WriteRejection::PermissionDenied)) => {
+            // The caller releases the claim and records the actual outcome.
+            SectionUpdateError::Rejected(rejection, ClaimRelease::Retained)
+        }
+        _ => SectionUpdateError::Unavailable,
+    }
 }
 
 /// Once-only verified section edit with independent durable index status.
@@ -112,6 +212,9 @@ pub enum SectionUpdateError {
     SelectionRejected,
     IdempotencyConflict,
     Unavailable,
+    /// Notion definitely refused the request before any effect. When the
+    /// claim was released, the same key may be retried.
+    Rejected(WriteRejection, ClaimRelease),
     /// The ledger must remain reserved; reconcile, NEVER resend the PATCH.
     OutcomeUnknown,
 }
@@ -172,8 +275,10 @@ fn fingerprint(request: &SectionUpdateRequest) -> String {
 /// nonempty, unambiguous old_str, and no guessed position is ever supplied.
 ///
 /// Ledger order is reserve -> preflight -> mark_uncertain -> one PATCH ->
-/// authoritative full readback -> record_verified. Failures after reservation
-/// never release the key automatically. The ledger MUST be persistent,
+/// authoritative full readback -> record_verified. A failure before
+/// mark_uncertain other than a revision conflict or declined confirmation, or
+/// a definite Notion refusal of the PATCH, releases the key; any other failure
+/// after mark_uncertain never does. The ledger MUST be persistent,
 /// transactional and shared between workers, as required by its interface.
 pub async fn update_section_once(
     reader: &dyn NotionRead,
@@ -239,96 +344,47 @@ async fn update_section_inner(
         Reservation::ExecuteOnce => {}
     }
 
-    let expected = ExpectedRevision {
-        last_edited_time: request.expected_last_edited_time.clone(),
-        markdown_sha256: request.expected_markdown_sha256.clone(),
-    };
-    check_revision(reader, &request.page_id, &expected)
-        .await
-        .map_err(|err| match err {
-            RevisionError::Conflict(meta) | RevisionError::Inactive(meta) => {
-                SectionUpdateError::RevisionConflict(meta)
-            }
-            RevisionError::InvalidPrecondition => SectionUpdateError::InvalidInput,
-            RevisionError::Read(_) => SectionUpdateError::Unavailable,
-        })?;
-
-    let original = reader
-        .read_content(&request.page_id)
-        .await
-        .map_err(|_| SectionUpdateError::Unavailable)?;
-    compare_content_snapshot(&request.page_id, &expected, &original).map_err(map_revision_error)?;
-
-    let plan = plan_section(
-        &original.markdown,
-        request.anchor.clone(),
-        &request.replacement,
-    )
-    .map_err(|err| match err {
-        SectionError::InvalidInput | SectionError::NoChange => SectionUpdateError::InvalidInput,
-        SectionError::NotFound | SectionError::Ambiguous | SectionError::Unsupported => {
-            SectionUpdateError::SelectionRejected
-        }
-    })?;
-    let old = plan.original_body();
-    // Upstream update_content matches textual occurrences, not our byte offsets.
-    // It cannot select an empty range or distinguish identical sibling content.
-    if old.is_empty() || original.markdown.match_indices(old).count() != 1 {
-        return Err(SectionUpdateError::SelectionRejected);
-    }
-
-    if let Some(provider) = confirmation {
-        let scope_identity = crate::destructive::confirmation_scope(scope)
-            .map_err(|_| SectionUpdateError::InvalidInput)?;
-        let intended = ConfirmationRequest::new(
-            WriteOperation::UpdateSection,
-            &scope_identity,
-            &request.page_id.0,
-            &fingerprint(&request),
-            &request.idempotency_key,
-        )
-        .and_then(|request_intent| {
-            request_intent.with_section_preview(crate::destructive::SectionConfirmationPreview {
-                section_anchor: format!(
-                    "{} {}",
-                    "#".repeat(request.anchor.level as usize),
-                    request.anchor.heading
+    // Nothing has been sent yet, so a preflight failure releases the claim and
+    // the same key can run again. A revision conflict or a declined or failed
+    // confirmation keeps it, as documented: the caller must review and
+    // resubmit with a new key.
+    let plan = match section_preflight(reader, scope, &request, confirmation).await {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Err(match error {
+                SectionUpdateError::RevisionConflict(_) | SectionUpdateError::NotAuthorized => {
+                    error
+                }
+                SectionUpdateError::Rejected(rejection, _) => SectionUpdateError::Rejected(
+                    rejection,
+                    release_rejected(ledger, &claim, "section.preflight", rejection.label()),
                 ),
-                original_body: old.to_owned(),
-                replacement_body: plan.replacement_body().to_owned(),
-            })
-        })
-        .map_err(|_| SectionUpdateError::InvalidInput)?;
-        DestructivePolicy::new(true)
-            .require_confirmation(&intended, Some(provider))
-            .await
-            .map_err(|_| SectionUpdateError::NotAuthorized)?
-            .consume(&intended)
-            .map_err(|_| SectionUpdateError::NotAuthorized)?;
-    }
-    // Approval can await human input; re-read the source AFTER it.
-    // Best-effort final immediate preflight. Not an atomic CAS.
-    let fresh = reader
-        .read_content(&request.page_id)
-        .await
-        .map_err(|_| SectionUpdateError::Unavailable)?;
-    let fresh_meta = compare_content_snapshot(&request.page_id, &expected, &fresh)
-        .map_err(map_revision_error)?;
-    if fresh.markdown != original.markdown {
-        return Err(SectionUpdateError::RevisionConflict(fresh_meta));
-    }
+                other => {
+                    release_unstarted(ledger, &claim, "section.preflight");
+                    other
+                }
+            });
+        }
+    };
+    let old = plan.original_body();
 
     // MUST be persisted before any network mutation, including failed or
     // timed-out requests. No automatic replay on any outcome.
     ledger.mark_uncertain(&claim).map_err(ledger_error)?;
-    writer
+    if let Err(error) = writer
         .update_section(UpdateSectionContent {
             page_id: request.page_id.clone(),
             old_str: old.to_owned(),
             new_str: plan.replacement_body().to_owned(),
         })
         .await
-        .map_err(|error| unknown("section.patch", error.kind.label()))?;
+    {
+        let Some(rejection) = WriteRejection::of(&error) else {
+            return Err(unknown("section.patch", error.kind.label()));
+        };
+        let release = release_rejected(ledger, &claim, "section.patch", rejection.label());
+        return Err(SectionUpdateError::Rejected(rejection, release));
+    }
 
     let after = reader
         .read_content(&request.page_id)

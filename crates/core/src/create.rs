@@ -1,10 +1,10 @@
 //! Provider-neutral, once-only page creation for semantic mutation dispatch.
 //! Each preflight/read/effect uses an injected authoritative port.
 use crate::{
-    backend::{CreatePage, NotionRead, NotionWrite, PageId},
+    backend::{CreatePage, NotionRead, NotionWrite, PageId, WriteRejection},
     idempotency::{
-        IdempotencyError, MutationClaim, MutationOperation, Reservation, VerifiedReceipt,
-        WriteIdempotencyStore,
+        ClaimRelease, IdempotencyError, MutationClaim, MutationOperation, Reservation,
+        VerifiedReceipt, WriteIdempotencyStore, release_rejected,
     },
     lifecycle::LifecycleScope,
     write_refresh::{MutationRefreshQueue, RefreshKey, WriteCompletion, admit_verified},
@@ -24,6 +24,9 @@ pub enum CreateError {
     NotAuthorized,
     IdempotencyConflict,
     Unavailable,
+    /// Notion definitely refused the POST: nothing was created. When the claim
+    /// was released, the same key may be retried.
+    Rejected(WriteRejection, ClaimRelease),
     /// A source effect might exist. Reconcile; never repeat the POST.
     OutcomeUnknown,
 }
@@ -59,6 +62,25 @@ fn readback_mismatch(
         Some("markdown")
     } else {
         None
+    }
+}
+
+/// Notion answers a database id given as a page parent with a refusal. Name
+/// that case so the caller can switch to a row create; any probe failure
+/// keeps the original classification.
+async fn explain_parent(
+    reader: &dyn NotionRead,
+    parent: &PageId,
+    rejection: WriteRejection,
+) -> WriteRejection {
+    if matches!(
+        rejection,
+        WriteRejection::NotFound | WriteRejection::InvalidRequest
+    ) && reader.is_database(parent).await.unwrap_or(false)
+    {
+        WriteRejection::ParentIsDatabase
+    } else {
+        rejection
     }
 }
 
@@ -119,14 +141,27 @@ pub async fn create_once_and_refresh(
         Reservation::Reconcile => return Err(unknown("create.reconcile_required", "")),
         Reservation::ExecuteOnce => {
             ledger.mark_uncertain(&claim).map_err(ledger_error)?;
-            let created = writer
+            let created = match writer
                 .create_page(CreatePage {
                     parent_page_id: request.parent_page_id.clone(),
                     title: request.title.clone(),
                     markdown: request.markdown.clone(),
                 })
                 .await
-                .map_err(|error| unknown("create.post", error.kind.label()))?;
+            {
+                Ok(created) => created,
+                Err(error) => {
+                    let Some(rejection) = WriteRejection::of(&error) else {
+                        return Err(unknown("create.post", error.kind.label()));
+                    };
+                    // Release first: the probe below only shapes the message.
+                    let release =
+                        release_rejected(ledger, &claim, "create.post", rejection.label());
+                    let rejection =
+                        explain_parent(reader, &request.parent_page_id, rejection).await;
+                    return Err(CreateError::Rejected(rejection, release));
+                }
+            };
             if created.archived || created.title != request.title {
                 return Err(unknown("create.receipt_mismatch", ""));
             }
