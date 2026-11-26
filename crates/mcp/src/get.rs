@@ -432,7 +432,7 @@ async fn belongs_to(server: &KnowledgeServer, page: &str, roots: &[String]) -> b
     }
 }
 
-/// `knowledge_get` with the saved-view mode of the old `knowledge_query_view`.
+/// `knowledge_get` with its saved-view mode.
 pub fn tool_with_views() -> Tool {
     let mut tool = tool();
     let mut input = tool.input_schema.as_ref().clone();

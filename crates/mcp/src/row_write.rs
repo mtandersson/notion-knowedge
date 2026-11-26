@@ -2,8 +2,6 @@ use notion_knowledge_core::row_write::{MAX_PROPERTIES, MAX_RELATIONS};
 use rmcp::model::{Tool, ToolAnnotations};
 use serde_json::{Value, json};
 
-pub const CREATE_TOOL: &str = "knowledge_create_row";
-pub const UPDATE_TOOL: &str = "knowledge_update_row";
 pub(crate) const UUID: &str = "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$";
 
 fn input_type(kind: &str, value: Value) -> Value {
@@ -51,7 +49,7 @@ pub(super) fn create_tool() -> Tool {
             "idempotency_key":{"type":"string","minLength":16,"maxLength":128}
         }
     });
-    Tool::new(CREATE_TOOL,
+    Tool::new("knowledge_create_page",
         "Create one row in an authorized Notion data source with its title, Markdown, and typed properties in one operation. Use existing option IDs for status and select values. Keep the same idempotency key for retries.",
         schema.as_object().unwrap().clone())
         .with_annotations(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true).open_world(true))
@@ -68,14 +66,14 @@ pub(super) fn update_tool() -> Tool {
         "required":["root_page_id","page_id","expected_row_revision","properties","idempotency_key"],
         "properties":{
             "root_page_id":{"type":"string","pattern":UUID,"description":crate::mutations::ROOT_FIELD},
-            "page_id":{"type":"string","pattern":UUID,"description":"Stable page_id of the row returned by knowledge_query_view."},
+            "page_id":{"type":"string","pattern":UUID,"description":"Stable page_id of the row returned by knowledge_get view mode."},
             "expected_row_revision":{"type":"string","pattern":"^[a-f0-9]{64}$",
-                "description":"The row_revision from a current authoritative knowledge_query_view result."},
+                "description":"The row_revision from a current authoritative knowledge_get view-mode result."},
             "properties":properties,
             "idempotency_key":{"type":"string","minLength":16,"maxLength":128}
         }
     });
-    Tool::new(UPDATE_TOOL,
+    Tool::new("knowledge_update_page",
         "Apply a typed property patch to one authorized Notion database row. Use its authoritative row_revision, and reuse the same idempotency key after an uncertain response.",
         schema.as_object().unwrap().clone())
         .with_annotations(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true).open_world(true))
