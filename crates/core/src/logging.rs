@@ -399,7 +399,12 @@ pub fn emit(
 
 /// Record why a saved-view query failed using fixed classifications only: the
 /// failure kind and the stage that produced it, never an id or upstream text.
-pub fn emit_view_query_failure(outcome: Outcome, elapsed: Duration, kind: &str, stage: &str) {
+pub fn emit_view_query_failure(
+    outcome: Outcome,
+    elapsed: Duration,
+    kind: &'static str,
+    stage: &'static str,
+) {
     let level = outcome.level();
     if enabled(level) {
         write_event(view_query_failure_value(
@@ -416,8 +421,8 @@ fn view_query_failure_value(
     id: &CorrelationId,
     outcome: Outcome,
     elapsed: Duration,
-    kind: &str,
-    stage: &str,
+    kind: &'static str,
+    stage: &'static str,
 ) -> serde_json::Value {
     let mut event = event_value(
         id,
@@ -651,12 +656,12 @@ mod tests {
             &CorrelationId::new(),
             Outcome::Rejected,
             Duration::from_millis(7),
-            "PermissionDenied",
-            "scope.excluded_or_cycle",
+            "permission_denied",
+            "scope.excluded",
         );
         assert_eq!(event["tool"], "saved_view_query");
-        assert_eq!(event["kind"], "PermissionDenied");
-        assert_eq!(event["stage"], "scope.excluded_or_cycle");
+        assert_eq!(event["kind"], "permission_denied");
+        assert_eq!(event["stage"], "scope.excluded");
         assert_eq!(event["outcome"], "rejected");
         assert_eq!(event["level"], "warn");
         // The event carries classifications only, never a view or page id.

@@ -314,12 +314,14 @@ impl NotionClient {
                 "block_id" => ("blocks", "block", None),
                 _ => return Err(denied("scope.unsupported_container")),
             };
-            if !visited.insert((kind, current.clone()))
-                || source_type
-                    .is_some_and(|source| scope.exclusions.exclusion(&current, source).is_some())
+            if !visited.insert((kind, current.clone())) {
+                return Err(denied("scope.cycle"));
+            }
+            if source_type
+                .is_some_and(|source| scope.exclusions.exclusion(&current, source).is_some())
                 || (kind == "page_id" && scope.exclusions.descendants_of.contains(&current))
             {
-                return Err(denied("scope.excluded_or_cycle"));
+                return Err(denied("scope.excluded"));
             }
             let value = match self.view_object(endpoint, &current).await {
                 // Notion's database endpoint can omit linked containers. The
@@ -345,8 +347,9 @@ impl NotionClient {
             };
             // Data source objects have no archive flag. Their database must be active.
             match (kind, pages::inactive(&value)) {
-                (_, Some(true)) | ("database_id" | "page_id" | "block_id", None) => {
-                    return Err(denied("scope.inactive_or_unknown_active_state"));
+                (_, Some(true)) => return Err(denied("scope.inactive")),
+                ("database_id" | "page_id" | "block_id", None) => {
+                    return Err(denied("scope.unknown_active_state"));
                 }
                 _ => {}
             }
@@ -381,8 +384,11 @@ impl NotionClient {
         }
         let metadata = self.view_object("data_sources", source).await?;
         object(&metadata, "data_source", source)?;
-        if metadata["parent"]["type"] != "database_id" || pages::inactive(&metadata) == Some(true) {
-            return Err(denied("data_source.parent_or_inactive"));
+        if metadata["parent"]["type"] != "database_id" {
+            return Err(denied("data_source.parent_not_database"));
+        }
+        if pages::inactive(&metadata) == Some(true) {
+            return Err(denied("data_source.inactive"));
         }
         let source_database = id(&metadata["parent"]["database_id"])?;
         self.verify_database_scope(&source_database, false, scope)
@@ -528,11 +534,13 @@ impl NotionClient {
             }
             let row = self.fetch_page_value(&PageId(row_id.clone())).await?;
             object(&row, "page", &row_id)?;
-            if pages::inactive(&row) != Some(false)
-                || row["parent"]["type"] != "data_source_id"
+            if pages::inactive(&row) != Some(false) {
+                return Err(denied("row.inactive"));
+            }
+            if row["parent"]["type"] != "data_source_id"
                 || id(&row["parent"]["data_source_id"])? != view.source
             {
-                return Err(denied("row.not_in_source_or_inactive"));
+                return Err(denied("row.not_in_source"));
             }
             row["last_edited_time"]
                 .as_str()

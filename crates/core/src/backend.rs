@@ -71,6 +71,23 @@ pub enum BackendErrorKind {
     Internal,
 }
 
+impl BackendErrorKind {
+    /// Fixed lowercase label for operator logs.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Unauthenticated => "unauthenticated",
+            Self::PermissionDenied => "permission_denied",
+            Self::NotFound => "not_found",
+            Self::InvalidInput => "invalid_input",
+            Self::UnsupportedContent => "unsupported_content",
+            Self::Conflict => "conflict",
+            Self::RateLimited => "rate_limited",
+            Self::Unavailable => "unavailable",
+            Self::Internal => "internal",
+        }
+    }
+}
+
 /// Sanitized adapter failure. Never include credentials, raw upstream bodies or
 /// page content in this model. retry_after is advisory, not a retry instruction;
 /// callers must not blindly retry non-idempotent writes.

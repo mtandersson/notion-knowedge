@@ -23,19 +23,15 @@ pub(crate) struct Runtime {
 
 /// Name the failing stage in the operator log; the caller still gets the
 /// generic classified message.
-fn log_failure(started: std::time::Instant, failure: &BackendError) {
+fn log_failure(started: std::time::Instant, failure: &BackendError, stage: &'static str) {
     let outcome = match failure.kind {
-        Kind::PermissionDenied | Kind::NotFound | Kind::Unauthenticated | Kind::InvalidInput => {
-            Outcome::Rejected
-        }
+        // The caller's own mistake (bad id or continuation): not worth a log line.
+        Kind::InvalidInput => return,
+        Kind::PermissionDenied | Kind::NotFound | Kind::Unauthenticated => Outcome::Rejected,
+        _ if failure.operation == "notion.view_query.response_limit" => Outcome::Rejected,
         _ => Outcome::Failed,
     };
-    logging::emit_view_query_failure(
-        outcome,
-        started.elapsed(),
-        &format!("{:?}", failure.kind),
-        failure.operation,
-    );
+    logging::emit_view_query_failure(outcome, started.elapsed(), failure.kind.label(), stage);
 }
 
 fn error(kind: Kind) -> BackendError {
@@ -158,12 +154,12 @@ impl SavedViewQuery for Runtime {
             {
                 Ok(Ok(output)) => output,
                 Ok(Err(failure)) => {
-                    log_failure(started, &failure);
+                    log_failure(started, &failure, failure.operation);
                     return Err(failure);
                 }
                 Err(_) => {
                     let failure = error(Kind::Unavailable);
-                    log_failure(started, &failure);
+                    log_failure(started, &failure, "timeout");
                     return Err(failure);
                 }
             };
