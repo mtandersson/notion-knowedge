@@ -25,6 +25,7 @@ use crate::{NotionClient, pages, views::row_revision, writes::encode_write_body}
 
 const CREATE: &str = "notion.row.create";
 const UPDATE: &str = "notion.row.update";
+const UPDATE_VERIFY: &str = "row.update.verify";
 
 fn preflight(error: BackendError) -> Error {
     match error.kind {
@@ -55,6 +56,12 @@ fn effect_failure(
             Error::OutcomeUnknown
         }
     }
+}
+
+/// An outcome that cannot be proven, logged with a fixed stage and check label.
+fn unknown(stage: &'static str, detail: &'static str) -> Error {
+    emit_write_outcome_unknown(Outcome::Failed, stage, detail);
+    Error::OutcomeUnknown
 }
 
 fn ledger_error(error: IdempotencyError) -> Error {
@@ -359,49 +366,67 @@ impl NotionClient {
         prepared: &Prepared,
         scope: &LifecycleScope,
     ) -> Result<VerifiedReceipt, Error> {
+        const V: &str = "row.create.verify";
         let id = receipt["id"]
             .as_str()
             .and_then(pages::uuid)
-            .ok_or(Error::OutcomeUnknown)?;
+            .ok_or_else(|| unknown(V, "receipt_id"))?;
         if !active_row(receipt, &id, &request.data_source_id) {
-            return Err(Error::OutcomeUnknown);
+            return Err(unknown(V, "receipt_not_active_row"));
         }
         let id = PageId(id);
         let first = self
             .fetch_page_value(&id)
             .await
-            .map_err(|_| Error::OutcomeUnknown)?;
+            .map_err(|e| unknown("row.create.fetch_first", e.kind.label()))?;
         let markdown = self
             .read_markdown(&id)
             .await
-            .map_err(|_| Error::OutcomeUnknown)?;
+            .map_err(|e| unknown("row.create.markdown", e.kind.label()))?;
         let last = self
             .fetch_page_value(&id)
             .await
-            .map_err(|_| Error::OutcomeUnknown)?;
-        if !active_row(&first, &id.0, &request.data_source_id)
-            || !active_row(&last, &id.0, &request.data_source_id)
-            || first["last_edited_time"] != last["last_edited_time"]
-            || first["url"] != last["url"]
-            || receipt["url"] != last["url"]
-            || !matches_properties(&first, &prepared.properties)
-            || !matches_properties(&last, &prepared.properties)
-            || !written_markdown_matches(&request.markdown, &markdown)
-        {
-            return Err(Error::OutcomeUnknown);
+            .map_err(|e| unknown("row.create.fetch_last", e.kind.label()))?;
+        let checks = [
+            (
+                "page_not_active_row",
+                active_row(&first, &id.0, &request.data_source_id)
+                    && active_row(&last, &id.0, &request.data_source_id),
+            ),
+            (
+                "edited_during_readback",
+                first["last_edited_time"] == last["last_edited_time"],
+            ),
+            ("url_changed", first["url"] == last["url"]),
+            ("receipt_url", receipt["url"] == last["url"]),
+            (
+                "properties",
+                matches_properties(&first, &prepared.properties)
+                    && matches_properties(&last, &prepared.properties),
+            ),
+            (
+                "markdown",
+                written_markdown_matches(&request.markdown, &markdown),
+            ),
+        ];
+        if let Some((label, _)) = checks.iter().find(|(_, ok)| !ok) {
+            return Err(unknown(V, label));
         }
         self.scoped_data_source(&request.data_source_id, scope)
             .await
-            .map_err(|_| Error::OutcomeUnknown)?;
+            .map_err(|e| unknown("row.create.scope", e.kind.label()))?;
         VerifiedReceipt::from_readback(
             id.0,
-            last["url"].as_str().ok_or(Error::OutcomeUnknown)?.into(),
+            last["url"]
+                .as_str()
+                .ok_or_else(|| unknown(V, "url_missing"))?
+                .into(),
             last["last_edited_time"]
                 .as_str()
-                .ok_or(Error::OutcomeUnknown)?
+                .ok_or_else(|| unknown(V, "edited_time_missing"))?
                 .into(),
         )
-        .map_err(|_| Error::OutcomeUnknown)
+        .map_err(|_| unknown(V, "receipt_invalid"))
     }
 }
 
@@ -449,7 +474,9 @@ impl RowWrite for NotionClient {
                 .map_err(preflight)?;
             let (receipt, replayed) = match ledger.lookup(&claim).map_err(ledger_error)? {
                 Some(ExistingClaim::Replay(receipt)) => (receipt, true),
-                Some(ExistingClaim::Reconcile) => return Err(Error::OutcomeUnknown),
+                Some(ExistingClaim::Reconcile) => {
+                    return Err(unknown("row.create.claim", "reconcile_required"));
+                }
                 None => {
                     let schema = &schema["properties"];
                     let mut prepared = prepare_properties(schema, &request.properties)?;
@@ -484,7 +511,9 @@ impl RowWrite for NotionClient {
                     encode_write_body(&body, CREATE).map_err(preflight)?;
                     match ledger.begin(&claim).map_err(ledger_error)? {
                         Reservation::Replay(receipt) => (receipt, true),
-                        Reservation::Reconcile => return Err(Error::OutcomeUnknown),
+                        Reservation::Reconcile => {
+                            return Err(unknown("row.create.claim", "reconcile_required"));
+                        }
                         Reservation::ExecuteOnce => {
                             ledger.mark_uncertain(&claim).map_err(ledger_error)?;
                             let created = self
@@ -498,7 +527,7 @@ impl RowWrite for NotionClient {
                                 .await?;
                             ledger
                                 .record_verified(&claim, &receipt)
-                                .map_err(|_| Error::OutcomeUnknown)?;
+                                .map_err(|_| unknown("row.create.ledger_commit", ""))?;
                             (receipt, false)
                         }
                     }
@@ -573,8 +602,11 @@ impl RowWrite for NotionClient {
 
             let (receipt, replayed) = match ledger.lookup(&claim).map_err(ledger_error)? {
                 Some(ExistingClaim::Replay(receipt)) if receipt.page_id == id.0 => (receipt, true),
-                Some(ExistingClaim::Replay(_)) | Some(ExistingClaim::Reconcile) => {
-                    return Err(Error::OutcomeUnknown.into());
+                Some(ExistingClaim::Replay(_)) => {
+                    return Err(unknown(UPDATE_VERIFY, "claim_replay_page_mismatch").into());
+                }
+                Some(ExistingClaim::Reconcile) => {
+                    return Err(unknown(UPDATE_VERIFY, "claim_reconcile").into());
                 }
                 None => {
                     check_row_revision(&original, &id, &request.expected_row_revision)?;
@@ -593,7 +625,7 @@ impl RowWrite for NotionClient {
                     match ledger.begin(&claim).map_err(ledger_error)? {
                         Reservation::Replay(receipt) if receipt.page_id == id.0 => (receipt, true),
                         Reservation::Replay(_) | Reservation::Reconcile => {
-                            return Err(Error::OutcomeUnknown.into());
+                            return Err(unknown(UPDATE_VERIFY, "claim_reconcile").into());
                         }
                         Reservation::ExecuteOnce => {
                             ledger.mark_uncertain(&claim).map_err(ledger_error)?;
@@ -615,36 +647,43 @@ impl RowWrite for NotionClient {
                                 && accepted["id"].as_str().and_then(pages::uuid).as_deref()
                                     == Some(id.0.as_str());
                             if !partial && !active_row(&accepted, &id.0, &data_source) {
-                                return Err(Error::OutcomeUnknown.into());
+                                return Err(unknown(UPDATE_VERIFY, "receipt_not_active_row").into());
                             }
-                            let readback = self
-                                .fetch_page_value(&id)
-                                .await
-                                .map_err(|_| Error::OutcomeUnknown)?;
-                            if !active_row(&readback, &id.0, &data_source)
-                                || (!partial && readback["url"] != accepted["url"])
-                                || !matches_properties(&readback, &prepared.properties)
-                            {
-                                return Err(Error::OutcomeUnknown.into());
+                            let readback = self.fetch_page_value(&id).await.map_err(|e| {
+                                unknown("row.update.fetch_readback", e.kind.label())
+                            })?;
+                            let checks = [
+                                (
+                                    "page_not_active_row",
+                                    active_row(&readback, &id.0, &data_source),
+                                ),
+                                ("url_changed", partial || readback["url"] == accepted["url"]),
+                                (
+                                    "properties",
+                                    matches_properties(&readback, &prepared.properties),
+                                ),
+                            ];
+                            if let Some((label, _)) = checks.iter().find(|(_, ok)| !ok) {
+                                return Err(unknown(UPDATE_VERIFY, label).into());
                             }
                             self.scoped_data_source(&data_source, scope)
                                 .await
-                                .map_err(|_| Error::OutcomeUnknown)?;
+                                .map_err(|e| unknown("row.update.scope", e.kind.label()))?;
                             let receipt = VerifiedReceipt::from_readback(
                                 id.0.clone(),
                                 readback["url"]
                                     .as_str()
-                                    .ok_or(Error::OutcomeUnknown)?
+                                    .ok_or_else(|| unknown(UPDATE_VERIFY, "url_missing"))?
                                     .into(),
                                 readback["last_edited_time"]
                                     .as_str()
-                                    .ok_or(Error::OutcomeUnknown)?
+                                    .ok_or_else(|| unknown(UPDATE_VERIFY, "edited_time_missing"))?
                                     .into(),
                             )
-                            .map_err(|_| Error::OutcomeUnknown)?;
+                            .map_err(|_| unknown(UPDATE_VERIFY, "receipt_invalid"))?;
                             ledger
                                 .record_verified(&claim, &receipt)
-                                .map_err(|_| Error::OutcomeUnknown)?;
+                                .map_err(|_| unknown("row.update.ledger_commit", ""))?;
                             (receipt, false)
                         }
                     }
