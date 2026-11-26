@@ -11,6 +11,10 @@ local index/operational-state compatibility. `TBD` is a **draft**, not a publish
 - Periodic cache-sync progress logs include `rss_kib` and `rss_peak_kib`.
 
 ### Fixed
+- Post-write verification ignores blank lines between Markdown blocks (outside code
+  fences), because Notion drops them when it persists a page. A ChatGPT row create
+  with a blank line after a heading used to be reported `outcome_unknown` although
+  the row had been created (#823).
 - A row create through `knowledge_create_page` no longer requires `properties`
   (a row with only a title and Markdown is valid); omitting it used to fail with
   `invalid semantic mutation arguments` (#823).

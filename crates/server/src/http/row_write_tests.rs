@@ -992,3 +992,19 @@ async fn row_create_without_properties_writes_only_the_title_and_body() {
     );
     assert!(log.iter().all(|entry| entry.0.starts_with("GET ")));
 }
+
+#[tokio::test]
+async fn row_create_verifies_when_notion_drops_a_blank_line_after_a_heading() {
+    let stores = Stores::new();
+    let mut request = call();
+    request["params"]["arguments"]["markdown"] = json!("## Flavours\n\n- sweet\n- sour");
+    let mut script = schema();
+    script.extend([
+        (200,row()), (200,row()),
+        (200,json!({"object":"page_markdown","id":ROW,"markdown":"## Flavours\n- sweet\n- sour","truncated":false,"unknown_block_ids":[]})),
+        (200,row()),
+    ]);
+    script.extend(schema());
+    let (created, _) = stores.invoke(script, request, false).await;
+    assert_eq!(status(&created), "verified", "{created}");
+}
