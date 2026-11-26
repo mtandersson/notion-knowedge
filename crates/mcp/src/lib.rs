@@ -257,17 +257,48 @@ impl KnowledgeServer {
         self
     }
 
+    /// Saved-view reads, shared by `knowledge_get` (view mode) and the old name.
+    async fn query_view(
+        &self,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+        let error = |message: &str| {
+            rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(message)])
+                .into()
+        };
+        let input: view::Request = serde_json::from_value(serde_json::Value::Object(arguments))
+            .ok()
+            .filter(view::Request::valid)
+            .ok_or_else(|| rmcp::ErrorData::invalid_params("invalid saved-view arguments", None))?;
+        let Some(service) = &self.saved_view_query else {
+            return Ok(error(
+                "notion_unavailable: saved view queries are not installed",
+            ));
+        };
+        match service.query(input).await {
+            Ok(output) if output_fits_budget(&output) => {
+                Ok(rmcp::model::CallToolResult::structured(output).into())
+            }
+            Ok(_) => Ok(error(
+                "incomplete: response exceeds the tool limit; request a smaller page",
+            )),
+            Err(failure) => Ok(error(view::failure(failure))),
+        }
+    }
+
     /// Shared discovery catalog for both MCP transport implementations.
     pub fn tool_catalog(&self) -> Vec<rmcp::model::Tool> {
+        let views = self.saved_view_query.is_some() && self.tool_permitted(view::TOOL);
         let mut catalog = vec![
             search::tool(),
-            get::tool(),
+            if views {
+                get::tool_with_views()
+            } else {
+                get::tool()
+            },
             sync_status::tool(),
             upload::tool_with_limit(self.max_upload_files),
         ];
-        if self.saved_view_query.is_some() {
-            catalog.push(view::tool());
-        }
         if self.related_graph.is_some() {
             catalog.push(related::tool());
         }
@@ -475,32 +506,7 @@ impl KnowledgeServer {
         };
 
         match request.name.as_ref() {
-            view::TOOL => {
-                let input: view::Request =
-                    serde_json::from_value(serde_json::Value::Object(arguments))
-                        .ok()
-                        .filter(view::Request::valid)
-                        .ok_or_else(|| {
-                            rmcp::ErrorData::invalid_params(
-                                "invalid knowledge_query_view arguments",
-                                None,
-                            )
-                        })?;
-                let Some(service) = &self.saved_view_query else {
-                    return Ok(error(
-                        "notion_unavailable: saved view queries are not installed",
-                    ));
-                };
-                match service.query(input).await {
-                    Ok(output) if output_fits_budget(&output) => {
-                        Ok(rmcp::model::CallToolResult::structured(output).into())
-                    }
-                    Ok(_) => Ok(error(
-                        "incomplete: response exceeds the tool limit; request a smaller page",
-                    )),
-                    Err(failure) => Ok(error(view::failure(failure))),
-                }
-            }
+            view::TOOL => self.query_view(arguments).await,
             "knowledge_sync_status" => {
                 if !arguments.is_empty() {
                     return Err(rmcp::ErrorData::invalid_params(
@@ -813,6 +819,19 @@ impl KnowledgeServer {
                         Ok(error("graph_unavailable: scoped graph traversal failed"))
                     }
                 }
+            }
+            "knowledge_get" if arguments.contains_key("view_id") => {
+                // Saved-view mode is governed by the knowledge_query_view selector.
+                if !self.tool_permitted(view::TOOL) {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "tool unavailable in read-only mode",
+                        None,
+                    ));
+                }
+                let Some(_view_permit) = self.tool_budget.try_acquire(view::TOOL) else {
+                    return Ok(error("tool_busy: retry later"));
+                };
+                self.query_view(arguments).await
             }
             "knowledge_get" => {
                 let input: get::GetRequest =
