@@ -397,6 +397,47 @@ pub fn emit(
     }
 }
 
+/// Record why a saved-view query failed using fixed classifications only: the
+/// failure kind and the stage that produced it, never an id or upstream text.
+pub fn emit_view_query_failure(
+    outcome: Outcome,
+    elapsed: Duration,
+    kind: &'static str,
+    stage: &'static str,
+) {
+    let level = outcome.level();
+    if enabled(level) {
+        write_event(view_query_failure_value(
+            &current_id(),
+            outcome,
+            elapsed,
+            kind,
+            stage,
+        ));
+    }
+}
+
+fn view_query_failure_value(
+    id: &CorrelationId,
+    outcome: Outcome,
+    elapsed: Duration,
+    kind: &'static str,
+    stage: &'static str,
+) -> serde_json::Value {
+    let mut event = event_value(
+        id,
+        Operation::McpTool,
+        outcome,
+        elapsed,
+        None,
+        outcome.level(),
+    );
+    event["tool"] = "saved_view_query".into();
+    event["kind"] = kind.into();
+    event["stage"] = stage.into();
+    event
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum FileIngestPhase {
@@ -607,5 +648,27 @@ mod tests {
         })
         .await;
         assert!(current_sync_progress().is_none());
+    }
+
+    #[test]
+    fn view_failure_event_names_kind_and_stage_without_identifiers() {
+        let event = view_query_failure_value(
+            &CorrelationId::new(),
+            Outcome::Rejected,
+            Duration::from_millis(7),
+            "permission_denied",
+            "scope.excluded",
+        );
+        assert_eq!(event["tool"], "saved_view_query");
+        assert_eq!(event["kind"], "permission_denied");
+        assert_eq!(event["stage"], "scope.excluded");
+        assert_eq!(event["outcome"], "rejected");
+        assert_eq!(event["level"], "warn");
+        // The event carries classifications only, never a view or page id.
+        let text = event.to_string();
+        assert!(
+            !text.contains("view_id") && !text.contains("page_id"),
+            "{text}"
+        );
     }
 }
