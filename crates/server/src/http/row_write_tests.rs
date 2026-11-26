@@ -946,12 +946,29 @@ async fn row_update_server_error_keeps_the_key_and_never_repeats_the_patch() {
 #[tokio::test]
 async fn row_create_without_properties_writes_only_the_title_and_body() {
     let stores = Stores::new();
+    let (discovery, _) = stores
+        .invoke(
+            vec![],
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}),
+            false,
+        )
+        .await;
+    let create = discovery["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "knowledge_create_page")
+        .unwrap();
+    let required = create["inputSchema"]["required"].as_array().unwrap();
+    assert!(!required.contains(&json!("properties")));
+    assert!(create["inputSchema"]["properties"]["properties"].is_object());
+
     let mut request = call();
     request["params"]["arguments"]
         .as_object_mut()
         .unwrap()
         .remove("properties");
-    let (created, log) = stores.invoke(created_steps(), request, false).await;
+    let (created, log) = stores.invoke(created_steps(), request.clone(), false).await;
     assert_eq!(status(&created), "verified", "{created}");
     let post = log
         .iter()
@@ -959,4 +976,19 @@ async fn row_create_without_properties_writes_only_the_title_and_body() {
         .unwrap();
     let sent: Value = serde_json::from_slice(&post.1).unwrap();
     assert_eq!(sent["properties"].as_object().unwrap().len(), 1);
+    assert_eq!(
+        sent["properties"]["title"]["title"][0]["text"]["content"],
+        "Fixture journal"
+    );
+
+    // The same key replays whether properties is omitted or an empty object.
+    request["params"]["arguments"]["properties"] = json!({});
+    let mut read = schema();
+    read.push((200, row()));
+    let (replay, log) = stores.invoke(read, request, false).await;
+    assert_eq!(
+        replay["result"]["structuredContent"]["write"]["replayed"], true,
+        "{replay}"
+    );
+    assert!(log.iter().all(|entry| entry.0.starts_with("GET ")));
 }

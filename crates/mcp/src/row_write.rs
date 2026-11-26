@@ -43,7 +43,7 @@ pub(super) fn create_tool() -> Tool {
         ));
     let schema = json!({
         "type":"object","additionalProperties":false,
-        "required":["root_page_id","data_source_id","title","markdown","properties","idempotency_key"],
+        "required":["root_page_id","data_source_id","title","markdown","idempotency_key"],
         "properties":{
             "root_page_id":{"type":"string","pattern":UUID,"description":crate::mutations::ROOT_FIELD},
             "data_source_id":{"type":"string","pattern":UUID,"description":"UUID of the original Notion data source."},

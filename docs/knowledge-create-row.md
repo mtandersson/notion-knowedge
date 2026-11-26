@@ -9,6 +9,9 @@ on authenticated HTTP. Select a configured `root_page_id` and an original
 Notion `data_source_id` under that root. A database may contain several data
 sources. Use the identifier of the one that owns the intended row.
 
+`properties` is optional: omit it, or send `{}`, for a row with only a title and
+Markdown. Both forms replay under the same idempotency key.
+
 ```json
 {
   "root_page_id": "22222222-2222-2222-2222-222222222222",
