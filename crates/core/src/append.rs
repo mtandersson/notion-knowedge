@@ -56,6 +56,13 @@ impl std::fmt::Display for AppendError {
 }
 impl std::error::Error for AppendError {}
 
+/// An unknown outcome is deliberately reported to the caller without detail;
+/// the operator log names the stage that could not prove the result.
+fn unknown(stage: &'static str, detail: &'static str) -> AppendError {
+    crate::logging::emit_write_outcome_unknown(crate::logging::Outcome::Failed, stage, detail);
+    AppendError::OutcomeUnknown
+}
+
 fn ledger_error(error: IdempotencyError) -> AppendError {
     match error {
         IdempotencyError::InvalidInput => AppendError::InvalidInput,
@@ -140,7 +147,7 @@ pub async fn append_once(
                 replayed: true,
             });
         }
-        Reservation::Reconcile => return Err(AppendError::OutcomeUnknown),
+        Reservation::Reconcile => return Err(unknown("append.reconcile_required", "")),
         Reservation::ExecuteOnce => {}
     }
 
@@ -211,17 +218,17 @@ pub async fn append_once(
             markdown: request.markdown.clone(),
         })
         .await
-        .map_err(|_| AppendError::OutcomeUnknown)?;
+        .map_err(|error| unknown("append.patch", error.kind.label()))?;
     if written.id != request.page_id || written.archived {
-        return Err(AppendError::OutcomeUnknown);
+        return Err(unknown("append.receipt_mismatch", ""));
     }
 
     let after = reader
         .read_content(&request.page_id)
         .await
-        .map_err(|_| AppendError::OutcomeUnknown)?;
+        .map_err(|error| unknown("append.readback", error.kind.label()))?;
     if after.page.id != request.page_id || after.page.archived {
-        return Err(AppendError::OutcomeUnknown);
+        return Err(unknown("append.readback_identity", ""));
     }
     let after_comparison = reader.comparison_markdown(&after.markdown);
     let inserted = reader.comparison_markdown(&request.markdown);
@@ -238,7 +245,7 @@ pub async fn append_once(
                     }))
         });
     if !matches_append {
-        return Err(AppendError::OutcomeUnknown);
+        return Err(unknown("append.readback_mismatch", "markdown"));
     }
 
     let receipt = VerifiedReceipt::from_readback(
@@ -246,10 +253,10 @@ pub async fn append_once(
         after.page.url,
         after.page.last_edited_time,
     )
-    .map_err(|_| AppendError::OutcomeUnknown)?;
+    .map_err(|_| unknown("append.receipt_invalid", ""))?;
     ledger
         .record_verified(&claim, &receipt)
-        .map_err(|_| AppendError::OutcomeUnknown)?;
+        .map_err(|_| unknown("append.ledger_commit", ""))?;
     Ok(AppendResult {
         receipt,
         replayed: false,
