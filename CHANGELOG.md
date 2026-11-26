@@ -15,6 +15,8 @@ local index/operational-state compatibility. `TBD` is a **draft**, not a publish
   fences), because Notion drops them when it persists a page. A ChatGPT row create
   with a blank line after a heading used to be reported `outcome_unknown` although
   the row had been created (#823).
+  Block structure expressed only by blank lines (loose versus tight lists, paragraph
+  breaks) is no longer verified; content and order still are.
 - A row create through `knowledge_create_page` no longer requires `properties`
   (a row with only a title and Markdown is valid); omitting it used to fail with
   `invalid semantic mutation arguments` (#823).
