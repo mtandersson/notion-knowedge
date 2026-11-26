@@ -48,6 +48,8 @@ pub struct CreateRowRequest {
     pub data_source_id: String,
     pub title: String,
     pub markdown: String,
+    /// Optional: a row with only a title and body is valid.
+    #[serde(default)]
     pub properties: PropertyPatch,
     pub idempotency_key: String,
 }

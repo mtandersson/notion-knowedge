@@ -11,6 +11,9 @@ local index/operational-state compatibility. `TBD` is a **draft**, not a publish
 - Periodic cache-sync progress logs include `rss_kib` and `rss_peak_kib`.
 
 ### Fixed
+- A row create through `knowledge_create_page` no longer requires `properties`
+  (a row with only a title and Markdown is valid); omitting it used to fail with
+  `invalid semantic mutation arguments` (#823).
 - Row creates and updates that Notion definitely refuses (400, 403, 404) now
   report the reason and release the idempotency key instead of staying
   `outcome_unknown` (#831, follows #826). The rejected or unknown stage is logged.
