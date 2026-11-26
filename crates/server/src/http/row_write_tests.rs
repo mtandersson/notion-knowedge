@@ -844,3 +844,101 @@ async fn retired_row_tool_names_are_not_callable() {
         assert!(log.is_empty());
     }
 }
+
+fn refusal_body(code: &str) -> Value {
+    json!({"object":"error","status":0,"code":code,"message":"Fixture refusal text"})
+}
+
+fn created_steps() -> Vec<(u16, Value)> {
+    let mut script = schema();
+    script.extend([
+        (200,row()), (200,row()),
+        (200,json!({"object":"page_markdown","id":ROW,"markdown":BODY,"truncated":false,"unknown_block_ids":[]})),
+        (200,row()),
+    ]);
+    script.extend(schema());
+    script
+}
+
+#[tokio::test]
+async fn refused_row_create_reports_why_and_releases_the_key() {
+    for (code, status_code, status_text, reason) in [
+        (400, "validation_error", "invalid_input", "invalid_request"),
+        (
+            403,
+            "restricted_resource",
+            "not_authorized",
+            "permission_denied",
+        ),
+        (404, "object_not_found", "not_authorized", "not_found"),
+    ] {
+        let stores = Stores::new();
+        let mut script = schema();
+        script.push((code, refusal_body(status_code)));
+        let (refused, log) = stores.invoke(script, call(), false).await;
+        let write = &refused["result"]["structuredContent"]["write"];
+        assert_eq!(write["status"], status_text, "{refused}");
+        assert_eq!(write["reason"], reason, "{refused}");
+        let message = write["message"].as_str().unwrap();
+        assert!(message.contains("Nothing was changed"), "{message}");
+        assert!(message.ends_with("The same idempotency key can be retried."));
+        assert!(!refused.to_string().contains("Fixture refusal text"));
+        assert_eq!(
+            log.iter()
+                .filter(|e| e.0.starts_with("POST /v1/pages "))
+                .count(),
+            1
+        );
+
+        let (retried, _) = stores.invoke(created_steps(), call(), false).await;
+        assert_eq!(status(&retried), "verified", "{retried}");
+    }
+}
+
+#[tokio::test]
+async fn row_create_server_errors_stay_outcome_unknown_and_keep_the_key() {
+    let stores = Stores::new();
+    let mut script = schema();
+    script.push((500, refusal_body("internal_server_error")));
+    let (unknown, _) = stores.invoke(script, call(), false).await;
+    assert_eq!(status(&unknown), "outcome_unknown", "{unknown}");
+    let (retry, log) = stores.invoke(schema(), call(), false).await;
+    assert_eq!(status(&retry), "outcome_unknown", "{retry}");
+    assert!(log.iter().all(|entry| !entry.0.starts_with("POST ")));
+}
+
+#[tokio::test]
+async fn refused_row_update_reports_why_and_releases_the_key() {
+    let stores = Stores::new();
+    let revision = revision(&stores).await;
+    let mut script = vec![(200, row())];
+    script.extend(schema());
+    script.extend([(200, row()), (400, refusal_body("validation_error"))]);
+    let (refused, _) = stores.invoke(script, update(&revision, KEY), false).await;
+    let write = &refused["result"]["structuredContent"]["write"];
+    assert_eq!(write["status"], "invalid_input", "{refused}");
+    assert_eq!(write["reason"], "invalid_request");
+    assert!(write["message"].as_str().unwrap().contains("property ids"));
+
+    let mut script = patch_steps(updated_row());
+    script.extend(schema());
+    let (retried, _) = stores.invoke(script, update(&revision, KEY), false).await;
+    assert_eq!(status(&retried), "verified", "{retried}");
+}
+
+#[tokio::test]
+async fn row_update_server_error_keeps_the_key_and_never_repeats_the_patch() {
+    let stores = Stores::new();
+    let revision = revision(&stores).await;
+    let mut script = vec![(200, row())];
+    script.extend(schema());
+    script.extend([(200, row()), (500, refusal_body("internal_server_error"))]);
+    let (unknown, log) = stores.invoke(script, update(&revision, KEY), false).await;
+    assert_eq!(status(&unknown), "outcome_unknown", "{unknown}");
+    assert_eq!(log.iter().filter(|e| e.0.starts_with("PATCH ")).count(), 1);
+    let mut script = vec![(200, row())];
+    script.extend(schema());
+    let (retry, log) = stores.invoke(script, update(&revision, KEY), false).await;
+    assert_eq!(status(&retry), "outcome_unknown", "{retry}");
+    assert!(log.iter().all(|e| !e.0.starts_with("PATCH ")));
+}

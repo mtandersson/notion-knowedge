@@ -203,7 +203,7 @@ impl MutationRuntime {
                 .ok_or(Failure::Denied)?
                 .create_row(input, &scope, self.ledger.as_ref(), self.queue.as_ref())
                 .await
-                .map_err(Failure::from),
+                .map_err(|error| Failure::from(error).for_row()),
             Input::UpdateRow(input) => self
                 .row_writer
                 .as_ref()
@@ -211,7 +211,7 @@ impl MutationRuntime {
                 .update_row(input, &scope, self.ledger.as_ref(), self.queue.as_ref())
                 .await
                 .map_err(|error| match error {
-                    UpdateRowError::Write(error) => Failure::from(error),
+                    UpdateRowError::Write(error) => Failure::from(error).for_row(),
                     UpdateRowError::RevisionConflict(meta) => Failure::Conflict(meta),
                 }),
             Input::Append(input) => append_once_and_refresh(
@@ -392,6 +392,8 @@ enum Failure {
 enum Effect {
     Create,
     Change,
+    /// A row create or update in a data source.
+    Row,
 }
 /// Fixed guidance for a refused write: no ids, titles or upstream text.
 fn rejection_message(rejection: WriteRejection, effect: Effect, release: ClaimRelease) -> String {
@@ -407,6 +409,15 @@ fn rejection_message(rejection: WriteRejection, effect: Effect, release: ClaimRe
         }
         (Effect::Create, WriteRejection::InvalidRequest) => {
             "Notion rejected the create request as invalid. Nothing was created; correct the request first."
+        }
+        (Effect::Row, WriteRejection::NotFound | WriteRejection::ParentIsDatabase) => {
+            "Notion found no such data source or row shared with the integration. Nothing was changed."
+        }
+        (Effect::Row, WriteRejection::PermissionDenied) => {
+            "Notion denied the integration access to the data source or row. Nothing was changed; share it with the integration first."
+        }
+        (Effect::Row, WriteRejection::InvalidRequest) => {
+            "Notion rejected the row write as invalid. Nothing was changed; check property ids and value types against the data source schema first."
         }
         (Effect::Change, WriteRejection::NotFound | WriteRejection::ParentIsDatabase) => {
             "Notion found no page with that id shared with the integration. Nothing was changed."
@@ -425,6 +436,15 @@ fn rejection_message(rejection: WriteRejection, effect: Effect, release: ClaimRe
     format!("{refusal} {retry}")
 }
 impl Failure {
+    /// Row writes name the data source and properties, not a parent page.
+    fn for_row(self) -> Self {
+        match self {
+            Self::Rejected(rejection, _, release) => {
+                Self::Rejected(rejection, Effect::Row, release)
+            }
+            other => other,
+        }
+    }
     fn code(&self) -> &'static str {
         match self {
             Self::Invalid => "invalid_input",

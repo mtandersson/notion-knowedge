@@ -3,14 +3,15 @@ use std::{collections::HashSet, future::Future, pin::Pin};
 
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use notion_knowledge_core::{
-    backend::{BackendError, BackendErrorKind, PageId},
+    backend::{BackendError, BackendErrorKind, PageId, WriteRejection},
     create::{CreateError as Error, valid_contents},
     discovery::SourceType,
     idempotency::{
         ExistingClaim, IdempotencyError, MutationClaim, MutationOperation, Reservation,
-        VerifiedReceipt, WriteIdempotencyStore,
+        VerifiedReceipt, WriteIdempotencyStore, release_rejected,
     },
     lifecycle::LifecycleScope,
+    logging::{Outcome, emit_write_outcome_unknown},
     revision::{RevisionMetadata, written_markdown_matches},
     row_write::{
         CreateRowRequest, MAX_PROPERTIES, MAX_RELATIONS, PropertyPatch, PropertyValue, RowWrite,
@@ -32,6 +33,27 @@ fn preflight(error: BackendError) -> Error {
         | BackendErrorKind::Unauthenticated => Error::NotAuthorized,
         BackendErrorKind::InvalidInput => Error::InvalidInput,
         _ => Error::Unavailable,
+    }
+}
+
+/// Classify a failed row POST/PATCH. A definite Notion refusal never took
+/// effect: release the claim so the key can be retried. Anything else may have
+/// committed, so the key stays in reconciliation.
+fn effect_failure(
+    ledger: &dyn WriteIdempotencyStore,
+    claim: &MutationClaim,
+    stage: &'static str,
+    error: &BackendError,
+) -> Error {
+    match WriteRejection::of(error) {
+        Some(rejection) => Error::Rejected(
+            rejection,
+            release_rejected(ledger, claim, stage, rejection.label()),
+        ),
+        None => {
+            emit_write_outcome_unknown(Outcome::Failed, stage, error.kind.label());
+            Error::OutcomeUnknown
+        }
     }
 }
 
@@ -468,7 +490,9 @@ impl RowWrite for NotionClient {
                             let created = self
                                 .write(reqwest::Method::POST, "/pages", body, CREATE)
                                 .await
-                                .map_err(|_| Error::OutcomeUnknown)?;
+                                .map_err(|e| {
+                                    effect_failure(ledger, &claim, "row.create.post", &e)
+                                })?;
                             let receipt = self
                                 .verify_created_row(&created, &request, &prepared, scope)
                                 .await?;
@@ -581,7 +605,9 @@ impl RowWrite for NotionClient {
                                     UPDATE,
                                 )
                                 .await
-                                .map_err(|_| Error::OutcomeUnknown)?;
+                                .map_err(|e| {
+                                    effect_failure(ledger, &claim, "row.update.patch", &e)
+                                })?;
                             // Notion can acknowledge with only object and ID. Require
                             // all other facts from the independent full page read.
                             let partial = accepted.as_object().is_some_and(|page| page.len() == 2)

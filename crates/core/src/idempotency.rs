@@ -205,7 +205,7 @@ pub enum ClaimRelease {
 
 /// Release a claim whose effect Notion definitely refused, logging the refusal
 /// with fixed labels. A failed release is logged and reported, never retried.
-pub(crate) fn release_rejected(
+pub fn release_rejected(
     ledger: &dyn WriteIdempotencyStore,
     claim: &MutationClaim,
     stage: &'static str,

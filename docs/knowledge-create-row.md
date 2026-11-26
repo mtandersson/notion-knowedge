@@ -36,7 +36,9 @@ supply no relation targets.
 The title, properties and Markdown travel in one Notion create request.
 The response distinguishes the verified write, audit and local refresh.
 A retry with the same key and inputs can replay a verified result without
-another create. If the response says `outcome_unknown`, check the original
+another create. If Notion definitely refuses the create (400, 403 or 404), the
+response is `invalid_input` or `not_authorized` with a `reason`, nothing was
+created and the same key can be retried. If the response says `outcome_unknown`, check the original
 source before making another attempt with a different key.
 
 [Notion's data-source row create guide](https://developers.notion.com/guides/data-apis/create-pages-in-a-data-source)

@@ -45,6 +45,8 @@ PATCH. The connector verifies the requested values after the PATCH.
 - On `revision_conflict`, reread the row and decide whether to apply the
   change against its new revision.
 - Keep the same key and inputs to replay the verified result after a retry.
+- On `invalid_input` or `not_authorized` with a `reason`, Notion refused the
+  PATCH (400, 403 or 404): nothing changed and the same key can be retried.
 - On `outcome_unknown`, inspect the row in Notion before attempting another
   write. A timed-out or cancelled PATCH can finish at Notion after the
   connector stops waiting. The connector records the unknown outcome
