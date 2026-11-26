@@ -57,10 +57,55 @@ pub fn markdown_sha256(markdown: &str) -> String {
 
 /// Notion may omit a single final LF when exporting persisted Markdown.
 /// Only post-write verification uses this allowance; revision hashes stay exact.
+///
+/// Notion also normalises blank lines between blocks (it drops the one after a
+/// heading, for example), so empty lines strictly between two non-empty lines
+/// outside code fences are ignored. Block structure that only blank lines
+/// express (loose versus tight lists, paragraph breaks) is therefore not verified. Leading and trailing blank lines, and every
+/// line inside a fence, still have to match exactly.
 pub fn written_markdown_matches(expected: &str, actual: &str) -> bool {
     expected == actual
         || expected.strip_suffix('\n') == Some(actual)
         || actual.strip_suffix('\n') == Some(expected)
+        || without_inner_blank_lines(expected) == without_inner_blank_lines(actual)
+}
+
+fn without_inner_blank_lines(markdown: &str) -> Vec<&str> {
+    let body = markdown.strip_suffix('\n').unwrap_or(markdown);
+    let lines: Vec<&str> = body.split('\n').collect();
+    let first = lines.iter().position(|line| !line.is_empty());
+    let last = lines.iter().rposition(|line| !line.is_empty());
+    let (Some(first), Some(last)) = (first, last) else {
+        return lines;
+    };
+    // CommonMark fences: opened by 3+ backticks or tildes, closed only by the same
+    // character, at least as many, and nothing else on the line.
+    let mut open: Option<(char, usize)> = None;
+    let mut kept: Vec<&str> = lines[..first].to_vec();
+    for line in &lines[first..=last] {
+        let trimmed = line.trim_start();
+        let marker = trimmed
+            .chars()
+            .next()
+            .filter(|c| matches!(c, '`' | '~'))
+            .map(|c| (c, trimmed.chars().take_while(|x| *x == c).count()))
+            .filter(|(_, run)| *run >= 3);
+        let inside = open.is_some();
+        match (open, marker) {
+            (None, Some(found)) => open = Some(found),
+            (Some((c, run)), Some((found_c, found_run)))
+                if c == found_c && found_run >= run && trimmed[found_run..].trim().is_empty() =>
+            {
+                open = None;
+            }
+            _ => {}
+        }
+        if inside || open.is_some() || !line.is_empty() {
+            kept.push(line);
+        }
+    }
+    kept.extend_from_slice(&lines[last + 1..]);
+    kept
 }
 
 /// Compare caller preconditions against one fresh authoritative page read.
@@ -196,5 +241,79 @@ mod written_markdown_contract {
         ] {
             assert_eq!(written_markdown_matches(expected, actual), matches);
         }
+    }
+
+    #[test]
+    fn blank_lines_between_blocks_may_differ_but_never_inside_code() {
+        for (expected, actual, matches) in [
+            (
+                "## Smaker\n\n- sött\n- surt",
+                "## Smaker\n- sött\n- surt",
+                true,
+            ),
+            ("## Smaker\n- sött\n", "## Smaker\n\n- sött", true),
+            ("one\n\n\ntwo", "one\ntwo", true),
+            ("one\n\ntwo", "one two", false),
+            ("one\n\ntwo", "one\ntwo\nthree", false),
+            ("```\na\n\nb\n```", "```\na\nb\n```", false),
+            ("```\na\n\nb\n```", "```\na\n\nb\n```\n", true),
+            ("one\n\n", "one", false),
+            ("\n\none", "one", false),
+        ] {
+            assert_eq!(
+                written_markdown_matches(expected, actual),
+                matches,
+                "{expected:?} vs {actual:?}"
+            );
+        }
+    }
+
+    /// A ChatGPT row body and the Markdown Notion persisted for it (read back
+    /// from the API): Notion dropped every blank line between blocks.
+    #[test]
+    fn fences_are_tracked_by_character_length_and_closing_rules() {
+        for (expected, actual, matches) in [
+            // A backtick line does not close a tilde fence.
+            (
+                "a\n\n~~~\nx\n```\n\ny\n~~~",
+                "a\n~~~\nx\n```\ny\n~~~",
+                false,
+            ),
+            (
+                "a\n\n~~~\nx\n```\n\ny\n~~~",
+                "a\n~~~\nx\n```\n\ny\n~~~",
+                true,
+            ),
+            // A shorter run does not close a longer fence.
+            ("````\nx\n```\n\ny\n````", "````\nx\n```\ny\n````", false),
+            // An info string opens a fence; text after the marker cannot close one.
+            ("```rust\nx\n\ny\n```", "```rust\nx\ny\n```", false),
+            (
+                "```\nx\n``` not a close\n\ny\n```",
+                "```\nx\n``` not a close\ny\n```",
+                false,
+            ),
+            // Blank lines after a closed fence are ordinary again.
+            ("```\nx\n```\n\ntext", "```\nx\n```\ntext", true),
+            // An unclosed fence keeps everything after it strict.
+            ("```\nx\n\ny", "```\nx\ny", false),
+        ] {
+            assert_eq!(
+                written_markdown_matches(expected, actual),
+                matches,
+                "{expected:?} vs {actual:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn notion_persisted_chatgpt_markdown_still_verifies() {
+        let sent = "## Kännetecken\nThailändsk matlagning balanserar kontrasterande smaker, färska örter, kryddor och aromatiska ingredienser. Regionala variationer är stora.\n\n## Fem centrala smakdimensioner\n- Sött – palmsocker.\n- Surt – lime och tamarind.\n- Salt – fisksås.\n- Beskt – exempelvis bittermelon och vissa örter.\n- Starkt – chili.\n\nChilihetta är en sensorisk upplevelse snarare än en biologisk grundsmak. Umami från exempelvis fisksås och räkpasta bidrar också till smakdjupet.\n\n## Tre klassiska rätter\n- Pad Thai – wokade risnudlar med tamarind, ägg, böngroddar och jordnötter, ofta med räkor eller tofu.\n- Tom Yum Goong – het och syrlig räksoppa med citrongräs, galangal och makrutlimeblad.\n- Gaeng Khiao Wan – grön curry med grön chilipasta, kokosmjölk och thaibasilika, ofta med kyckling och aubergine.\n\n## Källor\n- [Thailands honorärkonsulat i Kraków – regional matkultur](https://konsulat-tajlandii-krakow.pl/en/thai-cuisine-a-journey-through-four-regions-of-flavour/)\n- [Southeast Asia Travel – Dining in Thailand](https://staging.visitsoutheastasia.travel/guides/dining-in-thailand/)\n- [Thailand Insider Guide – Thai Food Guide](https://thailandinsiderguide.com/en/explore-thailand/experiences/food-drinks/thai-food-guide/)\n\nUndersökt 2026-11-26.";
+        let stored = "## Kännetecken\nThailändsk matlagning balanserar kontrasterande smaker, färska örter, kryddor och aromatiska ingredienser. Regionala variationer är stora.\n## Fem centrala smakdimensioner\n- Sött – palmsocker.\n- Surt – lime och tamarind.\n- Salt – fisksås.\n- Beskt – exempelvis bittermelon och vissa örter.\n- Starkt – chili.\nChilihetta är en sensorisk upplevelse snarare än en biologisk grundsmak. Umami från exempelvis fisksås och räkpasta bidrar också till smakdjupet.\n## Tre klassiska rätter\n- Pad Thai – wokade risnudlar med tamarind, ägg, böngroddar och jordnötter, ofta med räkor eller tofu.\n- Tom Yum Goong – het och syrlig räksoppa med citrongräs, galangal och makrutlimeblad.\n- Gaeng Khiao Wan – grön curry med grön chilipasta, kokosmjölk och thaibasilika, ofta med kyckling och aubergine.\n## Källor\n- [Thailands honorärkonsulat i Kraków – regional matkultur](https://konsulat-tajlandii-krakow.pl/en/thai-cuisine-a-journey-through-four-regions-of-flavour/)\n- [Southeast Asia Travel – Dining in Thailand](https://staging.visitsoutheastasia.travel/guides/dining-in-thailand/)\n- [Thailand Insider Guide – Thai Food Guide](https://thailandinsiderguide.com/en/explore-thailand/experiences/food-drinks/thai-food-guide/)\nUndersökt 2026-11-26.";
+        assert!(written_markdown_matches(sent, stored));
+        assert!(!written_markdown_matches(
+            sent,
+            &stored.replace("chili.", "paprika.")
+        ));
     }
 }
