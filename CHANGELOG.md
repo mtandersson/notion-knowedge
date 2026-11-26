@@ -11,6 +11,8 @@ local index/operational-state compatibility. `TBD` is a **draft**, not a publish
 - Periodic cache-sync progress logs include `rss_kib` and `rss_peak_kib`.
 
 ### Fixed
+- A 401 on a page or row write is reported as a definite `not_authorized` refusal
+  (`reason: unauthenticated`) and releases the idempotency key, like a 403 (#832).
 - Post-write verification ignores blank lines between Markdown blocks (outside code
   fences), because Notion drops them when it persists a page. A ChatGPT row create
   with a blank line after a heading used to be reported `outcome_unknown` although

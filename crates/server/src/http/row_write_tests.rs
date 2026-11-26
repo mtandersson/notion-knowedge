@@ -871,6 +871,7 @@ async fn refused_row_create_reports_why_and_releases_the_key() {
             "permission_denied",
         ),
         (404, "object_not_found", "not_authorized", "not_found"),
+        (401, "unauthorized", "not_authorized", "unauthenticated"),
     ] {
         let stores = Stores::new();
         let mut script = schema();

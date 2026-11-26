@@ -110,6 +110,9 @@ pub enum WriteRejection {
     /// The target or parent does not exist or is not shared with the integration.
     NotFound,
     PermissionDenied,
+    /// Notion refused the integration's credentials (401). Like a 403, the
+    /// request was never executed.
+    Unauthenticated,
     /// Notion's request validation refused the payload.
     InvalidRequest,
     /// A create named a database as its parent page.
@@ -126,6 +129,7 @@ impl WriteRejection {
         match error.kind {
             BackendErrorKind::NotFound => Some(Self::NotFound),
             BackendErrorKind::PermissionDenied => Some(Self::PermissionDenied),
+            BackendErrorKind::Unauthenticated => Some(Self::Unauthenticated),
             BackendErrorKind::InvalidInput => Some(Self::InvalidRequest),
             _ => None,
         }
@@ -136,6 +140,7 @@ impl WriteRejection {
         match self {
             Self::NotFound => "not_found",
             Self::PermissionDenied => "permission_denied",
+            Self::Unauthenticated => "unauthenticated",
             Self::InvalidRequest => "invalid_request",
             Self::ParentIsDatabase => "parent_is_database",
         }

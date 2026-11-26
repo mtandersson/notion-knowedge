@@ -84,7 +84,7 @@ reuse the same key for the same intended mutation. Revision conflicts return onl
 current edit time, never source text. A request Notion definitely refuses
 before any effect (400, 403 or 404 on the create POST, row create POST, row update PATCH,
 append PATCH or section PATCH, or a refused preflight read) returns `not_authorized` or
-`invalid_input` with `write.reason` `not_found`, `permission_denied`,
+`invalid_input` with `write.reason` `not_found`, `permission_denied`, `unauthenticated` (401: the integration token needs renewing),
 `invalid_request` or `parent_is_database` and a fixed message without ids.
 The idempotency claim is released and the audit records `failed`, so the
 same key can be retried. A create whose `parent_page_id` is a readable

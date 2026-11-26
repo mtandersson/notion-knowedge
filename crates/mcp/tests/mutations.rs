@@ -1250,6 +1250,20 @@ async fn definite_notion_refusals_fail_cleanly_and_release_the_key_for_a_retry()
             "permission_denied",
         ),
         (
+            "knowledge_create_page",
+            create("refused-create-unauthenticated"),
+            BackendErrorKind::Unauthenticated,
+            "not_authorized",
+            "unauthenticated",
+        ),
+        (
+            "knowledge_update_section",
+            section("refused-section-unauthenticated"),
+            BackendErrorKind::Unauthenticated,
+            "not_authorized",
+            "unauthenticated",
+        ),
+        (
             "knowledge_update_page",
             append("refused-append-forbidden"),
             BackendErrorKind::PermissionDenied,
