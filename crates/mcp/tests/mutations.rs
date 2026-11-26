@@ -389,7 +389,7 @@ async fn request(handler: KnowledgeServer, method: &str, params: Value) -> Value
     unreachable!()
 }
 fn append(key: &str) -> Value {
-    json!({"root_page_id":ROOT,"page_id":PAGE,"markdown":"\nNew append.\n","idempotency_key":key,"expected_last_edited_time":REV})
+    json!({"operation":"append_markdown","root_page_id":ROOT,"page_id":PAGE,"markdown":"\nNew append.\n","idempotency_key":key,"expected_last_edited_time":REV})
 }
 fn create(key: &str) -> Value {
     json!({"root_page_id":ROOT,"parent_page_id":PAGE,"title":"Created title","markdown":"Created exact body.\n","idempotency_key":key})
@@ -409,7 +409,10 @@ async fn create_append_and_section_dispatch_verify_source_and_return_separate_in
             "knowledge_create_page",
             create("create-through-mcp-fixture"),
         ),
-        ("knowledge_append", append("append-through-mcp-fixture")),
+        (
+            "knowledge_update_page",
+            append("append-through-mcp-fixture"),
+        ),
         (
             "knowledge_update_section",
             section("section-through-mcp-fixture"),
@@ -469,17 +472,12 @@ async fn installed_writes_explain_root_selection_and_allow_retry_without_consumi
             create("correct-root-create-fixture"),
         ),
         (
-            "knowledge_append",
+            "knowledge_update_page",
             "page_id",
             append("correct-root-append-fixture"),
         ),
     ] {
-        let listed = if name == "knowledge_append" {
-            "knowledge_update_page"
-        } else {
-            name
-        };
-        let tool = tools.iter().find(|tool| tool["name"] == listed).unwrap();
+        let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
         let fields = &tool["inputSchema"]["properties"];
         let root_description = fields["root_page_id"]["description"].as_str().unwrap();
         assert!(root_description.contains("knowledge_get"));
@@ -541,7 +539,7 @@ async fn installed_writes_explain_root_selection_and_allow_retry_without_consumi
 async fn normalized_final_line_feed_preserves_verified_receipts_and_once_only_replay() {
     for (name, args) in [
         ("knowledge_create_page", create("normalized-create-key")),
-        ("knowledge_append", append("normalized-append-key")),
+        ("knowledge_update_page", append("normalized-append-key")),
     ] {
         let f = Fixture::new();
         f.source.omit_final_lf.store(true, Ordering::SeqCst);
@@ -567,13 +565,13 @@ async fn append_verifies_the_provider_separator_and_replays_without_adding_anoth
     let handler = f.server(false);
     let mut args = append("append-with-provider-separator");
     args["markdown"] = json!("New paragraph.");
-    let response = invoke(handler.clone(), "knowledge_append", args.clone()).await;
+    let response = invoke(handler.clone(), "knowledge_update_page", args.clone()).await;
     assert_eq!(
         output(&response)["write"]["status"],
         "verified",
         "{response}"
     );
-    let replay = invoke(handler, "knowledge_append", args).await;
+    let replay = invoke(handler, "knowledge_update_page", args).await;
     assert_eq!(output(&replay)["write"]["replayed"], true);
     assert_eq!(f.source.effects.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -598,7 +596,7 @@ async fn defaults_and_absent_confirmation_hide_or_reject_uninstalled_mutations()
         ),
     ] {
         assert!(handler.get_tool("knowledge_create_page").is_none());
-        assert!(handler.get_tool("knowledge_append").is_none());
+        assert!(handler.get_tool("knowledge_update_page").is_none());
         let response = invoke(
             handler,
             "knowledge_create_page",
@@ -642,7 +640,7 @@ async fn untrusted_authority_confirmation_fields_and_root_claims_cannot_grant_a_
         let mut args = append("unknown-fields-must-not-write");
         args[extra] = json!(true);
         assert!(
-            invoke(f.server(true), "knowledge_append", args)
+            invoke(f.server(true), "knowledge_update_page", args)
                 .await
                 .get("error")
                 .is_some()
@@ -650,7 +648,7 @@ async fn untrusted_authority_confirmation_fields_and_root_claims_cannot_grant_a_
     }
     let mut foreign = append("foreign-root-claim-must-deny");
     foreign["root_page_id"] = json!(OTHER);
-    let response = invoke(f.server(true), "knowledge_append", foreign).await;
+    let response = invoke(f.server(true), "knowledge_update_page", foreign).await;
     assert_eq!(output(&response)["write"]["status"], "not_authorized");
     let mut schema_root = section("forged-confirmation-id-key");
     schema_root["confirmation_id"] = json!("forged");
@@ -699,7 +697,7 @@ async fn revision_conflict_and_authoritative_readback_failure_never_report_verif
     let f = Fixture::new();
     let mut stale = append("stale-revision-never-writes");
     stale["expected_last_edited_time"] = json!("2026-10-09T12:00:00Z");
-    let result = invoke(f.server(false), "knowledge_append", stale).await;
+    let result = invoke(f.server(false), "knowledge_update_page", stale).await;
     assert_eq!(output(&result)["write"]["status"], "revision_conflict");
     assert_eq!(output(&result)["write"]["page_id"], PAGE);
     assert_eq!(output(&result)["write"]["current_last_edited_time"], REV);
@@ -709,7 +707,10 @@ async fn revision_conflict_and_authoritative_readback_failure_never_report_verif
             "knowledge_create_page",
             create("unknown-create-readback-key"),
         ),
-        ("knowledge_append", append("unknown-append-readback-key")),
+        (
+            "knowledge_update_page",
+            append("unknown-append-readback-key"),
+        ),
         (
             "knowledge_update_section",
             section("unknown-section-readback-key"),
@@ -732,11 +733,11 @@ async fn queue_or_index_failure_preserves_verified_receipt_and_replay_never_repe
     let f = Fixture::new();
     f.queue.fail.store(true, Ordering::SeqCst);
     let args = append("queue-failure-preserve-write");
-    let first = invoke(f.server(false), "knowledge_append", args.clone()).await;
+    let first = invoke(f.server(false), "knowledge_update_page", args.clone()).await;
     assert_eq!(output(&first)["write"]["status"], "verified");
     assert_eq!(output(&first)["index"]["status"], "unavailable");
     f.queue.fail.store(false, Ordering::SeqCst);
-    let next = invoke(f.server(false), "knowledge_append", args.clone()).await;
+    let next = invoke(f.server(false), "knowledge_update_page", args.clone()).await;
     assert_eq!(output(&next)["write"]["replayed"], true);
     assert_eq!(output(&next)["index"]["status"], "queued");
     let claim = f
@@ -749,7 +750,7 @@ async fn queue_or_index_failure_preserves_verified_receipt_and_replay_never_repe
         .inner
         .complete_mutation_refresh(&claim, 101, false)
         .unwrap();
-    let failed = invoke(f.server(false), "knowledge_append", args).await;
+    let failed = invoke(f.server(false), "knowledge_update_page", args).await;
     assert_eq!(output(&failed)["write"]["status"], "verified");
     assert_eq!(output(&failed)["index"]["status"], "failed");
     assert_eq!(f.source.effects.load(Ordering::SeqCst), 1);
@@ -762,7 +763,7 @@ async fn audit_failure_before_effect_denies_and_terminal_failure_retains_verifie
     assert!(
         invoke(
             f.server(false),
-            "knowledge_append",
+            "knowledge_update_page",
             append("failed-audit-before-effect")
         )
         .await
@@ -773,12 +774,12 @@ async fn audit_failure_before_effect_denies_and_terminal_failure_retains_verifie
     f.audit.fail_start.store(false, Ordering::SeqCst);
     f.audit.fail_terminal.store(true, Ordering::SeqCst);
     let args = append("terminal-audit-failure-key");
-    let result = invoke(f.server(false), "knowledge_append", args.clone()).await;
+    let result = invoke(f.server(false), "knowledge_update_page", args.clone()).await;
     assert_eq!(output(&result)["write"]["status"], "verified");
     assert_eq!(output(&result)["audit"]["status"], "unavailable");
     assert_eq!(result["result"]["isError"], true);
     f.audit.fail_terminal.store(false, Ordering::SeqCst);
-    let replay = invoke(f.server(false), "knowledge_append", args).await;
+    let replay = invoke(f.server(false), "knowledge_update_page", args).await;
     assert_eq!(output(&replay)["write"]["replayed"], true);
     assert_eq!(output(&replay)["audit"]["status"], "recorded");
     assert_eq!(f.source.effects.load(Ordering::SeqCst), 1);
@@ -793,20 +794,22 @@ async fn shared_tool_budget_and_durable_claim_prevent_concurrent_duplicate_effec
     let args = append("concurrent-shared-budget-key");
     let first_args = args.clone();
     let task =
-        tokio::spawn(async move { invoke(first_handler, "knowledge_append", first_args).await });
+        tokio::spawn(
+            async move { invoke(first_handler, "knowledge_update_page", first_args).await },
+        );
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
         f.source.entered.notified(),
     )
     .await
     .unwrap();
-    let busy = invoke(handler.clone(), "knowledge_append", args.clone()).await;
+    let busy = invoke(handler.clone(), "knowledge_update_page", args.clone()).await;
     assert!(busy.to_string().contains("tool_busy"));
     assert_eq!(f.source.effects.load(Ordering::SeqCst), 1);
     f.source.proceed.notify_one();
     let first = task.await.unwrap();
     assert_eq!(output(&first)["write"]["status"], "verified");
-    let replay = invoke(handler, "knowledge_append", args).await;
+    let replay = invoke(handler, "knowledge_update_page", args).await;
     assert_eq!(output(&replay)["write"]["replayed"], true);
     assert_eq!(f.source.effects.load(Ordering::SeqCst), 1);
 }
@@ -819,14 +822,14 @@ async fn concurrent_sessions_share_durable_claim_even_when_tool_capacity_allows_
     let args = append("durable-concurrent-reservation-key");
     let initial = args.clone();
     let first = handler.clone();
-    let task = tokio::spawn(async move { invoke(first, "knowledge_append", initial).await });
+    let task = tokio::spawn(async move { invoke(first, "knowledge_update_page", initial).await });
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
         f.source.entered.notified(),
     )
     .await
     .unwrap();
-    let competing = invoke(handler, "knowledge_append", args).await;
+    let competing = invoke(handler, "knowledge_update_page", args).await;
     assert_eq!(output(&competing)["write"]["status"], "outcome_unknown");
     assert_eq!(f.source.effects.load(Ordering::SeqCst), 1);
     f.source.proceed.notify_one();
@@ -858,7 +861,10 @@ async fn reopened_durable_ledger_and_queue_replay_the_verified_receipt_without_s
             "knowledge_create_page",
             create("reopened-create-ledger-key"),
         ),
-        ("knowledge_append", append("reopened-append-ledger-key")),
+        (
+            "knowledge_update_page",
+            append("reopened-append-ledger-key"),
+        ),
         (
             "knowledge_update_section",
             section("reopened-section-ledger-key"),
@@ -923,7 +929,10 @@ async fn transport_cancellation_after_effect_is_indeterminate_and_cannot_repeat_
             "knowledge_create_page",
             create("cancelled-create-ledger-key"),
         ),
-        ("knowledge_append", append("cancelled-append-ledger-key")),
+        (
+            "knowledge_update_page",
+            append("cancelled-append-ledger-key"),
+        ),
         (
             "knowledge_update_section",
             section("cancelled-section-ledger-key"),
@@ -1022,44 +1031,40 @@ async fn merged_update_page_offers_only_operations_the_policy_permits() {
     assert!(denied["error"].is_object(), "{denied}");
 }
 
-fn merged_append(key: &str) -> Value {
-    let mut args = append(key);
-    args["operation"] = json!("append_markdown");
-    args
-}
-
 fn is_rejected(response: &Value) -> bool {
     response["error"].is_object() || response["result"]["isError"] == true
 }
 
 #[tokio::test]
-async fn merged_append_replays_across_old_and_new_names_and_rejects_smuggled_fields() {
+async fn merged_append_replays_and_rejects_smuggled_fields() {
     let f = Fixture::new();
     let handler = f.server(true);
-    let key = "append-across-names-fixture";
-    let first = invoke(handler.clone(), "knowledge_append", append(key)).await;
+    let key = "append-replay-fixture-key";
+    let first = invoke(handler.clone(), "knowledge_update_page", append(key)).await;
     assert_eq!(output(&first)["write"]["status"], "verified", "{first}");
-    let replay = invoke(handler.clone(), "knowledge_update_page", merged_append(key)).await;
+    let replay = invoke(handler.clone(), "knowledge_update_page", append(key)).await;
     assert_eq!(output(&replay)["write"]["replayed"], true, "{replay}");
     assert_eq!(f.source.effects.load(Ordering::SeqCst), 1);
 
-    let mut row_field = merged_append("append-with-row-revision-fixture");
+    let mut row_field = append("append-with-row-revision-fixture");
     row_field["expected_row_revision"] = json!("0".repeat(64));
     let mut page_field = create("create-with-properties-fixture");
     page_field["properties"] = json!({});
     let mut null_source = create("create-with-null-source-fixture");
     null_source["data_source_id"] = Value::Null;
-    let mut bad_operation = merged_append("append-bad-operation-fixture");
+    let mut bad_operation = append("append-bad-operation-fixture");
     bad_operation["operation"] = json!("APPEND_MARKDOWN");
+    let mut missing_operation = append("append-missing-operation-fixture");
+    missing_operation
+        .as_object_mut()
+        .unwrap()
+        .remove("operation");
     for (name, args) in [
         ("knowledge_update_page", row_field),
         ("knowledge_create_page", page_field),
         ("knowledge_create_page", null_source),
         ("knowledge_update_page", bad_operation),
-        (
-            "knowledge_update_page",
-            append("append-missing-operation-fixture"),
-        ),
+        ("knowledge_update_page", missing_operation),
     ] {
         let response = invoke(handler.clone(), name, args).await;
         assert!(is_rejected(&response), "{name}: {response}");
@@ -1095,7 +1100,7 @@ async fn existing_allowlists_keep_reaching_append_through_the_merged_tool() {
     let response = invoke(
         only_append.clone(),
         "knowledge_update_page",
-        merged_append("allowlisted-append-fixture"),
+        append("allowlisted-append-fixture"),
     )
     .await;
     assert_eq!(
@@ -1119,27 +1124,46 @@ async fn existing_allowlists_keep_reaching_append_through_the_merged_tool() {
             .contains(&"knowledge_update_page".to_owned())
     );
     let denied = invoke(
-        blocked.clone(),
+        blocked,
         "knowledge_update_page",
-        merged_append("blocked-merged-fixture"),
+        append("blocked-merged-fixture"),
     )
     .await;
     assert!(denied["error"].is_object(), "{denied}");
-    // The old name keeps its own selector.
-    let old = invoke(
-        blocked,
-        "knowledge_append",
-        append("blocked-merged-old-name-fixture"),
-    )
-    .await;
-    assert_eq!(output(&old)["write"]["status"], "verified", "{old}");
 
     let read_only = fixtures[2].server(true).with_read_only(true);
     let denied = invoke(
         read_only,
         "knowledge_update_page",
-        merged_append("read-only-merged-fixture"),
+        append("read-only-merged-fixture"),
     )
     .await;
     assert!(denied["error"].is_object(), "{denied}");
+}
+
+#[tokio::test]
+async fn retired_alias_names_are_not_callable_tools_but_remain_selectors() {
+    use notion_knowledge_mcp::capabilities::CapabilityPolicy;
+    let f = Fixture::new();
+    let handler = f.server(true);
+    let listed = request(handler.clone(), "tools/list", json!({})).await;
+    for name in [
+        "knowledge_append",
+        "knowledge_create_row",
+        "knowledge_update_row",
+        "knowledge_query_view",
+    ] {
+        assert!(handler.get_tool(name).is_none(), "{name}");
+        assert!(!listed.to_string().contains(&format!("\"name\":\"{name}\"")));
+        let mut args = append("retired-alias-name-fixture");
+        args.as_object_mut().unwrap().remove("operation");
+        let response = invoke(handler.clone(), name, args).await;
+        assert!(response["error"].is_object(), "{name}: {response}");
+        // Operator allowlists naming the operation keep parsing.
+        assert!(
+            CapabilityPolicy::from_lists(Some(name), None).is_ok(),
+            "{name}"
+        );
+    }
+    assert_eq!(f.source.effects.load(Ordering::SeqCst), 0);
 }

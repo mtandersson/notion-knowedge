@@ -84,7 +84,6 @@ fn catalog_accepts_complete_nonblank_text_with_search_or_full_match_validation()
             "knowledge_search",
             "knowledge_get",
             "knowledge_create_page",
-            "knowledge_append",
             "knowledge_update_section",
             "knowledge_archive_page",
         ]

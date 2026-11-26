@@ -1,4 +1,4 @@
-use notion_knowledge_mcp::{KnowledgeServer, view::TOOL};
+use notion_knowledge_mcp::{KnowledgeServer, view::SELECTOR};
 use serde_json::{Value, json};
 
 use crate::{
@@ -140,7 +140,7 @@ async fn call_with(
 }
 
 fn query(arguments: Value) -> Value {
-    json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":TOOL,"arguments":arguments}})
+    json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"knowledge_get","arguments":arguments}})
 }
 
 #[tokio::test]
@@ -171,7 +171,7 @@ async fn installed_view_discovery_on_read_only_transports() {
                 .as_array()
                 .unwrap()
                 .iter()
-                .all(|tool| tool["name"] != TOOL)
+                .all(|tool| tool["name"] != SELECTOR)
         );
         assert!(upstream.is_empty());
     }
@@ -434,7 +434,7 @@ async fn ten_row_view_response_stays_compact() {
 }
 
 #[tokio::test]
-async fn knowledge_get_view_mode_matches_the_old_tool_and_rejects_mixed_arguments() {
+async fn knowledge_get_view_mode_returns_rows_and_rejects_mixed_arguments() {
     let steps = || {
         let mut steps = scoped_view(false);
         steps.extend([
@@ -453,22 +453,12 @@ async fn knowledge_get_view_mode_matches_the_old_tool_and_rejects_mixed_argument
         request["params"]["name"] = json!("knowledge_get");
         request
     };
-    let (old, _) = call(
-        steps(),
-        query(json!({"view_id":VIEW,"fields":["Status"]})),
-        false,
-    )
-    .await;
     let (new, _) = call(
         steps(),
         as_get(json!({"view_id":VIEW,"fields":["Status"]})),
         false,
     )
     .await;
-    assert_eq!(
-        old["result"]["structuredContent"], new["result"]["structuredContent"],
-        "{new}"
-    );
     assert_eq!(
         new["result"]["structuredContent"]["rows"][0]["values"][1]["name"],
         "Done"
@@ -502,8 +492,15 @@ async fn view_mode_follows_the_view_selector_and_validates_its_arguments() {
     use notion_knowledge_mcp::capabilities::CapabilityPolicy;
     let blocked = || {
         KnowledgeServer::default()
-            .with_capability_policy(CapabilityPolicy::from_lists(None, Some(TOOL)).unwrap())
+            .with_capability_policy(CapabilityPolicy::from_lists(None, Some(SELECTOR)).unwrap())
     };
+    // An allowlist naming knowledge_get but not the view selector also hides view mode.
+    let get_only = KnowledgeServer::default()
+        .with_capability_policy(CapabilityPolicy::from_lists(Some("knowledge_get"), None).unwrap());
+    let (denied, upstream) =
+        call_with(get_only, vec![], get_view(json!({"view_id":VIEW})), false).await;
+    assert!(is_rejected(&denied), "{denied}");
+    assert!(upstream.is_empty());
     let (list, _) = call_with(
         blocked(),
         vec![],
@@ -568,4 +565,13 @@ async fn view_mode_works_at_the_smallest_tool_capacity_and_declares_its_output()
         .unwrap();
     assert!(get["outputSchema"]["required"].is_null());
     assert_eq!(get["outputSchema"]["properties"]["rows"]["type"], "array");
+}
+
+#[tokio::test]
+async fn retired_view_tool_name_is_not_callable() {
+    let mut request = query(json!({"view_id":VIEW}));
+    request["params"]["name"] = json!(SELECTOR);
+    let (response, upstream) = call(vec![], request, false).await;
+    assert!(response["error"].is_object(), "{response}");
+    assert!(upstream.is_empty());
 }

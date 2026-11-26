@@ -128,6 +128,21 @@ impl KnowledgeServer {
     /// Enforce the configured access mode before exposing or dispatching MCP tools.
     /// Only explicitly audited read tools are permitted in read-only mode.
     fn tool_permitted(&self, name: &str) -> bool {
+        let subsumed: &[&str] = match name {
+            "knowledge_update_page" => &["knowledge_append", row_write::UPDATE_SELECTOR],
+            "knowledge_create_page" => &[row_write::CREATE_SELECTOR],
+            _ => return self.tool_permitted_strict(name),
+        };
+        self.modes_permit(name)
+            && self.capability_policy.permits_via(name, subsumed)
+            && (name != "knowledge_update_page"
+                || subsumed
+                    .iter()
+                    .any(|operation| self.tool_permitted_strict(operation)))
+    }
+
+    /// Read-only and destructive gates, shared by every name.
+    fn modes_permit(&self, name: &str) -> bool {
         (!self.read_only
             || matches!(
                 name,
@@ -135,6 +150,20 @@ impl KnowledgeServer {
                     | "knowledge_get"
                     | "knowledge_sync_status"
                     | "knowledge_related"
+                    | view::SELECTOR
+            ))
+            && (self.destructive_writes_enabled || !write_contract::is_destructive_write(name))
+    }
+
+    fn tool_permitted_strict(&self, name: &str) -> bool {
+        (!self.read_only
+            || matches!(
+                name,
+                "knowledge_search"
+                    | "knowledge_get"
+                    | "knowledge_sync_status"
+                    | "knowledge_related"
+                    | view::SELECTOR
             ))
             && (self.destructive_writes_enabled || !write_contract::is_destructive_write(name))
             && self.capability_policy.permits(name)
@@ -230,7 +259,7 @@ impl KnowledgeServer {
 
     /// `knowledge_get`, with its saved-view mode when that read is installed and permitted.
     fn get_tool_definition(&self) -> rmcp::model::Tool {
-        if self.saved_view_query.is_some() {
+        if self.saved_view_query.is_some() && self.tool_permitted(view::SELECTOR) {
             get::tool_with_views()
         } else {
             get::tool()
@@ -278,7 +307,7 @@ impl KnowledgeServer {
             catalog.push(related::tool());
         }
         if let Some(runtime) = &self.mutations {
-            catalog.extend(runtime.tools(&|name| self.tool_permitted(name)));
+            catalog.extend(runtime.tools(&|name| self.tool_permitted_strict(name)));
         } else if self.write_design_preview {
             catalog.extend(write_contract::tools());
         }
@@ -795,6 +824,13 @@ impl KnowledgeServer {
                 }
             }
             "knowledge_get" if arguments.contains_key("view_id") => {
+                // Saved-view mode is governed by the knowledge_query_view selector.
+                if !self.tool_permitted(view::SELECTOR) {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "tool unavailable in read-only mode",
+                        None,
+                    ));
+                }
                 self.query_view(arguments).await
             }
             "knowledge_get" => {
@@ -901,6 +937,17 @@ impl KnowledgeServer {
                 .as_ref()
                 .is_some_and(|runtime| runtime.supports(name)) =>
             {
+                // Each merged operation is governed by its own selector.
+                let operation_denied = match mutations::effective_operation(name, &arguments) {
+                    Some(operation) => !self.tool_permitted_strict(operation),
+                    None => name == "knowledge_create_page" && !self.tool_permitted_strict(name),
+                };
+                if operation_denied {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "tool unavailable in read-only mode",
+                        None,
+                    ));
+                }
                 let output = self
                     .mutations
                     .as_ref()
@@ -988,7 +1035,7 @@ impl ServerHandler for KnowledgeServer {
                 .as_ref()
                 .is_some_and(|arguments| arguments.contains_key("view_id"))
         {
-            view::BUDGET_KEY
+            view::SELECTOR
         } else {
             request.name.as_ref()
         };

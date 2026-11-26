@@ -91,16 +91,20 @@ impl MutationRuntime {
         matches!(name, "knowledge_create_page" | "knowledge_update_page")
             || (name == "knowledge_update_section" && self.confirmation.is_some())
     }
-    /// The listed write tools. Row operations are described only when a row
-    /// writer is installed; each tool is governed by its own selector.
+    /// The listed write tools. Each operation is offered only when policy
+    /// permits its own selector (`knowledge_append`, `knowledge_create_row`,
+    /// `knowledge_update_row`); those selectors are not tool names.
     pub(crate) fn tools(&self, permits: &dyn Fn(&str) -> bool) -> Vec<rmcp::model::Tool> {
-        let rows = self.row_writer.is_some();
+        let rows_create = self.row_writer.is_some() && permits(crate::row_write::CREATE_SELECTOR);
+        let append = permits("knowledge_append");
+        let patch = self.row_writer.is_some() && permits(crate::row_write::UPDATE_SELECTOR);
+        let page_create = permits("knowledge_create_page");
         let mut tools = Vec::new();
-        if permits("knowledge_create_page") {
-            tools.push(with_output(merged_create_tool(rows)));
+        if page_create || rows_create {
+            tools.push(with_output(merged_create_tool(page_create, rows_create)));
         }
-        if permits("knowledge_update_page") {
-            tools.push(with_output(merged_update_tool(rows)));
+        if append || patch {
+            tools.push(with_output(merged_update_tool(append, patch)));
         }
         if self.supports("knowledge_update_section") {
             tools.push(tool("knowledge_update_section"));
@@ -511,8 +515,8 @@ impl Drop for AuditAttempt<'_> {
 
 pub(crate) fn tool(name: &str) -> rmcp::model::Tool {
     with_output(match name {
-        "knowledge_create_page" => merged_create_tool(true),
-        "knowledge_update_page" => merged_update_tool(true),
+        "knowledge_create_page" => merged_create_tool(true, true),
+        "knowledge_update_page" => merged_update_tool(true, true),
         _ => existing_tool(name),
     })
 }
@@ -523,8 +527,8 @@ fn with_output(mut tool: rmcp::model::Tool) -> rmcp::model::Tool {
 }
 
 /// `knowledge_create_page`: a page under `parent_page_id`, or, when rows are
-/// a row writer is installed, a row in `data_source_id` with typed `properties`.
-fn merged_create_tool(rows: bool) -> rmcp::model::Tool {
+/// permitted, a row in `data_source_id` with typed `properties`.
+fn merged_create_tool(page: bool, rows: bool) -> rmcp::model::Tool {
     if !rows {
         return existing_tool("knowledge_create_page");
     }
@@ -540,6 +544,28 @@ fn merged_create_tool(rows: bool) -> rmcp::model::Tool {
         "UUID of the original Notion data source for a new row. Give this or parent_page_id; properties apply only to a row."
     );
     schema["required"] = json!(["root_page_id", "title", "markdown", "idempotency_key"]);
+    if !page {
+        schema["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("parent_page_id");
+        schema["required"] = json!([
+            "root_page_id",
+            "data_source_id",
+            "title",
+            "markdown",
+            "properties",
+            "idempotency_key"
+        ]);
+        schema["properties"]["data_source_id"]["description"] =
+            json!("UUID of the original Notion data source.");
+        tool.description = Some(
+            "Create one row in a data source with typed properties and Markdown. Keep the same idempotency key for retries."
+                .into(),
+        );
+        tool.input_schema = Arc::new(schema);
+        return tool;
+    }
     tool.description = Some(
         "Create one page under parent_page_id, or one row in a data source with typed properties and Markdown. Keep the same idempotency key for retries."
             .into(),
@@ -549,8 +575,8 @@ fn merged_create_tool(rows: bool) -> rmcp::model::Tool {
 }
 
 /// `knowledge_update_page`: `operation` selects `append_markdown` or
-/// `patch_properties`; patch is described only when a row writer is installed.
-fn merged_update_tool(patch: bool) -> rmcp::model::Tool {
+/// `patch_properties`; only the permitted operations are described.
+fn merged_update_tool(append: bool, patch: bool) -> rmcp::model::Tool {
     let mut tool = crate::row_write::update_tool();
     tool.name = "knowledge_update_page".into();
     let row = tool.input_schema.as_ref().clone();
@@ -559,13 +585,16 @@ fn merged_update_tool(patch: bool) -> rmcp::model::Tool {
         fields.insert(key.into(), row["properties"][key].clone());
     }
     fields["page_id"]["description"] = json!("Page UUID to update.");
-    let mut operations = vec!["append_markdown"];
-    fields.insert("markdown".into(), json!({"type":"string","minLength":1,"maxLength":200000,"description":"append_markdown: exact Markdown to add at the end."}));
-    fields.insert("expected_last_edited_time".into(), json!({"type":"string","maxLength":128,"description":"append_markdown: guard; give this or expected_markdown_sha256."}));
-    fields.insert(
-        "expected_markdown_sha256".into(),
-        json!({"type":"string","pattern":"^[a-fA-F0-9]{64}$"}),
-    );
+    let mut operations = Vec::new();
+    if append {
+        operations.push("append_markdown");
+        fields.insert("markdown".into(), json!({"type":"string","minLength":1,"maxLength":200000,"description":"append_markdown: exact Markdown to add at the end."}));
+        fields.insert("expected_last_edited_time".into(), json!({"type":"string","maxLength":128,"description":"append_markdown: guard; give this or expected_markdown_sha256."}));
+        fields.insert(
+            "expected_markdown_sha256".into(),
+            json!({"type":"string","pattern":"^[a-fA-F0-9]{64}$"}),
+        );
+    }
     if patch {
         operations.push("patch_properties");
         fields.insert(
@@ -590,6 +619,24 @@ fn merged_update_tool(patch: bool) -> rmcp::model::Tool {
         .clone(),
     );
     tool
+}
+
+/// The capability selector a merged call's operation is governed by.
+pub(crate) fn effective_operation(
+    name: &str,
+    arguments: &serde_json::Map<String, Value>,
+) -> Option<&'static str> {
+    match name {
+        "knowledge_update_page" => match arguments.get("operation").and_then(Value::as_str) {
+            Some("append_markdown") => Some("knowledge_append"),
+            Some("patch_properties") => Some(crate::row_write::UPDATE_SELECTOR),
+            _ => None,
+        },
+        "knowledge_create_page" if arguments.contains_key("data_source_id") => {
+            Some(crate::row_write::CREATE_SELECTOR)
+        }
+        _ => None,
+    }
 }
 
 fn existing_tool(name: &str) -> rmcp::model::Tool {
@@ -655,8 +702,6 @@ fn common_output() -> Arc<serde_json::Map<String, Value>> {
 pub fn is_semantic_mutation(name: &str) -> bool {
     matches!(
         name,
-        "knowledge_create_page"
-            | "knowledge_update_page"
-            | "knowledge_update_section"
+        "knowledge_create_page" | "knowledge_update_page" | "knowledge_update_section"
     )
 }

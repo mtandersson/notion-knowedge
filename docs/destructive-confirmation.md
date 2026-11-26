@@ -4,7 +4,7 @@ This is a fail-closed policy and schema-level safety gate for the Phase 5 semant
 
 ## Operation classification and deployment gate
 
-- Non-destructive: `knowledge_create_page`, `knowledge_append`.
+- Non-destructive: `knowledge_create_page`, `knowledge_update_page`.
 - Destructive: `knowledge_update_section`, `knowledge_archive_page`, and future whole-page replacement or deletion operations.
 - Unknown names do not inherit permission from a broad writable mode.
 

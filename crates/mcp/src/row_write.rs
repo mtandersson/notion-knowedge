@@ -2,6 +2,10 @@ use notion_knowledge_core::row_write::{MAX_PROPERTIES, MAX_RELATIONS};
 use rmcp::model::{Tool, ToolAnnotations};
 use serde_json::{Value, json};
 
+/// Capability selectors (policy only, not tool names) for the row modes of
+/// `knowledge_create_page` and `knowledge_update_page`.
+pub const CREATE_SELECTOR: &str = "knowledge_create_row";
+pub const UPDATE_SELECTOR: &str = "knowledge_update_row";
 pub(crate) const UUID: &str = "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$";
 
 fn input_type(kind: &str, value: Value) -> Value {

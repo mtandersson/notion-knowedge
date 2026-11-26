@@ -50,7 +50,7 @@ fn explicit_design_preview_discovery_separates_narrow_writes_and_destructive_arc
         .with_destructive_writes_enabled(true)
         .with_write_design_preview();
     let tools = server.tool_catalog();
-    assert_eq!(tools.len(), 8);
+    assert_eq!(tools.len(), 7);
     let names: BTreeSet<String> = tools
         .iter()
         .map(|tool| {
@@ -68,7 +68,6 @@ fn explicit_design_preview_discovery_separates_narrow_writes_and_destructive_arc
             "knowledge_sync_status",
             "knowledge_upload_file",
             "knowledge_create_page",
-            "knowledge_append",
             "knowledge_update_section",
             "knowledge_archive_page",
         ]
@@ -78,7 +77,6 @@ fn explicit_design_preview_discovery_separates_narrow_writes_and_destructive_arc
     );
     for name in [
         "knowledge_create_page",
-        "knowledge_append",
         "knowledge_update_section",
         "knowledge_archive_page",
     ] {
@@ -122,9 +120,10 @@ fn explicit_design_preview_discovery_separates_narrow_writes_and_destructive_arc
     }
     assert!(create["inputSchema"]["properties"].get("page_id").is_none());
 
-    let append = serialized(server.get_tool("knowledge_append").unwrap());
+    assert!(server.get_tool("knowledge_append").is_none());
     let update = serialized(server.get_tool("knowledge_update_section").unwrap());
-    for tool in [&append, &update] {
+    {
+        let tool = &update;
         for required in ["page_id", "markdown"] {
             assert!(
                 tool["inputSchema"]["required"]
@@ -152,11 +151,6 @@ fn explicit_design_preview_discovery_separates_narrow_writes_and_destructive_arc
                 .is_some()
         );
     }
-    assert!(
-        append["inputSchema"]["properties"]
-            .get("section_anchor")
-            .is_none()
-    );
     assert!(
         update["inputSchema"]["required"]
             .as_array()
@@ -217,11 +211,10 @@ fn default_destructive_gate_hides_preview_schemas_without_disabling_safe_writes(
     let server = KnowledgeServer::default()
         .with_read_only(false)
         .with_write_design_preview();
-    assert_eq!(server.tool_catalog().len(), 6);
+    assert_eq!(server.tool_catalog().len(), 5);
     for name in ["knowledge_update_section", "knowledge_archive_page"] {
         assert!(server.get_tool(name).is_none());
     }
-    for name in ["knowledge_create_page", "knowledge_append"] {
-        assert!(server.get_tool(name).is_some());
-    }
+    assert!(server.get_tool("knowledge_create_page").is_some());
+    assert!(server.get_tool("knowledge_append").is_none());
 }

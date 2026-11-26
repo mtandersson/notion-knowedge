@@ -10,7 +10,7 @@ Default discovery stays read-only. The installed composition is the
 [guarded integration write path](integration-semantic-writes.md).
 
 With trusted capabilities and explicit writable mode, actual discovery includes
-`knowledge_create_page` and `knowledge_append`. Bounded
+`knowledge_create_page` and `knowledge_update_page`. Bounded
 `knowledge_update_section` additionally requires a trusted confirmation provider
 and the independent destructive-operation flag. Archive and whole-page
 replacement are not implemented, advertised or dispatched by this runtime, even

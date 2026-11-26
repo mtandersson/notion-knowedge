@@ -22,7 +22,7 @@ schemas and MCP annotations are in
 | Tool | Narrow intent | Target/provenance | Mutation risk |
 | --- | --- | --- | --- |
 | `knowledge_create_page` | Create one child page with a title and Markdown | Explicit authorized `parent_page_id` within server-approved `root_page_id`; stable verified page receipt | Non-destructive, non-idempotent without reservation |
-| `knowledge_append` | Append Markdown at the end, preserving unrelated content | Existing `page_id`, claimed root and `expected_last_edited_time` | Non-destructive but repeated append duplicates |
+| `knowledge_update_page` (`append_markdown`, installed only; not in the preview) | Append Markdown at the end, preserving unrelated content | Existing `page_id`, claimed root and `expected_last_edited_time` | Non-destructive but repeated append duplicates |
 | `knowledge_update_section` | Replace one anchored section, **not** a whole page | Existing `page_id`, stable `section_anchor`, claimed root and expected source revision | Content mutation; optimistic concurrency required |
 | `knowledge_archive_page` | Explicit archive of one named page | Existing `page_id`, claimed root, expected revision and server-issued `confirmation_id` | **Destructive**; cannot be hidden in a generic update |
 

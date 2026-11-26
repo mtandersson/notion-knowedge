@@ -6,8 +6,9 @@ use rmcp::model::{Tool, ToolAnnotations};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-/// Tool-budget key for the saved-view mode of `knowledge_get`; not a tool name.
-pub(crate) const BUDGET_KEY: &str = "saved_view";
+/// Capability selector (policy only, not a tool name) for the saved-view mode
+/// of `knowledge_get`; also its tool-budget key.
+pub const SELECTOR: &str = "knowledge_query_view";
 pub const MAX_PAGE_SIZE: usize = 25;
 pub const MAX_FIELDS: usize = 25;
 pub const MAX_CURSOR_BYTES: usize = 256;

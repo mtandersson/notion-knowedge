@@ -3,10 +3,10 @@
 > Listed as the saved-view mode of `knowledge_get`: pass `view_id` (with
 > `fields`, `include_row_revision`, `page_size`, `continuation`) instead of
 > `refs` and `max_chars`. Mixing the two modes is rejected. The
-> `knowledge_query_view` selector governs view mode, and the old tool name is
-> still accepted but no longer advertised.
+> `knowledge_query_view` capability selector governs view mode. It is no
+> longer a tool name (#814).
 
-`knowledge_query_view` is available on trusted stdio and loopback
+Saved-view mode is available on trusted stdio and loopback
 bearer-authenticated MCP with the Notion integration and configured scope.
 The read tool also works in read-only mode and uses the integration's connection
 permissions. The view's containing database and the original data source must
