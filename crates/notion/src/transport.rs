@@ -260,8 +260,9 @@ impl NotionClient {
             if let Some(clock) = &self.transport.waits {
                 let _ = clock.send(crate::test_clock::ClockEvent::ResponseReady);
             }
-            // Notion documents 529 (service_overload) next to 429: the request is turned
-            // away at admission, so a write is safe to resend after the Retry-After delay.
+            // Notion's request-limits page (developers.notion.com/reference/request-limits)
+            // pairs 529 (service_overload) with 429 and says to honour Retry-After, so it is
+            // treated as an admission rejection: so a write is safe to resend after the Retry-After delay.
             // Other 5xx answers may have been processed and are never resent.
             let rate_delay = result
                 .as_ref()
