@@ -25,7 +25,7 @@ use crate::{NotionClient, pages, views::row_revision, writes::encode_write_body}
 
 const CREATE: &str = "notion.row.create";
 const UPDATE: &str = "notion.row.update";
-const U: &str = "row.update.verify";
+const UPDATE_VERIFY: &str = "row.update.verify";
 
 fn preflight(error: BackendError) -> Error {
     match error.kind {
@@ -378,7 +378,7 @@ impl NotionClient {
         let first = self
             .fetch_page_value(&id)
             .await
-            .map_err(|e| unknown(V, e.kind.label()))?;
+            .map_err(|e| unknown("row.create.fetch_first", e.kind.label()))?;
         let markdown = self
             .read_markdown(&id)
             .await
@@ -386,7 +386,7 @@ impl NotionClient {
         let last = self
             .fetch_page_value(&id)
             .await
-            .map_err(|e| unknown(V, e.kind.label()))?;
+            .map_err(|e| unknown("row.create.fetch_last", e.kind.label()))?;
         let checks = [
             (
                 "page_not_active_row",
@@ -414,7 +414,7 @@ impl NotionClient {
         }
         self.scoped_data_source(&request.data_source_id, scope)
             .await
-            .map_err(|e| unknown(V, e.kind.label()))?;
+            .map_err(|e| unknown("row.create.scope", e.kind.label()))?;
         VerifiedReceipt::from_readback(
             id.0,
             last["url"]
@@ -602,8 +602,11 @@ impl RowWrite for NotionClient {
 
             let (receipt, replayed) = match ledger.lookup(&claim).map_err(ledger_error)? {
                 Some(ExistingClaim::Replay(receipt)) if receipt.page_id == id.0 => (receipt, true),
-                Some(ExistingClaim::Replay(_)) | Some(ExistingClaim::Reconcile) => {
-                    return Err(unknown(U, "claim_reconcile").into());
+                Some(ExistingClaim::Replay(_)) => {
+                    return Err(unknown(UPDATE_VERIFY, "claim_replay_page_mismatch").into());
+                }
+                Some(ExistingClaim::Reconcile) => {
+                    return Err(unknown(UPDATE_VERIFY, "claim_reconcile").into());
                 }
                 None => {
                     check_row_revision(&original, &id, &request.expected_row_revision)?;
@@ -622,7 +625,7 @@ impl RowWrite for NotionClient {
                     match ledger.begin(&claim).map_err(ledger_error)? {
                         Reservation::Replay(receipt) if receipt.page_id == id.0 => (receipt, true),
                         Reservation::Replay(_) | Reservation::Reconcile => {
-                            return Err(unknown(U, "claim_reconcile").into());
+                            return Err(unknown(UPDATE_VERIFY, "claim_reconcile").into());
                         }
                         Reservation::ExecuteOnce => {
                             ledger.mark_uncertain(&claim).map_err(ledger_error)?;
@@ -644,12 +647,11 @@ impl RowWrite for NotionClient {
                                 && accepted["id"].as_str().and_then(pages::uuid).as_deref()
                                     == Some(id.0.as_str());
                             if !partial && !active_row(&accepted, &id.0, &data_source) {
-                                return Err(unknown(U, "receipt_not_active_row").into());
+                                return Err(unknown(UPDATE_VERIFY, "receipt_not_active_row").into());
                             }
-                            let readback = self
-                                .fetch_page_value(&id)
-                                .await
-                                .map_err(|e| unknown(U, e.kind.label()))?;
+                            let readback = self.fetch_page_value(&id).await.map_err(|e| {
+                                unknown("row.update.fetch_readback", e.kind.label())
+                            })?;
                             let checks = [
                                 (
                                     "page_not_active_row",
@@ -662,23 +664,23 @@ impl RowWrite for NotionClient {
                                 ),
                             ];
                             if let Some((label, _)) = checks.iter().find(|(_, ok)| !ok) {
-                                return Err(unknown(U, label).into());
+                                return Err(unknown(UPDATE_VERIFY, label).into());
                             }
                             self.scoped_data_source(&data_source, scope)
                                 .await
-                                .map_err(|e| unknown(U, e.kind.label()))?;
+                                .map_err(|e| unknown("row.update.scope", e.kind.label()))?;
                             let receipt = VerifiedReceipt::from_readback(
                                 id.0.clone(),
                                 readback["url"]
                                     .as_str()
-                                    .ok_or_else(|| unknown(U, "receipt_field"))?
+                                    .ok_or_else(|| unknown(UPDATE_VERIFY, "url_missing"))?
                                     .into(),
                                 readback["last_edited_time"]
                                     .as_str()
-                                    .ok_or_else(|| unknown(U, "receipt_field"))?
+                                    .ok_or_else(|| unknown(UPDATE_VERIFY, "edited_time_missing"))?
                                     .into(),
                             )
-                            .map_err(|_| unknown(U, "receipt_invalid"))?;
+                            .map_err(|_| unknown(UPDATE_VERIFY, "receipt_invalid"))?;
                             ledger
                                 .record_verified(&claim, &receipt)
                                 .map_err(|_| unknown("row.update.ledger_commit", ""))?;
