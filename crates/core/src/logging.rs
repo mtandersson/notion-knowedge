@@ -411,6 +411,23 @@ fn write_unknown_value(
     outcome: Outcome,
     stage: &'static str,
     detail: &'static str,
+) -> serde_json::Value {
+    let mut event = event_value(
+        id,
+        Operation::McpTool,
+        outcome,
+        Duration::ZERO,
+        None,
+        outcome.level(),
+    );
+    event["tool"] = "guarded_write".into();
+    event["result"] = "outcome_unknown".into();
+    event["stage"] = stage.into();
+    if !detail.is_empty() {
+        event["detail"] = detail.into();
+    }
+    event
+}
 
 /// Record why a saved-view query failed using fixed classifications only: the
 /// failure kind and the stage that produced it, never an id or upstream text.
@@ -443,17 +460,6 @@ fn view_query_failure_value(
         id,
         Operation::McpTool,
         outcome,
-        Duration::ZERO,
-        None,
-        outcome.level(),
-    );
-    event["tool"] = "guarded_write".into();
-    event["result"] = "outcome_unknown".into();
-    event["stage"] = stage.into();
-    if !detail.is_empty() {
-        event["detail"] = detail.into();
-    }
-
         elapsed,
         None,
         outcome.level(),
@@ -719,7 +725,9 @@ mod tests {
         );
         assert!(cancelled["detail"].is_null());
         assert_eq!(cancelled["level"], "warn");
+    }
 
+    #[test]
     fn view_failure_event_names_kind_and_stage_without_identifiers() {
         let event = view_query_failure_value(
             &CorrelationId::new(),
@@ -733,11 +741,29 @@ mod tests {
         assert_eq!(event["stage"], "scope.excluded");
         assert_eq!(event["outcome"], "rejected");
         assert_eq!(event["level"], "warn");
-        // The event carries classifications only, never a view or page id.
-        let text = event.to_string();
-        assert!(
-            !text.contains("view_id") && !text.contains("page_id"),
-            "{text}"
-        );
+        // Exactly these fields, so nothing identifying can ride along.
+        let mut keys: Vec<&str> = event
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        let mut expected = vec![
+            "correlation_id",
+            "duration_ms",
+            "http_status",
+            "kind",
+            "level",
+            "operation",
+            "outcome",
+            "runtime_thread",
+            "stage",
+            "timestamp_unix_ms",
+            "tool",
+            "worker",
+        ];
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
     }
 }
