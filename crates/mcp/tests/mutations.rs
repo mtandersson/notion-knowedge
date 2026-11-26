@@ -1158,7 +1158,10 @@ async fn retired_alias_names_are_not_callable_tools_but_remain_selectors() {
         let mut args = append("retired-alias-name-fixture");
         args.as_object_mut().unwrap().remove("operation");
         let response = invoke(handler.clone(), name, args).await;
-        assert!(response["error"].is_object(), "{name}: {response}");
+        assert_eq!(
+            response["error"]["message"], "unknown tool",
+            "{name}: {response}"
+        );
         // Operator allowlists naming the operation keep parsing.
         assert!(
             CapabilityPolicy::from_lists(Some(name), None).is_ok(),

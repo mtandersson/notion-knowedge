@@ -131,11 +131,14 @@ impl KnowledgeServer {
         let subsumed: &[&str] = match name {
             "knowledge_update_page" => &["knowledge_append", row_write::UPDATE_SELECTOR],
             "knowledge_create_page" => &[row_write::CREATE_SELECTOR],
+            // A view-only allowlist still reaches saved views through knowledge_get.
+            "knowledge_get" if self.saved_view_query.is_some() => &[view::SELECTOR],
             _ => return self.tool_permitted_strict(name),
         };
         self.modes_permit(name)
             && self.capability_policy.permits_via(name, subsumed)
-            && (name != "knowledge_update_page"
+            && (name == "knowledge_create_page"
+                || self.tool_permitted_strict(name)
                 || subsumed
                     .iter()
                     .any(|operation| self.tool_permitted_strict(operation)))
@@ -834,6 +837,13 @@ impl KnowledgeServer {
                 self.query_view(arguments).await
             }
             "knowledge_get" => {
+                // Source mode needs the knowledge_get selector itself.
+                if !self.tool_permitted_strict("knowledge_get") {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        "tool unavailable in read-only mode",
+                        None,
+                    ));
+                }
                 let input: get::GetRequest =
                     serde_json::from_value(serde_json::Value::Object(arguments)).map_err(|_| {
                         rmcp::ErrorData::invalid_params("invalid knowledge_get arguments", None)

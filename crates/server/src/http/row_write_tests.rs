@@ -837,7 +837,10 @@ async fn retired_row_tool_names_are_not_callable() {
         let mut request = call();
         request["params"]["name"] = json!(name);
         let (response, log) = stores.invoke(vec![], request, false).await;
-        assert!(response["error"].is_object(), "{name}: {response}");
+        assert_eq!(
+            response["error"]["message"], "unknown tool",
+            "{name}: {response}"
+        );
         assert!(log.is_empty());
     }
 }

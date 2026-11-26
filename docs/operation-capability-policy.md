@@ -11,7 +11,8 @@ server-owned capability policy in both stdio and HTTP. Discovery (`list_tools`,
   restrictions. An explicitly empty value disables every tool.
 - `NK_TOOL_BLOCKLIST` is optional. When omitted/empty, no operations are
   removed by this policy.
-- Each setting is a comma-separated list of exact canonical tool names or
+- Each setting is a comma-separated list of exact canonical selectors (tool or
+  operation names) or
   the categories `read`, `write`, `admin`.
 - Current exact **read** selectors: `knowledge_search`, `knowledge_get`,
   `knowledge_related`, `knowledge_sync_status` and `knowledge_query_view`.
@@ -82,4 +83,6 @@ own name or any subsumed selector is allowlisted, so an existing
 blocks it entirely. The old names are no longer tools; they remain only as
 these selectors, so existing allowlists keep parsing and keep their meaning.
 Without `knowledge_query_view` (directly or through `read`), `knowledge_get`
-hides and rejects `view_id`.
+hides and rejects `view_id`. An allowlist with `knowledge_query_view` but not
+`knowledge_get` still lists `knowledge_get` for saved views and rejects its
+`refs` mode. Blocklisting `knowledge_get` now also blocks saved views.

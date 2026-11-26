@@ -572,6 +572,56 @@ async fn retired_view_tool_name_is_not_callable() {
     let mut request = query(json!({"view_id":VIEW}));
     request["params"]["name"] = json!(SELECTOR);
     let (response, upstream) = call(vec![], request, false).await;
-    assert!(response["error"].is_object(), "{response}");
+    assert_eq!(response["error"]["message"], "unknown tool", "{response}");
+    assert!(upstream.is_empty());
+}
+
+#[tokio::test]
+async fn a_view_only_allowlist_reads_saved_views_but_not_sources() {
+    use notion_knowledge_mcp::capabilities::CapabilityPolicy;
+    let view_only = || {
+        KnowledgeServer::default()
+            .with_capability_policy(CapabilityPolicy::from_lists(Some(SELECTOR), None).unwrap())
+    };
+    let (list, _) = call_with(
+        view_only(),
+        vec![],
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}),
+        false,
+    )
+    .await;
+    let get = list["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "knowledge_get")
+        .unwrap();
+    assert!(get["inputSchema"]["properties"]["view_id"].is_object());
+
+    let mut steps = scoped_view(false);
+    steps.extend([
+        (
+            200,
+            json!({"object":"view_query","view_id":VIEW,"id":QUERY,"results":[{"object":"page","id":FIRST}],
+            "has_more":false,"next_cursor":null}),
+        ),
+        row(FIRST, "2026-11-29"),
+    ]);
+    steps.extend(scoped_view(false));
+    let (rows, _) = call_with(view_only(), steps, get_view(json!({"view_id":VIEW})), false).await;
+    assert!(!is_rejected(&rows), "{rows}");
+    assert_eq!(
+        rows["result"]["structuredContent"]["rows"][0]["page_id"], FIRST,
+        "{rows}"
+    );
+
+    let (sources, upstream) = call_with(
+        view_only(),
+        vec![],
+        get_view(json!({"refs":[{"kind":"page","id":FIRST}],"max_chars":100})),
+        false,
+    )
+    .await;
+    assert!(is_rejected(&sources), "{sources}");
     assert!(upstream.is_empty());
 }
