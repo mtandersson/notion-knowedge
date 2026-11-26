@@ -147,12 +147,22 @@ async fn installed_view_discovery_on_read_only_transports() {
             .as_array()
             .unwrap()
             .iter()
-            .find(|tool| tool["name"] == TOOL)
+            .find(|tool| tool["name"] == "knowledge_get")
             .unwrap();
         assert_eq!(tool["annotations"]["readOnlyHint"], true);
         assert_eq!(
             tool["inputSchema"]["properties"]["page_size"]["maximum"],
             25
+        );
+        assert!(tool["inputSchema"]["properties"]["fields"].is_object());
+        // 4 377 B when added; it replaced knowledge_get (3 064) plus the view tool (1 470).
+        assert!(tool.to_string().len() <= 4_500);
+        assert!(
+            list["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|tool| tool["name"] != TOOL)
         );
         assert!(upstream.is_empty());
     }
@@ -412,4 +422,58 @@ async fn ten_row_view_response_stays_compact() {
     );
     assert!(selected_bytes <= 2_700, "{selected_bytes} B");
     assert!(revision_bytes <= 3_500, "{revision_bytes} B");
+}
+
+#[tokio::test]
+async fn knowledge_get_view_mode_matches_the_old_tool_and_rejects_mixed_arguments() {
+    let steps = || {
+        let mut steps = scoped_view(false);
+        steps.extend([
+            (
+                200,
+                json!({"object":"view_query","view_id":VIEW,"id":QUERY,"results":[{"object":"page","id":FIRST}],
+                "has_more":false,"next_cursor":null}),
+            ),
+            row(FIRST, "2026-11-29"),
+        ]);
+        steps.extend(scoped_view(false));
+        steps
+    };
+    let as_get = |arguments: Value| {
+        let mut request = query(arguments);
+        request["params"]["name"] = json!("knowledge_get");
+        request
+    };
+    let (old, _) = call(
+        steps(),
+        query(json!({"view_id":VIEW,"fields":["Status"]})),
+        false,
+    )
+    .await;
+    let (new, _) = call(
+        steps(),
+        as_get(json!({"view_id":VIEW,"fields":["Status"]})),
+        false,
+    )
+    .await;
+    assert_eq!(
+        old["result"]["structuredContent"], new["result"]["structuredContent"],
+        "{new}"
+    );
+    assert_eq!(
+        new["result"]["structuredContent"]["rows"][0]["values"][1]["name"],
+        "Done"
+    );
+
+    let (mixed, upstream) = call(
+        vec![],
+        as_get(json!({"view_id":VIEW,"refs":[{"kind":"page","id":FIRST}],"max_chars":100})),
+        false,
+    )
+    .await;
+    assert!(
+        mixed["error"].is_object() || mixed["result"]["isError"] == true,
+        "{mixed}"
+    );
+    assert!(upstream.is_empty());
 }

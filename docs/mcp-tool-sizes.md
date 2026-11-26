@@ -20,6 +20,9 @@ Per tool after #812: `knowledge_search` 7 152, `knowledge_create_row` 3 747,
 
 After #818 `knowledge_create_page` is 3 910 B and `knowledge_update_page` 3 915 B; the row, append and old create tools are no longer listed.
 
+After #819 `knowledge_get` with its saved-view mode is 4 377 B, replacing
+`knowledge_get` (3 064 B) and `knowledge_query_view` (1 470 B).
+
 The catalog barely shrank from compaction alone. The large remaining cost is
 the number of tools and their typed-property schemas, which #813 addresses by
 merging the page and row tools.

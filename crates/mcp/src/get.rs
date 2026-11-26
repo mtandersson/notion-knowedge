@@ -445,7 +445,10 @@ pub fn tool_with_views() -> Tool {
         "Saved-view mode instead of refs: view UUID or view:// UUID, with page_size, fields, include_row_revision and the returned continuation."
     );
     input["required"] = json!([]);
-    input["anyOf"] = json!([{"required":["refs","max_chars"]},{"required":["view_id"]}]);
+    input.insert(
+        "anyOf".into(),
+        json!([{"required":["refs","max_chars"]},{"required":["view_id"]}]),
+    );
     tool.input_schema = std::sync::Arc::new(input);
     tool.description = Some(format!(
         "{} With view_id, read ordered rows from a saved Notion view using its filters and sorts; rows hold values positionally matching the returned columns, so choose columns with fields and set include_row_revision only before updating rows.",
