@@ -137,8 +137,7 @@ impl KnowledgeServer {
         };
         self.modes_permit(name)
             && self.capability_policy.permits_via(name, subsumed)
-            && (name == "knowledge_create_page"
-                || self.tool_permitted_strict(name)
+            && (name != "knowledge_update_page"
                 || subsumed
                     .iter()
                     .any(|operation| self.tool_permitted_strict(operation)))

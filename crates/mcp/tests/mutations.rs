@@ -1170,3 +1170,18 @@ async fn retired_alias_names_are_not_callable_tools_but_remain_selectors() {
     }
     assert_eq!(f.source.effects.load(Ordering::SeqCst), 0);
 }
+
+#[test]
+fn update_page_selector_alone_grants_no_operation() {
+    use notion_knowledge_mcp::capabilities::CapabilityPolicy;
+    let handler = Fixture::new().server(true).with_capability_policy(
+        CapabilityPolicy::from_lists(Some("knowledge_update_page"), None).unwrap(),
+    );
+    assert!(handler.get_tool("knowledge_update_page").is_none());
+    assert!(
+        handler
+            .tool_catalog()
+            .iter()
+            .all(|tool| tool.name != "knowledge_update_page")
+    );
+}
