@@ -5002,8 +5002,11 @@ async fn http_answers_liveness_and_reports_startup_while_the_cache_rebuild_runs(
         .get(format!("http://{address}/readyz"))
         .send()
         .await
-        .unwrap();
+        .unwrap_or_else(|error| panic!("transport error on /readyz during the rebuild: {error:?}"));
     assert_eq!(ready.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    // Startup connections are never pooled, so the handover cannot close one
+    // under a request that a client is sending on it.
+    assert_eq!(ready.headers()["connection"], "close");
     let body: serde_json::Value = ready.json().await.unwrap();
     assert_eq!(body["status"], "starting");
     assert_eq!(body["startup"], "cache_rebuild");
@@ -5012,7 +5015,7 @@ async fn http_answers_liveness_and_reports_startup_while_the_cache_rebuild_runs(
         .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize"}))
         .send()
         .await
-        .unwrap();
+        .unwrap_or_else(|error| panic!("transport error on /mcp during the rebuild: {error:?}"));
     assert_eq!(mcp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
     let body: serde_json::Value = mcp.json().await.unwrap();
     assert_eq!(body["startup"], "cache_rebuild");
@@ -5024,7 +5027,9 @@ async fn http_answers_liveness_and_reports_startup_while_the_cache_rebuild_runs(
                 .get(format!("http://{address}/readyz"))
                 .send()
                 .await
-                .unwrap()
+                .unwrap_or_else(|error| {
+                    panic!("transport error on /readyz across the startup handover: {error:?}")
+                })
                 .json()
                 .await
                 .unwrap();

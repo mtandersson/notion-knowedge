@@ -182,7 +182,13 @@ async fn while_starting(
         .fallback(move || async move { starting_response(phase) })
         .layer(middleware::from_fn(correlate_request));
     let stop = tokio_util::sync::CancellationToken::new();
-    let serving = serve_router_on(listener, router, stop.clone(), HEADER_READ_TIMEOUT);
+    let serving = serve_router_on(
+        listener,
+        router,
+        stop.clone(),
+        HEADER_READ_TIMEOUT,
+        Connections::HandedOver,
+    );
     let startup = async {
         let result = startup.await;
         stop.cancel();
@@ -454,7 +460,28 @@ pub(crate) async fn serve_router(
     stop: tokio_util::sync::CancellationToken,
     header_read_timeout: Duration,
 ) -> io::Result<()> {
-    serve_router_on(listener, router, stop, header_read_timeout).await
+    serve_router_on(
+        listener,
+        router,
+        stop,
+        header_read_timeout,
+        Connections::Drained,
+    )
+    .await
+}
+
+/// How the connections a router accepted end once its `stop` fires.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Connections {
+    /// Keep-alive connections finish their in-flight request and close; the
+    /// router returns after every connection has ended.
+    Drained,
+    /// Each connection answers one request (`connection: close`) and is never
+    /// cut short or awaited, so the router returns at once and its borrowed
+    /// listener passes to the next router. A client neither reuses a pooled
+    /// connection that the handover closes nor loses one accepted just before
+    /// it, which a graceful shutdown would close before its request is read.
+    HandedOver,
 }
 
 /// `serve_router` on an owned listener, closed before draining, or a borrowed
@@ -464,6 +491,7 @@ async fn serve_router_on(
     router: axum::Router,
     stop: tokio_util::sync::CancellationToken,
     header_read_timeout: Duration,
+    connections: Connections,
 ) -> io::Result<()> {
     use hyper_util::{
         rt::{TokioIo, TokioTimer},
@@ -484,11 +512,18 @@ async fn serve_router_on(
             let mut builder = hyper::server::conn::http1::Builder::new();
             builder
                 .timer(TokioTimer::new())
-                .header_read_timeout(header_read_timeout);
+                .header_read_timeout(header_read_timeout)
+                .keep_alive(connections == Connections::Drained);
             let conn = builder
                 .serve_connection(TokioIo::new(stream), service)
                 .with_upgrades();
             let mut conn = std::pin::pin!(conn);
+            if connections == Connections::HandedOver {
+                // The header-read deadline still bounds a silent client.
+                drop(close_rx);
+                let _ = conn.await;
+                return;
+            }
             tokio::select! {
                 _ = conn.as_mut() => {}
                 () = stop.cancelled() => {
@@ -1036,6 +1071,88 @@ mod tests {
     use super::*;
     use notion_knowledge_core::health::{DependencyState, HealthProbe};
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn startup_connections_outlive_the_handover_to_the_installed_router() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        async fn exchange(stream: &mut tokio::net::TcpStream) -> String {
+            stream
+                .write_all(b"GET /phase HTTP/1.1\r\nHost: x\r\n\r\n")
+                .await
+                .unwrap();
+            let mut response = String::new();
+            // Reading to the end proves the server closed the connection.
+            stream.read_to_string(&mut response).await.unwrap();
+            response
+        }
+        let mut listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stop = tokio_util::sync::CancellationToken::new();
+        let starting = axum::Router::new().route("/phase", get(|| async { "starting" }));
+        let mut idle = None;
+        let clients = async {
+            // Accepted in connection order: once `served` is answered, `idle`
+            // is an accepted connection whose request has not arrived yet.
+            idle = Some(tokio::net::TcpStream::connect(addr).await.unwrap());
+            let mut served = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let response = exchange(&mut served).await;
+            stop.cancel();
+            response
+        };
+        let (served, response) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                serve_router_on(
+                    &mut listener,
+                    starting,
+                    stop.clone(),
+                    Duration::from_secs(5),
+                    Connections::HandedOver,
+                ),
+                clients
+            )
+        })
+        .await
+        .expect("the startup router hands over without waiting for idle connections");
+        served.unwrap();
+        // A startup connection is never reused, so no pooled client sends on it
+        // while the handover closes it.
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(
+            response.to_ascii_lowercase().contains("connection: close"),
+            "{response}"
+        );
+        assert!(response.ends_with("starting"), "{response}");
+
+        let installed_stop = tokio_util::sync::CancellationToken::new();
+        let installed = tokio::spawn(super::serve_router(
+            listener,
+            axum::Router::new().route("/phase", get(|| async { "installed" })),
+            installed_stop.clone(),
+            Duration::from_secs(5),
+        ));
+        let (late, fresh) = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut fresh = tokio::net::TcpStream::connect(addr).await.unwrap();
+            tokio::join!(exchange(idle.as_mut().unwrap()), async {
+                let mut response = String::new();
+                fresh
+                    .write_all(b"GET /phase HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                fresh.read_to_string(&mut response).await.unwrap();
+                response
+            })
+        })
+        .await
+        .expect("both connections are answered after the handover");
+        // The connection accepted before the handover is answered by its own
+        // router rather than closed unread; new connections reach the next one.
+        assert!(late.starts_with("HTTP/1.1 200"), "{late}");
+        assert!(late.ends_with("starting"), "{late}");
+        assert!(fresh.starts_with("HTTP/1.1 200"), "{fresh}");
+        assert!(fresh.ends_with("installed"), "{fresh}");
+        installed_stop.cancel();
+        installed.await.unwrap().unwrap();
+    }
 
     #[tokio::test]
     async fn unfinished_request_head_is_closed_at_the_deadline_while_others_are_served() {
