@@ -23,6 +23,17 @@ fn failure(kind: Kind) -> BackendError {
     }
 }
 
+/// A scope denial that names the stage in the log without changing the
+/// generic text returned to the caller.
+fn denied(stage: &'static str) -> BackendError {
+    BackendError {
+        kind: Kind::PermissionDenied,
+        operation: stage,
+        retry_after: None,
+        committed_page_id: None,
+    }
+}
+
 fn id(value: &Value) -> Result<String, BackendError> {
     value
         .as_str()
@@ -270,8 +281,19 @@ impl View {
 
 impl NotionClient {
     async fn view_object(&self, kind: &str, id: &str) -> Result<Value, BackendError> {
+        let stage = match kind {
+            "views" => "fetch.view",
+            "data_sources" => "fetch.data_source",
+            "databases" => "fetch.database",
+            "pages" => "fetch.page",
+            _ => "fetch.block",
+        };
         self.walk_request(Method::GET, &format!("{kind}/{id}"), None)
             .await
+            .map_err(|error| BackendError {
+                operation: stage,
+                ..error
+            })
     }
 
     /// Follow current physical parents. A link to a resource never grants access to it.
@@ -290,14 +312,14 @@ impl NotionClient {
                 "data_source_id" => ("data_sources", "data_source", Some(SourceType::DataSource)),
                 "page_id" => ("pages", "page", Some(SourceType::Page)),
                 "block_id" => ("blocks", "block", None),
-                _ => return Err(failure(Kind::PermissionDenied)),
+                _ => return Err(denied("scope.unsupported_container")),
             };
             if !visited.insert((kind, current.clone()))
                 || source_type
                     .is_some_and(|source| scope.exclusions.exclusion(&current, source).is_some())
                 || (kind == "page_id" && scope.exclusions.descendants_of.contains(&current))
             {
-                return Err(failure(Kind::PermissionDenied));
+                return Err(denied("scope.excluded_or_cycle"));
             }
             let value = match self.view_object(endpoint, &current).await {
                 // Notion's database endpoint can omit linked containers. The
@@ -311,7 +333,7 @@ impl NotionClient {
                     let block = self.view_object("blocks", &current).await?;
                     object(&block, "block", &current)?;
                     if block["type"] != "child_database" {
-                        return Err(failure(Kind::PermissionDenied));
+                        return Err(denied("scope.linked_not_child_database"));
                     }
                     block
                 }
@@ -324,7 +346,7 @@ impl NotionClient {
             // Data source objects have no archive flag. Their database must be active.
             match (kind, pages::inactive(&value)) {
                 (_, Some(true)) | ("database_id" | "page_id" | "block_id", None) => {
-                    return Err(failure(Kind::PermissionDenied));
+                    return Err(denied("scope.inactive_or_unknown_active_state"));
                 }
                 _ => {}
             }
@@ -337,11 +359,11 @@ impl NotionClient {
                 Some("data_source_id") => "data_source_id",
                 Some("page_id") => "page_id",
                 Some("block_id") => "block_id",
-                _ => return Err(failure(Kind::PermissionDenied)),
+                _ => return Err(denied("scope.unsupported_parent")),
             };
             current = id(&parent[kind])?;
         }
-        Err(failure(Kind::PermissionDenied))
+        Err(denied("scope.depth_exceeded"))
     }
 
     /// Resolve the actual owner of a data source with live root authorization.
@@ -355,12 +377,12 @@ impl NotionClient {
             .exclusion(source, SourceType::DataSource)
             .is_some()
         {
-            return Err(failure(Kind::PermissionDenied));
+            return Err(denied("data_source.excluded"));
         }
         let metadata = self.view_object("data_sources", source).await?;
         object(&metadata, "data_source", source)?;
         if metadata["parent"]["type"] != "database_id" || pages::inactive(&metadata) == Some(true) {
-            return Err(failure(Kind::PermissionDenied));
+            return Err(denied("data_source.parent_or_inactive"));
         }
         let source_database = id(&metadata["parent"]["database_id"])?;
         self.verify_database_scope(&source_database, false, scope)
@@ -502,7 +524,7 @@ impl NotionClient {
                 .exclusion(&row_id, SourceType::Page)
                 .is_some()
             {
-                return Err(failure(Kind::PermissionDenied));
+                return Err(denied("row.excluded"));
             }
             let row = self.fetch_page_value(&PageId(row_id.clone())).await?;
             object(&row, "page", &row_id)?;
@@ -510,7 +532,7 @@ impl NotionClient {
                 || row["parent"]["type"] != "data_source_id"
                 || id(&row["parent"]["data_source_id"])? != view.source
             {
-                return Err(failure(Kind::PermissionDenied));
+                return Err(denied("row.not_in_source_or_inactive"));
             }
             row["last_edited_time"]
                 .as_str()

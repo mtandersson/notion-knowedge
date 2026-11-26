@@ -3,6 +3,7 @@ use std::{future::Future, pin::Pin, time::Duration};
 use notion_knowledge_core::{
     backend::{BackendError, BackendErrorKind as Kind},
     lifecycle::LifecycleScope,
+    logging::{self, Outcome},
 };
 use notion_knowledge_mcp::view::{Continuation, Request, SavedViewQuery};
 use notion_knowledge_notion::{
@@ -18,6 +19,23 @@ pub(crate) struct Runtime {
     source: NotionClient,
     scope: LifecycleScope,
     continuation_key: hmac::Key,
+}
+
+/// Name the failing stage in the operator log; the caller still gets the
+/// generic classified message.
+fn log_failure(started: std::time::Instant, failure: &BackendError) {
+    let outcome = match failure.kind {
+        Kind::PermissionDenied | Kind::NotFound | Kind::Unauthenticated | Kind::InvalidInput => {
+            Outcome::Rejected
+        }
+        _ => Outcome::Failed,
+    };
+    logging::emit_view_query_failure(
+        outcome,
+        started.elapsed(),
+        &format!("{:?}", failure.kind),
+        failure.operation,
+    );
 }
 
 fn error(kind: Kind) -> BackendError {
@@ -122,7 +140,8 @@ impl SavedViewQuery for Runtime {
             } else {
                 None
             };
-            let mut output = tokio::time::timeout(
+            let started = std::time::Instant::now();
+            let mut output = match tokio::time::timeout(
                 Duration::from_secs(60),
                 self.source.query_saved_view(
                     &self.scope,
@@ -136,7 +155,18 @@ impl SavedViewQuery for Runtime {
                 ),
             )
             .await
-            .map_err(|_| error(Kind::Unavailable))??;
+            {
+                Ok(Ok(output)) => output,
+                Ok(Err(failure)) => {
+                    log_failure(started, &failure);
+                    return Err(failure);
+                }
+                Err(_) => {
+                    let failure = error(Kind::Unavailable);
+                    log_failure(started, &failure);
+                    return Err(failure);
+                }
+            };
             self.sign(&view, &mut output["continuation"])?;
             Ok(output)
         })
