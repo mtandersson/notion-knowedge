@@ -168,6 +168,41 @@ impl IndexCommitCoordinator {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "local-lancedb")]
+    #[tokio::test]
+    async fn a_search_waits_for_a_commit_that_releases_the_fence_within_its_budget() {
+        let root = tempfile::tempdir().unwrap();
+        let index = root.path().join("index");
+        let state = root.path().join("state.sqlite");
+        fs::create_dir(&index).unwrap();
+        let scope = ReconciliationScope::new(vec!["root".into()], vec![], "policy", "v1").unwrap();
+        let binding = CommitBinding::new("chunks", "workspace", &scope, "generation", 1).unwrap();
+        let coordinator = IndexCommitCoordinator::initialize(&index, &state, binding).unwrap();
+        let short = std::time::Duration::from_millis(100);
+
+        let writer = coordinator.try_acquire().unwrap();
+        assert!(matches!(
+            coordinator.search_guard(),
+            Err(CommitError::Conflict)
+        ));
+        assert!(matches!(
+            coordinator.search_guard_waiting_for(short).await,
+            Err(CommitError::Conflict)
+        ));
+
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(writer);
+        });
+        assert!(
+            coordinator
+                .search_guard_waiting_for(std::time::Duration::from_secs(2))
+                .await
+                .is_ok()
+        );
+        release.join().unwrap();
+    }
+
     #[test]
     fn legacy_handoff_blocks_existing_and_reopened_readers_until_reset() {
         let root = tempfile::tempdir().unwrap();

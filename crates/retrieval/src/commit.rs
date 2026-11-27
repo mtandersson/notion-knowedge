@@ -326,6 +326,10 @@ impl OwnedWork {
     }
 }
 const ANCHOR: &str = ".nk-operational-binding";
+/// How long a request-path search waits for an in-progress commit to release
+/// the read fence before reporting the index unavailable.
+#[cfg(feature = "local-lancedb")]
+const SEARCH_FENCE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 impl IndexCommitCoordinator {
     /// Initialize an explicit trusted binding, or verify an identical existing
     /// binding. The index directory must already exist. No index is rebuilt.
@@ -647,6 +651,30 @@ impl IndexCommitCoordinator {
             return Err(CommitError::Conflict);
         }
         Ok(guard)
+    }
+    /// Request-path variant of [`Self::search_guard`]: a commit in progress
+    /// holds the fence only briefly, so wait for it with an async backoff
+    /// instead of failing the search. Any other failure is returned at once.
+    #[cfg(feature = "local-lancedb")]
+    pub(crate) async fn search_guard_waiting(&self) -> Result<File, CommitError> {
+        self.search_guard_waiting_for(SEARCH_FENCE_WAIT).await
+    }
+    #[cfg(feature = "local-lancedb")]
+    pub(crate) async fn search_guard_waiting_for(
+        &self,
+        budget: std::time::Duration,
+    ) -> Result<File, CommitError> {
+        let deadline = tokio::time::Instant::now() + budget;
+        let mut delay = std::time::Duration::from_millis(10);
+        loop {
+            match self.search_guard() {
+                Err(CommitError::Conflict) if tokio::time::Instant::now() + delay < deadline => {
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(std::time::Duration::from_millis(200));
+                }
+                result => return result,
+            }
+        }
     }
     /// Internal readiness inspection may run while authoritative rebuild is
     /// pending. It cannot authorize serving content to a request.
