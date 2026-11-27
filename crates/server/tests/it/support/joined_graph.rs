@@ -77,7 +77,7 @@ async fn joined_committed_bilingual_aliases_navigation_and_off_on_ranking_surviv
         vec![PAGE.to_string()]
     );
     assert_eq!(
-        read.lookup_alias("FYREN / lighthouse").unwrap(),
+        read.lookup_alias("BEACON / lighthouse").unwrap(),
         vec![PAGE.to_string(), OTHER.to_string()]
     );
     assert!(read.lookup_alias("CSV").unwrap().is_empty()); // body text is not an alias
@@ -204,7 +204,7 @@ async fn joined_committed_bilingual_aliases_navigation_and_off_on_ranking_surviv
     tick(&runtime.worker, false).await;
     assert!(read.lookup_alias("updated fyr").unwrap().is_empty());
     assert_eq!(
-        read.lookup_alias("Fyren / Lighthouse").unwrap(),
+        read.lookup_alias("Beacon / Lighthouse").unwrap(),
         vec![OTHER.to_string()]
     );
     let output = wire_stdio(on, vec![query(2)]).await;
