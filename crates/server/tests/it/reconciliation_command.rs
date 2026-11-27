@@ -5049,3 +5049,41 @@ async fn http_answers_liveness_and_reports_startup_while_the_cache_rebuild_runs(
     stop.cancel();
     server.await.unwrap().unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_after_resync_with_pending_semantic_work_reuses_the_cache() {
+    let http = start_notion().await;
+    let f = Fixture::new(&http).await;
+    counts(&f.command(&http, &["--reconcile", "apply"]).await, 3, 0, 0);
+    fs::remove_dir_all(&f.settings.index).unwrap();
+    let recovered = IndexRuntime::recover(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        recovered
+            .coordinator
+            .drain_owned_outcomes()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop(recovered);
+    let reopened = IndexRuntime::recover(
+        &f.settings,
+        &f.state,
+        authority(),
+        http.client(),
+        f.provider.clone(),
+    )
+    .await;
+    assert!(
+        reopened.is_ok(),
+        "restart before embedding finished must reuse the cache"
+    );
+}
