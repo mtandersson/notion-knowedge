@@ -102,6 +102,21 @@ pub struct BackendError {
     pub committed_page_id: Option<PageId>,
 }
 
+/// Why a saved-view read failed. An unknown `fields` entry is the caller's
+/// mistake and carries the view's column names, so it can be corrected in one
+/// step; every other failure is a sanitized [`BackendError`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViewQueryError {
+    Backend(BackendError),
+    UnknownField { columns: Vec<String> },
+}
+
+impl From<BackendError> for ViewQueryError {
+    fn from(error: BackendError) -> Self {
+        Self::Backend(error)
+    }
+}
+
 /// A provider answer that proves a write was refused before any effect: the
 /// request never reached a state Notion could have committed. Timeouts,
 /// 5xx, rate limits and transport failures are never rejections.

@@ -329,10 +329,20 @@ async fn view_results_distinguish_empty_denied_unsupported_and_unavailable() {
         (unsupported, "unsupported_view"),
         (unavailable, "notion_unavailable"),
     ] {
-        let (result, _) = call(steps, query(json!({"view_id":VIEW})), false).await;
-        assert_eq!(result["result"]["isError"], true, "{result}");
-        let text = result["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.starts_with(code), "{text}");
+        // A bad field never reveals column names for a view that is refused first.
+        // (The unavailable case fails after the columns resolve, so it only
+        // takes the plain request.)
+        let mut variants = vec![json!({"view_id":VIEW})];
+        if code != "notion_unavailable" {
+            variants.push(json!({"view_id":VIEW,"fields":["Missing"]}));
+        }
+        for arguments in variants {
+            let (result, _) = call(steps.clone(), query(arguments), false).await;
+            assert_eq!(result["result"]["isError"], true, "{result}");
+            let text = result["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(text.starts_with(code), "{text}");
+            assert!(!text.contains("unknown_field"), "{text}");
+        }
     }
 }
 
@@ -382,13 +392,18 @@ async fn selected_columns_and_explicit_row_revision_shrink_the_response() {
         false,
     )
     .await;
+    // The refusal names the problem and lists the view's real columns, so the
+    // caller can correct the entry without guessing at ids or continuations.
+    let text = result["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("invalid_input: unknown_field"), "{result}");
+    for column in ["Name", "Status", "Attachment"] {
+        assert!(text.contains(column), "{text}");
+    }
     assert!(
-        result["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .starts_with("invalid_input"),
-        "{result}"
+        !text.contains("UUID") && !text.contains("continuation"),
+        "{text}"
     );
+    assert_eq!(result["result"]["isError"], true, "{result}");
 }
 
 fn nth(index: usize) -> String {

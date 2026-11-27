@@ -293,7 +293,7 @@ impl KnowledgeServer {
             Ok(_) => Ok(error(
                 "incomplete: response exceeds the tool limit; request a smaller page",
             )),
-            Err(failure) => Ok(error(view::failure(failure))),
+            Err(failure) => Ok(error(&view::failure(failure))),
         }
     }
 
