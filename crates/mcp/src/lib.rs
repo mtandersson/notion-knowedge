@@ -297,6 +297,37 @@ impl KnowledgeServer {
         }
     }
 
+    /// Saved views of a data source through the view mode of `knowledge_get`.
+    async fn list_views(
+        &self,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+        let error = |message: &str| {
+            rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(message)])
+                .into()
+        };
+        let input: view::ListRequest = serde_json::from_value(serde_json::Value::Object(arguments))
+            .ok()
+            .filter(view::ListRequest::valid)
+            .ok_or_else(|| {
+                rmcp::ErrorData::invalid_params("invalid saved-view listing arguments", None)
+            })?;
+        let Some(service) = &self.saved_view_query else {
+            return Ok(error(
+                "notion_unavailable: saved view queries are not installed",
+            ));
+        };
+        match service.list(input).await {
+            Ok(output) if output_fits_budget(&output) => {
+                Ok(rmcp::model::CallToolResult::structured(output).into())
+            }
+            Ok(_) => Ok(error(
+                "incomplete: response exceeds the tool limit; request a smaller page",
+            )),
+            Err(failure) => Ok(error(&view::list_failure(failure))),
+        }
+    }
+
     /// Shared discovery catalog for both MCP transport implementations.
     pub fn tool_catalog(&self) -> Vec<rmcp::model::Tool> {
         let mut catalog = vec![
@@ -825,7 +856,7 @@ impl KnowledgeServer {
                     }
                 }
             }
-            "knowledge_get" if arguments.contains_key("view_id") => {
+            "knowledge_get" if view::is_view_mode(&arguments) => {
                 // Saved-view mode is governed by the knowledge_query_view selector.
                 if !self.tool_permitted(view::SELECTOR) {
                     return Err(rmcp::ErrorData::invalid_params(
@@ -833,7 +864,11 @@ impl KnowledgeServer {
                         None,
                     ));
                 }
-                self.query_view(arguments).await
+                if arguments.contains_key("view_id") {
+                    self.query_view(arguments).await
+                } else {
+                    self.list_views(arguments).await
+                }
             }
             "knowledge_get" => {
                 // Source mode needs the knowledge_get selector itself.
@@ -1039,10 +1074,7 @@ impl ServerHandler for KnowledgeServer {
         // uncertain mutation outcomes must keep their original receipts.
         // View mode is a saved-view read and is weighted as one.
         let budget_name = if request.name == "knowledge_get"
-            && request
-                .arguments
-                .as_ref()
-                .is_some_and(|arguments| arguments.contains_key("view_id"))
+            && request.arguments.as_ref().is_some_and(view::is_view_mode)
         {
             view::SELECTOR
         } else {

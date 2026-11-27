@@ -12,6 +12,11 @@ use sha2::{Digest, Sha256};
 
 use crate::{NotionClient, pages};
 
+/// Views fetched per listing (one request each, after the scope lookups);
+/// a database with more reports `truncated`.
+const MAX_LISTED_VIEWS: usize = 25;
+/// View names are user text that reaches the model; keep them short and plain.
+const MAX_VIEW_NAME_CHARS: usize = 100;
 const MAX_VIEW_ROW_PAYLOAD_BYTES: usize = 512 * 1024;
 
 fn failure(kind: Kind) -> BackendError {
@@ -427,6 +432,94 @@ impl NotionClient {
             source,
             source_database,
         })
+    }
+
+    /// List the saved views of one data source: the views that live on the
+    /// data source's own database and read from it. Notion's list endpoint
+    /// returns bare ids, so each view is fetched for its name and type. Views
+    /// elsewhere (linked views) are not listed, which keeps every listed view
+    /// inside the scope already proven for the owning database.
+    pub async fn list_saved_views(
+        &self,
+        scope: &LifecycleScope,
+        reference: &str,
+    ) -> Result<Value, BackendError> {
+        let source = pages::uuid(reference).ok_or_else(|| failure(Kind::InvalidInput))?;
+        let (_, database) = self.scoped_data_source(&source, scope).await?;
+        let listing = self
+            .walk_request(
+                Method::GET,
+                &format!("views?database_id={database}&page_size={MAX_LISTED_VIEWS}"),
+                None,
+            )
+            .await?;
+        let ids = match (listing["object"].as_str(), listing["results"].as_array()) {
+            (Some("list"), Some(results)) => results,
+            _ => return Err(failure(Kind::Internal)),
+        };
+        let mut views = Vec::new();
+        let mut skipped = false;
+        for entry in ids {
+            let view_id = id(&entry["id"])?;
+            let view = match self.view_object("views", &view_id).await {
+                Ok(view) => view,
+                // Deleted or unreadable since the listing: leave it out, say so.
+                Err(error) if matches!(error.kind, Kind::NotFound | Kind::PermissionDenied) => {
+                    skipped = true;
+                    continue;
+                }
+                // A caller mistake cannot come from fetching an id Notion gave us.
+                Err(error) if error.kind == Kind::InvalidInput => {
+                    return Err(failure(Kind::Internal));
+                }
+                Err(error) => return Err(error),
+            };
+            object(&view, "view", &view_id)?;
+            let queryable = matches!(
+                view["type"].as_str(),
+                Some("table" | "list" | "board" | "calendar" | "timeline" | "gallery")
+            );
+            if !queryable
+                || view["parent"]["database_id"]
+                    .as_str()
+                    .and_then(pages::uuid)
+                    .as_deref()
+                    != Some(database.as_str())
+                || view["data_source_id"]
+                    .as_str()
+                    .and_then(pages::uuid)
+                    .as_deref()
+                    != Some(source.as_str())
+            {
+                continue;
+            }
+            views.push(json!({
+                "id": view_id,
+                "name": view["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(MAX_VIEW_NAME_CHARS)
+                    .collect::<String>(),
+                "type": view["type"],
+            }));
+        }
+        // The list cannot be paged, so an empty answer is only "empty" when
+        // nothing was cut off or skipped.
+        let truncated = listing["has_more"] == true || skipped;
+        let status = match (views.is_empty(), truncated) {
+            (false, _) => "ok",
+            (true, false) => "empty",
+            (true, true) => "partial",
+        };
+        Ok(json!({
+            "data_source_id": source,
+            "database_id": database,
+            "status": status,
+            "views": views,
+            "truncated": truncated,
+        }))
     }
 
     pub async fn query_saved_view(
