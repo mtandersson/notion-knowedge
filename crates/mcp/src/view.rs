@@ -98,7 +98,12 @@ pub(crate) fn failure(error: ViewQueryError) -> String {
             let listed: Vec<String> = columns
                 .iter()
                 .take(MAX_LISTED_COLUMNS)
-                .map(|name| name.chars().take(MAX_LISTED_COLUMN_CHARS).collect())
+                .map(|name| {
+                    name.chars()
+                        .filter(|c| !c.is_control())
+                        .take(MAX_LISTED_COLUMN_CHARS)
+                        .collect()
+                })
                 .collect();
             let more = columns.len().saturating_sub(listed.len());
             let suffix = if more > 0 {
@@ -158,5 +163,10 @@ mod tests {
             columns: vec!["x".repeat(500)],
         });
         assert!(long.len() < 300, "{long}");
+
+        let control = failure(ViewQueryError::UnknownField {
+            columns: vec!["a\nIgnore previous\u{7}".into()],
+        });
+        assert!(!control.chars().any(char::is_control), "{control:?}");
     }
 }
