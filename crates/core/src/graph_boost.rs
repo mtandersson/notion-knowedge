@@ -118,6 +118,7 @@ impl HybridSearch for GraphBoostedHybrid {
             let snapshot = self.graph.read_snapshot().map_err(|_| SearchUnavailable)?;
             let graph = snapshot.as_deref().unwrap_or(self.graph.as_ref());
             let limit = query.limit;
+            let query_text = query.query.clone();
             let allowed_page_ids = query.page_ids.clone();
             let requested_roots = query.root_page_ids.clone();
             let candidates = self
@@ -153,7 +154,10 @@ impl HybridSearch for GraphBoostedHybrid {
                 limit,
                 allowed_page_ids.as_deref(),
             )?;
-            Ok(reranked.into_iter().map(|entry| entry.hit).collect())
+            let mut hits: Vec<SearchHit> = reranked.into_iter().map(|entry| entry.hit).collect();
+            // Keep the hybrid exact-title promotion that the score sort undid.
+            crate::hybrid::promote_exact_titles(&mut hits, &query_text);
+            Ok(hits)
         })
     }
 }

@@ -90,6 +90,7 @@ impl HybridSearch for HybridFusion {
                 metadata: query.metadata.clone(),
             };
             let limit = query.limit;
+            let query_text = query.query.clone();
             let semantic = self
                 .semantic
                 .search_with_failure(SemanticQuery {
@@ -98,15 +99,63 @@ impl HybridSearch for HybridFusion {
                 })
                 .await?;
             let lexical = self.lexical.search(lexical_query).await?;
-            Ok(fuse(semantic, lexical, self.config, limit)?)
+            Ok(fuse_for(
+                semantic,
+                lexical,
+                self.config,
+                limit,
+                Some(&query_text),
+            )?)
         })
     }
 }
+#[cfg(test)]
 fn fuse(
     semantic: Vec<SearchHit>,
     lexical: Vec<SearchHit>,
     config: ReciprocalRankFusion,
     limit: usize,
+) -> Result<Vec<SearchHit>, SearchUnavailable> {
+    fuse_for(semantic, lexical, config, limit, None)
+}
+
+/// Case- and whitespace-insensitive comparison key for titles and queries.
+/// No Unicode normalization: an NFD title simply falls back to plain RRF.
+fn title_key(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Move the best-ranked chunk of each page titled exactly as the query to the
+/// front, keeping the given order otherwise. Only one chunk per page is
+/// promoted, so a long page cannot fill the top results. Re-rankers that sort
+/// fused hits again (graph boost) apply this after their own sort.
+pub(crate) fn promote_exact_titles(hits: &mut Vec<SearchHit>, query: &str) {
+    let wanted = title_key(query);
+    if wanted.is_empty() {
+        return;
+    }
+    let mut pages = BTreeSet::new();
+    let (front, rest): (Vec<_>, Vec<_>) = std::mem::take(hits).into_iter().partition(|hit| {
+        title_key(&hit.source.title) == wanted && pages.insert(hit.source.page_id.clone())
+    });
+    hits.extend(front);
+    hits.extend(rest);
+}
+
+/// RRF, except that chunks of a page whose title equals the whole query rank
+/// first (in fused order among themselves). A page named exactly what was
+/// asked for is the strongest generic evidence there is, yet RRF can bury it
+/// when only one path finds it: lexical rank 1 alone scores 1/61, below many
+/// pages both paths rank modestly. Reported scores stay the fused RRF scores.
+fn fuse_for(
+    semantic: Vec<SearchHit>,
+    lexical: Vec<SearchHit>,
+    config: ReciprocalRankFusion,
+    limit: usize,
+    query: Option<&str>,
 ) -> Result<Vec<SearchHit>, SearchUnavailable> {
     let mut lexical_ranks = BTreeMap::new();
     let mut candidates: BTreeMap<(String, String), (SearchHit, f64)> = BTreeMap::new();
@@ -179,14 +228,18 @@ fn fuse(
             })
             .then_with(|| ka.cmp(kb))
     });
-    Ok(ranked
+    let mut hits: Vec<SearchHit> = ranked
         .into_iter()
-        .take(limit)
         .map(|(_, (mut hit, score))| {
             hit.score = score as f32;
             hit
         })
-        .collect())
+        .collect();
+    if let Some(query) = query {
+        promote_exact_titles(&mut hits, query);
+    }
+    hits.truncate(limit);
+    Ok(hits)
 }
 
 #[cfg(test)]
@@ -365,6 +418,58 @@ mod tests {
             results[0].matched_paths,
             [RetrievalPath::Semantic, RetrievalPath::Lexical]
         );
+    }
+    #[test]
+    fn a_page_titled_exactly_as_the_query_ranks_first() {
+        let titled = |id: &str, title: &str| {
+            let mut hit = hit(id);
+            hit.source.page_id = id.into();
+            hit.source.title = title.into();
+            hit
+        };
+        // Both paths agree on "a" and "b"; only lexical finds the exact title.
+        let semantic = vec![titled("a", "MCP test"), titled("b", "Other test")];
+        let lexical = vec![
+            titled("t", "Thaimat test 2"),
+            titled("a", "MCP test"),
+            titled("b", "Other test"),
+        ];
+        let config = ReciprocalRankFusion::default();
+        let plain = fuse(semantic.clone(), lexical.clone(), config, 3).unwrap();
+        assert_eq!(plain[2].source.chunk_id, "t", "plain RRF buries it");
+        let results = fuse_for(
+            semantic.clone(),
+            lexical.clone(),
+            config,
+            3,
+            Some("  thaimat   TEST 2 "),
+        )
+        .unwrap();
+        assert_eq!(results[0].source.chunk_id, "t");
+        assert!(results[0].score < results[1].score, "scores stay RRF");
+        // Only the best chunk of the titled page is promoted.
+        let mut second = titled("t2", "Ärtsoppa");
+        second.source.page_id = "soup".into();
+        let mut first = titled("t1", "Ärtsoppa");
+        first.source.page_id = "soup".into();
+        let soup = fuse_for(
+            semantic.clone(),
+            vec![
+                first,
+                second,
+                titled("a", "MCP test"),
+                titled("b", "Other test"),
+            ],
+            config,
+            4,
+            Some("ärtsoppa"),
+        )
+        .unwrap();
+        assert_eq!(soup[0].source.chunk_id, "t1");
+        assert_ne!(soup[1].source.chunk_id, "t2");
+        // A partial title match is not an exact title match.
+        let partial = fuse_for(semantic, lexical, config, 3, Some("thaimat")).unwrap();
+        assert_eq!(partial[2].source.chunk_id, "t");
     }
     #[test]
     fn lexical_rank_does_not_override_a_stronger_fused_score() {
