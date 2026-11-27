@@ -444,10 +444,15 @@ pub fn tool_with_views() -> Tool {
     properties["view_id"]["description"] = json!(
         "Saved-view mode instead of refs: view UUID or view:// UUID, with page_size, fields, include_row_revision and the returned continuation."
     );
+    properties.insert(
+        "data_source_id".into(),
+        json!({"type":"string","minLength":32,"maxLength":36,
+            "description":"List this data source's saved views (id, name, type). Use alone."}),
+    );
     input.remove("required");
     input.insert(
         "anyOf".into(),
-        json!([{"required":["refs","max_chars"]},{"required":["view_id"]}]),
+        json!([{"required":["refs","max_chars"]},{"required":["view_id"]},{"required":["data_source_id"]}]),
     );
     tool.input_schema = std::sync::Arc::new(input);
     // View mode returns rows and columns instead of sources.
@@ -462,7 +467,7 @@ pub fn tool_with_views() -> Tool {
     properties.insert("continuation".into(), json!({"type":["object","null"]}));
     tool.output_schema = Some(std::sync::Arc::new(output));
     tool.description = Some(format!(
-        "{} With view_id, read ordered rows from a saved Notion view using its filters and sorts; rows hold values positionally matching the returned columns, so choose columns with fields and set include_row_revision only before updating rows.",
+        "{} With view_id, read ordered rows from a saved Notion view using its filters and sorts; rows hold values positionally matching the returned columns, so choose columns with fields and set include_row_revision only before updating rows. With data_source_id alone, list its saved views to find a view_id.",
         tool.description.as_deref().unwrap_or_default()
     ).into());
     tool

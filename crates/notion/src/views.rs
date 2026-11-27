@@ -12,6 +12,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{NotionClient, pages};
 
+/// Views fetched per listing; a database with more reports `truncated`.
+const MAX_LISTED_VIEWS: usize = 25;
 const MAX_VIEW_ROW_PAYLOAD_BYTES: usize = 512 * 1024;
 
 fn failure(kind: Kind) -> BackendError {
@@ -427,6 +429,67 @@ impl NotionClient {
             source,
             source_database,
         })
+    }
+
+    /// List the saved views of one data source: the views that live on the
+    /// data source's own database and read from it. Notion's list endpoint
+    /// returns bare ids, so each view is fetched for its name and type. Views
+    /// elsewhere (linked views) are not listed, which keeps every listed view
+    /// inside the scope already proven for the owning database.
+    pub async fn list_saved_views(
+        &self,
+        scope: &LifecycleScope,
+        reference: &str,
+    ) -> Result<Value, BackendError> {
+        let source = pages::uuid(reference).ok_or_else(|| failure(Kind::InvalidInput))?;
+        let (_, database) = self.scoped_data_source(&source, scope).await?;
+        let listing = self
+            .walk_request(
+                Method::GET,
+                &format!("views?database_id={database}&page_size={MAX_LISTED_VIEWS}"),
+                None,
+            )
+            .await?;
+        let ids = match (listing["object"].as_str(), listing["results"].as_array()) {
+            (Some("list"), Some(results)) => results,
+            _ => return Err(failure(Kind::Internal)),
+        };
+        let mut views = Vec::new();
+        for entry in ids {
+            let view_id = id(&entry["id"])?;
+            let view = self.view_object("views", &view_id).await?;
+            object(&view, "view", &view_id)?;
+            let queryable = matches!(
+                view["type"].as_str(),
+                Some("table" | "list" | "board" | "calendar" | "timeline" | "gallery")
+            );
+            if !queryable
+                || view["parent"]["database_id"]
+                    .as_str()
+                    .and_then(pages::uuid)
+                    .as_deref()
+                    != Some(database.as_str())
+                || view["data_source_id"]
+                    .as_str()
+                    .and_then(pages::uuid)
+                    .as_deref()
+                    != Some(source.as_str())
+            {
+                continue;
+            }
+            views.push(json!({
+                "id": view_id,
+                "name": view["name"].as_str().unwrap_or(""),
+                "type": view["type"],
+            }));
+        }
+        Ok(json!({
+            "data_source_id": source,
+            "database_id": database,
+            "status": if views.is_empty() { "empty" } else { "ok" },
+            "views": views,
+            "truncated": listing["has_more"] == true,
+        }))
     }
 
     pub async fn query_saved_view(

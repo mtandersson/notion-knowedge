@@ -58,10 +58,36 @@ impl Request {
     }
 }
 
+/// View mode of `knowledge_get`: a saved-view read (`view_id`) or the listing
+/// of a data source's views (`data_source_id`). Both are governed by the
+/// `knowledge_query_view` selector; `refs` mode has neither key.
+pub(crate) fn is_view_mode(arguments: &serde_json::Map<String, Value>) -> bool {
+    arguments.contains_key("view_id") || arguments.contains_key("data_source_id")
+}
+
+/// List the saved views of a data source instead of reading one.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListRequest {
+    pub data_source_id: String,
+}
+
+impl ListRequest {
+    pub(crate) fn valid(&self) -> bool {
+        (32..=36).contains(&self.data_source_id.len())
+    }
+}
+
 pub trait SavedViewQuery: Send + Sync {
     fn query(
         &self,
         input: Request,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, ViewQueryError>> + Send + '_>>;
+
+    /// The saved views of one in-scope data source (id, name, type).
+    fn list(
+        &self,
+        input: ListRequest,
     ) -> Pin<Box<dyn Future<Output = Result<Value, ViewQueryError>> + Send + '_>>;
 }
 
@@ -91,6 +117,17 @@ pub(crate) fn tool() -> Tool {
 /// schema, capped so a very wide database cannot inflate the answer.
 const MAX_LISTED_COLUMNS: usize = 50;
 const MAX_LISTED_COLUMN_CHARS: usize = 64;
+
+/// Failure text for the view listing; only the invalid-input wording differs.
+pub(crate) fn list_failure(error: ViewQueryError) -> String {
+    match error {
+        ViewQueryError::Backend(BackendError {
+            kind: BackendErrorKind::InvalidInput,
+            ..
+        }) => "invalid_input: expected a Notion data source UUID".to_owned(),
+        other => failure(other),
+    }
+}
 
 pub(crate) fn failure(error: ViewQueryError) -> String {
     match error {

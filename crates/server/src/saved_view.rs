@@ -5,7 +5,7 @@ use notion_knowledge_core::{
     lifecycle::LifecycleScope,
     logging::{self, Outcome},
 };
-use notion_knowledge_mcp::view::{Continuation, Request, SavedViewQuery};
+use notion_knowledge_mcp::view::{Continuation, ListRequest, Request, SavedViewQuery};
 use notion_knowledge_notion::{
     NotionClient,
     views::{ViewProjection, normalize_view_id},
@@ -167,6 +167,33 @@ impl SavedViewQuery for Runtime {
             };
             self.sign(&view, &mut output["continuation"])?;
             Ok(output)
+        })
+    }
+
+    fn list(
+        &self,
+        input: ListRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, ViewQueryError>> + Send + '_>> {
+        Box::pin(async move {
+            let started = std::time::Instant::now();
+            match tokio::time::timeout(
+                Duration::from_secs(60),
+                self.source
+                    .list_saved_views(&self.scope, &input.data_source_id),
+            )
+            .await
+            {
+                Ok(Ok(output)) => Ok(output),
+                Ok(Err(failure)) => {
+                    log_failure(started, &failure, failure.operation);
+                    Err(failure.into())
+                }
+                Err(_) => {
+                    let failure = error(Kind::Unavailable);
+                    log_failure(started, &failure, "timeout");
+                    Err(failure.into())
+                }
+            }
         })
     }
 }

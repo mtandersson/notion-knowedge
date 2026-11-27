@@ -7,6 +7,9 @@ local index/operational-state compatibility. `TBD` is a **draft**, not a publish
 ## [Unreleased]
 
 ### Added
+- `knowledge_get` with `data_source_id` alone lists the saved views (id, name, type) of
+  an in-scope data source, so a client can find a `view_id` (#839). The tool
+  definition grows by about 330 B.
 - Release checklist and machine-checkable changelog/version guard.
 - Periodic cache-sync progress logs include `rss_kib` and `rss_peak_kib`.
 
