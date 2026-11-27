@@ -211,6 +211,15 @@ impl PreparedPageMutation {
     }
 }
 
+/// Search reports only "unavailable" to clients; log why for operators.
+fn unavailable(stage: &str, error: &dyn std::fmt::Debug) -> SearchUnavailable {
+    eprintln!(
+        "{}",
+        serde_json::json!({"operation":"search_snapshot","stage":stage,"outcome":"failed","error":format!("{error:?}")})
+    );
+    SearchUnavailable
+}
+
 fn failure(error: ChunkTableError) -> FailureClass {
     match error {
         ChunkTableError::Storage
@@ -614,13 +623,13 @@ impl GuardedChunkTable {
         let _guard = self
             .coordinator
             .search_guard()
-            .map_err(|_| SearchUnavailable)?;
+            .map_err(|error| unavailable("search_guard", &error))?;
         let snapshot = if semantic {
             self.open_search_snapshot().await
         } else {
             self.open_text_search_snapshot().await
         }
-        .map_err(|_| SearchUnavailable)?;
+        .map_err(|error| unavailable("snapshot", &error))?;
         let results = operation(snapshot).await?;
         self.validate_search_authority()?;
         Ok(results)
@@ -636,15 +645,15 @@ impl GuardedChunkTable {
         let _guard = self
             .coordinator
             .search_guard()
-            .map_err(|_| SearchUnavailable)?;
+            .map_err(|error| unavailable("search_guard", &error))?;
         let semantic = self
             .open_search_snapshot()
             .await
-            .map_err(|_| SearchUnavailable)?;
+            .map_err(|error| unavailable("semantic_snapshot", &error))?;
         let lexical = self
             .open_text_search_snapshot()
             .await
-            .map_err(|_| SearchUnavailable)?;
+            .map_err(|error| unavailable("text_snapshot", &error))?;
         let results = operation(semantic, lexical).await?;
         self.validate_search_authority()?;
         Ok(results)

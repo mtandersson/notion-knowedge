@@ -389,7 +389,10 @@ impl IndexRuntime {
                     options.lexical.as_ref(),
                 ) {
                     Err(error) if error.is_incompatible_index() => rebuild = true,
-                    Err(_) => return Err("index unavailable"),
+                    Err(error) => {
+                        log_startup_error("bind_cache", &error);
+                        return Err("index unavailable");
+                    }
                     Ok(table) => {
                         let installed = table
                             .text_projection_installed()
@@ -410,7 +413,10 @@ impl IndexRuntime {
                             {
                                 rebuild = true
                             }
-                            Err(_) => return Err("index unavailable"),
+                            Err(error) => {
+                                log_startup_error("verify_layout", &error);
+                                return Err("index unavailable");
+                            }
                             Ok(()) => {}
                         }
                     }
@@ -1837,13 +1843,19 @@ impl IndexRuntime {
                     } else {
                         guard.create_empty(lease.clone(), clock.clone()).await
                     };
-                    result.map_err(|_| "index unavailable or incompatible")?;
+                    result.map_err(|error| {
+                        log_startup_error("startup_indexes", &error);
+                        "index unavailable or incompatible"
+                    })?;
                     guard
                 };
                 guard
                     .ensure_text_projection(lease.clone(), clock)
                     .await
-                    .map_err(|_| "text projection unavailable or incompatible")?;
+                    .map_err(|error| {
+                        log_startup_error("text_projection", &error);
+                        "text projection unavailable or incompatible"
+                    })?;
                 Ok(guard)
             }
             .await;
@@ -2030,6 +2042,20 @@ fn recover_hot_journal(state: &Path) -> Result<(), &'static str> {
 }
 
 /// Keep the startup error generic but log the underlying cause.
+/// Startup errors are mapped to short operator messages; keep the cause in the
+/// log so an unavailable index can be diagnosed without a debug build.
+fn log_startup_error(stage: &str, error: &dyn std::fmt::Debug) {
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "operation": "index_startup",
+            "stage": stage,
+            "outcome": "failed",
+            "error": format!("{error:?}"),
+        })
+    );
+}
+
 fn log_state_error(stage: &str, error: &str) {
     eprintln!(
         "{}",
