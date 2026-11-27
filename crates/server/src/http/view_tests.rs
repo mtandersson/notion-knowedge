@@ -330,10 +330,13 @@ async fn view_results_distinguish_empty_denied_unsupported_and_unavailable() {
         (unavailable, "notion_unavailable"),
     ] {
         // A bad field never reveals column names for a view that is refused first.
-        for arguments in [
-            json!({"view_id":VIEW}),
-            json!({"view_id":VIEW,"fields":["Missing"]}),
-        ] {
+        // (The unavailable case fails after the columns resolve, so it only
+        // takes the plain request.)
+        let mut variants = vec![json!({"view_id":VIEW})];
+        if code != "notion_unavailable" {
+            variants.push(json!({"view_id":VIEW,"fields":["Missing"]}));
+        }
+        for arguments in variants {
             let (result, _) = call(steps.clone(), query(arguments), false).await;
             assert_eq!(result["result"]["isError"], true, "{result}");
             let text = result["result"]["content"][0]["text"].as_str().unwrap();
