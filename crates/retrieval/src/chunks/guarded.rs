@@ -140,7 +140,8 @@ impl SourceExpansion for GuardedChunkTable {
         Box::pin(async move {
             let _guard = self
                 .coordinator
-                .search_guard()
+                .search_guard_waiting()
+                .await
                 .map_err(|_| SourceExpansionError::Unavailable)?;
             let snapshot = self
                 .open_canonical()
@@ -622,7 +623,8 @@ impl GuardedChunkTable {
     {
         let _guard = self
             .coordinator
-            .search_guard()
+            .search_guard_waiting()
+            .await
             .map_err(|error| unavailable("search_guard", &error))?;
         let snapshot = if semantic {
             self.open_search_snapshot().await
@@ -644,7 +646,8 @@ impl GuardedChunkTable {
     {
         let _guard = self
             .coordinator
-            .search_guard()
+            .search_guard_waiting()
+            .await
             .map_err(|error| unavailable("search_guard", &error))?;
         let semantic = self
             .open_search_snapshot()
@@ -861,7 +864,8 @@ impl GuardedChunkTable {
             }
             let _guard = self
                 .coordinator
-                .search_guard()
+                .search_guard_waiting()
+                .await
                 .map_err(|_| ChunkTableError::InvalidPath)?;
             let snapshot = self.open_text_search_snapshot().await?;
             let result = snapshot
