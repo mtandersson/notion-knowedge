@@ -12,7 +12,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub const CANDIDATE_BYTES: usize = 96 * 1024 * 1024;
 pub const CANDIDATE_ROWS: usize = 8_000;
-const METADATA_FIELDS: [(&str, usize); 8] = [
+const METADATA_FIELDS: [(&str, usize); 9] = [
     ("chunk_id", 128),
     ("page_id", 128),
     ("root_page_id", 128),
@@ -21,6 +21,7 @@ const METADATA_FIELDS: [(&str, usize); 8] = [
     ("title", 1024),
     ("heading_path_json", 4096),
     ("last_edited_time", 64),
+    ("property_text", PROPERTY_TEXT_CHARS),
 ];
 fn bound_error() -> ChunkTableError {
     ChunkTableError::InvalidRows("lexical candidate resource limit exceeded".into())
@@ -479,6 +480,7 @@ impl LanceChunkTable {
             ("chunk_id", 4.0),
             ("page_id", 4.0),
             ("title", 2.0),
+            ("property_text", 1.5),
             ("text", 1.0),
         ] {
             let hits = snapshot
@@ -1036,6 +1038,7 @@ mod ranking_tests {
             heading_path: vec![],
             last_edited_time: "2026-10-01T00:00:00Z".into(),
             text: "Original source text".into(),
+            property_text: String::new(),
             score: 1.0,
         }
     }

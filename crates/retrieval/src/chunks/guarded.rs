@@ -216,6 +216,7 @@ fn failure(error: ChunkTableError) -> FailureClass {
         ChunkTableError::Storage
         | ChunkTableError::Serialization
         | ChunkTableError::InvalidSchema(_)
+        | ChunkTableError::OutdatedSchema
         | ChunkTableError::InvalidRows(_) => FailureClass::Index,
         ChunkTableError::Io | ChunkTableError::InvalidPath => FailureClass::Unavailable,
         ChunkTableError::Embedding(_) => FailureClass::Source,

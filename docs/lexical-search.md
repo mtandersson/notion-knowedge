@@ -15,12 +15,13 @@ The two filter lists use OR within one field and AND across fields. The retrieva
 
 ## Candidate fields
 
-The LanceDB adapter queries four native BM25 indices:
+The LanceDB adapter queries five native BM25 indices:
 
 1. exact `chunk_id`;
 2. exact `page_id`;
 3. `title`;
-4. chunk `text`.
+4. `property_text`, the page's text-like property values (#844, see [fts-index.md](fts-index.md));
+5. chunk `text`.
 
 Stable IDs use the raw tokenizer from #41. Title and body text use the Swedish language profile documented in [fts-index.md](fts-index.md).
 
@@ -28,6 +29,7 @@ A chunk may match more than one field. The adapter deduplicates by `(page_id, ch
 
 - stable ID: `4 + s/(1+s)`;
 - title: `2 + s/(1+s)`;
+- property values: `1.5 + s/(1+s)`;
 - body text: `1 + s/(1+s)`;
 
 where `s = max(native_bm25_score, 0)`.

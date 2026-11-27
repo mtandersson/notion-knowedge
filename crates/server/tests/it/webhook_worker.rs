@@ -243,7 +243,7 @@ impl HttpNotion {
                 if snapshot.joined && response["object"] == "page" {
                     if response["id"] == PAGE || response["id"] == OTHER {
                         response["properties"]["Alternative"] = json!({"id":"alias", "type":"rich_text",
-                            "rich_text":[{"plain_text":"Fyren / Lighthouse"}]});
+                            "rich_text":[{"plain_text":"Beacon / Lighthouse"}]});
                     }
                     if response["id"] == PAGE {
                         response["properties"]["Related"] = json!({"id":"related", "type":"relation",

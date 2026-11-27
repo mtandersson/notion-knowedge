@@ -4,14 +4,17 @@ Issue #41 maintains native LanceDB full-text indices over the canonical chunk ta
 
 ## Indexed fields
 
-LanceDB native FTS indexes one string field at a time, so the chunk table keeps four independently named, versioned indices:
+LanceDB native FTS indexes one string field at a time, so the chunk table keeps five independently named, versioned indices:
 
 | Index | Column | Tokenization |
 | --- | --- | --- |
 | `chunks_fts_text_v1` | `text` | Swedish language profile |
 | `chunks_fts_title_v1` | `title` | Swedish language profile |
+| `chunks_fts_property_text_v1` | `property_text` | Swedish language profile |
 | `chunks_fts_page_id_v1` | `page_id` | raw/exact |
 | `chunks_fts_chunk_id_v1` | `chunk_id` | raw/exact |
+
+`property_text` is derived at write time from the page's text-like property values (#844): title, text, select, status, URL, email and phone values, multi-select options and formula or rollup string results, one per line in property-ID order, capped at 4096 characters. Numbers, dates, checkboxes, people and relations are left out. Created/edited timestamps are dropped by shape (an ISO date-time value), so a text value that is exactly a date-time is dropped too. A value equal to the title is not repeated. Adding the column moved the chunk-table and text-projection schema versions to `2`. Startup reports a version-`1` table of the same binding as `OutdatedSchema` and resets and resyncs the cache, also when the text projection is installed; other mismatches still fail closed.
 
 The versioned names are part of the local derived-index contract. Startup creates missing indices and fails closed if one of these names is present with the wrong index type or column.
 
