@@ -52,15 +52,18 @@ pub use guarded::{GuardedChunkTable, PreparedPageMutation, PreparedSemanticProje
 #[cfg(unix)]
 pub use semantic_jobs::SemanticBacklog;
 
-pub const CHUNK_TABLE_SCHEMA_VERSION: &str = "1";
+/// "2" added the derived `property_text` column (#844); an older table is a
+/// known schema incompatibility, so startup resets and resyncs it.
+pub const CHUNK_TABLE_SCHEMA_VERSION: &str = "2";
 const CANONICAL_CHUNK_SCHEMA_VERSION: &str = "1";
 const TABLE_SCHEMA_KEY: &str = "notion_knowledge.chunk_table.schema_version";
 const CANONICAL_SCHEMA_KEY: &str = "notion_knowledge.chunk_table.canonical_schema_version";
 const EMBEDDING_KEY: &str = "notion_knowledge.chunk_table.embedding";
 pub const CHUNK_VECTOR_INDEX_NAME: &str = "chunks_vector_ivf_flat_v1";
-const CHUNK_FTS_INDEXES: [(&str, &str); 4] = [
+const CHUNK_FTS_INDEXES: [(&str, &str); 5] = [
     ("chunks_fts_text_v1", "text"),
     ("chunks_fts_title_v1", "title"),
+    ("chunks_fts_property_text_v1", "property_text"),
     ("chunks_fts_page_id_v1", "page_id"),
     ("chunks_fts_chunk_id_v1", "chunk_id"),
 ];
@@ -235,7 +238,54 @@ pub struct FtsIndexHit {
     pub title: String,
     pub heading_path: Vec<String>,
     pub text: String,
+    pub property_text: String,
     pub score: f32,
+}
+
+/// Most characters of a row's searchable property text (#844).
+pub(crate) const PROPERTY_TEXT_CHARS: usize = 4096;
+
+/// Searchable text of a page's text-like property values (#844): title, text,
+/// select, status, URL, email and phone values (`Text`) and multi-select
+/// options (`Strings`). Numbers, dates, checkboxes, people and relations are
+/// left out, as are Notion's created/edited timestamps, which normalize to
+/// `Text` too. The title is already its own field and is not repeated. One
+/// value per line, in property-ID order, capped at [`PROPERTY_TEXT_CHARS`].
+pub(crate) fn property_text(metadata: &IndexedMetadata) -> String {
+    fn timestamp(value: &str) -> bool {
+        let bytes = value.as_bytes();
+        (20..=35).contains(&bytes.len())
+            && bytes[4] == b'-'
+            && bytes[10] == b'T'
+            && bytes
+                .iter()
+                .all(|b| b.is_ascii_digit() || b"-:T.Z+".contains(b))
+    }
+    let mut text = String::new();
+    let mut chars = 0;
+    let values = metadata.properties.values().flat_map(|value| match value {
+        PropertyValue::Text(value) => std::slice::from_ref(value),
+        PropertyValue::Strings(values) => values.as_slice(),
+        _ => &[],
+    });
+    for value in values {
+        let value = value.trim();
+        if value.is_empty() || value == metadata.title.trim() || timestamp(value) {
+            continue;
+        }
+        for ch in (!text.is_empty())
+            .then_some('\n')
+            .into_iter()
+            .chain(value.chars())
+        {
+            if chars == PROPERTY_TEXT_CHARS {
+                return text;
+            }
+            text.push(ch);
+            chars += 1;
+        }
+    }
+    text
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -932,6 +982,7 @@ impl LanceChunkTable {
                 "heading_path_json".into(),
                 "last_edited_time".into(),
                 "text".into(),
+                "property_text".into(),
             ]))
             .limit(limit);
         if let Some(predicate) = predicate {
@@ -1011,6 +1062,7 @@ impl LanceChunkTable {
             ("chunk_id", 4.0_f32),
             ("page_id", 4.0_f32),
             ("title", 2.0_f32),
+            ("property_text", 1.5_f32),
             ("text", 1.0_f32),
         ];
         let mut best = HashMap::<(String, String), SearchHit>::new();
@@ -1571,6 +1623,7 @@ fn hit_matches_phrase(column: &str, hit: &FtsIndexHit, phrase: &str) -> bool {
         "page_id" => hit.page_id == phrase,
         "title" => contains_case_insensitive(&hit.title, phrase),
         "text" => contains_case_insensitive(&hit.text, phrase),
+        "property_text" => contains_case_insensitive(&hit.property_text, phrase),
         _ => false,
     }
 }
@@ -1647,6 +1700,7 @@ fn decode_fts_hits(batches: &[RecordBatch]) -> Result<Vec<FtsIndexHit>, ChunkTab
         let headings = string_column(batch, "heading_path_json")?;
         let edited = string_column(batch, "last_edited_time")?;
         let texts = string_column(batch, "text")?;
+        let property_texts = string_column(batch, "property_text")?;
         let scores = float32_column(batch, "_score")?;
         for row in 0..batch.num_rows() {
             if scores.is_null(row) || !scores.value(row).is_finite() {
@@ -1664,6 +1718,7 @@ fn decode_fts_hits(batches: &[RecordBatch]) -> Result<Vec<FtsIndexHit>, ChunkTab
                 title: titles.value(row).to_owned(),
                 heading_path: serde_json::from_str(headings.value(row))?,
                 text: texts.value(row).to_owned(),
+                property_text: property_texts.value(row).to_owned(),
                 score: scores.value(row),
             });
         }
@@ -1856,6 +1911,7 @@ fn text_fields() -> Vec<Field> {
         Field::new("database_id", DataType::Utf8, true),
         Field::new("data_source_id", DataType::Utf8, true),
         Field::new("properties_json", DataType::Utf8, false),
+        Field::new("property_text", DataType::Utf8, false),
         Field::new("text", DataType::Utf8, false),
         Field::new("content_hash", DataType::Utf8, false),
         Field::new("links_json", DataType::Utf8, false),
@@ -1997,6 +2053,10 @@ fn text_columns<'a>(
         .clone()
         .map(|row| serde_json::to_string(&row.links))
         .collect::<Result<Vec<_>, _>>()?;
+    let property_texts = rows
+        .clone()
+        .map(|row| property_text(&row.metadata))
+        .collect::<Vec<_>>();
     Ok(vec![
         Arc::new(StringArray::from(
             rows.clone()
@@ -2058,6 +2118,12 @@ fn text_columns<'a>(
         )),
         Arc::new(StringArray::from(
             properties.iter().map(String::as_str).collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            property_texts
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
         )),
         Arc::new(StringArray::from(
             rows.clone()
@@ -2946,6 +3012,79 @@ mod tests {
 
         drop(table);
         std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[tokio::test]
+    async fn lexical_search_finds_rows_by_text_like_property_values() {
+        let path = temp_database("lexical-properties");
+        let metadata = embedding("revision-1", 3);
+        let table = LanceChunkTable::create(&path, "chunks", metadata.clone())
+            .await
+            .expect("create table");
+        let mut row = fts_chunk("page-row", "chunk-row", "Thaimat test 2", "Body.");
+        row.metadata.properties = BTreeMap::from([
+            ("a".into(), PropertyValue::Text("811-verifiering".into())),
+            (
+                "b".into(),
+                PropertyValue::Strings(vec!["Kryddstark".into()]),
+            ),
+            ("c".into(), PropertyValue::Number(4242.0)),
+            (
+                "d".into(),
+                PropertyValue::Text("2026-11-27T13:39:43.000Z".into()),
+            ),
+        ]);
+        let other = fts_chunk("page-other", "chunk-other", "Other", "Unrelated body.");
+        table
+            .upsert(
+                &metadata,
+                &[
+                    EmbeddedChunk::new(row, vec![1.0, 0.0, 0.0]),
+                    EmbeddedChunk::new(other, vec![0.0, 1.0, 0.0]),
+                ],
+            )
+            .await
+            .expect("seed rows");
+        table.optimize_fts_index().await.expect("optimize");
+
+        let search = |query: &str| {
+            LexicalSearch::search(
+                &table,
+                LexicalQuery {
+                    query: query.into(),
+                    limit: 10,
+                    page_ids: None,
+                    root_page_ids: None,
+                    metadata: Default::default(),
+                },
+            )
+        };
+        for query in ["811-verifiering", "kryddstark", "\"811-verifiering\""] {
+            let hits = search(query).await.expect("search property value");
+            assert_eq!(hits.len(), 1, "{query}");
+            assert_eq!(hits[0].source.page_id, "page-row", "{query}");
+        }
+        for query in ["4242", "2026-11-27T13:39:43.000Z"] {
+            assert!(search(query).await.expect("search").is_empty(), "{query}");
+        }
+
+        drop(table);
+        std::fs::remove_dir_all(path).expect("remove temporary database");
+    }
+
+    #[test]
+    fn property_text_is_capped_and_omits_the_title() {
+        let mut metadata = fts_chunk("p", "c", "Title", "Body.").metadata;
+        metadata.properties = BTreeMap::from([
+            ("a".into(), PropertyValue::Text("Title".into())),
+            (
+                "b".into(),
+                PropertyValue::Text("x".repeat(PROPERTY_TEXT_CHARS + 10)),
+            ),
+        ]);
+        let text = property_text(&metadata);
+        assert_eq!(text.chars().count(), PROPERTY_TEXT_CHARS);
+        assert!(!text.contains("Title"));
     }
 
     #[tokio::test]

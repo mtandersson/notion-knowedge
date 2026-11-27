@@ -7,6 +7,10 @@ local index/operational-state compatibility. `TBD` is a **draft**, not a publish
 ## [Unreleased]
 
 ### Added
+- Lexical and hybrid search match a page's text-like property values (text, select,
+  multi-select, status, URL, email, phone), so a database row is found by, for example,
+  an ID kept in a text property (#844). The chunk-table schema moves to version `2`:
+  the first start after upgrading resets the local index and resyncs from Notion.
 - `knowledge_get` with `data_source_id` alone lists the saved views (id, name, type) of
   an in-scope data source, so a client can find a `view_id` (#839). The tool
   definition grows by about 330 B.
