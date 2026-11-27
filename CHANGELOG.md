@@ -15,7 +15,9 @@ local index/operational-state compatibility. `TBD` is a **draft**, not a publish
 
 ### Fixed
 - Hybrid search ranks a page whose title equals the whole query first; plain RRF
-  could bury it when only the lexical path found it (#842).
+  could bury it when only the lexical path found it (#842). Only the page's best
+  chunk is promoted, also with graph boost; scores stay RRF, so they need not
+  decrease down the list.
 - A saved-view read with an unknown `fields` entry answers `invalid_input: unknown_field`
   and lists the view's column names, instead of a misleading UUID/continuation
   error (#838).
