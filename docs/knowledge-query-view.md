@@ -73,12 +73,16 @@ of a data source. The same `knowledge_query_view` selector governs it.
 ```
 
 The answer is `{data_source_id, database_id, status, views, truncated}`, where
-each view is `{id, name, type}` and `status` is `ok` or `empty`. The `id` is
+each view is `{id, name, type}` and `status` is `ok`, `empty` or `partial`. The `id` is
 the `view_id` for the read above. Only table, list, board, calendar, timeline
 and gallery views that live on the data source's own database and read from
 that data source are listed. Linked views on other pages are not, so every
 listed view is inside the scope already proven for the owning database. The
 data source must be in scope, otherwise the answer is `source_not_accessible`.
 Notion returns bare ids from its list endpoint, so each view is fetched once
-for its name and type. At most 25 views are listed; `truncated` is `true` when
-the database has more.
+for its name and type: a listing costs three scope lookups, one list call and up
+to 25 view fetches, run one after another. Names are stripped of control
+characters and cut at 100 characters. At most 25 views are looked at, and the
+list cannot be paged: `truncated` is `true` when the database has more or a view
+vanished mid-listing, and `status` is `partial` when that left no view to show.
+Views of other data sources in the same database count against the 25.

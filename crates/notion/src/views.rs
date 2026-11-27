@@ -12,8 +12,11 @@ use sha2::{Digest, Sha256};
 
 use crate::{NotionClient, pages};
 
-/// Views fetched per listing; a database with more reports `truncated`.
+/// Views fetched per listing (one request each, after the scope lookups);
+/// a database with more reports `truncated`.
 const MAX_LISTED_VIEWS: usize = 25;
+/// View names are user text that reaches the model; keep them short and plain.
+const MAX_VIEW_NAME_CHARS: usize = 100;
 const MAX_VIEW_ROW_PAYLOAD_BYTES: usize = 512 * 1024;
 
 fn failure(kind: Kind) -> BackendError {
@@ -455,9 +458,22 @@ impl NotionClient {
             _ => return Err(failure(Kind::Internal)),
         };
         let mut views = Vec::new();
+        let mut skipped = false;
         for entry in ids {
             let view_id = id(&entry["id"])?;
-            let view = self.view_object("views", &view_id).await?;
+            let view = match self.view_object("views", &view_id).await {
+                Ok(view) => view,
+                // Deleted or unreadable since the listing: leave it out, say so.
+                Err(error) if matches!(error.kind, Kind::NotFound | Kind::PermissionDenied) => {
+                    skipped = true;
+                    continue;
+                }
+                // A caller mistake cannot come from fetching an id Notion gave us.
+                Err(error) if error.kind == Kind::InvalidInput => {
+                    return Err(failure(Kind::Internal));
+                }
+                Err(error) => return Err(error),
+            };
             object(&view, "view", &view_id)?;
             let queryable = matches!(
                 view["type"].as_str(),
@@ -479,16 +495,30 @@ impl NotionClient {
             }
             views.push(json!({
                 "id": view_id,
-                "name": view["name"].as_str().unwrap_or(""),
+                "name": view["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(MAX_VIEW_NAME_CHARS)
+                    .collect::<String>(),
                 "type": view["type"],
             }));
         }
+        // The list cannot be paged, so an empty answer is only "empty" when
+        // nothing was cut off or skipped.
+        let truncated = listing["has_more"] == true || skipped;
+        let status = match (views.is_empty(), truncated) {
+            (false, _) => "ok",
+            (true, false) => "empty",
+            (true, true) => "partial",
+        };
         Ok(json!({
             "data_source_id": source,
             "database_id": database,
-            "status": if views.is_empty() { "empty" } else { "ok" },
+            "status": status,
             "views": views,
-            "truncated": listing["has_more"] == true,
+            "truncated": truncated,
         }))
     }
 
