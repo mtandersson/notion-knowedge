@@ -90,6 +90,7 @@ impl HybridSearch for HybridFusion {
                 metadata: query.metadata.clone(),
             };
             let limit = query.limit;
+            let query_text = query.query.clone();
             let semantic = self
                 .semantic
                 .search_with_failure(SemanticQuery {
@@ -98,16 +99,47 @@ impl HybridSearch for HybridFusion {
                 })
                 .await?;
             let lexical = self.lexical.search(lexical_query).await?;
-            Ok(fuse(semantic, lexical, self.config, limit)?)
+            Ok(fuse_for(
+                semantic,
+                lexical,
+                self.config,
+                limit,
+                Some(&query_text),
+            )?)
         })
     }
 }
+#[cfg(test)]
 fn fuse(
     semantic: Vec<SearchHit>,
     lexical: Vec<SearchHit>,
     config: ReciprocalRankFusion,
     limit: usize,
 ) -> Result<Vec<SearchHit>, SearchUnavailable> {
+    fuse_for(semantic, lexical, config, limit, None)
+}
+
+/// Case- and whitespace-insensitive comparison key for titles and queries.
+fn title_key(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// RRF, except that chunks of a page whose title equals the whole query rank
+/// first (in fused order among themselves). A page named exactly what was
+/// asked for is the strongest generic evidence there is, yet RRF can bury it
+/// when only one path finds it: lexical rank 1 alone scores 1/61, below many
+/// pages both paths rank modestly. Reported scores stay the fused RRF scores.
+fn fuse_for(
+    semantic: Vec<SearchHit>,
+    lexical: Vec<SearchHit>,
+    config: ReciprocalRankFusion,
+    limit: usize,
+    query: Option<&str>,
+) -> Result<Vec<SearchHit>, SearchUnavailable> {
+    let wanted = query.map(title_key).filter(|key| !key.is_empty());
     let mut lexical_ranks = BTreeMap::new();
     let mut candidates: BTreeMap<(String, String), (SearchHit, f64)> = BTreeMap::new();
     for (hits, path, weight) in [
@@ -168,8 +200,15 @@ fn fuse(
         }
     }
     let mut ranked: Vec<_> = candidates.into_iter().collect();
-    ranked.sort_by(|(ka, (_, sa)), (kb, (_, sb))| {
-        sb.total_cmp(sa)
+    let exact = |hit: &SearchHit| {
+        wanted
+            .as_deref()
+            .is_some_and(|key| title_key(&hit.source.title) == key)
+    };
+    ranked.sort_by(|(ka, (ha, sa)), (kb, (hb, sb))| {
+        exact(hb)
+            .cmp(&exact(ha))
+            .then_with(|| sb.total_cmp(sa))
             .then_with(|| {
                 lexical_ranks
                     .get(ka)
@@ -365,6 +404,38 @@ mod tests {
             results[0].matched_paths,
             [RetrievalPath::Semantic, RetrievalPath::Lexical]
         );
+    }
+    #[test]
+    fn a_page_titled_exactly_as_the_query_ranks_first() {
+        let titled = |id: &str, title: &str| {
+            let mut hit = hit(id);
+            hit.source.page_id = id.into();
+            hit.source.title = title.into();
+            hit
+        };
+        // Both paths agree on "a" and "b"; only lexical finds the exact title.
+        let semantic = vec![titled("a", "MCP test"), titled("b", "Other test")];
+        let lexical = vec![
+            titled("t", "Thaimat test 2"),
+            titled("a", "MCP test"),
+            titled("b", "Other test"),
+        ];
+        let config = ReciprocalRankFusion::default();
+        let plain = fuse(semantic.clone(), lexical.clone(), config, 3).unwrap();
+        assert_eq!(plain[2].source.chunk_id, "t", "plain RRF buries it");
+        let results = fuse_for(
+            semantic.clone(),
+            lexical.clone(),
+            config,
+            3,
+            Some("  thaimat   TEST 2 "),
+        )
+        .unwrap();
+        assert_eq!(results[0].source.chunk_id, "t");
+        assert!(results[0].score < results[1].score, "scores stay RRF");
+        // A partial title match is not an exact title match.
+        let partial = fuse_for(semantic, lexical, config, 3, Some("thaimat")).unwrap();
+        assert_eq!(partial[2].source.chunk_id, "t");
     }
     #[test]
     fn lexical_rank_does_not_override_a_stronger_fused_score() {
