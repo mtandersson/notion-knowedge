@@ -76,6 +76,9 @@ pub enum ChunkTableError {
     Embedding(EmbeddingError),
     InvalidPath,
     InvalidSchema(String),
+    /// A table this binary wrote under an older, known schema version: safe to
+    /// discard and rebuild from Notion even where other mismatches fail closed.
+    OutdatedSchema,
     InvalidRows(String),
 }
 
@@ -88,6 +91,7 @@ impl std::fmt::Display for ChunkTableError {
             Self::Embedding(error) => write!(f, "embedding identity failed: {error}"),
             Self::InvalidPath => write!(f, "local index path must be valid UTF-8"),
             Self::InvalidSchema(message) => write!(f, "incompatible chunk table schema: {message}"),
+            Self::OutdatedSchema => write!(f, "index was written under an older schema version"),
             Self::InvalidRows(message) => write!(f, "invalid chunk rows: {message}"),
         }
     }
@@ -101,7 +105,9 @@ impl ChunkTableError {
     pub fn is_incompatible_index(&self) -> bool {
         matches!(
             self,
-            Self::InvalidSchema(_) | Self::Embedding(EmbeddingError::IncompatibleIndex)
+            Self::InvalidSchema(_)
+                | Self::OutdatedSchema
+                | Self::Embedding(EmbeddingError::IncompatibleIndex)
         )
     }
 }
@@ -1924,6 +1930,10 @@ async fn validate_table_schema(
 ) -> Result<(), ChunkTableError> {
     let actual = table.schema().await?;
     let expected = chunk_schema(expected_embedding)?;
+    // Version "1" predates `property_text` (#844): a known older layout.
+    if actual.metadata().get(TABLE_SCHEMA_KEY).map(String::as_str) == Some("1") {
+        return Err(ChunkTableError::OutdatedSchema);
+    }
     if actual.fields().len() != expected.fields().len() {
         return Err(ChunkTableError::InvalidSchema(format!(
             "expected {} columns, found {}",

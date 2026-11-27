@@ -400,7 +400,14 @@ impl IndexRuntime {
                             table.verify_bound_legacy_layout().await
                         };
                         match ready {
-                            Err(error) if !installed && error.is_incompatible_index() => {
+                            Err(error)
+                                if error.is_incompatible_index()
+                                    && (!installed
+                                        || matches!(
+                                            error,
+                                            notion_knowledge_retrieval::chunks::ChunkTableError::OutdatedSchema
+                                        )) =>
+                            {
                                 rebuild = true
                             }
                             Err(_) => return Err("index unavailable"),

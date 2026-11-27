@@ -10,10 +10,14 @@ use lancedb::{
 const TEXT_SCHEMA_KEY: &str = "notion_knowledge.text_chunks.schema_version";
 const TEXT_BINDING_KEY: &str = "notion_knowledge.text_chunks.binding";
 
+/// "2" added `property_text` (#844). "1" is a known older layout.
+const TEXT_SCHEMA_VERSION: &str = "2";
+const OUTDATED_TEXT_SCHEMA_VERSIONS: [&str; 1] = ["1"];
+
 fn schema(binding: &CommitBinding) -> SchemaRef {
     let identity = format!("{}:{}", binding.generation(), binding.epoch());
     Arc::new(Schema::new(text_fields()).with_metadata(HashMap::from([
-        (TEXT_SCHEMA_KEY.into(), "1".into()),
+        (TEXT_SCHEMA_KEY.into(), TEXT_SCHEMA_VERSION.into()),
         (TEXT_BINDING_KEY.into(), identity),
         (
             CANONICAL_SCHEMA_KEY.into(),
@@ -42,7 +46,21 @@ async fn open(
         Err(lancedb::Error::TableNotFound { .. }) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    if table.schema().await? != schema(binding) {
+    let actual = table.schema().await?;
+    let expected = schema(binding);
+    if actual != expected {
+        // Only a table of this binding under a known older version is
+        // reported as outdated; any other mismatch still fails closed.
+        let same_binding =
+            actual.metadata().get(TEXT_BINDING_KEY) == expected.metadata().get(TEXT_BINDING_KEY);
+        if same_binding
+            && actual
+                .metadata()
+                .get(TEXT_SCHEMA_KEY)
+                .is_some_and(|version| OUTDATED_TEXT_SCHEMA_VERSIONS.contains(&version.as_str()))
+        {
+            return Err(ChunkTableError::OutdatedSchema);
+        }
         return Err(ChunkTableError::InvalidSchema(
             "text projection schema or authority does not match".into(),
         ));
@@ -141,4 +159,48 @@ pub(super) async fn replace(
         .execute(Box::new(RecordBatchIterator::new([Ok(batch)], schema)))
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notion_knowledge_core::reconciliation::ReconciliationScope;
+
+    fn binding(generation: u64) -> CommitBinding {
+        let scope = ReconciliationScope::new(vec!["root".into()], vec![], "policy", "1").unwrap();
+        CommitBinding::new("chunks", "workspace", &scope, "1", generation).unwrap()
+    }
+
+    /// The text layout before #844, as an older binary wrote it.
+    fn version_1_schema(binding: &CommitBinding) -> SchemaRef {
+        let mut metadata = schema(binding).metadata().clone();
+        metadata.insert(TEXT_SCHEMA_KEY.into(), "1".into());
+        let fields = text_fields()
+            .into_iter()
+            .filter(|field| field.name() != "property_text")
+            .collect::<Vec<_>>();
+        Arc::new(Schema::new(fields).with_metadata(metadata))
+    }
+
+    #[tokio::test]
+    async fn an_older_text_layout_of_this_binding_is_outdated_and_others_fail_closed() {
+        let embedding = super::super::tests::embedding("revision-1", 3);
+        for (written_by, expect_outdated) in [(binding(1), true), (binding(2), false)] {
+            let path = super::super::tests::temp_database("text-outdated");
+            let database = connection(&path).await.unwrap();
+            database
+                .create_empty_table(name(&binding(1)), version_1_schema(&written_by))
+                .execute()
+                .await
+                .unwrap();
+            let opened = open(&database, &binding(1), &embedding).await;
+            if expect_outdated {
+                assert!(matches!(opened, Err(ChunkTableError::OutdatedSchema)));
+            } else {
+                assert!(matches!(opened, Err(ChunkTableError::InvalidSchema(_))));
+            }
+            drop(database);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
 }
