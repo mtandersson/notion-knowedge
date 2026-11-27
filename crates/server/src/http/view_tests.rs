@@ -382,13 +382,18 @@ async fn selected_columns_and_explicit_row_revision_shrink_the_response() {
         false,
     )
     .await;
+    // The refusal names the problem and lists the view's real columns, so the
+    // caller can correct the entry without guessing at ids or continuations.
+    let text = result["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("invalid_input: unknown_field"), "{result}");
+    for column in ["Name", "Status", "Attachment"] {
+        assert!(text.contains(column), "{text}");
+    }
     assert!(
-        result["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .starts_with("invalid_input"),
-        "{result}"
+        !text.contains("UUID") && !text.contains("continuation"),
+        "{text}"
     );
+    assert_eq!(result["result"]["isError"], true, "{result}");
 }
 
 fn nth(index: usize) -> String {

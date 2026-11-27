@@ -1,7 +1,7 @@
 //! The installed read-only Notion saved-view contract.
 use std::{future::Future, pin::Pin};
 
-use notion_knowledge_core::backend::{BackendError, BackendErrorKind};
+use notion_knowledge_core::backend::{BackendError, BackendErrorKind, ViewQueryError};
 use rmcp::model::{Tool, ToolAnnotations};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -62,7 +62,7 @@ pub trait SavedViewQuery: Send + Sync {
     fn query(
         &self,
         input: Request,
-    ) -> Pin<Box<dyn Future<Output = Result<Value, BackendError>> + Send + '_>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Value, ViewQueryError>> + Send + '_>>;
 }
 
 pub(crate) fn tool() -> Tool {
@@ -87,7 +87,35 @@ pub(crate) fn tool() -> Tool {
     .with_annotations(ToolAnnotations::new().read_only(true).destructive(false).open_world(true))
 }
 
-pub(crate) fn failure(error: BackendError) -> &'static str {
+/// Column names listed in an unknown-field refusal. Names are the caller's own
+/// schema, capped so a very wide database cannot inflate the answer.
+const MAX_LISTED_COLUMNS: usize = 50;
+const MAX_LISTED_COLUMN_CHARS: usize = 64;
+
+pub(crate) fn failure(error: ViewQueryError) -> String {
+    match error {
+        ViewQueryError::UnknownField { columns } => {
+            let listed: Vec<String> = columns
+                .iter()
+                .take(MAX_LISTED_COLUMNS)
+                .map(|name| name.chars().take(MAX_LISTED_COLUMN_CHARS).collect())
+                .collect();
+            let more = columns.len().saturating_sub(listed.len());
+            let suffix = if more > 0 {
+                format!(" (and {more} more)")
+            } else {
+                String::new()
+            };
+            format!(
+                "invalid_input: unknown_field: every fields entry must be a column name or ID of this view. Columns: {}{suffix}",
+                listed.join(", ")
+            )
+        }
+        ViewQueryError::Backend(error) => backend_failure(error).to_owned(),
+    }
+}
+
+fn backend_failure(error: BackendError) -> &'static str {
     if error.operation == "notion.view_query.response_limit" {
         return "incomplete: response exceeds the tool limit; request a smaller page";
     }
@@ -110,5 +138,25 @@ pub(crate) fn failure(error: BackendError) -> &'static str {
         BackendErrorKind::Unavailable | BackendErrorKind::Internal => {
             "notion_unavailable: no authoritative view page was returned"
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_field_lists_a_bounded_set_of_column_names() {
+        let columns: Vec<String> = (0..60).map(|n| format!("col{n}")).collect();
+        let text = failure(ViewQueryError::UnknownField { columns });
+        assert!(text.starts_with("invalid_input: unknown_field"), "{text}");
+        assert!(text.contains("col0") && text.contains("col49"), "{text}");
+        assert!(!text.contains("col50"), "{text}");
+        assert!(text.ends_with("(and 10 more)"), "{text}");
+
+        let long = failure(ViewQueryError::UnknownField {
+            columns: vec!["x".repeat(500)],
+        });
+        assert!(long.len() < 300, "{long}");
     }
 }

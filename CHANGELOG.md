@@ -11,6 +11,9 @@ local index/operational-state compatibility. `TBD` is a **draft**, not a publish
 - Periodic cache-sync progress logs include `rss_kib` and `rss_peak_kib`.
 
 ### Fixed
+- A saved-view read with an unknown `fields` entry answers `invalid_input: unknown_field`
+  and lists the view's column names, instead of a misleading UUID/continuation
+  error (#838).
 - A 401 on a page or row write is reported as a definite `not_authorized` refusal
   (`reason: unauthenticated`) and releases the idempotency key, like a 403 (#832).
 - Post-write verification ignores blank lines between Markdown blocks (outside code

@@ -2,7 +2,7 @@
 use std::collections::HashSet;
 
 use notion_knowledge_core::{
-    backend::{BackendError, BackendErrorKind as Kind, PageId},
+    backend::{BackendError, BackendErrorKind as Kind, PageId, ViewQueryError},
     discovery::SourceType,
     lifecycle::LifecycleScope,
 };
@@ -143,7 +143,7 @@ struct Column {
 fn columns(
     schema: &Value,
     fields: Option<&[String]>,
-) -> Result<(Vec<Column>, Vec<Value>), BackendError> {
+) -> Result<(Vec<Column>, Vec<Value>), ViewQueryError> {
     let properties = schema["properties"]
         .as_object()
         .ok_or_else(|| failure(Kind::Internal))?;
@@ -164,7 +164,7 @@ fn columns(
     let mut titles = all.iter().filter(|column| column.kind == "title");
     let title = titles.next().ok_or_else(|| failure(Kind::Internal))?;
     if titles.next().is_some() {
-        return Err(failure(Kind::Internal));
+        return Err(failure(Kind::Internal).into());
     }
     let title_id = title.id.clone();
     let mut selected: Vec<usize> = Vec::new();
@@ -176,11 +176,13 @@ fn columns(
                 let by_id = all.iter().position(|column| &column.id == field);
                 let by_name = all.iter().position(|column| &column.name == field);
                 if by_id.is_some() && by_name.is_some() && by_id != by_name {
-                    return Err(failure(Kind::InvalidInput));
+                    return Err(failure(Kind::InvalidInput).into());
                 }
-                let index = by_id
-                    .or(by_name)
-                    .ok_or_else(|| failure(Kind::InvalidInput))?;
+                let Some(index) = by_id.or(by_name) else {
+                    return Err(ViewQueryError::UnknownField {
+                        columns: all.iter().map(|column| column.name.clone()).collect(),
+                    });
+                };
                 if !selected.contains(&index) {
                     selected.push(index);
                 }
@@ -434,9 +436,9 @@ impl NotionClient {
         page_size: usize,
         continuation: Option<(&str, &str, &str)>,
         projection: ViewProjection<'_>,
-    ) -> Result<Value, BackendError> {
+    ) -> Result<Value, ViewQueryError> {
         if !(1..=25).contains(&page_size) {
-            return Err(failure(Kind::InvalidInput));
+            return Err(failure(Kind::InvalidInput).into());
         }
         let view_id = normalize_view_id(reference).ok_or_else(|| failure(Kind::InvalidInput))?;
         let view = self.verified_view(&view_id, scope).await?;
@@ -446,10 +448,10 @@ impl NotionClient {
         let (response, query_id) = match continuation {
             Some((query, cursor, expected_revision)) => {
                 if revision != expected_revision {
-                    return Err(failure(Kind::Conflict));
+                    return Err(failure(Kind::Conflict).into());
                 }
                 if cursor.is_empty() || cursor.len() > 256 || cursor.chars().any(char::is_control) {
-                    return Err(failure(Kind::InvalidInput));
+                    return Err(failure(Kind::InvalidInput).into());
                 }
                 let query = pages::uuid(query).ok_or_else(|| failure(Kind::InvalidInput))?;
                 let cursor = pages::query_value(cursor);
@@ -468,7 +470,7 @@ impl NotionClient {
                         }
                     })?;
                 if response["object"] != "list" || response["type"] != "page" {
-                    return Err(failure(Kind::Internal));
+                    return Err(failure(Kind::Internal).into());
                 }
                 (response, query)
             }
@@ -477,7 +479,7 @@ impl NotionClient {
                     .walk_request(Method::POST, &path, Some(&json!({"page_size":page_size})))
                     .await?;
                 if response["object"] != "view_query" || id(&response["view_id"])? != view_id {
-                    return Err(failure(Kind::Internal));
+                    return Err(failure(Kind::Internal).into());
                 }
                 let query = id(&response["id"])?;
                 (response, query)
@@ -500,13 +502,13 @@ impl NotionClient {
                 json!({"query_id":query_id, "cursor":cursor, "view_revision":revision})
             }
             (Some(false), None) if response["next_cursor"].is_null() => Value::Null,
-            _ => return Err(failure(Kind::Internal)),
+            _ => return Err(failure(Kind::Internal).into()),
         };
         let truncated = match response["request_status"]["type"].as_str() {
             Some("incomplete") => true,
             Some("complete") => false,
             None if response["request_status"].is_null() => false,
-            _ => return Err(failure(Kind::Internal)),
+            _ => return Err(failure(Kind::Internal).into()),
         };
         // Query results carry references. Resolve each row in result order and
         // revalidate its active physical source before exposing its properties.
@@ -519,28 +521,28 @@ impl NotionClient {
         let mut bytes = json!([header, omitted_columns]).to_string().len();
         for entry in entries {
             if entry["object"] != "page" {
-                return Err(failure(Kind::UnsupportedContent));
+                return Err(failure(Kind::UnsupportedContent).into());
             }
             let row_id = id(&entry["id"])?;
             if !ids.insert(row_id.clone()) {
-                return Err(failure(Kind::Internal));
+                return Err(failure(Kind::Internal).into());
             }
             if scope
                 .exclusions
                 .exclusion(&row_id, SourceType::Page)
                 .is_some()
             {
-                return Err(denied("row.excluded"));
+                return Err(denied("row.excluded").into());
             }
             let row = self.fetch_page_value(&PageId(row_id.clone())).await?;
             object(&row, "page", &row_id)?;
             if pages::inactive(&row) != Some(false) {
-                return Err(denied("row.inactive"));
+                return Err(denied("row.inactive").into());
             }
             if row["parent"]["type"] != "data_source_id"
                 || id(&row["parent"]["data_source_id"])? != view.source
             {
-                return Err(denied("row.not_in_source"));
+                return Err(denied("row.not_in_source").into());
             }
             row["last_edited_time"]
                 .as_str()
@@ -577,14 +579,15 @@ impl NotionClient {
                 return Err(BackendError {
                     operation: "notion.view_query.response_limit",
                     ..failure(Kind::UnsupportedContent)
-                });
+                }
+                .into());
             }
             rows.push(row);
         }
         // Before emitting data, reject a reparented or reconfigured view/source.
         let current = self.verified_view(&view_id, scope).await?;
         if revision != current.fingerprint()? {
-            return Err(failure(Kind::Conflict));
+            return Err(failure(Kind::Conflict).into());
         }
         let status = if truncated {
             "incomplete"

@@ -1,7 +1,7 @@
 use std::{future::Future, pin::Pin, time::Duration};
 
 use notion_knowledge_core::{
-    backend::{BackendError, BackendErrorKind as Kind},
+    backend::{BackendError, BackendErrorKind as Kind, ViewQueryError},
     lifecycle::LifecycleScope,
     logging::{self, Outcome},
 };
@@ -122,7 +122,7 @@ impl SavedViewQuery for Runtime {
     fn query(
         &self,
         input: Request,
-    ) -> Pin<Box<dyn Future<Output = Result<Value, BackendError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Value, ViewQueryError>> + Send + '_>> {
         Box::pin(async move {
             let view =
                 normalize_view_id(&input.view_id).ok_or_else(|| error(Kind::InvalidInput))?;
@@ -153,14 +153,16 @@ impl SavedViewQuery for Runtime {
             .await
             {
                 Ok(Ok(output)) => output,
-                Ok(Err(failure)) => {
+                Ok(Err(ViewQueryError::Backend(failure))) => {
                     log_failure(started, &failure, failure.operation);
-                    return Err(failure);
+                    return Err(failure.into());
                 }
+                // The caller's own mistake, like a bad id: not worth a log line.
+                Ok(Err(unknown_field)) => return Err(unknown_field),
                 Err(_) => {
                     let failure = error(Kind::Unavailable);
                     log_failure(started, &failure, "timeout");
-                    return Err(failure);
+                    return Err(failure.into());
                 }
             };
             self.sign(&view, &mut output["continuation"])?;

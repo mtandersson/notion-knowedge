@@ -23,7 +23,9 @@ both be in scope. A linked view does not grant access to an outside source.
 
 `fields` lists column names or property IDs. The title column is always
 included. Without `fields` every readable column is returned. An unknown
-or ambiguous field (a name that is another column's ID) is `invalid_input`. Set `include_row_revision` only when the rows will
+field is `invalid_input: unknown_field` and lists the view's column names (at
+most 50, each cut at 64 characters), so the entry can be corrected in one step. An
+ambiguous field (a name that is another column's ID) is a plain `invalid_input`. Set `include_row_revision` only when the rows will
 be updated.
 
 Use the view UUID, with or without the `view://` prefix. Pass the returned
